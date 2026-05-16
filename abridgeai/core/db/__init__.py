@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import (
 from sqlalchemy.orm import DeclarativeBase
 
 from abridgeai.core.audit import register_audit_listener
+from abridgeai.core.cache.invalidator import register_cache_invalidator
 from abridgeai.core.config import get_settings
 from abridgeai.core.db.mixins import (
     PGUUID,
@@ -29,6 +30,9 @@ register_audit_listener()
 
 
 register_soft_delete_filter()
+
+
+register_cache_invalidator()
 
 
 _engine: AsyncEngine | None = None
