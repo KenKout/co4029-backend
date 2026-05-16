@@ -1,0 +1,175 @@
+# aBridgeAI backend-new CI
+#
+# This repo (backend-new/) is its own git root — paths in this workflow are
+# relative to the backend-new/ tree, not the parent monorepo. The 4 jobs
+# (lint, security, test, docker-build) run in parallel where possible.
+#
+# All third-party actions are SHA-pinned per security-hardening guidance:
+# https://docs.github.com/en/actions/security-guides/security-hardening-for-github-actions
+#
+# Required status checks (configure in branch protection): lint, security, test.
+# docker-build is gated off until Phase 9 lands the Dockerfile.
+
+name: backend-new CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+# Cancel in-flight runs of the same ref when a new push lands. Keeps queue
+# pressure low while still running the latest commit to completion on main.
+concurrency:
+  group: backend-new-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  lint:
+    name: Lint (ruff + mypy + import-linter)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install dependencies (incl. dev extras)
+        run: uv sync --extra dev
+
+      - name: ruff check
+        run: uv run ruff check .
+
+      - name: mypy
+        run: uv run mypy abridgeai/
+
+      - name: import-linter (architectural contracts)
+        run: uv run lint-imports
+
+  security:
+    name: Security (bandit + pip-audit + gitleaks)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          # gitleaks-action wants full history when running on PRs to diff
+          # only the new commits; depth 0 = full clone.
+          fetch-depth: 0
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install dev dependencies
+        run: uv sync --extra dev
+
+      - name: bandit (static security scan)
+        run: uv run bandit -r abridgeai/ -c pyproject.toml
+
+      - name: pip-audit (dependency CVE scan)
+        # Skip the local package itself (not on PyPI); audit only third-party
+        # dependencies pinned in uv.lock.
+        run: uv run pip-audit --skip-editable
+
+      - name: gitleaks (secret scan)
+        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2.3.9
+        env:
+          GITLEAKS_CONFIG: .gitleaks.toml
+          GITLEAKS_NOTIFY_USER_LIST: ""
+
+  test:
+    name: Test (pytest + coverage)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: abridgeai
+          POSTGRES_PASSWORD: abridgeai
+          POSTGRES_DB: abridgeai
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U abridgeai -d abridgeai"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    env:
+      # Service containers are reachable by service name on the runner's
+      # docker network — `postgres`/`redis` resolve from the job container.
+      DATABASE_URL: postgresql+psycopg://abridgeai:abridgeai@localhost:5432/abridgeai
+      REDIS_URL: redis://localhost:6379/0
+      # JWT_SECRET_KEY is required by core/config.py at import time. CI-only
+      # placeholder; matches .env.example length constraint (32+ chars).
+      JWT_SECRET_KEY: ci-only-secret-not-used-in-prod-12345
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install dev dependencies
+        run: uv sync --extra dev
+
+      - name: Run alembic migrations
+        run: uv run alembic upgrade head
+
+      - name: Run pytest with coverage
+        run: uv run pytest --cov=abridgeai --cov-report=xml --cov-report=term-missing --cov-fail-under=75
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-xml
+          path: coverage.xml
+          if-no-files-found: warn
+          retention-days: 14
+
+  docker-build:
+    name: Docker build (catches missing system deps early)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # TODO(phase-9): Flip to `if: github.event_name != 'workflow_dispatch'`
+    # (or remove the gate entirely) once backend-new/Dockerfile lands. Until
+    # then the job is a placeholder so branch protection has a stable name
+    # to register without forcing this job to run.
+    if: false
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Build image
+        # Phase 9 will introduce the Dockerfile; for now this command will
+        # fail loudly until the file exists, which is the desired signal.
+        run: docker build -f Dockerfile -t abridgeai-backend:ci .
