@@ -32,6 +32,10 @@ class Settings(BaseSettings):
     access_token_ttl_seconds: int = 15 * 60
     session_ttl_seconds: int = 30 * 24 * 60 * 60
 
+    google_client_id: str | None = None
+    google_client_secret: str | None = None
+    google_redirect_uri: str | None = None
+
     # Observability (T0.24). Console default keeps `pytest` output human-readable
     # in dev; CI + production set LOG_FORMAT=json so log aggregators (Loki,
     # Datadog, CloudWatch) can parse JSON keys.

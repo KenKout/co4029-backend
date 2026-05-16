@@ -7,13 +7,14 @@ with that vocabulary; renaming is out of scope for the queries layer.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.functions import func
 
-from abridgeai.features.identity.models import MfaChallenge, MfaFactor
+from abridgeai.features.identity.models import MfaChallenge, MfaFactor, MfaRecoveryCode
 
 
 async def get_verified_totp_factor(db: AsyncSession, user_id: UUID) -> MfaFactor | None:
@@ -56,3 +57,29 @@ async def get_active_challenge(
         .order_by(MfaChallenge.created_at.desc())
     )
     return result.scalars().first()
+
+
+async def get_factor_by_id(db: AsyncSession, factor_id: UUID) -> MfaFactor | None:
+    return await db.get(MfaFactor, factor_id)
+
+
+async def get_challenge_by_id(db: AsyncSession, challenge_id: UUID) -> MfaChallenge | None:
+    return await db.get(MfaChallenge, challenge_id)
+
+
+async def delete_recovery_codes_for_factor(db: AsyncSession, factor_id: UUID) -> None:
+    await db.execute(delete(MfaRecoveryCode).where(MfaRecoveryCode.factor_id == factor_id))
+
+
+async def list_unused_recovery_codes(db: AsyncSession, factor_id: UUID) -> list[MfaRecoveryCode]:
+    result = await db.execute(
+        select(MfaRecoveryCode).where(
+            MfaRecoveryCode.factor_id == factor_id,
+            MfaRecoveryCode.used_at.is_(None),
+        )
+    )
+    return list(result.scalars().all())
+
+
+async def mark_recovery_code_used(db: AsyncSession, code: MfaRecoveryCode) -> None:
+    code.used_at = datetime.now(UTC)

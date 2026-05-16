@@ -1,8 +1,7 @@
 """Access control feature: RBAC, tenancy, career paths.
 
-Re-exports the ORM models so callers can use the public path
-``abridgeai.features.access_control``. Service / repository / router
-modules land in later Phase 1 tasks.
+Re-exports ORM models and FastAPI permission policies under the public
+package path ``abridgeai.features.access_control``.
 """
 
 from abridgeai.features.access_control.models import (
@@ -18,6 +17,14 @@ from abridgeai.features.access_control.models import (
     UserPermissionGrant,
     UserRoleAssignment,
 )
+from abridgeai.features.access_control.policies import (
+    PermissionDependency,
+    can_manage_course,
+    require_any_permission,
+    require_course_permission,
+    require_org_unit_permission,
+    require_permission,
+)
 
 __all__ = [
     "CareerPath",
@@ -26,9 +33,15 @@ __all__ = [
     "OrganizationMembership",
     "OrgUnit",
     "Permission",
+    "PermissionDependency",
     "Role",
     "RolePermission",
     "StudentCareerEnrollment",
     "UserPermissionGrant",
     "UserRoleAssignment",
+    "can_manage_course",
+    "require_any_permission",
+    "require_course_permission",
+    "require_org_unit_permission",
+    "require_permission",
 ]
