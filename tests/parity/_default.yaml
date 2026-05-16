@@ -1,0 +1,12 @@
+redact_fields:
+  - "$.created_at"
+  - "$.updated_at"
+  - "$.deleted_at"
+  - "$.id"
+  - "$.expires_at"
+allow_extra_fields:
+  - "$.created_by"
+  - "$.updated_by"
+strict_match_fields: []
+behavior:
+  status_code: null

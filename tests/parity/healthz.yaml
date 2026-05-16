@@ -1,0 +1,7 @@
+endpoint: /healthz
+redact_fields: []
+allow_extra_fields: []
+strict_match_fields:
+  - "$.status"
+behavior:
+  status_code: 200
