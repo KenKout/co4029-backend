@@ -45,6 +45,24 @@ dev = [
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+addopts = "--cov=abridgeai --cov-report=term-missing --cov-report=xml --cov-fail-under=75"
+
+[tool.coverage.run]
+source = ["abridgeai"]
+omit = [
+    "abridgeai/**/__init__.py",
+    "abridgeai/**/migrations/**",
+]
+branch = true
+
+[tool.coverage.report]
+skip_covered = false
+show_missing = true
+exclude_lines = [
+    "pragma: no cover",
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:",
+]
 
 [tool.ruff]
 line-length = 100
