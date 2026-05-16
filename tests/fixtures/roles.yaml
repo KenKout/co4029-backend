@@ -1,0 +1,59 @@
+test_organization:
+  id: "00000000-0000-0000-0000-000000000020"
+  slug: "test-org"
+  name: "Test Organization"
+
+test_org_unit:
+  id: "00000000-0000-0000-0000-000000000030"
+  unit_type: "department"
+  name: "Test Department"
+  code: "TEST-DEPT"
+
+test_course:
+  id: "00000000-0000-0000-0000-000000000040"
+  slug: "test-course"
+  title: "Test Course"
+
+roles:
+  - code: "student"
+    name: "Student"
+    is_system_role: true
+  - code: "teacher"
+    name: "Teacher"
+    is_system_role: true
+  - code: "hod"
+    name: "Head of Department"
+    is_system_role: true
+  - code: "manager"
+    name: "Organization Manager"
+    is_system_role: true
+  - code: "admin"
+    name: "Platform Admin"
+    is_system_role: true
+
+assignments:
+  - user_id: "00000000-0000-0000-0000-000000000010"
+    role_code: "student"
+    scope_kind: "organization"
+    organization_id: "00000000-0000-0000-0000-000000000020"
+
+  - user_id: "00000000-0000-0000-0000-000000000011"
+    role_code: "teacher"
+    scope_kind: "course"
+    organization_id: "00000000-0000-0000-0000-000000000020"
+    course_id: "00000000-0000-0000-0000-000000000040"
+
+  - user_id: "00000000-0000-0000-0000-000000000012"
+    role_code: "hod"
+    scope_kind: "org_unit"
+    organization_id: "00000000-0000-0000-0000-000000000020"
+    org_unit_id: "00000000-0000-0000-0000-000000000030"
+
+  - user_id: "00000000-0000-0000-0000-000000000013"
+    role_code: "manager"
+    scope_kind: "organization"
+    organization_id: "00000000-0000-0000-0000-000000000020"
+
+  - user_id: "00000000-0000-0000-0000-000000000014"
+    role_code: "admin"
+    scope_kind: "global"

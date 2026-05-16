@@ -1,0 +1,40 @@
+users:
+  - id: "00000000-0000-0000-0000-000000000010"
+    primary_email: "test-student@abridgeai.local"
+    status: "active"
+    profile:
+      display_name: "Test Student"
+      given_name: "Test"
+      family_name: "Student"
+
+  - id: "00000000-0000-0000-0000-000000000011"
+    primary_email: "test-teacher@abridgeai.local"
+    status: "active"
+    profile:
+      display_name: "Test Teacher"
+      given_name: "Test"
+      family_name: "Teacher"
+
+  - id: "00000000-0000-0000-0000-000000000012"
+    primary_email: "test-hod@abridgeai.local"
+    status: "active"
+    profile:
+      display_name: "Test HOD"
+      given_name: "Test"
+      family_name: "HOD"
+
+  - id: "00000000-0000-0000-0000-000000000013"
+    primary_email: "test-manager@abridgeai.local"
+    status: "active"
+    profile:
+      display_name: "Test Manager"
+      given_name: "Test"
+      family_name: "Manager"
+
+  - id: "00000000-0000-0000-0000-000000000014"
+    primary_email: "test-admin@abridgeai.local"
+    status: "active"
+    profile:
+      display_name: "Test Admin"
+      given_name: "Test"
+      family_name: "Admin"
