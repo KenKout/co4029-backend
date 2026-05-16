@@ -133,6 +133,22 @@ forbidden_modules = [
     "abridgeai.features.*.routers.*",
 ]
 
+[tool.bandit]
+targets = ["abridgeai"]
+exclude_dirs = ["tests"]
+confidence_level = "MEDIUM"
+tests = [
+    "B102",
+    "B104",
+    "B105", "B106", "B107",
+    "B201",
+    "B301", "B302", "B303", "B304", "B305", "B306", "B307", "B308",
+    "B309", "B310", "B311", "B312", "B313", "B314", "B315", "B316",
+    "B317", "B318", "B319", "B320", "B321", "B322", "B323", "B324",
+    "B501", "B502",
+    "B601", "B602",
+]
+
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
