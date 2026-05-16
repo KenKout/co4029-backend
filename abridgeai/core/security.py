@@ -4,6 +4,7 @@ Algorithm pinned, required claims enforced. Compatible with backend/ tokens via
 shared HS256 + secret_key. PyJWT provides built-in algorithm-confusion guard
 (via ``algorithms=[...]`` whitelist) and standard exception types.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -36,9 +37,7 @@ def create_access_token(
 ) -> str:
     settings = get_settings()
     now = utcnow()
-    expires_at = now + (
-        expires_delta or timedelta(seconds=settings.access_token_ttl_seconds)
-    )
+    expires_at = now + (expires_delta or timedelta(seconds=settings.access_token_ttl_seconds))
     payload = {
         "sub": str(user_id),
         "sid": str(session_id),

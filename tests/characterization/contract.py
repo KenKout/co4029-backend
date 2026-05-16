@@ -14,7 +14,6 @@ The slug rule is identical to the snapshot slug (see ``slugify``).
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Annotated
 
 import yaml
 from pydantic import BaseModel, Field

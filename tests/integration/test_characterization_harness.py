@@ -5,7 +5,6 @@ from pathlib import Path
 
 import httpx
 import pytest
-
 from characterization.contract import ParityContract, load_contract, slugify
 from characterization.harness import (
     Snapshot,
@@ -237,9 +236,6 @@ def test_status_code_mismatch_diverges():
 
 
 def test_row_count_behavior_compares_list_length():
-    contract = ParityContract(
-        behavior={"status_code": 200, "row_count": "$.items"},
-    )
     captured = Snapshot(
         backend="old",
         endpoint="/list",

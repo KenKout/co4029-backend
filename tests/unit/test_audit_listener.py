@@ -10,7 +10,6 @@ from abridgeai.core.audit import current_actor_var, register_audit_listener
 from abridgeai.core.db import AuditedByMixin
 from abridgeai.workers.actor import set_worker_actor
 
-
 register_audit_listener()
 
 

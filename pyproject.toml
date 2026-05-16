@@ -41,6 +41,7 @@ dev = [
     "moto>=5.0",
     "bandit>=1.7",
     "pip-audit>=2.7",
+    "pre-commit>=3.7",
 ]
 
 [tool.pytest.ini_options]
@@ -83,11 +84,15 @@ max-complexity = 12
 
 [tool.ruff.lint.per-file-ignores]
 # Tests can use asserts (S101), broad pytest.raises (PT011),
-# and don't need full type annotations (ANN).
-"tests/**/*.py" = ["ANN", "S101", "PT011"]
+# and don't need full type annotations (ANN). T20 is allowed in CLI-style
+# test helpers (replay_cli, capture); E501 covers long SQL/snapshot strings
+# baked into integration tests.
+"tests/**/*.py" = ["ANN", "S101", "PT011", "T20", "E501"]
 "abridgeai/**/_test_models.py" = ["ANN"]
-# Alembic migrations are auto-generated / template-driven.
-"alembic/versions/**/*.py" = ["ANN", "E501"]
+# Alembic migrations are auto-generated / template-driven. Path is
+# `migrations/versions/` in this project (alembic was renamed during the
+# T0.5 init).
+"migrations/versions/**/*.py" = ["ANN", "E501"]
 
 [tool.mypy]
 python_version = "3.12"

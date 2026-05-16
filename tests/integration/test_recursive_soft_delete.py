@@ -7,7 +7,12 @@ import pytest
 import pytest_asyncio
 from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 
 from abridgeai.core.config import get_settings
 from abridgeai.core.db.recursive_delete import soft_delete_cascade
@@ -19,21 +24,15 @@ def _async_url(database_url: str) -> str:
     if "+psycopg_async" in database_url:
         return database_url
     if database_url.startswith("postgresql+psycopg://"):
-        return database_url.replace(
-            "postgresql+psycopg://", "postgresql+psycopg_async://", 1
-        )
+        return database_url.replace("postgresql+psycopg://", "postgresql+psycopg_async://", 1)
     if database_url.startswith("postgresql://"):
-        return database_url.replace(
-            "postgresql://", "postgresql+psycopg_async://", 1
-        )
+        return database_url.replace("postgresql://", "postgresql+psycopg_async://", 1)
     return database_url
 
 
 @pytest_asyncio.fixture
 async def engine() -> AsyncIterator[AsyncEngine]:
-    eng = create_async_engine(
-        _async_url(get_settings().database_url), pool_pre_ping=True
-    )
+    eng = create_async_engine(_async_url(get_settings().database_url), pool_pre_ping=True)
     yield eng
     await eng.dispose()
 
@@ -49,10 +48,7 @@ async def org_owner(engine: AsyncEngine):
     owner_id = uuid.uuid4()
     async with engine.begin() as conn:
         await conn.execute(
-            text(
-                "INSERT INTO organizations (id, slug, name) "
-                "VALUES (:id, :slug, :name)"
-            ),
+            text("INSERT INTO organizations (id, slug, name) VALUES (:id, :slug, :name)"),
             {
                 "id": org_id,
                 "slug": f"rsd-{org_id.hex[:8]}",
@@ -66,14 +62,18 @@ async def org_owner(engine: AsyncEngine):
     yield org_id, owner_id
     async with engine.begin() as conn:
         await conn.execute(
-            text("DELETE FROM lessons WHERE module_id IN "
-                 "(SELECT id FROM modules WHERE course_id IN "
-                 "(SELECT id FROM courses WHERE organization_id = :org))"),
+            text(
+                "DELETE FROM lessons WHERE module_id IN "
+                "(SELECT id FROM modules WHERE course_id IN "
+                "(SELECT id FROM courses WHERE organization_id = :org))"
+            ),
             {"org": org_id},
         )
         await conn.execute(
-            text("DELETE FROM modules WHERE course_id IN "
-                 "(SELECT id FROM courses WHERE organization_id = :org)"),
+            text(
+                "DELETE FROM modules WHERE course_id IN "
+                "(SELECT id FROM courses WHERE organization_id = :org)"
+            ),
             {"org": org_id},
         )
         await conn.execute(
@@ -84,12 +84,8 @@ async def org_owner(engine: AsyncEngine):
             text("DELETE FROM org_units WHERE organization_id = :org"),
             {"org": org_id},
         )
-        await conn.execute(
-            text("DELETE FROM users WHERE id = :id"), {"id": owner_id}
-        )
-        await conn.execute(
-            text("DELETE FROM organizations WHERE id = :id"), {"id": org_id}
-        )
+        await conn.execute(text("DELETE FROM users WHERE id = :id"), {"id": owner_id})
+        await conn.execute(text("DELETE FROM organizations WHERE id = :id"), {"id": org_id})
 
 
 async def _seed_chain(
@@ -108,9 +104,7 @@ async def _seed_chain(
     return course.id, module.id, lesson.id
 
 
-async def test_simple_cascade(
-    session_factory: async_sessionmaker[AsyncSession], org_owner
-) -> None:
+async def test_simple_cascade(session_factory: async_sessionmaker[AsyncSession], org_owner) -> None:
     org_id, owner_id = org_owner
     async with session_factory() as session:
         course_id, module_id, lesson_id = await _seed_chain(session, org_id, owner_id)
@@ -123,17 +117,25 @@ async def test_simple_cascade(
     assert {tbl for (tbl, _id) in result.affected} == {"courses", "modules", "lessons"}
 
     async with session_factory() as session:
-        active = (await session.execute(select(_Course).where(_Course.id == course_id))).scalar_one_or_none()
+        active = (
+            await session.execute(select(_Course).where(_Course.id == course_id))
+        ).scalar_one_or_none()
         assert active is None
-        active_module = (await session.execute(select(_Module).where(_Module.id == module_id))).scalar_one_or_none()
+        active_module = (
+            await session.execute(select(_Module).where(_Module.id == module_id))
+        ).scalar_one_or_none()
         assert active_module is None
-        active_lesson = (await session.execute(select(_Lesson).where(_Lesson.id == lesson_id))).scalar_one_or_none()
+        active_lesson = (
+            await session.execute(select(_Lesson).where(_Lesson.id == lesson_id))
+        ).scalar_one_or_none()
         assert active_lesson is None
 
     async with session_factory() as session:
         rows = (
             await session.execute(
-                select(_Course).where(_Course.id == course_id).execution_options(include_deleted=True)
+                select(_Course)
+                .where(_Course.id == course_id)
+                .execution_options(include_deleted=True)
             )
         ).all()
         assert len(rows) == 1
@@ -153,8 +155,10 @@ async def test_query_filter_respects_cascade(
 
     async with session_factory() as session:
         lessons = (
-            await session.execute(select(_Lesson).where(_Lesson.module_id == module_id))
-        ).scalars().all()
+            (await session.execute(select(_Lesson).where(_Lesson.module_id == module_id)))
+            .scalars()
+            .all()
+        )
         assert lessons == []
 
 
@@ -234,16 +238,16 @@ async def test_cycle_safety(
     async with session_factory() as session:
         rows = (
             await session.execute(
-                select(_OrgUnit).where(_OrgUnit.id == unit_id).execution_options(include_deleted=True)
+                select(_OrgUnit)
+                .where(_OrgUnit.id == unit_id)
+                .execution_options(include_deleted=True)
             )
         ).all()
         assert len(rows) == 1
         assert rows[0][0].deleted_at is not None
 
 
-async def test_dry_run(
-    session_factory: async_sessionmaker[AsyncSession], org_owner
-) -> None:
+async def test_dry_run(session_factory: async_sessionmaker[AsyncSession], org_owner) -> None:
     org_id, owner_id = org_owner
     async with session_factory() as session:
         course_id, module_id, lesson_id = await _seed_chain(session, org_id, owner_id)

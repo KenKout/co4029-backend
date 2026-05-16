@@ -19,9 +19,7 @@ from __future__ import annotations
 from contextvars import ContextVar
 from uuid import UUID
 
-current_actor_var: ContextVar[UUID | None] = ContextVar(
-    "current_actor", default=None
-)
+current_actor_var: ContextVar[UUID | None] = ContextVar("current_actor", default=None)
 
 
 def get_current_actor() -> UUID | None:

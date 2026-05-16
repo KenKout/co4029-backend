@@ -1,21 +1,18 @@
 from __future__ import annotations
 
 import pytest
+from conftest import SeededUsers
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from abridgeai.core.security import decode_access_token
-from conftest import SeededUsers
 
 
 @pytest.mark.asyncio
 async def test_seed_users(test_engine: AsyncEngine, seeded_users: SeededUsers) -> None:
     async with AsyncSession(test_engine) as session:
         user_count = await session.scalar(
-            text(
-                "SELECT COUNT(*) FROM users "
-                "WHERE primary_email LIKE 'test-%@abridgeai.local'"
-            )
+            text("SELECT COUNT(*) FROM users WHERE primary_email LIKE 'test-%@abridgeai.local'")
         )
         assert user_count == 5
 
@@ -39,7 +36,7 @@ async def test_seed_users(test_engine: AsyncEngine, seeded_users: SeededUsers) -
 
 
 @pytest.mark.parametrize(
-    "token_fixture, attr",
+    ("token_fixture", "attr"),
     [
         ("student_token", "student_id"),
         ("teacher_token", "teacher_id"),
@@ -57,9 +54,7 @@ def test_each_token_decodes(
 
 
 @pytest.mark.asyncio
-async def test_hod_org_unit_scope(
-    test_engine: AsyncEngine, seeded_users: SeededUsers
-) -> None:
+async def test_hod_org_unit_scope(test_engine: AsyncEngine, seeded_users: SeededUsers) -> None:
     async with AsyncSession(test_engine) as session:
         row = (
             await session.execute(

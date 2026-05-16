@@ -69,9 +69,7 @@ async def _purge(session: AsyncSession, users_data: dict, roles_data: dict) -> N
     await session.execute(text("DELETE FROM courses WHERE id = :id"), {"id": course_id})
     await session.execute(text("DELETE FROM org_units WHERE id = :id"), {"id": org_unit_id})
     await session.execute(text("DELETE FROM users WHERE id = ANY(:ids)"), {"ids": user_ids})
-    await session.execute(
-        text("DELETE FROM roles WHERE code = ANY(:codes)"), {"codes": role_codes}
-    )
+    await session.execute(text("DELETE FROM roles WHERE code = ANY(:codes)"), {"codes": role_codes})
     await session.execute(text("DELETE FROM organizations WHERE id = :id"), {"id": org_id})
 
 
@@ -114,9 +112,7 @@ async def _insert_users(session: AsyncSession, users: list[dict]) -> None:
         )
 
 
-async def _insert_course(
-    session: AsyncSession, course: dict, org_id: str, owner_id: str
-) -> None:
+async def _insert_course(session: AsyncSession, course: dict, org_id: str, owner_id: str) -> None:
     await session.execute(
         text(
             "INSERT INTO courses (id, organization_id, owner_user_id, slug, title, status) "

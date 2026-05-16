@@ -7,7 +7,12 @@ import pytest
 import pytest_asyncio
 from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 
 from abridgeai.core.audit.context import current_actor_var
 from abridgeai.core.config import get_settings
@@ -27,21 +32,15 @@ def _async_url(database_url: str) -> str:
     if "+psycopg_async" in database_url:
         return database_url
     if database_url.startswith("postgresql+psycopg://"):
-        return database_url.replace(
-            "postgresql+psycopg://", "postgresql+psycopg_async://", 1
-        )
+        return database_url.replace("postgresql+psycopg://", "postgresql+psycopg_async://", 1)
     if database_url.startswith("postgresql://"):
-        return database_url.replace(
-            "postgresql://", "postgresql+psycopg_async://", 1
-        )
+        return database_url.replace("postgresql://", "postgresql+psycopg_async://", 1)
     return database_url
 
 
 @pytest_asyncio.fixture
 async def engine() -> AsyncIterator[AsyncEngine]:
-    eng = create_async_engine(
-        _async_url(get_settings().database_url), pool_pre_ping=True
-    )
+    eng = create_async_engine(_async_url(get_settings().database_url), pool_pre_ping=True)
     yield eng
     await eng.dispose()
 
@@ -57,10 +56,7 @@ async def org_owner(engine: AsyncEngine):
     owner_id = uuid.uuid4()
     async with engine.begin() as conn:
         await conn.execute(
-            text(
-                "INSERT INTO organizations (id, slug, name) "
-                "VALUES (:id, :slug, :name)"
-            ),
+            text("INSERT INTO organizations (id, slug, name) VALUES (:id, :slug, :name)"),
             {
                 "id": org_id,
                 "slug": f"sdc-{org_id.hex[:8]}",
@@ -117,12 +113,8 @@ async def org_owner(engine: AsyncEngine):
             text("DELETE FROM org_units WHERE organization_id = :org"),
             {"org": org_id},
         )
-        await conn.execute(
-            text("DELETE FROM users WHERE id = :id"), {"id": owner_id}
-        )
-        await conn.execute(
-            text("DELETE FROM organizations WHERE id = :id"), {"id": org_id}
-        )
+        await conn.execute(text("DELETE FROM users WHERE id = :id"), {"id": owner_id})
+        await conn.execute(text("DELETE FROM organizations WHERE id = :id"), {"id": org_id})
 
 
 async def _seed_full_chain(
@@ -140,9 +132,7 @@ async def _seed_full_chain(
         title="Test Course",
     )
     module = _Module(course=course, title="Test Module", position=1)
-    lesson = _Lesson(
-        module=module, slug=f"l-{uuid.uuid4().hex[:8]}", title="Test Lesson"
-    )
+    lesson = _Lesson(module=module, slug=f"l-{uuid.uuid4().hex[:8]}", title="Test Lesson")
     resources = [
         _LessonResource(
             lesson=lesson,
@@ -201,12 +191,16 @@ async def test_nested_cascade_4_levels(
 
     async with session_factory() as session:
         rows = (
-            await session.execute(
-                select(_LessonResource)
-                .where(_LessonResource.lesson_id == ids["lesson_id"])
-                .execution_options(include_deleted=True)
+            (
+                await session.execute(
+                    select(_LessonResource)
+                    .where(_LessonResource.lesson_id == ids["lesson_id"])
+                    .execution_options(include_deleted=True)
+                )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         assert len(rows) == 2
         assert all(r.deleted_at is not None for r in rows)
 
@@ -224,12 +218,8 @@ async def test_partial_cascade_does_not_cross_siblings(
         )
         module_a = _Module(course=course, title="Module A", position=1)
         module_b = _Module(course=course, title="Module B", position=2)
-        lesson_a = _Lesson(
-            module=module_a, slug=f"la-{uuid.uuid4().hex[:8]}", title="Lesson A"
-        )
-        lesson_b = _Lesson(
-            module=module_b, slug=f"lb-{uuid.uuid4().hex[:8]}", title="Lesson B"
-        )
+        lesson_a = _Lesson(module=module_a, slug=f"la-{uuid.uuid4().hex[:8]}", title="Lesson A")
+        lesson_b = _Lesson(module=module_b, slug=f"lb-{uuid.uuid4().hex[:8]}", title="Lesson B")
         for i in range(1, 4):
             _LessonResource(
                 lesson=lesson_a,
@@ -264,9 +254,7 @@ async def test_partial_cascade_does_not_cross_siblings(
         assert sibling.deleted_at is None
 
         sibling_module = (
-            await session.execute(
-                select(_Module).where(_Module.id == module_b_id)
-            )
+            await session.execute(select(_Module).where(_Module.id == module_b_id))
         ).scalar_one_or_none()
         assert sibling_module is not None
         assert sibling_module.deleted_at is None
@@ -280,9 +268,7 @@ async def test_uniqueness_reuse_after_soft_delete(
     duplicate_slug = f"dup-{uuid.uuid4().hex[:8]}"
 
     async with session_factory() as session:
-        ids = await _seed_full_chain(
-            session, org_id, owner_id, slug=target_slug, resource_count=1
-        )
+        ids = await _seed_full_chain(session, org_id, owner_id, slug=target_slug, resource_count=1)
         await session.commit()
         first_course_id = ids["course_id"]
 
@@ -305,20 +291,24 @@ async def test_uniqueness_reuse_after_soft_delete(
 
     async with session_factory() as session:
         active_with_slug = (
-            await session.execute(
-                select(_Course).where(_Course.slug == target_slug)
-            )
-        ).scalars().all()
+            (await session.execute(select(_Course).where(_Course.slug == target_slug)))
+            .scalars()
+            .all()
+        )
         assert len(active_with_slug) == 1
         assert active_with_slug[0].id == recreated_id
 
         all_with_slug = (
-            await session.execute(
-                select(_Course)
-                .where(_Course.slug == target_slug)
-                .execution_options(include_deleted=True)
+            (
+                await session.execute(
+                    select(_Course)
+                    .where(_Course.slug == target_slug)
+                    .execution_options(include_deleted=True)
+                )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         assert len(all_with_slug) == 2
 
     async with session_factory() as session:
@@ -357,26 +347,28 @@ async def test_query_filter_respects_cascade(
 
     async with session_factory() as session:
         active_courses = (
-            await session.execute(
-                select(_Course).where(_Course.id == ids["course_id"])
-            )
-        ).scalars().all()
+            (await session.execute(select(_Course).where(_Course.id == ids["course_id"])))
+            .scalars()
+            .all()
+        )
         assert active_courses == []
 
         active_lessons = (
-            await session.execute(
-                select(_Lesson).where(_Lesson.module_id == ids["module_id"])
-            )
-        ).scalars().all()
+            (await session.execute(select(_Lesson).where(_Lesson.module_id == ids["module_id"])))
+            .scalars()
+            .all()
+        )
         assert active_lessons == []
 
         active_resources = (
-            await session.execute(
-                select(_LessonResource).where(
-                    _LessonResource.lesson_id == ids["lesson_id"]
+            (
+                await session.execute(
+                    select(_LessonResource).where(_LessonResource.lesson_id == ids["lesson_id"])
                 )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         assert active_resources == []
 
 
@@ -393,32 +385,44 @@ async def test_opt_out_admin_query_shows_descendants(
 
     async with session_factory() as session:
         course_rows = (
-            await session.execute(
-                select(_Course)
-                .where(_Course.id == ids["course_id"])
-                .execution_options(include_deleted=True)
+            (
+                await session.execute(
+                    select(_Course)
+                    .where(_Course.id == ids["course_id"])
+                    .execution_options(include_deleted=True)
+                )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         assert len(course_rows) == 1
         assert course_rows[0].deleted_at is not None
 
         lesson_rows = (
-            await session.execute(
-                select(_Lesson)
-                .where(_Lesson.module_id == ids["module_id"])
-                .execution_options(include_deleted=True)
+            (
+                await session.execute(
+                    select(_Lesson)
+                    .where(_Lesson.module_id == ids["module_id"])
+                    .execution_options(include_deleted=True)
+                )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         assert len(lesson_rows) == 1
         assert lesson_rows[0].deleted_at is not None
 
         resource_rows = (
-            await session.execute(
-                select(_LessonResource)
-                .where(_LessonResource.lesson_id == ids["lesson_id"])
-                .execution_options(include_deleted=True)
+            (
+                await session.execute(
+                    select(_LessonResource)
+                    .where(_LessonResource.lesson_id == ids["lesson_id"])
+                    .execution_options(include_deleted=True)
+                )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         assert len(resource_rows) == 2
         assert all(r.deleted_at is not None for r in resource_rows)
 
@@ -517,9 +521,7 @@ async def test_dry_run_then_real_cascade(
 
     async with session_factory() as session:
         active_course = (
-            await session.execute(
-                select(_Course).where(_Course.id == ids["course_id"])
-            )
+            await session.execute(select(_Course).where(_Course.id == ids["course_id"]))
         ).scalar_one_or_none()
         assert active_course is not None
         assert active_course.deleted_at is None
@@ -533,9 +535,7 @@ async def test_dry_run_then_real_cascade(
     assert real.count == 6
     async with session_factory() as session:
         active_course = (
-            await session.execute(
-                select(_Course).where(_Course.id == ids["course_id"])
-            )
+            await session.execute(select(_Course).where(_Course.id == ids["course_id"]))
         ).scalar_one_or_none()
         assert active_course is None
 
@@ -580,12 +580,16 @@ async def test_cycle_safety_two_node_ring(
 
     async with session_factory() as session:
         rows = (
-            await session.execute(
-                select(_OrgUnit)
-                .where(_OrgUnit.id.in_([unit_a_id, unit_b_id]))
-                .execution_options(include_deleted=True)
+            (
+                await session.execute(
+                    select(_OrgUnit)
+                    .where(_OrgUnit.id.in_([unit_a_id, unit_b_id]))
+                    .execution_options(include_deleted=True)
+                )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         assert len(rows) == 2
         assert all(r.deleted_at is not None for r in rows)
 
@@ -636,12 +640,16 @@ async def test_atomicity_flush_failure_rolls_back(
         assert le.deleted_at is None
 
         resource_rows = (
-            await session.execute(
-                select(_LessonResource)
-                .where(_LessonResource.lesson_id == ids["lesson_id"])
-                .execution_options(include_deleted=True)
+            (
+                await session.execute(
+                    select(_LessonResource)
+                    .where(_LessonResource.lesson_id == ids["lesson_id"])
+                    .execution_options(include_deleted=True)
+                )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         assert len(resource_rows) == 2
         assert all(r.deleted_at is None for r in resource_rows)
 

@@ -119,9 +119,7 @@ async def test_hit_miss_flow(redis_clean: Any) -> None:
 
 
 @pytest.mark.asyncio
-async def test_invalidation_after_write(
-    redis_clean: Any, sqlite_session: Session
-) -> None:
+async def test_invalidation_after_write(redis_clean: Any, sqlite_session: Session) -> None:
     key = PERM_USER.format(user_id="u-42")
     await redis_clean.set(key, json.dumps({"cached": True}), ex=60)
     assert await redis_clean.exists(key) == 1
@@ -190,9 +188,7 @@ async def test_jwt_validation_cache_hit(redis_clean: Any) -> None:
 
 
 @pytest.mark.asyncio
-async def test_logout_invalidates_session(
-    redis_clean: Any, sqlite_session: Session
-) -> None:
+async def test_logout_invalidates_session(redis_clean: Any, sqlite_session: Session) -> None:
     sid = "sess-logout"
     key = SESSION.format(session_id=sid)
     await redis_clean.set(key, json.dumps({"session_id": sid, "revoked_at": None}), ex=60)
@@ -239,9 +235,7 @@ async def test_admin_disable_cascades_user_sessions(
 
 
 @pytest.mark.asyncio
-async def test_revoked_session_warn_log(
-    redis_clean: Any, caplog: pytest.LogCaptureFixture
-) -> None:
+async def test_revoked_session_warn_log(redis_clean: Any, caplog: pytest.LogCaptureFixture) -> None:
     sid = "sess-stale"
     key = SESSION.format(session_id=sid)
     await redis_clean.set(
@@ -256,7 +250,8 @@ async def test_revoked_session_warn_log(
     assert payload is not None
     assert payload.get("revoked_at") == "2026-05-16T12:00:00Z"
     matching = [
-        rec for rec in caplog.records
+        rec
+        for rec in caplog.records
         if rec.levelno == logging.WARNING
         and getattr(rec, "event", None) == "cache_revoked_session_hit"
     ]

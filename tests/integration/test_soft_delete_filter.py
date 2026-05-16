@@ -41,7 +41,7 @@ class _Tag(_Base):
     label: Mapped[str] = mapped_column(String(100))
 
 
-@pytest.fixture()
+@pytest.fixture
 def engine():
     eng = create_engine("sqlite://")
     _Base.metadata.create_all(eng)
@@ -74,11 +74,7 @@ def test_opt_out_shows(engine):
         s.commit()
         _soft_delete(s, c)
 
-        rows = (
-            s.execute(select(_Course).execution_options(include_deleted=True))
-            .scalars()
-            .all()
-        )
+        rows = s.execute(select(_Course).execution_options(include_deleted=True)).scalars().all()
         assert len(rows) == 1
         assert rows[0].title == "Visible to admin"
         assert rows[0].deleted_at is not None
@@ -109,23 +105,17 @@ def test_join_filter(engine):
         s.commit()
         _soft_delete(s, dead)
 
-        rows = (
-            s.execute(
-                select(_Course, _Module).join(_Module, _Module.course_id == _Course.id)
-            )
-            .all()
-        )
+        rows = s.execute(
+            select(_Course, _Module).join(_Module, _Module.course_id == _Course.id)
+        ).all()
         assert len(rows) == 1
         course, module = rows[0]
         assert course.title == "Live"
         assert module.name == "m-live"
 
-        all_rows = (
-            s.execute(
-                select(_Course, _Module)
-                .join(_Module, _Module.course_id == _Course.id)
-                .execution_options(include_deleted=True)
-            )
-            .all()
-        )
+        all_rows = s.execute(
+            select(_Course, _Module)
+            .join(_Module, _Module.course_id == _Course.id)
+            .execution_options(include_deleted=True)
+        ).all()
         assert len(all_rows) == 2

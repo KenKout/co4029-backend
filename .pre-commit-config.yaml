@@ -1,0 +1,107 @@
+# aBridgeAI backend-new — pre-commit hook framework
+#
+# This config lives inside the backend-new/ git root because pre-commit
+# discovers its config relative to `git rev-parse --show-toplevel`. The
+# parent workspace co4029_projects/ is NOT a git repo, so a workspace-root
+# config would be unreachable.
+#
+# All hook revs are SHA-pinned (full 40-char commit SHA) per the same
+# security posture as the GitHub Actions workflow (T0.21). Annotation
+# comments expose the human-readable tag for review.
+#
+# Install once per fresh clone (run from backend-new/):
+#     uv run pre-commit install
+#
+# Run all hooks against the full tree at any time:
+#     uv run pre-commit run --all-files
+#
+# Skipping hooks for a single commit (`git commit --no-verify`) is
+# discouraged. Per AGENTS.md: never skip hooks unless the user explicitly
+# requests it, and the commit message must justify it.
+
+default_language_version:
+  python: python3.12
+
+# Hook scopes are tightened with `files:` regexes; without them mirrors-mypy
+# would walk the entire tree and choke on tests/ or alembic/versions/.
+# All paths below are relative to backend-new/ (the git root).
+
+repos:
+  # Standard hooks: fast, language-agnostic guards. SHA pinned to v6.0.0.
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: 3e8a8703264a2f4a69428a0aa4dcb512790b2c8c  # v6.0.0
+    hooks:
+      - id: check-yaml
+      - id: check-toml
+      - id: check-json
+      - id: check-merge-conflict
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: check-added-large-files
+        args: [--maxkb=500]
+      - id: check-ast
+        # Python parse check — catches syntax errors before they hit ruff.
+
+  # ruff lint + format. Same major version family as the dev pin
+  # (mypy>=1.18,<2 era; ruff 0.15.x is the current line). SHA pinned to
+  # v0.15.13.
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: 5e2fb545eba1ea9dc051f6f962d52fe8f76a9794  # v0.15.13
+    hooks:
+      - id: ruff
+        args: [--fix]
+        files: ^abridgeai/|^tests/
+      - id: ruff-format
+        files: ^abridgeai/|^tests/
+
+  # mypy via the pre-commit mirror. Rev pinned to v1.20.2 to match the
+  # project's installed mypy in uv.lock — keeping the two in lockstep
+  # avoids "passes locally but fails in hook" drift.
+  # additional_dependencies must mirror the runtime deps that abridgeai/
+  # imports so mypy can resolve types in its isolated env. Versions are
+  # pinned to the same range as pyproject.toml runtime deps; the hook
+  # rebuilds its venv whenever this file changes.
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: fc0f09a29bb495f4a91f00266155d6282d52485d  # v1.20.2
+    hooks:
+      - id: mypy
+        files: ^abridgeai/
+        # `entry` overrides what mirrors-mypy invokes by default so the
+        # tool always type-checks the configured target instead of just
+        # the staged files. mypy reads its config from pyproject.toml at
+        # backend-new/ root via the [tool.mypy] block.
+        entry: mypy abridgeai
+        pass_filenames: false
+        additional_dependencies:
+          - pydantic==2.13.4
+          - pydantic-settings==2.14.1
+          - sqlalchemy==2.0.49
+          - structlog==25.5.0
+          - redis==5.3.1
+          - fastapi==0.136.1
+          - starlette==1.0.0
+          - httpx==0.28.1
+          - jinja2==3.1.6
+          - pyjwt==2.12.1
+          - types-pyyaml
+
+  # bandit static security scan, scoped to the production source tree.
+  # Reuses the [tool.bandit] block in pyproject.toml so the hook and the
+  # CI job stay in lockstep.
+  - repo: https://github.com/PyCQA/bandit
+    rev: 92ae8b82fb422a639f0ed8d99e96cea769594e08  # 1.9.4
+    hooks:
+      - id: bandit
+        args: [-c, pyproject.toml, -r, abridgeai/]
+        files: ^abridgeai/
+        pass_filenames: false
+
+  # gitleaks secret scan (Go binary). Scope is the full backend-new/ repo
+  # — we cannot hook the parent workspace because it is not a git repo.
+  # The dual `.gitleaks.toml` (workspace + backend-new/) from T0.20 keeps
+  # both audit surfaces in sync; the hook reads the in-repo copy.
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: 83d9cd684c87d95d656c1458ef04895a7f1cbd8e  # v8.30.1
+    hooks:
+      - id: gitleaks
+        args: [--config=.gitleaks.toml]
