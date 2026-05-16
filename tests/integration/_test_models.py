@@ -2,13 +2,16 @@
 
 Phase 3 (T3.x) builds the canonical ``features/courses/models.py`` with
 real Course, Module, Lesson classes. Until then, this module gives the
-T0.15 integration tests a real-DB substrate to exercise relationship
-traversal against.
+T0.15 / T0.17 integration tests a real-DB substrate to exercise
+relationship traversal against.
 
 Bound to the existing ``courses`` / ``modules`` / ``lessons`` /
-``org_units`` tables created by ``0001_baseline_schema.py``. We declare
-only the columns the tests touch + mixin columns, and rely on the
-production schema for everything else.
+``module_items`` / ``lesson_resources`` / ``org_units`` tables created
+by ``0001_baseline_schema.py``. We declare only the columns the tests
+touch + mixin columns, and rely on the production schema for everything
+else. ``auth_sessions`` is exercised via raw SQL in the hard-delete
+boundary test — no ORM model is needed because the test only verifies
+non-touch.
 
 DELETE THIS FILE when ``features/courses/models.py`` lands.
 """
@@ -82,6 +85,11 @@ class _Module(
         back_populates="module",
         cascade="all",
     )
+    items: Mapped[list[_ModuleItem]] = relationship(
+        back_populates="module",
+        cascade="all",
+        foreign_keys="[_ModuleItem.module_id]",
+    )
 
 
 class _Lesson(
@@ -104,6 +112,59 @@ class _Lesson(
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="draft")
 
     module: Mapped[_Module] = relationship(back_populates="lessons")
+    resources: Mapped[list[_LessonResource]] = relationship(
+        back_populates="lesson",
+        cascade="all",
+    )
+
+
+class _ModuleItem(
+    UUIDPrimaryKeyMixin,
+    TimestampMixin,
+    AuditedByMixin,
+    SoftDeleteMixin,
+    _TestBase,
+):
+    __tablename__ = "module_items"
+
+    module_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("modules.id"),
+        nullable=False,
+    )
+    item_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    lesson_id: Mapped[uuid.UUID | None] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("lessons.id"),
+        nullable=True,
+    )
+    position: Mapped[int] = mapped_column(nullable=False)
+
+    module: Mapped[_Module] = relationship(
+        back_populates="items",
+        foreign_keys=[module_id],
+    )
+
+
+class _LessonResource(
+    UUIDPrimaryKeyMixin,
+    TimestampMixin,
+    AuditedByMixin,
+    SoftDeleteMixin,
+    _TestBase,
+):
+    __tablename__ = "lesson_resources"
+
+    lesson_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("lessons.id"),
+        nullable=False,
+    )
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    resource_type: Mapped[str] = mapped_column(String(20), nullable=False, default="link")
+    position: Mapped[int] = mapped_column(nullable=False)
+
+    lesson: Mapped[_Lesson] = relationship(back_populates="resources")
 
 
 class _OrgUnit(
@@ -137,4 +198,42 @@ class _OrgUnit(
     )
 
 
-__all__ = ["_Course", "_Lesson", "_Module", "_OrgUnit", "_TestBase"]
+class _AuthSession(
+    UUIDPrimaryKeyMixin,
+    TimestampMixin,
+    _TestBase,
+):
+    """Hard-delete table — intentionally NO SoftDeleteMixin.
+
+    Used by ``test_cascade_does_not_touch_hard_delete_table`` to prove
+    the cascade walker stops at non-SoftDeleteMixin instances and never
+    fabricates a ``deleted_at`` column on tables that don't have one.
+    """
+
+    __tablename__ = "auth_sessions"
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("users.id"),
+        nullable=False,
+    )
+    refresh_token_hash: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    expires_at: Mapped[uuid.UUID] = mapped_column(
+        # actually TIMESTAMPTZ; declared loosely since we never SELECT this column
+        # in tests (only INSERT via raw SQL with explicit value). Mapping kept
+        # minimal so SQLAlchemy can hydrate id/user_id round-trips.
+        String,
+        nullable=False,
+    )
+
+
+__all__ = [
+    "_AuthSession",
+    "_Course",
+    "_Lesson",
+    "_LessonResource",
+    "_Module",
+    "_ModuleItem",
+    "_OrgUnit",
+    "_TestBase",
+]
