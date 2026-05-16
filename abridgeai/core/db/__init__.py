@@ -3,6 +3,7 @@ from collections.abc import AsyncIterator
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase
 
+from abridgeai.core.audit import register_audit_listener
 from abridgeai.core.config import get_settings
 from abridgeai.core.db.mixins import (
     AuditedByMixin,
@@ -12,10 +13,17 @@ from abridgeai.core.db.mixins import (
     TimestampMixin,
     UUIDPrimaryKeyMixin,
 )
+from abridgeai.core.db.soft_delete import register_soft_delete_filter
 
 
 class Base(DeclarativeBase):
     pass
+
+
+register_audit_listener()
+
+
+register_soft_delete_filter()
 
 
 _engine: AsyncEngine | None = None
@@ -71,4 +79,5 @@ __all__ = [
     "get_db",
     "get_engine",
     "get_sessionmaker",
+    "register_soft_delete_filter",
 ]
