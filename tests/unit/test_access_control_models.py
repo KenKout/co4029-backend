@@ -68,18 +68,14 @@ def test_all_models_importable() -> None:
 
 def test_user_role_assignment_scope_kind_check_present() -> None:
     names = {
-        c.name
-        for c in UserRoleAssignment.__table__.constraints
-        if isinstance(c, CheckConstraint)
+        c.name for c in UserRoleAssignment.__table__.constraints if isinstance(c, CheckConstraint)
     }
     assert "ck_user_role_assignments_scope_kind" in names
 
 
 def test_user_permission_grant_scope_kind_check_present() -> None:
     names = {
-        c.name
-        for c in UserPermissionGrant.__table__.constraints
-        if isinstance(c, CheckConstraint)
+        c.name for c in UserPermissionGrant.__table__.constraints if isinstance(c, CheckConstraint)
     }
     assert "ck_user_permission_grants_scope_kind" in names
 
@@ -89,8 +85,7 @@ def test_user_permission_grant_scope_kind_check_present() -> None:
     [
         c
         for c in UserRoleAssignment.__table__.constraints
-        if isinstance(c, CheckConstraint)
-        and c.name == "ck_user_role_assignments_scope_kind"
+        if isinstance(c, CheckConstraint) and c.name == "ck_user_role_assignments_scope_kind"
     ],
 )
 def test_scope_kind_check_covers_four_scopes(ck: CheckConstraint) -> None:

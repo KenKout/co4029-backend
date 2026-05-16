@@ -78,9 +78,7 @@ _SCOPE_KIND_CHECK = (
 # ---------------------------------------------------------------------------
 
 
-class Organization(
-    UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftDeleteMixin, Base
-):
+class Organization(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftDeleteMixin, Base):
     """Top-level tenant.
 
     ``slug`` uniqueness is enforced by a partial unique index
@@ -99,14 +97,10 @@ class Organization(
 
     slug: Mapped[str] = mapped_column(String(100), nullable=False)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
-    status: Mapped[str] = mapped_column(
-        String(20), nullable=False, server_default=text("'active'")
-    )
+    status: Mapped[str] = mapped_column(String(20), nullable=False, server_default=text("'active'"))
 
 
-class OrgUnit(
-    UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftDeleteMixin, Base
-):
+class OrgUnit(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftDeleteMixin, Base):
     """Faculty / department / program / campus inside an organization.
 
     Self-referential via ``parent_unit_id``. Uniqueness on
@@ -116,8 +110,7 @@ class OrgUnit(
     __tablename__ = "org_units"
     __table_args__ = (
         CheckConstraint(
-            "unit_type IN ('faculty', 'department', 'office', "
-            "'program', 'campus', 'other')",
+            "unit_type IN ('faculty', 'department', 'office', 'program', 'campus', 'other')",
             name="ck_org_units_unit_type",
         ),
     )
@@ -166,8 +159,7 @@ class OrganizationMembership(
     __tablename__ = "organization_memberships"
     __table_args__ = (
         CheckConstraint(
-            "status IN ('active', 'invited', 'inactive', "
-            "'suspended', 'left')",
+            "status IN ('active', 'invited', 'inactive', 'suspended', 'left')",
             name="ck_organization_memberships_status",
         ),
     )
@@ -188,9 +180,7 @@ class OrganizationMembership(
         PGUUID(as_uuid=True),
         ForeignKey("org_units.id", ondelete="SET NULL"),
     )
-    status: Mapped[str] = mapped_column(
-        String(20), nullable=False, server_default=text("'active'")
-    )
+    status: Mapped[str] = mapped_column(String(20), nullable=False, server_default=text("'active'"))
     student_code: Mapped[str | None] = mapped_column(String(50))
     employee_code: Mapped[str | None] = mapped_column(String(50))
     joined_at: Mapped[datetime] = mapped_column(
@@ -204,9 +194,7 @@ class OrganizationMembership(
 # ---------------------------------------------------------------------------
 
 
-class Permission(
-    UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftDeleteMixin, Base
-):
+class Permission(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftDeleteMixin, Base):
     """Permission catalog entry (e.g. ``course.read``).
 
     ``code`` uniqueness is a T0.16 partial unique index.
@@ -219,9 +207,7 @@ class Permission(
     description: Mapped[str | None] = mapped_column(Text)
 
 
-class Role(
-    UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftDeleteMixin, Base
-):
+class Role(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftDeleteMixin, Base):
     """Role definition (``student`` | ``teacher`` | ``hod`` | ``manager``
     | ``admin``).
 
@@ -379,9 +365,7 @@ class UserPermissionGrant(
 # ---------------------------------------------------------------------------
 
 
-class CareerPath(
-    UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftDeleteMixin, Base
-):
+class CareerPath(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftDeleteMixin, Base):
     """Career track owned by an organization.
 
     ``description`` is the Reconciliation §B6 net-new column added in the
@@ -409,9 +393,7 @@ class CareerPath(
     slug: Mapped[str] = mapped_column(String(100), nullable=False)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     description: Mapped[str | None] = mapped_column(Text)
-    status: Mapped[str] = mapped_column(
-        String(20), nullable=False, server_default=text("'draft'")
-    )
+    status: Mapped[str] = mapped_column(String(20), nullable=False, server_default=text("'draft'"))
 
 
 class StudentCareerEnrollment(
@@ -441,9 +423,7 @@ class StudentCareerEnrollment(
         ForeignKey("users.id", ondelete="CASCADE"),
         nullable=False,
     )
-    status: Mapped[str] = mapped_column(
-        String(20), nullable=False, server_default=text("'active'")
-    )
+    status: Mapped[str] = mapped_column(String(20), nullable=False, server_default=text("'active'"))
     started_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("NOW()")
     )

@@ -35,9 +35,6 @@ def test_canonical_module_docstring_documents_rationale() -> None:
         "Canonical module docstring must reference the legacy file by name."
     )
     assert "not ported" in doc, (
-        "Canonical module docstring must state that the legacy file is "
-        "not ported."
+        "Canonical module docstring must state that the legacy file is not ported."
     )
-    assert "canonical" in doc, (
-        "Canonical module docstring must self-identify as canonical."
-    )
+    assert "canonical" in doc, "Canonical module docstring must self-identify as canonical."
