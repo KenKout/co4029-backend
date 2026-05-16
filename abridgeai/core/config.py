@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from functools import lru_cache
+from typing import Literal
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -30,6 +31,12 @@ class Settings(BaseSettings):
     jwt_secret_key: str = Field(default="dev-only-change-me", min_length=16)
     access_token_ttl_seconds: int = 15 * 60
     session_ttl_seconds: int = 30 * 24 * 60 * 60
+
+    # Observability (T0.24). Console default keeps `pytest` output human-readable
+    # in dev; CI + production set LOG_FORMAT=json so log aggregators (Loki,
+    # Datadog, CloudWatch) can parse JSON keys.
+    log_format: Literal["json", "console"] = "console"
+    log_level: str = Field(default="INFO")
 
 
 @lru_cache(maxsize=1)

@@ -127,6 +127,10 @@ jobs:
       # JWT_SECRET_KEY is required by core/config.py at import time. CI-only
       # placeholder; matches .env.example length constraint (32+ chars).
       JWT_SECRET_KEY: ci-only-secret-not-used-in-prod-12345
+      # Observability (T0.24): JSON logs in CI so any future log-grepping
+      # assertions or aggregator integration tests see the production format.
+      LOG_FORMAT: json
+      LOG_LEVEL: INFO
 
     steps:
       - name: Checkout
