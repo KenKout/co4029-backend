@@ -1,0 +1,6 @@
+[project]
+name = "abridgeai-backend"
+version = "0.1.0"
+description = "aBridgeAI backend (restructured) — feature-first architecture"
+readme = "README.md"
+requires-python = ">=3.12"
