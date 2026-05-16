@@ -1,0 +1,81 @@
+# Gitleaks configuration for co4029_projects monorepo
+# Scans backend/, backend-new/, frontend/, frontend-vite/, docs/, etc.
+# Run from repo root: gitleaks detect --source . --config .gitleaks.toml --no-git
+# Or from backend-new/: gitleaks detect --source .. --config ../.gitleaks.toml
+
+# Extend default gitleaks ruleset (AWS, GitHub, JWT, generic API keys, private keys, etc.)
+[extend]
+useDefault = true
+
+# ─────────────────────────── Custom rules ───────────────────────────
+
+[[rules]]
+id = "openai-api-key-project"
+description = "OpenAI project-scoped API key (sk-proj-...)"
+regex = '''sk-proj-[A-Za-z0-9_-]{40,}'''
+keywords = ["sk-proj-"]
+tags = ["key", "openai"]
+
+[[rules]]
+id = "openai-api-key-classic"
+description = "OpenAI classic API key (sk-...)"
+regex = '''\bsk-[A-Za-z0-9]{48}\b'''
+keywords = ["sk-"]
+tags = ["key", "openai"]
+
+[[rules]]
+id = "garage-s3-access-key"
+description = "Garage S3 access key (GK + 32 hex chars)"
+regex = '''\bGK[a-fA-F0-9]{32}\b'''
+keywords = ["GK"]
+tags = ["key", "garage", "s3"]
+
+[[rules]]
+id = "garage-s3-secret-key"
+description = "Garage S3 secret key (64 hex chars associated with access key)"
+regex = '''(?i)(garage[_-]?secret|s3[_-]?secret[_-]?key)["'\s:=]+([a-fA-F0-9]{64})'''
+keywords = ["garage_secret", "s3_secret_key", "garage-secret"]
+tags = ["key", "garage", "s3"]
+
+[[rules]]
+id = "anthropic-api-key"
+description = "Anthropic API key"
+regex = '''sk-ant-[A-Za-z0-9_-]{32,}'''
+keywords = ["sk-ant-"]
+tags = ["key", "anthropic"]
+
+# ─────────────────────────── Allowlist ───────────────────────────
+
+[allowlist]
+description = "Global allowlist for fixtures, docs, and example envs"
+paths = [
+  '''(.*/)?tests/fixtures/.*''',
+  '''(.*/)?docs/.*''',
+  '''(.*/)?\.env\.example$''',
+  '''(.*/)?\.env\.sample$''',
+  '''(.*/)?\.env\.template$''',
+  '''(.*/)?\.gitleaks\.toml$''',
+  '''\.sisyphus/evidence/.*''',
+  '''\.sisyphus/plans/.*''',
+  '''\.sisyphus/notepads/.*''',
+  '''(.*/)?reference_repo/.*''',
+  '''(.*/)?node_modules/.*''',
+  '''(.*/)?\.venv/.*''',
+  '''(.*/)?venv/.*''',
+  '''(.*/)?dist/.*''',
+  '''(.*/)?build/.*''',
+  '''(.*/)?\.next/.*''',
+  '''(.*/)?\.mypy_cache/.*''',
+  '''(.*/)?\.pytest_cache/.*''',
+  '''(.*/)?\.ruff_cache/.*''',
+  '''(.*/)?latex/.*''',
+  '''.*\.lock$''',
+  '''.*\.egg-info/.*''',
+]
+regexes = [
+  # Obvious placeholders / examples (NOT real env files)
+  '''(?i)(your[_-]?(api[_-]?)?key[_-]?here)''',
+  '''(?i)(replace[_-]?me|changeme|example|placeholder|dummy)''',
+  '''sk-(proj-)?(xxx|XXX|abc|test|fake|example|placeholder)+''',
+  '''sk-[Aa]{48}''',
+]
