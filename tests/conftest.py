@@ -53,7 +53,6 @@ def _load_yaml(name: str) -> dict:
 
 async def _purge(session: AsyncSession, users_data: dict, roles_data: dict) -> None:
     user_ids = [u["id"] for u in users_data["users"]]
-    role_codes = [r["code"] for r in roles_data["roles"]]
     org_id = roles_data["test_organization"]["id"]
     org_unit_id = roles_data["test_org_unit"]["id"]
     course_id = roles_data["test_course"]["id"]
@@ -69,8 +68,9 @@ async def _purge(session: AsyncSession, users_data: dict, roles_data: dict) -> N
     await session.execute(text("DELETE FROM courses WHERE id = :id"), {"id": course_id})
     await session.execute(text("DELETE FROM org_units WHERE id = :id"), {"id": org_unit_id})
     await session.execute(text("DELETE FROM users WHERE id = ANY(:ids)"), {"ids": user_ids})
-    await session.execute(text("DELETE FROM roles WHERE code = ANY(:codes)"), {"codes": role_codes})
     await session.execute(text("DELETE FROM organizations WHERE id = :id"), {"id": org_id})
+    # Roles are now seeded permanently by migration 0004 and carry role_permissions
+    # rows that block deletion. Tests bind to seeded role IDs via lookup_roles().
 
 
 async def _insert_organization(session: AsyncSession, org: dict) -> None:
@@ -128,17 +128,14 @@ async def _insert_course(session: AsyncSession, course: dict, org_id: str, owner
     )
 
 
-async def _insert_roles(session: AsyncSession, roles: list[dict]) -> dict[str, str]:
+async def _lookup_role_ids(session: AsyncSession, role_codes: list[str]) -> dict[str, str]:
     code_to_id: dict[str, str] = {}
-    for role in roles:
+    for code in role_codes:
         result = await session.execute(
-            text(
-                "INSERT INTO roles (code, name, is_system_role) "
-                "VALUES (:code, :name, :is_system_role) RETURNING id"
-            ),
-            role,
+            text("SELECT id FROM roles WHERE code = :code"),
+            {"code": code},
         )
-        code_to_id[role["code"]] = str(result.scalar_one())
+        code_to_id[code] = str(result.scalar_one())
     return code_to_id
 
 
@@ -182,7 +179,7 @@ async def seeded_users(test_engine: AsyncEngine) -> SeededUsers:
         await _insert_org_unit(session, org_unit, org["id"])
         await _insert_users(session, users_data["users"])
         await _insert_course(session, course, org["id"], admin_id)
-        role_id_by_code = await _insert_roles(session, roles_data["roles"])
+        role_id_by_code = await _lookup_role_ids(session, [r["code"] for r in roles_data["roles"]])
         await _insert_assignments(session, roles_data["assignments"], role_id_by_code)
         await session.flush()
 
