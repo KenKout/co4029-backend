@@ -54,6 +54,7 @@ dev = [
 dev = [
     { name = "jsonpath-ng" },
     { name = "pyyaml" },
+    { name = "types-pyyaml" },
 ]
 
 [package.metadata]
@@ -98,6 +99,7 @@ provides-extras = ["dev"]
 dev = [
     { name = "jsonpath-ng", specifier = ">=1.8.0" },
     { name = "pyyaml", specifier = ">=6.0.3" },
+    { name = "types-pyyaml", specifier = ">=6.0" },
 ]
 
 [[package]]
@@ -2777,6 +2779,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/19/75/241269d1da26b624c0d5e110e8149093c759b7a286138f4efd61a60e75fe/tomli_w-1.2.0.tar.gz", hash = "sha256:2dd14fac5a47c27be9cd4c976af5a12d87fb1f0b4512f81d69cce3b35ae25021", size = 7184, upload-time = "2025-01-15T12:07:24.262Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/c7/18/c86eb8e0202e32dd3df50d43d7ff9854f8e0603945ff398974c1d91ac1ef/tomli_w-1.2.0-py3-none-any.whl", hash = "sha256:188306098d013b691fcadc011abd66727d3c414c571bb01b1a174ba8c983cf90", size = 6675, upload-time = "2025-01-15T12:07:22.074Z" },
+]
+
+[[package]]
+name = "types-pyyaml"
+version = "6.0.12.20260510"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/36/85/0d9fafce21be112e977a89677f1ce9d1aef921d745b17c758c93e861c11f/types_pyyaml-6.0.12.20260510.tar.gz", hash = "sha256:09c1f1cb65a6eebea1e2e51ccf4918b8288e152909609a35cdb0d805efd125ad", size = 17831, upload-time = "2026-05-10T05:26:28.136Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/d3/ad/fd618a218925daada7b8a5e7326e662599fa5fdff4a4c44ab2795bd2d9ca/types_pyyaml-6.0.12.20260510-py3-none-any.whl", hash = "sha256:3492eb9ba4d9d833473214c4d5736cccf5f37d93f5854059721e1c84f785309d", size = 20304, upload-time = "2026-05-10T05:26:26.981Z" },
 ]
 
 [[package]]

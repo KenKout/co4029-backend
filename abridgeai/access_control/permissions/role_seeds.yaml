@@ -1,0 +1,59 @@
+version: 1
+roles:
+  - code: student
+    name: Student
+    description: Default learner role
+    permissions:
+      - course.read
+      - quiz.take
+      - interview.take
+      - progress.read.self
+  - code: teacher
+    name: Teacher
+    description: Course author with own-course CRUD on lessons, materials, quizzes, and interviews
+    permissions:
+      - course.read
+      - course.read.draft
+      - course.update
+      - lesson.manage
+      - material.manage
+      - quiz.manage
+      - interview.manage
+      - progress.read.cohort
+  - code: hod
+    name: Head of Department
+    description: Department oversight, teacher assignment, and HOD role provisioning within scope
+    permissions:
+      - course.read
+      - course.read.draft
+      - course.assign_teacher
+      - course.enrollment.read
+      - user.read
+      - user.role_assign.hod
+      - system.stats.read
+      - progress.read.cohort
+  - code: manager
+    name: Manager
+    description: Course lifecycle, enrollment management, and org-scoped user/role/org-unit administration
+    permissions:
+      - course.create
+      - course.read
+      - course.read.draft
+      - course.update
+      - course.publish
+      - course.delete
+      - course.assign_teacher
+      - course.enrollment.read
+      - course.enrollment.create
+      - course.enrollment.remove
+      - user.read
+      - user.bulk_import
+      - user.role_assign
+      - org_unit.manage
+      - system.stats.read
+      - bulk_import.read
+      - notification.send.bulk
+  - code: admin
+    name: IT Admin
+    description: Full platform access including audit, AI processing telemetry, and organisation settings
+    permissions: ALL

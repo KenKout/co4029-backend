@@ -1,0 +1,95 @@
+version: 1
+permissions:
+  - code: course.create
+    description: Create a new course
+    category: course
+  - code: course.read
+    description: Read a published course (catalog + content)
+    category: course
+  - code: course.read.draft
+    description: Read draft (unpublished) course content
+    category: course
+  - code: course.update
+    description: Update course metadata and structure
+    category: course
+  - code: course.publish
+    description: Transition course status to published
+    category: course
+  - code: course.delete
+    description: Soft-delete a course
+    category: course
+  - code: course.assign_teacher
+    description: Assign or remove teachers on a course
+    category: course
+  - code: course.enrollment.read
+    description: List enrollments and rosters for a course
+    category: course
+  - code: course.enrollment.create
+    description: Enroll learners (single or bulk) into a course
+    category: course
+  - code: course.enrollment.remove
+    description: Remove enrollments from a course
+    category: course
+  - code: lesson.manage
+    description: Create, update, reorder, or delete lessons (module items)
+    category: lesson
+  - code: material.manage
+    description: Upload, replace, or delete course materials
+    category: material
+  - code: quiz.manage
+    description: Author and review quizzes and quiz banks
+    category: quiz
+  - code: quiz.take
+    description: Submit quiz attempts as a learner
+    category: quiz
+  - code: interview.manage
+    description: Author and review interviews and interview banks
+    category: interview
+  - code: interview.take
+    description: Take interviews as a learner
+    category: interview
+  - code: progress.read.self
+    description: Read own learner progress and analytics
+    category: progress
+  - code: progress.read.cohort
+    description: Read cohort-level progress (HOD/teacher dashboards)
+    category: progress
+  - code: user.read
+    description: Read user profiles within scope
+    category: user
+  - code: user.bulk_import
+    description: Bulk-import users via CSV/job
+    category: user
+  - code: user.role_assign
+    description: Assign or revoke any role within scope
+    category: user
+  - code: user.role_assign.hod
+    description: Assign or revoke the HOD role within a department scope
+    category: user
+  - code: org_unit.manage
+    description: Create, update, or archive organisational units (departments)
+    category: org_unit
+  - code: organization.manage
+    description: Manage tenant-level organisation settings
+    category: organization
+  - code: audit.read
+    description: Read the audit log
+    category: audit
+  - code: system.stats.read
+    description: Read aggregated platform statistics (org or department scoped)
+    category: system
+  - code: system.administer
+    description: Perform IT-admin operations (system settings, feature flags, jobs)
+    category: system
+  - code: ai.processing.read
+    description: Read AI/LLM processing telemetry, queues, and bank analytics
+    category: ai
+  - code: notification.send.bulk
+    description: Send bulk notifications across cohorts or org units
+    category: notification
+  - code: feature_flag.manage
+    description: Toggle and configure feature flags
+    category: feature_flag
+  - code: bulk_import.read
+    description: Read bulk-import job status, rows, and errors
+    category: bulk_import
