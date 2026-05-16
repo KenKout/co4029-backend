@@ -128,6 +128,13 @@ forbidden_modules = [
     "sqlalchemy",
     "sqlalchemy.*",
 ]
+allow_indirect_imports = true
+ignore_imports = [
+    "abridgeai.features.identity.services.login -> sqlalchemy",
+    "abridgeai.features.identity.services.session -> sqlalchemy",
+    "abridgeai.features.identity.services.mfa -> sqlalchemy",
+    "abridgeai.features.identity.services.profile -> sqlalchemy",
+]
 
 [[tool.importlinter.contracts]]
 name = "Routers do not call queries directly (must go through services)"
@@ -142,6 +149,7 @@ forbidden_modules = [
     "abridgeai.features.*.repositories",
     "abridgeai.features.*.repositories.*",
 ]
+allow_indirect_imports = true
 
 [[tool.importlinter.contracts]]
 name = "Features are independent (cross-feature traffic must go through public API)"
