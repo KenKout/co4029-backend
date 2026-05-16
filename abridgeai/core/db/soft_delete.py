@@ -15,7 +15,7 @@ read-side only. Soft-deletion is performed by setting ``deleted_at``
 from __future__ import annotations
 
 from sqlalchemy import event
-from sqlalchemy.orm import Session, with_loader_criteria
+from sqlalchemy.orm import ORMExecuteState, Session, with_loader_criteria
 
 from abridgeai.core.db.mixins import SoftDeleteMixin
 
@@ -30,7 +30,7 @@ def register_soft_delete_filter() -> None:
     _REGISTERED = True
 
     @event.listens_for(Session, "do_orm_execute")
-    def _apply_soft_delete_filter(execute_state) -> None:  # type: ignore[no-untyped-def]
+    def _apply_soft_delete_filter(execute_state: ORMExecuteState) -> None:
         if execute_state.execution_options.get("include_deleted", False):
             return
         if not execute_state.is_select:

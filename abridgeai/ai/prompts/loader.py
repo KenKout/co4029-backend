@@ -56,7 +56,7 @@ def render_prompt(template_path: str, **kwargs: object) -> str:
 
     env = jinja2.Environment(
         loader=jinja2.FileSystemLoader(searchpath=[str(full_path.parent)]),
-        autoescape=False,
+        autoescape=False,  # noqa: S701  -- prompts render LLM plain text, not HTML
         undefined=jinja2.StrictUndefined,
         keep_trailing_newline=True,
         trim_blocks=False,

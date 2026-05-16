@@ -38,7 +38,7 @@ def get_jinja_env() -> jinja2.Environment:
     """
     return jinja2.Environment(
         loader=jinja2.FileSystemLoader(searchpath=[str(_PACKAGE_ROOT)]),
-        autoescape=False,
+        autoescape=False,  # noqa: S701  -- prompts render LLM plain text, not HTML
         undefined=jinja2.StrictUndefined,
         keep_trailing_newline=True,
         trim_blocks=False,

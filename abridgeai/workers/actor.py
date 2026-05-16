@@ -20,7 +20,7 @@ from uuid import UUID
 from abridgeai.core.audit import current_actor_var
 
 
-def set_worker_actor(actor_id: UUID | None) -> Token:
+def set_worker_actor(actor_id: UUID | None) -> Token[UUID | None]:
     """Bind the given actor to the current async context.
 
     Returns the token for optional `current_actor_var.reset(token)` use.

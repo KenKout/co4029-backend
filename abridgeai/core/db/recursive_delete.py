@@ -36,13 +36,13 @@ Actor identity:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
 from sqlalchemy import inspect
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm.relationships import ONETOMANY
+from sqlalchemy.orm.interfaces import ONETOMANY
 
 from abridgeai.core.audit.context import current_actor_var
 from abridgeai.core.db.mixins import SoftDeleteMixin
@@ -59,7 +59,7 @@ class SoftDeleteResult:
 
 async def soft_delete_cascade(
     session: AsyncSession,
-    instance: Any,
+    instance: Any,  # noqa: ANN401  -- ORM instances are runtime-typed via SoftDeleteMixin check.
     actor_id: UUID | None = None,
     *,
     dry_run: bool = False,
@@ -92,12 +92,14 @@ async def soft_delete_cascade(
 
     visited: set[tuple[str, UUID]] = set()
     effective_actor = actor_id if actor_id is not None else current_actor_var.get()
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
-    async def _walk(obj: Any) -> None:
+    async def _walk(obj: Any) -> None:  # noqa: ANN401  -- traversed runtime ORM nodes.
         if not isinstance(obj, SoftDeleteMixin):
             return
         mapper = inspect(type(obj))
+        if mapper is None:  # pragma: no cover  -- inspect() on a mapped class is never None.
+            return
         table_name = mapper.persist_selectable.name
         obj_id = getattr(obj, "id", None)
         if obj_id is None:

@@ -16,8 +16,10 @@ once (e.g. test harness re-imports) does not double-fire the hook.
 
 from __future__ import annotations
 
+from typing import Any
+
 from sqlalchemy import event
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, UOWTransaction
 
 from .context import current_actor_var
 
@@ -34,7 +36,11 @@ def register_audit_listener() -> None:
     from ..db.mixins import AuditedByMixin
 
     @event.listens_for(Session, "before_flush")
-    def _audit_before_flush(session, flush_context, instances) -> None:  # noqa: ARG001
+    def _audit_before_flush(  # noqa: ARG001  -- SQLAlchemy event signature.
+        session: Session,
+        flush_context: UOWTransaction,
+        instances: Any,  # noqa: ANN401  -- SQLAlchemy passes a heterogeneous tuple.
+    ) -> None:
         actor_id = current_actor_var.get()
         if actor_id is None:
             return

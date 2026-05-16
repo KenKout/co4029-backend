@@ -35,7 +35,7 @@ dev = [
     "pytest-cov>=5.0",
     "respx>=0.21",
     "ruff>=0.7",
-    "mypy>=1.11",
+    "mypy>=1.18,<2",
     "import-linter>=2.0",
     "moto>=5.0",
     "bandit>=1.7",
@@ -67,6 +67,42 @@ exclude_lines = [
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+
+[tool.ruff.lint]
+# E,W = pycodestyle errors/warnings; F = pyflakes; I = isort; B = bugbear;
+# UP = pyupgrade; N = pep8-naming; S = bandit; C90 = mccabe complexity;
+# PT = pytest-style; RET = flake8-return; SIM = simplify; ANN = annotations;
+# ASYNC = async; T20 = no print/pprint
+select = ["E", "F", "W", "I", "B", "UP", "N", "S", "C90", "PT", "RET", "SIM", "ANN", "ASYNC", "T20"]
+ignore = ["ANN101", "ANN102"]
+
+[tool.ruff.lint.mccabe]
+# Recursive ORM walker (soft_delete_cascade) sits at 12; raise from default 10.
+max-complexity = 12
+
+[tool.ruff.lint.per-file-ignores]
+# Tests can use asserts (S101), broad pytest.raises (PT011),
+# and don't need full type annotations (ANN).
+"tests/**/*.py" = ["ANN", "S101", "PT011"]
+"abridgeai/**/_test_models.py" = ["ANN"]
+# Alembic migrations are auto-generated / template-driven.
+"alembic/versions/**/*.py" = ["ANN", "E501"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+disallow_untyped_defs = true
+plugins = ["pydantic.mypy", "sqlalchemy.ext.mypy.plugin"]
+# Keep error output actionable; show error codes for targeted ignores.
+show_error_codes = true
+warn_unused_ignores = true
+exclude = ["alembic/versions/"]
+
+[[tool.mypy.overrides]]
+module = "tests.*"
+disallow_untyped_defs = false
+disallow_untyped_decorators = false
+disallow_incomplete_defs = false
 
 [tool.setuptools.packages.find]
 include = ["abridgeai*"]
