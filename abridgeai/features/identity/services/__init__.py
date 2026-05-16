@@ -10,7 +10,8 @@ need ``AsyncSession`` go through a ``TYPE_CHECKING`` guard.
 
 from __future__ import annotations
 
-from . import login, mfa, profile, session
+from . import admin, login, mfa, profile, session
+from .admin import get_user_with_profile, list_users
 from .login import handle_google_callback
 from .mfa import (
     create_mfa_challenge,
@@ -23,10 +24,13 @@ from .profile import get_current_user_read, serialize_user, update_profile
 from .session import logout, refresh_tokens
 
 __all__ = [
+    "admin",
     "create_mfa_challenge",
     "enroll_totp",
     "get_current_user_read",
+    "get_user_with_profile",
     "handle_google_callback",
+    "list_users",
     "login",
     "logout",
     "mfa",

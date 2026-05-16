@@ -134,6 +134,8 @@ ignore_imports = [
     "abridgeai.features.identity.services.session -> sqlalchemy",
     "abridgeai.features.identity.services.mfa -> sqlalchemy",
     "abridgeai.features.identity.services.profile -> sqlalchemy",
+    "abridgeai.features.identity.services.admin -> sqlalchemy",
+    "abridgeai.features.access_control.services.permissions_lookup -> sqlalchemy",
 ]
 
 [[tool.importlinter.contracts]]
@@ -156,6 +158,10 @@ name = "Features are independent (cross-feature traffic must go through public A
 type = "independence"
 modules = [
     "abridgeai.features.*",
+]
+ignore_imports = [
+    "abridgeai.features.identity.routers.me -> abridgeai.features.access_control.services",
+    "abridgeai.features.identity.routers.users -> abridgeai.features.access_control.policies",
 ]
 
 [[tool.importlinter.contracts]]

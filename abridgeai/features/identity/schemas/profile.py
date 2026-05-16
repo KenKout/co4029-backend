@@ -61,3 +61,16 @@ class AuthSessionRead(_ORMModel):
     user_agent: str | None = None
     created_at: datetime
     updated_at: datetime
+
+
+class UserPermissionsRead(BaseModel):
+    """Effective permission codes the current user holds (T1.9 ``/users/me/permissions``)."""
+
+    permissions: list[str]
+
+
+class UserListPage(BaseModel):
+    """Cursor-paginated list of users (T1.9 ``GET /users``)."""
+
+    items: list[UserRead]
+    next_cursor: str | None = None

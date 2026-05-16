@@ -21,6 +21,8 @@ from abridgeai.features.identity.queries.users import (
     get_profile,
     get_user,
     get_user_by_email,
+    list_profiles,
+    list_users,
 )
 
 __all__ = [
@@ -30,5 +32,7 @@ __all__ = [
     "get_user",
     "get_user_by_email",
     "get_verified_totp_factor",
+    "list_profiles",
+    "list_users",
     "user_has_verified_mfa",
 ]

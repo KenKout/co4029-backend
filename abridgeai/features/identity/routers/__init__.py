@@ -10,6 +10,8 @@ import by tests.
 from __future__ import annotations
 
 from .auth import router as auth_router
+from .me import router as me_router
 from .mfa import router as mfa_router
+from .users import router as users_router
 
-__all__ = ["auth_router", "mfa_router"]
+__all__ = ["auth_router", "me_router", "mfa_router", "users_router"]

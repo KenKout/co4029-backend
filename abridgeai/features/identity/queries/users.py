@@ -7,6 +7,7 @@ layer (T1.7) composes these and shapes the response.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from uuid import UUID
 
 from sqlalchemy import select
@@ -44,3 +45,29 @@ async def get_identity_by_provider_subject(
 
 async def get_profile(db: AsyncSession, user_id: UUID) -> UserProfile | None:
     return await db.get(UserProfile, user_id)
+
+
+async def list_users(
+    db: AsyncSession,
+    *,
+    after: UUID | None = None,
+    limit: int = 50,
+) -> list[User]:
+    """Cursor-paginated user listing ordered by ``users.id``.
+
+    ``after`` is exclusive: rows with ``id > after`` are returned. ``None``
+    starts at the first row. Caller must clamp ``limit`` (service layer
+    handles policy).
+    """
+    stmt = select(User).order_by(User.id).limit(limit)
+    if after is not None:
+        stmt = stmt.where(User.id > after)
+    result = await db.execute(stmt)
+    return list(result.scalars().all())
+
+
+async def list_profiles(db: AsyncSession, user_ids: Sequence[UUID]) -> list[UserProfile]:
+    if not user_ids:
+        return []
+    result = await db.execute(select(UserProfile).where(UserProfile.user_id.in_(user_ids)))
+    return list(result.scalars().all())

@@ -1,0 +1,90 @@
+"""Identity ``/users/me`` router — self-service profile + permissions.
+
+Three endpoints under ``/users/me`` that the SPA uses for the signed-in user:
+
+* ``GET /users/me`` — current user details (with profile if present).
+* ``PATCH /users/me/profile`` — partial update of the user's profile fields.
+* ``GET /users/me/permissions`` — effective global permission codes.
+
+Auth: every endpoint requires a valid bearer token via
+:func:`get_current_user`. No additional permission check is needed because
+each endpoint is self-scoped — users can always read and update their own
+profile. Admin lookup of other users lives in ``users.py`` and uses
+``require_permission("user.read")`` instead.
+
+Service-commit discipline: ``services.profile.update_profile`` commits its
+own transaction. ``services.permissions.get_effective_permissions`` is a
+read-only wrapper over the canonical scope-aware query (T1.4a).
+"""
+
+from __future__ import annotations
+
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from abridgeai.core.db import get_db
+from abridgeai.core.security import CurrentUser, get_current_user
+from abridgeai.features.access_control.services import (
+    get_effective_permissions,
+)
+from abridgeai.features.identity.models import User
+from abridgeai.features.identity.schemas import (
+    UserPermissionsRead,
+    UserProfileUpdate,
+    UserRead,
+)
+from abridgeai.features.identity.services import (
+    get_current_user_read,
+)
+from abridgeai.features.identity.services import profile as profile_service
+
+router = APIRouter(prefix="/users/me", tags=["users", "me"])
+
+
+def _unauthorized(detail: str) -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail=detail,
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+
+async def _load_user(db: AsyncSession, current_user: CurrentUser) -> User:
+    user = await db.get(User, current_user.user_id)
+    if user is None:
+        raise _unauthorized("User not found")
+    return user
+
+
+@router.get("", response_model=UserRead)
+async def read_me(
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> UserRead:
+    user = await _load_user(db, current_user)
+    return await get_current_user_read(db, user)
+
+
+@router.patch("/profile", response_model=UserRead)
+async def update_my_profile(
+    payload: UserProfileUpdate,
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> UserRead:
+    user = await _load_user(db, current_user)
+    await profile_service.update_profile(db, user, payload)
+    return await get_current_user_read(db, user)
+
+
+@router.get("/permissions", response_model=UserPermissionsRead)
+async def read_my_permissions(
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> UserPermissionsRead:
+    perms = await get_effective_permissions(db, current_user.user_id)
+    return UserPermissionsRead(permissions=perms)
+
+
+__all__ = ["router"]
