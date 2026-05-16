@@ -52,6 +52,68 @@ target-version = "py312"
 [tool.setuptools.packages.find]
 include = ["abridgeai*"]
 
+[tool.importlinter]
+root_packages = ["abridgeai"]
+include_external_packages = true
+
+[[tool.importlinter.contracts]]
+name = "Services do not touch SQLAlchemy directly (must go through repositories/queries)"
+type = "forbidden"
+source_modules = [
+    "abridgeai.features.*.services",
+    "abridgeai.features.*.services.*",
+]
+forbidden_modules = [
+    "sqlalchemy",
+    "sqlalchemy.*",
+]
+
+[[tool.importlinter.contracts]]
+name = "Routers do not call queries directly (must go through services)"
+type = "forbidden"
+source_modules = [
+    "abridgeai.features.*.routers",
+    "abridgeai.features.*.routers.*",
+]
+forbidden_modules = [
+    "abridgeai.features.*.queries",
+    "abridgeai.features.*.queries.*",
+    "abridgeai.features.*.repositories",
+    "abridgeai.features.*.repositories.*",
+]
+
+[[tool.importlinter.contracts]]
+name = "Features are independent (cross-feature traffic must go through public API)"
+type = "independence"
+modules = [
+    "abridgeai.features.*",
+]
+
+[[tool.importlinter.contracts]]
+name = "Learner-facing routers do not touch authoring services"
+type = "forbidden"
+source_modules = [
+    "abridgeai.features.*.routers.learner",
+]
+forbidden_modules = [
+    "abridgeai.features.*.services.authoring",
+    "abridgeai.features.*.services.administration",
+]
+
+[[tool.importlinter.contracts]]
+name = "Models are leaf-most (no imports of services or routers)"
+type = "forbidden"
+source_modules = [
+    "abridgeai.features.*.models",
+    "abridgeai.features.*.models.*",
+]
+forbidden_modules = [
+    "abridgeai.features.*.services",
+    "abridgeai.features.*.services.*",
+    "abridgeai.features.*.routers",
+    "abridgeai.features.*.routers.*",
+]
+
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
