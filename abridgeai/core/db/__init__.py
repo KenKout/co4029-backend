@@ -4,6 +4,14 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase
 
 from abridgeai.core.config import get_settings
+from abridgeai.core.db.mixins import (
+    AuditedByMixin,
+    CreatedAtMixin,
+    PGUUID,
+    SoftDeleteMixin,
+    TimestampMixin,
+    UUIDPrimaryKeyMixin,
+)
 
 
 class Base(DeclarativeBase):
@@ -49,3 +57,18 @@ async def close_db() -> None:
         await _engine.dispose()
     _engine = None
     _sessionmaker = None
+
+
+__all__ = [
+    "AuditedByMixin",
+    "Base",
+    "CreatedAtMixin",
+    "PGUUID",
+    "SoftDeleteMixin",
+    "TimestampMixin",
+    "UUIDPrimaryKeyMixin",
+    "close_db",
+    "get_db",
+    "get_engine",
+    "get_sessionmaker",
+]
