@@ -1,8 +1,34 @@
-"""LLM-as-judge package.
+"""LLM-as-judge scoring for the eval framework (T8.3).
 
-Loads judge prompts from `prompts/` (Jinja2 templates) and applies them to
-scenario outputs to produce numeric scores per criterion.
-
-T8.1 ships scaffold only. T8.3 will ship the first prompt set
-(faithfulness, coverage, difficulty alignment, ...).
+Public re-exports. ``criteria`` exposes declarative criterion catalogs
+per scenario capability; ``judge`` runs one LLM call per criterion and
+returns a ``JudgeScore`` or ``PairwiseVerdict``.
 """
+
+from __future__ import annotations
+
+from eval.judges.criteria import (
+    Criterion,
+    criteria_for_capability,
+    gap_report_criteria,
+    interview_criteria,
+    quiz_criteria,
+)
+from eval.judges.judge import (
+    JudgeScore,
+    PairwiseVerdict,
+    judge_pairwise,
+    judge_response,
+)
+
+__all__ = [
+    "Criterion",
+    "JudgeScore",
+    "PairwiseVerdict",
+    "criteria_for_capability",
+    "gap_report_criteria",
+    "interview_criteria",
+    "judge_pairwise",
+    "judge_response",
+    "quiz_criteria",
+]

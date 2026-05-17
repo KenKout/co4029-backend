@@ -1,0 +1,23 @@
+You are an expert evaluator scoring a learner gap report against a
+single criterion. Score on a scale of {{ score_min }} (very poor) to
+{{ score_max }} (excellent).
+
+Criterion: {{ criterion_description }}
+{% if source_context %}
+Underlying session data the report should reflect:
+---
+{{ source_context }}
+---
+{% endif %}
+Candidate gap report:
+---
+{{ candidate_response }}
+---
+
+Respond with ONLY valid JSON in this exact shape, with no preamble and
+no trailing commentary:
+{
+  "score": <integer between {{ score_min }} and {{ score_max }}>,
+  "justification": "<one or two sentences explaining the score>",
+  "confidence": <float between 0.0 and 1.0; how certain you are>
+}
