@@ -82,6 +82,7 @@ class EmbeddingClient:
         texts: list[str],
         *,
         db: AsyncSession,
+        pipeline_run_id: UUID | None = None,
         parent_job_id: UUID | None = None,
         parent_run_id: UUID | None = None,
     ) -> list[list[float]]:
@@ -113,7 +114,8 @@ class EmbeddingClient:
                 operation="embedding",
                 model_name=binding.model,
                 base_url=binding.base_url,
-                pipeline_stage=None,
+                stage_name="embedding",
+                pipeline_run_id=pipeline_run_id,
                 parent_run_id=parent_run_id,
                 parent_job_id=parent_job_id,
                 request_payload=request_meta,
@@ -142,7 +144,8 @@ class EmbeddingClient:
                 operation="embedding",
                 model_name=binding.model,
                 base_url=binding.base_url,
-                pipeline_stage=None,
+                stage_name="embedding",
+                pipeline_run_id=pipeline_run_id,
                 parent_run_id=parent_run_id,
                 parent_job_id=parent_job_id,
                 request_payload=request_meta,
@@ -164,7 +167,8 @@ class EmbeddingClient:
             operation="embedding",
             model_name=binding.model,
             base_url=binding.base_url,
-            pipeline_stage=None,
+            stage_name="embedding",
+            pipeline_run_id=pipeline_run_id,
             parent_run_id=parent_run_id,
             parent_job_id=parent_job_id,
             request_payload=request_meta,
@@ -178,7 +182,6 @@ class EmbeddingClient:
             estimated_cost_usd=cost,
         )
 
-        # Sort by `index` since the upstream may return out of order.
         items = sorted(data, key=lambda x: x["index"])
         return [item["embedding"] for item in items]
 
@@ -187,6 +190,7 @@ class EmbeddingClient:
         text_query: str,
         *,
         db: AsyncSession,
+        pipeline_run_id: UUID | None = None,
         parent_job_id: UUID | None = None,
         parent_run_id: UUID | None = None,
     ) -> list[float]:
@@ -194,6 +198,7 @@ class EmbeddingClient:
         results = await self.embed(
             [text_query],
             db=db,
+            pipeline_run_id=pipeline_run_id,
             parent_job_id=parent_job_id,
             parent_run_id=parent_run_id,
         )

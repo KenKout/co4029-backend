@@ -4,9 +4,8 @@ Owned by the LLM integration module because only ``LLMGateway`` and
 ``EmbeddingClient`` write rows (via ``audit.write_ai_model_call``). Pipeline
 call sites must not construct ``AIModelCall`` directly.
 
-T2.4 extends this table with ``pipeline_run_id`` + renames ``pipeline_stage``
-to ``stage_name``; this module reflects only the baseline schema (see
-``migrations/versions/0001_baseline_schema.py``).
+Schema reflects baseline 0001 plus 0005's
+``pipeline_run_id`` addition and ``pipeline_stage`` → ``stage_name`` rename.
 """
 
 from __future__ import annotations
@@ -57,7 +56,8 @@ class AIModelCall(UUIDPrimaryKeyMixin, Base):
     )
     role: Mapped[str | None] = mapped_column(String(30))
     tier: Mapped[str | None] = mapped_column(String(20))
-    pipeline_stage: Mapped[str | None] = mapped_column(String(40))
+    pipeline_run_id: Mapped[uuid.UUID | None] = mapped_column(PGUUID(as_uuid=True))
+    stage_name: Mapped[str | None] = mapped_column(String(50))
     operation: Mapped[str] = mapped_column(
         String(30), nullable=False, server_default=text("'chat_completion'")
     )

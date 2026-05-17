@@ -90,15 +90,17 @@ class LLMResult:
     """Outcome of a single chat-completion call.
 
     Mirrors what callers used to read off the old ``LLMResult`` plus the new
-    attribution fields (role/tier/pipeline_stage/base_url/total_tokens/...).
-    The legacy ``provider`` field is gone — see the chunk-2 schema migration.
+    attribution fields (role/tier/stage_name/pipeline_run_id/base_url/
+    total_tokens/...). The legacy ``provider`` field is gone — see the
+    chunk-2 schema migration.
     """
 
     role: LLMRole
     tier: str | None
     model_name: str
     base_url: str
-    pipeline_stage: str | None
+    stage_name: str | None
+    pipeline_run_id: UUID | None
     request_payload: dict[str, Any]
     response_payload: dict[str, Any]
     content_json: dict[str, Any] | list[Any]
@@ -123,7 +125,8 @@ class LLMGateway:
         system_prompt: str,
         user_prompt: str,
         db: AsyncSession,
-        pipeline_stage: str | None = None,
+        stage_name: str | None = None,
+        pipeline_run_id: UUID | None = None,
         parent_job_id: UUID | None = None,
         parent_run_id: UUID | None = None,
     ) -> LLMResult:
@@ -139,10 +142,6 @@ class LLMGateway:
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ]
-        # We store the request body verbatim per the prompt-logging policy in
-        # enterprise-governance.md. Embedding rows use a metadata-only payload
-        # (see embeddings.py) since input text is recoverable from
-        # document_chunks.
         request_payload: dict[str, Any] = {
             "model": binding.model,
             "messages": messages,
@@ -161,7 +160,8 @@ class LLMGateway:
                 operation="chat_completion",
                 model_name=binding.model,
                 base_url=binding.base_url,
-                pipeline_stage=pipeline_stage,
+                stage_name=stage_name,
+                pipeline_run_id=pipeline_run_id,
                 parent_run_id=parent_run_id,
                 parent_job_id=parent_job_id,
                 request_payload=request_payload,
@@ -194,7 +194,8 @@ class LLMGateway:
                 operation="chat_completion",
                 model_name=binding.model,
                 base_url=binding.base_url,
-                pipeline_stage=pipeline_stage,
+                stage_name=stage_name,
+                pipeline_run_id=pipeline_run_id,
                 parent_run_id=parent_run_id,
                 parent_job_id=parent_job_id,
                 request_payload=request_payload,
@@ -219,7 +220,8 @@ class LLMGateway:
                 operation="chat_completion",
                 model_name=binding.model,
                 base_url=binding.base_url,
-                pipeline_stage=pipeline_stage,
+                stage_name=stage_name,
+                pipeline_run_id=pipeline_run_id,
                 parent_run_id=parent_run_id,
                 parent_job_id=parent_job_id,
                 request_payload=request_payload,
@@ -241,7 +243,8 @@ class LLMGateway:
             operation="chat_completion",
             model_name=binding.model,
             base_url=binding.base_url,
-            pipeline_stage=pipeline_stage,
+            stage_name=stage_name,
+            pipeline_run_id=pipeline_run_id,
             parent_run_id=parent_run_id,
             parent_job_id=parent_job_id,
             request_payload=request_payload,
@@ -266,7 +269,8 @@ class LLMGateway:
             tier=binding.tier,
             model_name=binding.model,
             base_url=binding.base_url,
-            pipeline_stage=pipeline_stage,
+            stage_name=stage_name,
+            pipeline_run_id=pipeline_run_id,
             request_payload=request_payload,
             response_payload=response_body,
             content_json=content_json,
