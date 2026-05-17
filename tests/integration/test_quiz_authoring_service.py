@@ -242,5 +242,6 @@ async def test_start_generation_run_creates_run_quiz_and_enqueues_job(
     assert run.module_id == scenario["module_id"]
     arq_pool.enqueue_job.assert_awaited_once()
     invocation = arq_pool.enqueue_job.await_args
-    assert invocation.args[0] == "generate_quiz"
-    assert invocation.args[1] == str(run.id)
+    assert invocation.args[0] == "run_quiz_generation_task"
+    assert invocation.args[1] == scenario["owner_id"]
+    assert invocation.args[2] == run.id

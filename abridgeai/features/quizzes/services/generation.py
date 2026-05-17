@@ -1,8 +1,9 @@
 """Quiz generation pipeline entrypoint (T5.13).
 
 Top-level dispatcher invoked by the ARQ worker for the
-``generate_quiz`` job. Reads the :class:`GenerationRun` row, normalizes
-:attr:`GenerationRun.config_json`, and routes to one of three pipelines:
+``run_quiz_generation_task`` job. Reads the :class:`GenerationRun`
+row, normalizes :attr:`GenerationRun.config_json`, and routes to one
+of three pipelines:
 
 * ``run.config_json["question_id"]`` set → :func:`run_regenerate_pipeline`
   (per-question replacement; ports legacy

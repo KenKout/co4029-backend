@@ -309,7 +309,7 @@ async def test_generation_lifecycle_enqueue_and_poll(
 
     arq_pool.enqueue_job.assert_awaited_once()
     invocation = arq_pool.enqueue_job.await_args
-    assert invocation.args[0] == "generate_quiz"
+    assert invocation.args[0] == "run_quiz_generation_task"
 
     poll_resp = await client.get(
         f"/api/v1/teacher/quizzes/{run['quiz_id']}/generation-runs/{run_id}",

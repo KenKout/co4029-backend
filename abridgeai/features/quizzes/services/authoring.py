@@ -443,11 +443,14 @@ async def start_generation_run(
     arq_pool: object | None,
 ) -> GenerationRun:
     """Create a quiz (or attach to an existing one), persist a
-    :class:`GenerationRun`, and enqueue the ``generate_quiz`` ARQ task.
+    :class:`GenerationRun`, and enqueue the ``run_quiz_generation_task``
+    ARQ task.
 
     This is the only authoring helper that commits inline — the worker
     needs to read the run row out of band, so the transaction must be
-    committed before :func:`enqueue_job` returns.
+    committed before :func:`enqueue_job` returns. The task name is the
+    canonical Python function name registered on the ARQ worker
+    (T5.15: reconciled from the legacy ``generate_quiz`` alias).
     """
     course_id = await _resolve_module_course(db, module_id)
 
@@ -522,7 +525,7 @@ async def start_generation_run(
 
     if arq_pool is not None:
         await arq_pool.enqueue_job(  # type: ignore[attr-defined]
-            "generate_quiz", str(run.id)
+            "run_quiz_generation_task", actor.user_id, run.id
         )
     return run
 
@@ -534,11 +537,12 @@ async def regenerate_question(
     *,
     arq_pool: object | None,
 ) -> GenerationRun:
-    """Create a per-question regeneration run + enqueue ``generate_quiz``.
+    """Create a per-question regeneration run + enqueue the worker task.
 
     The dispatcher uses ``run.config_json["question_id"]`` to route to
     the regenerate pipeline; no other config is required for the
-    legacy parity port.
+    legacy parity port. Task name matches the registered worker
+    function (``run_quiz_generation_task``) per ARQ convention.
     """
     question = await _require_question(db, question_id)
     quiz = await _require_quiz(db, question.quiz_id)
@@ -557,7 +561,7 @@ async def regenerate_question(
 
     if arq_pool is not None:
         await arq_pool.enqueue_job(  # type: ignore[attr-defined]
-            "generate_quiz", str(run.id)
+            "run_quiz_generation_task", actor.user_id, run.id
         )
     return run
 
