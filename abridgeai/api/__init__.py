@@ -1,0 +1,192 @@
+"""FastAPI application factory (T7.6 -- Phase 7 final integration).
+
+Composes the cross-feature router surface that ships with Phase 7. All
+routers are mounted under ``/api/v1``; the routers themselves carry their
+own per-feature prefix (e.g. ``/teacher``, ``/me/notifications``,
+``/admin/stats``) so the wiring layer is purely a list of
+``include_router`` calls.
+
+Wiring philosophy (per Reconciliation §A1 / Phase 7 contract):
+
+* Identity, access_control, courses, materials, quizzes, interviews are
+  all already-shipped (Phases 1-6). Phase 7 adds enrollments, progress,
+  career_paths, notifications, and admin.
+* Cross-feature *event wiring* (e.g. enrollment-added -> dispatch
+  notification) is left to the per-feature service layer; this factory
+  only owns transport (HTTP) composition.
+* Lifespan / DB pool / Redis / observability bootstrapping is intentionally
+  deferred -- Phase 9 layers production middleware on top of this factory.
+  Tests instantiate ``create_app()`` directly and override ``get_db`` /
+  ``get_arq_pool`` with in-process fakes.
+
+The factory is import-safe: importing this module does *not* open DB
+connections, start ARQ pools, or read environment beyond what FastAPI's
+constructor itself touches.
+"""
+
+from __future__ import annotations
+
+from fastapi import FastAPI
+
+from abridgeai.features.access_control.routers import admin_router as access_control_admin_router
+from abridgeai.features.admin.routers import (
+    audit_router as admin_audit_router,
+)
+from abridgeai.features.admin.routers import (
+    processing_router as admin_processing_router,
+)
+from abridgeai.features.admin.routers import (
+    stats_router as admin_stats_router,
+)
+from abridgeai.features.admin.routers import (
+    users_router as admin_users_router,
+)
+from abridgeai.features.career_paths.routers import (
+    authoring_management_router as career_paths_management_router,
+)
+from abridgeai.features.career_paths.routers import (
+    authoring_teacher_router as career_paths_teacher_router,
+)
+from abridgeai.features.career_paths.routers import (
+    career_paths_learner_router,
+    me_career_enrollments_router,
+)
+from abridgeai.features.courses.routers import (
+    administration_router as courses_administration_router,
+)
+from abridgeai.features.courses.routers import (
+    assignment_router as courses_assignment_router,
+)
+from abridgeai.features.courses.routers import (
+    authoring_router as courses_authoring_router,
+)
+from abridgeai.features.courses.routers import (
+    learner_router as courses_learner_router,
+)
+from abridgeai.features.courses.routers import (
+    me_courses_router,
+)
+from abridgeai.features.enrollments.routers import (
+    assignment_dept_router as enrollments_dept_router,
+)
+from abridgeai.features.enrollments.routers import (
+    assignment_management_router as enrollments_management_router,
+)
+from abridgeai.features.enrollments.routers import (
+    me_enrollments_router,
+)
+from abridgeai.features.identity.routers import (
+    auth_router as identity_auth_router,
+)
+from abridgeai.features.identity.routers import (
+    me_router as identity_me_router,
+)
+from abridgeai.features.identity.routers import (
+    mfa_router as identity_mfa_router,
+)
+from abridgeai.features.identity.routers import (
+    users_router as identity_users_router,
+)
+from abridgeai.features.interviews.routers import (
+    authoring_router as interviews_authoring_router,
+)
+from abridgeai.features.interviews.routers import (
+    learner_router as interviews_learner_router,
+)
+from abridgeai.features.materials.routers import (
+    authoring_router as materials_authoring_router,
+)
+from abridgeai.features.materials.routers import (
+    learner_router as materials_learner_router,
+)
+from abridgeai.features.notifications.routers import (
+    learner_router as notifications_learner_router,
+)
+from abridgeai.features.progress.routers import (
+    authoring_router as progress_authoring_router,
+)
+from abridgeai.features.progress.routers import (
+    learner_router as progress_learner_router,
+)
+from abridgeai.features.quizzes.routers import (
+    authoring_router as quizzes_authoring_router,
+)
+from abridgeai.features.quizzes.routers import (
+    learner_router as quizzes_learner_router,
+)
+
+API_V1_PREFIX = "/api/v1"
+
+
+def create_app() -> FastAPI:
+    """Build and return the FastAPI application.
+
+    All feature routers are mounted under :data:`API_V1_PREFIX`. The
+    factory is deliberately side-effect-free at import time: tests can
+    call it freely and override DB / ARQ dependencies before sending
+    any traffic.
+    """
+    app = FastAPI(
+        title="aBridgeAI API",
+        description="Cross-feature API composing identity, courses, materials, "
+        "quizzes, interviews, enrollments, progress, career paths, "
+        "notifications, and admin surfaces.",
+        version="0.7.0",
+    )
+
+    # Phase 1 -- identity
+    app.include_router(identity_auth_router, prefix=API_V1_PREFIX)
+    app.include_router(identity_me_router, prefix=API_V1_PREFIX)
+    app.include_router(identity_mfa_router, prefix=API_V1_PREFIX)
+    app.include_router(identity_users_router, prefix=API_V1_PREFIX)
+
+    # Phase 2 -- access control
+    app.include_router(access_control_admin_router, prefix=API_V1_PREFIX)
+
+    # Phase 3 -- courses
+    app.include_router(courses_learner_router, prefix=API_V1_PREFIX)
+    app.include_router(me_courses_router, prefix=API_V1_PREFIX)
+    app.include_router(courses_authoring_router, prefix=API_V1_PREFIX)
+    app.include_router(courses_assignment_router, prefix=API_V1_PREFIX)
+    app.include_router(courses_administration_router, prefix=API_V1_PREFIX)
+
+    # Phase 4 -- materials
+    app.include_router(materials_learner_router, prefix=API_V1_PREFIX)
+    app.include_router(materials_authoring_router, prefix=API_V1_PREFIX)
+
+    # Phase 5 -- quizzes
+    app.include_router(quizzes_learner_router, prefix=API_V1_PREFIX)
+    app.include_router(quizzes_authoring_router, prefix=API_V1_PREFIX)
+
+    # Phase 6 -- interviews
+    app.include_router(interviews_learner_router, prefix=API_V1_PREFIX)
+    app.include_router(interviews_authoring_router, prefix=API_V1_PREFIX)
+
+    # Phase 7 -- enrollments (T7.1)
+    app.include_router(me_enrollments_router, prefix=API_V1_PREFIX)
+    app.include_router(enrollments_dept_router, prefix=API_V1_PREFIX)
+    app.include_router(enrollments_management_router, prefix=API_V1_PREFIX)
+
+    # Phase 7 -- progress (T7.2)
+    app.include_router(progress_learner_router, prefix=API_V1_PREFIX)
+    app.include_router(progress_authoring_router, prefix=API_V1_PREFIX)
+
+    # Phase 7 -- career paths (T7.3)
+    app.include_router(career_paths_learner_router, prefix=API_V1_PREFIX)
+    app.include_router(me_career_enrollments_router, prefix=API_V1_PREFIX)
+    app.include_router(career_paths_management_router, prefix=API_V1_PREFIX)
+    app.include_router(career_paths_teacher_router, prefix=API_V1_PREFIX)
+
+    # Phase 7 -- notifications (T7.4)
+    app.include_router(notifications_learner_router, prefix=API_V1_PREFIX)
+
+    # Phase 7 -- admin (T7.5)
+    app.include_router(admin_stats_router, prefix=API_V1_PREFIX)
+    app.include_router(admin_audit_router, prefix=API_V1_PREFIX)
+    app.include_router(admin_processing_router, prefix=API_V1_PREFIX)
+    app.include_router(admin_users_router, prefix=API_V1_PREFIX)
+
+    return app
+
+
+__all__ = ["API_V1_PREFIX", "create_app"]

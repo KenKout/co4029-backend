@@ -151,6 +151,8 @@ module = [
     "faster_whisper.*",
     "pytesseract",
     "pytesseract.*",
+    "pgvector",
+    "pgvector.*",
 ]
 ignore_missing_imports = true
 
