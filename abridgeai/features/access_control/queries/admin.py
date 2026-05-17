@@ -1,13 +1,19 @@
 """Admin-surface data accessors for the access-control feature.
 
-INSERT / DELETE flows use ``text()`` rather than ``db.add()`` /
-``db.delete()`` because the ORM unit-of-work walks
-``Base.metadata.sorted_tables`` to compute insertion order, which triggers
-cross-feature FK resolution against ``courses`` (Phase 3) and ``users``
-(:mod:`features.identity`). Same pattern is used by
-:mod:`abridgeai.features.access_control.policies` for its inline ``courses``
-SELECT. SELECTs do not trigger this resolution and continue using
-``select()`` for type-safe row hydration.
+INSERT flows use ``text()`` rather than ``db.add()`` because the ORM
+unit-of-work walks ``Base.metadata.sorted_tables`` to compute insertion
+order, which triggers cross-feature FK resolution against ``courses``
+(Phase 3) and ``users`` (:mod:`features.identity`). Same pattern is used
+by :mod:`abridgeai.features.access_control.policies` for its inline
+``courses`` SELECT. SELECTs do not trigger this resolution and continue
+using ``select()`` for type-safe row hydration.
+
+DELETE flows on :class:`SoftDeleteMixin` tables go through
+:func:`abridgeai.core.db.recursive_delete.soft_delete_cascade`. Raw
+``DELETE FROM`` would bypass the ``hard_delete_guard`` listener and erase
+the audit trail; ``soft_delete_cascade`` stamps ``deleted_at`` /
+``deleted_by`` and flushes via ``session.flush()`` (no ORM
+unit-of-work-driven INSERT order resolution).
 """
 
 from __future__ import annotations
@@ -18,6 +24,7 @@ from uuid import UUID, uuid4
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from abridgeai.core.db.recursive_delete import soft_delete_cascade
 from abridgeai.features.access_control.models import (
     OrganizationMembership,
     Permission,
@@ -115,13 +122,17 @@ async def insert_assignment(
     return fetched.scalar_one()
 
 
-async def soft_delete_assignment(db: AsyncSession, assignment_id: UUID) -> bool:
-    result = await db.execute(
-        text("DELETE FROM user_role_assignments WHERE id = :id"),
-        {"id": assignment_id},
-    )
-    await db.flush()
-    return (getattr(result, "rowcount", 0) or 0) > 0
+async def soft_delete_assignment(
+    db: AsyncSession,
+    assignment_id: UUID,
+    *,
+    actor_id: UUID | None = None,
+) -> bool:
+    row = await db.get(UserRoleAssignment, assignment_id)
+    if row is None or row.deleted_at is not None:
+        return False
+    await soft_delete_cascade(db, row, actor_id=actor_id)
+    return True
 
 
 async def list_grants_for_user(db: AsyncSession, user_id: UUID) -> list[UserPermissionGrant]:
@@ -181,13 +192,17 @@ async def insert_grant(
     return fetched.scalar_one()
 
 
-async def delete_grant(db: AsyncSession, grant_id: UUID) -> bool:
-    result = await db.execute(
-        text("DELETE FROM user_permission_grants WHERE id = :id"),
-        {"id": grant_id},
-    )
-    await db.flush()
-    return (getattr(result, "rowcount", 0) or 0) > 0
+async def delete_grant(
+    db: AsyncSession,
+    grant_id: UUID,
+    *,
+    actor_id: UUID | None = None,
+) -> bool:
+    row = await db.get(UserPermissionGrant, grant_id)
+    if row is None or row.deleted_at is not None:
+        return False
+    await soft_delete_cascade(db, row, actor_id=actor_id)
+    return True
 
 
 async def list_memberships_for_organization(

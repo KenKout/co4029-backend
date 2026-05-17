@@ -147,12 +147,12 @@ async def create_user_assignment(
 async def revoke_user_assignment(
     user_id: UUID,
     assignment_id: UUID,
-    _user: Annotated[CurrentUser, Depends(_REQUIRE_ASSIGN)],
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_ASSIGN)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> None:
     del user_id
     try:
-        await admin_service.revoke_role_assignment(db, assignment_id)
+        await admin_service.revoke_role_assignment(db, assignment_id, actor_id=current_user.user_id)
     except NotFoundError as exc:
         raise _not_found(str(exc)) from exc
     await db.commit()
@@ -204,12 +204,12 @@ async def create_user_grant(
 async def revoke_user_grant(
     user_id: UUID,
     grant_id: UUID,
-    _user: Annotated[CurrentUser, Depends(_REQUIRE_ASSIGN)],
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_ASSIGN)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> None:
     del user_id
     try:
-        await admin_service.revoke_permission_grant(db, grant_id)
+        await admin_service.revoke_permission_grant(db, grant_id, actor_id=current_user.user_id)
     except NotFoundError as exc:
         raise _not_found(str(exc)) from exc
     await db.commit()

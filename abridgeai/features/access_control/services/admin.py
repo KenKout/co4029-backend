@@ -157,8 +157,13 @@ async def create_role_assignment(
     )
 
 
-async def revoke_role_assignment(db: AsyncSession, assignment_id: UUID) -> None:
-    if not await admin_queries.soft_delete_assignment(db, assignment_id):
+async def revoke_role_assignment(
+    db: AsyncSession,
+    assignment_id: UUID,
+    *,
+    actor_id: UUID | None = None,
+) -> None:
+    if not await admin_queries.soft_delete_assignment(db, assignment_id, actor_id=actor_id):
         raise NotFoundError(f"role assignment {assignment_id} not found")
 
 
@@ -197,8 +202,13 @@ async def create_permission_grant(
     )
 
 
-async def revoke_permission_grant(db: AsyncSession, grant_id: UUID) -> None:
-    if not await admin_queries.delete_grant(db, grant_id):
+async def revoke_permission_grant(
+    db: AsyncSession,
+    grant_id: UUID,
+    *,
+    actor_id: UUID | None = None,
+) -> None:
+    if not await admin_queries.delete_grant(db, grant_id, actor_id=actor_id):
         raise NotFoundError(f"permission grant {grant_id} not found")
 
 

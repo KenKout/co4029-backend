@@ -733,6 +733,145 @@ async def test_admin_router_membership_endpoints(
             )
 
 
+async def test_revoke_role_assignment_soft_deletes_not_hard(
+    client: httpx.AsyncClient,
+    engine: AsyncEngine,
+    scenario: _Scenario,
+) -> None:
+    target_user_id = uuid.uuid4()
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("INSERT INTO users (id, primary_email, status) VALUES (:id, :em, 'active')"),
+            {
+                "id": target_user_id,
+                "em": f"t113-soft-asn-{target_user_id.hex[:8]}@test.local",
+            },
+        )
+
+    admin_session_id, admin_token = await _open_session(engine, scenario.admin_id)
+
+    try:
+        grant = await client.post(
+            f"/api/v1/admin/users/{target_user_id}/assignments",
+            headers={"Authorization": f"Bearer {admin_token}"},
+            json={
+                "role_code": "teacher",
+                "scope_kind": "course",
+                "organization_id": str(scenario.organization_id),
+                "course_id": str(scenario.course_id),
+            },
+        )
+        assert grant.status_code == 201, grant.text
+        assignment_id = uuid.UUID(grant.json()["id"])
+
+        revoke = await client.delete(
+            f"/api/v1/admin/users/{target_user_id}/assignments/{assignment_id}",
+            headers={"Authorization": f"Bearer {admin_token}"},
+        )
+        assert revoke.status_code == 204, revoke.text
+
+        async with engine.connect() as conn:
+            row = (
+                await conn.execute(
+                    text("SELECT deleted_at, deleted_by FROM user_role_assignments WHERE id = :id"),
+                    {"id": assignment_id},
+                )
+            ).one_or_none()
+
+        assert row is not None, (
+            "revoke must soft-delete (row stays in table); raw DELETE bypassed the "
+            "hard_delete_guard and erased the audit trail"
+        )
+        deleted_at, deleted_by = row
+        assert deleted_at is not None, "deleted_at must be stamped on revoke"
+        assert deleted_by == scenario.admin_id, (
+            f"deleted_by must equal acting admin user_id; got {deleted_by!r}"
+        )
+    finally:
+        await _close_session(engine, admin_session_id)
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("DELETE FROM user_role_assignments WHERE user_id = :uid"),
+                {"uid": target_user_id},
+            )
+            await conn.execute(
+                text("DELETE FROM users WHERE id = :id"),
+                {"id": target_user_id},
+            )
+
+
+async def test_revoke_permission_grant_soft_deletes_not_hard(
+    client: httpx.AsyncClient,
+    engine: AsyncEngine,
+    scenario: _Scenario,
+) -> None:
+    target_user_id = uuid.uuid4()
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("INSERT INTO users (id, primary_email, status) VALUES (:id, :em, 'active')"),
+            {
+                "id": target_user_id,
+                "em": f"t113-soft-grt-{target_user_id.hex[:8]}@test.local",
+            },
+        )
+        permission_id = (
+            await conn.execute(
+                text("SELECT id FROM permissions WHERE code = 'course.read' LIMIT 1"),
+            )
+        ).scalar_one()
+
+    admin_session_id, admin_token = await _open_session(engine, scenario.admin_id)
+
+    try:
+        created = await client.post(
+            f"/api/v1/admin/users/{target_user_id}/grants",
+            headers={"Authorization": f"Bearer {admin_token}"},
+            json={
+                "permission_id": str(permission_id),
+                "scope_kind": "global",
+            },
+        )
+        assert created.status_code == 201, created.text
+        grant_id = uuid.UUID(created.json()["id"])
+
+        revoked = await client.delete(
+            f"/api/v1/admin/users/{target_user_id}/grants/{grant_id}",
+            headers={"Authorization": f"Bearer {admin_token}"},
+        )
+        assert revoked.status_code == 204, revoked.text
+
+        async with engine.connect() as conn:
+            row = (
+                await conn.execute(
+                    text(
+                        "SELECT deleted_at, deleted_by FROM user_permission_grants WHERE id = :id"
+                    ),
+                    {"id": grant_id},
+                )
+            ).one_or_none()
+
+        assert row is not None, (
+            "revoke must soft-delete (row stays in table); raw DELETE bypassed the "
+            "hard_delete_guard and erased the audit trail"
+        )
+        deleted_at, deleted_by = row
+        assert deleted_at is not None, "deleted_at must be stamped on revoke"
+        assert deleted_by == scenario.admin_id, (
+            f"deleted_by must equal acting admin user_id; got {deleted_by!r}"
+        )
+    finally:
+        await _close_session(engine, admin_session_id)
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("DELETE FROM user_permission_grants WHERE user_id = :uid"),
+                {"uid": target_user_id},
+            )
+            await conn.execute(
+                text("DELETE FROM users WHERE id = :id"),
+                {"id": target_user_id},
+            )
+
+
 def test_no_dev_bypass_in_repo() -> None:
     backend_new = Path(__file__).resolve().parents[2]
     abridgeai_root = backend_new / "abridgeai"
