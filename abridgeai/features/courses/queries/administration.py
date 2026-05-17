@@ -109,8 +109,7 @@ _PROCESSING_AUDIT_SQL = text(
     FROM ai_model_calls amc
     LEFT JOIN processing_jobs pj   ON pj.id = amc.processing_job_id
     LEFT JOIN generation_runs gr   ON gr.id = amc.generation_run_id
-    WHERE pj.course_id = :course_id
-       OR gr.course_id = :course_id
+    WHERE gr.course_id = :course_id
     """
 )
 
