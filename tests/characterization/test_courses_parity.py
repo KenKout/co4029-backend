@@ -72,6 +72,8 @@ from characterization.replay import compare
 PARITY_DIR = Path(__file__).resolve().parent.parent / "parity" / "courses"
 
 
+import abridgeai.features.interviews.models  # noqa: E402, F401  -- T6.1 registers interview_* tables
+
 for _stub_name in ("interview_configs",):
     if _stub_name not in Base.metadata.tables:
         Table(

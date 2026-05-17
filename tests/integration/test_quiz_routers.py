@@ -39,6 +39,7 @@ from sqlalchemy.ext.asyncio import (
 import abridgeai.features.access_control.models  # noqa: F401  -- register FK targets
 import abridgeai.features.courses.models  # noqa: F401  -- register courses/modules/lessons FK targets
 import abridgeai.features.identity.models  # noqa: F401  -- register users FK target
+import abridgeai.features.interviews.models  # noqa: F401  -- T6.1 registers interview_* tables
 import abridgeai.features.quizzes.models  # noqa: F401  -- register tables
 from abridgeai.core.config import get_settings
 from abridgeai.core.db import Base, get_db

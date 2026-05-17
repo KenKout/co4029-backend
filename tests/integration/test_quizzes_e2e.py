@@ -83,6 +83,8 @@ from abridgeai.features.quizzes.services import generation as generation_service
 EMBEDDING_DIM = 1536
 
 
+import abridgeai.features.interviews.models  # noqa: E402, F401  -- T6.1 registers interview_* tables
+
 for _stub_name in (
     "interview_configs",
     "learning_materials",

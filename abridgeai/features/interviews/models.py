@@ -1,0 +1,549 @@
+"""Interviews feature ORM models.
+
+Ports the legacy ``backend/app/models/assessment.py`` interview aggregate
+to the feature-first layout. The schema source of truth is
+``migrations/versions/0001_baseline_schema.py`` lines 773-902 (the seven
+``interview_*`` tables + ``gap_reports``) and lines 1081-1096
+(``assessment_integrity_events``).
+
+Reconciliation directives applied (plan §266-585)
+-------------------------------------------------
+
+* §A13 — baseline DDL is canonical. Plan body for T6.1 lists 5 ORM
+  classes (``InterviewConfig``, ``InterviewQuestion``,
+  ``InterviewSession``, ``InterviewResponse``, ``GapReport``); baseline
+  declares **9** interview-related tables. Port all 9. The plan-body
+  ``InterviewResponse`` is reconciled to baseline's
+  ``InterviewSessionMessage`` (per-utterance log) plus
+  ``InterviewSessionQuestion`` (asked-question audit), and the rubric
+  scoring is reconciled to a separate ``InterviewOutcome`` /
+  ``InterviewOutcomeEvaluation`` pair (rubric criteria + per-criterion
+  verdicts) rather than a flat ``rubric_scores JSONB`` column. This
+  matches the baseline DDL verbatim.
+
+* §A13 baseline-canon column-shape decisions on ``InterviewConfig``:
+  - ``status VARCHAR(20)`` CHECK ``{'draft', 'published', 'archived'}``.
+  - ``persona VARCHAR(20)`` CHECK ``{'strict', 'neutral', 'supportive'}``
+    (baseline DDL line 784, NOT the plan-body's "{strict, friendly,
+    neutral}" — baseline wins).
+  - ``supported_modes VARCHAR(20)`` CHECK
+    ``{'voice', 'text', 'hybrid'}`` (baseline DDL line 786). The legacy
+    ``input_mode`` rename note in inherited wisdom is for the *session*
+    column, not config — config keeps ``supported_modes``.
+  - ``min_outcomes_to_pass`` PRESERVED (legacy ORM line 199 + baseline
+    line 781; plan body did not list it).
+  - ``time_limit_minutes`` PRESERVED (baseline NOT ``time_limit_seconds``
+    like quizzes — interview baseline uses minutes).
+  - ``generation_run_id`` FK SET NULL preserved.
+
+* §A13 baseline-canon on ``InterviewQuestion``:
+  - ``question_type`` CHECK ``{'conceptual', 'behavioral', 'technical',
+    'situational', 'system_design'}`` (baseline line 814) — the
+    plan-body claim of ``{technical, behavioral, situational}`` is
+    reconciled to the broader baseline set.
+  - ``difficulty`` CHECK ``{'junior', 'mid_level', 'senior'}`` (baseline
+    line 817) — per inherited wisdom note (plan §39 "difficulty →
+    integer 1-5"), the integerization is NOT for this field; baseline
+    keeps it as a level string. Plan §39's note targets a future
+    refactor on quiz_questions, not interview_questions.
+  - ``review_status`` CHECK ``{'pending', 'approved', 'edited',
+    'rejected'}`` (baseline line 819) — same shape as
+    ``quiz_questions.review_status``.
+  - ``ai_generated BOOLEAN DEFAULT TRUE`` preserved.
+  - ``source_refs_json JSONB`` — name kept verbatim from baseline
+    (legacy ORM line 241). Plan §36 rename ``source_refs_json →
+    source_refs`` was applied to ``quiz_questions`` only via migration
+    0007; interview_questions retains the ``_json`` suffix per
+    baseline. Generating a parallel migration for interview rename is
+    out of scope for T6.1.
+
+* §A13 baseline-canon on ``InterviewSession``:
+  - ``status`` CHECK ``{'in_progress', 'completed', 'timed_out',
+    'abandoned', 'failed'}`` (baseline line 835) — note 5 values, NOT
+    the 3 the plan body listed.
+  - ``input_mode`` CHECK ``{'voice', 'text', 'hybrid'}`` (baseline line
+    837). Inherited wisdom §39 says "KEEP ``input_mode`` (not
+    delivery_format)" — confirmed.
+  - ``UNIQUE (interview_config_id, student_id, attempt_number)``
+    enforces one row per attempt per student per config.
+  - ``transcript_object_id`` + ``recording_object_id`` are nullable FKs
+    to ``storage_objects`` for voice-mode forward-compat (Phase 7+
+    wires uploads). Plan §6.1 explicitly forbids making these NOT NULL.
+
+* §A13 baseline-canon on ``InterviewSessionQuestion``:
+  - Composite UNIQUE ``(session_id, sequence_no)`` enforces ordered
+    asked-questions.
+  - ``CreatedAtMixin`` ONLY (baseline DDL line 858 has no
+    ``updated_at``) — immutable record of "this question was asked".
+
+* §A13 baseline-canon on ``InterviewSessionMessage``:
+  - ``role`` CHECK ``{'ai', 'user', 'system'}`` (baseline line 866 — note
+    ``'ai'`` NOT ``'assistant'`` like OpenAI chat schema; baseline
+    chose the abridgeai-internal vocabulary).
+  - ``audio_object_id`` nullable FK to ``storage_objects`` (voice
+    forward-compat).
+  - ``latency_ms`` CHECK ``>= 0`` preserved.
+  - ``TimestampMixin`` (baseline gives both ``created_at`` AND
+    ``updated_at`` at line 873-874, so the ORM mirrors that — plan body
+    "CreatedAt only for InterviewResponse" is overridden by §A13).
+
+* §A13 baseline-canon on ``InterviewOutcomeEvaluation``:
+  - UNIQUE ``(session_id, outcome_id)`` — one verdict per outcome per
+    session.
+  - ``hidden_reasoning`` carries the LLM rationale (NEVER returned in
+    public schemas — Phase 6.2 schemas enforce).
+
+* §A13 baseline-canon on ``GapReport``:
+  - ``source_quiz_attempt_id`` and ``source_interview_session_id`` are
+    BOTH nullable FK SET NULL — a gap report is anchored to one or the
+    other (or both, for a discrepancy report combining quiz vs
+    interview). The application layer enforces "at least one source"
+    invariant; no DDL CHECK enforces it.
+  - ``module_id`` is nullable FK SET NULL — gap reports may span an
+    entire course not a specific module.
+  - Plan body's "discrepancy analysis between quiz score and interview
+    rubric" lives in ``report_json`` JSONB; no dedicated columns.
+
+* §A13 baseline-canon on ``AssessmentIntegrityEvent`` (baseline lines
+  1081-1096):
+  - Polymorphic parent: either ``quiz_attempt_id`` OR
+    ``interview_session_id`` non-null (CHECK enforces XOR).
+  - ``CreatedAtMixin`` only — append-only proctoring log.
+  - ``event_type`` CHECK ``{'focus_lost', 'tab_switch', 'fullscreen_exit',
+    'warning_issued', 'reconnect', 'disconnect'}``.
+  - ``severity`` CHECK ``{'info', 'warning', 'critical'}``.
+  - Baseline already places this table in the
+    ``assessment_integrity_events`` lane; per inherited wisdom §44 it
+    belongs with the interview aggregate (closer to integrity/proctoring
+    concerns) rather than with the quizzes feature.
+
+Mixin policy (§A13 + plan §6.1)
+--------------------------------
+
+Baseline ``SOFT_DELETE_TABLES`` listing (migration 0001 line 41-72)
+includes the three authoring-side interview tables:
+``interview_configs``, ``interview_outcomes``, ``interview_questions``.
+These three receive ``UUIDPrimaryKeyMixin + TimestampMixin +
+AuditedByMixin + SoftDeleteMixin`` — same stack as the quiz authoring
+trio (T5.1).
+
+Note: ``interview_configs`` already carries a ``created_by`` column in
+baseline DDL (line 790). The migration 0001 ``_add_audit_columns(...,
+with_created_by=False)`` skips re-adding it but still adds
+``updated_by`` + ``deleted_at`` + ``deleted_by``. The ORM
+``AuditedByMixin`` declares the ``created_by`` column once — both the
+hand-rolled DDL ``created_by`` and the mixin-declared
+``created_by`` resolve to the same column at metadata-merge time
+because they share table + column name + FK target.
+
+The session/runtime side is HISTORICAL RECORD (plan §6.1 explicit
+"Must NOT add SoftDeleteMixin to InterviewSession or InterviewResponse").
+Mixins:
+- ``InterviewSession`` → ``UUIDPrimaryKeyMixin + TimestampMixin``.
+- ``InterviewSessionMessage`` → ``UUIDPrimaryKeyMixin + TimestampMixin``
+  (baseline DDL ships ``updated_at``).
+- ``InterviewOutcomeEvaluation`` → ``UUIDPrimaryKeyMixin + TimestampMixin``.
+- ``InterviewSessionQuestion`` → ``UUIDPrimaryKeyMixin + CreatedAtMixin``
+  (immutable).
+- ``GapReport`` → ``UUIDPrimaryKeyMixin + TimestampMixin``.
+- ``AssessmentIntegrityEvent`` → ``UUIDPrimaryKeyMixin + CreatedAtMixin``.
+
+Forward references
+------------------
+- ``InterviewConfig.generation_run_id`` → string FK to
+  ``generation_runs.id``. ``GenerationRun`` is owned by
+  ``features/quizzes/models.py`` (T5.1 stop-gap port until T5.x moves it
+  to ``features/ai/models.py``); the FK resolves at flush time once that
+  module is imported.
+- ``courses.id``, ``modules.id``, ``users.id``, ``storage_objects.id``,
+  ``quiz_attempts.id`` are owned by other features. Tests must
+  side-effect-import the owning models module before flushing
+  cross-feature FKs (T3.5/T5.1 recipe).
+
+No alembic migration generated
+------------------------------
+Baseline 0001 already creates all 9 tables verbatim. T6.1 ports ORM
+classes only; no DDL drift is introduced. ``alembic upgrade head``
+remains a no-op for this task.
+"""
+
+from __future__ import annotations
+
+import uuid
+from datetime import datetime
+from typing import Any
+
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    text,
+)
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.orm import Mapped, mapped_column
+
+from abridgeai.core.db import (
+    PGUUID,
+    AuditedByMixin,
+    Base,
+    CreatedAtMixin,
+    SoftDeleteMixin,
+    TimestampMixin,
+    UUIDPrimaryKeyMixin,
+)
+
+
+class InterviewConfig(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftDeleteMixin, Base):
+    __tablename__ = "interview_configs"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('draft', 'published', 'archived')",
+            name="ck_interview_configs_status",
+        ),
+        CheckConstraint(
+            "persona IS NULL OR persona IN ('strict', 'neutral', 'supportive')",
+            name="ck_interview_configs_persona",
+        ),
+        CheckConstraint(
+            "supported_modes IN ('voice', 'text', 'hybrid')",
+            name="ck_interview_configs_supported_modes",
+        ),
+    )
+
+    course_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("courses.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    module_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("modules.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, server_default=text("'draft'"))
+    max_attempts: Mapped[int | None] = mapped_column(Integer)
+    min_outcomes_to_pass: Mapped[int | None] = mapped_column(Integer)
+    lock_quiz_ef_until_pass: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("FALSE")
+    )
+    time_limit_minutes: Mapped[int | None] = mapped_column(Integer)
+    persona: Mapped[str | None] = mapped_column(String(20))
+    supported_modes: Mapped[str] = mapped_column(
+        String(20), nullable=False, server_default=text("'hybrid'")
+    )
+    supplementary_instructions: Mapped[str | None] = mapped_column(Text)
+    generation_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("generation_runs.id", ondelete="SET NULL"),
+    )
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class InterviewOutcome(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftDeleteMixin, Base):
+    __tablename__ = "interview_outcomes"
+    __table_args__ = (
+        UniqueConstraint("interview_config_id", "position", name="uq_interview_outcomes_position"),
+        CheckConstraint(
+            "outcome_type IN ('knowledge', 'skill', 'attitude')",
+            name="ck_interview_outcomes_type",
+        ),
+        CheckConstraint(
+            "importance_weight BETWEEN 1 AND 5",
+            name="ck_interview_outcomes_importance",
+        ),
+    )
+
+    interview_config_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("interview_configs.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    position: Mapped[int] = mapped_column(Integer, nullable=False)
+    outcome_text: Mapped[str] = mapped_column(Text, nullable=False)
+    outcome_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    importance_weight: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("1")
+    )
+
+
+class InterviewQuestion(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftDeleteMixin, Base):
+    __tablename__ = "interview_questions"
+    __table_args__ = (
+        UniqueConstraint("interview_config_id", "position", name="uq_interview_questions_position"),
+        CheckConstraint(
+            "question_type IN ('conceptual', 'behavioral', 'technical', "
+            "'situational', 'system_design')",
+            name="ck_interview_questions_question_type",
+        ),
+        CheckConstraint(
+            "difficulty IS NULL OR difficulty IN ('junior', 'mid_level', 'senior')",
+            name="ck_interview_questions_difficulty",
+        ),
+        CheckConstraint(
+            "review_status IN ('pending', 'approved', 'edited', 'rejected')",
+            name="ck_interview_questions_review_status",
+        ),
+    )
+
+    interview_config_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("interview_configs.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    linked_outcome_id: Mapped[uuid.UUID | None] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("interview_outcomes.id", ondelete="SET NULL"),
+    )
+    position: Mapped[int | None] = mapped_column(Integer)
+    question_type: Mapped[str] = mapped_column(String(30), nullable=False)
+    prompt_text: Mapped[str] = mapped_column(Text, nullable=False)
+    difficulty: Mapped[str | None] = mapped_column(String(20))
+    review_status: Mapped[str] = mapped_column(
+        String(20), nullable=False, server_default=text("'pending'")
+    )
+    ai_generated: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("TRUE"))
+    source_refs_json: Mapped[Any] = mapped_column(
+        JSONB, nullable=False, server_default=text("'[]'::jsonb")
+    )
+    reviewed_by: Mapped[uuid.UUID | None] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+    )
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class InterviewSession(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    __tablename__ = "interview_sessions"
+    __table_args__ = (
+        UniqueConstraint(
+            "interview_config_id",
+            "student_id",
+            "attempt_number",
+            name="uq_interview_sessions_number",
+        ),
+        CheckConstraint(
+            "status IN ('in_progress', 'completed', 'timed_out', 'abandoned', 'failed')",
+            name="ck_interview_sessions_status",
+        ),
+        CheckConstraint(
+            "input_mode IN ('voice', 'text', 'hybrid')",
+            name="ck_interview_sessions_input_mode",
+        ),
+    )
+
+    interview_config_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("interview_configs.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    student_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    attempt_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(20), nullable=False, server_default=text("'in_progress'")
+    )
+    input_mode: Mapped[str] = mapped_column(String(20), nullable=False)
+    livekit_room_name: Mapped[str | None] = mapped_column(String(255))
+    livekit_session_ref: Mapped[str | None] = mapped_column(String(255))
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("NOW()")
+    )
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    resume_deadline_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    transcript_object_id: Mapped[uuid.UUID | None] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("storage_objects.id", ondelete="SET NULL"),
+    )
+    recording_object_id: Mapped[uuid.UUID | None] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("storage_objects.id", ondelete="SET NULL"),
+    )
+    pass_verdict: Mapped[bool | None] = mapped_column(Boolean)
+    internal_summary_json: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+
+
+class InterviewSessionQuestion(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
+    __tablename__ = "interview_session_questions"
+    __table_args__ = (
+        UniqueConstraint(
+            "session_id", "sequence_no", name="uq_interview_session_questions_sequence"
+        ),
+    )
+
+    session_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("interview_sessions.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    interview_question_id: Mapped[uuid.UUID | None] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("interview_questions.id", ondelete="SET NULL"),
+    )
+    sequence_no: Mapped[int] = mapped_column(Integer, nullable=False)
+    asked_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("NOW()")
+    )
+
+
+class InterviewSessionMessage(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    __tablename__ = "interview_session_messages"
+    __table_args__ = (
+        CheckConstraint(
+            "role IN ('ai', 'user', 'system')",
+            name="ck_interview_session_messages_role",
+        ),
+    )
+
+    session_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("interview_sessions.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    session_question_id: Mapped[uuid.UUID | None] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("interview_session_questions.id", ondelete="SET NULL"),
+    )
+    role: Mapped[str] = mapped_column(String(20), nullable=False)
+    content_text: Mapped[str | None] = mapped_column(Text)
+    audio_object_id: Mapped[uuid.UUID | None] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("storage_objects.id", ondelete="SET NULL"),
+    )
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    latency_ms: Mapped[int | None] = mapped_column(Integer)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+
+
+class InterviewOutcomeEvaluation(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    __tablename__ = "interview_outcome_evaluations"
+    __table_args__ = (
+        UniqueConstraint("session_id", "outcome_id", name="uq_interview_outcome_evaluations"),
+    )
+
+    session_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("interview_sessions.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    outcome_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("interview_outcomes.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    verdict_met: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    hidden_reasoning: Mapped[str | None] = mapped_column(Text)
+    evidence_excerpt: Mapped[str | None] = mapped_column(Text)
+    evaluated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("NOW()")
+    )
+
+
+class GapReport(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    __tablename__ = "gap_reports"
+
+    student_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    course_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("courses.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    module_id: Mapped[uuid.UUID | None] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("modules.id", ondelete="SET NULL"),
+    )
+    source_quiz_attempt_id: Mapped[uuid.UUID | None] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("quiz_attempts.id", ondelete="SET NULL"),
+    )
+    source_interview_session_id: Mapped[uuid.UUID | None] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("interview_sessions.id", ondelete="SET NULL"),
+    )
+    student_summary: Mapped[str | None] = mapped_column(Text)
+    teacher_summary: Mapped[str | None] = mapped_column(Text)
+    report_json: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+
+
+class AssessmentIntegrityEvent(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
+    __tablename__ = "assessment_integrity_events"
+    __table_args__ = (
+        CheckConstraint(
+            "assessment_kind IN ('quiz', 'interview')",
+            name="ck_assessment_integrity_kind",
+        ),
+        CheckConstraint(
+            "event_type IN ('focus_lost', 'tab_switch', 'fullscreen_exit', "
+            "'warning_issued', 'reconnect', 'disconnect')",
+            name="ck_assessment_integrity_event_type",
+        ),
+        CheckConstraint(
+            "severity IN ('info', 'warning', 'critical')",
+            name="ck_assessment_integrity_severity",
+        ),
+        CheckConstraint(
+            "(assessment_kind = 'quiz' AND quiz_attempt_id IS NOT NULL "
+            "AND interview_session_id IS NULL) OR "
+            "(assessment_kind = 'interview' AND interview_session_id IS NOT NULL "
+            "AND quiz_attempt_id IS NULL)",
+            name="ck_assessment_integrity_parent_ref",
+        ),
+    )
+
+    assessment_kind: Mapped[str] = mapped_column(String(20), nullable=False)
+    quiz_attempt_id: Mapped[uuid.UUID | None] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("quiz_attempts.id", ondelete="CASCADE"),
+    )
+    interview_session_id: Mapped[uuid.UUID | None] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("interview_sessions.id", ondelete="CASCADE"),
+    )
+    student_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    event_type: Mapped[str] = mapped_column(String(30), nullable=False)
+    severity: Mapped[str] = mapped_column(String(20), nullable=False)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+
+
+__all__ = [
+    "AssessmentIntegrityEvent",
+    "GapReport",
+    "InterviewConfig",
+    "InterviewOutcome",
+    "InterviewOutcomeEvaluation",
+    "InterviewQuestion",
+    "InterviewSession",
+    "InterviewSessionMessage",
+    "InterviewSessionQuestion",
+]
