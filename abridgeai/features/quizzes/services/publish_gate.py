@@ -13,7 +13,7 @@ from uuid import UUID
 
 from abridgeai.core.exceptions import AppError, NotFoundError
 from abridgeai.core.security import CurrentUser
-from abridgeai.features.quizzes.models import Quiz
+from abridgeai.features.quizzes.models import Quiz, QuizQuestion
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -37,17 +37,23 @@ class QuizPublishValidationError(AppError):
 
 
 async def assert_t_exp_set_for_all_questions(db: AsyncSession, quiz_id: UUID) -> None:
-    from sqlalchemy import text  # noqa: PLC0415
+    """Assert every live question on ``quiz_id`` has positive ``expected_response_time_ms``.
 
-    rows = await db.execute(
-        text(
-            "SELECT id FROM quiz_questions "
-            "WHERE quiz_id = :qid AND deleted_at IS NULL "
-            "AND (expected_response_time_ms IS NULL OR expected_response_time_ms <= 0)"
+    The ``deleted_at IS NULL`` predicate is applied automatically by the
+    SoftDeleteMixin SELECT filter (``core.db.soft_delete``) — no need to
+    repeat it here.
+    """
+    from sqlalchemy import or_, select  # noqa: PLC0415
+
+    stmt = select(QuizQuestion.id).where(
+        QuizQuestion.quiz_id == quiz_id,
+        or_(
+            QuizQuestion.expected_response_time_ms.is_(None),
+            QuizQuestion.expected_response_time_ms <= 0,
         ),
-        {"qid": str(quiz_id)},
     )
-    missing = [UUID(str(row[0])) for row in rows.all()]
+    result = await db.execute(stmt)
+    missing = list(result.scalars().all())
     if missing:
         raise QuizPublishValidationError(missing_t_exp_question_ids=missing)
 
@@ -58,6 +64,14 @@ async def bulk_set_expected_response_time(
     items: list[tuple[UUID, int]],
     actor: CurrentUser,
 ) -> int:
+    """Set ``expected_response_time_ms`` on each ``(question_id, ms)`` pair.
+
+    Migrated from raw ``UPDATE`` to load-then-mutate (T8): we fetch each
+    question via :func:`db.get`, verify it belongs to ``quiz_id``, and
+    assign the column. Soft-deleted rows are auto-filtered. Triggers
+    refresh ``updated_at`` (T1) and stamp ``updated_by`` (T3); we never
+    touch them by hand.
+    """
     del actor
     quiz = await db.get(Quiz, quiz_id)
     if quiz is None:
@@ -68,19 +82,13 @@ async def bulk_set_expected_response_time(
         if ms <= 0:
             raise AppError(f"expected_response_time_ms must be > 0 for question {question_id}")
 
-    from sqlalchemy import text  # noqa: PLC0415
-
     updated = 0
     for question_id, ms in items:
-        result = await db.execute(
-            text(
-                "UPDATE quiz_questions SET expected_response_time_ms = :ms, "
-                "updated_at = NOW() "
-                "WHERE id = :qid AND quiz_id = :quiz_id AND deleted_at IS NULL"
-            ),
-            {"ms": ms, "qid": str(question_id), "quiz_id": str(quiz_id)},
-        )
-        updated += result.rowcount or 0  # type: ignore[attr-defined]
+        question = await db.get(QuizQuestion, question_id)
+        if question is None or question.quiz_id != quiz_id:
+            continue
+        question.expected_response_time_ms = ms
+        updated += 1
     await db.flush()
     return updated
 

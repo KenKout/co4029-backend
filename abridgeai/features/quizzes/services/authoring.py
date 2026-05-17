@@ -139,51 +139,35 @@ def _validate_mcq_options(options: list[Any]) -> None:
 
 
 async def _next_question_position(db: AsyncSession, quiz_id: UUID) -> int:
-    from sqlalchemy import text  # noqa: PLC0415
+    from sqlalchemy import func, select  # noqa: PLC0415
 
-    row = (
-        await db.execute(
-            text(
-                "SELECT COALESCE(MAX(position), 0) + 1 AS next_pos "
-                "FROM quiz_questions "
-                "WHERE quiz_id = :quiz_id AND deleted_at IS NULL"
-            ),
-            {"quiz_id": quiz_id},
-        )
-    ).first()
-    return int(row.next_pos) if row is not None else 1
+    stmt = select(func.coalesce(func.max(QuizQuestion.position), 0) + 1).where(
+        QuizQuestion.quiz_id == quiz_id
+    )
+    return int((await db.execute(stmt)).scalar_one())
 
 
 async def _next_revision_no(db: AsyncSession, question_id: UUID) -> int:
-    from sqlalchemy import text  # noqa: PLC0415
+    from sqlalchemy import func, select  # noqa: PLC0415
 
-    row = (
-        await db.execute(
-            text(
-                "SELECT COALESCE(MAX(revision_no), 0) + 1 AS next_no "
-                "FROM quiz_question_revisions WHERE question_id = :qid"
-            ),
-            {"qid": question_id},
-        )
-    ).first()
-    return int(row.next_no) if row is not None else 1
+    stmt = select(func.coalesce(func.max(QuizQuestionRevision.revision_no), 0) + 1).where(
+        QuizQuestionRevision.question_id == question_id
+    )
+    return int((await db.execute(stmt)).scalar_one())
 
 
 async def _quiz_has_in_flight_run(db: AsyncSession, quiz_id: UUID) -> bool:
-    from sqlalchemy import text  # noqa: PLC0415
+    from sqlalchemy import select  # noqa: PLC0415
 
-    row = (
-        await db.execute(
-            text(
-                "SELECT 1 FROM generation_runs "
-                "WHERE config_json->>'quiz_id' = :quiz_id "
-                "  AND status IN ('pending', 'running') "
-                "LIMIT 1"
-            ),
-            {"quiz_id": str(quiz_id)},
+    stmt = (
+        select(GenerationRun.id)
+        .where(
+            GenerationRun.config_json["quiz_id"].astext == str(quiz_id),
+            GenerationRun.status.in_(("pending", "running")),
         )
-    ).first()
-    return row is not None
+        .limit(1)
+    )
+    return (await db.execute(stmt)).first() is not None
 
 
 async def _add_quiz_source_lessons(db: AsyncSession, quiz_id: UUID, lesson_ids: list[UUID]) -> None:

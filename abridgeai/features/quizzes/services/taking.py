@@ -91,19 +91,13 @@ async def _require_attempt(db: AsyncSession, attempt_id: UUID) -> QuizAttempt:
 
 
 async def _next_attempt_number(db: AsyncSession, quiz_id: UUID, student_id: UUID) -> int:
-    from sqlalchemy import text  # noqa: PLC0415
+    from sqlalchemy import func, select  # noqa: PLC0415
 
-    row = (
-        await db.execute(
-            text(
-                "SELECT COALESCE(MAX(attempt_number), 0) + 1 AS next_no "
-                "FROM quiz_attempts "
-                "WHERE quiz_id = :quiz_id AND student_id = :student_id"
-            ),
-            {"quiz_id": quiz_id, "student_id": student_id},
-        )
-    ).first()
-    return int(row.next_no) if row is not None else 1
+    stmt = select(func.coalesce(func.max(QuizAttempt.attempt_number), 0) + 1).where(
+        QuizAttempt.quiz_id == quiz_id,
+        QuizAttempt.student_id == student_id,
+    )
+    return int((await db.execute(stmt)).scalar_one())
 
 
 async def _load_quiz_questions_for_taking(db: AsyncSession, quiz_id: UUID) -> list[QuizQuestion]:
