@@ -75,7 +75,7 @@ PERM_COURSE: Final = CacheKey(
 # ---------------------------------------------------------------------------
 
 LESSON_UNLOCK: Final = CacheKey(
-    pattern="lesson_unlock:{user_id}:{lesson_id}",
+    pattern="lesson_unlock:{student_id}:{lesson_id}",
     ttl_seconds=60,
     description="Whether a lesson is unlocked for a learner (SR engine).",
 )
