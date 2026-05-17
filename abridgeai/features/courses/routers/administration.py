@@ -20,22 +20,33 @@ filter via :mod:`features.courses.services.administration`.
 their ``UPDATE`` / ``SELECT`` statements but do NOT commit. This
 router commits on the success path of each write so a service-level
 exception leaves the transaction unchanged.
+
+**T7 (orm-consolidation)**: the four intra-feature ``text()`` sites
+(updated_by touch + three stats aggregations) were migrated to ORM
+``select(...) / db.get(...)``. The remaining ``_LIST_PROCESSING_JOBS_SQL``
+is a cross-feature read joining ``processing_jobs`` /
+``ai_model_calls`` / ``generation_runs`` -- those tables are owned by
+other features and Wave 5 will route the query through their public
+APIs once they exist. Soft-delete filter is auto-applied to every
+``courses`` SELECT via :mod:`abridgeai.core.db.soft_delete` so manual
+``deleted_at IS NULL`` clauses are no longer needed.
 """
 
 from __future__ import annotations
 
-from typing import Annotated, Any
+from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
-from sqlalchemy import text
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from abridgeai.core.db import get_db
 from abridgeai.core.exceptions import NotFoundError
 from abridgeai.core.security import CurrentUser
 from abridgeai.features.access_control.policies import require_permission
+from abridgeai.features.courses.models import Course
 from abridgeai.features.courses.schemas import CourseAuthoring
 from abridgeai.features.courses.services import administration as administration_service
 
@@ -116,16 +127,6 @@ def _not_found(detail: str) -> HTTPException:
     )
 
 
-_TOUCH_UPDATED_BY_SQL = text(
-    """
-    UPDATE courses
-       SET updated_by = :admin_id,
-           updated_at = NOW()
-     WHERE id = :course_id
-    """
-)
-
-
 _LIST_PROCESSING_JOBS_SQL = text(
     """
     SELECT DISTINCT
@@ -146,41 +147,6 @@ _LIST_PROCESSING_JOBS_SQL = text(
     LEFT JOIN generation_runs gr ON gr.id = amc.generation_run_id
     WHERE gr.course_id = :course_id
     ORDER BY pj.created_at DESC
-    LIMIT :limit
-    """
-)
-
-
-_STATS_BY_STATUS_SQL = text(
-    """
-    SELECT status, COUNT(*) AS count
-    FROM courses
-    WHERE deleted_at IS NULL
-    GROUP BY status
-    ORDER BY status
-    """
-)
-
-
-_STATS_TOTAL_SQL = text(
-    """
-    SELECT
-        COUNT(*) FILTER (WHERE deleted_at IS NULL) AS active_total,
-        COUNT(*) FILTER (WHERE deleted_at IS NOT NULL) AS soft_deleted_total
-    FROM courses
-    """
-)
-
-
-_STATS_TOP_DRAFT_OWNERS_SQL = text(
-    """
-    SELECT owner_user_id, COUNT(*) AS draft_count
-    FROM courses
-    WHERE status = 'draft'
-      AND deleted_at IS NULL
-      AND owner_user_id IS NOT NULL
-    GROUP BY owner_user_id
-    ORDER BY draft_count DESC, owner_user_id
     LIMIT :limit
     """
 )
@@ -235,10 +201,11 @@ async def restore_soft_deleted_course(
         restored = await administration_service.restore_soft_deleted_course(db, course_id, admin)
     except NotFoundError as exc:
         raise _not_found(str(exc)) from exc
-    await db.execute(
-        _TOUCH_UPDATED_BY_SQL,
-        {"admin_id": admin.user_id, "course_id": course_id},
-    )
+
+    course_orm = await db.get(Course, course_id)
+    if course_orm is not None:
+        course_orm.updated_by = admin.user_id
+
     await db.commit()
     return restored
 
@@ -319,22 +286,50 @@ async def get_course_stats(
 
     The path uses the underscore-prefix ``/_stats`` so it does not
     collide with the ``/courses/{course_id}`` UUID-shaped path.
+
+    Soft-delete semantics:
+    * ``by_status`` and ``top_draft_owners`` only count live rows --
+      the do_orm_execute listener auto-applies ``deleted_at IS NULL``
+      to every ``Course`` SELECT.
+    * ``totals`` distinguishes active vs tombstoned and therefore
+      bypasses the loader filter via
+      ``execution_options(include_deleted=True)``.
     """
-    by_status_rows = (await db.execute(_STATS_BY_STATUS_SQL)).mappings().all()
-    totals_row: Any = (await db.execute(_STATS_TOTAL_SQL)).mappings().one()
-    top_owner_rows = (
-        await db.execute(_STATS_TOP_DRAFT_OWNERS_SQL, {"limit": top_draft_owners_limit})
-    ).mappings()
+    by_status_stmt = (
+        select(Course.status, func.count().label("status_count"))
+        .group_by(Course.status)
+        .order_by(Course.status)
+    )
+    by_status_rows = (await db.execute(by_status_stmt)).all()
+
+    totals_stmt = (
+        select(
+            func.count().filter(Course.deleted_at.is_(None)).label("active_total"),
+            func.count().filter(Course.deleted_at.is_not(None)).label("soft_deleted_total"),
+        )
+        .select_from(Course)
+        .execution_options(include_deleted=True)
+    )
+    totals_row = (await db.execute(totals_stmt)).one()
+
+    top_owners_stmt = (
+        select(Course.owner_user_id, func.count().label("draft_count"))
+        .where(Course.status == "draft")
+        .group_by(Course.owner_user_id)
+        .order_by(func.count().desc(), Course.owner_user_id)
+        .limit(top_draft_owners_limit)
+    )
+    top_owner_rows = (await db.execute(top_owners_stmt)).all()
 
     return CourseStats(
-        total_courses=int(totals_row["active_total"] or 0),
-        soft_deleted_courses=int(totals_row["soft_deleted_total"] or 0),
+        total_courses=int(totals_row.active_total or 0),
+        soft_deleted_courses=int(totals_row.soft_deleted_total or 0),
         by_status=[
-            CourseStatusCount(status=row["status"], count=int(row["count"]))
+            CourseStatusCount(status=row.status, count=int(row.status_count))
             for row in by_status_rows
         ],
         top_draft_owners=[
-            TopOwnerRow(owner_user_id=row["owner_user_id"], draft_count=int(row["draft_count"]))
+            TopOwnerRow(owner_user_id=row.owner_user_id, draft_count=int(row.draft_count))
             for row in top_owner_rows
         ],
     )
