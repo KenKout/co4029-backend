@@ -36,6 +36,11 @@ class LLMRole(str, Enum):  # noqa: UP042 - StrEnum changes value coercion; prese
     KG_EXTRACTION = "kg_extraction"
     STT = "stt"
     VISION = "vision"
+    INTERVIEW_GENERATION = "interview_generation"
+    INTERVIEW_VALIDATION = "interview_validation"
+    INTERVIEW_FOLLOWUP = "interview_followup"
+    INTERVIEW_EVALUATION = "interview_evaluation"
+    GAP_REPORT_GENERATION = "gap_report_generation"
 
 
 # Default role -> tier mapping. Embedding intentionally excluded — it has its
@@ -53,6 +58,11 @@ ROLE_TO_TIER: dict[LLMRole, Literal["small", "standard", "large"]] = {
     LLMRole.KG_EXTRACTION: "small",
     LLMRole.STT: "standard",
     LLMRole.VISION: "standard",
+    LLMRole.INTERVIEW_GENERATION: "large",
+    LLMRole.INTERVIEW_VALIDATION: "standard",
+    LLMRole.INTERVIEW_FOLLOWUP: "small",
+    LLMRole.INTERVIEW_EVALUATION: "large",
+    LLMRole.GAP_REPORT_GENERATION: "large",
 }
 
 
