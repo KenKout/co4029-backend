@@ -6,6 +6,7 @@ absent — it ports to ``features/career_paths/`` in Phase 7. Same for
 ``Enrollment`` / ``InvitationCode`` (port to ``features/enrollments/``).
 """
 
+from abridgeai.features.courses import services
 from abridgeai.features.courses.models import (
     Course,
     CourseLearningOutcome,
@@ -32,4 +33,5 @@ __all__ = [
     "ModuleItem",
     "ModulePrerequisite",
     "Tag",
+    "services",
 ]

@@ -179,6 +179,10 @@ ignore_imports = [
     "abridgeai.features.identity.services.profile -> sqlalchemy",
     "abridgeai.features.identity.services.admin -> sqlalchemy",
     "abridgeai.features.access_control.services.permissions_lookup -> sqlalchemy",
+    "abridgeai.features.courses.services.catalog -> sqlalchemy",
+    "abridgeai.features.courses.services.authoring -> sqlalchemy",
+    "abridgeai.features.courses.services.assignment -> sqlalchemy",
+    "abridgeai.features.courses.services.administration -> sqlalchemy",
 ]
 
 [[tool.importlinter.contracts]]

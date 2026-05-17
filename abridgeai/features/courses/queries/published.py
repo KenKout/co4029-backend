@@ -109,9 +109,7 @@ async def list_enrolled_courses(
     course_ids = [row.id for row in rows]
     if not course_ids:
         return CursorPage(items=[], next_cursor=None)
-    courses_stmt = (
-        select(Course).where(Course.id.in_(course_ids)).order_by(Course.id)
-    )
+    courses_stmt = select(Course).where(Course.id.in_(course_ids)).order_by(Course.id)
     courses = list((await db.execute(courses_stmt)).scalars().all())
     next_cursor = encode_cursor(courses[-1].id) if len(courses) == capped else None
     return CursorPage(items=courses, next_cursor=next_cursor)
@@ -140,9 +138,7 @@ async def get_published_course_by_id(db: AsyncSession, course_id: UUID) -> Cours
     return (await db.execute(stmt)).scalar_one_or_none()
 
 
-async def get_published_course_content(
-    db: AsyncSession, course_id: UUID
-) -> dict[str, Any] | None:
+async def get_published_course_content(db: AsyncSession, course_id: UUID) -> dict[str, Any] | None:
     """Recursive-CTE fetch of the published course tree.
 
     Returns ``{"course": dict, "modules": list, "items": list}`` or
@@ -184,9 +180,7 @@ async def list_published_lessons(db: AsyncSession, module_id: UUID) -> list[Less
     return list((await db.execute(stmt)).scalars().all())
 
 
-async def list_visible_lesson_resources(
-    db: AsyncSession, lesson_id: UUID
-) -> list[LessonResource]:
+async def list_visible_lesson_resources(db: AsyncSession, lesson_id: UUID) -> list[LessonResource]:
     """Resources that are both attached to a published lesson AND have
     ``visible_to_students = TRUE`` (T3.3 :func:`student_visible_resource_clause`).
     """
