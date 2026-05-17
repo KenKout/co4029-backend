@@ -6,11 +6,12 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
     create_async_engine,
 )
-from sqlalchemy.orm import DeclarativeBase
+from sqlalchemy.orm import DeclarativeBase, Session
 
 from abridgeai.core.audit import register_audit_listener
 from abridgeai.core.cache.invalidator import register_cache_invalidator
 from abridgeai.core.config import get_settings
+from abridgeai.core.db.hard_delete_guard import register_hard_delete_guard
 from abridgeai.core.db.mixins import (
     PGUUID,
     AuditedByMixin,
@@ -33,6 +34,9 @@ register_soft_delete_filter()
 
 
 register_cache_invalidator()
+
+
+register_hard_delete_guard(Session)
 
 
 _engine: AsyncEngine | None = None

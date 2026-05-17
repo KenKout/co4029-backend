@@ -143,7 +143,7 @@ class Course(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftDeleteMixi
 
     modules: Mapped[list[Module]] = relationship(
         back_populates="course",
-        cascade="all",
+        cascade="save-update, merge, refresh-expire, expunge",
     )
 
 
@@ -241,11 +241,11 @@ class Module(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftDeleteMixi
     course: Mapped[Course] = relationship(back_populates="modules")
     lessons: Mapped[list[Lesson]] = relationship(
         back_populates="module",
-        cascade="all",
+        cascade="save-update, merge, refresh-expire, expunge",
     )
     items: Mapped[list[ModuleItem]] = relationship(
         back_populates="module",
-        cascade="all",
+        cascade="save-update, merge, refresh-expire, expunge",
         foreign_keys="[ModuleItem.module_id]",
     )
 
@@ -341,7 +341,7 @@ class Lesson(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftDeleteMixi
     module: Mapped[Module] = relationship(back_populates="lessons")
     resources: Mapped[list[LessonResource]] = relationship(
         back_populates="lesson",
-        cascade="all",
+        cascade="save-update, merge, refresh-expire, expunge",
     )
 
 
