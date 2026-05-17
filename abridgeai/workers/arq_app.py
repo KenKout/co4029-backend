@@ -16,6 +16,8 @@ from abridgeai.features.materials.workers import JOBS as MATERIAL_JOBS
 from abridgeai.features.materials.workers.cron import cleanup_orphaned_uploads_task
 from abridgeai.features.notifications.workers import JOBS as NOTIFICATION_JOBS
 from abridgeai.features.quizzes.workers import JOBS as QUIZ_JOBS
+from abridgeai.features.spaced_repetition.workers import JOBS as SR_JOBS
+from abridgeai.features.spaced_repetition.workers import scan_due_cards_task
 
 
 class WorkerSettings:
@@ -35,7 +37,11 @@ class WorkerSettings:
 
     redis_settings = RedisSettings.from_dsn(get_settings().redis_url)
     functions = (
-        list(MATERIAL_JOBS) + list(QUIZ_JOBS) + list(INTERVIEW_JOBS) + list(NOTIFICATION_JOBS)
+        list(MATERIAL_JOBS)
+        + list(QUIZ_JOBS)
+        + list(INTERVIEW_JOBS)
+        + list(NOTIFICATION_JOBS)
+        + list(SR_JOBS)
     )
     max_jobs = 10
     job_timeout = 600
@@ -43,6 +49,7 @@ class WorkerSettings:
     max_tries = 3
     cron_jobs: list[CronJob] = [
         cron(cleanup_orphaned_uploads_task, hour={3}, minute=0),
+        cron(scan_due_cards_task, minute=0),
     ]
 
 

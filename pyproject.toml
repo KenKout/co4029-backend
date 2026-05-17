@@ -258,6 +258,7 @@ ignore_imports = [
     "abridgeai.features.progress.routers.authoring -> abridgeai.features.access_control.policies",
     "abridgeai.features.career_paths.routers.authoring -> abridgeai.features.access_control.policies",
     "abridgeai.features.career_paths.models -> abridgeai.features.access_control.models",
+    "abridgeai.features.spaced_repetition.workers.scan_due_cards -> abridgeai.features.notifications.services.dispatch",
 ]
 
 [[tool.importlinter.contracts]]
