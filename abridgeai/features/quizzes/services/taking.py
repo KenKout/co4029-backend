@@ -30,6 +30,7 @@ from abridgeai.features.quizzes.models import (
     QuizQuestionOption,
 )
 from abridgeai.features.quizzes.queries import authoring as authoring_queries
+from abridgeai.features.quizzes.queries import published as published_queries
 from abridgeai.features.quizzes.schemas.public import (
     QuizForTakingPublic,
     QuizPublic,
@@ -38,6 +39,16 @@ from abridgeai.features.quizzes.schemas.public import (
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
+
+
+async def get_published_quiz(db: AsyncSession, quiz_id: UUID) -> Quiz | None:
+    """Pass-through to :func:`published_queries.get_published_quiz`.
+
+    Routers cannot import queries directly (T0.4 contract); learner
+    callers reach the published-quiz fetcher through this thin service
+    indirection.
+    """
+    return await published_queries.get_published_quiz(db, quiz_id)
 
 
 async def _require_quiz(db: AsyncSession, quiz_id: UUID) -> Quiz:
@@ -254,6 +265,7 @@ async def get_attempt_history(
 __all__ = [
     "answer_attempt",
     "get_attempt_history",
+    "get_published_quiz",
     "start_attempt",
     "submit_attempt",
 ]
