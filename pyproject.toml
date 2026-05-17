@@ -189,6 +189,10 @@ ignore_imports = [
     "abridgeai.features.quizzes.services.authoring -> sqlalchemy",
     "abridgeai.features.quizzes.services.taking -> sqlalchemy",
     "abridgeai.features.quizzes.services.generation -> sqlalchemy",
+    "abridgeai.features.interviews.services.authoring -> sqlalchemy",
+    "abridgeai.features.interviews.services.taking -> sqlalchemy",
+    "abridgeai.features.interviews.services.evaluation -> sqlalchemy",
+    "abridgeai.features.interviews.services.generation -> sqlalchemy",
 ]
 
 [[tool.importlinter.contracts]]
@@ -224,6 +228,7 @@ ignore_imports = [
     "abridgeai.features.quizzes.routers.authoring -> abridgeai.features.access_control.policies",
     "abridgeai.features.quizzes.routers._deps -> abridgeai.features.access_control.policies",
     "abridgeai.features.interviews.ai.pipelines.generation -> abridgeai.features.quizzes.models",
+    "abridgeai.features.interviews.services.authoring -> abridgeai.features.quizzes.models",
 ]
 
 [[tool.importlinter.contracts]]

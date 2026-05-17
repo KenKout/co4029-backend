@@ -1,0 +1,395 @@
+"""Interview authoring service (T6.11).
+
+Ports the teacher CRUD + generation-trigger surface from
+``backend/app/routes/interviews/service.py``. Composes
+:mod:`features.interviews.queries.authoring` for reads and applies
+business rules + ORM writes for config / outcome / question CRUD,
+manual edits, and ARQ enqueue.
+
+Discipline matches T5.13 (quiz authoring): the service flushes, the
+router commits — except :func:`start_generation_run` and
+:func:`regenerate_question`, which commit inline because the ARQ
+worker reads the new ``GenerationRun`` row out of band and must see
+the row before the job dequeues.
+
+Locked task names (mirrored by T6.13 worker registration):
+
+* ``run_interview_generation_task`` — fan-out for full + per-question
+  regeneration runs.
+"""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any
+from uuid import UUID
+
+from abridgeai.core.db.recursive_delete import soft_delete_cascade
+from abridgeai.core.exceptions import AppError, NotFoundError
+from abridgeai.core.security import CurrentUser, utcnow
+from abridgeai.features.interviews.models import (
+    InterviewConfig,
+    InterviewOutcome,
+    InterviewQuestion,
+)
+from abridgeai.features.interviews.queries import authoring as authoring_queries
+from abridgeai.features.quizzes.models import GenerationRun
+
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+
+_RUN_INTERVIEW_GENERATION_TASK = "run_interview_generation_task"
+
+
+def _apply_patch(model: object, payload: object) -> None:
+    data = payload.model_dump(exclude_unset=True)  # type: ignore[attr-defined]
+    for key, value in data.items():
+        setattr(model, key, value)
+
+
+async def _require_config(db: AsyncSession, config_id: UUID) -> InterviewConfig:
+    config = await authoring_queries.get_interview_for_authoring(db, config_id)
+    if config is None:
+        raise NotFoundError(f"Interview config {config_id} not found")
+    return config
+
+
+async def _require_question(
+    db: AsyncSession, config_id: UUID, question_id: UUID
+) -> InterviewQuestion:
+    question = await db.get(InterviewQuestion, question_id)
+    if question is None or question.interview_config_id != config_id:
+        raise NotFoundError(f"Interview question {question_id} not found")
+    return question
+
+
+async def _require_outcome(db: AsyncSession, config_id: UUID, outcome_id: UUID) -> InterviewOutcome:
+    outcome = await db.get(InterviewOutcome, outcome_id)
+    if outcome is None or outcome.interview_config_id != config_id:
+        raise NotFoundError(f"Interview outcome {outcome_id} not found")
+    return outcome
+
+
+async def _ensure_module_item(
+    db: AsyncSession, *, module_id: UUID, interview_config_id: UUID
+) -> None:
+    """Insert a ``module_items`` row pointing at the published config.
+
+    Raw SQL because the ``courses`` ORM lives in another feature and
+    importing it would break the ``Features are independent``
+    import-linter contract (mirrors T5.13 quiz authoring).
+    """
+    from sqlalchemy import text  # noqa: PLC0415
+
+    existing = (
+        await db.execute(
+            text(
+                "SELECT 1 FROM module_items "
+                "WHERE interview_config_id = :id AND deleted_at IS NULL LIMIT 1"
+            ),
+            {"id": interview_config_id},
+        )
+    ).first()
+    if existing is not None:
+        return
+    next_pos_row = (
+        await db.execute(
+            text(
+                "SELECT COALESCE(MAX(position), 0) + 1 AS next_pos "
+                "FROM module_items WHERE module_id = :module_id"
+            ),
+            {"module_id": module_id},
+        )
+    ).first()
+    next_pos = int(next_pos_row.next_pos) if next_pos_row is not None else 1
+    await db.execute(
+        text(
+            "INSERT INTO module_items (id, module_id, item_type, "
+            "interview_config_id, position, created_at, updated_at) VALUES "
+            "(uuid_generate_v4(), :module_id, 'interview', :cfg, :pos, NOW(), NOW())"
+        ),
+        {"module_id": module_id, "cfg": interview_config_id, "pos": next_pos},
+    )
+
+
+async def create_interview_config(
+    db: AsyncSession,
+    course_id: UUID,
+    payload: Any,  # noqa: ANN401  -- DTO carried in by router (T6.12).
+    actor: CurrentUser,
+) -> InterviewConfig:
+    """Create a new ``draft`` interview config under ``course_id``."""
+    data = payload.model_dump(exclude_unset=True)
+    module_id = data.get("module_id")
+    if module_id is None:
+        raise AppError("module_id is required to create an interview config")
+    config = InterviewConfig(
+        course_id=course_id,
+        module_id=module_id,
+        title=data["title"],
+        persona=data.get("persona"),
+        supported_modes=data.get("supported_modes", "hybrid"),
+        time_limit_minutes=data.get("time_limit_minutes"),
+        max_attempts=data.get("max_attempts"),
+        min_outcomes_to_pass=data.get("min_outcomes_to_pass"),
+        lock_quiz_ef_until_pass=bool(data.get("lock_quiz_ef_until_pass", False)),
+        supplementary_instructions=data.get("supplementary_instructions"),
+        created_by=actor.user_id,
+    )
+    db.add(config)
+    await db.flush()
+    await db.refresh(config)
+    return config
+
+
+async def update_interview_config(
+    db: AsyncSession,
+    config_id: UUID,
+    payload: Any,  # noqa: ANN401
+    actor: CurrentUser,
+) -> InterviewConfig:
+    del actor
+    config = await _require_config(db, config_id)
+    _apply_patch(config, payload)
+    await db.flush()
+    await db.refresh(config)
+    return config
+
+
+async def publish_interview_config(
+    db: AsyncSession, config_id: UUID, actor: CurrentUser
+) -> InterviewConfig:
+    del actor
+    config = await _require_config(db, config_id)
+    if config.status == "archived":
+        raise AppError(f"Cannot publish archived interview config {config_id}")
+    config.status = "published"
+    config.published_at = utcnow()
+    await _ensure_module_item(db, module_id=config.module_id, interview_config_id=config.id)
+    await db.flush()
+    await db.refresh(config)
+    return config
+
+
+async def archive_interview_config(
+    db: AsyncSession, config_id: UUID, actor: CurrentUser
+) -> InterviewConfig:
+    del actor
+    config = await _require_config(db, config_id)
+    config.status = "archived"
+    await db.flush()
+    await db.refresh(config)
+    return config
+
+
+async def delete_interview_config(db: AsyncSession, config_id: UUID, actor: CurrentUser) -> None:
+    """Soft-delete the config + cascade to outcomes / questions."""
+    config = await _require_config(db, config_id)
+    await soft_delete_cascade(db, config, actor_id=actor.user_id)
+
+
+async def add_question(
+    db: AsyncSession,
+    config_id: UUID,
+    payload: Any,  # noqa: ANN401
+    actor: CurrentUser,
+) -> InterviewQuestion:
+    await _require_config(db, config_id)
+    next_position = await authoring_queries.next_question_position(db, config_id)
+    data = payload.model_dump(exclude_unset=True)
+    if not str(data.get("prompt_text", "")).strip():
+        raise AppError("Question prompt is required")
+    question = InterviewQuestion(
+        interview_config_id=config_id,
+        linked_outcome_id=data.get("linked_outcome_id"),
+        position=data.get("position") or next_position,
+        question_type=data["question_type"],
+        prompt_text=data["prompt_text"].strip(),
+        difficulty=data.get("difficulty"),
+        review_status="approved",
+        ai_generated=False,
+        source_refs_json=data.get("source_refs_json", []) or [],
+        reviewed_by=actor.user_id,
+        reviewed_at=utcnow(),
+        created_by=actor.user_id,
+    )
+    db.add(question)
+    await db.flush()
+    await db.refresh(question)
+    return question
+
+
+async def update_question(
+    db: AsyncSession,
+    config_id: UUID,
+    question_id: UUID,
+    payload: Any,  # noqa: ANN401
+    actor: CurrentUser,
+) -> InterviewQuestion:
+    question = await _require_question(db, config_id, question_id)
+    data = payload.model_dump(exclude_unset=True)
+    for key, value in data.items():
+        setattr(question, key, value)
+    question.reviewed_by = actor.user_id
+    question.reviewed_at = utcnow()
+    await db.flush()
+    await db.refresh(question)
+    return question
+
+
+async def delete_question(
+    db: AsyncSession,
+    config_id: UUID,
+    question_id: UUID,
+    actor: CurrentUser,
+) -> None:
+    question = await _require_question(db, config_id, question_id)
+    await soft_delete_cascade(db, question, actor_id=actor.user_id)
+
+
+async def add_outcome(
+    db: AsyncSession,
+    config_id: UUID,
+    payload: Any,  # noqa: ANN401
+    actor: CurrentUser,
+) -> InterviewOutcome:
+    await _require_config(db, config_id)
+    data = payload.model_dump(exclude_unset=True)
+    next_position = await authoring_queries.next_outcome_position(db, config_id)
+    outcome = InterviewOutcome(
+        interview_config_id=config_id,
+        position=data.get("position") or next_position,
+        outcome_text=data["outcome_text"],
+        outcome_type=data["outcome_type"],
+        importance_weight=data.get("importance_weight", 1),
+        created_by=actor.user_id,
+    )
+    db.add(outcome)
+    await db.flush()
+    await db.refresh(outcome)
+    return outcome
+
+
+async def update_outcome(
+    db: AsyncSession,
+    config_id: UUID,
+    outcome_id: UUID,
+    payload: Any,  # noqa: ANN401
+    actor: CurrentUser,
+) -> InterviewOutcome:
+    del actor
+    outcome = await _require_outcome(db, config_id, outcome_id)
+    _apply_patch(outcome, payload)
+    await db.flush()
+    await db.refresh(outcome)
+    return outcome
+
+
+async def start_generation_run(
+    db: AsyncSession,
+    config_id: UUID,
+    request: Any,  # noqa: ANN401  -- InterviewGenerationRequest DTO at router edge.
+    actor: CurrentUser,
+    *,
+    arq_pool: object | None = None,
+) -> GenerationRun:
+    """Create a :class:`GenerationRun` + enqueue
+    ``run_interview_generation_task``.
+
+    Commits inline so the worker sees the row before the ARQ job
+    dequeues. Mirrors T5.13 quiz ``start_generation_run`` semantics.
+    """
+    config = await _require_config(db, config_id)
+    request_data = request.model_dump(exclude_unset=True, mode="json") if request else {}
+    config_json: dict[str, Any] = dict(request_data) | {
+        "interview_config_id": str(config.id),
+    }
+    run = GenerationRun(
+        generation_type="interview",
+        source_scope_kind="module",
+        course_id=config.course_id,
+        module_id=config.module_id,
+        requested_by=actor.user_id,
+        status="pending",
+        config_json=config_json,
+    )
+    db.add(run)
+    await db.flush()
+    config.generation_run_id = run.id
+    await db.commit()
+    await db.refresh(run)
+
+    if arq_pool is not None:
+        await arq_pool.enqueue_job(  # type: ignore[attr-defined]
+            _RUN_INTERVIEW_GENERATION_TASK, actor.user_id, run.id
+        )
+    return run
+
+
+async def regenerate_question(
+    db: AsyncSession,
+    config_id: UUID,
+    question_id: UUID,
+    actor: CurrentUser,
+    *,
+    arq_pool: object | None = None,
+) -> GenerationRun:
+    """Per-question regeneration run + ARQ enqueue.
+
+    Worker dispatcher reads ``config_json["question_id"]`` to route to
+    the per-question regeneration path. Task name matches the canonical
+    worker function (``run_interview_generation_task``).
+    """
+    question = await _require_question(db, config_id, question_id)
+    config = await _require_config(db, config_id)
+    run = GenerationRun(
+        generation_type="interview",
+        source_scope_kind="module",
+        course_id=config.course_id,
+        module_id=config.module_id,
+        requested_by=actor.user_id,
+        status="pending",
+        config_json={
+            "interview_config_id": str(config.id),
+            "question_id": str(question.id),
+        },
+    )
+    db.add(run)
+    await db.commit()
+    await db.refresh(run)
+
+    if arq_pool is not None:
+        await arq_pool.enqueue_job(  # type: ignore[attr-defined]
+            _RUN_INTERVIEW_GENERATION_TASK, actor.user_id, run.id
+        )
+    return run
+
+
+async def get_generation_run(
+    db: AsyncSession, config_id: UUID, run_id: UUID
+) -> GenerationRun | None:
+    """Look up a run by id; ensures it belongs to ``config_id``."""
+    run = await db.get(GenerationRun, run_id)
+    if run is None:
+        return None
+    config_ref = (run.config_json or {}).get("interview_config_id")
+    if config_ref != str(config_id):
+        return None
+    return run
+
+
+__all__ = [
+    "add_outcome",
+    "add_question",
+    "archive_interview_config",
+    "create_interview_config",
+    "delete_interview_config",
+    "delete_question",
+    "get_generation_run",
+    "publish_interview_config",
+    "regenerate_question",
+    "start_generation_run",
+    "update_interview_config",
+    "update_outcome",
+    "update_question",
+]
