@@ -191,6 +191,7 @@ ignore_imports = [
     "abridgeai.features.materials.services.catalog -> sqlalchemy",
     "abridgeai.features.materials.services.authoring -> sqlalchemy",
     "abridgeai.features.quizzes.services.authoring -> sqlalchemy",
+    "abridgeai.features.quizzes.services.publish_gate -> sqlalchemy",
     "abridgeai.features.quizzes.services.taking -> sqlalchemy",
     "abridgeai.features.quizzes.services.generation -> sqlalchemy",
     "abridgeai.features.interviews.services.authoring -> sqlalchemy",

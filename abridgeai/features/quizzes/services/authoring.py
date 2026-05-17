@@ -41,6 +41,11 @@ from abridgeai.features.quizzes.models import (
     QuizSourceLesson,
 )
 from abridgeai.features.quizzes.queries import authoring as authoring_queries
+from abridgeai.features.quizzes.services.publish_gate import (
+    QuizPublishValidationError,
+    assert_t_exp_set_for_all_questions,
+    bulk_set_expected_response_time,
+)
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -251,6 +256,7 @@ async def publish_quiz(db: AsyncSession, quiz_id: UUID, actor: CurrentUser) -> Q
     quiz = await _require_quiz(db, quiz_id)
     if quiz.status == "archived":
         raise AppError(f"Cannot publish archived quiz {quiz_id}")
+    await assert_t_exp_set_for_all_questions(db, quiz_id)
     quiz.status = "published"
     quiz.published_at = utcnow()
     await _ensure_module_item(db, module_id=quiz.module_id, quiz_id=quiz.id)
@@ -567,7 +573,9 @@ async def regenerate_question(
 
 
 __all__ = [
+    "QuizPublishValidationError",
     "archive_quiz",
+    "bulk_set_expected_response_time",
     "create_question",
     "create_quiz",
     "delete_question",
