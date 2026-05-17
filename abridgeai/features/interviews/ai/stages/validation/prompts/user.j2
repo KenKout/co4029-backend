@@ -1,0 +1,24 @@
+Interview title: {{ title }}
+{% if config_summary %}
+Config summary:
+{{ config_summary }}
+{% endif %}
+
+Source context (chunk_id / excerpt):
+{% for chunk in chunks %}[{{ chunk.id }}] {{ chunk.content }}
+{% if not loop.last %}
+{% endif %}{% endfor %}
+
+Generated questions to judge for leading phrasing:
+{% for question in questions %}#{{ question.index }} ({{ question.question_type }} / {{ question.difficulty }}, depth {{ question.expected_depth }})
+{{ question.prompt_text }}
+{% if not loop.last %}
+{% endif %}{% endfor %}
+
+Return JSON in this shape:
+{
+  "verdicts": [
+    {"question_index": 0, "not_leading": true},
+    {"question_index": 1, "not_leading": false, "rationale": "Stem assumes microservices win — phrase neutrally."}
+  ]
+}
