@@ -33,6 +33,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from abridgeai.core.audit.context import current_actor_var
 from abridgeai.core.config import Settings, get_settings
 from abridgeai.core.db import get_db
 
@@ -207,6 +208,13 @@ async def get_current_user(
 
     current = CurrentUser(user_id=row["user_id"], session_id=row["session_id"])
     request.state.user = current
+    # Bind the actor for the rest of this request's contextvars.Context.
+    # FastAPI/Starlette runs each request in its own asyncio.Task, which holds
+    # an isolated copy of the context, so the bind dies when the handler
+    # returns. The companion ``after_begin`` listener in ``core/db/__init__``
+    # propagates this UUID to PostgreSQL via ``set_config('app.actor_id',
+    # ..., true)`` on every transaction begin.
+    current_actor_var.set(current.user_id)
     return current
 
 
