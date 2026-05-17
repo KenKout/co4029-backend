@@ -9,9 +9,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from abridgeai.features.courses.models import (
     Course,
+    CourseLearningOutcome,
+    CourseTag,
     Lesson,
     LessonResource,
     Module,
+    ModuleItem,
+    Tag,
 )
 from abridgeai.features.courses.queries._pagination import (
     CursorPage,
@@ -19,6 +23,7 @@ from abridgeai.features.courses.queries._pagination import (
     encode_cursor,
 )
 from abridgeai.features.courses.visibility import (
+    module_item_visible_clause,
     published_course_clause,
     published_lesson_clause,
     published_module_clause,
@@ -195,6 +200,176 @@ async def list_visible_lesson_resources(db: AsyncSession, lesson_id: UUID) -> li
         .order_by(LessonResource.position)
     )
     return list((await db.execute(stmt)).scalars().all())
+
+
+async def get_published_module_by_id(db: AsyncSession, module_id: UUID) -> Module | None:
+    """Module by id, only when the module AND its parent course are published."""
+    stmt = (
+        select(Module)
+        .join(Course, Course.id == Module.course_id)
+        .where(
+            Module.id == module_id,
+            published_course_clause(),
+            published_module_clause(),
+        )
+    )
+    return (await db.execute(stmt)).scalar_one_or_none()
+
+
+async def get_published_lesson_by_id(db: AsyncSession, lesson_id: UUID) -> Lesson | None:
+    """Lesson by id, only when the lesson + parent module + parent course are published."""
+    stmt = (
+        select(Lesson)
+        .join(Module, Module.id == Lesson.module_id)
+        .join(Course, Course.id == Module.course_id)
+        .where(
+            Lesson.id == lesson_id,
+            published_course_clause(),
+            published_module_clause(),
+            published_lesson_clause(),
+        )
+    )
+    return (await db.execute(stmt)).scalar_one_or_none()
+
+
+async def get_visible_lesson_resource(db: AsyncSession, resource_id: UUID) -> LessonResource | None:
+    """Resource by id, only when ``visible_to_students=TRUE`` AND the
+    parent lesson / module / course are all published.
+
+    Returns ``None`` (which the router maps to 404) for invisible resources
+    so existence is not leaked.
+    """
+    stmt = (
+        select(LessonResource)
+        .join(Lesson, Lesson.id == LessonResource.lesson_id)
+        .join(Module, Module.id == Lesson.module_id)
+        .join(Course, Course.id == Module.course_id)
+        .where(
+            LessonResource.id == resource_id,
+            published_course_clause(),
+            published_module_clause(),
+            published_lesson_clause(),
+            student_visible_resource_clause(),
+        )
+    )
+    return (await db.execute(stmt)).scalar_one_or_none()
+
+
+async def list_visible_module_items(db: AsyncSession, module_id: UUID) -> list[ModuleItem]:
+    """``ModuleItem`` rows under ``module_id`` that point to non-draft targets.
+
+    Per the DRAFT_VISIBILITY rule (plan §4153) items pointing to draft /
+    soft-deleted lessons are EXCLUDED, not nullified. Quiz / interview
+    items also resolve to ``false`` until Phase 5 / Phase 6 wire their
+    own published clauses (see T3.3 :func:`module_item_visible_clause`).
+    """
+    stmt = (
+        select(ModuleItem)
+        .join(Module, Module.id == ModuleItem.module_id)
+        .join(Lesson, Lesson.id == ModuleItem.lesson_id, isouter=True)
+        .where(
+            ModuleItem.module_id == module_id,
+            published_module_clause(),
+            module_item_visible_clause(),
+        )
+        .order_by(ModuleItem.position)
+    )
+    return list((await db.execute(stmt)).scalars().all())
+
+
+async def list_published_course_tags(db: AsyncSession, course_id: UUID) -> list[Tag]:
+    """Tags attached to a published course (404 path enforced by caller)."""
+    stmt = (
+        select(Tag)
+        .join(CourseTag, CourseTag.tag_id == Tag.id)
+        .join(Course, Course.id == CourseTag.course_id)
+        .where(
+            Course.id == course_id,
+            published_course_clause(),
+        )
+        .order_by(Tag.name)
+    )
+    return list((await db.execute(stmt)).scalars().all())
+
+
+async def list_published_course_outcomes(
+    db: AsyncSession, course_id: UUID
+) -> list[CourseLearningOutcome]:
+    """Course learning outcomes for a published course, ordered by position (§A12)."""
+    stmt = (
+        select(CourseLearningOutcome)
+        .join(Course, Course.id == CourseLearningOutcome.course_id)
+        .where(
+            Course.id == course_id,
+            published_course_clause(),
+        )
+        .order_by(CourseLearningOutcome.position)
+    )
+    return list((await db.execute(stmt)).scalars().all())
+
+
+_USER_PRIMARY_ORG_SQL = text(
+    """
+    SELECT organization_id
+    FROM user_role_assignments
+    WHERE user_id = :user_id
+      AND scope_kind IN ('organization', 'org_unit', 'course')
+      AND organization_id IS NOT NULL
+      AND (active_until IS NULL OR active_until > NOW())
+    ORDER BY created_at DESC NULLS LAST
+    LIMIT 1
+    """
+)
+
+
+async def get_user_primary_organization_id(db: AsyncSession, user_id: UUID) -> UUID | None:
+    """Resolve the requesting user's organization for org-scoped catalog reads.
+
+    Picks the most recent active scoped assignment from
+    ``user_role_assignments``. ``scope_kind='global'`` is intentionally
+    excluded — platform admins do not implicitly belong to one org and
+    must hit endpoints that accept an explicit org param. Returns
+    ``None`` for users with no scoped membership; the router then
+    treats the catalog as empty.
+    """
+    result = await db.execute(_USER_PRIMARY_ORG_SQL, {"user_id": user_id})
+    return result.scalar_one_or_none()
+
+
+_RESOURCE_STORAGE_TARGET_SQL = text(
+    """
+    SELECT so.bucket AS bucket, so.object_key AS object_key
+    FROM lesson_resources lr
+    JOIN lessons l ON l.id = lr.lesson_id
+    JOIN modules m ON m.id = l.module_id
+    JOIN courses c ON c.id = m.course_id
+    JOIN storage_objects so ON so.id = lr.storage_object_id
+    WHERE lr.id = :resource_id
+      AND lr.visible_to_students = TRUE
+      AND lr.deleted_at IS NULL
+      AND l.status = 'published' AND l.deleted_at IS NULL
+      AND m.status = 'published' AND m.deleted_at IS NULL
+      AND c.status = 'published' AND c.deleted_at IS NULL
+    """
+)
+
+
+async def get_visible_resource_storage_target(
+    db: AsyncSession, resource_id: UUID
+) -> tuple[str, str] | None:
+    """Bucket + object_key for a student-visible resource (or ``None``).
+
+    The composite visibility predicate inlines the same publish gates as
+    :func:`get_visible_lesson_resource` so a 404 surfaces uniformly when
+    any link in the lesson → module → course chain is unpublished /
+    soft-deleted, OR when ``visible_to_students`` is FALSE. Caller (the
+    catalog service) maps ``None`` to HTTP 404 — existence MUST NOT leak.
+    """
+    result = await db.execute(_RESOURCE_STORAGE_TARGET_SQL, {"resource_id": resource_id})
+    row = result.one_or_none()
+    if row is None:
+        return None
+    return row.bucket, row.object_key
 
 
 __all__ = [
