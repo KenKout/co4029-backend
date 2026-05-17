@@ -38,11 +38,11 @@ always resolve.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import text
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from abridgeai.core.audit import current_actor_var
@@ -52,6 +52,7 @@ from abridgeai.core.observability import (
     clear_request_context,
     get_logger,
 )
+from abridgeai.features.spaced_repetition.models import StudentCardState
 from abridgeai.workers.actor import set_worker_actor
 
 SYSTEM_ACTOR_ID = UUID("00000000-0000-0000-0000-000000000001")
@@ -92,17 +93,18 @@ async def scan_due_cards_task(
 
 async def _run(db: AsyncSession) -> None:
     started_at = datetime.now(tz=UTC)
-    rows = await db.execute(
-        text(
-            """
-            SELECT student_id, COUNT(*) AS due_count
-            FROM student_card_state
-            WHERE due_at BETWEEN NOW() AND NOW() + INTERVAL '1 hour'
-            GROUP BY student_id
-            HAVING COUNT(*) > 0
-            """
+    window_end = started_at + timedelta(hours=1)
+    due_count_expr = func.count().label("due_count")
+    stmt = (
+        select(StudentCardState.student_id, due_count_expr)
+        .where(
+            StudentCardState.due_at >= started_at,
+            StudentCardState.due_at <= window_end,
         )
+        .group_by(StudentCardState.student_id)
+        .having(func.count() > 0)
     )
+    rows = await db.execute(stmt)
     dispatched = 0
     for row in rows.all():
         student_id: UUID = row[0]
