@@ -1,0 +1,41 @@
+Quiz title: {{ title }}
+
+Difficulty: {{ difficulty }}
+
+Target Bloom distribution: {{ bloom_distribution }}
+
+Generate exactly {{ template_count }} templates total.
+
+Per-section budget (sum equals total): {{ budget }}
+{% if focus_topics %}
+
+Focus topics (distribute coverage across these; do not stray to unrelated topics):
+{% for topic in focus_topics %}- {{ topic }}
+{% endfor %}{% endif %}{% if avoid_topics %}
+
+Avoid topics (NEVER produce a question about these):
+{% for topic in avoid_topics %}- {{ topic }}
+{% endfor %}{% endif %}{% if extra_instructions %}
+
+Extra teacher instructions:
+{{ extra_instructions }}
+{% endif %}
+
+Lesson outline:
+{{ outline_text }}
+
+Return JSON in this shape:
+{
+  "templates": [
+    {
+      "position": 1,
+      "section_id": "sec_abc",
+      "topic": "What this template tests",
+      "question_type": "mcq",
+      "bloom_level": "understand",
+      "difficulty": "medium",
+      "source_chunk_ids": ["uuid-from-section-abc"],
+      "rationale": "Why this template tests this concept at this level."
+    }
+  ]
+}
