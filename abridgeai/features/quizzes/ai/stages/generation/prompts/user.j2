@@ -1,0 +1,62 @@
+Quiz title: {{ title }}
+
+Difficulty: {{ difficulty }}
+
+Question types: {{ question_types | join(', ') }}
+{%- if focus_topics %}
+
+Focus topics (distribute coverage across these; do not stray to unrelated topics):
+{%- for topic in focus_topics %}
+- {{ topic }}
+{%- endfor %}
+{%- endif %}
+{%- if avoid_topics %}
+
+Avoid topics (NEVER produce a question about these):
+{%- for topic in avoid_topics %}
+- {{ topic }}
+{%- endfor %}
+{%- endif %}
+{%- if extra_instructions %}
+
+Extra teacher instructions:
+{{ extra_instructions }}
+{%- endif %}
+{%- if kg_section %}
+
+{{ kg_section }}
+{%- endif %}
+{%- if templates %}
+
+Question templates (produce one question per template, in order):
+{%- for tpl in templates %}
+{{ loop.index }}. [{{ tpl.bloom_level or 'understand' }}/{{ tpl.difficulty or 'medium' }}/{{ tpl.question_type or 'mcq' }}] {{ tpl.topic or '(no topic)' }}{% if tpl.section_id %} — section: {{ tpl.section_id }}{% endif %}{% if tpl.source_chunk_ids %} — source_chunk_ids: {{ tpl.source_chunk_ids }}{% endif %}
+{%- endfor %}
+{%- endif %}
+{%- if previous_questions %}
+
+Previously generated questions in this run (your new question MUST be conceptually distinct from each):
+{%- for q in previous_questions %}
+{{ loop.index }}. {{ q }}
+{%- endfor %}
+{%- endif %}
+
+Source context:
+{{ chunks_block }}
+
+Return JSON in this shape:
+{
+  "questions": [
+    {
+      "position": 1,
+      "question_type": "mcq",
+      "question": "...",
+      "options": {"A": "...", "B": "...", "C": "...", "D": "..."},
+      "correct_answer": "B",
+      "explanation": "...",
+      "bloom_level": "understand",
+      "difficulty": "medium",
+      "source_refs": ["chunk uuid"]
+    }
+  ]
+}
