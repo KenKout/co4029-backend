@@ -14,8 +14,9 @@ T3.7 / T3.8 / T3.9 SHOULD APPEND their re-exports below the learner imports
 
 from __future__ import annotations
 
+from .assignment import router as assignment_router
 from .authoring import router as authoring_router
 from .learner import me_courses_router
 from .learner import router as learner_router
 
-__all__ = ["authoring_router", "learner_router", "me_courses_router"]
+__all__ = ["assignment_router", "authoring_router", "learner_router", "me_courses_router"]

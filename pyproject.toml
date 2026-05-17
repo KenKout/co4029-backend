@@ -211,6 +211,7 @@ ignore_imports = [
     "abridgeai.features.identity.routers.users -> abridgeai.features.access_control.policies",
     "abridgeai.features.courses.routers.authoring -> abridgeai.features.access_control.policies",
     "abridgeai.features.courses.routers._deps -> abridgeai.features.access_control.policies",
+    "abridgeai.features.courses.routers.assignment -> abridgeai.features.access_control.policies",
 ]
 
 [[tool.importlinter.contracts]]
