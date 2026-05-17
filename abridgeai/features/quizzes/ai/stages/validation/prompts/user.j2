@@ -1,0 +1,31 @@
+Quiz title: {{ title }}
+
+Source context:
+{% for chunk in chunks %}[{{ chunk.id }}]{% if chunk.section_title %} section: {{ chunk.section_title }}{% endif %}
+text: {{ chunk.content }}
+{% if not loop.last %}
+{% endif %}{% endfor %}
+{% if avoid_topics %}
+
+Avoid topics (REJECT any question that touches these):
+{% for topic in avoid_topics %}- {{ topic }}
+{% endfor %}{% endif %}
+
+Generated questions to judge:
+{% for question in questions %}Q{{ loop.index }}. {{ question.prompt_text }}
+  Options:
+  {% for key, value in question.options.items() %}{{ key }}: {{ value }}
+  {% endfor %}Correct: {{ question.correct_answer }}
+  Explanation: {{ question.explanation }}
+{% if not loop.last %}
+{% endif %}{% endfor %}
+
+Return JSON in this shape:
+{
+  "verdicts": [
+    {"position": 1, "verdict": "accept", "reason": "Source-supported and clean MCQ shape.", "evidence_excerpt": "supporting fragment"},
+    {"position": 2, "verdict": "reject", "reason": "SOURCE_LEAK: stem references 'the summary'.", "evidence_excerpt": "according to the summary"}
+  ]
+}
+Reasons for rejected questions MUST start with one of:
+SOURCE_LEAK, ANSWER_LEAK, SHALLOW, SHAPE, UNGROUNDED, AMBIGUOUS, META.
