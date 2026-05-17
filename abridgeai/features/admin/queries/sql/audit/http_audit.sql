@@ -8,12 +8,12 @@ SELECT
     h.path          AS path,
     h.status_code   AS status_code,
     h.latency_ms    AS latency_ms,
-    h.ip_address    AS ip_address,
+    h.ip_address::text AS ip_address,
     h.user_agent    AS user_agent,
     h.created_at    AS created_at
 FROM http_audit_log h
 WHERE h.created_at >= CAST(:since AS timestamptz)
   AND (CAST(:user_id AS uuid) IS NULL OR h.user_id = CAST(:user_id AS uuid))
-  AND (:path_pattern IS NULL OR h.path LIKE :path_pattern)
+  AND (CAST(:path_pattern AS text) IS NULL OR h.path LIKE CAST(:path_pattern AS text))
 ORDER BY h.created_at DESC
 LIMIT :limit;

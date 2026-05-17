@@ -28,6 +28,7 @@ from __future__ import annotations
 
 from fastapi import FastAPI
 
+from abridgeai.core.observability.audit_log import AuditLogMiddleware
 from abridgeai.features.access_control.routers import admin_router as access_control_admin_router
 from abridgeai.features.admin.routers import (
     audit_router as admin_audit_router,
@@ -185,6 +186,9 @@ def create_app() -> FastAPI:
     app.include_router(admin_audit_router, prefix=API_V1_PREFIX)
     app.include_router(admin_processing_router, prefix=API_V1_PREFIX)
     app.include_router(admin_users_router, prefix=API_V1_PREFIX)
+
+    # T0.23 -- HTTP audit log middleware (logs every request to http_audit_log)
+    app.add_middleware(AuditLogMiddleware)
 
     return app
 
