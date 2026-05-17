@@ -47,7 +47,7 @@ def _not_found(user_id: UUID) -> HTTPException:
 
 def _bad_cursor() -> HTTPException:
     return HTTPException(
-        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
         detail={"error": "invalid_cursor"},
     )
 

@@ -183,5 +183,6 @@ def test_no_god_file_in_validation_stage() -> None:
     target = here / "abridgeai" / "features" / "quizzes" / "ai" / "stages" / "validation"
     assert target.is_dir(), f"validation stage dir not found at {target}"
     for path in target.glob("*.py"):
-        line_count = sum(1 for _ in path.open())
+        with path.open() as fh:
+            line_count = sum(1 for _ in fh)
         assert line_count <= 250, f"{path.name} has {line_count} LOC > 250"

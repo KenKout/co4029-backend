@@ -61,7 +61,7 @@ _REQUIRE_ORG_MANAGE = require_any_permission(
 
 def _bad_request(detail: str) -> HTTPException:
     return HTTPException(
-        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
         detail={"error": "scope_invalid", "message": detail},
     )
 

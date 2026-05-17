@@ -196,6 +196,7 @@ def test_no_god_file_in_generation() -> None:
     assert target.is_dir(), f"generation stage dir not found at {target}"
     budget = {"logic.py": 250, "parsers.py": 200, "__init__.py": 250}
     for path in target.glob("*.py"):
-        line_count = sum(1 for _ in path.open())
+        with path.open() as fh:
+            line_count = sum(1 for _ in fh)
         cap = budget.get(path.name, 250)
         assert line_count <= cap, f"{path.name} has {line_count} LOC > {cap}"

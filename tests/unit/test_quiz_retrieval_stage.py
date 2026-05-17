@@ -237,16 +237,9 @@ def test_retrieval_metadata_falls_back_strategy_without_embedding() -> None:
 
 def test_no_god_file_in_retrieval_stage() -> None:
     here = Path(__file__).resolve().parents[2]
-    target = (
-        here
-        / "abridgeai"
-        / "features"
-        / "quizzes"
-        / "ai"
-        / "stages"
-        / "retrieval"
-    )
+    target = here / "abridgeai" / "features" / "quizzes" / "ai" / "stages" / "retrieval"
     assert target.is_dir(), f"retrieval stage dir not found at {target}"
     for path in target.glob("*.py"):
-        line_count = sum(1 for _ in path.open())
+        with path.open() as fh:
+            line_count = sum(1 for _ in fh)
         assert line_count <= 250, f"{path.name} has {line_count} LOC > 250"

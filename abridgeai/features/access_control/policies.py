@@ -164,7 +164,7 @@ def _resolve_path_uuid(request: Request, param_name: str, resource: str) -> UUID
         return raw if isinstance(raw, UUID) else UUID(str(raw))
     except (ValueError, AttributeError) as exc:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail={"error": "invalid_uuid", "param": param_name, "value": str(raw)},
         ) from exc
 

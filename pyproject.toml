@@ -209,6 +209,8 @@ ignore_imports = [
     "abridgeai.features.notifications.services.inbox -> sqlalchemy",
     "abridgeai.features.career_paths.services.authoring -> sqlalchemy",
     "abridgeai.features.career_paths.services.enrollment -> sqlalchemy",
+    "abridgeai.features.spaced_repetition.services.review -> sqlalchemy",
+    "abridgeai.features.spaced_repetition.services._events -> sqlalchemy",
 ]
 
 [[tool.importlinter.contracts]]
