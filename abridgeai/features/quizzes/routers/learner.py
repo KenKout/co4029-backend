@@ -27,7 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from abridgeai.core.db import get_db
 from abridgeai.core.exceptions import NotFoundError
-from abridgeai.core.security import CurrentUser, get_current_user
+from abridgeai.core.security import CurrentUser, get_current_user, utcnow
 from abridgeai.features.quizzes.schemas import (
     QuizAttemptRead,
     QuizAttemptStart,
@@ -35,6 +35,7 @@ from abridgeai.features.quizzes.schemas import (
     QuizPublic,
 )
 from abridgeai.features.quizzes.services import taking as taking_service
+from abridgeai.features.quizzes.services.taking import AllCardsInCooldownError
 
 router = APIRouter(tags=["quizzes-learner"])
 
@@ -101,7 +102,13 @@ async def start_attempt(
     current_user: Annotated[CurrentUser, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> QuizForTakingPublic:
-    """Create a :class:`QuizAttempt` and return the no-leak take payload."""
+    """Create a :class:`QuizAttempt` and return the no-leak take payload.
+
+    Maps :class:`AllCardsInCooldownError` (raised when every question in
+    the quiz is still in SR cooldown — thesis UC-LEARN-01 Alt 1a) to
+    HTTP 429 with a ``Retry-After`` header counting down to the earliest
+    card's ``due_at``.
+    """
     if payload.quiz_id != quiz_id:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -116,6 +123,20 @@ async def start_attempt(
         )
     except NotFoundError as exc:
         raise _not_found("quiz", quiz_id) from exc
+    except AllCardsInCooldownError as exc:
+        retry_after_seconds = max(0, int((exc.retry_available_at - utcnow()).total_seconds()))
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail={
+                "reason": "all_cards_in_cooldown",
+                "retry_available_at": exc.retry_available_at.isoformat(),
+                "cards_due_at": [
+                    {"question_id": str(qid), "due_at": due_at.isoformat()}
+                    for qid, due_at in exc.cards_due_at
+                ],
+            },
+            headers={"Retry-After": str(retry_after_seconds)},
+        ) from exc
     await db.commit()
     return take_payload
 

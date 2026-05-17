@@ -16,11 +16,12 @@ service is the only consumer of the authoring projection.
 
 from __future__ import annotations
 
+from datetime import datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING
 from uuid import UUID
 
-from abridgeai.core.exceptions import NotFoundError
+from abridgeai.core.exceptions import AppError, NotFoundError
 from abridgeai.core.security import CurrentUser, utcnow
 from abridgeai.features.quizzes.models import (
     Quiz,
@@ -39,6 +40,30 @@ from abridgeai.features.quizzes.schemas.public import (
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
+
+
+_DEFAULT_FAILURE_COOLDOWN_SECONDS = 86400
+
+
+class AllCardsInCooldownError(AppError):
+    """Every question in the quiz has ``student_card_state.due_at > now``.
+
+    Per thesis UC-LEARN-01 Alt 1a: a student who fails a card cannot
+    retry it until the SR scheduler's failure cooldown elapses (default
+    24 h, configurable via ``settings.sr_failure_cooldown_seconds``).
+    When the *whole* quiz is in cooldown the router must reply HTTP 429
+    with a ``Retry-After`` header — :class:`AllCardsInCooldownError`
+    carries the timing payload needed to build that response.
+    """
+
+    def __init__(
+        self,
+        retry_available_at: datetime,
+        cards_due_at: list[tuple[UUID, datetime]],
+    ) -> None:
+        super().__init__("All cards in cooldown")
+        self.retry_available_at = retry_available_at
+        self.cards_due_at = cards_due_at
 
 
 async def get_published_quiz(db: AsyncSession, quiz_id: UUID) -> Quiz | None:
@@ -117,6 +142,41 @@ async def _load_quiz_questions_for_taking(db: AsyncSession, quiz_id: UUID) -> li
     return list(questions)
 
 
+async def _load_cooldown_map(
+    db: AsyncSession,
+    student_id: UUID,
+    question_ids: list[UUID],
+) -> dict[UUID, datetime]:
+    """Return ``{question_id: due_at}`` for cards still in cooldown.
+
+    A row is included only when ``student_card_state.due_at > NOW()``;
+    cards the student has never attempted (no row at all) are absent
+    from the map and therefore treated as available — per thesis
+    UC-LEARN-01 Alt 1a, cooldown applies to *failed* cards only, not to
+    cards the learner has not touched yet.
+
+    The query reaches across the spaced-repetition feature boundary on
+    purpose: services cannot import ``features/spaced_repetition/models``
+    directly (Features-independent contract), so this uses raw SQL
+    against the ``student_card_state`` table — mirroring the precedent
+    established by T7.5.5's ``record_card_review``.
+    """
+    from sqlalchemy import text  # noqa: PLC0415
+
+    if not question_ids:
+        return {}
+    result = await db.execute(
+        text(
+            "SELECT question_id, due_at FROM student_card_state "
+            "WHERE student_id = :sid "
+            "  AND question_id = ANY(CAST(:qids AS uuid[])) "
+            "  AND due_at > NOW()"
+        ),
+        {"sid": str(student_id), "qids": [str(q) for q in question_ids]},
+    )
+    return {row[0]: row[1] for row in result.all()}
+
+
 async def start_attempt(
     db: AsyncSession,
     quiz_id: UUID,
@@ -131,8 +191,40 @@ async def start_attempt(
     before the bytes leave the service boundary. Routers must serialize
     the returned :class:`QuizForTakingPublic` directly — never re-hydrate
     via the authoring schema.
+
+    **T7.5.11 — cooldown enforcement.** Before persisting the attempt,
+    the service consults ``student_card_state.due_at`` for every quiz
+    question (cross-feature read against the SR table — see
+    :func:`_load_cooldown_map`). Three outcomes:
+
+    * **All questions in cooldown** — raise
+      :class:`AllCardsInCooldownError` carrying the earliest
+      ``retry_available_at`` plus the per-question ``due_at`` list. The
+      router maps this to HTTP 429 with a ``Retry-After`` header.
+    * **Some questions in cooldown** — drop them from the take payload
+      and stash the ``(question_id, due_at)`` pairs onto
+      ``attempt.cards_in_cooldown`` so the router can echo them on the
+      response (no schema change required; the field is dynamic on the
+      ORM instance).
+    * **None in cooldown** — proceed with the existing happy path.
+
+    Cards the student has never attempted (no ``student_card_state``
+    row) are *not* in cooldown — they are new material per thesis
+    UC-LEARN-01 Alt 1a.
     """
     quiz = await _require_quiz(db, quiz_id)
+    questions = await _load_quiz_questions_for_taking(db, quiz_id)
+
+    cooldown_map = await _load_cooldown_map(
+        db, actor.user_id, [question.id for question in questions]
+    )
+    if questions and len(cooldown_map) == len(questions):
+        cards_due_at = sorted(cooldown_map.items(), key=lambda item: item[1])
+        retry_available_at = cards_due_at[0][1]
+        raise AllCardsInCooldownError(retry_available_at, cards_due_at)
+
+    available_questions = [q for q in questions if q.id not in cooldown_map]
+
     next_number = await _next_attempt_number(db, quiz_id, actor.user_id)
     attempt = QuizAttempt(
         quiz_id=quiz_id,
@@ -144,9 +236,14 @@ async def start_attempt(
     await db.flush()
     await db.refresh(attempt)
 
-    questions = await _load_quiz_questions_for_taking(db, quiz_id)
+    attempt.cards_in_cooldown = [  # type: ignore[attr-defined]
+        {"question_id": qid, "due_at": due_at} for qid, due_at in cooldown_map.items()
+    ]
+
     public_quiz = QuizPublic.model_validate(quiz)
-    public_questions = [QuizQuestionPublic.model_validate(question) for question in questions]
+    public_questions = [
+        QuizQuestionPublic.model_validate(question) for question in available_questions
+    ]
     take_payload = QuizForTakingPublic(quiz=public_quiz, questions=public_questions)
     return attempt, take_payload
 
