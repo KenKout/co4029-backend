@@ -129,7 +129,8 @@ class Settings(BaseSettings):
             if lower_key in FORBIDDEN_EXTRA_HEADERS:
                 raise ConfigError(
                     f"LLM_EXTRA_HEADERS_JSON contains forbidden header {key!r}; "
-                    f"authentication-bearing headers ({sorted(FORBIDDEN_EXTRA_HEADERS)}) are not allowed"
+                    f"authentication-bearing headers "
+                    f"({sorted(FORBIDDEN_EXTRA_HEADERS)}) are not allowed"
                 )
             if lower_key not in ALLOWED_EXTRA_HEADERS:
                 dropped.append(str(key))
