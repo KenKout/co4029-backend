@@ -205,6 +205,8 @@ ignore_imports = [
     "abridgeai.features.notifications.services.dispatch -> sqlalchemy",
     "abridgeai.features.notifications.services.email -> sqlalchemy",
     "abridgeai.features.notifications.services.inbox -> sqlalchemy",
+    "abridgeai.features.career_paths.services.authoring -> sqlalchemy",
+    "abridgeai.features.career_paths.services.enrollment -> sqlalchemy",
 ]
 
 [[tool.importlinter.contracts]]
@@ -249,6 +251,8 @@ ignore_imports = [
     "abridgeai.features.admin.routers.stats -> abridgeai.features.access_control.policies",
     "abridgeai.features.admin.routers.users -> abridgeai.features.access_control.policies",
     "abridgeai.features.progress.routers.authoring -> abridgeai.features.access_control.policies",
+    "abridgeai.features.career_paths.routers.authoring -> abridgeai.features.access_control.policies",
+    "abridgeai.features.career_paths.models -> abridgeai.features.access_control.models",
 ]
 
 [[tool.importlinter.contracts]]

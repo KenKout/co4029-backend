@@ -1,0 +1,317 @@
+from __future__ import annotations
+
+from typing import Annotated
+from uuid import UUID
+
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from abridgeai.core.db import get_db
+from abridgeai.core.exceptions import AppError, NotFoundError
+from abridgeai.core.security import CurrentUser
+from abridgeai.features.access_control.policies import (
+    require_any_permission,
+    require_permission,
+)
+from abridgeai.features.career_paths.schemas import (
+    CareerPathAuthoring,
+    CareerPathCourseAdd,
+    CareerPathCourseAuthoring,
+    CareerPathCourseReorder,
+    CareerPathCreate,
+    CareerPathStudentEnroll,
+    CareerPathUpdate,
+    StudentCareerEnrollmentAuthoring,
+    StudentPathProgressAuthoring,
+)
+from abridgeai.features.career_paths.services import authoring as authoring_service
+from abridgeai.features.career_paths.services import enrollment as enrollment_service
+
+management_router = APIRouter(prefix="/management/career-paths", tags=["career-paths-authoring"])
+teacher_router = APIRouter(prefix="/teacher/career-paths", tags=["career-paths-authoring"])
+
+
+_REQUIRE_PATH_MANAGE = require_any_permission("course.create", "course.update", "system.administer")
+_REQUIRE_PATH_PUBLISH = require_any_permission("course.publish", "system.administer")
+_REQUIRE_PATH_DELETE = require_any_permission("course.delete", "system.administer")
+_REQUIRE_PATH_ENROLL = require_any_permission("course.enrollment.create", "system.administer")
+_REQUIRE_PATH_UNENROLL = require_any_permission("course.enrollment.remove", "system.administer")
+_REQUIRE_PATH_ROSTER_READ = require_any_permission(
+    "course.enrollment.read",
+    "progress.read.cohort",
+    "system.administer",
+)
+_REQUIRE_PATH_CREATE = require_permission("course.create")
+
+
+def _not_found(detail: str) -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail={"error": "not_found", "message": detail},
+    )
+
+
+def _conflict(detail: str) -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail={"error": "conflict", "message": detail},
+    )
+
+
+def _bad_request(detail: str) -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail={"error": "bad_request", "message": detail},
+    )
+
+
+@management_router.post(
+    "",
+    response_model=CareerPathAuthoring,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_career_path(
+    payload: CareerPathCreate,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_PATH_CREATE)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> CareerPathAuthoring:
+    result = await authoring_service.create_career_path(db, payload, current_user)
+    await db.commit()
+    return result
+
+
+@management_router.get(
+    "",
+    response_model=list[CareerPathAuthoring],
+)
+async def list_career_paths(
+    organization_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_PATH_MANAGE)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    include_archived: bool = False,
+) -> list[CareerPathAuthoring]:
+    del current_user
+    return await authoring_service.list_career_paths_for_org(
+        db, organization_id, include_archived=include_archived
+    )
+
+
+@management_router.get(
+    "/{career_path_id}",
+    response_model=CareerPathAuthoring,
+)
+async def get_career_path(
+    career_path_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_PATH_MANAGE)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> CareerPathAuthoring:
+    del current_user
+    try:
+        return await authoring_service.get_career_path(db, career_path_id)
+    except NotFoundError as exc:
+        raise _not_found(str(exc)) from exc
+
+
+@management_router.patch(
+    "/{career_path_id}",
+    response_model=CareerPathAuthoring,
+)
+async def update_career_path(
+    career_path_id: UUID,
+    payload: CareerPathUpdate,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_PATH_MANAGE)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> CareerPathAuthoring:
+    try:
+        result = await authoring_service.update_career_path(
+            db, career_path_id, payload, current_user
+        )
+    except NotFoundError as exc:
+        raise _not_found(str(exc)) from exc
+    await db.commit()
+    return result
+
+
+@management_router.get(
+    "/{career_path_id}/courses",
+    response_model=list[CareerPathCourseAuthoring],
+)
+async def list_career_path_courses(
+    career_path_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_PATH_MANAGE)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> list[CareerPathCourseAuthoring]:
+    del current_user
+    try:
+        return await authoring_service.list_career_path_courses(db, career_path_id)
+    except NotFoundError as exc:
+        raise _not_found(str(exc)) from exc
+
+
+@management_router.post(
+    "/{career_path_id}/courses",
+    response_model=CareerPathCourseAuthoring,
+    status_code=status.HTTP_201_CREATED,
+)
+async def add_course_to_path(
+    career_path_id: UUID,
+    payload: CareerPathCourseAdd,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_PATH_MANAGE)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> CareerPathCourseAuthoring:
+    try:
+        result = await authoring_service.add_course_to_path(
+            db,
+            career_path_id,
+            payload.course_id,
+            position=payload.position,
+            is_required=payload.is_required,
+            actor=current_user,
+        )
+    except NotFoundError as exc:
+        raise _not_found(str(exc)) from exc
+    except AppError as exc:
+        raise _conflict(str(exc)) from exc
+    await db.commit()
+    return result
+
+
+@management_router.put(
+    "/{career_path_id}/courses/reorder",
+    response_model=list[CareerPathCourseAuthoring],
+)
+async def reorder_courses_in_path(
+    career_path_id: UUID,
+    payload: CareerPathCourseReorder,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_PATH_MANAGE)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> list[CareerPathCourseAuthoring]:
+    try:
+        result = await authoring_service.reorder_courses_in_path(
+            db, career_path_id, payload.course_ids, current_user
+        )
+    except NotFoundError as exc:
+        raise _not_found(str(exc)) from exc
+    except AppError as exc:
+        raise _bad_request(str(exc)) from exc
+    await db.commit()
+    return result
+
+
+@management_router.delete(
+    "/{career_path_id}/courses/{course_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def remove_course_from_path(
+    career_path_id: UUID,
+    course_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_PATH_MANAGE)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> None:
+    try:
+        await authoring_service.remove_course_from_path(db, career_path_id, course_id, current_user)
+    except NotFoundError as exc:
+        raise _not_found(str(exc)) from exc
+    await db.commit()
+
+
+@management_router.post(
+    "/{career_path_id}/students",
+    response_model=StudentCareerEnrollmentAuthoring,
+    status_code=status.HTTP_201_CREATED,
+)
+async def enroll_student_in_path(
+    career_path_id: UUID,
+    payload: CareerPathStudentEnroll,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_PATH_ENROLL)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> StudentCareerEnrollmentAuthoring:
+    try:
+        result = await enrollment_service.enroll_student_in_path(
+            db,
+            career_path_id=career_path_id,
+            student_id=payload.student_id,
+            actor=current_user,
+        )
+    except NotFoundError as exc:
+        raise _not_found(str(exc)) from exc
+    except AppError as exc:
+        raise _conflict(str(exc)) from exc
+    await db.commit()
+    return result
+
+
+@management_router.delete(
+    "/{career_path_id}/students/{student_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def unenroll_student_from_path(
+    career_path_id: UUID,
+    student_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_PATH_UNENROLL)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> None:
+    try:
+        await enrollment_service.unenroll_student(
+            db,
+            career_path_id=career_path_id,
+            student_id=student_id,
+            actor=current_user,
+        )
+    except NotFoundError as exc:
+        raise _not_found(str(exc)) from exc
+    await db.commit()
+
+
+@management_router.post(
+    "/{career_path_id}/publish",
+    response_model=CareerPathAuthoring,
+)
+async def publish_path(
+    career_path_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_PATH_PUBLISH)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> CareerPathAuthoring:
+    try:
+        result = await authoring_service.publish_path(db, career_path_id, current_user)
+    except NotFoundError as exc:
+        raise _not_found(str(exc)) from exc
+    except AppError as exc:
+        raise _bad_request(str(exc)) from exc
+    await db.commit()
+    return result
+
+
+@management_router.post(
+    "/{career_path_id}/archive",
+    response_model=CareerPathAuthoring,
+)
+async def archive_path(
+    career_path_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_PATH_DELETE)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> CareerPathAuthoring:
+    try:
+        result = await authoring_service.archive_path(db, career_path_id, current_user)
+    except NotFoundError as exc:
+        raise _not_found(str(exc)) from exc
+    except AppError as exc:
+        raise _conflict(str(exc)) from exc
+    await db.commit()
+    return result
+
+
+@teacher_router.get(
+    "/{career_path_id}/students/progress",
+    response_model=list[StudentPathProgressAuthoring],
+)
+async def list_path_roster_progress(
+    career_path_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_PATH_ROSTER_READ)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> list[StudentPathProgressAuthoring]:
+    del current_user
+    return await enrollment_service.get_roster_progress(db, career_path_id)
+
+
+__all__ = ["management_router", "teacher_router"]
