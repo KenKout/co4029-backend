@@ -1,0 +1,24 @@
+redact_fields:
+  - "$.id"
+  - "$.created_at"
+  - "$.updated_at"
+  - "$.deleted_at"
+  - "$.published_at"
+  - "$.items[*].id"
+  - "$.items[*].created_at"
+  - "$.items[*].updated_at"
+  - "$.items[*].deleted_at"
+  - "$.items[*].published_at"
+allow_extra_fields:
+  - "$.created_by"
+  - "$.updated_by"
+  - "$.organization_id"
+  - "$.deleted_by"
+  - "$.items[*].created_by"
+  - "$.items[*].updated_by"
+  - "$.items[*].organization_id"
+  - "$.items[*].deleted_by"
+  - "$.next_cursor"
+strict_match_fields: []
+behavior:
+  status_code: null

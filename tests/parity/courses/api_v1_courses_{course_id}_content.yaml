@@ -1,0 +1,30 @@
+endpoint: /api/v1/courses/{course_id}/content
+redact_fields:
+  - "$.course.id"
+  - "$.course.created_at"
+  - "$.course.updated_at"
+  - "$.course.published_at"
+  - "$.modules[*].id"
+  - "$.modules[*].created_at"
+  - "$.modules[*].updated_at"
+allow_extra_fields:
+  - "$.course.created_by"
+  - "$.course.updated_by"
+  - "$.course.organization_id"
+  - "$.course.deleted_by"
+  - "$.course.instructor"
+  - "$.course.outcomes"
+  - "$.course.tags"
+  - "$.modules[*].created_by"
+  - "$.modules[*].updated_by"
+strict_match_fields: []
+behavior:
+  status_code: null
+  row_count: "$.modules"
+  note: |
+    INTENTIONAL DIVERSGENCE -- DRAFT_VISIBILITY fix (Reconciliation §A9, plan §4587).
+    The legacy backend leaked draft modules / draft module_items / module_items
+    pointing to draft lessons through this endpoint. The new behaviour EXCLUDES
+    those entirely. Replay tests assert that the new response is a STRICT SUBSET
+    of the captured legacy response: every module in the new tree exists in the
+    legacy tree, but the legacy tree may carry additional draft rows.

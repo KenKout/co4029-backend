@@ -1,0 +1,20 @@
+endpoint: /api/v1/courses
+redact_fields:
+  - "$.items[*].id"
+  - "$.items[*].created_at"
+  - "$.items[*].updated_at"
+  - "$.items[*].deleted_at"
+  - "$.items[*].published_at"
+allow_extra_fields:
+  - "$.next_cursor"
+  - "$.items[*].created_by"
+  - "$.items[*].updated_by"
+  - "$.items[*].organization_id"
+  - "$.items[*].deleted_by"
+  - "$.items[*].instructor"
+  - "$.items[*].outcomes"
+  - "$.items[*].tags"
+strict_match_fields: []
+behavior:
+  status_code: null
+  row_count: "$.items"

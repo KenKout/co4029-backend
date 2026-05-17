@@ -1,0 +1,25 @@
+endpoint: /api/v1/teacher/courses/{course_id}
+redact_fields:
+  - "$.id"
+  - "$.created_at"
+  - "$.updated_at"
+  - "$.deleted_at"
+  - "$.published_at"
+allow_extra_fields:
+  - "$.created_by"
+  - "$.updated_by"
+  - "$.deleted_by"
+  - "$.organization_id"
+  - "$.draft_notes"
+strict_match_fields: []
+behavior:
+  status_code: null
+  note: |
+    INTENTIONAL DIVERGENCE -- AUTH TIGHTENING (FIX-SEC-1; Reconciliation §A9 + §E4).
+    Pre-T3.7 the legacy backend authenticated this route with bare
+    Depends(get_current_user), so ANY authenticated user could read another
+    teacher's course detail. The new authoring router enforces course-scoped
+    course.update permission, so non-owner / non-staffed callers receive 403.
+    Replay assertions: the new backend may return 403 where the legacy returned
+    200 -- this is the documented expected divergence and tests assert the
+    direction is correct (legacy permissive -> new strict, never the reverse).
