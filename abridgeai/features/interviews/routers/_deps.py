@@ -212,9 +212,7 @@ def require_session_owner_access() -> SubResourceDependency:
         current_user: Annotated[CurrentUser, Depends(get_current_user)],
         db: Annotated[AsyncSession, Depends(get_db)],
     ) -> CurrentUser:
-        result = await db.execute(
-            select(InterviewSession).where(InterviewSession.id == session_id)
-        )
+        result = await db.execute(select(InterviewSession).where(InterviewSession.id == session_id))
         session = result.scalar_one_or_none()
         if session is None:
             raise _not_found("interview_session", session_id)

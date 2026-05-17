@@ -185,7 +185,7 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from abridgeai.core.db import (
     PGUUID,
@@ -245,6 +245,15 @@ class InterviewConfig(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftD
     )
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
+    questions: Mapped[list[InterviewQuestion]] = relationship(
+        back_populates="config",
+        cascade="save-update, merge, refresh-expire, expunge",
+    )
+    outcomes: Mapped[list[InterviewOutcome]] = relationship(
+        back_populates="config",
+        cascade="save-update, merge, refresh-expire, expunge",
+    )
+
 
 class InterviewOutcome(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftDeleteMixin, Base):
     __tablename__ = "interview_outcomes"
@@ -270,6 +279,12 @@ class InterviewOutcome(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, Soft
     outcome_type: Mapped[str] = mapped_column(String(20), nullable=False)
     importance_weight: Mapped[int] = mapped_column(
         Integer, nullable=False, server_default=text("1")
+    )
+
+    config: Mapped[InterviewConfig] = relationship(back_populates="outcomes")
+    evaluations: Mapped[list[InterviewOutcomeEvaluation]] = relationship(
+        back_populates="outcome",
+        cascade="save-update, merge, refresh-expire, expunge",
     )
 
 
@@ -318,6 +333,8 @@ class InterviewQuestion(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, Sof
         ForeignKey("users.id", ondelete="SET NULL"),
     )
     reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    config: Mapped[InterviewConfig] = relationship(back_populates="questions")
 
 
 class InterviewSession(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -375,6 +392,26 @@ class InterviewSession(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         JSONB, nullable=False, server_default=text("'{}'::jsonb")
     )
 
+    questions: Mapped[list[InterviewSessionQuestion]] = relationship(
+        back_populates="session",
+        cascade="save-update, merge, refresh-expire, expunge",
+    )
+    messages: Mapped[list[InterviewSessionMessage]] = relationship(
+        back_populates="session",
+        cascade="save-update, merge, refresh-expire, expunge",
+    )
+    gap_report: Mapped[GapReport | None] = relationship(
+        back_populates="session",
+        cascade="save-update, merge, refresh-expire, expunge",
+        uselist=False,
+        foreign_keys="[GapReport.source_interview_session_id]",
+    )
+    integrity_events: Mapped[list[AssessmentIntegrityEvent]] = relationship(
+        back_populates="session",
+        cascade="save-update, merge, refresh-expire, expunge",
+        foreign_keys="[AssessmentIntegrityEvent.interview_session_id]",
+    )
+
 
 class InterviewSessionQuestion(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
     __tablename__ = "interview_session_questions"
@@ -397,6 +434,8 @@ class InterviewSessionQuestion(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
     asked_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("NOW()")
     )
+
+    session: Mapped[InterviewSession] = relationship(back_populates="questions")
 
 
 class InterviewSessionMessage(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -431,6 +470,8 @@ class InterviewSessionMessage(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         JSONB, nullable=False, server_default=text("'{}'::jsonb")
     )
 
+    session: Mapped[InterviewSession] = relationship(back_populates="messages")
+
 
 class InterviewOutcomeEvaluation(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "interview_outcome_evaluations"
@@ -454,6 +495,8 @@ class InterviewOutcomeEvaluation(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     evaluated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("NOW()")
     )
+
+    outcome: Mapped[InterviewOutcome] = relationship(back_populates="evaluations")
 
 
 class GapReport(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -486,6 +529,11 @@ class GapReport(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     teacher_summary: Mapped[str | None] = mapped_column(Text)
     report_json: Mapped[dict[str, Any]] = mapped_column(
         JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+
+    session: Mapped[InterviewSession | None] = relationship(
+        back_populates="gap_report",
+        foreign_keys=[source_interview_session_id],
     )
 
 
@@ -533,6 +581,11 @@ class AssessmentIntegrityEvent(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
     severity: Mapped[str] = mapped_column(String(20), nullable=False)
     metadata_json: Mapped[dict[str, Any]] = mapped_column(
         JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+
+    session: Mapped[InterviewSession | None] = relationship(
+        back_populates="integrity_events",
+        foreign_keys=[interview_session_id],
     )
 
 
