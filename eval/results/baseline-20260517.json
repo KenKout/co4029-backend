@@ -1,0 +1,93 @@
+{
+  "run_id": "20260517T200436Z",
+  "started_at": "2026-05-17T20:04:36.880364+00:00",
+  "finished_at": "2026-05-17T20:04:36.889550+00:00",
+  "budget_usd": 0.0,
+  "spent_usd": 0.0,
+  "backend": "new",
+  "judge_model": "gpt-4o-mini",
+  "dry_run": true,
+  "results": [
+    {
+      "scenario_name": "gap_report",
+      "inputs": {
+        "seeded_sessions_per_fixture": 3,
+        "include_remediation_links": true
+      },
+      "outputs_old": null,
+      "outputs_new": null,
+      "judge_scores_old": null,
+      "judge_scores_new": null,
+      "cost_breakdown": [],
+      "latency_ms_old": null,
+      "latency_ms_new": null,
+      "errors": [
+        "T8.4 will populate"
+      ]
+    },
+    {
+      "scenario_name": "interview_generation",
+      "inputs": {
+        "question_count": 8,
+        "difficulty_progression": "easy_to_hard",
+        "type_mix": {
+          "open_ended": 0.6,
+          "scenario_based": 0.3,
+          "yes_no_or_factual": 0.1
+        }
+      },
+      "outputs_old": null,
+      "outputs_new": null,
+      "judge_scores_old": null,
+      "judge_scores_new": null,
+      "cost_breakdown": [],
+      "latency_ms_old": null,
+      "latency_ms_new": null,
+      "errors": [
+        "T8.4 will populate"
+      ]
+    },
+    {
+      "scenario_name": "quiz_coverage_pipeline",
+      "inputs": {
+        "total_question_count": 12,
+        "difficulty": "medium",
+        "question_types": [
+          "multiple_choice",
+          "true_false"
+        ]
+      },
+      "outputs_old": null,
+      "outputs_new": null,
+      "judge_scores_old": null,
+      "judge_scores_new": null,
+      "cost_breakdown": [],
+      "latency_ms_old": null,
+      "latency_ms_new": null,
+      "errors": [
+        "T8.4 will populate"
+      ]
+    },
+    {
+      "scenario_name": "quiz_full_pipeline",
+      "inputs": {
+        "question_count": 5,
+        "difficulty": "medium",
+        "question_types": [
+          "multiple_choice",
+          "true_false"
+        ]
+      },
+      "outputs_old": null,
+      "outputs_new": null,
+      "judge_scores_old": null,
+      "judge_scores_new": null,
+      "cost_breakdown": [],
+      "latency_ms_old": null,
+      "latency_ms_new": null,
+      "errors": [
+        "T8.4 will populate"
+      ]
+    }
+  ]
+}
