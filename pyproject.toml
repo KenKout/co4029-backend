@@ -227,6 +227,8 @@ ignore_imports = [
     "abridgeai.features.materials.routers.authoring -> abridgeai.features.courses.routers._deps",
     "abridgeai.features.quizzes.routers.authoring -> abridgeai.features.access_control.policies",
     "abridgeai.features.quizzes.routers._deps -> abridgeai.features.access_control.policies",
+    "abridgeai.features.interviews.routers.authoring -> abridgeai.features.access_control.policies",
+    "abridgeai.features.interviews.routers._deps -> abridgeai.features.access_control.policies",
     "abridgeai.features.interviews.ai.pipelines.generation -> abridgeai.features.quizzes.models",
     "abridgeai.features.interviews.services.authoring -> abridgeai.features.quizzes.models",
 ]
