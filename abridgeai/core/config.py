@@ -1,10 +1,27 @@
 from __future__ import annotations
 
+import json
+import logging
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+logger = logging.getLogger(__name__)
+
+
+# FR-12 whitelist for ``LLM_EXTRA_HEADERS_JSON``. Disallowed keys
+# (case-insensitive) are dropped with a single WARN log so operators notice
+# typos without a hard startup failure. Authentication-bearing headers are
+# forbidden outright (they would leak credentials or override the configured
+# Bearer token).
+ALLOWED_EXTRA_HEADERS: frozenset[str] = frozenset(
+    h.lower() for h in {"HTTP-Referer", "X-Title", "User-Agent"}
+)
+FORBIDDEN_EXTRA_HEADERS: frozenset[str] = frozenset(
+    h.lower() for h in {"Authorization", "Cookie", "Set-Cookie", "Proxy-Authorization"}
+)
 
 
 class Settings(BaseSettings):
@@ -41,6 +58,93 @@ class Settings(BaseSettings):
     # Datadog, CloudWatch) can parse JSON keys.
     log_format: Literal["json", "console"] = "console"
     log_level: str = Field(default="INFO")
+
+    knowledge_graph_enabled: bool = False
+    neo4j_uri: str = ""
+    neo4j_user: str = "neo4j"
+    neo4j_password: SecretStr | None = None
+    neo4j_database: str = "neo4j"
+    neo4j_max_connection_pool_size: int = Field(default=50, ge=1, le=1000)
+
+    llm_base_url: str = "https://api.openai.com/v1"
+    llm_api_key: str | None = None
+    llm_default_tier: Literal["small", "standard", "large"] = "standard"
+    llm_model_small: str = "gpt-4o-mini"
+    llm_model_standard: str = "gpt-4o-mini"
+    llm_model_large: str = "gpt-4o"
+    llm_timeout_seconds: float = 60.0
+    llm_extra_headers_json: str | None = None
+
+    # Per-role overrides; None means "fall back to the tier mapping".
+    llm_model_extraction: str | None = None
+    llm_model_enrichment: str | None = None
+    llm_model_ideation: str | None = None
+    llm_model_generation: str | None = None
+    llm_model_validation: str | None = None
+    llm_model_chunking_enrichment: str | None = None
+
+    # Derived field, populated by ``_populate_extra_headers`` from
+    # ``llm_extra_headers_json``. Always a dict (possibly empty).
+    llm_extra_headers: dict[str, str] = Field(default_factory=dict)
+
+    embedding_base_url: str = "https://api.openai.com/v1"
+    embedding_api_key: str | None = None
+    embedding_model: str = "text-embedding-3-small"
+    embedding_dimensions: int = 1536
+    embedding_timeout_seconds: float = 30.0
+
+    @model_validator(mode="after")
+    def _populate_extra_headers(self) -> Settings:
+        """Parse, whitelist, and store the LLM extra-headers map (FR-12).
+
+        Failure modes:
+          * ``Authorization``/``Cookie``/``Set-Cookie``/``Proxy-Authorization``
+            (case-insensitive) raise ``ConfigError`` — these would either leak
+            credentials or override the configured Bearer token.
+          * Invalid JSON raises ``ConfigError``.
+          * Other unrecognized keys are dropped with a single WARN log so the
+            operator notices typos without breaking startup.
+        """
+        # Lazy import to avoid a circular dependency: abridgeai.ai.llm imports
+        # back into abridgeai.core.config for Settings + get_settings.
+        from abridgeai.ai.llm.errors import ConfigError
+
+        raw = self.llm_extra_headers_json
+        if raw is None or raw == "":
+            object.__setattr__(self, "llm_extra_headers", {})
+            return self
+
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise ConfigError(f"LLM_EXTRA_HEADERS_JSON is not valid JSON: {exc.msg}") from exc
+
+        if not isinstance(parsed, dict):
+            raise ConfigError("LLM_EXTRA_HEADERS_JSON must decode to a JSON object")
+
+        cleaned: dict[str, str] = {}
+        dropped: list[str] = []
+        for key, value in parsed.items():
+            lower_key = str(key).lower()
+            if lower_key in FORBIDDEN_EXTRA_HEADERS:
+                raise ConfigError(
+                    f"LLM_EXTRA_HEADERS_JSON contains forbidden header {key!r}; "
+                    f"authentication-bearing headers ({sorted(FORBIDDEN_EXTRA_HEADERS)}) are not allowed"
+                )
+            if lower_key not in ALLOWED_EXTRA_HEADERS:
+                dropped.append(str(key))
+                continue
+            cleaned[str(key)] = str(value)
+
+        if dropped:
+            logger.warning(
+                "LLM_EXTRA_HEADERS_JSON: dropping disallowed header(s) %s; allowed keys are %s",
+                dropped,
+                sorted(ALLOWED_EXTRA_HEADERS),
+            )
+
+        object.__setattr__(self, "llm_extra_headers", cleaned)
+        return self
 
 
 @lru_cache(maxsize=1)
