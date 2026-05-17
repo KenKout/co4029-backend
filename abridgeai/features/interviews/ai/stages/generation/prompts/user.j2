@@ -1,0 +1,52 @@
+Interview title: {{ title }}
+
+Persona: {{ persona }}
+
+Total questions to produce: {{ question_count }}
+
+Type mix (the produced set must match these proportions, rounded):
+- technical: {{ technical_pct }}%
+- behavioral: {{ behavioral_pct }}%
+- situational: {{ situational_pct }}%
+
+Difficulty progression rubric:
+- positions 1-3: easy   (expected_depth 1-2)
+- positions 4-7: medium (expected_depth 2-4)
+- positions 8+ : hard   (expected_depth 3-5)
+{%- if supplementary_instructions %}
+
+Teacher's supplementary instructions:
+{{ supplementary_instructions }}
+{%- endif %}
+
+Learning outcomes the interview must assess (link each question to one
+outcome ID):
+{%- if outcomes %}
+{%- for outcome in outcomes %}
+- id: {{ outcome.id }}
+  type: {{ outcome.outcome_type }}
+  weight: {{ outcome.importance_weight }}
+  text: {{ outcome.outcome_text }}
+{%- endfor %}
+{%- else %}
+(no outcomes provided — link_outcome_id MUST be null in the output)
+{%- endif %}
+
+Source context (chunks the interview should be grounded in):
+{{ chunks_block }}
+
+Return JSON in this shape:
+{
+  "questions": [
+    {
+      "position": 1,
+      "question_type": "technical",
+      "prompt_text": "...",
+      "difficulty": "easy",
+      "expected_depth": 2,
+      "linked_outcome_id": "<one of the outcome ids above, or null>",
+      "source_refs": ["<chunk uuid>"],
+      "rationale": "..."
+    }
+  ]
+}
