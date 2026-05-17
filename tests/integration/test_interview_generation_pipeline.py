@@ -1,0 +1,587 @@
+"""Integration tests for the interview generation pipeline (T6.10).
+
+Mirrors the test playbook used for the quiz full pipeline (T5.10):
+
+* Stage-substitution tests (``AsyncMock``) cover composition + arg
+  threading.
+* DB-backed tests cover the status-transition contract on
+  ``GenerationRun`` and end-to-end persistence.
+* One audit-lineage test asserts every ``ai_model_calls`` row written
+  during a pipeline run shares the same ``pipeline_run_id``.
+"""
+
+from __future__ import annotations
+
+from collections.abc import AsyncIterator
+from decimal import Decimal
+from pathlib import Path
+from typing import Any
+from unittest.mock import AsyncMock
+from uuid import UUID, uuid4
+
+import pytest
+import pytest_asyncio
+from alembic import command
+from alembic.config import Config
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
+
+import abridgeai.features.access_control.models  # noqa: F401  -- register FK targets
+import abridgeai.features.courses.models  # noqa: F401  -- register modules / lessons
+import abridgeai.features.identity.models  # noqa: F401  -- register users
+import abridgeai.features.interviews.models  # noqa: F401  -- register interview tables
+import abridgeai.features.materials.models  # noqa: F401  -- register processing_jobs (audit FK)
+import abridgeai.features.quizzes.models  # noqa: F401  -- register GenerationRun
+from abridgeai.ai.llm import LLMRole
+from abridgeai.ai.llm.audit import write_ai_model_call
+from abridgeai.core.config import get_settings
+from abridgeai.features.interviews.ai.pipelines import generation as generation_pipeline
+from abridgeai.features.interviews.ai.pipelines import run_interview_generation
+from abridgeai.features.interviews.ai.stages.generation.parsers import (
+    InterviewQuestionDraft,
+)
+from abridgeai.features.interviews.ai.stages.retrieval.logic import (
+    InterviewRetrievalContext,
+)
+from abridgeai.features.interviews.ai.stages.validation.verdicts import (
+    ValidationCriterion,
+    Verdict,
+)
+from abridgeai.features.quizzes.models import GenerationRun
+
+
+def _async_url(database_url: str) -> str:
+    if "+psycopg_async" in database_url:
+        return database_url
+    if database_url.startswith("postgresql+psycopg://"):
+        return database_url.replace("postgresql+psycopg://", "postgresql+psycopg_async://", 1)
+    if database_url.startswith("postgresql://"):
+        return database_url.replace("postgresql://", "postgresql+psycopg_async://", 1)
+    return database_url
+
+
+def _ensure_head() -> None:
+    cfg_path = Path(__file__).resolve().parents[2] / "alembic.ini"
+    cfg = Config(str(cfg_path))
+    cfg.set_main_option(
+        "script_location",
+        str(Path(__file__).resolve().parents[2] / "migrations"),
+    )
+    command.upgrade(cfg, "head")
+
+
+@pytest_asyncio.fixture
+async def engine() -> AsyncIterator[AsyncEngine]:
+    _ensure_head()
+    eng = create_async_engine(_async_url(get_settings().database_url), pool_pre_ping=True)
+    yield eng
+    await eng.dispose()
+
+
+@pytest_asyncio.fixture
+async def session_factory(
+    engine: AsyncEngine,
+) -> async_sessionmaker[AsyncSession]:
+    return async_sessionmaker(engine, expire_on_commit=False, autoflush=False)
+
+
+@pytest_asyncio.fixture
+async def fixture_data(engine: AsyncEngine) -> AsyncIterator[dict[str, UUID]]:
+    """Seed an interview config + generation run shell."""
+
+    org = uuid4()
+    teacher = uuid4()
+    course = uuid4()
+    module_id = uuid4()
+    cfg_id = uuid4()
+    outcome_id = uuid4()
+    run_id = uuid4()
+
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO organizations (id, slug, name, status) "
+                "VALUES (:id, :slug, 'Pipeline Org', 'active')"
+            ),
+            {"id": org, "slug": f"pipe-org-{org.hex[:8]}"},
+        )
+        await conn.execute(
+            text("INSERT INTO users (id, primary_email, status) VALUES (:t, :te, 'active')"),
+            {"t": teacher, "te": f"t-{teacher.hex[:8]}@test.local"},
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO courses (id, organization_id, owner_user_id, slug, title, status) "
+                "VALUES (:id, :org, :u, :slug, 'Pipe Course', 'published')"
+            ),
+            {
+                "id": course,
+                "org": org,
+                "u": teacher,
+                "slug": f"pipe-course-{course.hex[:8]}",
+            },
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO modules (id, course_id, title, position, status) "
+                "VALUES (:m, :c, 'Pipe Module', 1, 'published')"
+            ),
+            {"m": module_id, "c": course},
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO interview_configs ("
+                "id, course_id, module_id, title, status, supported_modes) "
+                "VALUES (:id, :c, :m, 'Pipe Interview', 'draft', 'hybrid')"
+            ),
+            {"id": cfg_id, "c": course, "m": module_id},
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO interview_outcomes ("
+                "id, interview_config_id, position, outcome_text, "
+                "outcome_type, importance_weight) "
+                "VALUES (:o, :c, 1, 'Demo outcome', 'knowledge', 3)"
+            ),
+            {"o": outcome_id, "c": cfg_id},
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO generation_runs ("
+                "id, generation_type, source_scope_kind, course_id, module_id, "
+                "status, config_json) "
+                "VALUES (:id, 'interview', 'module', :c, :m, 'pending', "
+                "CAST(:cfg_json AS JSONB))"
+            ),
+            {
+                "id": run_id,
+                "c": course,
+                "m": module_id,
+                "cfg_json": f'{{"interview_config_id": "{cfg_id}"}}',
+            },
+        )
+
+    data = {
+        "org": org,
+        "teacher": teacher,
+        "course": course,
+        "module_id": module_id,
+        "cfg_id": cfg_id,
+        "outcome_id": outcome_id,
+        "run_id": run_id,
+    }
+    yield data
+
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("DELETE FROM ai_model_calls WHERE generation_run_id = :id"),
+            {"id": run_id},
+        )
+        await conn.execute(
+            text("DELETE FROM interview_questions WHERE interview_config_id = :id"),
+            {"id": cfg_id},
+        )
+        await conn.execute(
+            text("DELETE FROM interview_outcomes WHERE interview_config_id = :id"),
+            {"id": cfg_id},
+        )
+        await conn.execute(text("DELETE FROM interview_configs WHERE id = :id"), {"id": cfg_id})
+        await conn.execute(text("DELETE FROM generation_runs WHERE id = :id"), {"id": run_id})
+        await conn.execute(text("DELETE FROM modules WHERE id = :id"), {"id": module_id})
+        await conn.execute(text("DELETE FROM courses WHERE id = :id"), {"id": course})
+        await conn.execute(text("DELETE FROM users WHERE id = :id"), {"id": teacher})
+        await conn.execute(text("DELETE FROM organizations WHERE id = :id"), {"id": org})
+
+
+def _draft(idx: int) -> InterviewQuestionDraft:
+    return InterviewQuestionDraft(
+        question_type="technical",
+        prompt_text=f"Explain concept #{idx} for testing purposes.",
+        difficulty="medium",
+        expected_depth=3,
+        linked_outcome_id=None,
+        source_refs=[uuid4()],
+        rationale=f"Probe concept {idx}.",
+    )
+
+
+def _verdict(idx: int, *, accepted: bool) -> Verdict:
+    return Verdict(
+        question_index=idx,
+        accepted=accepted,
+        failed_criteria=[] if accepted else [ValidationCriterion.GROUNDED],
+        rationale="ok" if accepted else "no chunks",
+    )
+
+
+def _retrieval_context() -> InterviewRetrievalContext:
+    return InterviewRetrievalContext(
+        chunks=[],
+        kg_concepts=[],
+        weak_topic_chunks=[],
+        query_embedding=[],
+        anchors=["anchor"],
+        metadata={"count": 0},
+    )
+
+
+def _install_stage_mocks(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    drafts: list[InterviewQuestionDraft] | None = None,
+    verdicts: list[Verdict] | None = None,
+    context: InterviewRetrievalContext | None = None,
+) -> dict[str, AsyncMock]:
+    drafts = drafts if drafts is not None else [_draft(1), _draft(2)]
+    verdicts = (
+        verdicts
+        if verdicts is not None
+        else [_verdict(i, accepted=True) for i in range(len(drafts))]
+    )
+    retrieve = AsyncMock(return_value=context if context is not None else _retrieval_context())
+    generate = AsyncMock(return_value=drafts)
+    validate = AsyncMock(return_value=verdicts)
+    list_outcomes = AsyncMock(return_value=[])
+    next_pos_calls: list[int] = []
+
+    async def _fake_next_pos(_db: Any, _cfg_id: Any) -> int:
+        next_pos_calls.append(1)
+        return len(next_pos_calls)
+
+    next_pos = AsyncMock(side_effect=_fake_next_pos)
+
+    monkeypatch.setattr(generation_pipeline, "retrieve_interview_context", retrieve)
+    monkeypatch.setattr(generation_pipeline, "generate_interview_questions", generate)
+    monkeypatch.setattr(generation_pipeline, "validate_interview_questions", validate)
+    monkeypatch.setattr(generation_pipeline, "list_outcomes_for_config", list_outcomes)
+    monkeypatch.setattr(generation_pipeline, "next_question_position", next_pos)
+
+    return {
+        "retrieve": retrieve,
+        "generate": generate,
+        "validate": validate,
+        "list_outcomes": list_outcomes,
+        "next_pos": next_pos,
+    }
+
+
+@pytest.mark.asyncio
+async def test_pipeline_composes_all_four_stages(
+    session_factory: async_sessionmaker[AsyncSession],
+    fixture_data: dict[str, UUID],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mocks = _install_stage_mocks(monkeypatch)
+
+    async with session_factory() as session:
+        await run_interview_generation(session, fixture_data["run_id"])
+
+    assert mocks["retrieve"].await_count == 1
+    assert mocks["generate"].await_count == 1
+    assert mocks["validate"].await_count == 1
+    assert mocks["list_outcomes"].await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_persisted_questions_only_accepted_drafts(
+    session_factory: async_sessionmaker[AsyncSession],
+    fixture_data: dict[str, UUID],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    drafts = [_draft(i) for i in range(1, 6)]
+    verdicts = [
+        _verdict(0, accepted=True),
+        _verdict(1, accepted=True),
+        _verdict(2, accepted=False),
+        _verdict(3, accepted=True),
+        _verdict(4, accepted=False),
+    ]
+    _install_stage_mocks(monkeypatch, drafts=drafts, verdicts=verdicts)
+
+    async with session_factory() as session:
+        await run_interview_generation(session, fixture_data["run_id"])
+
+    async with session_factory() as session:
+        rows = (
+            await session.execute(
+                text(
+                    "SELECT prompt_text, position, review_status, ai_generated "
+                    "FROM interview_questions "
+                    "WHERE interview_config_id = :c ORDER BY position"
+                ),
+                {"c": fixture_data["cfg_id"]},
+            )
+        ).all()
+
+    assert len(rows) == 3
+    assert [r.position for r in rows] == [1, 2, 3]
+    assert all(r.review_status == "pending" for r in rows)
+    assert all(r.ai_generated is True for r in rows)
+
+
+@pytest.mark.asyncio
+async def test_pipeline_run_status_completed_on_success(
+    session_factory: async_sessionmaker[AsyncSession],
+    fixture_data: dict[str, UUID],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_stage_mocks(monkeypatch)
+
+    async with session_factory() as session:
+        await run_interview_generation(session, fixture_data["run_id"])
+
+    async with session_factory() as session:
+        run = await session.get(GenerationRun, fixture_data["run_id"])
+
+    assert run is not None
+    assert run.status == "completed"
+    assert run.finished_at is not None
+    assert run.started_at is not None
+    pipeline_summary = (run.config_json or {}).get("pipeline")
+    assert isinstance(pipeline_summary, dict)
+    assert pipeline_summary["stage"] == "completed"
+    assert pipeline_summary["pipeline_run_id"] == str(run.id)
+
+
+@pytest.mark.asyncio
+async def test_pipeline_run_status_failed_on_exception(
+    session_factory: async_sessionmaker[AsyncSession],
+    fixture_data: dict[str, UUID],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_stage_mocks(monkeypatch)
+    monkeypatch.setattr(
+        generation_pipeline,
+        "generate_interview_questions",
+        AsyncMock(side_effect=RuntimeError("upstream LLM exploded")),
+    )
+
+    async with session_factory() as session:
+        with pytest.raises(RuntimeError, match="upstream LLM exploded"):
+            await run_interview_generation(session, fixture_data["run_id"])
+
+    async with session_factory() as session:
+        run = await session.get(GenerationRun, fixture_data["run_id"])
+
+    assert run is not None
+    assert run.status == "failed"
+    assert run.finished_at is not None
+    failure = (run.config_json or {}).get("failure")
+    assert isinstance(failure, dict)
+    assert "upstream LLM exploded" in failure["message"]
+
+
+@pytest.mark.asyncio
+async def test_pipeline_threads_run_id_to_stages(
+    session_factory: async_sessionmaker[AsyncSession],
+    fixture_data: dict[str, UUID],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mocks = _install_stage_mocks(monkeypatch)
+
+    async with session_factory() as session:
+        await run_interview_generation(session, fixture_data["run_id"])
+
+    expected_run_id = fixture_data["run_id"]
+    for stage_key in ("retrieve", "generate", "validate"):
+        kwargs = mocks[stage_key].await_args.kwargs
+        if stage_key == "retrieve":
+            assert kwargs["pipeline_run_id"] == expected_run_id
+            assert kwargs["run"].id == expected_run_id
+        else:
+            assert kwargs["run"].id == expected_run_id
+
+
+@pytest.mark.asyncio
+async def test_audit_rows_share_pipeline_run_id(
+    session_factory: async_sessionmaker[AsyncSession],
+    fixture_data: dict[str, UUID],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end: every stage writes one ai_model_calls row sharing run.id."""
+
+    expected_run_id = fixture_data["run_id"]
+
+    async def _emit_audit(db: AsyncSession, *, stage: str, role: LLMRole) -> None:
+        await write_ai_model_call(
+            db,
+            role=role,
+            tier=None,
+            operation="chat_completion" if role is not LLMRole.EMBEDDING else "embedding",
+            model_name="fake-model",
+            base_url="https://fake.test/v1",
+            stage_name=stage,
+            pipeline_run_id=expected_run_id,
+            parent_run_id=expected_run_id,
+            parent_job_id=None,
+            request_payload={"stage": stage},
+            response_payload={"stage": stage},
+            input_tokens=10,
+            output_tokens=20,
+            cached_input_tokens=None,
+            latency_ms=1,
+            status="success",
+            error_message=None,
+            estimated_cost_usd=Decimal("0"),
+        )
+
+    async def _fake_retrieve(db: AsyncSession, **_kwargs: Any) -> InterviewRetrievalContext:
+        await _emit_audit(db, stage="interview_retrieval", role=LLMRole.EMBEDDING)
+        return _retrieval_context()
+
+    async def _fake_generate(db: AsyncSession, **_kwargs: Any) -> list[InterviewQuestionDraft]:
+        await _emit_audit(db, stage="interview_generation", role=LLMRole.INTERVIEW_GENERATION)
+        return [_draft(1)]
+
+    async def _fake_validate(db: AsyncSession, **_kwargs: Any) -> list[Verdict]:
+        await _emit_audit(db, stage="interview_validation", role=LLMRole.INTERVIEW_VALIDATION)
+        return [_verdict(0, accepted=True)]
+
+    async def _fake_outcomes(_db: Any, _cfg_id: Any) -> list[Any]:
+        return []
+
+    async def _fake_pos(_db: Any, _cfg_id: Any) -> int:
+        return 1
+
+    monkeypatch.setattr(generation_pipeline, "retrieve_interview_context", _fake_retrieve)
+    monkeypatch.setattr(generation_pipeline, "generate_interview_questions", _fake_generate)
+    monkeypatch.setattr(generation_pipeline, "validate_interview_questions", _fake_validate)
+    monkeypatch.setattr(generation_pipeline, "list_outcomes_for_config", _fake_outcomes)
+    monkeypatch.setattr(generation_pipeline, "next_question_position", _fake_pos)
+
+    async with session_factory() as session:
+        await run_interview_generation(session, expected_run_id)
+
+    async with session_factory() as session:
+        rows = (
+            await session.execute(
+                text(
+                    "SELECT pipeline_run_id, stage_name "
+                    "FROM ai_model_calls "
+                    "WHERE generation_run_id = :id"
+                ),
+                {"id": expected_run_id},
+            )
+        ).all()
+
+    assert len(rows) >= 3
+    distinct_pipeline_ids = {r.pipeline_run_id for r in rows}
+    assert distinct_pipeline_ids == {expected_run_id}
+
+
+@pytest.mark.asyncio
+async def test_pipeline_persists_question_with_correct_fields(
+    session_factory: async_sessionmaker[AsyncSession],
+    fixture_data: dict[str, UUID],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    outcome_id = fixture_data["outcome_id"]
+    chunk_ref = uuid4()
+    draft = InterviewQuestionDraft(
+        question_type="behavioral",
+        prompt_text="Tell me about a time you debugged a flaky test.",
+        difficulty="hard",
+        expected_depth=4,
+        linked_outcome_id=outcome_id,
+        source_refs=[chunk_ref],
+        rationale="Probe debugging mindset.",
+    )
+    _install_stage_mocks(
+        monkeypatch,
+        drafts=[draft],
+        verdicts=[_verdict(0, accepted=True)],
+    )
+
+    async with session_factory() as session:
+        await run_interview_generation(session, fixture_data["run_id"])
+
+    async with session_factory() as session:
+        rows = (
+            await session.execute(
+                text(
+                    "SELECT linked_outcome_id, question_type, prompt_text, "
+                    "difficulty, source_refs_json "
+                    "FROM interview_questions "
+                    "WHERE interview_config_id = :c"
+                ),
+                {"c": fixture_data["cfg_id"]},
+            )
+        ).all()
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.linked_outcome_id == outcome_id
+    assert row.question_type == "behavioral"
+    assert row.prompt_text == draft.prompt_text
+    assert row.difficulty == "senior"
+    assert row.source_refs_json == [str(chunk_ref)]
+
+
+def test_no_pipeline_file_exceeds_300_loc() -> None:
+    target = Path(__file__).resolve().parents[2] / (
+        "abridgeai/features/interviews/ai/pipelines/generation.py"
+    )
+    assert target.exists(), f"missing {target}"
+    line_count = len(target.read_text(encoding="utf-8").splitlines())
+    assert line_count <= 300, f"generation.py is {line_count} LOC; soft cap 300, target 200"
+
+
+@pytest.mark.asyncio
+async def test_pipeline_raises_when_run_missing_interview_config_id(
+    session_factory: async_sessionmaker[AsyncSession],
+    fixture_data: dict[str, UUID],
+    engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A run without ``interview_config_id`` should be rejected up-front."""
+    _install_stage_mocks(monkeypatch)
+
+    bare_run_id = uuid4()
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO generation_runs ("
+                "id, generation_type, source_scope_kind, course_id, module_id, "
+                "status, config_json) "
+                "VALUES (:id, 'interview', 'module', :c, :m, 'pending', "
+                "CAST('{}' AS JSONB))"
+            ),
+            {
+                "id": bare_run_id,
+                "c": fixture_data["course"],
+                "m": fixture_data["module_id"],
+            },
+        )
+    try:
+        async with session_factory() as session:
+            with pytest.raises(Exception, match="interview_config_id"):
+                await run_interview_generation(session, bare_run_id)
+
+        async with session_factory() as session:
+            run = await session.get(GenerationRun, bare_run_id)
+        assert run is not None
+        assert run.status == "pending"
+    finally:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("DELETE FROM generation_runs WHERE id = :id"), {"id": bare_run_id}
+            )
+
+
+def test_stage_args_use_keyword_only() -> None:
+    """Pipeline must call stages with kwargs only — guards against positional drift."""
+    body = (
+        Path(__file__).resolve().parents[2]
+        / "abridgeai/features/interviews/ai/pipelines/generation.py"
+    ).read_text(encoding="utf-8")
+    for stage_call in (
+        "retrieve_interview_context(",
+        "generate_interview_questions(",
+        "validate_interview_questions(",
+    ):
+        assert stage_call in body, f"pipeline must call {stage_call!r}"
