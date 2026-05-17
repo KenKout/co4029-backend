@@ -1,0 +1,35 @@
+Theory score (avg quiz % across related modules): {{ "%.1f"|format(theory_score_avg) }}
+Practice score (interview total, 0–100): {{ "%.1f"|format(practice_score) }}
+Discrepancy (theory − practice): {{ "%.1f"|format(discrepancy_score) }}
+{% if discrepancy_score > 10 %}
+Direction: Student knows the theory but underperforms when applying it live. Focus the plan on PRACTICE — exercises, mock interviews, applied labs.
+{% elif discrepancy_score < -10 %}
+Direction: Student performed strongly in the live interview but quiz coverage is weak. Focus the plan on THEORY — reading the linked lessons, retaking quizzes.
+{% else %}
+Direction: Theory and practice are aligned. Reinforce the weakest criteria identified below.
+{% endif %}
+
+Per-criterion rubric averages (0–5 scale):
+{% for criterion, score in rubric_aggregated.items() %}- {{ criterion }}: {{ "%.2f"|format(score) }}
+{% endfor %}
+
+Top per-response evidence excerpts (criterion → justification):
+{% for excerpt in evidence_excerpts %}- {{ excerpt.criterion }} (score {{ excerpt.score }}): "{{ excerpt.justification }}"
+{% endfor %}
+{% if not evidence_excerpts %}- (no per-response evidence available)
+{% endif %}
+
+Lesson library (the ONLY lesson_ids and resource_ids you may use):
+{% if lesson_library %}
+{% for lesson in lesson_library %}- lesson_id: {{ lesson.id }}
+  title: {{ lesson.title }}
+  {% if lesson.summary %}summary: {{ lesson.summary }}
+  {% endif %}resources:
+  {% for resource in lesson.resources %}  - resource_id: {{ resource.id }} | type: {{ resource.resource_type }} | title: {{ resource.title }}
+  {% endfor %}{% if not lesson.resources %}  - (no resources attached)
+  {% endif %}
+{% endfor %}
+{% else %}- (lesson library is empty for this scope; emit study_plan items with suggested_lesson_id=null and leave suggested_resource_ids empty)
+{% endif %}
+
+Synthesize a Gap Report following the system-prompt contract. Each study_plan item MUST include at least one suggested_resource_id drawn from the library entry under the chosen lesson; across the full plan surface at least 3 distinct resource_ids whenever the library has 3+ resources.
