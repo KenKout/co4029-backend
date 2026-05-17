@@ -24,7 +24,7 @@ depth.
 
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -364,8 +364,37 @@ def _rubric_scores_from_session(session: object) -> list[InterviewRubricScore]:
     return []
 
 
-def _gap_report_view(report: object) -> GapReportRead:
-    return GapReportRead.model_validate(report)
+def _gap_report_view(report: Any) -> GapReportRead:  # noqa: ANN401  -- ORM row, typed via duck shape
+    report_json = report.report_json or {}
+    raw_plan = report_json.get("study_plan") if isinstance(report_json, dict) else None
+    study_plan: list[dict[str, Any]] = []
+    if isinstance(raw_plan, list):
+        for entry in raw_plan:
+            if not isinstance(entry, dict):
+                continue
+            study_plan.append(
+                {
+                    "topic": entry.get("topic", ""),
+                    "lesson_id": entry.get("suggested_lesson_id"),
+                    "suggested_resources": [
+                        str(rid) for rid in entry.get("suggested_resource_ids", []) or []
+                    ],
+                }
+            )
+    per_criterion = report_json.get("rubric_aggregated") if isinstance(report_json, dict) else None
+    summary_text = report.student_summary or ""
+    return GapReportRead.model_validate(
+        {
+            "id": report.id,
+            "student_id": report.student_id,
+            "course_id": report.course_id,
+            "module_id": report.module_id,
+            "discrepancy_summary": summary_text or None,
+            "study_plan": study_plan,
+            "per_criterion_breakdown": (per_criterion if isinstance(per_criterion, dict) else {}),
+            "generated_at": report.created_at,
+        }
+    )
 
 
 __all__ = ["get_arq_pool", "router"]
