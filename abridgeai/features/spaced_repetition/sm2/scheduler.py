@@ -41,7 +41,14 @@ def apply_jitter(
 ) -> int:
     """Add +/- ``fraction`` jitter to ``interval_days`` to prevent review pile-up.
 
-    ``fraction=0.1`` means +/-10%. The result is floored at 1 day.
+    Uses float math (``round(interval * (1 + epsilon))``) so jitter applies
+    even for short intervals (e.g. n=1 cohort at 6 days gets +/- 0.6 -> +/- 1
+    day). The integer-truncation form previously used here had a dead zone
+    for ``interval_days in [1, 9]`` with ``fraction=0.1`` (BUG-1).
+
+    ``fraction=0.0`` disables jitter (deterministic). ``fraction=0.1`` yields
+    a result in roughly ``[interval*0.9, interval*1.1]``. The result is
+    floored at 1 day.
 
     Args:
         interval_days: base interval in days.
@@ -53,12 +60,12 @@ def apply_jitter(
     """
     if not (0 <= fraction < 1):
         raise ValueError(f"fraction must be in [0, 1); got {fraction}")
-    actual_rng = rng if rng is not None else random.Random()  # noqa: S311 - non-crypto jitter  # nosec B311
-    delta = int(interval_days * fraction)
-    if delta == 0:
+    if fraction == 0.0:
         return interval_days
-    jitter = actual_rng.randint(-delta, delta)
-    return max(1, interval_days + jitter)
+    actual_rng = rng if rng is not None else random.Random()  # noqa: S311 - non-crypto jitter  # nosec B311
+    epsilon = actual_rng.uniform(-fraction, fraction)
+    jittered = round(interval_days * (1 + epsilon))
+    return max(1, jittered)
 
 
 def next_due_at(

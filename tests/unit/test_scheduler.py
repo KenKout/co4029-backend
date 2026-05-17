@@ -47,9 +47,12 @@ def test_apply_jitter_zero_fraction_returns_unchanged() -> None:
 
 def test_apply_jitter_within_bounds() -> None:
     rng = random.Random(42)  # noqa: S311 - non-crypto jitter test
+    interval = 100
+    fraction = 0.1
+    tolerance = round(interval * fraction) + 1
     for _ in range(100):
-        result = apply_jitter(100, fraction=0.1, rng=rng)
-        assert 90 <= result <= 110
+        result = apply_jitter(interval, fraction=fraction, rng=rng)
+        assert abs(result - interval) <= tolerance
 
 
 def test_apply_jitter_min_one_day_floor() -> None:
@@ -77,9 +80,44 @@ def test_apply_jitter_invalid_fraction_raises() -> None:
         apply_jitter(10, fraction=2.0)
 
 
-def test_apply_jitter_small_interval_no_jitter() -> None:
-    # interval=5, fraction=0.1 -> delta = int(0.5) = 0, so no jitter applied
-    assert apply_jitter(5, fraction=0.1) == 5
+def test_apply_jitter_short_intervals_not_dead_zone() -> None:
+    """BUG-1 regression guard: integer-truncation jitter was dead for intervals 1-9 days.
+
+    Float-math jitter (round(interval * (1 + epsilon))) is active across all
+    short intervals once fraction is large enough to push round() past 0.5.
+    For intervals 6-9 the default fraction=0.1 is sufficient (this covers the
+    critical n=1 SM-2 cohort at 6 days). For intervals 1-5 the result domain
+    is too narrow at 0.1, so we test with fraction=0.9 to prove the value is
+    not hardcoded.
+    """
+    for interval in range(6, 10):
+        rng = random.Random(interval * 17 + 3)  # noqa: S311 - non-crypto jitter test
+        results = [apply_jitter(interval, fraction=0.1, rng=rng) for _ in range(50)]
+        assert any(r != interval for r in results), (
+            f"jitter dead zone re-introduced at interval={interval} "
+            f"(all 50 trials returned {interval})"
+        )
+    for interval in range(1, 6):
+        rng = random.Random(interval * 17 + 3)  # noqa: S311 - non-crypto jitter test
+        results = [apply_jitter(interval, fraction=0.9, rng=rng) for _ in range(50)]
+        assert any(r != interval for r in results), (
+            f"jitter dead at interval={interval} even with fraction=0.9 "
+            f"(all 50 trials returned {interval})"
+        )
+
+
+def test_apply_jitter_active_for_n1_cohort_6_days() -> None:
+    """The n=1 SM-2 cohort fixes interval at 6 days; jitter MUST apply there."""
+    rng = random.Random(42)  # noqa: S311 - non-crypto jitter test
+    results = [apply_jitter(6, fraction=0.1, rng=rng) for _ in range(100)]
+    assert any(r != 6 for r in results)
+
+
+def test_apply_jitter_floor_at_one_day() -> None:
+    rng = random.Random(0)  # noqa: S311 - non-crypto jitter test
+    for _ in range(100):
+        result = apply_jitter(1, fraction=0.5, rng=rng)
+        assert result >= 1
 
 
 def test_next_due_at_requires_tz_aware_now() -> None:
