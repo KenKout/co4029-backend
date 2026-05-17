@@ -35,12 +35,13 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import Depends, HTTPException, Request, status
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from abridgeai.core.db import get_db
 from abridgeai.core.security import CurrentUser, get_current_user
 from abridgeai.features.access_control.policies import can_manage_course
+from abridgeai.features.interviews.models import InterviewSession
 
 _DEFAULT_AUTHORING_PERMS: tuple[str, ...] = ("course.update",)
 
@@ -211,19 +212,13 @@ def require_session_owner_access() -> SubResourceDependency:
         current_user: Annotated[CurrentUser, Depends(get_current_user)],
         db: Annotated[AsyncSession, Depends(get_db)],
     ) -> CurrentUser:
-        row = (
-            (
-                await db.execute(
-                    text("SELECT student_id FROM interview_sessions WHERE id = :session_id"),
-                    {"session_id": session_id},
-                )
-            )
-            .mappings()
-            .one_or_none()
+        result = await db.execute(
+            select(InterviewSession).where(InterviewSession.id == session_id)
         )
-        if row is None:
+        session = result.scalar_one_or_none()
+        if session is None:
             raise _not_found("interview_session", session_id)
-        if row["student_id"] != current_user.user_id:
+        if session.student_id != current_user.user_id:
             raise _forbidden_session(session_id)
         return current_user
 
