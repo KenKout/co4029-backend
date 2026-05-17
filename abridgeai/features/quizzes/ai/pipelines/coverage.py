@@ -239,17 +239,19 @@ async def run_coverage_pipeline(
 def _resolve_parallelism(config: dict[str, Any]) -> int:
     """Pick the per-template fanout limit from config / coverage_options.
 
-    Resolution order (legacy parity):
+    Resolution order:
       1. ``config['coverage_options']['parallelism']`` if set.
-      2. ``Settings.quiz_coverage_parallelism`` — **not yet ported** to
-         backend-new, see notepad. Falls through to default until then.
-      3. Module default (:data:`_DEFAULT_PARALLELISM`).
+      2. Module default (:data:`_DEFAULT_PARALLELISM`).
+
+    A server-wide ``Settings.quiz_coverage_parallelism`` knob was
+    intentionally not ported (tracked in
+    ``.sisyphus/notepads/backend-restructure/issues.md``). Callers that
+    need ops-level tuning pass ``coverage_options.parallelism`` in the
+    run config; the fallback default is conservative and safe.
     """
     coverage_options = config.get("coverage_options") or {}
     raw = coverage_options.get("parallelism")
     if raw is None:
-        # TODO(phase-5-cleanup): port ``quiz_coverage_parallelism`` to
-        # ``abridgeai.core.config.Settings`` and read it here.
         raw = _DEFAULT_PARALLELISM
     try:
         return int(raw)
