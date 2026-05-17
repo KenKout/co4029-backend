@@ -3,6 +3,9 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+# Sisyphus orchestration state — lives at the project root, must never be committed inside backend-new/
+.sisyphus/
+
 # Distribution / packaging
 .Python
 build/
