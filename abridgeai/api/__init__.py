@@ -27,9 +27,12 @@ constructor itself touches.
 from __future__ import annotations
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from abridgeai.api.healthz import router as healthz_router
+from abridgeai.core.config import get_settings
 from abridgeai.core.observability.audit_log import AuditLogMiddleware
+from abridgeai.core.security.headers import SecurityHeadersMiddleware
 from abridgeai.features.access_control.routers import admin_router as access_control_admin_router
 from abridgeai.features.admin.routers import (
     ai_costs_router as admin_ai_costs_router,
@@ -145,6 +148,8 @@ def create_app() -> FastAPI:
         version="0.7.0",
     )
 
+    settings = get_settings()
+
     # Phase 1 -- identity
     app.include_router(identity_auth_router, prefix=API_V1_PREFIX)
     app.include_router(identity_me_router, prefix=API_V1_PREFIX)
@@ -203,6 +208,27 @@ def create_app() -> FastAPI:
 
     # T0.27 -- AI cost dashboard (admin observability)
     app.include_router(admin_ai_costs_router, prefix=API_V1_PREFIX)
+
+    # T0.28 -- security headers (HSTS, CSP, X-Frame-Options, ...). Added
+    # BEFORE the audit-log middleware in source order so it sits INSIDE the
+    # audit-log layer at runtime (Starlette wraps later additions outermost),
+    # which means the audit log records the final headers-decorated response.
+    app.add_middleware(SecurityHeadersMiddleware, environment=settings.environment)
+
+    # T0.28 -- CORS. Only mounted when ALLOWED_ORIGINS is set; otherwise no
+    # CORS headers are emitted and browsers block cross-origin traffic by
+    # default. Wildcard origins are intentionally NOT supported because we
+    # set ``allow_credentials=True`` (browsers refuse "*" + credentials).
+    allowed_origins = [o.strip() for o in settings.allowed_origins.split(",") if o.strip()]
+    if allowed_origins:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=allowed_origins,
+            allow_credentials=True,
+            allow_methods=["GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"],
+            allow_headers=["Authorization", "Content-Type", "X-Request-ID"],
+            expose_headers=["X-Request-ID"],
+        )
 
     # T0.23 -- HTTP audit log middleware (logs every request to http_audit_log)
     app.add_middleware(AuditLogMiddleware)

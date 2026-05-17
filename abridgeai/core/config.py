@@ -37,6 +37,12 @@ class Settings(BaseSettings):
     app_name: str = "aBridgeAI API"
     environment: str = "local"
 
+    # T0.28 -- CORS allowed origins (comma-separated, e.g.
+    # "http://localhost:5173,https://app.abridgeai.com"). Empty string means
+    # CORS middleware is not mounted; cross-origin requests get the normal
+    # response (browsers will block them by default).
+    allowed_origins: str = ""
+
     database_url: str = "postgresql+psycopg://abridgeai:abridgeai@localhost:5432/abridgeai"
     db_pool_size: int = Field(default=5, ge=1, le=100)
     db_max_overflow: int = Field(default=10, ge=0, le=100)
