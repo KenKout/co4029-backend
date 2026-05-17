@@ -202,6 +202,9 @@ ignore_imports = [
     "abridgeai.features.progress.services.tracking -> sqlalchemy",
     "abridgeai.features.progress.services.monitoring -> sqlalchemy",
     "abridgeai.features.progress.services.reporting -> sqlalchemy",
+    "abridgeai.features.notifications.services.dispatch -> sqlalchemy",
+    "abridgeai.features.notifications.services.email -> sqlalchemy",
+    "abridgeai.features.notifications.services.inbox -> sqlalchemy",
 ]
 
 [[tool.importlinter.contracts]]
