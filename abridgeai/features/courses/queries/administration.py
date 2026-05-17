@@ -13,18 +13,18 @@ resolution; SELECTs use ``select()`` for type-safe ORM hydration.
 
 from __future__ import annotations
 
+import base64
+import json
 from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import select, text
+from sqlalchemy import and_, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from abridgeai.features.courses.models import Course
 from abridgeai.features.courses.queries._pagination import (
     CursorPage,
-    decode_cursor,
-    encode_cursor,
 )
 
 _DEFAULT_LIMIT = 20
@@ -35,6 +35,24 @@ def _clamp(limit: int) -> int:
     return min(max(limit, 1), _MAX_LIMIT)
 
 
+def _encode_admin_cursor(created_at: datetime, course_id: UUID) -> str:
+    """Composite cursor for the admin list ``(created_at, id)`` order.
+
+    Admin lists newest first so freshly-inserted rows surface on page 1
+    regardless of UUID lexical order. The cursor encodes both keys so
+    pagination is stable when many rows share a ``created_at`` value.
+    """
+    payload = json.dumps([created_at.isoformat(), str(course_id)], separators=(",", ":"))
+    return base64.urlsafe_b64encode(payload.encode()).decode().rstrip("=")
+
+
+def _decode_admin_cursor(cursor: str) -> tuple[datetime, UUID]:
+    padding = "=" * (-len(cursor) % 4)
+    raw = base64.urlsafe_b64decode((cursor + padding).encode()).decode()
+    created_iso, course_id = json.loads(raw)
+    return datetime.fromisoformat(created_iso), UUID(course_id)
+
+
 async def list_all_courses_admin(
     db: AsyncSession,
     *,
@@ -42,21 +60,34 @@ async def list_all_courses_admin(
     limit: int = _DEFAULT_LIMIT,
     cursor: str | None = None,
 ) -> CursorPage[Course]:
-    """Cursor-paginated admin view of every course.
+    """Cursor-paginated admin view of every course (newest first).
+
+    Ordered by ``(created_at DESC, id DESC)`` so the most recently
+    created rows surface first — operationally useful (admins reach for
+    the freshest course) and resilient to schemas that already carry
+    hundreds of legacy seed rows ahead of newly tombstoned ones.
 
     When ``include_deleted=True`` the T0.7 global soft-delete filter is
     bypassed via ``execution_options(include_deleted=True)`` so admin
     sees both live and tombstoned rows.
     """
     capped = _clamp(limit)
-    after = decode_cursor(cursor) if cursor else None
-    stmt = select(Course).order_by(Course.id).limit(capped)
+    after = _decode_admin_cursor(cursor) if cursor else None
+    stmt = select(Course).order_by(Course.created_at.desc(), Course.id.desc()).limit(capped)
     if after is not None:
-        stmt = stmt.where(Course.id > after)
+        after_created_at, after_id = after
+        stmt = stmt.where(
+            or_(
+                Course.created_at < after_created_at,
+                and_(Course.created_at == after_created_at, Course.id < after_id),
+            )
+        )
     if include_deleted:
         stmt = stmt.execution_options(include_deleted=True)
     rows = list((await db.execute(stmt)).scalars().all())
-    next_cursor = encode_cursor(rows[-1].id) if len(rows) == capped else None
+    next_cursor = (
+        _encode_admin_cursor(rows[-1].created_at, rows[-1].id) if len(rows) == capped else None
+    )
     return CursorPage(items=rows, next_cursor=next_cursor)
 
 
