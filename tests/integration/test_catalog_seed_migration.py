@@ -157,6 +157,7 @@ async def test_idempotent_re_run(
     assert role_after == role_before
 
 
+@pytest.mark.destructive
 async def test_round_trip_upgrade_downgrade_upgrade(
     at_seed_head: None,
     alembic_cfg: Config,

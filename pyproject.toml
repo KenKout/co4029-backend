@@ -53,12 +53,13 @@ audio-local = [
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
-addopts = "--cov=abridgeai --cov-report=term-missing --cov-report=xml --cov-fail-under=75"
+addopts = "--cov=abridgeai --cov-report=term-missing --cov-report=xml --cov-fail-under=75 -m 'not destructive'"
 markers = [
     "s3_live: integration test against a real Garage container (skipped by default; run with -m s3_live)",
     "kg_live: integration test against a real Neo4j container (skipped by default; run with -m kg_live)",
     "audio_live: integration test that calls the real Whisper / faster-whisper backend (skipped by default; run with -m audio_live)",
     "video_live: integration test that exercises the real ffmpeg binary (skipped by default; run with -m video_live)",
+    "destructive: test that mutates global DB state (alembic round-trip etc.); skipped by default to keep the suite isolated; run with -m destructive",
 ]
 
 [tool.coverage.run]

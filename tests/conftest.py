@@ -10,10 +10,17 @@ import yaml
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
 
+from abridgeai.access_control.permissions.loader import load_catalog, load_role_seeds
 from abridgeai.core.config import get_settings
 from abridgeai.core.security import create_access_token
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
+
+# Stable system user (mirrors migration 0004). Re-inserted defensively by
+# _ensure_catalog_seeded so a destructive migration round-trip mid-suite
+# cannot leave audit FKs dangling.
+_SYSTEM_USER_ID = "00000000-0000-0000-0000-000000000001"
+_SYSTEM_USER_EMAIL = "system@abridgeai.local"
 
 
 @dataclass(frozen=True)
@@ -49,6 +56,57 @@ async def test_engine() -> AsyncEngine:
 def _load_yaml(name: str) -> dict:
     with (FIXTURES_DIR / name).open() as f:
         return yaml.safe_load(f)
+
+
+async def _ensure_catalog_seeded(session: AsyncSession) -> None:
+    catalog = load_catalog()
+    role_seeds = load_role_seeds(catalog)
+
+    await session.execute(
+        text(
+            "INSERT INTO users (id, primary_email, status, created_at, updated_at) "
+            "VALUES (CAST(:user_id AS uuid), :email, 'inactive', NOW(), NOW()) "
+            "ON CONFLICT (id) DO NOTHING"
+        ),
+        {"user_id": _SYSTEM_USER_ID, "email": _SYSTEM_USER_EMAIL},
+    )
+
+    for perm in catalog.permissions:
+        await session.execute(
+            text(
+                "INSERT INTO permissions (id, code, name, description, created_at, updated_at) "
+                "VALUES (uuid_generate_v4(), :code, :name, :description, NOW(), NOW()) "
+                "ON CONFLICT (code) WHERE deleted_at IS NULL DO NOTHING"
+            ),
+            {"code": perm.code, "name": perm.code, "description": perm.description},
+        )
+
+    for role in role_seeds.roles:
+        await session.execute(
+            text(
+                "INSERT INTO roles (id, code, name, is_system_role, created_at, updated_at) "
+                "VALUES (uuid_generate_v4(), :code, :name, TRUE, NOW(), NOW()) "
+                "ON CONFLICT (code) WHERE deleted_at IS NULL DO NOTHING"
+            ),
+            {"code": role.code, "name": role.name},
+        )
+
+    for role in role_seeds.roles:
+        permissions_codes = role.permissions
+        if not isinstance(permissions_codes, list):
+            msg = f"loader returned unexpanded sentinel for role {role.code!r}"
+            raise RuntimeError(msg)
+        for perm_code in permissions_codes:
+            await session.execute(
+                text(
+                    "INSERT INTO role_permissions (role_id, permission_id, created_at) "
+                    "SELECT r.id, p.id, NOW() "
+                    "FROM roles r JOIN permissions p ON p.code = :perm_code "
+                    "WHERE r.code = :role_code "
+                    "ON CONFLICT (role_id, permission_id) DO NOTHING"
+                ),
+                {"role_code": role.code, "perm_code": perm_code},
+            )
 
 
 async def _purge(session: AsyncSession, users_data: dict, roles_data: dict) -> None:
@@ -174,6 +232,7 @@ async def seeded_users(test_engine: AsyncEngine) -> SeededUsers:
 
     async with test_engine.begin() as conn:
         session = AsyncSession(bind=conn, expire_on_commit=False)
+        await _ensure_catalog_seeded(session)
         await _purge(session, users_data, roles_data)
         await _insert_organization(session, org)
         await _insert_org_unit(session, org_unit, org["id"])
