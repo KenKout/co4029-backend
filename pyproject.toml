@@ -184,6 +184,8 @@ ignore_imports = [
     "abridgeai.features.courses.services.authoring -> sqlalchemy",
     "abridgeai.features.courses.services.assignment -> sqlalchemy",
     "abridgeai.features.courses.services.administration -> sqlalchemy",
+    "abridgeai.features.enrollments.services.manager -> sqlalchemy",
+    "abridgeai.features.enrollments.services.student_view -> sqlalchemy",
     "abridgeai.features.materials.services.catalog -> sqlalchemy",
     "abridgeai.features.materials.services.authoring -> sqlalchemy",
     "abridgeai.features.quizzes.services.authoring -> sqlalchemy",
@@ -197,6 +199,9 @@ ignore_imports = [
     "abridgeai.features.admin.services.processing -> sqlalchemy",
     "abridgeai.features.admin.services.audit -> sqlalchemy",
     "abridgeai.features.admin.services.stats -> sqlalchemy",
+    "abridgeai.features.progress.services.tracking -> sqlalchemy",
+    "abridgeai.features.progress.services.monitoring -> sqlalchemy",
+    "abridgeai.features.progress.services.reporting -> sqlalchemy",
 ]
 
 [[tool.importlinter.contracts]]
@@ -227,6 +232,7 @@ ignore_imports = [
     "abridgeai.features.courses.routers._deps -> abridgeai.features.access_control.policies",
     "abridgeai.features.courses.routers.assignment -> abridgeai.features.access_control.policies",
     "abridgeai.features.courses.routers.administration -> abridgeai.features.access_control.policies",
+    "abridgeai.features.enrollments.routers.assignment -> abridgeai.features.access_control.policies",
     "abridgeai.features.materials.routers.authoring -> abridgeai.features.access_control.policies",
     "abridgeai.features.materials.routers.authoring -> abridgeai.features.courses.routers._deps",
     "abridgeai.features.quizzes.routers.authoring -> abridgeai.features.access_control.policies",
@@ -239,6 +245,7 @@ ignore_imports = [
     "abridgeai.features.admin.routers.processing -> abridgeai.features.access_control.policies",
     "abridgeai.features.admin.routers.stats -> abridgeai.features.access_control.policies",
     "abridgeai.features.admin.routers.users -> abridgeai.features.access_control.policies",
+    "abridgeai.features.progress.routers.authoring -> abridgeai.features.access_control.policies",
 ]
 
 [[tool.importlinter.contracts]]
