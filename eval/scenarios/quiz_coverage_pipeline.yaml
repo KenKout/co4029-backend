@@ -1,0 +1,25 @@
+scenario_id: quiz_coverage_pipeline
+description: Quiz COVERAGE pipeline output quality (one quiz per section, distributed budget) on each fixture
+capability: quiz_generation
+mode: coverage
+fixtures:
+  - beginner_python_loops
+  - intermediate_rest_api_design
+  - advanced_system_design
+inputs:
+  total_question_count: 12
+  difficulty: medium
+  question_types:
+    - multiple_choice
+    - true_false
+criteria:
+  - id: coverage_breadth
+    description: Generated questions span every major section of the source material; no large gaps
+    expected_score_threshold: 3.5
+  - id: per_section_budget_respected
+    description: Per-section question count stays within the planned budget; no section over-allocated
+    expected_score_threshold: 3.5
+  - id: no_duplicates
+    description: No question is a duplicate or near-paraphrase of another within the same quiz
+    expected_score_threshold: 4.0
+estimated_cost_usd_per_fixture: 0.40

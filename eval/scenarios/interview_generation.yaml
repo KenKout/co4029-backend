@@ -1,0 +1,28 @@
+scenario_id: interview_generation
+description: Interview question generation output quality on each fixture
+capability: interview_generation
+fixtures:
+  - beginner_python_loops
+  - intermediate_rest_api_design
+  - advanced_system_design
+inputs:
+  question_count: 8
+  difficulty_progression: easy_to_hard
+  type_mix:
+    open_ended: 0.6
+    scenario_based: 0.3
+    yes_no_or_factual: 0.1
+criteria:
+  - id: groundedness
+    description: Every question is answerable from the source material; no hallucinated topics
+    expected_score_threshold: 3.5
+  - id: type_mix
+    description: Generated questions follow the requested 60/30/10 type distribution within tolerance
+    expected_score_threshold: 3.5
+  - id: difficulty_progression
+    description: Questions progress from easy to hard across the set; no abrupt jumps backwards
+    expected_score_threshold: 3.5
+  - id: open_ended
+    description: Questions invite explanation or design rationale; not yes/no or one-word answers
+    expected_score_threshold: 4.0
+estimated_cost_usd_per_fixture: 0.20

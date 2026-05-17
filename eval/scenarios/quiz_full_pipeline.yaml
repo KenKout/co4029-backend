@@ -1,0 +1,31 @@
+scenario_id: quiz_full_pipeline
+description: Quiz FULL pipeline output quality on each fixture material
+capability: quiz_generation
+mode: full
+fixtures:
+  - beginner_python_loops
+  - intermediate_rest_api_design
+  - advanced_system_design
+inputs:
+  question_count: 5
+  difficulty: medium
+  question_types:
+    - multiple_choice
+    - true_false
+criteria:
+  - id: groundedness
+    description: Every question must be answerable from the source material; no hallucinated facts
+    expected_score_threshold: 3.5
+  - id: difficulty_appropriate
+    description: Questions match the requested difficulty level
+    expected_score_threshold: 3.5
+  - id: distractors_plausible
+    description: For multiple-choice, distractors are plausible (not obviously wrong)
+    expected_score_threshold: 3.5
+  - id: is_correct_unambiguous
+    description: Exactly one option is correct; no ambiguity
+    expected_score_threshold: 4.0
+  - id: no_leaked_answer
+    description: Question stem doesn't accidentally reveal the answer
+    expected_score_threshold: 4.0
+estimated_cost_usd_per_fixture: 0.30

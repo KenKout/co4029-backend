@@ -1,0 +1,21 @@
+scenario_id: gap_report
+description: Gap-report quality on fake completed sessions seeded from each fixture
+capability: gap_report
+fixtures:
+  - beginner_python_loops
+  - intermediate_rest_api_design
+  - advanced_system_design
+inputs:
+  seeded_sessions_per_fixture: 3
+  include_remediation_links: true
+criteria:
+  - id: actionable_insights
+    description: Each gap names a concrete topic the learner should revisit; no vague generalities
+    expected_score_threshold: 3.5
+  - id: linked_resources_relevance
+    description: Linked remediation resources actually cover the identified gap
+    expected_score_threshold: 3.5
+  - id: per_criterion_accuracy
+    description: Reported per-criterion scores match a manual check of the seeded session answers
+    expected_score_threshold: 4.0
+estimated_cost_usd_per_fixture: 0.30
