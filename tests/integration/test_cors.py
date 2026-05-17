@@ -14,6 +14,7 @@ from abridgeai.core.config import get_settings
 def cors_client(monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
     monkeypatch.setenv("ALLOWED_ORIGINS", "http://localhost:5173,https://app.abridgeai.com")
     monkeypatch.setenv("ENVIRONMENT", "production")
+    monkeypatch.setenv("JWT_SECRET_KEY", "x" * 64)
     get_settings.cache_clear()
     from abridgeai.api import create_app
 
@@ -29,6 +30,7 @@ def cors_client(monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
 def no_cors_client(monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
     monkeypatch.setenv("ALLOWED_ORIGINS", "")
     monkeypatch.setenv("ENVIRONMENT", "production")
+    monkeypatch.setenv("JWT_SECRET_KEY", "x" * 64)
     get_settings.cache_clear()
     from abridgeai.api import create_app
 

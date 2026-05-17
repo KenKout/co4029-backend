@@ -111,6 +111,7 @@ def test_security_headers_on_all_endpoints(prod_client: TestClient) -> None:
 def test_real_app_emits_security_headers(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ENVIRONMENT", "production")
     monkeypatch.setenv("ALLOWED_ORIGINS", "")
+    monkeypatch.setenv("JWT_SECRET_KEY", "x" * 64)
     get_settings.cache_clear()
     try:
         from abridgeai.api import create_app

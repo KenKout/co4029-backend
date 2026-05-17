@@ -309,6 +309,12 @@ forbidden_modules = [
 targets = ["abridgeai"]
 exclude_dirs = ["tests"]
 confidence_level = "MEDIUM"
+# B701 (jinja2 autoescape=False) is suppressed: LLM prompts are plain-text,
+# not HTML; autoescape would corrupt prompt rendering. The two
+# `# noqa: S701` markers in abridgeai/ai/prompts/{env,loader}.py document
+# this intent for code reviewers; this skip silences the equivalent
+# bandit-level finding.
+skips = ["B701"]
 tests = [
     "B102",
     "B104",

@@ -10,6 +10,14 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 logger = logging.getLogger(__name__)
 
+# Class-level marker prefix for the development-only JWT default. Any secret
+# starting with this prefix is rejected when ``environment == "production"``.
+# We check the prefix (rather than the full literal "dev-only-change-me") so
+# operators can't sneak the dev default past the validator with trivial
+# variations like "dev-only-change-me-2" while still permitting custom dev
+# secrets that explicitly opt into the "dev-" namespace in non-prod envs.
+_DEV_JWT_SECRET_PREFIX = "dev-"  # noqa: S105
+
 
 # FR-12 whitelist for ``LLM_EXTRA_HEADERS_JSON``. Disallowed keys
 # (case-insensitive) are dropped with a single WARN log so operators notice
@@ -51,7 +59,7 @@ class Settings(BaseSettings):
 
     redis_url: str = "redis://localhost:6379/0"
 
-    jwt_secret_key: str = Field(default="dev-only-change-me", min_length=16)
+    jwt_secret_key: str = Field(default="dev-only-change-me", min_length=32)
     access_token_ttl_seconds: int = 15 * 60
     session_ttl_seconds: int = 30 * 24 * 60 * 60
 
@@ -121,6 +129,18 @@ class Settings(BaseSettings):
     ffmpeg_path: str = "ffmpeg"
     whisper_model: str = "whisper-1"
     video_frame_sample_fps: float = Field(default=1.0, gt=0, le=30)
+
+    @model_validator(mode="after")
+    def _reject_dev_jwt_secret_in_production(self) -> Settings:
+        if self.environment == "production" and self.jwt_secret_key.startswith(
+            _DEV_JWT_SECRET_PREFIX
+        ):
+            raise ValueError(
+                "jwt_secret_key starting with 'dev-' is forbidden when "
+                "environment='production'; provide a strong secret "
+                "(>=32 bytes of entropy) via JWT_SECRET_KEY"
+            )
+        return self
 
     @model_validator(mode="after")
     def _populate_extra_headers(self) -> Settings:

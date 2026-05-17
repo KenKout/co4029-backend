@@ -333,7 +333,7 @@ async def test_local_mock_fallback_returns_for_local_env() -> None:
 
 
 def test_local_mock_returns_none_for_non_local_env() -> None:
-    settings = Settings(environment="production")
+    settings = Settings(environment="production", jwt_secret_key="x" * 64)
     assert maybe_local_mock_extractor("application/x-foo", settings) is None
 
 
