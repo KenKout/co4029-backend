@@ -69,7 +69,7 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from abridgeai.core.db import (
     PGUUID,
@@ -140,6 +140,11 @@ class Course(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftDeleteMixi
     estimated_minutes: Mapped[int | None] = mapped_column(Integer)
     expected_completion_days: Mapped[int | None] = mapped_column(Integer)
     enrollment_cap: Mapped[int | None] = mapped_column(Integer)
+
+    modules: Mapped[list[Module]] = relationship(
+        back_populates="course",
+        cascade="all",
+    )
 
 
 class Tag(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -233,6 +238,17 @@ class Module(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftDeleteMixi
         Boolean, nullable=False, server_default=text("FALSE")
     )
 
+    course: Mapped[Course] = relationship(back_populates="modules")
+    lessons: Mapped[list[Lesson]] = relationship(
+        back_populates="module",
+        cascade="all",
+    )
+    items: Mapped[list[ModuleItem]] = relationship(
+        back_populates="module",
+        cascade="all",
+        foreign_keys="[ModuleItem.module_id]",
+    )
+
 
 class ModulePrerequisite(CreatedAtMixin, Base):
     __tablename__ = "module_prerequisites"
@@ -322,6 +338,12 @@ class Lesson(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftDeleteMixi
         JSONB, nullable=False, server_default=text("'{}'::jsonb")
     )
 
+    module: Mapped[Module] = relationship(back_populates="lessons")
+    resources: Mapped[list[LessonResource]] = relationship(
+        back_populates="lesson",
+        cascade="all",
+    )
+
 
 class LessonPrerequisite(CreatedAtMixin, Base):
     """Append-only self-edge between :class:`Lesson` rows.
@@ -378,6 +400,8 @@ class LessonResource(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftDe
         Boolean, nullable=False, server_default=text("TRUE")
     )
 
+    lesson: Mapped[Lesson] = relationship(back_populates="resources")
+
 
 class ModuleItem(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftDeleteMixin, Base):
     """Polymorphic ordering row inside a :class:`Module`.
@@ -422,6 +446,11 @@ class ModuleItem(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftDelete
     position: Mapped[int] = mapped_column(Integer, nullable=False)
     unlock_rule_json: Mapped[dict[str, Any]] = mapped_column(
         JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+
+    module: Mapped[Module] = relationship(
+        back_populates="items",
+        foreign_keys=[module_id],
     )
 
 

@@ -14,10 +14,14 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
+import abridgeai.features.identity.models  # noqa: F401, E402  -- register users / storage_objects FK targets
+import abridgeai.features.interviews.models  # noqa: F401, E402  -- register interview_configs FK target
+import abridgeai.features.materials.models  # noqa: F401, E402  -- register learning_materials FK target
+import abridgeai.features.quizzes.models  # noqa: F401, E402  -- register quizzes FK target
 from abridgeai.core.config import get_settings
 from abridgeai.core.db.recursive_delete import soft_delete_cascade
-
-from ._test_models import _Course, _Lesson, _Module, _OrgUnit
+from abridgeai.features.access_control.models import OrgUnit  # noqa: E402
+from abridgeai.features.courses.models import Course, Lesson, Module  # noqa: E402
 
 
 def _async_url(database_url: str) -> str:
@@ -91,14 +95,14 @@ async def org_owner(engine: AsyncEngine):
 async def _seed_chain(
     session: AsyncSession, org_id: uuid.UUID, owner_id: uuid.UUID
 ) -> tuple[uuid.UUID, uuid.UUID, uuid.UUID]:
-    course = _Course(
+    course = Course(
         organization_id=org_id,
         owner_user_id=owner_id,
         slug=f"c-{uuid.uuid4().hex[:8]}",
         title="Test Course",
     )
-    module = _Module(course=course, title="Test Module", position=1)
-    lesson = _Lesson(module=module, slug=f"l-{uuid.uuid4().hex[:8]}", title="Test Lesson")
+    module = Module(course=course, title="Test Module", position=1)
+    lesson = Lesson(module=module, slug=f"l-{uuid.uuid4().hex[:8]}", title="Test Lesson")
     session.add(course)
     await session.flush()
     return course.id, module.id, lesson.id
@@ -108,7 +112,7 @@ async def test_simple_cascade(session_factory: async_sessionmaker[AsyncSession],
     org_id, owner_id = org_owner
     async with session_factory() as session:
         course_id, module_id, lesson_id = await _seed_chain(session, org_id, owner_id)
-        course = await session.get(_Course, course_id)
+        course = await session.get(Course, course_id)
         assert course is not None
         result = await soft_delete_cascade(session, course)
         await session.commit()
@@ -118,24 +122,22 @@ async def test_simple_cascade(session_factory: async_sessionmaker[AsyncSession],
 
     async with session_factory() as session:
         active = (
-            await session.execute(select(_Course).where(_Course.id == course_id))
+            await session.execute(select(Course).where(Course.id == course_id))
         ).scalar_one_or_none()
         assert active is None
         active_module = (
-            await session.execute(select(_Module).where(_Module.id == module_id))
+            await session.execute(select(Module).where(Module.id == module_id))
         ).scalar_one_or_none()
         assert active_module is None
         active_lesson = (
-            await session.execute(select(_Lesson).where(_Lesson.id == lesson_id))
+            await session.execute(select(Lesson).where(Lesson.id == lesson_id))
         ).scalar_one_or_none()
         assert active_lesson is None
 
     async with session_factory() as session:
         rows = (
             await session.execute(
-                select(_Course)
-                .where(_Course.id == course_id)
-                .execution_options(include_deleted=True)
+                select(Course).where(Course.id == course_id).execution_options(include_deleted=True)
             )
         ).all()
         assert len(rows) == 1
@@ -148,14 +150,14 @@ async def test_query_filter_respects_cascade(
     org_id, owner_id = org_owner
     async with session_factory() as session:
         course_id, module_id, lesson_id = await _seed_chain(session, org_id, owner_id)
-        course = await session.get(_Course, course_id)
+        course = await session.get(Course, course_id)
         assert course is not None
         await soft_delete_cascade(session, course)
         await session.commit()
 
     async with session_factory() as session:
         lessons = (
-            (await session.execute(select(_Lesson).where(_Lesson.module_id == module_id)))
+            (await session.execute(select(Lesson).where(Lesson.module_id == module_id)))
             .scalars()
             .all()
         )
@@ -173,7 +175,7 @@ async def test_atomicity_on_exception(
         await session.commit()
 
     async with session_factory() as session:
-        course = await session.get(_Course, course_id)
+        course = await session.get(Course, course_id)
         assert course is not None
 
         original_refresh = session.refresh
@@ -194,10 +196,10 @@ async def test_atomicity_on_exception(
     async with session_factory() as session:
         rows = (
             await session.execute(
-                select(_Course, _Module, _Lesson)
-                .join(_Module, _Module.course_id == _Course.id)
-                .join(_Lesson, _Lesson.module_id == _Module.id)
-                .where(_Course.id == course_id)
+                select(Course, Module, Lesson)
+                .join(Module, Module.course_id == Course.id)
+                .join(Lesson, Lesson.module_id == Module.id)
+                .where(Course.id == course_id)
                 .execution_options(include_deleted=True)
             )
         ).all()
@@ -227,7 +229,7 @@ async def test_cycle_safety(
         )
 
     async with session_factory() as session:
-        unit = await session.get(_OrgUnit, unit_id)
+        unit = await session.get(OrgUnit, unit_id)
         assert unit is not None
         result = await soft_delete_cascade(session, unit)
         await session.commit()
@@ -238,9 +240,7 @@ async def test_cycle_safety(
     async with session_factory() as session:
         rows = (
             await session.execute(
-                select(_OrgUnit)
-                .where(_OrgUnit.id == unit_id)
-                .execution_options(include_deleted=True)
+                select(OrgUnit).where(OrgUnit.id == unit_id).execution_options(include_deleted=True)
             )
         ).all()
         assert len(rows) == 1
@@ -254,7 +254,7 @@ async def test_dry_run(session_factory: async_sessionmaker[AsyncSession], org_ow
         await session.commit()
 
     async with session_factory() as session:
-        course = await session.get(_Course, course_id)
+        course = await session.get(Course, course_id)
         assert course is not None
         result = await soft_delete_cascade(session, course, dry_run=True)
         await session.commit()
@@ -265,10 +265,10 @@ async def test_dry_run(session_factory: async_sessionmaker[AsyncSession], org_ow
     async with session_factory() as session:
         rows = (
             await session.execute(
-                select(_Course, _Module, _Lesson)
-                .join(_Module, _Module.course_id == _Course.id)
-                .join(_Lesson, _Lesson.module_id == _Module.id)
-                .where(_Course.id == course_id)
+                select(Course, Module, Lesson)
+                .join(Module, Module.course_id == Course.id)
+                .join(Lesson, Lesson.module_id == Module.id)
+                .where(Course.id == course_id)
                 .execution_options(include_deleted=True)
             )
         ).all()
@@ -285,7 +285,7 @@ async def test_actor_id_propagation(
     org_id, owner_id = org_owner
     async with session_factory() as session:
         course_id, module_id, lesson_id = await _seed_chain(session, org_id, owner_id)
-        course = await session.get(_Course, course_id)
+        course = await session.get(Course, course_id)
         assert course is not None
         await soft_delete_cascade(session, course, actor_id=owner_id)
         await session.commit()
@@ -293,10 +293,10 @@ async def test_actor_id_propagation(
     async with session_factory() as session:
         rows = (
             await session.execute(
-                select(_Course, _Module, _Lesson)
-                .join(_Module, _Module.course_id == _Course.id)
-                .join(_Lesson, _Lesson.module_id == _Module.id)
-                .where(_Course.id == course_id)
+                select(Course, Module, Lesson)
+                .join(Module, Module.course_id == Course.id)
+                .join(Lesson, Lesson.module_id == Module.id)
+                .where(Course.id == course_id)
                 .execution_options(include_deleted=True)
             )
         ).all()

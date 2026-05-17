@@ -46,7 +46,7 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.dialects.postgresql import CITEXT
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from abridgeai.core.db import (
     PGUUID,
@@ -128,6 +128,19 @@ class OrgUnit(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftDeleteMix
     unit_type: Mapped[str] = mapped_column(String(20), nullable=False)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     code: Mapped[str | None] = mapped_column(String(50))
+
+    children: Mapped[list[OrgUnit]] = relationship(
+        back_populates="parent",
+        remote_side="OrgUnit.parent_unit_id",
+        foreign_keys=[parent_unit_id],
+        post_update=True,
+    )
+    parent: Mapped[OrgUnit | None] = relationship(
+        back_populates="children",
+        remote_side="OrgUnit.id",
+        foreign_keys=[parent_unit_id],
+        post_update=True,
+    )
 
 
 class OrganizationDomain(
