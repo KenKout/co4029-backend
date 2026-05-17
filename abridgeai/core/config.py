@@ -93,6 +93,20 @@ class Settings(BaseSettings):
     embedding_dimensions: int = 1536
     embedding_timeout_seconds: float = 30.0
 
+    # T2.3: S3 / Garage object storage. ``aws_endpoint_url`` is the
+    # server-side hostname (None → AWS default); ``aws_public_endpoint_url``
+    # is the browser-reachable hostname for presigned URLs (falls back to
+    # the internal endpoint). Path-style addressing is forced when an
+    # endpoint is set (Garage requires it); virtual-host style is used
+    # otherwise (AWS S3 default).
+    aws_access_key_id: SecretStr | None = None
+    aws_secret_access_key: SecretStr | None = None
+    aws_endpoint_url: str | None = None
+    aws_public_endpoint_url: str | None = None
+    aws_region: str = "us-east-1"
+    s3_url_ttl_seconds: int = Field(default=3600, ge=60, le=24 * 60 * 60)
+    s3_bucket_name: str = "abridgeai-materials"
+
     @model_validator(mode="after")
     def _populate_extra_headers(self) -> Settings:
         """Parse, whitelist, and store the LLM extra-headers map (FR-12).

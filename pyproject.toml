@@ -38,7 +38,7 @@ dev = [
     "ruff>=0.7",
     "mypy>=1.18,<2",
     "import-linter>=2.0",
-    "moto>=5.0",
+    "moto[server]>=5.0",
     "bandit>=1.7",
     "pip-audit>=2.7",
     "pre-commit>=3.7",
@@ -48,6 +48,9 @@ dev = [
 asyncio_mode = "auto"
 testpaths = ["tests"]
 addopts = "--cov=abridgeai --cov-report=term-missing --cov-report=xml --cov-fail-under=75"
+markers = [
+    "s3_live: integration test against a real Garage container (skipped by default; run with -m s3_live)",
+]
 
 [tool.coverage.run]
 source = ["abridgeai"]
@@ -127,6 +130,15 @@ warn_return_any = false
 warn_unused_ignores = false
 check_untyped_defs = false
 ignore_errors = true
+
+[[tool.mypy.overrides]]
+module = [
+    "aioboto3",
+    "aioboto3.*",
+    "botocore",
+    "botocore.*",
+]
+ignore_missing_imports = true
 
 [tool.setuptools.packages.find]
 include = ["abridgeai*"]
