@@ -11,6 +11,7 @@ from arq.connections import RedisSettings
 from arq.cron import CronJob, cron
 
 from abridgeai.core.config import get_settings
+from abridgeai.features.interviews.workers import JOBS as INTERVIEW_JOBS
 from abridgeai.features.materials.workers import JOBS as MATERIAL_JOBS
 from abridgeai.features.materials.workers.cron import cleanup_orphaned_uploads_task
 from abridgeai.features.quizzes.workers import JOBS as QUIZ_JOBS
@@ -32,7 +33,7 @@ class WorkerSettings:
     """
 
     redis_settings = RedisSettings.from_dsn(get_settings().redis_url)
-    functions = list(MATERIAL_JOBS) + list(QUIZ_JOBS)
+    functions = list(MATERIAL_JOBS) + list(QUIZ_JOBS) + list(INTERVIEW_JOBS)
     max_jobs = 10
     job_timeout = 600
     keep_result_seconds = 3600
