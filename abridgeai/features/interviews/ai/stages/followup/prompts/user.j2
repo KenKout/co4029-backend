@@ -1,0 +1,22 @@
+Original question:
+{{ question_text }}
+
+Candidate's answer:
+{{ student_answer }}
+{% if related_chunks %}
+Reference material (groundedness check only — do NOT quote in your follow-up):
+{% for chunk in related_chunks %}[{{ chunk.id }}]{% if chunk.section_title %} section: {{ chunk.section_title }}{% endif %}
+text: {{ chunk.content }}
+{% if not loop.last %}
+{% endif %}{% endfor %}
+{% endif %}
+
+Return JSON in this shape:
+{
+  "is_sufficient": true,
+  "followup": null,
+  "rationale": "Short sentence."
+}
+
+If the answer is insufficient, ``is_sufficient`` MUST be ``false`` and
+``followup`` MUST be a single concrete probing question.
