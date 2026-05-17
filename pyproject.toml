@@ -209,6 +209,8 @@ modules = [
 ignore_imports = [
     "abridgeai.features.identity.routers.me -> abridgeai.features.access_control.services",
     "abridgeai.features.identity.routers.users -> abridgeai.features.access_control.policies",
+    "abridgeai.features.courses.routers.authoring -> abridgeai.features.access_control.policies",
+    "abridgeai.features.courses.routers._deps -> abridgeai.features.access_control.policies",
 ]
 
 [[tool.importlinter.contracts]]
