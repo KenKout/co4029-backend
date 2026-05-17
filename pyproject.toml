@@ -27,6 +27,9 @@ dependencies = [
     "boto3>=1.34",
     "pyjwt>=2.8",
     "structlog>=24.4",
+    "beautifulsoup4>=4.12",
+    "pytesseract>=0.3",
+    "pillow>=10.0",
 ]
 
 [project.optional-dependencies]
@@ -43,6 +46,9 @@ dev = [
     "pip-audit>=2.7",
     "pre-commit>=3.7",
 ]
+audio-local = [
+    "faster-whisper>=1.0",
+]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
@@ -51,6 +57,8 @@ addopts = "--cov=abridgeai --cov-report=term-missing --cov-report=xml --cov-fail
 markers = [
     "s3_live: integration test against a real Garage container (skipped by default; run with -m s3_live)",
     "kg_live: integration test against a real Neo4j container (skipped by default; run with -m kg_live)",
+    "audio_live: integration test that calls the real Whisper / faster-whisper backend (skipped by default; run with -m audio_live)",
+    "video_live: integration test that exercises the real ffmpeg binary (skipped by default; run with -m video_live)",
 ]
 
 [tool.coverage.run]
@@ -138,6 +146,10 @@ module = [
     "aioboto3.*",
     "botocore",
     "botocore.*",
+    "faster_whisper",
+    "faster_whisper.*",
+    "pytesseract",
+    "pytesseract.*",
 ]
 ignore_missing_imports = true
 

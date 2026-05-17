@@ -82,6 +82,9 @@ class Settings(BaseSettings):
     llm_model_generation: str | None = None
     llm_model_validation: str | None = None
     llm_model_chunking_enrichment: str | None = None
+    llm_model_kg_extraction: str | None = None
+    llm_model_stt: str | None = None
+    llm_model_vision: str | None = None
 
     # Derived field, populated by ``_populate_extra_headers`` from
     # ``llm_extra_headers_json``. Always a dict (possibly empty).
@@ -106,6 +109,12 @@ class Settings(BaseSettings):
     aws_region: str = "us-east-1"
     s3_url_ttl_seconds: int = Field(default=3600, ge=60, le=24 * 60 * 60)
     s3_bucket_name: str = "abridgeai-materials"
+
+    audio_extraction_local: bool = False
+    image_ocr_provider: Literal["tesseract", "llm_vision"] = "tesseract"
+    ffmpeg_path: str = "ffmpeg"
+    whisper_model: str = "whisper-1"
+    video_frame_sample_fps: float = Field(default=1.0, gt=0, le=30)
 
     @model_validator(mode="after")
     def _populate_extra_headers(self) -> Settings:

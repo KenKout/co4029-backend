@@ -20,9 +20,10 @@ if TYPE_CHECKING:
 
 
 class LLMRole(str, Enum):  # noqa: UP042 - StrEnum changes value coercion; preserve verbatim per plan §3051
-    """The seven logical roles AI calls can play in our pipelines.
+    """The logical roles AI calls can play in our pipelines.
 
     Stored verbatim in ``ai_model_calls.role`` for cost attribution.
+    Per Reconciliation §B1 values are APPEND-ONLY — never reorder.
     """
 
     EXTRACTION = "extraction"
@@ -33,10 +34,15 @@ class LLMRole(str, Enum):  # noqa: UP042 - StrEnum changes value coercion; prese
     EMBEDDING = "embedding"
     CHUNKING_ENRICHMENT = "chunking_enrichment"
     KG_EXTRACTION = "kg_extraction"
+    STT = "stt"
+    VISION = "vision"
 
 
 # Default role -> tier mapping. Embedding intentionally excluded — it has its
 # own EMBEDDING_* config and never participates in the LLM tier system.
+# STT and VISION map to "standard" since hosted Whisper / multimodal models
+# are not partitioned into our small/large tiers; per-role overrides
+# (``llm_model_stt`` / ``llm_model_vision``) carry the concrete model name.
 ROLE_TO_TIER: dict[LLMRole, Literal["small", "standard", "large"]] = {
     LLMRole.EXTRACTION: "small",
     LLMRole.ENRICHMENT: "small",
@@ -45,6 +51,8 @@ ROLE_TO_TIER: dict[LLMRole, Literal["small", "standard", "large"]] = {
     LLMRole.VALIDATION: "standard",
     LLMRole.CHUNKING_ENRICHMENT: "small",
     LLMRole.KG_EXTRACTION: "small",
+    LLMRole.STT: "standard",
+    LLMRole.VISION: "standard",
 }
 
 

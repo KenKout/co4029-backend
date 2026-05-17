@@ -33,8 +33,8 @@ def test_pptx_dispatch() -> None:
 
 def test_unknown_raises() -> None:
     with pytest.raises(UnsupportedMimeError) as excinfo:
-        dispatch_extractor("text/plain")
-    assert "text/plain" in str(excinfo.value)
+        dispatch_extractor("application/x-no-such-extractor")
+    assert "application/x-no-such-extractor" in str(excinfo.value)
 
 
 def test_register_extractor_decorator_returns_class_unchanged() -> None:
