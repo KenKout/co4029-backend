@@ -28,6 +28,7 @@ from __future__ import annotations
 
 from fastapi import FastAPI
 
+from abridgeai.api.healthz import router as healthz_router
 from abridgeai.core.observability.audit_log import AuditLogMiddleware
 from abridgeai.features.access_control.routers import admin_router as access_control_admin_router
 from abridgeai.features.admin.routers import (
@@ -189,6 +190,10 @@ def create_app() -> FastAPI:
 
     # T0.23 -- HTTP audit log middleware (logs every request to http_audit_log)
     app.add_middleware(AuditLogMiddleware)
+
+    # T0.26 -- health checks (mounted at root so K8s probes + load balancers
+    # can hit /healthz, /healthz/deep, /readyz without the /api/v1 prefix).
+    app.include_router(healthz_router)
 
     return app
 
