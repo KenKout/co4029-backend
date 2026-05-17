@@ -32,6 +32,7 @@ class LLMRole(str, Enum):  # noqa: UP042 - StrEnum changes value coercion; prese
     VALIDATION = "validation"
     EMBEDDING = "embedding"
     CHUNKING_ENRICHMENT = "chunking_enrichment"
+    KG_EXTRACTION = "kg_extraction"
 
 
 # Default role -> tier mapping. Embedding intentionally excluded — it has its
@@ -43,6 +44,7 @@ ROLE_TO_TIER: dict[LLMRole, Literal["small", "standard", "large"]] = {
     LLMRole.GENERATION: "large",
     LLMRole.VALIDATION: "standard",
     LLMRole.CHUNKING_ENRICHMENT: "small",
+    LLMRole.KG_EXTRACTION: "small",
 }
 
 

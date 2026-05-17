@@ -50,6 +50,7 @@ testpaths = ["tests"]
 addopts = "--cov=abridgeai --cov-report=term-missing --cov-report=xml --cov-fail-under=75"
 markers = [
     "s3_live: integration test against a real Garage container (skipped by default; run with -m s3_live)",
+    "kg_live: integration test against a real Neo4j container (skipped by default; run with -m kg_live)",
 ]
 
 [tool.coverage.run]
