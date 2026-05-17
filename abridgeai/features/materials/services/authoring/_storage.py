@@ -115,18 +115,27 @@ async def update_storage_object_metadata(
 async def reset_other_versions_current(
     db: AsyncSession, material_id: UUID, keep_version_id: UUID
 ) -> None:
-    from sqlalchemy import text  # noqa: PLC0415  -- localised raw-SQL escape hatch
+    from sqlalchemy import select  # noqa: PLC0415  -- localised import
 
-    await db.execute(
-        text(
-            """
-            UPDATE learning_material_versions
-            SET is_current = FALSE
-            WHERE material_id = :mid AND id <> :vid
-            """
-        ),
-        {"mid": material_id, "vid": keep_version_id},
+    from abridgeai.features.materials.models import (  # noqa: PLC0415  -- localised import
+        LearningMaterialVersion,
     )
+
+    rows = (
+        (
+            await db.execute(
+                select(LearningMaterialVersion).where(
+                    LearningMaterialVersion.material_id == material_id,
+                    LearningMaterialVersion.id != keep_version_id,
+                    LearningMaterialVersion.is_current.is_(True),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    for version in rows:
+        version.is_current = False
 
 
 async def purge_chunks_for_version(db: AsyncSession, version_id: UUID) -> None:
