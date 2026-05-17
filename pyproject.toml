@@ -53,6 +53,7 @@ audio-local = [
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+pythonpath = ["."]
 addopts = "--cov=abridgeai --cov-report=term-missing --cov-report=xml --cov-fail-under=75 -m 'not destructive'"
 markers = [
     "s3_live: integration test against a real Garage container (skipped by default; run with -m s3_live)",
@@ -106,6 +107,10 @@ max-complexity = 12
 # `migrations/versions/` in this project (alembic was renamed during the
 # T0.5 init).
 "migrations/versions/**/*.py" = ["ANN", "E501"]
+# eval/ is a manual-trigger eval harness, not part of the production app.
+# CLI legitimately writes to stdout/stderr (T20); tests use assert (S101).
+"eval/run.py" = ["T20"]
+"eval/tests/**/*.py" = ["ANN", "S101", "PT011", "T20", "E501"]
 
 [tool.mypy]
 python_version = "3.12"

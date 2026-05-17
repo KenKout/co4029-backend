@@ -72,3 +72,9 @@ Thumbs.db
 *.sqlite
 *.db
 *.log
+
+# eval/ run results — only commit explicit baselines
+eval/results/run-*.json
+!eval/results/baseline-*.json
+!eval/results/.gitkeep
+!eval/results/README.md
