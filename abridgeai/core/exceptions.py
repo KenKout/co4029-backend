@@ -29,4 +29,12 @@ class ForbiddenError(AppError):
     the requested action."""
 
 
-__all__ = ["AppError", "ForbiddenError", "NotFoundError", "UnauthorizedError"]
+class ConflictError(AppError):
+    """The requested operation conflicts with current state (HTTP 409).
+
+    Examples: a generation run is already in flight for the target
+    quiz, or a UNIQUE constraint would be violated by the write.
+    """
+
+
+__all__ = ["AppError", "ConflictError", "ForbiddenError", "NotFoundError", "UnauthorizedError"]

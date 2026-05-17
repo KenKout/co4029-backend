@@ -362,7 +362,63 @@ class QuizAttemptAnswer(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     interval_after_days: Mapped[int | None] = mapped_column(Integer)
 
 
+class GenerationRun(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    """Generation-run job header (T5.13 stop-gap port).
+
+    Mirrors baseline DDL ``generation_runs`` (migration 0001 §554-572).
+    The notepad-tracked plan is to move this to ``features/ai/models.py``
+    in a later T5.x port; co-located here for now because the quiz
+    services + AI pipelines are the only writers, and ``Quiz`` already
+    carries an FK to this table.
+    """
+
+    __tablename__ = "generation_runs"
+    __table_args__ = (
+        CheckConstraint(
+            "generation_type IN ('quiz', 'interview', 'knowledge_graph', 'material_index')",
+            name="ck_generation_runs_type",
+        ),
+        CheckConstraint(
+            "source_scope_kind IN ('lesson', 'module', 'course')",
+            name="ck_generation_runs_scope",
+        ),
+        CheckConstraint(
+            "status IN ('pending', 'running', 'completed', 'failed', 'cancelled')",
+            name="ck_generation_runs_status",
+        ),
+    )
+
+    generation_type: Mapped[str] = mapped_column(String(30), nullable=False)
+    source_scope_kind: Mapped[str] = mapped_column(String(20), nullable=False)
+    course_id: Mapped[uuid.UUID | None] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("courses.id", ondelete="NO ACTION"),
+    )
+    module_id: Mapped[uuid.UUID | None] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("modules.id", ondelete="NO ACTION"),
+    )
+    lesson_id: Mapped[uuid.UUID | None] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("lessons.id", ondelete="NO ACTION"),
+    )
+    requested_by: Mapped[uuid.UUID | None] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+    )
+    status: Mapped[str] = mapped_column(
+        String(20), nullable=False, server_default=text("'pending'")
+    )
+    config_json: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    dedup_key: Mapped[str | None] = mapped_column(String(255))
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 __all__ = [
+    "GenerationRun",
     "Quiz",
     "QuizAttempt",
     "QuizAttemptAnswer",
