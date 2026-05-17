@@ -14,11 +14,21 @@ import-linter contract forbids it. The required column
 ``sqlalchemy.text(...)`` against the table directly. The module is
 listed in ``[tool.importlinter]`` ``ignore_imports`` for the
 "services do not touch SQLAlchemy" contract.
+
+T7.5.10 + BUG-2 fix
+-------------------
+On q == 0 the service no longer fires the failure event at flush time.
+It appends a :class:`CardFailedEvent` to ``CardReviewResult.pending_events``
+and the caller is expected to ``await db.commit()`` first, then iterate
+the list and dispatch
+:func:`abridgeai.features.spaced_repetition.services.remediation.dispatch_remediation_for_card_failure`.
+This avoids the ghost-notification race where a rolled-back review
+would still trigger a side-effect.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING
@@ -36,7 +46,7 @@ from abridgeai.features.spaced_repetition.sm2 import (
     update_ef,
 )
 
-from ._events import CardFailedEvent, emit_card_failed
+from ._events import CardFailedEvent
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -47,7 +57,13 @@ _DEFAULT_FAILURE_COOLDOWN_SECONDS = 86400
 
 @dataclass(frozen=True)
 class CardReviewResult:
-    """Outcome of :func:`record_card_review` returned to the caller."""
+    """Outcome of :func:`record_card_review` returned to the caller.
+
+    ``pending_events`` carries any :class:`CardFailedEvent` instances
+    queued for after-commit dispatch (see module docstring). Always a
+    list (possibly empty) so callers can iterate without a ``None``
+    guard.
+    """
 
     q: int
     ef_before: float
@@ -60,6 +76,7 @@ class CardReviewResult:
     passing: bool
     retry_available_at: datetime | None
     calibration_active: bool
+    pending_events: list[CardFailedEvent] = field(default_factory=list)
 
 
 async def _load_quiz_question_meta(db: AsyncSession, question_id: UUID) -> tuple[int, UUID]:
@@ -128,6 +145,10 @@ async def record_card_review(
     pushes ``due_at`` out by the configured cooldown (default 24 h). The
     ``retry_available_at`` field on the result mirrors that timestamp so
     the quiz router (T7.5.11) can enforce a per-card retry block.
+
+    On q == 0 the result includes a :class:`CardFailedEvent` in
+    ``pending_events`` for the caller to dispatch **after commit** (T7.5.10
+    BUG-2 fix). The service itself does not fire anything.
 
     Raises:
         NotFoundError: when ``question_id`` does not match any
@@ -212,16 +233,16 @@ async def record_card_review(
 
     await db.flush()
 
+    pending_events: list[CardFailedEvent] = []
     if q == 0:
-        await emit_card_failed(
-            db,
+        pending_events.append(
             CardFailedEvent(
                 student_id=student_id,
                 question_id=question_id,
                 quiz_attempt_id=quiz_attempt_id,
                 quiz_id=quiz_id,
                 timestamp=now,
-            ),
+            )
         )
 
     return CardReviewResult(
@@ -236,7 +257,8 @@ async def record_card_review(
         passing=passing,
         retry_available_at=retry_available_at,
         calibration_active=n_after <= 3,
+        pending_events=pending_events,
     )
 
 
-__all__ = ["CardReviewResult", "record_card_review"]
+__all__ = ["CardFailedEvent", "CardReviewResult", "record_card_review"]

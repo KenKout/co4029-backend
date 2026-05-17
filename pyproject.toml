@@ -211,7 +211,7 @@ ignore_imports = [
     "abridgeai.features.career_paths.services.authoring -> sqlalchemy",
     "abridgeai.features.career_paths.services.enrollment -> sqlalchemy",
     "abridgeai.features.spaced_repetition.services.review -> sqlalchemy",
-    "abridgeai.features.spaced_repetition.services._events -> sqlalchemy",
+    "abridgeai.features.spaced_repetition.services.remediation -> sqlalchemy",
 ]
 
 [[tool.importlinter.contracts]]
@@ -259,6 +259,7 @@ ignore_imports = [
     "abridgeai.features.career_paths.routers.authoring -> abridgeai.features.access_control.policies",
     "abridgeai.features.career_paths.models -> abridgeai.features.access_control.models",
     "abridgeai.features.spaced_repetition.workers.scan_due_cards -> abridgeai.features.notifications.services.dispatch",
+    "abridgeai.features.spaced_repetition.services.remediation -> abridgeai.features.notifications.services.dispatch",
 ]
 
 [[tool.importlinter.contracts]]

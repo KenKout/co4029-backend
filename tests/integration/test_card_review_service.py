@@ -294,8 +294,8 @@ async def test_atomicity_on_exception(
 
     with (
         patch(
-            "abridgeai.features.spaced_repetition.services.review.emit_card_failed",
-            side_effect=RuntimeError("simulated failure after writes"),
+            "abridgeai.features.spaced_repetition.services.review.derive_q",
+            side_effect=RuntimeError("simulated failure inside service"),
         ),
         pytest.raises(RuntimeError, match="simulated failure"),
     ):
@@ -432,48 +432,42 @@ async def test_subsequent_review_increments_n(
 
 
 @pytest.mark.asyncio
-async def test_card_failed_event_emitted_on_q0(
+async def test_card_failed_event_queued_on_q0(
     engine: AsyncEngine,
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     student_id, question_id, attempt_id = await _seed_quiz(engine)
-    with patch(
-        "abridgeai.features.spaced_repetition.services.review.emit_card_failed",
-    ) as mock_emit:
-        async with session_factory() as session, session.begin():
-            await record_card_review(
-                session,
-                student_id=student_id,
-                question_id=question_id,
-                quiz_attempt_id=attempt_id,
-                t_actual_ms=20000,
-                correct=False,
-                hint_used=False,
-            )
-    assert mock_emit.await_count == 1
-    event = mock_emit.await_args.args[1]
+    async with session_factory() as session, session.begin():
+        result = await record_card_review(
+            session,
+            student_id=student_id,
+            question_id=question_id,
+            quiz_attempt_id=attempt_id,
+            t_actual_ms=20000,
+            correct=False,
+            hint_used=False,
+        )
+    assert len(result.pending_events) == 1
+    event = result.pending_events[0]
     assert event.student_id == student_id
     assert event.question_id == question_id
     assert event.quiz_attempt_id == attempt_id
 
 
 @pytest.mark.asyncio
-async def test_no_event_emitted_on_passing(
+async def test_no_event_queued_on_passing(
     engine: AsyncEngine,
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     student_id, question_id, attempt_id = await _seed_quiz(engine)
-    with patch(
-        "abridgeai.features.spaced_repetition.services.review.emit_card_failed",
-    ) as mock_emit:
-        async with session_factory() as session, session.begin():
-            await record_card_review(
-                session,
-                student_id=student_id,
-                question_id=question_id,
-                quiz_attempt_id=attempt_id,
-                t_actual_ms=20000,
-                correct=True,
-                hint_used=False,
-            )
-    assert mock_emit.await_count == 0
+    async with session_factory() as session, session.begin():
+        result = await record_card_review(
+            session,
+            student_id=student_id,
+            question_id=question_id,
+            quiz_attempt_id=attempt_id,
+            t_actual_ms=20000,
+            correct=True,
+            hint_used=False,
+        )
+    assert result.pending_events == []
