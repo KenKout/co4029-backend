@@ -1,0 +1,126 @@
+from __future__ import annotations
+
+from importlib import resources
+from typing import Any
+from uuid import UUID
+
+from sqlalchemy import select, text, true
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import InstrumentedAttribute
+from sqlalchemy.sql.elements import ColumnElement
+
+from abridgeai.features.courses.models import (
+    Course,
+    Lesson,
+    LessonResource,
+    Module,
+)
+
+_AUTHORING_CONTENT_TREE_SQL = text(
+    resources.files("abridgeai.features.courses.queries.sql")
+    .joinpath("authoring_content_tree.sql")
+    .read_text(encoding="utf-8")
+)
+
+
+def _archived_filter(
+    include_archived: bool, status_col: InstrumentedAttribute[str]
+) -> ColumnElement[bool]:
+    if include_archived:
+        return true()
+    return status_col != "archived"
+
+
+async def list_courses_for_owner(
+    db: AsyncSession,
+    user_id: UUID,
+    *,
+    include_archived: bool = False,
+) -> list[Course]:
+    """All courses (any status) owned by ``user_id``.
+
+    No visibility filter — drafts surface for the author. ``include_archived``
+    defaults FALSE per plan §4119; pass TRUE for the "all my courses" admin
+    view.
+    """
+    stmt = (
+        select(Course)
+        .where(
+            Course.owner_user_id == user_id,
+            _archived_filter(include_archived, Course.status),
+        )
+        .order_by(Course.created_at.desc())
+    )
+    return list((await db.execute(stmt)).scalars().all())
+
+
+async def list_courses_in_org_unit(db: AsyncSession, org_unit_id: UUID) -> list[Course]:
+    stmt = (
+        select(Course)
+        .where(Course.org_unit_id == org_unit_id)
+        .order_by(Course.created_at.desc())
+    )
+    return list((await db.execute(stmt)).scalars().all())
+
+
+async def get_course_for_authoring(db: AsyncSession, course_id: UUID) -> Course | None:
+    """Course by id without status filter (returns drafts and archived)."""
+    return await db.get(Course, course_id)
+
+
+async def get_course_content_authoring(
+    db: AsyncSession,
+    course_id: UUID,
+    *,
+    include_archived: bool = False,
+) -> dict[str, Any] | None:
+    """Full authoring tree (drafts included).
+
+    Mirror of :func:`get_published_course_content` shape, but no
+    status='published' gate. ``include_archived`` toggles the archived
+    filter at every level (course, modules, lessons). Soft-deleted rows
+    are still excluded.
+    """
+    result = await db.execute(
+        _AUTHORING_CONTENT_TREE_SQL,
+        {"course_id": course_id, "include_archived": include_archived},
+    )
+    row = result.one_or_none()
+    if row is None or row.course is None:
+        return None
+    return {"course": row.course, "modules": row.modules, "items": row.items}
+
+
+async def list_modules_for_authoring(db: AsyncSession, course_id: UUID) -> list[Module]:
+    stmt = (
+        select(Module).where(Module.course_id == course_id).order_by(Module.position)
+    )
+    return list((await db.execute(stmt)).scalars().all())
+
+
+async def list_lessons_for_authoring(db: AsyncSession, module_id: UUID) -> list[Lesson]:
+    stmt = select(Lesson).where(Lesson.module_id == module_id).order_by(Lesson.title)
+    return list((await db.execute(stmt)).scalars().all())
+
+
+async def list_all_lesson_resources(
+    db: AsyncSession, lesson_id: UUID
+) -> list[LessonResource]:
+    """All resources on the lesson (no visible_to_students filter)."""
+    stmt = (
+        select(LessonResource)
+        .where(LessonResource.lesson_id == lesson_id)
+        .order_by(LessonResource.position)
+    )
+    return list((await db.execute(stmt)).scalars().all())
+
+
+__all__ = [
+    "get_course_content_authoring",
+    "get_course_for_authoring",
+    "list_all_lesson_resources",
+    "list_courses_for_owner",
+    "list_courses_in_org_unit",
+    "list_lessons_for_authoring",
+    "list_modules_for_authoring",
+]
