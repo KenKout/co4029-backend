@@ -185,6 +185,7 @@ ignore_imports = [
     "abridgeai.features.courses.services.assignment -> sqlalchemy",
     "abridgeai.features.courses.services.administration -> sqlalchemy",
     "abridgeai.features.materials.services.catalog -> sqlalchemy",
+    "abridgeai.features.materials.services.authoring -> sqlalchemy",
 ]
 
 [[tool.importlinter.contracts]]
@@ -215,6 +216,8 @@ ignore_imports = [
     "abridgeai.features.courses.routers._deps -> abridgeai.features.access_control.policies",
     "abridgeai.features.courses.routers.assignment -> abridgeai.features.access_control.policies",
     "abridgeai.features.courses.routers.administration -> abridgeai.features.access_control.policies",
+    "abridgeai.features.materials.routers.authoring -> abridgeai.features.access_control.policies",
+    "abridgeai.features.materials.routers.authoring -> abridgeai.features.courses.routers._deps",
 ]
 
 [[tool.importlinter.contracts]]

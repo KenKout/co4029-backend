@@ -8,10 +8,11 @@ fast and surface missing features at import time, not at first job run).
 from __future__ import annotations
 
 from arq.connections import RedisSettings
-from arq.cron import CronJob
+from arq.cron import CronJob, cron
 
 from abridgeai.core.config import get_settings
 from abridgeai.features.materials.workers import JOBS as MATERIAL_JOBS
+from abridgeai.features.materials.workers.cron import cleanup_orphaned_uploads_task
 
 
 class WorkerSettings:
@@ -35,7 +36,9 @@ class WorkerSettings:
     job_timeout = 600
     keep_result_seconds = 3600
     max_tries = 3
-    cron_jobs: list[CronJob] = []
+    cron_jobs: list[CronJob] = [
+        cron(cleanup_orphaned_uploads_task, hour={3}, minute=0),
+    ]
 
 
 __all__ = ["WorkerSettings"]
