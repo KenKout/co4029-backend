@@ -91,7 +91,7 @@ FIXTURES_DIR = Path(__file__).resolve().parents[1] / "fixtures" / "multimodal"
 # T3.10 / T4.5 use.
 # ---------------------------------------------------------------------------
 
-for _stub_name in ("quizzes", "interview_configs"):
+for _stub_name in ("interview_configs",):
     if _stub_name not in Base.metadata.tables:
         Table(
             _stub_name,

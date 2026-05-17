@@ -48,7 +48,7 @@ from abridgeai.core.db import Base, get_db
 from abridgeai.features.materials.routers import learner_router
 from abridgeai.features.materials.services import catalog as catalog_service
 
-for _stub_name in ("quizzes", "interview_configs"):
+for _stub_name in ("interview_configs",):
     if _stub_name not in Base.metadata.tables:
         Table(
             _stub_name,

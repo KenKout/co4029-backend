@@ -49,7 +49,7 @@ from abridgeai.features.courses.routers.learner import (
     router as learner_router,
 )
 
-for _stub_name in ("quizzes", "interview_configs"):
+for _stub_name in ("interview_configs",):
     if _stub_name not in Base.metadata.tables:
         Table(
             _stub_name,

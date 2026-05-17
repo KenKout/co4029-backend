@@ -57,7 +57,7 @@ from abridgeai.infrastructure import s3 as s3_module
 
 BUCKET = "abridgeai-test-authoring"
 
-for _stub_name in ("quizzes", "interview_configs"):
+for _stub_name in ("interview_configs",):
     if _stub_name not in Base.metadata.tables:
         Table(
             _stub_name,
