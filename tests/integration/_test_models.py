@@ -13,7 +13,14 @@ else. ``auth_sessions`` is exercised via raw SQL in the hard-delete
 boundary test — no ORM model is needed because the test only verifies
 non-touch.
 
-DELETE THIS FILE when ``features/courses/models.py`` lands.
+KEEP THIS FILE. The production ``features/courses/models.py`` is intentionally
+relationship-less per the ``Features are independent`` import-linter contract —
+no ``relationship()`` declarations means cross-feature ORM walks can't fan out
+across feature boundaries. ``soft_delete_cascade`` (core/db/recursive_delete.py)
+nevertheless walks ``mapper.relationships`` ONETOMANY edges, so the cascade-walker
+tests need an ORM substrate that DOES expose those edges. This file is that
+substrate. Production code uses ``soft_delete_cascade`` only on leaf objects
+(LessonResource has no ORM children); the walker is fully exercised here.
 """
 
 from __future__ import annotations
