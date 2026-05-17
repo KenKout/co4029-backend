@@ -1,0 +1,11 @@
+"""Quiz pipeline orchestrators.
+
+Each pipeline composes stages from `..stages/`. T5.11 (regenerate) + T5.12 (coverage)
+APPEND their re-exports below; do not reorder.
+"""
+
+from __future__ import annotations
+
+from abridgeai.features.quizzes.ai.pipelines.full import run_full_pipeline
+
+__all__ = ["run_full_pipeline"]
