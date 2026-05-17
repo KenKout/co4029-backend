@@ -58,7 +58,7 @@ from abridgeai.core.db import Base, get_db
 from abridgeai.core.security import create_access_token, generate_token, hash_secret
 from abridgeai.features.courses.routers import assignment_router
 
-for _stub_name in ("learning_materials", "quizzes", "interview_configs"):
+for _stub_name in ("quizzes", "interview_configs"):
     if _stub_name not in Base.metadata.tables:
         Table(
             _stub_name,
