@@ -32,6 +32,9 @@ from abridgeai.api.healthz import router as healthz_router
 from abridgeai.core.observability.audit_log import AuditLogMiddleware
 from abridgeai.features.access_control.routers import admin_router as access_control_admin_router
 from abridgeai.features.admin.routers import (
+    ai_costs_router as admin_ai_costs_router,
+)
+from abridgeai.features.admin.routers import (
     audit_router as admin_audit_router,
 )
 from abridgeai.features.admin.routers import (
@@ -116,6 +119,12 @@ from abridgeai.features.quizzes.routers import (
 from abridgeai.features.quizzes.routers import (
     learner_router as quizzes_learner_router,
 )
+from abridgeai.features.spaced_repetition.routers import (
+    learner_router as spaced_repetition_learner_router,
+)
+from abridgeai.features.spaced_repetition.routers import (
+    teacher_router as spaced_repetition_teacher_router,
+)
 
 API_V1_PREFIX = "/api/v1"
 
@@ -187,6 +196,13 @@ def create_app() -> FastAPI:
     app.include_router(admin_audit_router, prefix=API_V1_PREFIX)
     app.include_router(admin_processing_router, prefix=API_V1_PREFIX)
     app.include_router(admin_users_router, prefix=API_V1_PREFIX)
+
+    # Phase 7.5 -- spaced repetition dashboards (T7.5.12)
+    app.include_router(spaced_repetition_learner_router, prefix=API_V1_PREFIX)
+    app.include_router(spaced_repetition_teacher_router, prefix=API_V1_PREFIX)
+
+    # T0.27 -- AI cost dashboard (admin observability)
+    app.include_router(admin_ai_costs_router, prefix=API_V1_PREFIX)
 
     # T0.23 -- HTTP audit log middleware (logs every request to http_audit_log)
     app.add_middleware(AuditLogMiddleware)

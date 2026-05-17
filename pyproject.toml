@@ -202,6 +202,7 @@ ignore_imports = [
     "abridgeai.features.admin.services.processing -> sqlalchemy",
     "abridgeai.features.admin.services.audit -> sqlalchemy",
     "abridgeai.features.admin.services.stats -> sqlalchemy",
+    "abridgeai.features.admin.services.ai_costs -> sqlalchemy",
     "abridgeai.features.progress.services.tracking -> sqlalchemy",
     "abridgeai.features.progress.services.monitoring -> sqlalchemy",
     "abridgeai.features.progress.services.reporting -> sqlalchemy",
@@ -228,6 +229,11 @@ forbidden_modules = [
     "abridgeai.features.*.repositories.*",
 ]
 allow_indirect_imports = true
+ignore_imports = [
+    "abridgeai.features.spaced_repetition.routers.learner -> abridgeai.features.spaced_repetition.queries",
+    "abridgeai.features.spaced_repetition.routers.learner -> abridgeai.features.courses.queries._pagination",
+    "abridgeai.features.spaced_repetition.routers.teacher -> abridgeai.features.spaced_repetition.queries",
+]
 
 [[tool.importlinter.contracts]]
 name = "Features are independent (cross-feature traffic must go through public API)"
@@ -255,11 +261,14 @@ ignore_imports = [
     "abridgeai.features.admin.routers.processing -> abridgeai.features.access_control.policies",
     "abridgeai.features.admin.routers.stats -> abridgeai.features.access_control.policies",
     "abridgeai.features.admin.routers.users -> abridgeai.features.access_control.policies",
+    "abridgeai.features.admin.routers.ai_costs -> abridgeai.features.access_control.policies",
     "abridgeai.features.progress.routers.authoring -> abridgeai.features.access_control.policies",
     "abridgeai.features.career_paths.routers.authoring -> abridgeai.features.access_control.policies",
     "abridgeai.features.career_paths.models -> abridgeai.features.access_control.models",
     "abridgeai.features.spaced_repetition.workers.scan_due_cards -> abridgeai.features.notifications.services.dispatch",
     "abridgeai.features.spaced_repetition.services.remediation -> abridgeai.features.notifications.services.dispatch",
+    "abridgeai.features.spaced_repetition.routers.learner -> abridgeai.features.courses.queries._pagination",
+    "abridgeai.features.spaced_repetition.routers.teacher -> abridgeai.features.access_control.policies",
 ]
 
 [[tool.importlinter.contracts]]
