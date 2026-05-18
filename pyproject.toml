@@ -250,18 +250,29 @@ modules = [
     "abridgeai.features.*",
 ]
 ignore_imports = [
-    # Allow any feature -> any sibling's api.public surface (and its
-    # submodule namespace). These two wildcards express the cross-feature
-    # contract carve-out; lint-imports may report "No matches" against
-    # them depending on which exact import shape consumers use post-Wave-5
-    # but the contract intent is what matters here -- legit-stays.
-    "abridgeai.features.* -> abridgeai.features.*.api.public",
-    "abridgeai.features.* -> abridgeai.features.*.api.public.*",
+    # Allow any feature submodule (at any depth) to import any sibling
+    # feature's api.public module. The `**` wildcard is required on the
+    # importer side because cross-feature consumers live in nested
+    # paths like `features.X.routers.teacher` or `features.X.queries.Y`.
+    "abridgeai.features.** -> abridgeai.features.*.api.public",
     # Permanent grandfather: career_paths joins access_control.OrgUnit
     # at the ORM mapper level for the shared schema split predating
     # this refactor (T17 added the relationship; the import direction
     # is one-way and documented).
     "abridgeai.features.career_paths.models -> abridgeai.features.access_control.models",
+    # Pre-existing carve-outs for FastAPI router decorators / shared deps
+    # that import `access_control.policies` directly (require_permission,
+    # require_course_permission, require_any_permission, can_manage_course).
+    # These predate the api.public migration and are wired at route-decoration
+    # time, not via the public read API.
+    "abridgeai.features.** -> abridgeai.features.access_control.policies",
+    "abridgeai.features.identity.routers.me -> abridgeai.features.access_control.services",
+    # Cross-feature router dependency reuse (FastAPI Depends).
+    "abridgeai.features.materials.routers.authoring -> abridgeai.features.courses.routers._deps",
+    # Notification dispatch is invoked from spaced_repetition workers /
+    # remediation services as a side-effect channel; no public API exists.
+    "abridgeai.features.spaced_repetition.workers.scan_due_cards -> abridgeai.features.notifications.services.dispatch",
+    "abridgeai.features.spaced_repetition.services.remediation -> abridgeai.features.notifications.services.dispatch",
 ]
 
 [[tool.importlinter.contracts]]

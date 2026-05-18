@@ -16,7 +16,6 @@ from abridgeai.features.materials.api._dto import (
     StorageBlobInfoDTO,
 )
 
-
 _EXPECTED_FUNCTIONS = (
     "get_storage_blob_for_version",
     "get_storage_size_and_key",

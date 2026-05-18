@@ -6,6 +6,7 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
+from abridgeai.features.access_control import policies as _policies
 from abridgeai.features.access_control.api.public import (
     OrgUnitDTO,
     can_manage_course,
@@ -14,7 +15,6 @@ from abridgeai.features.access_control.api.public import (
     require_course_permission,
     require_permission,
 )
-from abridgeai.features.access_control import policies as _policies
 
 
 def test_decorator_reexport_is_true_alias() -> None:

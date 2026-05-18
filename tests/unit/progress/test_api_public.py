@@ -5,6 +5,7 @@ from decimal import Decimal
 from uuid import uuid4
 
 import pytest
+from pydantic import ValidationError
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
@@ -32,7 +33,7 @@ def test_dto_is_frozen() -> None:
         last_activity_at=None,
         total_time_seconds=0,
     )
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         dto.status = "completed"  # type: ignore[misc]
 
 

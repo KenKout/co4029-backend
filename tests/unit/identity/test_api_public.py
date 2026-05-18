@@ -16,7 +16,6 @@ import pytest
 from abridgeai.features.identity.api import public
 from abridgeai.features.identity.api._dto import UserDTO, UserProfileDTO
 
-
 _EXPECTED_FUNCTIONS = (
     "get_user_by_id",
     "get_users_by_ids",

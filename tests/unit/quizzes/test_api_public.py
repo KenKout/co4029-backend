@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import AsyncIterator
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 
@@ -397,4 +397,4 @@ async def test_factory_does_not_lift_orm_into_caller_scope(
     assert run.generation_type == "material_index"
     assert isinstance(run.created_at, datetime)
     assert run.created_at.tzinfo is not None
-    assert run.created_at <= datetime.now(tz=timezone.utc)
+    assert run.created_at <= datetime.now(tz=UTC)

@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 import pytest
+from pydantic import ValidationError
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
@@ -31,7 +32,7 @@ def test_dto_is_frozen() -> None:
         completed_at=None,
         dropped_at=None,
     )
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         dto.status = "dropped"  # type: ignore[misc]
 
 

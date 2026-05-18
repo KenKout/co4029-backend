@@ -77,7 +77,6 @@ from abridgeai.features.materials.models import (
     ProcessingJob,
 )
 
-
 _STORAGE_BLOB_BY_VERSION_SQL = text(
     """
     SELECT so.bucket       AS bucket,

@@ -207,7 +207,7 @@ async def _update_run(
     if not sets:
         return
     sets.append("updated_at = NOW()")
-    sql = f"UPDATE generation_runs SET {', '.join(sets)} WHERE id = :id"
+    sql = f"UPDATE generation_runs SET {', '.join(sets)} WHERE id = :id"  # noqa: S608  # sets list is code-controlled, no user input
     await db.execute(text(sql), params)
 
 

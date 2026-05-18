@@ -22,10 +22,10 @@ from uuid import UUID
 from sqlalchemy import and_, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from abridgeai.features.courses.models import Course
 from abridgeai.core.pagination.cursor import (
     CursorPage,
 )
+from abridgeai.features.courses.models import Course
 
 _DEFAULT_LIMIT = 20
 _MAX_LIMIT = 100

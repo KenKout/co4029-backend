@@ -7,6 +7,11 @@ from uuid import UUID
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from abridgeai.core.pagination.cursor import (
+    CursorPage,
+    decode_cursor,
+    encode_cursor,
+)
 from abridgeai.features.access_control.api import public as access_control_api
 from abridgeai.features.courses.models import (
     Course,
@@ -17,11 +22,6 @@ from abridgeai.features.courses.models import (
     Module,
     ModuleItem,
     Tag,
-)
-from abridgeai.core.pagination.cursor import (
-    CursorPage,
-    decode_cursor,
-    encode_cursor,
 )
 from abridgeai.features.courses.visibility import (
     module_item_visible_clause,

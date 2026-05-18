@@ -36,7 +36,8 @@ def _load_timestamp_tables() -> tuple[str, ...]:
         / "0012_updated_at_trigger.py"
     )
     spec = importlib.util.spec_from_file_location("_mig_0012", migration_path)
-    assert spec and spec.loader, f"cannot load {migration_path}"
+    assert spec is not None, f"cannot load {migration_path}"
+    assert spec.loader is not None, f"cannot load {migration_path}"
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return tuple(module.TIMESTAMP_TABLES)
@@ -817,12 +818,12 @@ async def test_trigger_overwrites_stale_updated_at(engine: AsyncEngine, table: s
 
             stale = datetime(2020, 1, 1, tzinfo=UTC)
             await conn.execute(
-                text(f"UPDATE {table} SET updated_at = :stale WHERE {where}"),
+                text(f"UPDATE {table} SET updated_at = :stale WHERE {where}"),  # noqa: S608  # test fixture: table names from code-controlled list
                 {"stale": stale, **params},
             )
 
             after_row = await conn.execute(
-                text(f"SELECT updated_at FROM {table} WHERE {where}"),
+                text(f"SELECT updated_at FROM {table} WHERE {where}"),  # noqa: S608  # test fixture: table names from code-controlled list
                 params,
             )
             after = after_row.scalar_one()
