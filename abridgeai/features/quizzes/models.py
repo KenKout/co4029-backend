@@ -112,7 +112,7 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from abridgeai.core.db import (
     PGUUID,
@@ -177,6 +177,19 @@ class Quiz(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftDeleteMixin,
     )
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
+    questions: Mapped[list[QuizQuestion]] = relationship(
+        back_populates="quiz",
+        cascade="save-update, merge, refresh-expire, expunge",
+    )
+    attempts: Mapped[list[QuizAttempt]] = relationship(
+        back_populates="quiz",
+        cascade="save-update, merge, refresh-expire, expunge",
+    )
+    source_lessons: Mapped[list[QuizSourceLesson]] = relationship(
+        back_populates="quiz",
+        cascade="save-update, merge, refresh-expire, expunge",
+    )
+
 
 class QuizSourceLesson(CreatedAtMixin, Base):
     __tablename__ = "quiz_source_lessons"
@@ -191,6 +204,8 @@ class QuizSourceLesson(CreatedAtMixin, Base):
         ForeignKey("lessons.id", ondelete="NO ACTION"),
         primary_key=True,
     )
+
+    quiz: Mapped[Quiz] = relationship(back_populates="source_lessons")
 
 
 class QuizQuestion(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftDeleteMixin, Base):
@@ -246,6 +261,12 @@ class QuizQuestion(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftDele
     reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
+    quiz: Mapped[Quiz] = relationship(back_populates="questions")
+    revisions: Mapped[list[QuizQuestionRevision]] = relationship(
+        back_populates="question",
+        cascade="save-update, merge, refresh-expire, expunge",
+    )
+
 
 class QuizQuestionOption(
     UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftDeleteMixin, Base
@@ -290,6 +311,8 @@ class QuizQuestionRevision(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
         ForeignKey("users.id", ondelete="SET NULL"),
     )
 
+    question: Mapped[QuizQuestion] = relationship(back_populates="revisions")
+
 
 class QuizAttempt(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "quiz_attempts"
@@ -326,6 +349,12 @@ class QuizAttempt(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     passed: Mapped[bool | None] = mapped_column(Boolean)
     idempotency_key: Mapped[uuid.UUID | None] = mapped_column(PGUUID(as_uuid=True), unique=True)
 
+    quiz: Mapped[Quiz] = relationship(back_populates="attempts")
+    answers: Mapped[list[QuizAttemptAnswer]] = relationship(
+        back_populates="attempt",
+        cascade="save-update, merge, refresh-expire, expunge",
+    )
+
 
 class QuizAttemptAnswer(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "quiz_attempt_answers"
@@ -360,6 +389,8 @@ class QuizAttemptAnswer(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     ef_after: Mapped[Decimal | None] = mapped_column(Numeric(4, 2))
     interval_before_days: Mapped[int | None] = mapped_column(Integer)
     interval_after_days: Mapped[int | None] = mapped_column(Integer)
+
+    attempt: Mapped[QuizAttempt] = relationship(back_populates="answers")
 
 
 class GenerationRun(UUIDPrimaryKeyMixin, TimestampMixin, Base):
