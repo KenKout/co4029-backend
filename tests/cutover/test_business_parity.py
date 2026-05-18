@@ -1,7 +1,7 @@
 """Cutover business-parity dry-run (T9.3).
 
 These tests assert that ``backend-new`` produces sensible business outcomes for
-the canonical user flows that the cutover runbook (`docs/cutover/RUNBOOK.md`)
+the canonical user flows that the cutover runbook (`docs/frontend-cutover/RUNBOOK.md`)
 will gate on. They are NOT a structural diff against the legacy ``backend/``
 service -- the API contracts intentionally diverge (Phase 9 §4).
 
