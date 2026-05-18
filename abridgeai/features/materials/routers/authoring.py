@@ -33,14 +33,17 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import text
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from abridgeai.core.db import get_db
 from abridgeai.core.exceptions import NotFoundError
 from abridgeai.core.security import CurrentUser, get_current_user
 from abridgeai.features.access_control.policies import can_manage_course
+from abridgeai.features.courses.api import public as courses_api
 from abridgeai.features.courses.routers._deps import require_lesson_authoring_access
+from abridgeai.features.materials.api import public as materials_api
+from abridgeai.features.materials.models import LearningMaterialVersion
 from abridgeai.features.materials.schemas import (
     MaterialAuthoring,
     MaterialUpdate,
@@ -65,41 +68,32 @@ _DEFAULT_AUTHORING_PERM: tuple[str, ...] = ("course.update",)
 # ---------------------------------------------------------------------------
 
 
-_MATERIAL_TO_COURSE_SQL = text(
-    """
-    SELECT m.course_id     AS course_id,
-           c.owner_user_id AS owner_user_id
-    FROM learning_materials lm
-    JOIN lessons l  ON l.id = lm.lesson_id
-    JOIN modules m  ON m.id = l.module_id
-    JOIN courses c  ON c.id = m.course_id
-    WHERE lm.id = :material_id
-      AND lm.deleted_at IS NULL
-      AND l.deleted_at IS NULL
-      AND m.deleted_at IS NULL
-      AND c.deleted_at IS NULL
-    """
-)
+async def _resolve_material_to_course(
+    db: AsyncSession, material_id: UUID
+) -> tuple[UUID, UUID] | None:
+    ctx = await materials_api.get_material_with_lesson_context(db, material_id)
+    if ctx is None:
+        return None
+    course = await courses_api.get_course_by_id(db, ctx.course_id)
+    if course is None:
+        return None
+    return ctx.course_id, course.owner_user_id
 
 
-_VERSION_TO_COURSE_SQL = text(
-    """
-    SELECT m.course_id     AS course_id,
-           lmv.material_id AS material_id,
-           c.owner_user_id AS owner_user_id
-    FROM learning_material_versions lmv
-    JOIN learning_materials lm ON lm.id = lmv.material_id
-    JOIN lessons l  ON l.id = lm.lesson_id
-    JOIN modules m  ON m.id = l.module_id
-    JOIN courses c  ON c.id = m.course_id
-    WHERE lmv.id = :version_id
-      AND lmv.deleted_at IS NULL
-      AND lm.deleted_at IS NULL
-      AND l.deleted_at IS NULL
-      AND m.deleted_at IS NULL
-      AND c.deleted_at IS NULL
-    """
-)
+async def _resolve_version_to_course(
+    db: AsyncSession, version_id: UUID
+) -> tuple[UUID, UUID, UUID] | None:
+    stmt = select(LearningMaterialVersion.material_id).where(
+        LearningMaterialVersion.id == version_id
+    )
+    material_id = (await db.execute(stmt)).scalar_one_or_none()
+    if material_id is None:
+        return None
+    resolved = await _resolve_material_to_course(db, material_id)
+    if resolved is None:
+        return None
+    course_id, owner_user_id = resolved
+    return course_id, material_id, owner_user_id
 
 
 def _not_found(resource: str, resource_id: UUID) -> HTTPException:
@@ -153,13 +147,11 @@ def require_material_authoring_access(
         current_user: Annotated[CurrentUser, Depends(get_current_user)],
         db: Annotated[AsyncSession, Depends(get_db)],
     ) -> CurrentUser:
-        result = await db.execute(_MATERIAL_TO_COURSE_SQL, {"material_id": material_id})
-        row = result.mappings().one_or_none()
-        if row is None:
+        resolved = await _resolve_material_to_course(db, material_id)
+        if resolved is None:
             raise _not_found("material", material_id)
-        return await _enforce_course_permission(
-            db, current_user, row["course_id"], row["owner_user_id"], codes
-        )
+        course_id, owner_user_id = resolved
+        return await _enforce_course_permission(db, current_user, course_id, owner_user_id, codes)
 
     return dependency
 
@@ -182,16 +174,14 @@ def require_version_authoring_access(
         current_user: Annotated[CurrentUser, Depends(get_current_user)],
         db: Annotated[AsyncSession, Depends(get_db)],
     ) -> CurrentUser:
-        result = await db.execute(_VERSION_TO_COURSE_SQL, {"version_id": version_id})
-        row = result.mappings().one_or_none()
-        if row is None:
+        resolved = await _resolve_version_to_course(db, version_id)
+        if resolved is None:
             raise _not_found("material_version", version_id)
+        course_id, material_id, owner_user_id = resolved
         path_material = request.path_params.get("material_id")
-        if path_material is not None and str(path_material) != str(row["material_id"]):
+        if path_material is not None and str(path_material) != str(material_id):
             raise _not_found("material_version", version_id)
-        return await _enforce_course_permission(
-            db, current_user, row["course_id"], row["owner_user_id"], codes
-        )
+        return await _enforce_course_permission(db, current_user, course_id, owner_user_id, codes)
 
     return dependency
 

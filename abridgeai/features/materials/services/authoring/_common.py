@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Literal
 from uuid import UUID
 
 from abridgeai.core.exceptions import NotFoundError
+from abridgeai.features.materials.api import public as materials_api
 from abridgeai.features.materials.models import LearningMaterial, LearningMaterialVersion
 from abridgeai.features.materials.queries import get_material_for_authoring
 from abridgeai.features.materials.schemas import MaterialVersionAuthoring
@@ -197,26 +198,18 @@ async def require_version(db: AsyncSession, version_id: UUID) -> LearningMateria
 async def resolve_storage_view(db: AsyncSession, version: LearningMaterialVersion) -> _StorageView:
     """Return ``(bucket, object_key)`` for the version's storage row.
 
-    Raw SQL keeps us off the identity feature's ORM (the import-linter
-    "Features are independent" contract) — only ``bucket`` /
-    ``object_key`` are needed for the S3 helpers.
+    Delegates to :mod:`features.materials.api.public` so the cross-feature
+    ``storage_objects`` join (identity-owned table) stays inside the
+    materials feature's typed read surface — the import-linter
+    "Features are independent" contract forbids importing the identity
+    ``StorageObject`` ORM directly.
     """
-    from sqlalchemy import text  # noqa: PLC0415  -- localised raw-SQL escape hatch
-
-    row = (
-        await db.execute(
-            text(
-                "SELECT bucket, object_key FROM storage_objects "
-                "WHERE id = :id AND deleted_at IS NULL"
-            ),
-            {"id": version.storage_object_id},
-        )
-    ).first()
-    if row is None:
+    blob = await materials_api.get_storage_blob_for_version(db, version.id)
+    if blob is None:
         raise NotFoundError(
             f"Storage object {version.storage_object_id} for version {version.id} not found"
         )
-    return _StorageView(bucket=row.bucket, object_key=row.object_key)
+    return _StorageView(bucket=blob.bucket, object_key=blob.object_key)
 
 
 async def resolve_course_id_for_material(db: AsyncSession, material_id: UUID) -> UUID | None:
@@ -226,29 +219,13 @@ async def resolve_course_id_for_material(db: AsyncSession, material_id: UUID) ->
     ``require_course_permission("course.update")`` guard on
     material-scoped endpoints (FIX-SEC-1 perimeter).
     Returns ``None`` if the chain is broken or any row is soft-deleted.
-    """
-    from sqlalchemy import text  # noqa: PLC0415  -- localised raw-SQL escape hatch
 
-    row = (
-        await db.execute(
-            text(
-                """
-                SELECT m.course_id AS course_id
-                FROM learning_materials lm
-                JOIN lessons l ON l.id = lm.lesson_id
-                JOIN modules m ON m.id = l.module_id
-                JOIN courses c ON c.id = m.course_id
-                WHERE lm.id = :id
-                  AND lm.deleted_at IS NULL
-                  AND l.deleted_at IS NULL
-                  AND m.deleted_at IS NULL
-                  AND c.deleted_at IS NULL
-                """
-            ),
-            {"id": material_id},
-        )
-    ).first()
-    return None if row is None else row.course_id
+    Delegates to :func:`materials.api.public.get_material_with_lesson_context`
+    so the cross-feature ``lessons``/``modules``/``courses`` walk stays
+    behind the typed api.public surface.
+    """
+    ctx = await materials_api.get_material_with_lesson_context(db, material_id)
+    return None if ctx is None else ctx.course_id
 
 
 # ---------------------------------------------------------------------------
