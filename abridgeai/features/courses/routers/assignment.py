@@ -43,6 +43,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from abridgeai.core.db import get_db
 from abridgeai.core.exceptions import NotFoundError
 from abridgeai.core.security import CurrentUser
+from abridgeai.features.access_control.api import public as access_control_api
 from abridgeai.features.access_control.policies import (
     require_any_permission,
     require_course_permission,
@@ -130,36 +131,22 @@ def _not_found(detail: str) -> HTTPException:
     )
 
 
-_RESOLVE_CALLER_SCOPE_SQL = text(
-    """
-    SELECT ura.scope_kind,
-           ura.organization_id,
-           ura.org_unit_id
-    FROM user_role_assignments ura
-    WHERE ura.user_id = :user_id
-      AND ura.deleted_at IS NULL
-      AND ura.active_from <= NOW()
-      AND (ura.active_until IS NULL OR ura.active_until > NOW())
-    ORDER BY
-        CASE ura.scope_kind
-            WHEN 'course' THEN 1
-            WHEN 'org_unit' THEN 2
-            WHEN 'organization' THEN 3
-            WHEN 'global' THEN 4
-            ELSE 5
-        END
-    """
-)
+_SCOPE_PRIORITY: dict[str, int] = {
+    "course": 1,
+    "org_unit": 2,
+    "organization": 3,
+    "global": 4,
+}
 
 
 async def _resolve_caller_scope(
     db: AsyncSession, user_id: UUID
 ) -> tuple[str, UUID | None, UUID | None]:
-    result = await db.execute(_RESOLVE_CALLER_SCOPE_SQL, {"user_id": user_id})
-    row = result.first()
-    if row is None:
+    assignments = await access_control_api.get_role_assignments_for_user(db, user_id)
+    if not assignments:
         return ("global", None, None)
-    return (str(row.scope_kind), row.organization_id, row.org_unit_id)
+    most_specific = min(assignments, key=lambda a: _SCOPE_PRIORITY.get(a.scope_kind, 5))
+    return (most_specific.scope_kind, most_specific.organization_id, most_specific.org_unit_id)
 
 
 @router.get("/courses", response_model=list[CourseAuthoring])

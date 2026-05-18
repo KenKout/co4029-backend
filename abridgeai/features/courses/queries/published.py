@@ -7,6 +7,7 @@ from uuid import UUID
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from abridgeai.features.access_control.api import public as access_control_api
 from abridgeai.features.courses.models import (
     Course,
     CourseLearningOutcome,
@@ -308,32 +309,19 @@ async def list_published_course_outcomes(
     return list((await db.execute(stmt)).scalars().all())
 
 
-_USER_PRIMARY_ORG_SQL = text(
-    """
-    SELECT organization_id
-    FROM user_role_assignments
-    WHERE user_id = :user_id
-      AND scope_kind IN ('organization', 'org_unit', 'course')
-      AND organization_id IS NOT NULL
-      AND (active_until IS NULL OR active_until > NOW())
-    ORDER BY created_at DESC NULLS LAST
-    LIMIT 1
-    """
-)
-
-
 async def get_user_primary_organization_id(db: AsyncSession, user_id: UUID) -> UUID | None:
     """Resolve the requesting user's organization for org-scoped catalog reads.
 
-    Picks the most recent active scoped assignment from
-    ``user_role_assignments``. ``scope_kind='global'`` is intentionally
-    excluded — platform admins do not implicitly belong to one org and
-    must hit endpoints that accept an explicit org param. Returns
-    ``None`` for users with no scoped membership; the router then
-    treats the catalog as empty.
+    Delegates to :func:`access_control.api.public.get_user_primary_org`
+    so the cross-feature read goes through the canonical typed surface
+    (T31). ``scope_kind='global'`` is intentionally excluded by the
+    upstream surface — platform admins do not implicitly belong to one
+    org and must hit endpoints that accept an explicit org param.
+    Returns ``None`` for users with no scoped membership; the router
+    then treats the catalog as empty.
     """
-    result = await db.execute(_USER_PRIMARY_ORG_SQL, {"user_id": user_id})
-    return result.scalar_one_or_none()
+    org = await access_control_api.get_user_primary_org(db, user_id)
+    return org.id if org is not None else None
 
 
 _RESOURCE_STORAGE_TARGET_SQL = text(
