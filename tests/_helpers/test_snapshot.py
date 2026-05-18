@@ -43,7 +43,9 @@ def cleanup_test_capture() -> Path:
     path = _SNAPSHOTS_DIR / "test_capture.json"
     if path.exists():
         path.unlink()
-    return path
+    yield path
+    if path.exists():
+        path.unlink()
 
 
 @pytest.fixture
