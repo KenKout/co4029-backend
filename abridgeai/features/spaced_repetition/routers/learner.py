@@ -31,12 +31,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from abridgeai.core.cache.client import RedisFallbackError, get_cache
 from abridgeai.core.cache.keys import CARDS_DUE
 from abridgeai.core.db import get_db
-from abridgeai.core.security import CurrentUser, get_current_user
 from abridgeai.core.pagination.cursor import (
     decode_cursor,
     encode_cursor,
 )
-from abridgeai.features.courses.api.public import get_published_content_tree
+from abridgeai.core.security import CurrentUser, get_current_user
+from abridgeai.features.courses.api.public import get_published_lessons_for_course
 from abridgeai.features.quizzes.api.public import get_quiz_question_id_set_by_lesson
 from abridgeai.features.spaced_repetition.models import StudentCardState
 from abridgeai.features.spaced_repetition.queries import (
@@ -252,18 +252,11 @@ async def get_my_course_sr_overview(
     * ``locked``  — eligible AND ``kr_estimate < 0.1`` (treated as
       not-yet-engaged; mirrors the "no progress yet" UX).
     """
-    tree = await get_published_content_tree(db, course_id)
-    if tree is None:
+    tree = await get_published_lessons_for_course(db, course_id)
+    if not tree:
         raise _not_found("course", course_id)
 
-    published_lessons: list[tuple[UUID, str]] = []
-    for item in tree.items:
-        if item.lesson is None:
-            continue
-        published_lessons.append((item.lesson.id, item.lesson.title))
-
-    if not published_lessons:
-        raise _not_found("course", course_id)
+    published_lessons: list[tuple[UUID, str]] = [(lesson.id, lesson.title) for lesson in tree]
 
     student_id = current_user.user_id
     items: list[LessonOverviewItem] = []

@@ -26,13 +26,13 @@ from abridgeai.features.courses.api._dto import (
     OrgDTO,
 )
 
-
 _EXPECTED_FUNCTIONS = (
     "get_course_by_id",
     "get_lesson_by_id",
     "get_module_by_id",
     "walk_resource_to_course",
     "get_published_content_tree",
+    "get_published_lessons_for_course",
     "find_module_items",
     "next_module_item_position",
     "insert_module_item",
@@ -255,3 +255,197 @@ def test_module_docstring_documents_public_contract() -> None:
     doc = (public.__doc__ or "").lower()
     assert "cross-feature" in doc
     assert "soft-delete" in doc
+
+
+from sqlalchemy import text  # noqa: E402
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession  # noqa: E402
+
+from abridgeai.features.courses.api.public import (  # noqa: E402
+    get_published_lessons_for_course,
+)
+
+
+async def _seed_course_tree(
+    session: AsyncSession,
+    *,
+    org_id: UUID,
+    owner_id: UUID,
+    course_id: UUID,
+    course_status: str = "draft",
+    course_deleted: bool = False,
+    module_status: str = "published",
+    lesson_specs: tuple[tuple[UUID, str], ...] = (),
+) -> None:
+    """``lesson_specs`` is a tuple of ``(lesson_id, lesson_status)`` pairs;
+    each is also linked via a ``module_items`` row of ``item_type='lesson'``.
+    """
+    suffix = course_id.hex[:8]
+    await session.execute(
+        text(
+            "INSERT INTO organizations (id, slug, name, status) "
+            "VALUES (:id, :slug, :name, 'active') ON CONFLICT DO NOTHING"
+        ),
+        {"id": str(org_id), "slug": f"o-{suffix}", "name": "O"},
+    )
+    await session.execute(
+        text("INSERT INTO users (id, primary_email) VALUES (:id, :email) ON CONFLICT DO NOTHING"),
+        {"id": str(owner_id), "email": f"u-{suffix}@e.com"},
+    )
+    deleted_clause = "NOW()" if course_deleted else "NULL"
+    await session.execute(
+        text(
+            "INSERT INTO courses "  # noqa: S608  # test fixture: deleted_clause is a code-controlled literal
+            "(id, organization_id, owner_user_id, slug, title, status, deleted_at) "
+            f"VALUES (:id, :org, :owner, :slug, :title, :status, {deleted_clause})"
+        ),
+        {
+            "id": str(course_id),
+            "org": str(org_id),
+            "owner": str(owner_id),
+            "slug": f"c-{suffix}",
+            "title": "C",
+            "status": course_status,
+        },
+    )
+    module_id = uuid4()
+    await session.execute(
+        text(
+            "INSERT INTO modules (id, course_id, title, position, status) "
+            "VALUES (:id, :c, :title, 1, :status)"
+        ),
+        {
+            "id": str(module_id),
+            "c": str(course_id),
+            "title": "M",
+            "status": module_status,
+        },
+    )
+    for idx, (lesson_id, lesson_status) in enumerate(lesson_specs, start=1):
+        await session.execute(
+            text(
+                "INSERT INTO lessons "
+                "(id, module_id, slug, title, status) "
+                "VALUES (:id, :m, :slug, :title, :status)"
+            ),
+            {
+                "id": str(lesson_id),
+                "m": str(module_id),
+                "slug": f"l-{lesson_id.hex[:8]}",
+                "title": f"L{idx}",
+                "status": lesson_status,
+            },
+        )
+        await session.execute(
+            text(
+                "INSERT INTO module_items "
+                "(id, module_id, item_type, lesson_id, position) "
+                "VALUES (:id, :m, 'lesson', :l, :pos)"
+            ),
+            {
+                "id": str(uuid4()),
+                "m": str(module_id),
+                "l": str(lesson_id),
+                "pos": idx,
+            },
+        )
+
+
+@pytest.mark.asyncio
+async def test_get_published_lessons_for_course_returns_lessons_in_draft_course(
+    test_engine: AsyncEngine,
+) -> None:
+    org_id = uuid4()
+    owner_id = uuid4()
+    course_id = uuid4()
+    lesson_a = uuid4()
+    lesson_b = uuid4()
+
+    async with test_engine.connect() as conn:
+        trans = await conn.begin()
+        session = AsyncSession(bind=conn, expire_on_commit=False)
+        try:
+            await _seed_course_tree(
+                session,
+                org_id=org_id,
+                owner_id=owner_id,
+                course_id=course_id,
+                course_status="draft",
+                lesson_specs=((lesson_a, "published"), (lesson_b, "published")),
+            )
+            await session.flush()
+
+            lessons = await get_published_lessons_for_course(session, course_id)
+        finally:
+            await trans.rollback()
+
+    returned_ids = {lesson.id for lesson in lessons}
+    assert returned_ids == {lesson_a, lesson_b}
+    for lesson in lessons:
+        assert isinstance(lesson, LessonDTO)
+        assert lesson.status == "published"
+
+
+@pytest.mark.asyncio
+async def test_get_published_lessons_for_course_excludes_non_published(
+    test_engine: AsyncEngine,
+) -> None:
+    org_id = uuid4()
+    owner_id = uuid4()
+    course_id = uuid4()
+    pub_lesson = uuid4()
+    draft_lesson = uuid4()
+
+    async with test_engine.connect() as conn:
+        trans = await conn.begin()
+        session = AsyncSession(bind=conn, expire_on_commit=False)
+        try:
+            await _seed_course_tree(
+                session,
+                org_id=org_id,
+                owner_id=owner_id,
+                course_id=course_id,
+                course_status="published",
+                lesson_specs=(
+                    (pub_lesson, "published"),
+                    (draft_lesson, "draft"),
+                ),
+            )
+            await session.flush()
+
+            lessons = await get_published_lessons_for_course(session, course_id)
+        finally:
+            await trans.rollback()
+
+    returned_ids = {lesson.id for lesson in lessons}
+    assert returned_ids == {pub_lesson}
+
+
+@pytest.mark.asyncio
+async def test_get_published_lessons_for_course_soft_deleted_course_returns_empty(
+    test_engine: AsyncEngine,
+) -> None:
+    org_id = uuid4()
+    owner_id = uuid4()
+    course_id = uuid4()
+    lesson_id = uuid4()
+
+    async with test_engine.connect() as conn:
+        trans = await conn.begin()
+        session = AsyncSession(bind=conn, expire_on_commit=False)
+        try:
+            await _seed_course_tree(
+                session,
+                org_id=org_id,
+                owner_id=owner_id,
+                course_id=course_id,
+                course_status="published",
+                course_deleted=True,
+                lesson_specs=((lesson_id, "published"),),
+            )
+            await session.flush()
+
+            lessons = await get_published_lessons_for_course(session, course_id)
+        finally:
+            await trans.rollback()
+
+    assert lessons == []

@@ -91,6 +91,45 @@ async def get_published_content_tree(db: AsyncSession, course_id: UUID) -> Conte
     )
 
 
+async def get_published_lessons_for_course(db: AsyncSession, course_id: UUID) -> list[LessonDTO]:
+    """Return published lessons in a course regardless of ``courses.status``.
+
+    The course row must exist and not be soft-deleted (the soft-delete
+    loader-criteria filter applies automatically), but its publish
+    status is NOT gated -- a draft course with published modules +
+    published lessons still returns those lessons. This matches the
+    pre-T30 SR-overview semantic and is the correct behaviour when the
+    caller has already verified course access via a separate
+    authorization step (e.g. enrollment / role check) and only wants the
+    lesson roster for a status-classification pass.
+
+    Soft-delete and publish gates that *do* apply:
+
+    * ``modules.status = 'published'`` AND ``modules.deleted_at IS NULL``
+    * ``lessons.status = 'published'`` AND ``lessons.deleted_at IS NULL``
+    * ``courses.deleted_at IS NULL`` (via the loader-criteria join)
+
+    Ordering: ``Module.position`` then ``Lesson.id`` (deterministic;
+    ``Lesson.position`` is intentionally absent per Reconciliation
+    \u00a7A2 and ordering across lessons within a module is otherwise
+    carried by the parent ``ModuleItem`` link, which is not required
+    here -- the SR overview only needs a stable lesson roster).
+    """
+    stmt = (
+        select(Lesson)
+        .join(Module, Module.id == Lesson.module_id)
+        .join(Course, Course.id == Module.course_id)
+        .where(
+            Course.id == course_id,
+            Module.status == "published",
+            Lesson.status == "published",
+        )
+        .order_by(Module.position, Lesson.id)
+    )
+    rows: Sequence[Lesson] = (await db.execute(stmt)).scalars().all()
+    return [LessonDTO.model_validate(row) for row in rows]
+
+
 async def find_module_items(db: AsyncSession, *, lesson_id: UUID) -> list[ModuleItemDTO]:
     stmt = select(ModuleItem).where(ModuleItem.lesson_id == lesson_id)
     rows: Sequence[ModuleItem] = (await db.execute(stmt)).scalars().all()
@@ -192,6 +231,7 @@ __all__ = [
     "get_lesson_title",
     "get_module_by_id",
     "get_published_content_tree",
+    "get_published_lessons_for_course",
     "get_user_primary_org",
     "insert_module_item",
     "next_module_item_position",
