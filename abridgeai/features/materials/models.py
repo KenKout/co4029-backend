@@ -76,7 +76,7 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from abridgeai.core.db import Base
 from abridgeai.core.db.mixins import (
@@ -159,6 +159,13 @@ class LearningMaterial(
         nullable=True,
     )
 
+    # ``foreign_keys`` disambiguates against ``LearningMaterial.current_version_id``.
+    versions: Mapped[list[LearningMaterialVersion]] = relationship(
+        back_populates="material",
+        foreign_keys="[LearningMaterialVersion.material_id]",
+        cascade="save-update, merge, refresh-expire, expunge",
+    )
+
 
 class LearningMaterialVersion(
     UUIDPrimaryKeyMixin,
@@ -217,6 +224,15 @@ class LearningMaterialVersion(
         DateTime(timezone=True), nullable=False, server_default=text("NOW()")
     )
     processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    material: Mapped[LearningMaterial] = relationship(
+        back_populates="versions",
+        foreign_keys=[material_id],
+    )
+    chunks: Mapped[list[DocumentChunk]] = relationship(
+        back_populates="version",
+        cascade="save-update, merge, refresh-expire, expunge",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -283,6 +299,8 @@ class DocumentChunk(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
         nullable=True,
     )
     content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+
+    version: Mapped[LearningMaterialVersion] = relationship(back_populates="chunks")
 
 
 # ---------------------------------------------------------------------------
