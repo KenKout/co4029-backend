@@ -114,9 +114,7 @@ async def get_t_exp_for_question(
     questions may legitimately have it unset).
     """
 
-    stmt = select(QuizQuestion.expected_response_time_ms).where(
-        QuizQuestion.id == question_id
-    )
+    stmt = select(QuizQuestion.expected_response_time_ms).where(QuizQuestion.id == question_id)
     return (await db.execute(stmt)).scalar_one_or_none()
 
 

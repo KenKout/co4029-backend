@@ -149,8 +149,7 @@ async def scenario(engine: AsyncEngine) -> AsyncIterator[dict]:
         )
         await conn.execute(
             text(
-                "INSERT INTO quiz_source_lessons (quiz_id, lesson_id) "
-                "VALUES (:quiz_id, :lesson_id)"
+                "INSERT INTO quiz_source_lessons (quiz_id, lesson_id) VALUES (:quiz_id, :lesson_id)"
             ),
             {"quiz_id": quiz_id, "lesson_id": lesson_id},
         )
@@ -213,9 +212,7 @@ async def scenario(engine: AsyncEngine) -> AsyncIterator[dict]:
             {"m": module_id, "c": course_id},
         )
         await conn.execute(text("DELETE FROM quiz_attempts WHERE quiz_id = :q"), {"q": quiz_id})
-        await conn.execute(
-            text("DELETE FROM quiz_questions WHERE quiz_id = :q"), {"q": quiz_id}
-        )
+        await conn.execute(text("DELETE FROM quiz_questions WHERE quiz_id = :q"), {"q": quiz_id})
         await conn.execute(
             text("DELETE FROM quiz_source_lessons WHERE quiz_id = :q"), {"q": quiz_id}
         )
@@ -353,9 +350,7 @@ async def test_get_quiz_question_id_set_by_lesson(
         ids = await get_quiz_question_id_set_by_lesson(session, scenario["lesson_id"])
 
     assert isinstance(ids, frozenset)
-    assert ids == frozenset(
-        {scenario["question_a_id"], scenario["question_b_id"]}
-    )
+    assert ids == frozenset({scenario["question_a_id"], scenario["question_b_id"]})
 
     async with session_factory() as session:
         empty = await get_quiz_question_id_set_by_lesson(session, uuid.uuid4())
