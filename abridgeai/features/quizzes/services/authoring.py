@@ -32,6 +32,7 @@ from uuid import UUID
 from abridgeai.core.db.recursive_delete import soft_delete_cascade
 from abridgeai.core.exceptions import AppError, ConflictError, NotFoundError
 from abridgeai.core.security import CurrentUser, utcnow
+from abridgeai.features.courses.api import public as courses_api
 from abridgeai.features.quizzes.models import (
     GenerationRun,
     Quiz,
@@ -74,23 +75,11 @@ async def _require_question(db: AsyncSession, question_id: UUID) -> QuizQuestion
 
 
 async def _resolve_module_course(db: AsyncSession, module_id: UUID) -> UUID:
-    """Look up ``modules.course_id`` via raw SQL (cross-feature read).
-
-    The features-are-independent import-linter contract forbids importing
-    the courses ORM from quizzes; raw SQL is the documented escape hatch
-    (mirrors :func:`features.materials.services.authoring.resolve_course_id_for_material`).
-    """
-    from sqlalchemy import text  # noqa: PLC0415
-
-    row = (
-        await db.execute(
-            text("SELECT course_id FROM modules WHERE id = :id AND deleted_at IS NULL"),
-            {"id": module_id},
-        )
-    ).first()
-    if row is None:
+    """Look up ``modules.course_id`` via :mod:`courses.api.public`."""
+    module = await courses_api.get_module_by_id(db, module_id)
+    if module is None:
         raise NotFoundError(f"Module {module_id} not found")
-    return UUID(str(row.course_id))
+    return module.course_id
 
 
 async def _ensure_module_item(db: AsyncSession, *, module_id: UUID, quiz_id: UUID) -> None:
@@ -106,16 +95,7 @@ async def _ensure_module_item(db: AsyncSession, *, module_id: UUID, quiz_id: UUI
     ).first()
     if existing is not None:
         return
-    next_pos_row = (
-        await db.execute(
-            text(
-                "SELECT COALESCE(MAX(position), 0) + 1 AS next_pos "
-                "FROM module_items WHERE module_id = :module_id"
-            ),
-            {"module_id": module_id},
-        )
-    ).first()
-    next_pos = int(next_pos_row.next_pos) if next_pos_row is not None else 1
+    next_pos = await courses_api.next_module_item_position(db, module_id)
     await db.execute(
         text(
             "INSERT INTO module_items (id, module_id, item_type, quiz_id, position, "

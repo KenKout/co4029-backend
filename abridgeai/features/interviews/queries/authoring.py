@@ -3,8 +3,9 @@
 Plan §6.3. Unlike :mod:`abridgeai.features.interviews.queries.published`
 these queries return interview configs / outcomes / questions in *all*
 states (draft, published, archived) so the teacher dashboard can show
-in-progress work. Soft-deleted rows are still excluded by default
-(T0.7 loader-criteria); admin/restore flows pass ``include_deleted``.
+in-progress work. Soft-deleted rows are excluded by the T0.7
+loader-criteria listener; the authoring path has no restore surface
+(per Metis E3a — confirmed no callers reach the deleted set).
 """
 
 from __future__ import annotations
@@ -24,19 +25,13 @@ from abridgeai.features.interviews.models import (
 async def get_interview_for_authoring(
     db: AsyncSession,
     config_id: UUID,
-    *,
-    include_deleted: bool = False,
 ) -> InterviewConfig | None:
     """Interview config by id including draft / archived states.
 
-    By default the T0.7 loader-criteria filters soft-deleted rows.
-    Pass ``include_deleted=True`` to surface deleted configs for admin
-    restore workflows — the listener honours the
-    ``execution_options(include_deleted=True)`` escape hatch.
+    Soft-deleted rows are filtered by the T0.7 loader-criteria listener;
+    Metis E3a confirmed no authoring caller needs the deleted set.
     """
     stmt = select(InterviewConfig).where(InterviewConfig.id == config_id)
-    if include_deleted:
-        stmt = stmt.execution_options(include_deleted=True)
     return (await db.execute(stmt)).scalar_one_or_none()
 
 

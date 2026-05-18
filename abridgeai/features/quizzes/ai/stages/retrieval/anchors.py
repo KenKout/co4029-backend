@@ -21,11 +21,8 @@ import logging
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
-from sqlalchemy import bindparam, text
-from sqlalchemy.dialects.postgresql import ARRAY
-from sqlalchemy.dialects.postgresql import UUID as PG_UUID
-
 from abridgeai.ai.retrieval import retrieve_kg_context_for_anchors
+from abridgeai.features.courses.api import public as courses_api
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -78,9 +75,7 @@ async def build_query_anchors(
         return [cleaned] if cleaned else []
 
     focus_topics = [
-        t.strip()
-        for t in (config.get("focus_topics") or [])
-        if isinstance(t, str) and t.strip()
+        t.strip() for t in (config.get("focus_topics") or []) if isinstance(t, str) and t.strip()
     ]
     if focus_topics:
         return focus_topics[:MAX_ANCHORS]
@@ -128,21 +123,16 @@ def _kg_lesson_ids(config: dict[str, Any], quiz: Quiz) -> list[UUID]:
     return parsed
 
 
-async def _source_lesson_titles(
-    db: AsyncSession, config: dict[str, Any]
-) -> list[str]:
+async def _source_lesson_titles(db: AsyncSession, config: dict[str, Any]) -> list[str]:
     lesson_ids = _kg_lesson_ids_loose(config)
     if not lesson_ids:
         return []
-
-    stmt = text(
-        "SELECT title FROM lessons "
-        "WHERE id = ANY(CAST(:lesson_ids AS uuid[])) "
-        "  AND deleted_at IS NULL"
-    ).bindparams(bindparam("lesson_ids", type_=ARRAY(PG_UUID(as_uuid=True))))
-
-    result = await db.execute(stmt, {"lesson_ids": lesson_ids})
-    return [str(row[0]) for row in result.all() if row[0]]
+    titles: list[str] = []
+    for lesson_id in lesson_ids:
+        title = await courses_api.get_lesson_title(db, lesson_id)
+        if title:
+            titles.append(title)
+    return titles
 
 
 def _kg_lesson_ids_loose(config: dict[str, Any]) -> list[UUID]:

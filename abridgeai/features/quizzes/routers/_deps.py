@@ -7,19 +7,23 @@ that mirrors :func:`features.access_control.policies.require_course_permission`.
 
 Two factories cover the quiz authoring path-param shapes:
 
-* :func:`require_quiz_authoring_access` — resolves ``quiz_id → course_id``
+* :func:`require_quiz_authoring_access` -- resolves ``quiz_id -> course_id``
   via the ``quizzes.course_id`` column directly.
-* :func:`require_question_authoring_access` — resolves
-  ``question_id → quiz → course`` (joins quiz_questions → quizzes); a
+* :func:`require_question_authoring_access` -- resolves
+  ``question_id -> quiz -> course`` (quiz_questions ORM, then quiz ORM); a
   question's URL also carries ``quiz_id``, which we cross-check so a
   request that smuggles a foreign ``quiz_id`` gets a 404 (no information
   leak).
 
 Why a separate module: keeping these wrappers out of ``authoring.py``
-makes the security perimeter independently auditable — the FIX-SEC-1
+makes the security perimeter independently auditable -- the FIX-SEC-1
 grep guard asserts every authoring endpoint depends on a wrapper from
 this file (or :func:`require_course_permission`), never on a bare
 :func:`get_current_user`.
+
+Cross-feature reads route through :mod:`features.courses.api.public` so
+the ``Features are independent`` import-linter contract holds without
+per-edge ``ignore_imports`` entries (T35).
 """
 
 from __future__ import annotations
@@ -29,44 +33,18 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import Depends, HTTPException, Request, status
-from sqlalchemy import text
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from abridgeai.core.db import get_db
 from abridgeai.core.security import CurrentUser, get_current_user
 from abridgeai.features.access_control.policies import can_manage_course
+from abridgeai.features.courses.api import public as courses_api
+from abridgeai.features.quizzes.models import Quiz, QuizQuestion
 
 _DEFAULT_AUTHORING_PERMS: tuple[str, ...] = ("course.update",)
 
 SubResourceDependency = Callable[..., Awaitable[CurrentUser]]
-
-
-_QUIZ_TO_COURSE_SQL = text(
-    """
-    SELECT q.course_id     AS course_id,
-           c.owner_user_id AS owner_user_id
-    FROM quizzes q
-    JOIN courses c ON c.id = q.course_id
-    WHERE q.id = :quiz_id
-      AND q.deleted_at IS NULL
-      AND c.deleted_at IS NULL
-    """
-)
-
-_QUESTION_TO_COURSE_SQL = text(
-    """
-    SELECT q.course_id     AS course_id,
-           q.id            AS quiz_id,
-           c.owner_user_id AS owner_user_id
-    FROM quiz_questions qq
-    JOIN quizzes q  ON q.id = qq.quiz_id
-    JOIN courses c  ON c.id = q.course_id
-    WHERE qq.id = :question_id
-      AND qq.deleted_at IS NULL
-      AND q.deleted_at IS NULL
-      AND c.deleted_at IS NULL
-    """
-)
 
 
 def _not_found(resource: str, resource_id: UUID) -> HTTPException:
@@ -104,10 +82,27 @@ async def _check_course_permission(
     raise _permission_denied(codes=codes, course_id=course_id)
 
 
+async def _resolve_quiz_course(db: AsyncSession, quiz_id: UUID) -> tuple[UUID, UUID] | None:
+    """Return ``(course_id, owner_user_id)`` for a non-deleted quiz.
+
+    The quizzes feature owns ``Quiz``, so the ORM read is feature-local;
+    the courses-side ``owner_user_id`` is read through
+    :mod:`courses.api.public` so this module never imports the courses
+    ORM. Soft-deletion on ``Quiz`` is auto-filtered by the T0.7 listener.
+    """
+    quiz = (await db.execute(select(Quiz.course_id).where(Quiz.id == quiz_id))).scalar_one_or_none()
+    if quiz is None:
+        return None
+    course = await courses_api.get_course_by_id(db, quiz)
+    if course is None:
+        return None
+    return course.id, course.owner_user_id
+
+
 def require_quiz_authoring_access(
     *perm_codes: str,
 ) -> SubResourceDependency:
-    """Walks ``quiz_id → course_id`` and enforces course perms.
+    """Walks ``quiz_id -> course_id`` and enforces course perms.
 
     The path parameter MUST be named ``quiz_id``.
     """
@@ -118,13 +113,11 @@ def require_quiz_authoring_access(
         current_user: Annotated[CurrentUser, Depends(get_current_user)],
         db: Annotated[AsyncSession, Depends(get_db)],
     ) -> CurrentUser:
-        result = await db.execute(_QUIZ_TO_COURSE_SQL, {"quiz_id": quiz_id})
-        row = result.mappings().one_or_none()
-        if row is None:
+        resolved = await _resolve_quiz_course(db, quiz_id)
+        if resolved is None:
             raise _not_found("quiz", quiz_id)
-        return await _check_course_permission(
-            db, current_user, row["course_id"], row["owner_user_id"], codes
-        )
+        course_id, owner_user_id = resolved
+        return await _check_course_permission(db, current_user, course_id, owner_user_id, codes)
 
     return dependency
 
@@ -132,11 +125,11 @@ def require_quiz_authoring_access(
 def require_question_authoring_access(
     *perm_codes: str,
 ) -> SubResourceDependency:
-    """Walks ``question_id → quiz → course`` and enforces course perms.
+    """Walks ``question_id -> quiz -> course`` and enforces course perms.
 
     The path parameter MUST be named ``question_id``. If a sibling
     ``quiz_id`` path parameter is also present it is cross-checked
-    against the question's parent — a request smuggling a foreign
+    against the question's parent -- a request smuggling a foreign
     ``quiz_id`` is rejected with 404 to avoid leaking existence.
     """
     codes = perm_codes or _DEFAULT_AUTHORING_PERMS
@@ -147,16 +140,19 @@ def require_question_authoring_access(
         current_user: Annotated[CurrentUser, Depends(get_current_user)],
         db: Annotated[AsyncSession, Depends(get_db)],
     ) -> CurrentUser:
-        result = await db.execute(_QUESTION_TO_COURSE_SQL, {"question_id": question_id})
-        row = result.mappings().one_or_none()
-        if row is None:
+        question_quiz = (
+            await db.execute(select(QuizQuestion.quiz_id).where(QuizQuestion.id == question_id))
+        ).scalar_one_or_none()
+        if question_quiz is None:
             raise _not_found("quiz_question", question_id)
         path_quiz = request.path_params.get("quiz_id")
-        if path_quiz is not None and str(path_quiz) != str(row["quiz_id"]):
+        if path_quiz is not None and str(path_quiz) != str(question_quiz):
             raise _not_found("quiz_question", question_id)
-        return await _check_course_permission(
-            db, current_user, row["course_id"], row["owner_user_id"], codes
-        )
+        resolved = await _resolve_quiz_course(db, question_quiz)
+        if resolved is None:
+            raise _not_found("quiz_question", question_id)
+        course_id, owner_user_id = resolved
+        return await _check_course_permission(db, current_user, course_id, owner_user_id, codes)
 
     return dependency
 

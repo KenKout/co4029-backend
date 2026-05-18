@@ -2,10 +2,10 @@
 
 A caller with ``system.administer`` bypasses scoping (returns ``None`` ->
 global view). A caller with only ``system.stats.read`` (Manager / HOD) gets
-their organization derived from ``organization_memberships`` (preferred) or
-``user_role_assignments`` as a fallback. Returns ``None`` when no
-organization can be resolved -- callers MUST treat this as "no data
-visible" rather than as global access.
+their organization derived from active ``user_role_assignments`` via
+:func:`access_control.api.public.get_user_primary_org`. Returns ``None``
+when no organization can be resolved -- callers MUST treat this as "no
+data visible" rather than as global access.
 """
 
 from __future__ import annotations
@@ -13,32 +13,11 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 from uuid import UUID
 
-from sqlalchemy import text
-
 from abridgeai.core.security import CurrentUser
+from abridgeai.features.access_control.api import public as access_control_api
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
-
-
-_RESOLVE_ORG_SQL = text(
-    """
-    SELECT om.organization_id
-    FROM organization_memberships om
-    WHERE om.user_id = :user_id
-      AND om.deleted_at IS NULL
-      AND om.status = 'active'
-    UNION
-    SELECT ura.organization_id
-    FROM user_role_assignments ura
-    WHERE ura.user_id = :user_id
-      AND ura.deleted_at IS NULL
-      AND ura.organization_id IS NOT NULL
-      AND ura.active_from <= NOW()
-      AND (ura.active_until IS NULL OR ura.active_until > NOW())
-    LIMIT 1
-    """
-)
 
 
 async def resolve_admin_scope(db: AsyncSession, current_user: CurrentUser) -> UUID | None:
@@ -49,11 +28,8 @@ async def resolve_admin_scope(db: AsyncSession, current_user: CurrentUser) -> UU
     """
     if "system.administer" in current_user.permissions:
         return None
-    row = (await db.execute(_RESOLVE_ORG_SQL, {"user_id": current_user.user_id})).first()
-    if row is None:
-        return None
-    org_id: UUID = row[0]
-    return org_id
+    org = await access_control_api.get_user_primary_org(db, current_user.user_id)
+    return org.id if org is not None else None
 
 
 __all__ = ["resolve_admin_scope"]

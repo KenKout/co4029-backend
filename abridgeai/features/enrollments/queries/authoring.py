@@ -5,15 +5,14 @@ from uuid import UUID
 
 from sqlalchemy import and_, select, text
 
+from abridgeai.features.courses.api import public as courses_api
 from abridgeai.features.enrollments.models import Enrollment, InvitationCode
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
 
-async def list_enrollments_for_course(
-    db: AsyncSession, course_id: UUID
-) -> list[Enrollment]:
+async def list_enrollments_for_course(db: AsyncSession, course_id: UUID) -> list[Enrollment]:
     result = await db.execute(
         select(Enrollment)
         .where(Enrollment.course_id == course_id)
@@ -31,9 +30,7 @@ async def list_enrollments_for_user(db: AsyncSession, user_id: UUID) -> list[Enr
     return list(result.scalars().all())
 
 
-async def find_enrollment(
-    db: AsyncSession, course_id: UUID, student_id: UUID
-) -> Enrollment | None:
+async def find_enrollment(db: AsyncSession, course_id: UUID, student_id: UUID) -> Enrollment | None:
     result = await db.execute(
         select(Enrollment).where(
             and_(
@@ -45,9 +42,7 @@ async def find_enrollment(
     return result.scalar_one_or_none()
 
 
-async def find_invitation_code_by_string(
-    db: AsyncSession, code: str
-) -> InvitationCode | None:
+async def find_invitation_code_by_string(db: AsyncSession, code: str) -> InvitationCode | None:
     result = await db.execute(
         select(InvitationCode).where(
             and_(
@@ -97,26 +92,16 @@ _LOOKUP_USERS_BY_EMAIL_SQL = text(
 )
 
 
-async def lookup_users_by_email(
-    db: AsyncSession, emails: list[str]
-) -> list[dict[str, Any]]:
+async def lookup_users_by_email(db: AsyncSession, emails: list[str]) -> list[dict[str, Any]]:
     if not emails:
         return []
     rows = (await db.execute(_LOOKUP_USERS_BY_EMAIL_SQL, {"emails": emails})).mappings()
     return [dict(row) for row in rows]
 
 
-_GET_COURSE_ORG_SQL = text(
-    "SELECT organization_id FROM courses WHERE id = :course_id AND deleted_at IS NULL"
-)
-
-
-async def get_course_organization_id(
-    db: AsyncSession, course_id: UUID
-) -> UUID | None:
-    result = await db.execute(_GET_COURSE_ORG_SQL, {"course_id": course_id})
-    row = result.scalar_one_or_none()
-    return None if row is None else UUID(str(row))
+async def get_course_organization_id(db: AsyncSession, course_id: UUID) -> UUID | None:
+    course = await courses_api.get_course_by_id(db, course_id)
+    return course.organization_id if course is not None else None
 
 
 _INSERT_USER_SQL = text(
