@@ -44,7 +44,7 @@ from sqlalchemy import (
     UniqueConstraint,
     text,
 )
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from abridgeai.core.db import (
     PGUUID,
@@ -92,9 +92,7 @@ class Enrollment(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, Base):
         ForeignKey("users.id", ondelete="CASCADE"),
         nullable=False,
     )
-    status: Mapped[str] = mapped_column(
-        String(20), nullable=False, server_default=text("'active'")
-    )
+    status: Mapped[str] = mapped_column(String(20), nullable=False, server_default=text("'active'"))
     waitlist_position: Mapped[int | None] = mapped_column(Integer)
     source: Mapped[str] = mapped_column(
         String(20), nullable=False, server_default=text("'self_enroll'")
@@ -109,10 +107,13 @@ class Enrollment(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, Base):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     dropped_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
+    invitation_code: Mapped[InvitationCode | None] = relationship(
+        back_populates="enrollments",
+        foreign_keys=[invitation_code_id],
+    )
 
-class InvitationCode(
-    UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftDeleteMixin, Base
-):
+
+class InvitationCode(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftDeleteMixin, Base):
     """Manager-issued invitation code. NOT student-redeemable in T7.1.
 
     Per the locked T7.1 decision, codes are tracking artefacts that
@@ -143,11 +144,13 @@ class InvitationCode(
     code: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     max_uses: Mapped[int | None] = mapped_column(Integer)
-    current_uses: Mapped[int] = mapped_column(
-        Integer, nullable=False, server_default=text("0")
-    )
-    is_active: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, server_default=text("TRUE")
+    current_uses: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("TRUE"))
+
+    enrollments: Mapped[list[Enrollment]] = relationship(
+        back_populates="invitation_code",
+        foreign_keys="[Enrollment.invitation_code_id]",
+        cascade="save-update, merge, refresh-expire, expunge",
     )
 
 
