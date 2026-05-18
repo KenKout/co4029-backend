@@ -1,9 +1,11 @@
 """Student-self performance metric reads (T7.5.7).
 
 Each function returns a single learner's view of their own progress through a
-lesson. Cross-feature reads use raw ``text(...)`` against table names so the
-``Features are independent`` import-linter contract is upheld — we never
-import ``QuizQuestion``, ``Lesson``, or ``QuizSourceLesson`` here.
+lesson. SR-owned tables (``student_card_state``) are read through the local
+ORM; cross-feature reads against quizzes go through
+:mod:`features.quizzes.api.public` (Wave 5 T30b). Quiz-question id sets are
+fetched once per request and combined with a local SR-side aggregation,
+keeping every cross-feature surface inside the typed public API.
 
 Cache integration
 -----------------
@@ -26,11 +28,13 @@ from importlib import resources
 from typing import TYPE_CHECKING
 from uuid import UUID
 
-from sqlalchemy import text
+from sqlalchemy import func, select, text
 from sqlalchemy.sql.elements import TextClause
 
 from abridgeai.core.cache.decorators import cached
 from abridgeai.core.cache.keys import COMPLIANCE, KR_ESTIMATE
+from abridgeai.features.quizzes.api.public import get_quiz_question_id_set_by_lesson
+from abridgeai.features.spaced_repetition.models import StudentCardState
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -44,24 +48,6 @@ def _load(name: str) -> TextClause:
 
 _KR_ESTIMATE_SQL = _load("kr_estimate.sql")
 _COMPLIANCE_SQL = _load("compliance_rate.sql")
-_LESSON_CARDS_DUE_NOW_SQL = text(
-    """
-    SELECT
-        COUNT(*) AS cards_total,
-        COUNT(*) FILTER (
-            WHERE scs.due_at IS NOT NULL AND scs.due_at <= NOW()
-        ) AS cards_due_now
-    FROM quiz_questions qq
-    JOIN quizzes q ON q.id = qq.quiz_id
-    JOIN quiz_source_lessons qsl ON qsl.quiz_id = q.id
-    LEFT JOIN student_card_state scs
-        ON scs.question_id = qq.id
-        AND scs.student_id = CAST(:student_id AS uuid)
-    WHERE qsl.lesson_id = CAST(:lesson_id AS uuid)
-      AND qq.deleted_at IS NULL
-      AND q.deleted_at IS NULL
-    """
-)
 
 
 @cached(KR_ESTIMATE)
@@ -151,18 +137,32 @@ async def student_lesson_summary(
     ready = await progression_readiness(db, student_id=student_id, lesson_id=lesson_id)
     compliance = await review_compliance_rate(db, user_id=student_id, lesson_id=lesson_id)
 
-    counts = (
-        await db.execute(
-            _LESSON_CARDS_DUE_NOW_SQL,
-            {"student_id": str(student_id), "lesson_id": str(lesson_id)},
+    question_ids = await get_quiz_question_id_set_by_lesson(db, lesson_id)
+    if not question_ids:
+        cards_total = 0
+        cards_due_now = 0
+    else:
+        counts_stmt = select(
+            func.count(StudentCardState.question_id).label("cards_total"),
+            func.count(StudentCardState.question_id)
+            .filter(
+                StudentCardState.due_at.is_not(None),
+                StudentCardState.due_at <= func.now(),
+            )
+            .label("cards_due_now"),
+        ).where(
+            StudentCardState.student_id == student_id,
+            StudentCardState.question_id.in_(question_ids),
         )
-    ).one()
+        counts = (await db.execute(counts_stmt)).one()
+        cards_total = int(counts[0] or 0)
+        cards_due_now = int(counts[1] or 0)
     return StudentLessonSummary(
         kr_estimate=kr,
         progression_ready=ready,
         compliance_rate=compliance,
-        cards_total=int(counts[0] or 0),
-        cards_due_now=int(counts[1] or 0),
+        cards_total=cards_total,
+        cards_due_now=cards_due_now,
     )
 
 

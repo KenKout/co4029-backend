@@ -7,12 +7,14 @@ compose:
 * T7.5.6 :func:`check_lesson_unlock` for unlock-gate state.
 * T7.5.7 :func:`student_lesson_summary` /
   :func:`knowledge_retention_estimate` for the three thesis metrics.
-* Raw cross-feature SQL (joining ``student_card_state`` to ``lessons`` /
-  ``quizzes`` / ``quiz_source_lessons``) for cards-due — the existing
-  T7.5.7 queries don't expose per-card metadata, only aggregated per-lesson
-  metrics, so this router materialises one minimal cross-feature SELECT
-  inline (same pattern as the access-control sub-resource resolvers in
-  :mod:`features.courses.routers._deps`).
+* :mod:`features.courses.api.public` /
+  :mod:`features.quizzes.api.public` for cross-feature reads (Wave 5
+  T30a/b).
+* Raw cross-feature SQL for ``cards-due`` — the published-tree DTOs
+  don't expose per-card ``student_card_state`` joins, and lifting that
+  join into the quizzes public API would either re-implement SR
+  scheduler state on the quizzes side or require a one-off helper that
+  violates the per-lesson abstraction. Keep raw + allowlist.
 """
 
 from __future__ import annotations
@@ -23,7 +25,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from redis.exceptions import RedisError
-from sqlalchemy import text
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from abridgeai.core.cache.client import RedisFallbackError, get_cache
@@ -34,6 +36,9 @@ from abridgeai.core.pagination.cursor import (
     decode_cursor,
     encode_cursor,
 )
+from abridgeai.features.courses.api.public import get_published_content_tree
+from abridgeai.features.quizzes.api.public import get_quiz_question_id_set_by_lesson
+from abridgeai.features.spaced_repetition.models import StudentCardState
 from abridgeai.features.spaced_repetition.queries import (
     knowledge_retention_estimate,
     student_lesson_summary,
@@ -82,36 +87,6 @@ _CARDS_DUE_SQL = text(
       AND (CAST(:after_qid AS uuid) IS NULL OR scs.question_id > CAST(:after_qid AS uuid))
     ORDER BY scs.question_id
     LIMIT :limit
-    """
-)
-
-_LESSONS_IN_COURSE_SQL = text(
-    """
-    SELECT l.id AS lesson_id, l.title AS lesson_title
-    FROM lessons l
-    JOIN modules m ON m.id = l.module_id
-    WHERE m.course_id = CAST(:course_id AS uuid)
-      AND l.deleted_at IS NULL
-      AND m.deleted_at IS NULL
-      AND l.status = 'published'
-      AND m.status = 'published'
-    ORDER BY m.position, l.title
-    """
-)
-
-_LESSON_DUE_COUNT_SQL = text(
-    """
-    SELECT COUNT(*)
-    FROM student_card_state scs
-    JOIN quiz_questions qq ON qq.id = scs.question_id
-    JOIN quizzes q ON q.id = qq.quiz_id
-    JOIN quiz_source_lessons qsl ON qsl.quiz_id = q.id
-    WHERE scs.student_id = CAST(:student_id AS uuid)
-      AND qsl.lesson_id = CAST(:lesson_id AS uuid)
-      AND scs.due_at IS NOT NULL
-      AND scs.due_at <= NOW()
-      AND qq.deleted_at IS NULL
-      AND q.deleted_at IS NULL
     """
 )
 
@@ -277,27 +252,39 @@ async def get_my_course_sr_overview(
     * ``locked``  — eligible AND ``kr_estimate < 0.1`` (treated as
       not-yet-engaged; mirrors the "no progress yet" UX).
     """
-    rows = (await db.execute(_LESSONS_IN_COURSE_SQL, {"course_id": str(course_id)})).all()
-    if not rows:
+    tree = await get_published_content_tree(db, course_id)
+    if tree is None:
+        raise _not_found("course", course_id)
+
+    published_lessons: list[tuple[UUID, str]] = []
+    for item in tree.items:
+        if item.lesson is None:
+            continue
+        published_lessons.append((item.lesson.id, item.lesson.title))
+
+    if not published_lessons:
         raise _not_found("course", course_id)
 
     student_id = current_user.user_id
     items: list[LessonOverviewItem] = []
-    for row in rows:
-        raw_lesson_id = row[0]
-        lesson_uuid = raw_lesson_id if isinstance(raw_lesson_id, UUID) else UUID(str(raw_lesson_id))
+    for lesson_uuid, lesson_title in published_lessons:
         unlock = await check_lesson_unlock(db, student_id=student_id, lesson_id=lesson_uuid)
         kr = await knowledge_retention_estimate(db, user_id=student_id, lesson_id=lesson_uuid)
-        due_count = (
-            await db.execute(
-                _LESSON_DUE_COUNT_SQL,
-                {"student_id": str(student_id), "lesson_id": str(lesson_uuid)},
+        question_ids = await get_quiz_question_id_set_by_lesson(db, lesson_uuid)
+        if question_ids:
+            due_stmt = select(func.count(StudentCardState.question_id)).where(
+                StudentCardState.student_id == student_id,
+                StudentCardState.question_id.in_(question_ids),
+                StudentCardState.due_at.is_not(None),
+                StudentCardState.due_at <= func.now(),
             )
-        ).scalar_one()
+            due_count = (await db.execute(due_stmt)).scalar_one()
+        else:
+            due_count = 0
         items.append(
             LessonOverviewItem(
                 lesson_id=lesson_uuid,
-                lesson_title=str(row[1]),
+                lesson_title=lesson_title,
                 status=_classify_status(eligible=unlock.eligible, kr_estimate=kr),
                 kr_estimate=kr,
                 due_count=int(due_count or 0),

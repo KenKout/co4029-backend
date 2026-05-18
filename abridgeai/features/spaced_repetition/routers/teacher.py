@@ -12,9 +12,22 @@ The data layer is T7.5.7's analytics queries:
 * :func:`class_card_difficulty` — top-N hardest cards by mean EF.
 * :func:`at_risk_students` — composite UC-COURSE-04 signal.
 
-The student drill-down endpoint composes T7.5.6 + T7.5.7 per lesson and
-materialises a recent-reviews window via raw cross-feature SQL — same
-contract as :mod:`abridgeai.features.spaced_repetition.queries.analytics`.
+Cross-feature reads
+-------------------
+Per-lesson card counts use
+:func:`features.quizzes.api.public.get_quiz_question_id_set_by_lesson`
+combined with a local ``StudentCardState`` aggregation (Wave 5 T30b).
+
+Three remaining ``text(...)`` blocks are intentionally kept raw and
+remain on the ``PATTERN3_ALLOWLIST``:
+
+* enrollment + display-name lookup (``users``, ``user_profiles``,
+  ``course_enrollments``) — needs ``enrollments.api.public`` /
+  ``identity.api.public`` (T30d).
+* draft course lesson tree — needs
+  ``courses.api.public.get_course_lessons_for_authoring`` (T30c).
+* recent reviews course-scoped scan — needs
+  ``quizzes.api.public.get_quiz_question_id_set_by_course`` (T30c).
 """
 
 from __future__ import annotations
@@ -23,11 +36,13 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import text
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from abridgeai.core.db import get_db
 from abridgeai.features.access_control.policies import require_course_permission
+from abridgeai.features.quizzes.api.public import get_quiz_question_id_set_by_lesson
+from abridgeai.features.spaced_repetition.models import StudentCardState
 from abridgeai.features.spaced_repetition.queries import (
     at_risk_students,
     class_card_difficulty,
@@ -97,25 +112,6 @@ _LESSONS_IN_COURSE_SQL = text(
       AND l.deleted_at IS NULL
       AND m.deleted_at IS NULL
     ORDER BY m.position, l.title
-    """
-)
-
-_LESSON_CARD_COUNTS_SQL = text(
-    """
-    SELECT
-        COUNT(*) AS cards_total,
-        COUNT(*) FILTER (
-            WHERE scs.due_at IS NOT NULL AND scs.due_at <= NOW()
-        ) AS cards_due_now
-    FROM quiz_questions qq
-    JOIN quizzes q ON q.id = qq.quiz_id
-    JOIN quiz_source_lessons qsl ON qsl.quiz_id = q.id
-    LEFT JOIN student_card_state scs
-        ON scs.question_id = qq.id
-        AND scs.student_id = CAST(:student_id AS uuid)
-    WHERE qsl.lesson_id = CAST(:lesson_id AS uuid)
-      AND qq.deleted_at IS NULL
-      AND q.deleted_at IS NULL
     """
 )
 
@@ -245,19 +241,31 @@ async def get_student_sr_detail(
         summary = await student_lesson_summary(db, student_id=student_id, lesson_id=lesson_uuid)
         unlock = await check_lesson_unlock(db, student_id=student_id, lesson_id=lesson_uuid)
         kr = await knowledge_retention_estimate(db, user_id=student_id, lesson_id=lesson_uuid)
-        counts = (
-            await db.execute(
-                _LESSON_CARD_COUNTS_SQL,
-                {"student_id": str(student_id), "lesson_id": str(lesson_uuid)},
+        question_ids = await get_quiz_question_id_set_by_lesson(db, lesson_uuid)
+        if question_ids:
+            counts_stmt = select(
+                func.count(StudentCardState.question_id),
+                func.count(StudentCardState.question_id).filter(
+                    StudentCardState.due_at.is_not(None),
+                    StudentCardState.due_at <= func.now(),
+                ),
+            ).where(
+                StudentCardState.student_id == student_id,
+                StudentCardState.question_id.in_(question_ids),
             )
-        ).one()
+            counts = (await db.execute(counts_stmt)).one()
+            cards_total = int(counts[0] or 0)
+            cards_due_now = int(counts[1] or 0)
+        else:
+            cards_total = 0
+            cards_due_now = 0
         lesson_breakdown.append(
             StudentSrDetailLessonRead(
                 lesson_id=lesson_uuid,
                 lesson_title=str(row[1]),
                 kr_estimate=summary.kr_estimate,
-                cards_total=int(counts[0] or 0),
-                cards_due_now=int(counts[1] or 0),
+                cards_total=cards_total,
+                cards_due_now=cards_due_now,
                 status=_classify_status(eligible=unlock.eligible, kr_estimate=kr),
             )
         )

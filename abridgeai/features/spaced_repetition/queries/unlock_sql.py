@@ -9,6 +9,8 @@ from uuid import UUID
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from abridgeai.features.courses.api.public import get_lesson_by_id
+
 _LESSON_UNLOCK_SQL = text(
     resources.files("abridgeai.features.spaced_repetition.queries.sql")
     .joinpath("lesson_unlock.sql")
@@ -107,15 +109,10 @@ async def fetch_lesson_module_id(
     lesson_id: UUID,
 ) -> UUID | None:
     """Return the parent module UUID for ``lesson_id`` (or None)."""
-    result = await db.execute(
-        text("SELECT module_id FROM lessons WHERE id = :lesson_id AND deleted_at IS NULL"),
-        {"lesson_id": str(lesson_id)},
-    )
-    row = result.first()
-    if row is None:
+    lesson = await get_lesson_by_id(db, lesson_id)
+    if lesson is None:
         return None
-    val = row[0]
-    return val if isinstance(val, UUID) else UUID(str(val))
+    return lesson.module_id
 
 
 async def has_passing_interview_for_module(

@@ -8,12 +8,11 @@ responsible for ``commit()``; if any step raises, the caller's enclosing
 transaction rolls both writes back together.
 
 Cross-feature contract: this module does NOT import
-``QuizQuestion`` from ``features.quizzes`` — the Features-independent
-import-linter contract forbids it. The required column
-``quiz_questions.expected_response_time_ms`` is read via raw
-``sqlalchemy.text(...)`` against the table directly. The module is
-listed in ``[tool.importlinter]`` ``ignore_imports`` for the
-"services do not touch SQLAlchemy" contract.
+``QuizQuestion`` from ``features.quizzes`` directly. The required
+columns (``expected_response_time_ms`` / ``quiz_id``) are read through
+:mod:`features.quizzes.api.public` (Wave 4 T21) — the typed
+cross-feature surface — so SR holds zero raw SQL into quiz tables for
+the per-card scheduler hot path (Wave 5 T30a).
 
 T7.5.10 + BUG-2 fix
 -------------------
@@ -34,10 +33,12 @@ from decimal import Decimal
 from typing import TYPE_CHECKING
 from uuid import UUID
 
-from sqlalchemy import text
-
 from abridgeai.core.config import get_settings
 from abridgeai.core.exceptions import NotFoundError
+from abridgeai.features.quizzes.api.public import (
+    get_question_with_quiz_context,
+    get_t_exp_for_question,
+)
 from abridgeai.features.spaced_repetition.models import CardReview, StudentCardState
 from abridgeai.features.spaced_repetition.sm2 import (
     apply_jitter,
@@ -80,25 +81,16 @@ class CardReviewResult:
 
 
 async def _load_quiz_question_meta(db: AsyncSession, question_id: UUID) -> tuple[int, UUID]:
-    """Read T_exp + parent quiz_id for ``question_id`` via raw SQL.
-
-    Cross-feature read: importing ``QuizQuestion`` here would violate
-    the "Features are independent" contract, so we go through ``text()``.
-    """
-    result = await db.execute(
-        text("SELECT expected_response_time_ms, quiz_id FROM quiz_questions WHERE id = :qid"),
-        {"qid": str(question_id)},
-    )
-    row = result.first()
-    if row is None:
+    t_exp_ms = await get_t_exp_for_question(db, question_id)
+    context = await get_question_with_quiz_context(db, question_id)
+    if context is None:
         raise NotFoundError(f"QuizQuestion {question_id} not found")
-    t_exp_ms, quiz_id = row[0], row[1]
     if t_exp_ms is None:
         raise ValueError(
             f"QuizQuestion {question_id} has no expected_response_time_ms — "
             "T_exp must be set before review (T7.5.9 publish gate)",
         )
-    return int(t_exp_ms), quiz_id if isinstance(quiz_id, UUID) else UUID(str(quiz_id))
+    return int(t_exp_ms), context.quiz_id
 
 
 async def _load_or_init_state(
