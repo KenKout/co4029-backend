@@ -10,7 +10,7 @@ from sqlalchemy import (
     UniqueConstraint,
     text,
 )
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from abridgeai.core.db import (
     PGUUID,
@@ -46,6 +46,8 @@ class CareerPathCourse(CreatedAtMixin, Base):
     )
     position: Mapped[int] = mapped_column(Integer, nullable=False)
     is_required: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("TRUE"))
+
+    career_path: Mapped[CareerPath] = relationship()
 
 
 __all__ = ["CareerPath", "CareerPathCourse", "StudentCareerEnrollment"]

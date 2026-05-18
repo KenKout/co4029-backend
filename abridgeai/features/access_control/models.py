@@ -408,6 +408,11 @@ class CareerPath(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftDelete
     description: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String(20), nullable=False, server_default=text("'draft'"))
 
+    enrollments: Mapped[list[StudentCareerEnrollment]] = relationship(
+        back_populates="career_path",
+        cascade="save-update, merge, refresh-expire, expunge",
+    )
+
 
 class StudentCareerEnrollment(
     UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftDeleteMixin, Base
@@ -441,6 +446,8 @@ class StudentCareerEnrollment(
         DateTime(timezone=True), nullable=False, server_default=text("NOW()")
     )
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    career_path: Mapped[CareerPath] = relationship(back_populates="enrollments")
 
 
 __all__ = [
