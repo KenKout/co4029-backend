@@ -1,4 +1,4 @@
-from abridgeai.features.courses.queries._pagination import (
+from abridgeai.core.pagination.cursor import (
     CursorPage,
     decode_cursor,
     encode_cursor,

@@ -30,7 +30,7 @@ from abridgeai.core.cache.client import RedisFallbackError, get_cache
 from abridgeai.core.cache.keys import CARDS_DUE
 from abridgeai.core.db import get_db
 from abridgeai.core.security import CurrentUser, get_current_user
-from abridgeai.features.courses.queries._pagination import (
+from abridgeai.core.pagination.cursor import (
     decode_cursor,
     encode_cursor,
 )

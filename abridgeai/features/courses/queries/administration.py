@@ -23,7 +23,7 @@ from sqlalchemy import and_, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from abridgeai.features.courses.models import Course
-from abridgeai.features.courses.queries._pagination import (
+from abridgeai.core.pagination.cursor import (
     CursorPage,
 )
 
