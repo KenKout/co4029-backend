@@ -5,6 +5,7 @@ from uuid import UUID
 
 from sqlalchemy import select, text
 
+from abridgeai.features.access_control.api import public as access_control_api
 from abridgeai.features.career_paths.models import CareerPath
 
 if TYPE_CHECKING:
@@ -67,23 +68,19 @@ async def list_published_career_path_courses(
     return [dict(row) for row in rows]
 
 
-_USER_PRIMARY_ORG_SQL = text(
-    """
-    SELECT organization_id
-    FROM user_role_assignments
-    WHERE user_id = :user_id
-      AND scope_kind IN ('organization', 'org_unit', 'course')
-      AND organization_id IS NOT NULL
-      AND (active_until IS NULL OR active_until > NOW())
-    ORDER BY created_at DESC NULLS LAST
-    LIMIT 1
-    """
-)
-
-
 async def get_user_primary_organization_id(db: AsyncSession, user_id: UUID) -> UUID | None:
-    result = await db.execute(_USER_PRIMARY_ORG_SQL, {"user_id": user_id})
-    return result.scalar_one_or_none()
+    """Resolve the requesting user's organization for catalog scoping.
+
+    Delegates to :func:`access_control.api.public.get_user_primary_org`
+    so the cross-feature read goes through the canonical typed surface
+    (T33; deduplicates the parallel helper in
+    ``features/courses/queries/published.py`` which T31 migrated).
+    ``scope_kind='global'`` is intentionally excluded by the upstream
+    surface -- platform admins do not implicitly belong to one org.
+    Returns ``None`` for users with no scoped membership.
+    """
+    org = await access_control_api.get_user_primary_org(db, user_id)
+    return org.id if org is not None else None
 
 
 __all__ = [

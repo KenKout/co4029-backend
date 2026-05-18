@@ -3,9 +3,10 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
-from sqlalchemy import func, select, text
+from sqlalchemy import func, select
 
 from abridgeai.features.career_paths.models import CareerPath, CareerPathCourse
+from abridgeai.features.courses.api import public as courses_api
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -32,26 +33,32 @@ async def get_career_path_for_authoring(
     return await db.get(CareerPath, career_path_id)
 
 
-_AUTHORING_PATH_COURSES_SQL = text(
-    """
-    SELECT cci.career_path_id, cci.course_id, cci.position, cci.is_required,
-           c.slug AS course_slug, c.title AS course_title, c.status AS course_status
-    FROM career_course_items cci
-    JOIN courses c ON c.id = cci.course_id
-    WHERE cci.career_path_id = :career_path_id
-      AND c.deleted_at IS NULL
-    ORDER BY cci.position
-    """
-)
-
-
 async def list_authoring_career_path_courses(
     db: AsyncSession, career_path_id: UUID
 ) -> list[dict[str, Any]]:
-    rows = (
-        await db.execute(_AUTHORING_PATH_COURSES_SQL, {"career_path_id": career_path_id})
-    ).mappings()
-    return [dict(row) for row in rows]
+    link_stmt = (
+        select(CareerPathCourse)
+        .where(CareerPathCourse.career_path_id == career_path_id)
+        .order_by(CareerPathCourse.position)
+    )
+    links = (await db.execute(link_stmt)).scalars().all()
+    rows: list[dict[str, Any]] = []
+    for link in links:
+        course = await courses_api.get_course_by_id(db, link.course_id)
+        if course is None:
+            continue
+        rows.append(
+            {
+                "career_path_id": link.career_path_id,
+                "course_id": link.course_id,
+                "position": link.position,
+                "is_required": link.is_required,
+                "course_slug": course.slug,
+                "course_title": course.title,
+                "course_status": course.status,
+            }
+        )
+    return rows
 
 
 async def get_path_course_link(
@@ -80,25 +87,9 @@ async def next_path_course_position(db: AsyncSession, career_path_id: UUID) -> i
     return int((await db.execute(stmt)).scalar_one()) + 1
 
 
-_COURSE_BELONGS_TO_ORG_SQL = text(
-    """
-    SELECT 1
-    FROM courses
-    WHERE id = :course_id
-      AND organization_id = :organization_id
-      AND deleted_at IS NULL
-    """
-)
-
-
 async def course_belongs_to_org(db: AsyncSession, course_id: UUID, organization_id: UUID) -> bool:
-    row = (
-        await db.execute(
-            _COURSE_BELONGS_TO_ORG_SQL,
-            {"course_id": course_id, "organization_id": organization_id},
-        )
-    ).one_or_none()
-    return row is not None
+    course = await courses_api.get_course_by_id(db, course_id)
+    return course is not None and course.organization_id == organization_id
 
 
 __all__ = [
