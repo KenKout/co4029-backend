@@ -240,7 +240,6 @@ forbidden_modules = [
 allow_indirect_imports = true
 ignore_imports = [
     "abridgeai.features.spaced_repetition.routers.learner -> abridgeai.features.spaced_repetition.queries",
-    "abridgeai.features.spaced_repetition.routers.learner -> abridgeai.features.courses.queries._pagination",
     "abridgeai.features.spaced_repetition.routers.teacher -> abridgeai.features.spaced_repetition.queries",
 ]
 
