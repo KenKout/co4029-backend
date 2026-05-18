@@ -250,7 +250,11 @@ modules = [
     "abridgeai.features.*",
 ]
 ignore_imports = [
-    # Allow any feature -> any sibling's api.public surface
+    # Allow any feature -> any sibling's api.public surface (and its
+    # submodule namespace). These two wildcards express the cross-feature
+    # contract carve-out; lint-imports may report "No matches" against
+    # them depending on which exact import shape consumers use post-Wave-5
+    # but the contract intent is what matters here -- legit-stays.
     "abridgeai.features.* -> abridgeai.features.*.api.public",
     "abridgeai.features.* -> abridgeai.features.*.api.public.*",
     # Permanent grandfather: career_paths joins access_control.OrgUnit
