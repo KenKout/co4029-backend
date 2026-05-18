@@ -108,9 +108,7 @@ def test_get_processing_job_status_signature() -> None:
 def test_dtos_are_frozen_and_from_attributes(dto: type) -> None:
     cfg = dto.model_config
     assert cfg.get("frozen") is True, f"{dto.__name__} must be frozen"
-    assert cfg.get("from_attributes") is True, (
-        f"{dto.__name__} must allow ORM attribute hydration"
-    )
+    assert cfg.get("from_attributes") is True, f"{dto.__name__} must allow ORM attribute hydration"
 
 
 def test_storage_blob_dto_field_set() -> None:

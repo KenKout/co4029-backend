@@ -244,9 +244,7 @@ async def resolve_chunks_to_materials(
     chunk_id_list = [str(cid) for cid in chunk_ids]
     if not chunk_id_list:
         return {}
-    rows = (
-        await db.execute(_RESOLVE_CHUNKS_SQL, {"chunk_ids": chunk_id_list})
-    ).mappings().all()
+    rows = (await db.execute(_RESOLVE_CHUNKS_SQL, {"chunk_ids": chunk_id_list})).mappings().all()
     out: dict[UUID, MaterialContextDTO] = {}
     for row in rows:
         material_id = _as_uuid(row["material_id"])
@@ -309,9 +307,7 @@ async def get_document_chunks_by_material(
     ]
 
 
-async def get_processing_job_status(
-    db: AsyncSession, job_id: UUID
-) -> ProcessingJobDTO | None:
+async def get_processing_job_status(db: AsyncSession, job_id: UUID) -> ProcessingJobDTO | None:
     """Return the :class:`ProcessingJobDTO` for ``job_id`` or ``None``.
 
     Used by the admin processing dashboard. ``ProcessingJob`` is hard-
