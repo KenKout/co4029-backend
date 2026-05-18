@@ -35,58 +35,22 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import Depends, HTTPException, Request, status
-from sqlalchemy import select, text
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from abridgeai.core.db import get_db
 from abridgeai.core.security import CurrentUser, get_current_user
 from abridgeai.features.access_control.policies import can_manage_course
-from abridgeai.features.interviews.models import InterviewSession
+from abridgeai.features.courses.api import public as courses_public
+from abridgeai.features.interviews.models import (
+    InterviewConfig,
+    InterviewQuestion,
+    InterviewSession,
+)
 
 _DEFAULT_AUTHORING_PERMS: tuple[str, ...] = ("course.update",)
 
 SubResourceDependency = Callable[..., Awaitable[CurrentUser]]
-
-
-_CONFIG_TO_COURSE_SQL = text(
-    """
-    SELECT ic.course_id    AS course_id,
-           c.owner_user_id AS owner_user_id
-    FROM interview_configs ic
-    JOIN courses c ON c.id = ic.course_id
-    WHERE ic.id = :config_id
-      AND ic.deleted_at IS NULL
-      AND c.deleted_at IS NULL
-    """
-)
-
-_QUESTION_TO_COURSE_SQL = text(
-    """
-    SELECT ic.course_id              AS course_id,
-           ic.id                     AS config_id,
-           c.owner_user_id           AS owner_user_id
-    FROM interview_questions iq
-    JOIN interview_configs ic ON ic.id = iq.interview_config_id
-    JOIN courses c            ON c.id  = ic.course_id
-    WHERE iq.id = :question_id
-      AND iq.deleted_at IS NULL
-      AND ic.deleted_at IS NULL
-      AND c.deleted_at IS NULL
-    """
-)
-
-_SESSION_TO_COURSE_SQL = text(
-    """
-    SELECT ic.course_id     AS course_id,
-           c.owner_user_id  AS owner_user_id
-    FROM interview_sessions s
-    JOIN interview_configs ic ON ic.id = s.interview_config_id
-    JOIN courses c            ON c.id  = ic.course_id
-    WHERE s.id = :session_id
-      AND ic.deleted_at IS NULL
-      AND c.deleted_at IS NULL
-    """
-)
 
 
 def _not_found(resource: str, resource_id: UUID) -> HTTPException:
@@ -149,12 +113,16 @@ def require_interview_authoring_access(
         current_user: Annotated[CurrentUser, Depends(get_current_user)],
         db: Annotated[AsyncSession, Depends(get_db)],
     ) -> CurrentUser:
-        result = await db.execute(_CONFIG_TO_COURSE_SQL, {"config_id": config_id})
-        row = result.mappings().one_or_none()
-        if row is None:
+        config = (
+            await db.execute(select(InterviewConfig).where(InterviewConfig.id == config_id))
+        ).scalar_one_or_none()
+        if config is None:
+            raise _not_found("interview_config", config_id)
+        course = await courses_public.get_course_by_id(db, config.course_id)
+        if course is None:
             raise _not_found("interview_config", config_id)
         return await _check_course_permission(
-            db, current_user, row["course_id"], row["owner_user_id"], codes
+            db, current_user, course.id, course.owner_user_id, codes
         )
 
     return dependency
@@ -178,15 +146,26 @@ def require_question_authoring_access(
         current_user: Annotated[CurrentUser, Depends(get_current_user)],
         db: Annotated[AsyncSession, Depends(get_db)],
     ) -> CurrentUser:
-        result = await db.execute(_QUESTION_TO_COURSE_SQL, {"question_id": question_id})
-        row = result.mappings().one_or_none()
-        if row is None:
+        question = (
+            await db.execute(select(InterviewQuestion).where(InterviewQuestion.id == question_id))
+        ).scalar_one_or_none()
+        if question is None:
+            raise _not_found("interview_question", question_id)
+        config = (
+            await db.execute(
+                select(InterviewConfig).where(InterviewConfig.id == question.interview_config_id)
+            )
+        ).scalar_one_or_none()
+        if config is None:
             raise _not_found("interview_question", question_id)
         path_config = request.path_params.get("config_id")
-        if path_config is not None and str(path_config) != str(row["config_id"]):
+        if path_config is not None and str(path_config) != str(config.id):
+            raise _not_found("interview_question", question_id)
+        course = await courses_public.get_course_by_id(db, config.course_id)
+        if course is None:
             raise _not_found("interview_question", question_id)
         return await _check_course_permission(
-            db, current_user, row["course_id"], row["owner_user_id"], codes
+            db, current_user, course.id, course.owner_user_id, codes
         )
 
     return dependency
@@ -240,12 +219,23 @@ def require_session_authoring_access(
         current_user: Annotated[CurrentUser, Depends(get_current_user)],
         db: Annotated[AsyncSession, Depends(get_db)],
     ) -> CurrentUser:
-        result = await db.execute(_SESSION_TO_COURSE_SQL, {"session_id": session_id})
-        row = result.mappings().one_or_none()
-        if row is None:
+        session = (
+            await db.execute(select(InterviewSession).where(InterviewSession.id == session_id))
+        ).scalar_one_or_none()
+        if session is None:
+            raise _not_found("interview_session", session_id)
+        config = (
+            await db.execute(
+                select(InterviewConfig).where(InterviewConfig.id == session.interview_config_id)
+            )
+        ).scalar_one_or_none()
+        if config is None:
+            raise _not_found("interview_session", session_id)
+        course = await courses_public.get_course_by_id(db, config.course_id)
+        if course is None:
             raise _not_found("interview_session", session_id)
         return await _check_course_permission(
-            db, current_user, row["course_id"], row["owner_user_id"], codes
+            db, current_user, course.id, course.owner_user_id, codes
         )
 
     return dependency

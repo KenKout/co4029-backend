@@ -63,7 +63,7 @@ from abridgeai.features.interviews.services import (
 from abridgeai.features.interviews.services import (
     taking as taking_service,
 )
-from abridgeai.features.quizzes.models import GenerationRun
+from abridgeai.features.quizzes.api.public import GenerationRunDTO
 
 
 def _async_url(database_url: str) -> str:
@@ -634,7 +634,7 @@ async def test_start_generation_run_enqueues_arq(
             arq_pool=arq_pool,
         )
 
-    assert isinstance(run, GenerationRun)
+    assert isinstance(run, GenerationRunDTO)
     assert run.status == "pending"
     assert run.module_id == scenario["module_id"]
     assert run.config_json["interview_config_id"] == str(seeded["config_id"])

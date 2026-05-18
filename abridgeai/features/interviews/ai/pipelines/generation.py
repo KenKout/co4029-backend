@@ -9,19 +9,27 @@ The pipeline does NOT make its own LLM calls; every stage emits its own
 into each stage as ``pipeline_run_id`` so audit rows for one run share
 a single ``ai_pipeline_runs`` parent.
 
-Stages T6.7 (followup), T6.8 (evaluation), T6.9 (gap report) are NOT in
-this pipeline — followup runs at session runtime; evaluation + gap-report
-run after submit. Both are wired by T6.11 services.
+Cross-feature decoupling: the ``generation_runs`` row is owned by
+``features.quizzes``; this pipeline never imports the quizzes ORM.
+Reads go through ``quizzes.api.public.get_generation_run`` and state
+mutations use raw ``UPDATE`` against the ``generation_runs`` table
+(which has no ``SoftDeleteMixin``, so the audit-bypass lint patterns
+in ``tests/lint/test_no_audit_bypass.py`` do not apply).
 
-Mirrors :mod:`abridgeai.features.quizzes.ai.pipelines.full` (T5.10) and
-:mod:`abridgeai.features.quizzes.services.generation` (T5.13) for status /
-failure-recovery contract.
+Stages T6.7 (followup), T6.8 (evaluation), T6.9 (gap report) are NOT
+in this pipeline — followup runs at session runtime; evaluation +
+gap-report run after submit. Both are wired by T6.11 services.
 """
 
 from __future__ import annotations
 
+import json
+from dataclasses import dataclass
+from datetime import datetime
 from typing import TYPE_CHECKING, Any, cast
 from uuid import UUID
+
+from sqlalchemy import text
 
 from abridgeai.core.exceptions import NotFoundError
 from abridgeai.core.security import utcnow
@@ -39,7 +47,7 @@ from abridgeai.features.interviews.queries.authoring import (
     list_outcomes_for_config,
     next_question_position,
 )
-from abridgeai.features.quizzes.models import GenerationRun
+from abridgeai.features.quizzes.api import public as quizzes_public
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -51,6 +59,13 @@ if TYPE_CHECKING:
         InterviewRetrievalContext,
     )
     from abridgeai.features.interviews.ai.stages.validation.verdicts import Verdict
+
+
+@dataclass
+class _RunState:
+    id: UUID
+    course_id: UUID | None
+    config_json: dict[str, Any]
 
 
 async def run_interview_generation(
@@ -75,38 +90,42 @@ async def run_interview_generation(
     engages.
     """
 
-    run = await db.get(GenerationRun, generation_run_id)
-    if run is None:
+    run_dto = await quizzes_public.get_generation_run(db, generation_run_id)
+    if run_dto is None:
         raise NotFoundError("Generation run not found")
-    run_id = run.id
+    state = _RunState(
+        id=run_dto.id,
+        course_id=run_dto.course_id,
+        config_json=dict(run_dto.config_json or {}),
+    )
 
-    config_id = _config_uuid(run.config_json, "interview_config_id")
+    config_id = _config_uuid(state.config_json, "interview_config_id")
     if config_id is None:
         raise NotFoundError("Generation run is missing interview_config_id")
     config = await db.get(InterviewConfig, config_id)
     if config is None:
         raise NotFoundError("Interview config not found for generation run")
 
-    run.status = "running"
-    run.started_at = utcnow()
+    await _update_run(db, state.id, status="running", started_at=utcnow())
     await db.commit()
 
     try:
         context = await retrieve_interview_context(
             db,
-            run=run,
+            run=state,
             config=config,
-            pipeline_run_id=run.id,
+            pipeline_run_id=state.id,
         )
-        run.config_json = dict(run.config_json or {}) | {
+        state.config_json = state.config_json | {
             "retrieval": _retrieval_summary(context),
         }
+        await _update_run(db, state.id, config_json=state.config_json)
         await db.commit()
 
         outcomes = await list_outcomes_for_config(db, config.id)
         drafts = await generate_interview_questions(
             db,
-            run=run,
+            run=state,
             config=config,
             context=cast("Any", context),
             outcomes=outcomes,
@@ -114,7 +133,7 @@ async def run_interview_generation(
 
         verdicts = await validate_interview_questions(
             db,
-            run=run,
+            run=state,
             config=config,
             drafts=cast("Any", drafts),
             context=cast("Any", context),
@@ -123,12 +142,10 @@ async def run_interview_generation(
 
         await _persist_questions(db, config=config, accepted=accepted)
 
-        run.status = "completed"
-        run.finished_at = utcnow()
-        run.config_json = dict(run.config_json or {}) | {
+        state.config_json = state.config_json | {
             "pipeline": {
                 "stage": "completed",
-                "pipeline_run_id": str(run.id),
+                "pipeline_run_id": str(state.id),
                 "generation": {
                     "drafts_total": len(drafts),
                     "drafts_accepted": len(accepted),
@@ -137,19 +154,61 @@ async def run_interview_generation(
                 "validation": _validation_summary(verdicts),
             }
         }
+        await _update_run(
+            db,
+            state.id,
+            status="completed",
+            finished_at=utcnow(),
+            config_json=state.config_json,
+        )
         await db.commit()
     except Exception as exc:
         await db.rollback()
-        fresh_run = await db.get(GenerationRun, run_id)
-        if fresh_run is None:
+        fresh = await quizzes_public.get_generation_run(db, generation_run_id)
+        if fresh is None:
             raise
-        fresh_run.status = "failed"
-        fresh_run.config_json = dict(fresh_run.config_json or {}) | {
+        failure_config = dict(fresh.config_json or {}) | {
             "failure": {"message": str(exc)},
         }
-        fresh_run.finished_at = utcnow()
+        await _update_run(
+            db,
+            fresh.id,
+            status="failed",
+            finished_at=utcnow(),
+            config_json=failure_config,
+        )
         await db.commit()
         raise
+
+
+async def _update_run(
+    db: AsyncSession,
+    run_id: UUID,
+    *,
+    status: str | None = None,
+    started_at: datetime | None = None,
+    finished_at: datetime | None = None,
+    config_json: dict[str, Any] | None = None,
+) -> None:
+    sets: list[str] = []
+    params: dict[str, Any] = {"id": run_id}
+    if status is not None:
+        sets.append("status = :status")
+        params["status"] = status
+    if started_at is not None:
+        sets.append("started_at = :started_at")
+        params["started_at"] = started_at
+    if finished_at is not None:
+        sets.append("finished_at = :finished_at")
+        params["finished_at"] = finished_at
+    if config_json is not None:
+        sets.append("config_json = CAST(:config_json AS jsonb)")
+        params["config_json"] = json.dumps(config_json, default=str)
+    if not sets:
+        return
+    sets.append("updated_at = NOW()")
+    sql = f"UPDATE generation_runs SET {', '.join(sets)} WHERE id = :id"
+    await db.execute(text(sql), params)
 
 
 def _config_uuid(config_json: dict[str, Any] | None, key: str) -> UUID | None:

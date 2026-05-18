@@ -26,13 +26,15 @@ from uuid import UUID
 from abridgeai.core.db.recursive_delete import soft_delete_cascade
 from abridgeai.core.exceptions import AppError, NotFoundError
 from abridgeai.core.security import CurrentUser, utcnow
+from abridgeai.features.courses.api import public as courses_public
 from abridgeai.features.interviews.models import (
     InterviewConfig,
     InterviewOutcome,
     InterviewQuestion,
 )
 from abridgeai.features.interviews.queries import authoring as authoring_queries
-from abridgeai.features.quizzes.models import GenerationRun
+from abridgeai.features.quizzes.api import public as quizzes_public
+from abridgeai.features.quizzes.api.public import GenerationRunDTO
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -75,9 +77,13 @@ async def _ensure_module_item(
 ) -> None:
     """Insert a ``module_items`` row pointing at the published config.
 
-    Raw SQL because the ``courses`` ORM lives in another feature and
-    importing it would break the ``Features are independent``
-    import-linter contract (mirrors T5.13 quiz authoring).
+    Existence check stays raw because ``courses.api.public`` does not
+    surface a "find module_items by interview_config_id" reader (the
+    available ``find_module_items`` is keyed by ``lesson_id``).  Next-
+    position resolution and the INSERT itself bracket that raw SELECT:
+    the position fetch goes through ``courses.api.public`` and the
+    INSERT remains raw because it is a cross-feature WRITE that owns
+    its own UoW boundary (mirrors T5.13 quiz authoring).
     """
     from sqlalchemy import text  # noqa: PLC0415
 
@@ -92,16 +98,7 @@ async def _ensure_module_item(
     ).first()
     if existing is not None:
         return
-    next_pos_row = (
-        await db.execute(
-            text(
-                "SELECT COALESCE(MAX(position), 0) + 1 AS next_pos "
-                "FROM module_items WHERE module_id = :module_id"
-            ),
-            {"module_id": module_id},
-        )
-    ).first()
-    next_pos = int(next_pos_row.next_pos) if next_pos_row is not None else 1
+    next_pos = await courses_public.next_module_item_position(db, module_id)
     await db.execute(
         text(
             "INSERT INTO module_items (id, module_id, item_type, "
@@ -292,9 +289,8 @@ async def start_generation_run(
     actor: CurrentUser,
     *,
     arq_pool: object | None = None,
-) -> GenerationRun:
-    """Create a :class:`GenerationRun` + enqueue
-    ``run_interview_generation_task``.
+) -> GenerationRunDTO:
+    """Create a generation run + enqueue ``run_interview_generation_task``.
 
     Commits inline so the worker sees the row before the ARQ job
     dequeues. Mirrors T5.13 quiz ``start_generation_run`` semantics.
@@ -304,20 +300,17 @@ async def start_generation_run(
     config_json: dict[str, Any] = dict(request_data) | {
         "interview_config_id": str(config.id),
     }
-    run = GenerationRun(
-        generation_type="interview",
+    run = await quizzes_public.create_generation_run(
+        db,
+        kind="interview",
         source_scope_kind="module",
         course_id=config.course_id,
         module_id=config.module_id,
         requested_by=actor.user_id,
-        status="pending",
         config_json=config_json,
     )
-    db.add(run)
-    await db.flush()
     config.generation_run_id = run.id
     await db.commit()
-    await db.refresh(run)
 
     if arq_pool is not None:
         await arq_pool.enqueue_job(  # type: ignore[attr-defined]
@@ -333,7 +326,7 @@ async def regenerate_question(
     actor: CurrentUser,
     *,
     arq_pool: object | None = None,
-) -> GenerationRun:
+) -> GenerationRunDTO:
     """Per-question regeneration run + ARQ enqueue.
 
     Worker dispatcher reads ``config_json["question_id"]`` to route to
@@ -342,21 +335,19 @@ async def regenerate_question(
     """
     question = await _require_question(db, config_id, question_id)
     config = await _require_config(db, config_id)
-    run = GenerationRun(
-        generation_type="interview",
+    run = await quizzes_public.create_generation_run(
+        db,
+        kind="interview",
         source_scope_kind="module",
         course_id=config.course_id,
         module_id=config.module_id,
         requested_by=actor.user_id,
-        status="pending",
         config_json={
             "interview_config_id": str(config.id),
             "question_id": str(question.id),
         },
     )
-    db.add(run)
     await db.commit()
-    await db.refresh(run)
 
     if arq_pool is not None:
         await arq_pool.enqueue_job(  # type: ignore[attr-defined]
@@ -367,9 +358,9 @@ async def regenerate_question(
 
 async def get_generation_run(
     db: AsyncSession, config_id: UUID, run_id: UUID
-) -> GenerationRun | None:
+) -> GenerationRunDTO | None:
     """Look up a run by id; ensures it belongs to ``config_id``."""
-    run = await db.get(GenerationRun, run_id)
+    run = await quizzes_public.get_generation_run(db, run_id)
     if run is None:
         return None
     config_ref = (run.config_json or {}).get("interview_config_id")
