@@ -183,6 +183,36 @@ async def get_lesson_resource(db: AsyncSession, resource_id: UUID) -> LessonReso
     return await db.get(LessonResource, resource_id)
 
 
+_AUTHORING_RESOURCE_STORAGE_TARGET_SQL = text(
+    """
+    SELECT so.bucket AS bucket, so.object_key AS object_key
+    FROM lesson_resources lr
+    JOIN storage_objects so ON so.id = lr.storage_object_id
+    WHERE lr.id = :resource_id
+      AND lr.deleted_at IS NULL
+    """
+)
+
+
+async def get_authoring_resource_storage_target(
+    db: AsyncSession, resource_id: UUID
+) -> tuple[str, str] | None:
+    """Bucket + object_key for a lesson resource the teacher can edit.
+
+    Authoring sibling of :func:`published.get_visible_resource_storage_target`:
+    no learner publish-chain gates and no ``visible_to_students``
+    filter — the teacher must reach hidden / draft resources during
+    course assembly. Soft-deleted rows are still excluded. Returns
+    ``None`` for missing resources or resources without an attached
+    storage object.
+    """
+    result = await db.execute(_AUTHORING_RESOURCE_STORAGE_TARGET_SQL, {"resource_id": resource_id})
+    row = result.one_or_none()
+    if row is None:
+        return None
+    return row.bucket, row.object_key
+
+
 async def get_module_item(db: AsyncSession, item_id: UUID) -> ModuleItem | None:
     return await db.get(ModuleItem, item_id)
 

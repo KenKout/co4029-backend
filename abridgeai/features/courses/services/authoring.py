@@ -25,6 +25,8 @@ accept ``actor: CurrentUser`` to permit explicit ownership writes
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from datetime import datetime
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
@@ -64,6 +66,14 @@ from abridgeai.features.courses.schemas import (
     ModuleItemAuthoring,
     ModuleUpdate,
 )
+from abridgeai.infrastructure.s3 import create_stream_url
+
+
+@dataclass
+class _AuthoringStorageTarget:
+    bucket: str
+    object_key: str
+
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -433,6 +443,41 @@ async def get_authoring_content(
     return tree
 
 
+async def get_authoring_lesson(db: AsyncSession, lesson_id: UUID) -> LessonAuthoring:
+    lesson = await _require_lesson(db, lesson_id)
+    return LessonAuthoring.model_validate(lesson)
+
+
+async def list_authoring_lesson_resources(
+    db: AsyncSession, lesson_id: UUID
+) -> list[LessonResourceAuthoring]:
+    """All non-soft-deleted resources for ``lesson_id`` (drafts + hidden included)."""
+    await _require_lesson(db, lesson_id)
+    rows = await authoring_queries.list_all_lesson_resources(db, lesson_id)
+    return [LessonResourceAuthoring.model_validate(r) for r in rows]
+
+
+async def get_authoring_resource_download_url(
+    db: AsyncSession, resource_id: UUID
+) -> tuple[str, datetime]:
+    """Mint a presigned GET URL for a teacher-visible resource.
+
+    Authoring sibling of :func:`catalog.get_lesson_resource_download_url`:
+    no learner publish-chain gates and no ``visible_to_students``
+    filter, since the teacher must see hidden / draft resources during
+    course assembly. Raises :class:`NotFoundError` for missing resources
+    or resources with no storage object attached.
+    """
+    target = await authoring_queries.get_authoring_resource_storage_target(db, resource_id)
+    if target is None:
+        raise NotFoundError(f"Lesson resource {resource_id} not found or has no storage object")
+    bucket, object_key = target
+    url, expires_at = await create_stream_url(
+        _AuthoringStorageTarget(bucket=bucket, object_key=object_key)
+    )
+    return url, expires_at
+
+
 __all__ = [
     "add_lesson",
     "add_lesson_resource",
@@ -443,7 +488,10 @@ __all__ = [
     "delete_lesson_resource",
     "get_authoring_content",
     "get_authoring_course",
+    "get_authoring_lesson",
+    "get_authoring_resource_download_url",
     "list_authoring_courses_for_user",
+    "list_authoring_lesson_resources",
     "publish_course",
     "reorder_module_items",
     "set_module_prerequisites",

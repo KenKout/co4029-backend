@@ -48,6 +48,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import httpx
+import pytest
 import pytest_asyncio
 from alembic import command
 from alembic.config import Config
@@ -1026,3 +1027,99 @@ async def test_get_authoring_course_roster(
             "enrolled_at",
         ):
             assert key in sample
+
+
+async def test_get_authoring_lesson(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    scenario: dict[str, uuid.UUID | str],
+) -> None:
+    """``GET /teacher/lessons/{id}`` returns the authoring projection."""
+    response = await client.get(
+        f"/api/v1/teacher/lessons/{scenario['lesson_a']}",
+        headers={"Authorization": f"Bearer {admin_bearer}"},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["id"] == str(scenario["lesson_a"])
+
+
+async def test_get_authoring_lesson_not_found_returns_404(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+) -> None:
+    response = await client.get(
+        f"/api/v1/teacher/lessons/{uuid.uuid4()}",
+        headers={"Authorization": f"Bearer {admin_bearer}"},
+    )
+    assert response.status_code == 404
+
+
+async def test_list_authoring_lesson_resources(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    scenario: dict[str, uuid.UUID | str],
+) -> None:
+    """``GET /teacher/lessons/{id}/resources`` returns ALL resources, including
+    hidden / draft (no ``visible_to_students=TRUE`` filter).
+
+    The seeded resource_a has ``visible_to_students=TRUE`` so the count
+    matches the learner-side endpoint here, but the contract diverges
+    once a teacher hides a resource.
+    """
+    response = await client.get(
+        f"/api/v1/teacher/lessons/{scenario['lesson_a']}/resources",
+        headers={"Authorization": f"Bearer {admin_bearer}"},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert isinstance(body, list)
+    resource_ids = {r["id"] for r in body}
+    assert str(scenario["resource_a"]) in resource_ids
+
+
+async def test_get_authoring_resource_download_url(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    scenario: dict[str, uuid.UUID | str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``GET /teacher/lesson-resources/{id}/download-url`` returns a
+    presigned URL with the SPA's expected ``stream_url`` field name.
+
+    S3 is monkey-patched — same pattern the learner-side router tests
+    use — so the test is hermetic.
+    """
+    from datetime import UTC, timedelta
+    from datetime import datetime as _datetime
+
+    from abridgeai.features.courses.services import authoring as authoring_service
+
+    expires_at = _datetime.now(tz=UTC) + timedelta(minutes=5)
+
+    async def _fake_create_stream_url(_target, *, response_headers=None, settings=None):  # noqa: ANN001
+        del response_headers, settings
+        return ("https://stub.local/signed", expires_at)
+
+    monkeypatch.setattr(authoring_service, "create_stream_url", _fake_create_stream_url)
+
+    response = await client.get(
+        f"/api/v1/teacher/lesson-resources/{scenario['resource_a']}/download-url",
+        headers={"Authorization": f"Bearer {admin_bearer}"},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["stream_url"] == "https://stub.local/signed"
+    assert "expires_at" in body
+
+
+async def test_get_authoring_resource_download_url_not_found(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+) -> None:
+    """Unknown resource ids return 404 from the auth dep, not 500."""
+    response = await client.get(
+        f"/api/v1/teacher/lesson-resources/{uuid.uuid4()}/download-url",
+        headers={"Authorization": f"Bearer {admin_bearer}"},
+    )
+    assert response.status_code == 404

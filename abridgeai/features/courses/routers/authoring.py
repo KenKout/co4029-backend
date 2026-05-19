@@ -428,6 +428,42 @@ async def create_lesson(
     return lesson
 
 
+@router.get("/lessons/{lesson_id}", response_model=LessonAuthoring)
+async def get_authoring_lesson(
+    lesson_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_LESSON)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> LessonAuthoring:
+    """Authoring detail for a single lesson (drafts included)."""
+    del current_user
+    try:
+        return await authoring_service.get_authoring_lesson(db, lesson_id)
+    except NotFoundError as exc:
+        raise _not_found(str(exc)) from exc
+
+
+@router.get(
+    "/lessons/{lesson_id}/resources",
+    response_model=list[LessonResourceAuthoring],
+)
+async def list_authoring_lesson_resources(
+    lesson_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_LESSON)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> list[LessonResourceAuthoring]:
+    """All resources attached to ``lesson_id`` (drafts + hidden included).
+
+    The learner-side ``/lessons/{id}/resources`` endpoint applies a
+    ``visible_to_students=TRUE`` filter; this authoring sibling does
+    not, so the teacher can see and reorder hidden / draft resources.
+    """
+    del current_user
+    try:
+        return await authoring_service.list_authoring_lesson_resources(db, lesson_id)
+    except NotFoundError as exc:
+        raise _not_found(str(exc)) from exc
+
+
 @router.patch("/lessons/{lesson_id}", response_model=LessonAuthoring)
 async def update_lesson(
     lesson_id: UUID,
@@ -481,6 +517,44 @@ async def delete_lesson_resource(
     except NotFoundError as exc:
         raise _not_found(str(exc)) from exc
     await db.commit()
+
+
+class _StreamUrlResponse(BaseModel):
+    """Response shape for ``GET /teacher/lesson-resources/{id}/download-url``.
+
+    Field name ``stream_url`` (not ``url``) matches the SPA's
+    ``StreamUrlResponse`` TypeScript interface so the existing
+    ``fetchTeacherResourceDownloadUrl`` helper works unchanged.
+    """
+
+    stream_url: str
+    expires_at: datetime
+
+
+@router.get(
+    "/lesson-resources/{resource_id}/download-url",
+    response_model=_StreamUrlResponse,
+)
+async def get_authoring_resource_download_url(
+    resource_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_RESOURCE)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> _StreamUrlResponse:
+    """Mint a presigned GET URL for a teacher-visible resource.
+
+    Same auth as the DELETE sibling — caller must have authoring access
+    on the owning course (owner OR scope=course teacher assignment).
+    Unlike the learner-side ``/lesson-resources/{id}/download-url`` this
+    surfaces hidden / draft resources too.
+    """
+    del current_user
+    try:
+        url, expires_at = await authoring_service.get_authoring_resource_download_url(
+            db, resource_id
+        )
+    except NotFoundError as exc:
+        raise _not_found(str(exc)) from exc
+    return _StreamUrlResponse(stream_url=url, expires_at=expires_at)
 
 
 __all__ = ["router"]

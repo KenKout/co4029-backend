@@ -18,6 +18,7 @@ from abridgeai.features.courses.queries.assignment import (
 )
 from abridgeai.features.courses.queries.authoring import (
     course_slug_exists,
+    get_authoring_resource_storage_target,
     get_course_content_authoring,
     get_course_for_authoring,
     get_lesson,
@@ -60,6 +61,7 @@ __all__ = [
     "decode_cursor",
     "encode_cursor",
     "find_active_teacher_assignment",
+    "get_authoring_resource_storage_target",
     "get_course_content_authoring",
     "get_course_for_authoring",
     "get_course_including_deleted",
