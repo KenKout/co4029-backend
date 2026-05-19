@@ -12,10 +12,11 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
+import abridgeai.ai.models  # noqa: F401  -- register generation_runs FK target
 import abridgeai.features.courses.models  # noqa: F401  -- register courses / modules FK targets
 import abridgeai.features.identity.models  # noqa: F401  -- register users FK target
 import abridgeai.features.interviews.models  # noqa: F401  -- register interview_* FK targets
-import abridgeai.features.quizzes.models  # noqa: F401  -- register generation_runs / quiz_attempts FK targets
+import abridgeai.features.quizzes.models  # noqa: F401  -- register quiz_attempts FK target
 from abridgeai.core.config import get_settings
 from abridgeai.core.db.recursive_delete import soft_delete_cascade
 from abridgeai.features.interviews.models import (

@@ -31,6 +31,7 @@ import abridgeai.features.access_control.models  # noqa: F401  -- register users
 import abridgeai.features.courses.models  # noqa: F401  -- register courses/modules/lessons FK targets
 import abridgeai.features.identity.models  # noqa: F401  -- register users FK target
 import abridgeai.features.interviews.models  # noqa: F401  -- register interview_* FK targets
+from abridgeai.ai.models import GenerationRun
 from abridgeai.core.config import get_settings
 from abridgeai.core.db import Base
 from abridgeai.features.quizzes.api.public import (
@@ -41,7 +42,7 @@ from abridgeai.features.quizzes.api.public import (
     get_quiz_question_id_set_by_lesson,
     get_t_exp_for_question,
 )
-from abridgeai.features.quizzes.models import GenerationRun, QuizQuestion
+from abridgeai.features.quizzes.models import QuizQuestion
 
 for _stub_name in ("interview_configs", "learning_materials", "learning_material_versions"):
     if _stub_name not in Base.metadata.tables:

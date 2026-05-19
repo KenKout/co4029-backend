@@ -35,10 +35,9 @@ import abridgeai.features.access_control.models  # noqa: F401  -- register FK ta
 import abridgeai.features.courses.models  # noqa: F401  -- register modules / lessons
 import abridgeai.features.identity.models  # noqa: F401  -- register users
 import abridgeai.features.interviews.models  # noqa: F401  -- register interview tables
-import abridgeai.features.materials.models  # noqa: F401  -- register processing_jobs (audit FK)
-import abridgeai.features.quizzes.models  # noqa: F401  -- register GenerationRun
 from abridgeai.ai.llm import LLMRole
 from abridgeai.ai.llm.audit import write_ai_model_call
+from abridgeai.ai.models import GenerationRun
 from abridgeai.core.config import get_settings
 from abridgeai.features.interviews.ai.pipelines import generation as generation_pipeline
 from abridgeai.features.interviews.ai.pipelines import run_interview_generation
@@ -52,7 +51,6 @@ from abridgeai.features.interviews.ai.stages.validation.verdicts import (
     ValidationCriterion,
     Verdict,
 )
-from abridgeai.features.quizzes.models import GenerationRun
 
 
 def _async_url(database_url: str) -> str:

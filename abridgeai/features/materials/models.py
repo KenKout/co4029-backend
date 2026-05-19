@@ -15,10 +15,6 @@ Mixin policy (Reconciliation §A13 + draft "Soft-delete eligibility"):
 * ``DocumentChunk`` is derived data, deleted-and-rebuilt on re-ingest
   (plan §4647 / §4653 / Reconciliation §C11). ``UUIDPrimaryKeyMixin``
   + ``CreatedAtMixin`` only — no soft delete, no ``updated_at``.
-* ``ProcessingJob`` is an audit-style timeline of background work. It
-  keeps the historical ``TimestampMixin`` schema (the baseline DDL has
-  ``updated_at`` so workers can bump it on status transitions) but is
-  not in ``SOFT_DELETE_TABLES`` — no audit / soft-delete cols.
 * ``ChunkingEnrichmentCache`` (Reconciliation §B9 / §C12) is an LLM
   output cache keyed by ``(content_hash, prompt_version)``. Append-only,
   rebuilt on prompt-version bump — ``UUIDPrimaryKeyMixin`` +
@@ -105,20 +101,6 @@ _PROCESSING_STATUS_CHECK = (
 _CHUNK_TYPE_CHECK = (
     "chunk_type IN ('video', 'pdf', 'code', 'audio', 'image', 'docx', 'pptx', 'xlsx', 'text')"
 )
-_PROCESSING_JOB_ENTITY_CHECK = (
-    "entity_type IN ('material_version', 'lesson', 'quiz', 'interview_config', 'generation_run')"
-)
-_PROCESSING_JOB_TYPE_CHECK = (
-    "job_type IN "
-    "('transcribe', 'parse_document', 'parse_code', 'chunk', 'embed', "
-    "'extract_entities', 'extract_relations', 'build_graph', 'full_pipeline', "
-    "'generate_quiz', 'generate_interview_questions')"
-)
-_PROCESSING_JOB_STATUS_CHECK = (
-    "status IN ('pending', 'running', 'completed', 'failed', 'cancelled')"
-)
-
-
 # ---------------------------------------------------------------------------
 # Learning materials & versions
 # ---------------------------------------------------------------------------
@@ -304,46 +286,6 @@ class DocumentChunk(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
 
 
 # ---------------------------------------------------------------------------
-# ProcessingJob — background-work timeline
-# ---------------------------------------------------------------------------
-
-
-class ProcessingJob(UUIDPrimaryKeyMixin, TimestampMixin, Base):
-    """ARQ-driven background job for ingestion / RAG / generation work.
-
-    Polymorphic via ``(entity_type, entity_id)`` rather than a hard FK to
-    a single parent table — the same job machinery handles material
-    versions, lessons, quizzes, interview configs, and generation runs.
-    Hard-delete (no soft-delete columns) because finished/failed jobs are
-    audit history, not soft-deletable content.
-    """
-
-    __tablename__ = "processing_jobs"
-    __table_args__ = (
-        CheckConstraint(_PROCESSING_JOB_ENTITY_CHECK, name="processing_jobs_entity_type_check"),
-        CheckConstraint(_PROCESSING_JOB_TYPE_CHECK, name="processing_jobs_job_type_check"),
-        CheckConstraint(_PROCESSING_JOB_STATUS_CHECK, name="processing_jobs_status_check"),
-        CheckConstraint(
-            "progress_percent BETWEEN 0 AND 100",
-            name="processing_jobs_progress_percent_check",
-        ),
-        CheckConstraint("retry_count >= 0", name="processing_jobs_retry_count_check"),
-    )
-
-    entity_type: Mapped[str] = mapped_column(String(30), nullable=False)
-    entity_id: Mapped[uuid.UUID] = mapped_column(PGUUID(as_uuid=True), nullable=False, index=True)
-    job_type: Mapped[str] = mapped_column(String(40), nullable=False)
-    status: Mapped[str] = mapped_column(
-        String(20), nullable=False, server_default=text("'pending'")
-    )
-    progress_percent: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
-    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
-    retry_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
-
-
-# ---------------------------------------------------------------------------
 # ChunkingEnrichmentCache — Reconciliation §B9 / §C12
 # ---------------------------------------------------------------------------
 
@@ -383,5 +325,4 @@ __all__ = [
     "DocumentChunk",
     "LearningMaterial",
     "LearningMaterialVersion",
-    "ProcessingJob",
 ]

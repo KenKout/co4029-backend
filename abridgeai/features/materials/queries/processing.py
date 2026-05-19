@@ -29,7 +29,7 @@ from uuid import UUID
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from abridgeai.features.materials.models import ProcessingJob
+from abridgeai.ai.models import ProcessingJob
 
 _IN_PROGRESS_STATUSES: tuple[str, ...] = ("pending", "running")
 

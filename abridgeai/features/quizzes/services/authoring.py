@@ -29,6 +29,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
+from abridgeai.ai.models import GenerationRun
 from abridgeai.core.db.conflict_mapper import (
     flush_or_conflict,
     register_conflict_mappings,
@@ -38,7 +39,6 @@ from abridgeai.core.exceptions import AppError, ConflictError, NotFoundError
 from abridgeai.core.security import CurrentUser, utcnow
 from abridgeai.features.courses.api import public as courses_api
 from abridgeai.features.quizzes.models import (
-    GenerationRun,
     Quiz,
     QuizQuestion,
     QuizQuestionOption,

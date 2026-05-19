@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
+import abridgeai.ai.models  # noqa: F401  -- register ai_model_calls / processing_jobs / generation_runs
 import abridgeai.features.access_control.models  # noqa: F401
 import abridgeai.features.courses.models  # noqa: F401
 import abridgeai.features.identity.models  # noqa: F401

@@ -64,12 +64,13 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
+import abridgeai.ai.models  # noqa: F401  -- register processing_jobs / generation_runs (audit + FK targets)
 import abridgeai.features.access_control.models  # noqa: F401  -- register FK targets
 import abridgeai.features.courses.models  # noqa: F401  -- register modules / lessons
 import abridgeai.features.identity.models  # noqa: F401  -- register users
 import abridgeai.features.interviews.models  # noqa: F401  -- register interview tables
-import abridgeai.features.materials.models  # noqa: F401  -- register processing_jobs (audit FK)
-import abridgeai.features.quizzes.models  # noqa: F401  -- register GenerationRun + quiz_attempts
+import abridgeai.features.materials.models  # noqa: F401  -- register learning_* tables
+import abridgeai.features.quizzes.models  # noqa: F401  -- register quiz_attempts
 from abridgeai.ai.llm import LLMGateway, LLMRole
 from abridgeai.ai.llm.audit import write_ai_model_call
 from abridgeai.core.config import get_settings

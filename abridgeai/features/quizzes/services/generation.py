@@ -37,6 +37,7 @@ from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from abridgeai.ai.knowledge_graph.schemas import KGContext
+from abridgeai.ai.models import GenerationRun
 from abridgeai.core.exceptions import NotFoundError
 from abridgeai.core.security import utcnow
 from abridgeai.features.quizzes.ai.pipelines import (
@@ -48,7 +49,7 @@ from abridgeai.features.quizzes.ai.pipelines import (
 from abridgeai.features.quizzes.ai.pipelines import (
     regenerate as regenerate_pipeline,
 )
-from abridgeai.features.quizzes.models import GenerationRun, Quiz, QuizQuestion
+from abridgeai.features.quizzes.models import Quiz, QuizQuestion
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession

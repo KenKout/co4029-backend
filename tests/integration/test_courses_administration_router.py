@@ -52,9 +52,12 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
+import abridgeai.ai.models  # noqa: F401  -- register processing_jobs / generation_runs / ai_model_calls
 import abridgeai.features.access_control.models  # noqa: F401  -- register FK targets
 import abridgeai.features.identity.models  # noqa: F401  -- register users FK target
 import abridgeai.features.interviews.models  # noqa: F401  -- T6.1 registers interview_* tables
+import abridgeai.features.materials.models  # noqa: F401  -- register learning_materials FK target
+import abridgeai.features.quizzes.models  # noqa: F401  -- register Quiz (ModuleItem.target relationship)
 from abridgeai.core.config import get_settings
 from abridgeai.core.db import Base, get_db
 from abridgeai.core.security import create_access_token, generate_token, hash_secret

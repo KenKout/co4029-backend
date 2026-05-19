@@ -39,11 +39,12 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from abridgeai.ai.models import GenerationRun
 from abridgeai.core.db import get_db
 from abridgeai.core.exceptions import AppError, ConflictError, NotFoundError
 from abridgeai.core.security import CurrentUser
 from abridgeai.features.access_control.policies import require_course_permission
-from abridgeai.features.quizzes.models import GenerationRun, Quiz, QuizQuestion
+from abridgeai.features.quizzes.models import Quiz, QuizQuestion
 from abridgeai.features.quizzes.routers._deps import (
     require_question_authoring_access,
     require_quiz_authoring_access,

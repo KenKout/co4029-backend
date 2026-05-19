@@ -37,8 +37,9 @@ from sqlalchemy.ext.asyncio import (
 
 import abridgeai.features.courses.models  # noqa: F401  -- register course/module/lesson FK targets
 import abridgeai.features.identity.models  # noqa: F401  -- register users + storage_objects FK targets
+from abridgeai.ai.models import ProcessingJob
 from abridgeai.core.config import get_settings
-from abridgeai.features.materials.models import LearningMaterialVersion, ProcessingJob
+from abridgeai.features.materials.models import LearningMaterialVersion
 from abridgeai.features.materials.workers import ingest as worker_mod
 from abridgeai.features.materials.workers import ingest_material_version_task
 from abridgeai.workers.arq_app import WorkerSettings

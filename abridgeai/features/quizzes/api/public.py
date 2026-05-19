@@ -47,6 +47,7 @@ from uuid import UUID
 
 from sqlalchemy import select
 
+from abridgeai.ai.models import GenerationRun
 from abridgeai.features.quizzes.api._dto import (
     AttemptScoreDTO,
     GenerationRunDTO,
@@ -55,7 +56,6 @@ from abridgeai.features.quizzes.api._dto import (
     QuestionWithQuizDTO,
 )
 from abridgeai.features.quizzes.models import (
-    GenerationRun,
     Quiz,
     QuizAttempt,
     QuizQuestion,

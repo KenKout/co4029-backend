@@ -10,6 +10,7 @@ from __future__ import annotations
 from arq.connections import RedisSettings
 from arq.cron import CronJob, cron
 
+import abridgeai.ai.models  # noqa: F401
 import abridgeai.features.career_paths.models  # noqa: F401
 import abridgeai.features.courses.models  # noqa: F401
 import abridgeai.features.enrollments.models  # noqa: F401

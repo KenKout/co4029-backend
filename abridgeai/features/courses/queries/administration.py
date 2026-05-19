@@ -5,10 +5,10 @@ to produce a per-course processing audit. The cross-feature reach is
 intentional and read-only: services consuming this module are themselves
 the IT-Admin-scoped course administration layer.
 
-The pattern mirrors :mod:`abridgeai.features.access_control.queries.admin` —
-INSERT/DELETE flows use raw SQL (``text()``) because the ORM unit-of-work
-walks ``Base.metadata.sorted_tables`` and triggers cross-feature FK
-resolution; SELECTs use ``select()`` for type-safe ORM hydration.
+The shared models (:class:`AIModelCall` / :class:`ProcessingJob` /
+:class:`GenerationRun`) live in :mod:`abridgeai.ai.models`, outside the
+``features/`` tree, so importing them here does not violate the
+``Features are independent`` import-linter contract.
 """
 
 from __future__ import annotations
@@ -19,9 +19,10 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import and_, func, or_, select, text
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from abridgeai.ai.models import AIModelCall, GenerationRun, ProcessingJob
 from abridgeai.core.pagination.cursor import (
     CursorPage,
 )
@@ -60,17 +61,7 @@ async def list_all_courses_admin(
     limit: int = _DEFAULT_LIMIT,
     cursor: str | None = None,
 ) -> CursorPage[Course]:
-    """Cursor-paginated admin view of every course (newest first).
-
-    Ordered by ``(created_at DESC, id DESC)`` so the most recently
-    created rows surface first — operationally useful (admins reach for
-    the freshest course) and resilient to schemas that already carry
-    hundreds of legacy seed rows ahead of newly tombstoned ones.
-
-    When ``include_deleted=True`` the T0.7 global soft-delete filter is
-    bypassed via ``execution_options(include_deleted=True)`` so admin
-    sees both live and tombstoned rows.
-    """
+    """Cursor-paginated admin view of every course (newest first)."""
     capped = _clamp(limit)
     after = _decode_admin_cursor(cursor) if cursor else None
     stmt = select(Course).order_by(Course.created_at.desc(), Course.id.desc()).limit(capped)
@@ -92,23 +83,13 @@ async def list_all_courses_admin(
 
 
 async def get_course_including_deleted(db: AsyncSession, course_id: UUID) -> Course | None:
-    """Course-by-id lookup that ignores the soft-delete loader filter.
-
-    Required by :func:`restore_soft_deleted_course` because by definition
-    the row we want to restore is already soft-deleted.
-    """
+    """Course-by-id lookup that ignores the soft-delete loader filter."""
     stmt = select(Course).where(Course.id == course_id).execution_options(include_deleted=True)
     return (await db.execute(stmt)).scalar_one_or_none()
 
 
 async def restore_soft_deleted_course(db: AsyncSession, course_id: UUID) -> bool:
-    """Clear ``deleted_at`` / ``deleted_by`` on the course row.
-
-    Returns True if a soft-deleted row was found and restored.
-    Children (modules, lessons, ...) are left in their current state —
-    administrators who need full-tree restore must escalate via DB ops
-    (out of scope for the MVP per plan §4216).
-    """
+    """Clear ``deleted_at`` / ``deleted_by`` on the course row."""
     stmt = (
         select(Course)
         .where(Course.id == course_id, Course.deleted_at.is_not(None))
@@ -123,26 +104,6 @@ async def restore_soft_deleted_course(db: AsyncSession, course_id: UUID) -> bool
     return True
 
 
-_PROCESSING_AUDIT_SQL = text(
-    """
-    SELECT
-        COALESCE(SUM(amc.estimated_cost_usd), 0) AS total_cost_usd,
-        COALESCE(SUM(amc.input_tokens), 0)       AS total_input_tokens,
-        COALESCE(SUM(amc.output_tokens), 0)      AS total_output_tokens,
-        COUNT(amc.id)                             AS total_calls,
-        COUNT(DISTINCT amc.pipeline_run_id)       AS pipeline_runs,
-        COUNT(DISTINCT pj.id)                     AS processing_jobs,
-        COUNT(DISTINCT gr.id)                     AS generation_runs,
-        MIN(amc.called_at)                        AS first_call_at,
-        MAX(amc.called_at)                        AS last_call_at
-    FROM ai_model_calls amc
-    LEFT JOIN processing_jobs pj   ON pj.id = amc.processing_job_id
-    LEFT JOIN generation_runs gr   ON gr.id = amc.generation_run_id
-    WHERE gr.course_id = :course_id
-    """
-)
-
-
 async def get_course_processing_audit(db: AsyncSession, course_id: UUID) -> dict[str, Any]:
     """Aggregate AI processing costs / counts scoped to ``course_id``.
 
@@ -151,61 +112,69 @@ async def get_course_processing_audit(db: AsyncSession, course_id: UUID) -> dict
     Returns a single-row aggregate; values are zero / None when no AI work
     has touched the course.
     """
-    result = await db.execute(_PROCESSING_AUDIT_SQL, {"course_id": course_id})
-    row: dict[str, Any] = dict(result.mappings().one_or_none() or {})
+    stmt = (
+        select(
+            func.coalesce(func.sum(AIModelCall.estimated_cost_usd), 0).label("total_cost_usd"),
+            func.coalesce(func.sum(AIModelCall.input_tokens), 0).label("total_input_tokens"),
+            func.coalesce(func.sum(AIModelCall.output_tokens), 0).label("total_output_tokens"),
+            func.count(AIModelCall.id).label("total_calls"),
+            func.count(func.distinct(AIModelCall.pipeline_run_id)).label("pipeline_runs"),
+            func.count(func.distinct(ProcessingJob.id)).label("processing_jobs"),
+            func.count(func.distinct(GenerationRun.id)).label("generation_runs"),
+            func.min(AIModelCall.called_at).label("first_call_at"),
+            func.max(AIModelCall.called_at).label("last_call_at"),
+        )
+        .select_from(AIModelCall)
+        .outerjoin(ProcessingJob, ProcessingJob.id == AIModelCall.processing_job_id)
+        .outerjoin(GenerationRun, GenerationRun.id == AIModelCall.generation_run_id)
+        .where(GenerationRun.course_id == course_id)
+    )
+    row = (await db.execute(stmt)).one()
     return {
         "course_id": course_id,
-        "total_cost_usd": float(row.get("total_cost_usd") or 0),
-        "total_input_tokens": int(row.get("total_input_tokens") or 0),
-        "total_output_tokens": int(row.get("total_output_tokens") or 0),
-        "total_calls": int(row.get("total_calls") or 0),
-        "pipeline_runs": int(row.get("pipeline_runs") or 0),
-        "processing_jobs": int(row.get("processing_jobs") or 0),
-        "generation_runs": int(row.get("generation_runs") or 0),
-        "first_call_at": _normalize_dt(row.get("first_call_at")),
-        "last_call_at": _normalize_dt(row.get("last_call_at")),
+        "total_cost_usd": float(row.total_cost_usd or 0),
+        "total_input_tokens": int(row.total_input_tokens or 0),
+        "total_output_tokens": int(row.total_output_tokens or 0),
+        "total_calls": int(row.total_calls or 0),
+        "pipeline_runs": int(row.pipeline_runs or 0),
+        "processing_jobs": int(row.processing_jobs or 0),
+        "generation_runs": int(row.generation_runs or 0),
+        "first_call_at": row.first_call_at,
+        "last_call_at": row.last_call_at,
     }
-
-
-def _normalize_dt(value: object) -> datetime | None:
-    if isinstance(value, datetime):
-        return value
-    return None
-
-
-_LIST_PROCESSING_JOBS_SQL = text(
-    """
-    SELECT DISTINCT
-        pj.id              AS id,
-        pj.entity_type     AS entity_type,
-        pj.entity_id       AS entity_id,
-        pj.job_type        AS job_type,
-        pj.status          AS status,
-        pj.progress_percent AS progress_percent,
-        pj.error_message   AS error_message,
-        pj.retry_count     AS retry_count,
-        pj.started_at      AS started_at,
-        pj.finished_at     AS finished_at,
-        pj.created_at      AS created_at,
-        pj.updated_at      AS updated_at
-    FROM processing_jobs pj
-    LEFT JOIN ai_model_calls amc ON amc.processing_job_id = pj.id
-    LEFT JOIN generation_runs gr ON gr.id = amc.generation_run_id
-    WHERE gr.course_id = :course_id
-    ORDER BY pj.created_at DESC
-    LIMIT :limit
-    """
-)
 
 
 async def list_course_processing_jobs(
     db: AsyncSession, course_id: UUID, *, limit: int = 50
 ) -> list[dict[str, Any]]:
-    """Recent processing_jobs rows tied to course_id via generation_runs."""
-    rows = (
-        await db.execute(_LIST_PROCESSING_JOBS_SQL, {"course_id": course_id, "limit": limit})
-    ).mappings()
-    return [dict(row) for row in rows]
+    """Recent ``processing_jobs`` rows tied to ``course_id`` via ``generation_runs``."""
+    stmt = (
+        select(ProcessingJob)
+        .join(AIModelCall, AIModelCall.processing_job_id == ProcessingJob.id)
+        .join(GenerationRun, GenerationRun.id == AIModelCall.generation_run_id)
+        .where(GenerationRun.course_id == course_id)
+        .order_by(ProcessingJob.created_at.desc())
+        .distinct()
+        .limit(limit)
+    )
+    jobs = list((await db.execute(stmt)).scalars().all())
+    return [
+        {
+            "id": job.id,
+            "entity_type": job.entity_type,
+            "entity_id": job.entity_id,
+            "job_type": job.job_type,
+            "status": job.status,
+            "progress_percent": job.progress_percent,
+            "error_message": job.error_message,
+            "retry_count": job.retry_count,
+            "started_at": job.started_at,
+            "finished_at": job.finished_at,
+            "created_at": job.created_at,
+            "updated_at": job.updated_at,
+        }
+        for job in jobs
+    ]
 
 
 async def get_course_stats(db: AsyncSession, *, top_draft_owners_limit: int = 10) -> dict[str, Any]:
@@ -250,7 +219,7 @@ async def get_course_stats(db: AsyncSession, *, top_draft_owners_limit: int = 10
 
 
 async def stamp_updated_by(db: AsyncSession, course_id: UUID, user_id: UUID) -> None:
-    """Set updated_by on a course after restore (audit trail)."""
+    """Set ``updated_by`` on a course after restore (audit trail)."""
     course = await get_course_including_deleted(db, course_id)
     if course is not None:
         course.updated_by = user_id

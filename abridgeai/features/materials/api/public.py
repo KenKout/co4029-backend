@@ -64,6 +64,7 @@ from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from abridgeai.ai.models import ProcessingJob
 from abridgeai.features.materials.api._dto import (
     DocumentChunkDTO,
     MaterialContextDTO,
@@ -74,7 +75,6 @@ from abridgeai.features.materials.models import (
     DocumentChunk,
     LearningMaterial,
     LearningMaterialVersion,
-    ProcessingJob,
 )
 
 _STORAGE_BLOB_BY_VERSION_SQL = text(

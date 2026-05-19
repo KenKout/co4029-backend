@@ -20,11 +20,11 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
+from abridgeai.ai.models import ProcessingJob
 from abridgeai.core.db.conflict_mapper import flush_or_conflict
 from abridgeai.core.db.recursive_delete import soft_delete_cascade
 from abridgeai.core.exceptions import NotFoundError
 from abridgeai.core.security import CurrentUser
-from abridgeai.features.materials.models import ProcessingJob
 from abridgeai.features.materials.queries import get_latest_processing_job
 from abridgeai.features.materials.schemas import MaterialUploadComplete
 from abridgeai.features.materials.services.authoring._common import (

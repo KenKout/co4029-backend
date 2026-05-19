@@ -41,9 +41,9 @@ import abridgeai.features.access_control.models  # noqa: F401  -- register users
 import abridgeai.features.courses.models  # noqa: F401  -- register courses/modules/lessons FK targets
 import abridgeai.features.identity.models  # noqa: F401  -- register users FK target
 import abridgeai.features.interviews.models  # noqa: F401  -- T6.1 registers interview_* tables
+from abridgeai.ai.models import GenerationRun
 from abridgeai.core.config import get_settings
 from abridgeai.core.db import Base
-from abridgeai.features.quizzes.models import GenerationRun
 from abridgeai.features.quizzes.services import generation as generation_service
 
 for _stub_name in ("interview_configs", "learning_materials", "learning_material_versions"):

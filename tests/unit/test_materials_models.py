@@ -2,12 +2,12 @@ from __future__ import annotations
 
 from sqlalchemy import CheckConstraint, UniqueConstraint
 
+from abridgeai.ai.models import ProcessingJob
 from abridgeai.features.materials.models import (
     ChunkingEnrichmentCache,
     DocumentChunk,
     LearningMaterial,
     LearningMaterialVersion,
-    ProcessingJob,
 )
 
 _AUDIT_COLUMNS = {"created_by", "updated_by", "deleted_at", "deleted_by"}

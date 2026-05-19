@@ -66,12 +66,12 @@ from abridgeai.ai.knowledge_graph import (
     build_knowledge_graph_for_material_version,
 )
 from abridgeai.ai.llm import EmbeddingClient, LLMGateway
+from abridgeai.ai.models import ProcessingJob
 from abridgeai.core.config import get_settings
 from abridgeai.features.materials.models import (
     DocumentChunk,
     LearningMaterial,
     LearningMaterialVersion,
-    ProcessingJob,
 )
 from abridgeai.features.materials.queries.processing import get_latest_processing_job
 from abridgeai.infrastructure.s3 import download_to_temp

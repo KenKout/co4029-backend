@@ -39,13 +39,13 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
+import abridgeai.ai.models  # noqa: F401  -- register processing_jobs / generation_runs / ai_model_calls
 import abridgeai.features.access_control.models  # noqa: F401  -- register FK targets
 import abridgeai.features.career_paths.models  # noqa: F401  -- register career path tables
 import abridgeai.features.courses.models  # noqa: F401  -- register course tables
 import abridgeai.features.enrollments.models  # noqa: F401  -- register enrollments tables
 import abridgeai.features.identity.models  # noqa: F401  -- register users
 import abridgeai.features.interviews.models  # noqa: F401  -- register interview_* tables
-import abridgeai.features.materials.models  # noqa: F401  -- register processing_jobs
 import abridgeai.features.notifications.models  # noqa: F401  -- register notifications
 import abridgeai.features.progress.models  # noqa: F401  -- register lesson_progress
 import abridgeai.features.quizzes.models  # noqa: F401  -- register quiz tables

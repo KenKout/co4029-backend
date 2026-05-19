@@ -19,8 +19,8 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from abridgeai.ai.llm._model import AIModelCall
 from abridgeai.ai.llm.roles import LLMRole
+from abridgeai.ai.models import AIModelCall
 
 _ERROR_MESSAGE_LIMIT = 2000
 

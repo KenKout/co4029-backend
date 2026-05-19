@@ -40,11 +40,12 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
+import abridgeai.ai.models  # noqa: F401  -- register generation_runs (FK target for interview_configs.generation_run_id)
 import abridgeai.features.access_control.models  # noqa: F401  -- register FK targets
 import abridgeai.features.courses.models  # noqa: F401  -- register courses/modules/lessons FK targets
 import abridgeai.features.identity.models  # noqa: F401  -- register users FK target
 import abridgeai.features.interviews.models  # noqa: F401  -- register interview tables
-import abridgeai.features.quizzes.models  # noqa: F401  -- register quiz tables (GenerationRun)
+import abridgeai.features.quizzes.models  # noqa: F401  -- register quiz tables
 from abridgeai.core.config import get_settings
 from abridgeai.core.db import Base, get_db
 from abridgeai.core.security import create_access_token, generate_token, hash_secret
