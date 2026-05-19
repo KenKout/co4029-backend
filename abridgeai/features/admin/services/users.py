@@ -54,9 +54,14 @@ _REVOKE_SESSIONS_SQL = text(
 
 _GET_USER_SQL = text(
     """
-    SELECT id, primary_email, status, last_login_at, created_at, updated_at
-    FROM users
-    WHERE id = :user_id
+    SELECT u.id, u.primary_email, u.status, u.last_login_at,
+           u.created_at, u.updated_at,
+           p.display_name, p.given_name, p.family_name, p.bio,
+           p.avatar_object_id
+    FROM users u
+    LEFT JOIN user_profiles p
+      ON p.user_id = u.id AND p.deleted_at IS NULL
+    WHERE u.id = :user_id
     """
 )
 
@@ -86,8 +91,13 @@ async def user_detail(db: AsyncSession, *, user_id: UUID) -> dict[str, Any]:
         raise NotFoundError(f"user {user_id} not found")
     role_assignments = await user_queries.role_assignments(db, user_id=user_id)
     sessions = await user_queries.active_sessions(db, user_id=user_id)
+    base_dict = dict(base)
+    profile_keys = ("display_name", "given_name", "family_name", "bio", "avatar_object_id")
+    profile = {k: base_dict.pop(k) for k in profile_keys}
+    user_payload = dict(base_dict)
+    user_payload["profile"] = profile if profile.get("display_name") is not None else None
     return {
-        "user": dict(base),
+        "user": user_payload,
         "role_assignments": role_assignments,
         "active_sessions": sessions,
     }
