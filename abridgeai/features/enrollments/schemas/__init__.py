@@ -12,6 +12,7 @@ from abridgeai.features.enrollments.schemas.request import (
     CSVImportFailure,
     CSVImportResult,
     CSVImportRow,
+    EnrollmentPatch,
     InvitationCodeCreate,
     InvitationCodePatch,
 )
@@ -24,6 +25,7 @@ __all__ = [
     "CSVImportResult",
     "CSVImportRow",
     "EnrollmentAuthoring",
+    "EnrollmentPatch",
     "EnrollmentRead",
     "InvitationCodeAuthoring",
     "InvitationCodeCreate",

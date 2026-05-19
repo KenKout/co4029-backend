@@ -28,6 +28,7 @@ stay HTTP-agnostic.
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from datetime import datetime
 from typing import Annotated, Literal
 from uuid import UUID
 
@@ -39,7 +40,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from abridgeai.core.db import get_db
 from abridgeai.core.exceptions import NotFoundError
 from abridgeai.core.security import CurrentUser, get_current_user
-from abridgeai.features.access_control.policies import can_manage_course
+from abridgeai.features.access_control.policies import can_manage_course, require_permission
 from abridgeai.features.courses.api import public as courses_api
 from abridgeai.features.courses.routers._deps import require_lesson_authoring_access
 from abridgeai.features.materials.api import public as materials_api
@@ -61,8 +62,74 @@ from abridgeai.features.materials.services.authoring import (
 )
 
 router = APIRouter(prefix="/teacher", tags=["materials-authoring"])
+upload_router = APIRouter(prefix="/materials", tags=["materials-authoring"])
 
 _DEFAULT_AUTHORING_PERM: tuple[str, ...] = ("course.update",)
+_REQUIRE_UPLOAD_URL = require_permission("course.update")
+
+
+class _UploadUrlRequest(BaseModel):
+    """Request body for ``POST /materials/upload-url``.
+
+    Lets the SPA pre-create a ``storage_objects`` row + presigned PUT URL
+    for direct browser → S3 uploads (lesson resources flow). The simpler
+    sibling of ``init_upload`` which is reserved for the AI material
+    pipeline.
+    """
+
+    original_filename: str
+    mime_type: str
+    size_bytes: int | None = None
+
+
+class _UploadUrlStorageObject(BaseModel):
+    id: UUID
+    object_key: str
+    bucket: str
+
+
+class _UploadUrlResponse(BaseModel):
+    storage_object: _UploadUrlStorageObject
+    upload_url: str
+    expires_at: datetime
+
+
+@upload_router.post("/upload-url", response_model=_UploadUrlResponse)
+async def request_upload_url(
+    payload: _UploadUrlRequest,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_UPLOAD_URL)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> _UploadUrlResponse:
+    """Mint a presigned PUT URL + storage_objects row for a teacher upload.
+
+    Powers the SPA's lesson-resource attach flow on the lesson-manage
+    page (PDFs, slides, ZIPs, etc.). The teacher uploads directly to S3,
+    then POSTs to ``/teacher/lessons/{id}/resources`` with the returned
+    storage_object_id. The init/complete pipeline (T4.5) is reserved for
+    AI-processed materials.
+    """
+    (
+        storage_object_id,
+        storage_view,
+        upload_url,
+        expires_at,
+    ) = await authoring_service.request_simple_upload(
+        db,
+        original_filename=payload.original_filename,
+        mime_type=payload.mime_type,
+        size_bytes=payload.size_bytes,
+        actor=current_user,
+    )
+    await db.commit()
+    return _UploadUrlResponse(
+        storage_object=_UploadUrlStorageObject(
+            id=storage_object_id,
+            object_key=storage_view.object_key,
+            bucket=storage_view.bucket,
+        ),
+        upload_url=upload_url,
+        expires_at=expires_at,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -608,4 +675,5 @@ __all__ = [
     "require_material_authoring_access",
     "require_version_authoring_access",
     "router",
+    "upload_router",
 ]

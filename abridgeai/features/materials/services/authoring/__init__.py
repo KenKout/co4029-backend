@@ -71,6 +71,7 @@ from abridgeai.features.materials.services.authoring._upload import (
     complete_multipart,
     fetch_multipart_parts,
     init_upload,
+    request_simple_upload,
 )
 from abridgeai.features.materials.services.authoring._versions import (
     complete_upload,
@@ -98,6 +99,7 @@ __all__ = [
     "init_upload",
     "list_authoring_materials",
     "reprocess_material",
+    "request_simple_upload",
     "resolve_course_id_for_material",
     "soft_delete_material",
     "update_material",

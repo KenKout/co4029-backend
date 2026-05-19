@@ -37,6 +37,7 @@ from abridgeai.features.enrollments.schemas import (
     BulkEnrollResult,
     CSVImportResult,
     EnrollmentAuthoring,
+    EnrollmentPatch,
     InvitationCodeAuthoring,
     InvitationCodeCreate,
     InvitationCodePatch,
@@ -45,6 +46,7 @@ from abridgeai.features.enrollments.services import manager as manager_service
 
 dept_router = APIRouter(prefix="/dept", tags=["enrollments-assignment"])
 management_router = APIRouter(prefix="/management", tags=["enrollments-assignment"])
+teacher_router = APIRouter(prefix="/teacher", tags=["enrollments-assignment"])
 
 
 class CSVImportPayload(BaseModel):
@@ -65,6 +67,12 @@ _REQUIRE_COURSE_ENROLLMENT_REMOVE = require_course_permission(
     "course_id", "course.enrollment.remove", "system.administer"
 )
 _REQUIRE_INVITATION_CODE_MANAGE = require_permission("course.enrollment.create")
+_REQUIRE_TEACHER_ENROLLMENT_PATCH = require_any_permission(
+    "course.enrollment.create",
+    "course.enrollment.remove",
+    "course.update",
+    "system.administer",
+)
 
 
 def _not_found(detail: str) -> HTTPException:
@@ -234,4 +242,29 @@ async def delete_invitation_code(
     await db.commit()
 
 
-__all__ = ["dept_router", "management_router"]
+@teacher_router.patch(
+    "/course-enrollments/{enrollment_id}",
+    response_model=EnrollmentAuthoring,
+)
+async def patch_enrollment(
+    enrollment_id: UUID,
+    payload: EnrollmentPatch,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_TEACHER_ENROLLMENT_PATCH)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> EnrollmentAuthoring:
+    """Drop / reactivate an individual enrollment from the teacher's roster.
+
+    Powers the SPA's drop / reactivate buttons on the
+    course-student-detail page. The schema allowlist (status,
+    completed_at, dropped_at) keeps identity (course_id, student_id,
+    source) immutable.
+    """
+    try:
+        result = await manager_service.patch_enrollment(db, enrollment_id, payload, current_user)
+    except NotFoundError as exc:
+        raise _not_found(str(exc)) from exc
+    await db.commit()
+    return result
+
+
+__all__ = ["dept_router", "management_router", "teacher_router"]

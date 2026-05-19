@@ -283,3 +283,38 @@ async def abort_multipart(
     await abort_multipart_upload(storage_view, upload_id)
     version.processing_status = "cancelled"
     await flush_or_conflict(db)
+
+
+async def request_simple_upload(
+    db: AsyncSession,
+    *,
+    original_filename: str,
+    mime_type: str,
+    size_bytes: int | None,
+    actor: CurrentUser,
+) -> tuple[UUID, _StorageView, str, datetime]:
+    """Mint a presigned PUT URL for a generic teacher upload (lesson resources).
+
+    Powers the SPA's legacy ``POST /materials/upload-url`` flow which
+    the lesson-manage page still uses for non-AI lesson resources
+    (PDFs, slides, etc.). Creates a ``storage_objects`` row up front so
+    the SPA can persist the resulting ``storage_object_id`` against a
+    ``lesson_resources`` row in the same UI flow. The init/complete
+    pipeline (T4.5) handles the AI material path; this is the simpler
+    sibling for resources that bypass the processing pipeline.
+    """
+    settings = _get_settings()
+    storage_object_id = await create_storage_object(
+        db,
+        bucket=settings.s3_bucket_name,  # type: ignore[attr-defined]
+        object_key=None,
+        size_bytes=max(0, int(size_bytes or 0)),
+        content_type=mime_type,
+        original_filename=original_filename,
+        uploaded_by=actor.user_id,
+    )
+    object_key = f"resources/{storage_object_id}/{original_filename}"
+    await set_storage_object_key(db, storage_object_id, object_key)
+    storage_view = _StorageView(bucket=settings.s3_bucket_name, object_key=object_key)  # type: ignore[attr-defined]
+    upload_url, expires_at = await create_upload_url(storage_view, content_type=mime_type)
+    return storage_object_id, storage_view, upload_url, expires_at

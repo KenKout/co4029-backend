@@ -20,6 +20,7 @@ from abridgeai.features.enrollments.schemas import (
     CSVImportResult,
     CSVImportRow,
     EnrollmentAuthoring,
+    EnrollmentPatch,
     InvitationCodeAuthoring,
     InvitationCodeCreate,
     InvitationCodePatch,
@@ -180,6 +181,41 @@ async def unenroll_student(
         raise NotFoundError(f"No enrollment for course={course_id} user={user_id}")
     enrollment.status = "dropped"
     enrollment.dropped_at = datetime.now(UTC)
+    enrollment.updated_by = actor.user_id
+    await flush_or_conflict(db)
+    await db.refresh(enrollment)
+    return _to_authoring(enrollment)
+
+
+async def patch_enrollment(
+    db: AsyncSession,
+    enrollment_id: UUID,
+    payload: EnrollmentPatch,
+    actor: CurrentUser,
+) -> EnrollmentAuthoring:
+    """Update a single enrollment row by id (teacher / manager surface).
+
+    Powers the SPA's drop / reactivate buttons on the
+    course-student-detail page. The schema allowlist (status,
+    completed_at, dropped_at) keeps identity (course_id, student_id,
+    source) immutable. ``status='dropped'`` auto-stamps ``dropped_at``
+    if the caller didn't supply one; ``status='active'`` clears
+    ``dropped_at`` so the row reflects re-activation.
+    """
+    enrollment = await db.get(Enrollment, enrollment_id)
+    if enrollment is None:
+        raise NotFoundError(f"Enrollment {enrollment_id} not found")
+    data = payload.model_dump(exclude_unset=True)
+    if (
+        data.get("status") == "dropped"
+        and enrollment.dropped_at is None
+        and "dropped_at" not in data
+    ):
+        data["dropped_at"] = datetime.now(UTC)
+    if data.get("status") == "active" and "dropped_at" not in data:
+        enrollment.dropped_at = None
+    for key, value in data.items():
+        setattr(enrollment, key, value)
     enrollment.updated_by = actor.user_id
     await flush_or_conflict(db)
     await db.refresh(enrollment)

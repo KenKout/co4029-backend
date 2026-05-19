@@ -81,10 +81,16 @@ from abridgeai.features.enrollments.routers import (
     assignment_management_router as enrollments_management_router,
 )
 from abridgeai.features.enrollments.routers import (
+    assignment_teacher_router as enrollments_teacher_router,
+)
+from abridgeai.features.enrollments.routers import (
     me_enrollments_router,
 )
 from abridgeai.features.identity.routers import (
     auth_router as identity_auth_router,
+)
+from abridgeai.features.identity.routers import (
+    me_root_router as identity_me_root_router,
 )
 from abridgeai.features.identity.routers import (
     me_router as identity_me_router,
@@ -106,6 +112,9 @@ from abridgeai.features.materials.routers import (
 )
 from abridgeai.features.materials.routers import (
     learner_router as materials_learner_router,
+)
+from abridgeai.features.materials.routers import (
+    materials_upload_router,
 )
 from abridgeai.features.notifications.routers import (
     learner_router as notifications_learner_router,
@@ -153,6 +162,7 @@ def create_app() -> FastAPI:
     # Phase 1 -- identity
     app.include_router(identity_auth_router, prefix=API_V1_PREFIX)
     app.include_router(identity_me_router, prefix=API_V1_PREFIX)
+    app.include_router(identity_me_root_router, prefix=API_V1_PREFIX)
     app.include_router(identity_mfa_router, prefix=API_V1_PREFIX)
     app.include_router(identity_users_router, prefix=API_V1_PREFIX)
 
@@ -169,6 +179,7 @@ def create_app() -> FastAPI:
     # Phase 4 -- materials
     app.include_router(materials_learner_router, prefix=API_V1_PREFIX)
     app.include_router(materials_authoring_router, prefix=API_V1_PREFIX)
+    app.include_router(materials_upload_router, prefix=API_V1_PREFIX)
 
     # Phase 5 -- quizzes
     app.include_router(quizzes_learner_router, prefix=API_V1_PREFIX)
@@ -182,6 +193,7 @@ def create_app() -> FastAPI:
     app.include_router(me_enrollments_router, prefix=API_V1_PREFIX)
     app.include_router(enrollments_dept_router, prefix=API_V1_PREFIX)
     app.include_router(enrollments_management_router, prefix=API_V1_PREFIX)
+    app.include_router(enrollments_teacher_router, prefix=API_V1_PREFIX)
 
     # Phase 7 -- progress (T7.2)
     app.include_router(progress_learner_router, prefix=API_V1_PREFIX)

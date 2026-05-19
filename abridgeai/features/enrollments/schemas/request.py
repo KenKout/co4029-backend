@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from datetime import datetime
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -85,6 +86,23 @@ class InvitationCodePatch(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class EnrollmentPatch(BaseModel):
+    """Patch payload for ``PATCH /teacher/course-enrollments/{id}``.
+
+    Only ``status``, ``completed_at`` and ``dropped_at`` are mutable
+    here — identity (course_id, student_id, source) is immutable so a
+    teacher cannot use PATCH to migrate an enrollment between courses
+    or relabel its origin. Status transitions follow the values the
+    public ``EnrollmentRead`` schema already exposes.
+    """
+
+    status: Literal["active", "completed", "dropped", "waitlisted"] | None = None
+    completed_at: datetime | None = None
+    dropped_at: datetime | None = None
+
+    model_config = ConfigDict(extra="forbid")
+
+
 __all__ = [
     "BulkEnrollFailure",
     "BulkEnrollRequest",
@@ -92,6 +110,7 @@ __all__ = [
     "CSVImportFailure",
     "CSVImportResult",
     "CSVImportRow",
+    "EnrollmentPatch",
     "InvitationCodeCreate",
     "InvitationCodePatch",
 ]

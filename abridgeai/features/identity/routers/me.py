@@ -26,6 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from abridgeai.core.db import get_db
 from abridgeai.core.security import CurrentUser, get_current_user
+from abridgeai.features.access_control.api import public as access_control_api
 from abridgeai.features.access_control.services import (
     get_effective_permissions,
 )
@@ -41,6 +42,7 @@ from abridgeai.features.identity.services import (
 from abridgeai.features.identity.services import profile as profile_service
 
 router = APIRouter(prefix="/users/me", tags=["users", "me"])
+me_root_router = APIRouter(prefix="/me", tags=["users", "me"])
 
 
 def _unauthorized(detail: str) -> HTTPException:
@@ -87,4 +89,25 @@ async def read_my_permissions(
     return UserPermissionsRead(permissions=perms)
 
 
-__all__ = ["router"]
+@me_root_router.get("/roles", response_model=list[str])
+async def read_my_roles(
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> list[str]:
+    """Return the distinct role codes the caller currently holds.
+
+    Powers the SPA's ``useMyRoles`` hook, which gates UI for
+    multi-role users (e.g. show the manager dashboard tile only when
+    the caller actually has ``manager``). Active = not soft-deleted
+    AND ``active_until`` is NULL or in the future. Codes are
+    de-duplicated across scopes.
+    """
+    rows = await access_control_api.get_role_assignments_for_user(db, current_user.user_id)
+    seen: list[str] = []
+    for assignment in rows:
+        if assignment.role_code not in seen:
+            seen.append(assignment.role_code)
+    return seen
+
+
+__all__ = ["me_root_router", "router"]
