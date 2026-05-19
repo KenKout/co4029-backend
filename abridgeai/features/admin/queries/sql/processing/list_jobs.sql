@@ -17,6 +17,6 @@ SELECT
     pj.updated_at      AS updated_at
 FROM processing_jobs pj
 WHERE pj.updated_at >= CAST(:since AS timestamptz)
-  AND (:status IS NULL OR pj.status = :status)
+  AND (CAST(:status AS text) IS NULL OR pj.status = CAST(:status AS text))
 ORDER BY pj.updated_at DESC
 LIMIT :limit;

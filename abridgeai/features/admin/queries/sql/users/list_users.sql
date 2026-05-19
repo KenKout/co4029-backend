@@ -11,7 +11,7 @@ SELECT
     u.created_at      AS created_at,
     u.updated_at      AS updated_at
 FROM users u
-WHERE (:status_filter IS NULL OR u.status = :status_filter)
+WHERE (CAST(:status_filter AS text) IS NULL OR u.status = CAST(:status_filter AS text))
   AND (CAST(:organization_id AS uuid) IS NULL
        OR EXISTS (
            SELECT 1 FROM organization_memberships om
@@ -19,7 +19,7 @@ WHERE (:status_filter IS NULL OR u.status = :status_filter)
              AND om.organization_id = CAST(:organization_id AS uuid)
              AND om.deleted_at IS NULL
        ))
-  AND (:role_code IS NULL
+  AND (CAST(:role_code AS text) IS NULL
        OR EXISTS (
            SELECT 1
            FROM user_role_assignments ura
@@ -28,7 +28,7 @@ WHERE (:status_filter IS NULL OR u.status = :status_filter)
              AND ura.deleted_at IS NULL
              AND ura.active_from <= NOW()
              AND (ura.active_until IS NULL OR ura.active_until > NOW())
-             AND r.code = :role_code
+             AND r.code = CAST(:role_code AS text)
              AND (CAST(:organization_id AS uuid) IS NULL
                   OR ura.scope_kind = 'global'
                   OR ura.organization_id = CAST(:organization_id AS uuid))

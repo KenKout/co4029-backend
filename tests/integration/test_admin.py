@@ -337,6 +337,74 @@ async def test_retry_failed_job(
     assert args[0] == "parse_document"
 
 
+async def test_list_processing_jobs_smoke(
+    client: httpx.AsyncClient,
+    engine: AsyncEngine,
+    seeded_users: SeededUsers,
+    failed_job: uuid.UUID,
+) -> None:
+    """Regression: ``GET /admin/processing/jobs`` must succeed with and without
+    a status filter.
+
+    The bug was ``psycopg.errors.AmbiguousParameter`` on ``:status IS NULL OR
+    pj.status = :status`` when ``status`` was omitted, because PostgreSQL
+    could not infer the parameter type. The SQL now wraps it in
+    ``CAST(:status AS text)``; this test exercises both branches.
+    """
+    del failed_job  # ensures at least one row exists
+    token, _ = await _bearer(engine, seeded_users.admin_id)
+    since = quote_plus((datetime.now(tz=UTC) - timedelta(days=7)).isoformat())
+    try:
+        no_filter = await client.get(
+            f"/api/v1/admin/processing/jobs?since={since}&limit=50",
+            headers=_auth(token),
+        )
+        with_filter = await client.get(
+            f"/api/v1/admin/processing/jobs?since={since}&status=failed&limit=50",
+            headers=_auth(token),
+        )
+    finally:
+        await _purge_sessions(engine, seeded_users.admin_id)
+    assert no_filter.status_code == 200, no_filter.text
+    assert with_filter.status_code == 200, with_filter.text
+    assert isinstance(no_filter.json(), list)
+    assert isinstance(with_filter.json(), list)
+    assert all(row["status"] == "failed" for row in with_filter.json())
+
+
+async def test_list_admin_users_smoke(
+    client: httpx.AsyncClient,
+    engine: AsyncEngine,
+    seeded_users: SeededUsers,
+) -> None:
+    """Regression: ``GET /admin/users`` must succeed with no filters and with
+    each filter set, covering the same ``:param IS NULL OR ...`` cast bug as
+    the processing-jobs query.
+    """
+    token, _ = await _bearer(engine, seeded_users.admin_id)
+    try:
+        no_filter = await client.get(
+            "/api/v1/admin/users?limit=10",
+            headers=_auth(token),
+        )
+        status_filter = await client.get(
+            "/api/v1/admin/users?status=active&limit=10",
+            headers=_auth(token),
+        )
+        role_filter = await client.get(
+            "/api/v1/admin/users?role_code=teacher&limit=10",
+            headers=_auth(token),
+        )
+    finally:
+        await _purge_sessions(engine, seeded_users.admin_id)
+    assert no_filter.status_code == 200, no_filter.text
+    assert status_filter.status_code == 200, status_filter.text
+    assert role_filter.status_code == 200, role_filter.text
+    assert isinstance(no_filter.json(), list)
+    assert isinstance(status_filter.json(), list)
+    assert isinstance(role_filter.json(), list)
+
+
 async def test_disable_revokes_sessions(
     client: httpx.AsyncClient,
     engine: AsyncEngine,
