@@ -61,7 +61,7 @@ _TEST_AUDIO_MIME = "audio/x-test"
 _TEST_VIDEO_MIME = "video/x-test"
 _TEST_IMAGE_MIME = "image/x-test"
 _TEST_FAILING_MIME = "application/x-test-fail"
-_EMBEDDING_DIM = 1536
+_EMBEDDING_DIM = 3072
 
 
 def _async_url(database_url: str) -> str:

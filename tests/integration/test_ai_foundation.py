@@ -29,7 +29,7 @@ from abridgeai.ai.llm.roles import LLMRole
 from abridgeai.ai.retrieval import mmr_diversify, vector_search
 from abridgeai.core.config import get_settings
 
-_EMBEDDING_DIM = 1536
+_EMBEDDING_DIM = 3072
 
 
 def _async_url(database_url: str) -> str:
@@ -318,7 +318,7 @@ async def test_full_pipeline_extract_chunk_embed_store_retrieve_diversify(
                     "(id, course_id, module_id, lesson_id, material_version_id, "
                     " chunk_index, chunk_type, content, content_hash, embedding) "
                     "VALUES (:id, :course, :module, :lesson, :ver, :idx, 'pdf', "
-                    "        :content, :hash, CAST(:emb AS vector))"
+                    "        :content, :hash, CAST(:emb AS halfvec))"
                 ),
                 {
                     "id": chunk_id,

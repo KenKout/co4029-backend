@@ -63,7 +63,7 @@ from datetime import datetime
 from typing import Any
 
 from pgvector.sqlalchemy import (
-    Vector,  # type: ignore[import-not-found,import-untyped,unused-ignore]
+    HALFVEC,  # type: ignore[import-not-found,import-untyped,unused-ignore]
 )
 from sqlalchemy import (
     CheckConstraint,
@@ -295,7 +295,7 @@ class DocumentChunk(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
         "metadata", JSONB, nullable=False, server_default=text("'{}'::jsonb")
     )
     embedding: Mapped[list[float] | None] = mapped_column(
-        Vector(1536),
+        HALFVEC(3072),
         nullable=True,
     )
     content_hash: Mapped[str] = mapped_column(String(64), nullable=False)

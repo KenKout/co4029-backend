@@ -64,17 +64,18 @@ class EmbeddingClient:
                 "document_chunks.embedding column not found; "
                 "run db/schema.sql or alembic upgrade head"
             )
-        # pgvector stores the declared dimension directly in atttypmod
-        # (verified empirically: vector(1536) yields atttypmod=1536).
+        # pgvector stores the declared dimension directly in atttypmod for
+        # halfvec(N) and vector(N) (verified empirically: halfvec(3072) yields
+        # atttypmod=3072).
         column_dim = atttypmod_row[0]
         configured_dim = self._settings.embedding_dimensions
 
         if configured_dim != column_dim:
             raise ConfigError(
                 f"EMBEDDING_DIMENSIONS={configured_dim} but "
-                f"document_chunks.embedding is vector({column_dim}). "
-                "Run migration 0006_widen_embedding_vector first, or revert "
-                f"EMBEDDING_DIMENSIONS to {column_dim}."
+                f"document_chunks.embedding is halfvec({column_dim}). "
+                "Run alembic upgrade head, or set EMBEDDING_DIMENSIONS to "
+                f"{column_dim}."
             )
 
     async def embed(

@@ -80,7 +80,7 @@ from abridgeai.features.quizzes.routers import (
 from abridgeai.features.quizzes.routers.authoring import get_arq_pool
 from abridgeai.features.quizzes.services import generation as generation_service
 
-EMBEDDING_DIM = 1536
+EMBEDDING_DIM = 3072
 
 
 import abridgeai.features.interviews.models  # noqa: E402, F401  -- T6.1 registers interview_* tables
@@ -254,7 +254,7 @@ async def scenario(
                     "(id, course_id, module_id, lesson_id, material_version_id, "
                     " chunk_index, chunk_type, content, embedding, content_hash) "
                     "VALUES (:id, :c, :m, :l, :v, :idx, 'text', :content, "
-                    "        CAST(:emb AS vector), :hash)"
+                    "        CAST(:emb AS halfvec), :hash)"
                 ),
                 {
                     "id": chunk_id,

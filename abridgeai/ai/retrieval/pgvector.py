@@ -75,7 +75,7 @@ class ChunkWithDistance:
 
 _SELECT_COLS = (
     "id, material_version_id, course_id, lesson_id, content, "
-    "(embedding <=> CAST(:query_embedding AS vector)) AS distance"
+    "(embedding <=> CAST(:query_embedding AS halfvec)) AS distance"
 )
 _SELECT_COLS_WITH_EMB = _SELECT_COLS + ", embedding"
 
@@ -95,7 +95,7 @@ def _build_query(*, include_embeddings: bool) -> str:
         + "WHERE embedding IS NOT NULL "
         + course_filter
         + lesson_filter
-        + "ORDER BY embedding <=> CAST(:query_embedding AS vector) "
+        + "ORDER BY embedding <=> CAST(:query_embedding AS halfvec) "
         "LIMIT :top_k"
     )
 
@@ -145,8 +145,8 @@ async def vector_search(
     db
         Active :class:`sqlalchemy.ext.asyncio.AsyncSession`.
     embedding
-        Query vector; must match the column dimension (1536 in the
-        baseline schema, see ``embedding vector(1536)``).
+        Query vector; must match the column dimension (3072 in the
+        baseline schema, see ``embedding halfvec(3072)``).
     course_id
         Optional course scope. ``None`` means no course filter.
     lesson_ids

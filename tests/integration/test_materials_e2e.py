@@ -73,7 +73,7 @@ from abridgeai.features.materials.routers.authoring import get_arq_pool
 from abridgeai.infrastructure import s3 as s3_module
 
 BUCKET = "abridgeai-test-e2e"
-EMBEDDING_DIM = 1536
+EMBEDDING_DIM = 3072
 
 PDF_MIME = "application/pdf"
 DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
@@ -123,7 +123,7 @@ def _ensure_head() -> None:
 
 
 def _vec(seed: int) -> list[float]:
-    """Deterministic 1536-d vector keyed off ``seed``."""
+    """Deterministic 3072-d vector keyed off ``seed``."""
     base = [0.1, 0.2, 0.3, float(seed % 7) / 10.0]
     padded = base + [0.0] * (EMBEDDING_DIM - len(base))
     return [float(v) for v in padded[:EMBEDDING_DIM]]

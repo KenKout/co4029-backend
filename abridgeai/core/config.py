@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 # operators can't sneak the dev default past the validator with trivial
 # variations like "dev-only-change-me-2" while still permitting custom dev
 # secrets that explicitly opt into the "dev-" namespace in non-prod envs.
-_DEV_JWT_SECRET_PREFIX = "dev-"  # noqa: S105
+_DEV_JWT_SECRET_PREFIX = "dev-"  # noqa: S105  # nosec B105
 
 
 # FR-12 whitelist for ``LLM_EXTRA_HEADERS_JSON``. Disallowed keys
@@ -106,8 +106,8 @@ class Settings(BaseSettings):
 
     embedding_base_url: str = "https://api.openai.com/v1"
     embedding_api_key: str | None = None
-    embedding_model: str = "text-embedding-3-small"
-    embedding_dimensions: int = 1536
+    embedding_model: str = "text-embedding-3-large"
+    embedding_dimensions: int = 3072
     embedding_timeout_seconds: float = 30.0
 
     # T2.3: S3 / Garage object storage. ``aws_endpoint_url`` is the

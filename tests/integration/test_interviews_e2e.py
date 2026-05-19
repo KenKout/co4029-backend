@@ -133,7 +133,7 @@ from abridgeai.features.quizzes.routers.authoring import (
     get_arq_pool as get_quiz_arq_pool,
 )
 
-EMBEDDING_DIM = 1536
+EMBEDDING_DIM = 3072
 
 
 # Cross-feature stub tables — interview_configs is now real (T6.1) but tests
@@ -337,7 +337,7 @@ async def scenario(engine: AsyncEngine, seeded_users: SeededUsers) -> AsyncItera
                     "(id, course_id, module_id, lesson_id, material_version_id, "
                     " chunk_index, chunk_type, content, embedding, content_hash) "
                     "VALUES (:id, :c, :m, :l, :v, :idx, 'text', :content, "
-                    "        CAST(:emb AS vector), :hash)"
+                    "        CAST(:emb AS halfvec), :hash)"
                 ),
                 {
                     "id": chunk_id,

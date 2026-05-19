@@ -21,12 +21,12 @@ def _async_url(database_url: str) -> str:
     return database_url
 
 
-def _vec_literal(values: list[float], dim: int = 1536) -> str:
+def _vec_literal(values: list[float], dim: int = 3072) -> str:
     padded = list(values) + [0.0] * (dim - len(values))
     return "[" + ",".join(repr(float(v)) for v in padded[:dim]) + "]"
 
 
-def _vec(values: list[float], dim: int = 1536) -> list[float]:
+def _vec(values: list[float], dim: int = 3072) -> list[float]:
     padded = list(values) + [0.0] * (dim - len(values))
     return [float(v) for v in padded[:dim]]
 
@@ -195,7 +195,7 @@ async def _insert_chunk(
             "(id, course_id, module_id, lesson_id, material_version_id, chunk_index, "
             " chunk_type, content, content_hash, embedding) "
             "VALUES (:id, :course, :module, :lesson, :version, :idx, 'text', :content, "
-            "        :hash, CAST(:embedding AS vector))"
+            "        :hash, CAST(:embedding AS halfvec))"
         ),
         {
             "id": chunk_id,
@@ -387,7 +387,7 @@ async def test_vector_search_includes_embeddings_when_requested(engine: AsyncEng
 
     assert without[0].embedding is None
     assert with_emb[0].embedding is not None
-    assert len(with_emb[0].embedding) == 1536
+    assert len(with_emb[0].embedding) == 3072
     assert with_emb[0].embedding[0] == pytest.approx(1.0, abs=1e-6)
 
 

@@ -256,7 +256,7 @@ def _check_alembic_at_head_sync() -> bool:
     except Exception as exc:  # noqa: BLE001
         logger.warning("healthz.alembic_check_failed", extra={"err": repr(exc)})
         return False
-    return current == head
+    return bool(current == head)
 
 
 async def _check_alembic_at_head() -> bool:
