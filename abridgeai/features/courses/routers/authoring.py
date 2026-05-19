@@ -37,17 +37,20 @@ Architectural rules honoured:
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from abridgeai.core.db import get_db
 from abridgeai.core.exceptions import AppError, ConflictError, NotFoundError
 from abridgeai.core.security import CurrentUser
 from abridgeai.features.access_control.policies import (
+    require_any_permission,
     require_course_permission,
     require_permission,
 )
@@ -58,6 +61,7 @@ from abridgeai.features.courses.routers._deps import (
 )
 from abridgeai.features.courses.schemas import (
     CourseAuthoring,
+    CourseContentAuthoring,
     CourseCreate,
     CourseUpdate,
     LessonAuthoring,
@@ -77,6 +81,7 @@ from abridgeai.features.courses.services import authoring as authoring_service
 router = APIRouter(prefix="/teacher", tags=["courses-authoring"])
 
 _REQUIRE_CREATE = require_permission("course.create")
+_REQUIRE_AUTHORING_LIST = require_any_permission("course.read.draft", "course.create")
 _REQUIRE_COURSE_UPDATE = require_course_permission("course_id", "course.update")
 _REQUIRE_COURSE_PUBLISH = require_course_permission("course_id", "course.publish")
 _REQUIRE_COURSE_DELETE = require_course_permission("course_id", "course.delete")
@@ -136,6 +141,45 @@ class _SlugAvailability(BaseModel):
     available: bool
 
 
+class _RosterEntry(BaseModel):
+    """Roster row for ``GET /teacher/courses/{course_id}/roster``.
+
+    Same shape as the HOD-scope ``RosterEntry`` in ``assignment.py`` —
+    duplicated here intentionally to keep the authoring router free of
+    cross-router imports. Both should evolve together; if Phase 7 lands
+    a canonical ``EnrollmentRead`` shared schema, both can replace this.
+    """
+
+    enrollment_id: UUID
+    student_id: UUID
+    display_name: str | None = None
+    primary_email: str
+    status: str
+    enrolled_at: datetime
+    completed_at: datetime | None = None
+    dropped_at: datetime | None = None
+
+
+_LIST_ROSTER_SQL = text(
+    """
+    SELECT
+        ce.id           AS enrollment_id,
+        ce.student_id   AS student_id,
+        u.primary_email AS primary_email,
+        up.display_name AS display_name,
+        ce.status       AS status,
+        ce.enrolled_at  AS enrolled_at,
+        ce.completed_at AS completed_at,
+        ce.dropped_at   AS dropped_at
+    FROM course_enrollments ce
+    JOIN users u ON u.id = ce.student_id
+    LEFT JOIN user_profiles up ON up.user_id = u.id
+    WHERE ce.course_id = :course_id
+    ORDER BY ce.enrolled_at DESC
+    """
+)
+
+
 @router.get("/courses/check-slug", response_model=_SlugAvailability)
 async def check_course_slug(
     slug: Annotated[str, Query(min_length=1, max_length=100)],
@@ -156,6 +200,79 @@ async def check_course_slug(
     except AppError as exc:
         raise _bad_request(str(exc)) from exc
     return _SlugAvailability(available=available)
+
+
+@router.get("/courses", response_model=list[CourseAuthoring])
+async def list_authoring_courses(
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_AUTHORING_LIST)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    include_archived: bool = False,
+) -> list[CourseAuthoring]:
+    """Courses the caller can author (owned + scope=course teacher assignments).
+
+    Drafts and archived rows are visible to the author. Permission is
+    intentionally lax (``course.read.draft`` OR ``course.create``) — the
+    visibility filter happens in the service via owner/assignment match,
+    not via permission gating, so a teacher seeing nothing is a UX
+    problem rather than a 403.
+    """
+    return await authoring_service.list_authoring_courses_for_user(
+        db, user=current_user, include_archived=include_archived
+    )
+
+
+@router.get("/courses/{course_id}", response_model=CourseAuthoring)
+async def get_authoring_course(
+    course_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_COURSE_UPDATE)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> CourseAuthoring:
+    del current_user
+    try:
+        return await authoring_service.get_authoring_course(db, course_id)
+    except NotFoundError as exc:
+        raise _not_found(str(exc)) from exc
+
+
+@router.get(
+    "/courses/{course_id}/content",
+    response_model=CourseContentAuthoring,
+)
+async def get_authoring_course_content(
+    course_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_COURSE_UPDATE)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    include_archived: bool = False,
+) -> CourseContentAuthoring:
+    """Authoring content tree (drafts included) for ``course_id``."""
+    del current_user
+    try:
+        tree = await authoring_service.get_authoring_content(
+            db, course_id, include_archived=include_archived
+        )
+    except NotFoundError as exc:
+        raise _not_found(str(exc)) from exc
+    return CourseContentAuthoring.model_validate(tree)
+
+
+@router.get(
+    "/courses/{course_id}/roster",
+    response_model=list[_RosterEntry],
+)
+async def get_authoring_course_roster(
+    course_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_COURSE_UPDATE)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> list[_RosterEntry]:
+    """Roster of enrolled students for the teacher's course view.
+
+    Same response shape as ``GET /dept/courses/{id}/roster`` (HOD-scope)
+    but gated on ``course.update`` so the course owner / assigned teacher
+    can read their own roster without HOD privileges.
+    """
+    del current_user
+    rows = (await db.execute(_LIST_ROSTER_SQL, {"course_id": course_id})).mappings()
+    return [_RosterEntry.model_validate(dict(row)) for row in rows]
 
 
 @router.patch("/courses/{course_id}", response_model=CourseAuthoring)

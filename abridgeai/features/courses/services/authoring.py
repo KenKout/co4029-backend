@@ -25,7 +25,7 @@ accept ``actor: CurrentUser`` to permit explicit ownership writes
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from abridgeai.core.db.conflict_mapper import (
@@ -373,6 +373,66 @@ async def set_module_prerequisites(
     return ModuleAuthoring.model_validate(module)
 
 
+async def list_authoring_courses_for_user(
+    db: AsyncSession,
+    *,
+    user: CurrentUser,
+    include_archived: bool = False,
+) -> list[CourseAuthoring]:
+    """Return courses the caller can author.
+
+    Two visibility paths combined:
+
+    * Courses the caller owns (``Course.owner_user_id == user_id``) — the
+      "my drafts" view.
+    * Courses the caller has a ``role=teacher, scope=course`` assignment
+      on — the "courses I co-author" view.
+
+    Soft-deleted rows are excluded by the global filter; archived rows
+    are filtered unless ``include_archived`` is true.
+    """
+    owned = await authoring_queries.list_courses_for_owner(
+        db, user.user_id, include_archived=include_archived
+    )
+    assigned = await authoring_queries.list_courses_assigned_to_teacher(
+        db, user.user_id, include_archived=include_archived
+    )
+    seen: set[UUID] = set()
+    merged: list[Course] = []
+    for course in (*owned, *assigned):
+        if course.id in seen:
+            continue
+        seen.add(course.id)
+        merged.append(course)
+    merged.sort(key=lambda c: c.created_at, reverse=True)
+    return [CourseAuthoring.model_validate(c) for c in merged]
+
+
+async def get_authoring_course(db: AsyncSession, course_id: UUID) -> CourseAuthoring:
+    course = await _require_course(db, course_id)
+    return CourseAuthoring.model_validate(course)
+
+
+async def get_authoring_content(
+    db: AsyncSession,
+    course_id: UUID,
+    *,
+    include_archived: bool = False,
+) -> dict[str, Any]:
+    """Authoring content tree for ``course_id`` (drafts included).
+
+    Wraps :func:`authoring_queries.get_course_content_authoring` and
+    raises :class:`NotFoundError` for an unknown / soft-deleted course
+    so the router gets a 404 instead of an empty 200.
+    """
+    tree = await authoring_queries.get_course_content_authoring(
+        db, course_id, include_archived=include_archived
+    )
+    if tree is None:
+        raise NotFoundError(f"Course {course_id} not found")
+    return tree
+
+
 __all__ = [
     "add_lesson",
     "add_lesson_resource",
@@ -381,6 +441,9 @@ __all__ = [
     "check_course_slug_available",
     "create_course",
     "delete_lesson_resource",
+    "get_authoring_content",
+    "get_authoring_course",
+    "list_authoring_courses_for_user",
     "publish_course",
     "reorder_module_items",
     "set_module_prerequisites",

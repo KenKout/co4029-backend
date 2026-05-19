@@ -876,3 +876,153 @@ async def test_create_lesson_resource_duplicate_position_returns_409(
     detail = response.json()["detail"]
     assert detail["error"] == "conflict"
     assert "lesson_resource_position_taken" in detail["message"]
+
+
+async def test_get_authoring_courses_lists_owned_courses(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    scenario: dict[str, uuid.UUID | str],
+) -> None:
+    """``GET /teacher/courses`` returns courses owned by the bearer.
+
+    Replaces the legacy 405 the SPA was hitting (only POST was registered
+    on this path). The seeded admin owns ``test_course`` so the response
+    must contain it.
+    """
+    response = await client.get(
+        "/api/v1/teacher/courses",
+        headers={"Authorization": f"Bearer {admin_bearer}"},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert isinstance(body, list)
+    course_ids = {c["id"] for c in body}
+    assert str(scenario["course_a"]) in course_ids
+
+
+async def test_get_authoring_courses_includes_assigned_courses(
+    client: httpx.AsyncClient,
+    teacher_bearer: str,
+    scenario: dict[str, uuid.UUID | str],
+) -> None:
+    """The teacher seed has ``role=teacher, scope=course`` on ``course_a``
+    (Course-A) but does NOT own it. They must still see it in their
+    authoring list — that's the "courses I co-author" path.
+    """
+    response = await client.get(
+        "/api/v1/teacher/courses",
+        headers={"Authorization": f"Bearer {teacher_bearer}"},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    course_ids = {c["id"] for c in body}
+    assert str(scenario["course_a"]) in course_ids
+
+
+async def test_get_authoring_courses_excludes_unrelated_courses(
+    client: httpx.AsyncClient,
+    teacher_bearer: str,
+    scenario: dict[str, uuid.UUID | str],
+) -> None:
+    """Teacher has no scope on Course-B; the list must NOT leak it."""
+    response = await client.get(
+        "/api/v1/teacher/courses",
+        headers={"Authorization": f"Bearer {teacher_bearer}"},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    course_ids = {c["id"] for c in body}
+    assert str(scenario["course_b"]) not in course_ids
+
+
+async def test_get_authoring_courses_unauthenticated_returns_401(
+    client: httpx.AsyncClient,
+) -> None:
+    response = await client.get("/api/v1/teacher/courses")
+    assert response.status_code == 401
+
+
+async def test_get_authoring_course_detail(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    scenario: dict[str, uuid.UUID | str],
+) -> None:
+    response = await client.get(
+        f"/api/v1/teacher/courses/{scenario['course_a']}",
+        headers={"Authorization": f"Bearer {admin_bearer}"},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["id"] == str(scenario["course_a"])
+    assert body["organization_id"]
+
+
+async def test_get_authoring_course_detail_unknown_returns_404(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+) -> None:
+    """Unknown course ids must surface as 404, not 500 or empty 200."""
+    response = await client.get(
+        f"/api/v1/teacher/courses/{uuid.uuid4()}",
+        headers={"Authorization": f"Bearer {admin_bearer}"},
+    )
+    assert response.status_code == 404
+
+
+async def test_get_authoring_course_detail_no_scope_returns_403(
+    client: httpx.AsyncClient,
+    teacher_bearer: str,
+    scenario: dict[str, uuid.UUID | str],
+) -> None:
+    """Teacher with no scope on Course-B gets 403, not the row."""
+    response = await client.get(
+        f"/api/v1/teacher/courses/{scenario['course_b']}",
+        headers={"Authorization": f"Bearer {teacher_bearer}"},
+    )
+    assert response.status_code == 403
+
+
+async def test_get_authoring_course_content(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    scenario: dict[str, uuid.UUID | str],
+) -> None:
+    """``GET /teacher/courses/{id}/content`` returns the authoring tree
+    (drafts included, owners only)."""
+    response = await client.get(
+        f"/api/v1/teacher/courses/{scenario['course_a']}/content",
+        headers={"Authorization": f"Bearer {admin_bearer}"},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert "course" in body
+    assert "modules" in body
+    assert body["course"]["id"] == str(scenario["course_a"])
+
+
+async def test_get_authoring_course_roster(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    scenario: dict[str, uuid.UUID | str],
+) -> None:
+    """``GET /teacher/courses/{id}/roster`` returns the same shape as
+    ``/dept/courses/{id}/roster`` so the SPA's existing
+    useTeacherCourseRoster hook works without code changes.
+    """
+    response = await client.get(
+        f"/api/v1/teacher/courses/{scenario['course_a']}/roster",
+        headers={"Authorization": f"Bearer {admin_bearer}"},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert isinstance(body, list)
+    if body:
+        sample = body[0]
+        for key in (
+            "enrollment_id",
+            "student_id",
+            "primary_email",
+            "status",
+            "enrolled_at",
+        ):
+            assert key in sample

@@ -56,6 +56,47 @@ async def list_courses_for_owner(
     return list((await db.execute(stmt)).scalars().all())
 
 
+async def list_courses_assigned_to_teacher(
+    db: AsyncSession,
+    user_id: UUID,
+    *,
+    include_archived: bool = False,
+) -> list[Course]:
+    """All courses where ``user_id`` holds an active ``role=teacher`` course-scoped assignment.
+
+    Mirrors :func:`list_courses_for_owner` for the "co-author" path:
+    ``user_role_assignments`` rows with ``scope_kind='course'`` and
+    ``role.code='teacher'`` give a teacher edit access without owning
+    the course. Active = not soft-deleted AND ``active_until`` IS NULL
+    or in the future.
+    """
+    join_sql = text(
+        """
+        SELECT c.id
+        FROM courses c
+        JOIN user_role_assignments ura ON ura.course_id = c.id
+        JOIN roles r ON r.id = ura.role_id
+        WHERE ura.user_id = :user_id
+          AND ura.scope_kind = 'course'
+          AND r.code = 'teacher'
+          AND ura.deleted_at IS NULL
+          AND (ura.active_until IS NULL OR ura.active_until > NOW())
+        """
+    )
+    ids = [row[0] for row in await db.execute(join_sql, {"user_id": user_id})]
+    if not ids:
+        return []
+    stmt = (
+        select(Course)
+        .where(
+            Course.id.in_(ids),
+            _archived_filter(include_archived, Course.status),
+        )
+        .order_by(Course.created_at.desc())
+    )
+    return list((await db.execute(stmt)).scalars().all())
+
+
 async def list_courses_in_org_unit(db: AsyncSession, org_unit_id: UUID) -> list[Course]:
     stmt = (
         select(Course).where(Course.org_unit_id == org_unit_id).order_by(Course.created_at.desc())
