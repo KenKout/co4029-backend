@@ -177,8 +177,7 @@ async def scenario(
         for sid_, email in zip(student_ids, student_emails, strict=True):
             await conn.execute(
                 text(
-                    "INSERT INTO users (id, primary_email, status) "
-                    "VALUES (:id, :email, 'active')"
+                    "INSERT INTO users (id, primary_email, status) VALUES (:id, :email, 'active')"
                 ),
                 {"id": sid_, "email": email},
             )
@@ -415,9 +414,7 @@ async def test_csv_import_partial_failure(
     async with engine.begin() as conn:
         rows = (
             await conn.execute(
-                text(
-                    "SELECT COUNT(*) AS c FROM course_enrollments WHERE course_id = :cid"
-                ),
+                text("SELECT COUNT(*) AS c FROM course_enrollments WHERE course_id = :cid"),
                 {"cid": course_id},
             )
         ).one()
@@ -475,10 +472,7 @@ async def test_invitation_code_create_and_expire(
     async with engine.begin() as conn:
         row = (
             await conn.execute(
-                text(
-                    "SELECT is_active, deleted_at FROM course_invitation_codes "
-                    "WHERE id = :id"
-                ),
+                text("SELECT is_active, deleted_at FROM course_invitation_codes WHERE id = :id"),
                 {"id": code_id},
             )
         ).one_or_none()
@@ -492,6 +486,51 @@ async def test_invitation_code_create_and_expire(
     )
     assert list_after.status_code == 200
     assert all(c["id"] != code_id for c in list_after.json())
+
+
+async def test_invitation_code_duplicate_returns_409(
+    client: httpx.AsyncClient,
+    manager_bearer: str,
+    scenario: dict[str, object],
+    engine: AsyncEngine,
+) -> None:
+    """Re-submitting an invitation code that already exists must return 409.
+
+    Regression: ``create_invitation_code`` used to raise ``ValueError`` for
+    a known-duplicate, which the router mapped to 409, but a true UNIQUE
+    race (e.g. two managers POSTing the same code at the same time) hit
+    Postgres's ``course_invitation_codes_code_key`` and bubbled up as a
+    raw IntegrityError -> 500. The conflict mapper now turns both paths
+    into the same stable 409.
+    """
+    course_id = scenario["course_id"]
+    suffix = uuid.uuid4().hex[:6]
+    code_str = f"DUP-{suffix}"
+    headers = {"Authorization": f"Bearer {manager_bearer}"}
+
+    first = await client.post(
+        f"/api/v1/management/courses/{course_id}/invitation-codes",
+        json={"code": code_str, "max_uses": 1},
+        headers=headers,
+    )
+    assert first.status_code == 201, first.text
+    created_id = first.json()["id"]
+    try:
+        second = await client.post(
+            f"/api/v1/management/courses/{course_id}/invitation-codes",
+            json={"code": code_str, "max_uses": 1},
+            headers=headers,
+        )
+        assert second.status_code == 409, second.text
+        detail = second.json()["detail"]
+        assert detail["error"] == "conflict"
+        assert "invitation_code_taken" in detail["message"]
+    finally:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("DELETE FROM course_invitation_codes WHERE id = :id"),
+                {"id": created_id},
+            )
 
 
 async def test_me_enrollments_returns_my_courses(
@@ -519,8 +558,6 @@ async def test_me_enrollments_returns_my_courses(
 
 
 @pytest.mark.parametrize("path", ["/api/v1/me/enrollments"])
-async def test_me_enrollments_requires_auth(
-    client: httpx.AsyncClient, path: str
-) -> None:
+async def test_me_enrollments_requires_auth(client: httpx.AsyncClient, path: str) -> None:
     response = await client.get(path)
     assert response.status_code == 401

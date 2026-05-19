@@ -1172,4 +1172,68 @@ async def test_audio_object_id_persisted_without_transcription(
     assert "stt" not in summary
 
 
+async def test_create_interview_outcome_duplicate_position_returns_409(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    scenario: dict[str, Any],
+    engine: AsyncEngine,
+) -> None:
+    """``interview_outcomes_interview_config_id_position_key`` collisions
+    must surface as 409, not 500.
+
+    Two outcomes with the same ``position`` under one config used to hit
+    the raw IntegrityError; the conflict mapper now translates this to a
+    stable ``conflict`` / ``interview_outcome_position_taken`` 409.
+    """
+    create_resp = await client.post(
+        f"/api/v1/teacher/courses/{scenario['course_id']}/interview-configs",
+        json={
+            "title": "Outcome-409 Probe",
+            "course_id": str(scenario["course_id"]),
+            "module_id": str(scenario["module_id"]),
+            "supported_modes": "text",
+        },
+        headers=_auth(admin_bearer),
+    )
+    assert create_resp.status_code == 201, create_resp.text
+    config_id = UUID(create_resp.json()["id"])
+    try:
+        first = await client.post(
+            f"/api/v1/teacher/interview-configs/{config_id}/outcomes",
+            json={
+                "position": 1,
+                "outcome_text": "First outcome at position 1",
+                "outcome_type": "knowledge",
+                "importance_weight": 1,
+            },
+            headers=_auth(admin_bearer),
+        )
+        assert first.status_code == 201, first.text
+
+        second = await client.post(
+            f"/api/v1/teacher/interview-configs/{config_id}/outcomes",
+            json={
+                "position": 1,
+                "outcome_text": "Second outcome at the SAME position 1",
+                "outcome_type": "skill",
+                "importance_weight": 1,
+            },
+            headers=_auth(admin_bearer),
+        )
+        assert second.status_code == 409, second.text
+        detail = second.json()["detail"]
+        assert detail["error"] == "conflict"
+        assert "interview_outcome_position_taken" in detail["message"]
+    finally:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("DELETE FROM interview_outcomes WHERE interview_config_id = :c"),
+                {"c": config_id},
+            )
+            await conn.execute(
+                text("DELETE FROM interview_configs WHERE id = :c"),
+                {"c": config_id},
+            )
+
+
 __all__: list[str] = []
