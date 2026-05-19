@@ -113,6 +113,7 @@ class ModulePublic(_ORMModel):
     course_id: UUID
     title: str
     position: int
+    items: list[ModuleItemPublic] = []
 
 
 class LessonPublic(_ORMModel):

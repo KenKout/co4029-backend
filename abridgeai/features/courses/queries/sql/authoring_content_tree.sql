@@ -64,7 +64,13 @@ authoring_items AS (
         mi.quiz_id,
         mi.interview_config_id,
         mi.position,
-        mi.unlock_rule_json
+        mi.unlock_rule_json,
+        mi.created_at,
+        mi.updated_at,
+        mi.created_by,
+        mi.updated_by,
+        mi.deleted_at,
+        mi.deleted_by
     FROM module_items mi
     JOIN authoring_modules m ON mi.module_id = m.id
     WHERE mi.deleted_at IS NULL
@@ -109,6 +115,12 @@ SELECT
                     'interview_config_id', ai.interview_config_id,
                     'position', ai.position,
                     'unlock_rule_json', ai.unlock_rule_json,
+                    'created_at', ai.created_at,
+                    'updated_at', ai.updated_at,
+                    'created_by', ai.created_by,
+                    'updated_by', ai.updated_by,
+                    'deleted_at', ai.deleted_at,
+                    'deleted_by', ai.deleted_by,
                     'lesson', (
                         SELECT row_to_json(al)
                         FROM authoring_lessons al

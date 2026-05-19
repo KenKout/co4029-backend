@@ -477,12 +477,27 @@ async def get_authoring_content(
     Wraps :func:`authoring_queries.get_course_content_authoring` and
     raises :class:`NotFoundError` for an unknown / soft-deleted course
     so the router gets a 404 instead of an empty 200.
+
+    Composes the flat (course, modules, items) shape from SQL into the
+    nested ``CourseContentAuthoring``-friendly tree the SPA expects:
+    every module gets its ``items`` collection (sorted by ``position``,
+    each item carrying its inline polymorphic target). Without this
+    step the SPA's lesson / quiz / interview counts on the
+    course-manage page render as zero.
     """
     tree = await authoring_queries.get_course_content_authoring(
         db, course_id, include_archived=include_archived
     )
     if tree is None:
         raise NotFoundError(f"Course {course_id} not found")
+
+    items_by_module: dict[Any, list[Any]] = {}
+    for item in tree.get("items") or []:
+        items_by_module.setdefault(item["module_id"], []).append(item)
+    for grouped in items_by_module.values():
+        grouped.sort(key=lambda it: it["position"])
+    for module in tree.get("modules") or []:
+        module["items"] = items_by_module.get(module["id"], [])
     return tree
 
 

@@ -46,7 +46,7 @@ from datetime import datetime
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from abridgeai.features.courses.schemas.public import (
     CourseLearningOutcomePublic,
@@ -128,12 +128,40 @@ class ModuleAuthoring(ModulePublic):
     estimated_minutes: int | None = None
     requires_all_lessons_unlocked: bool = False
     prerequisites: list[UUID] = []
+    items: list[ModuleItemAuthoring] = Field(default_factory=list)  # type: ignore[assignment]
     created_by: UUID | None = None
     updated_by: UUID | None = None
     created_at: datetime
     updated_at: datetime
     deleted_at: datetime | None = None
     deleted_by: UUID | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _strip_orm_items_relationship(cls, data: Any) -> Any:  # noqa: ANN401 - Pydantic before-validator: opaque input
+        """Skip the ``Module.items`` ORM relationship during from_attributes.
+
+        Pydantic v2 with ``from_attributes=True`` getattrs every field;
+        for the ``items`` relationship that triggers a sync SQLAlchemy
+        lazy-load inside an async context (``MissingGreenlet``). The
+        authoring content tree composer populates ``items`` explicitly
+        from a JSON dict; bare-module fetches just want an empty list.
+
+        Same applies to ``prerequisites`` — that's a separately-loaded
+        join the service hydrates only when needed.
+        """
+        if isinstance(data, dict | BaseModel):
+            return data
+        if hasattr(data, "_sa_instance_state"):
+            shim: dict[str, Any] = {}
+            for name in cls.model_fields:
+                if name in {"items", "prerequisites"}:
+                    continue
+                shim[name] = getattr(data, name, None)
+            shim["items"] = []
+            shim["prerequisites"] = []
+            return shim
+        return data
 
 
 class LessonAuthoring(LessonPublic):
