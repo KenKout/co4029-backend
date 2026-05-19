@@ -481,7 +481,6 @@ async def test_teacher_only_authoring(
     response = await client.post(
         "/api/v1/management/career-paths",
         json={
-            "organization_id": str(seeded_users.organization_id),
             "slug": f"teacher-attempt-{uuid.uuid4().hex[:6]}",
             "name": "Teacher should not be allowed",
         },
@@ -500,7 +499,6 @@ async def test_create_publish_lifecycle(
     create_resp = await client.post(
         "/api/v1/management/career-paths",
         json={
-            "organization_id": str(seeded_users.organization_id),
             "slug": f"lc-{suffix}",
             "name": f"Lifecycle {suffix}",
             "description": "lifecycle test",
@@ -521,3 +519,91 @@ async def test_create_publish_lifecycle(
 
     async with engine.begin() as conn:
         await conn.execute(text("DELETE FROM career_paths WHERE id = :id"), {"id": path_id})
+
+
+async def test_create_career_path_resolves_org_from_token(
+    client: httpx.AsyncClient,
+    manager_bearer: str,
+    seeded_users: SeededUsers,
+    engine: AsyncEngine,
+) -> None:
+    """``POST /management/career-paths`` derives ``organization_id`` from the
+    bearer token, NOT the payload.
+
+    Mirrors the contract introduced for ``POST /teacher/courses`` so a
+    manager in Org A cannot create a path in Org B by editing the
+    request body.
+    """
+    suffix = uuid.uuid4().hex[:6]
+    response = await client.post(
+        "/api/v1/management/career-paths",
+        json={
+            "slug": f"derive-{suffix}",
+            "name": f"Server-Derived {suffix}",
+        },
+        headers={"Authorization": f"Bearer {manager_bearer}"},
+    )
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["organization_id"] == str(seeded_users.organization_id)
+    try:
+        async with engine.begin() as conn:
+            row = (
+                await conn.execute(
+                    text("SELECT organization_id FROM career_paths WHERE id = :id"),
+                    {"id": body["id"]},
+                )
+            ).one()
+        assert row.organization_id == seeded_users.organization_id
+    finally:
+        async with engine.begin() as conn:
+            await conn.execute(text("DELETE FROM career_paths WHERE id = :id"), {"id": body["id"]})
+
+
+async def test_create_career_path_rejects_forged_organization_id(
+    client: httpx.AsyncClient,
+    manager_bearer: str,
+) -> None:
+    """A forged ``organization_id`` in the payload must be rejected at the
+    schema layer (``extra='forbid'``).
+
+    Same hostile wire shape that prompted the courses fix; without
+    strict-extras the backend would have honoured the spoofed id.
+    """
+    forged_org = "00000000-0000-0000-0000-000000000001"
+    response = await client.post(
+        "/api/v1/management/career-paths",
+        json={
+            "organization_id": forged_org,
+            "slug": f"forge-{uuid.uuid4().hex[:6]}",
+            "name": "Forged",
+        },
+        headers={"Authorization": f"Bearer {manager_bearer}"},
+    )
+    assert response.status_code == 422, response.text
+
+
+async def test_create_career_path_duplicate_slug_returns_409(
+    client: httpx.AsyncClient,
+    manager_bearer: str,
+    engine: AsyncEngine,
+) -> None:
+    """``career_paths_organization_id_slug_key`` collisions surface as 409."""
+    suffix = uuid.uuid4().hex[:6]
+    body = {
+        "slug": f"dup-{suffix}",
+        "name": "Dup Path",
+    }
+    auth = {"Authorization": f"Bearer {manager_bearer}"}
+    first = await client.post("/api/v1/management/career-paths", json=body, headers=auth)
+    assert first.status_code == 201, first.text
+    created_id = first.json()["id"]
+    try:
+        second = await client.post("/api/v1/management/career-paths", json=body, headers=auth)
+        assert second.status_code == 409, second.text
+        detail = second.json()["detail"]
+        assert detail["error"] == "conflict"
+        assert "career_path_slug_taken" in detail["message"]
+    finally:
+        async with engine.begin() as conn:
+            await conn.execute(text("DELETE FROM career_paths WHERE id = :id"), {"id": created_id})

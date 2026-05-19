@@ -448,7 +448,6 @@ async def test_career_path_lifecycle(
     create_resp = await client.post(
         "/api/v1/management/career-paths",
         json={
-            "organization_id": str(seeded_users.organization_id),
             "slug": f"phase7-path-{suffix}",
             "name": "Phase 7 Path",
             "description": "Cross-feature scenario path",

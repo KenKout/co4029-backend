@@ -88,12 +88,30 @@ async def create_career_path(
     response_model=list[CareerPathAuthoring],
 )
 async def list_career_paths(
-    organization_id: UUID,
     current_user: Annotated[CurrentUser, Depends(_REQUIRE_PATH_MANAGE)],
     db: Annotated[AsyncSession, Depends(get_db)],
+    organization_id: UUID | None = None,
     include_archived: bool = False,
 ) -> list[CareerPathAuthoring]:
-    del current_user
+    """List career paths for an organization.
+
+    ``organization_id`` is OPTIONAL: when omitted the caller's primary
+    org is resolved from the bearer token, matching the contract used by
+    POST. An explicit value is honoured (so platform admins can list any
+    org); managers without scope and no override get a 400 instead of a
+    confusing empty list.
+    """
+    if organization_id is None:
+        from abridgeai.features.career_paths.queries.published import (  # noqa: PLC0415
+            get_user_primary_organization_id,
+        )
+
+        organization_id = await get_user_primary_organization_id(db, current_user.user_id)
+        if organization_id is None:
+            raise _bad_request(
+                f"User {current_user.user_id} has no primary organization; "
+                "pass ?organization_id=... to list paths for a specific org."
+            )
     return await authoring_service.list_career_paths_for_org(
         db, organization_id, include_archived=include_archived
     )

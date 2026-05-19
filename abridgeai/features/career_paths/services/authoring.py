@@ -11,6 +11,9 @@ from abridgeai.core.db.recursive_delete import soft_delete_cascade
 from abridgeai.core.exceptions import AppError, NotFoundError
 from abridgeai.features.career_paths.models import CareerPath, CareerPathCourse
 from abridgeai.features.career_paths.queries import authoring as authoring_queries
+from abridgeai.features.career_paths.queries.published import (
+    get_user_primary_organization_id,
+)
 from abridgeai.features.career_paths.schemas import (
     CareerPathAuthoring,
     CareerPathCourseAuthoring,
@@ -86,8 +89,19 @@ async def list_career_path_courses(
 async def create_career_path(
     db: AsyncSession, payload: CareerPathCreate, actor: CurrentUser
 ) -> CareerPathAuthoring:
+    """Create a career path in the actor's primary organization.
+
+    ``organization_id`` is server-derived from the bearer token to match
+    the contract used by ``POST /teacher/courses``: a manager in Org A
+    cannot create a path in Org B by sending a forged payload.
+    """
+    org_id = await get_user_primary_organization_id(db, actor.user_id)
+    if org_id is None:
+        raise AppError(
+            f"User {actor.user_id} has no primary organization; cannot create a career path."
+        )
     path = CareerPath(
-        organization_id=payload.organization_id,
+        organization_id=org_id,
         org_unit_id=payload.org_unit_id,
         slug=payload.slug,
         name=payload.name,

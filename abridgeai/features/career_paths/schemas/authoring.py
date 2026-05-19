@@ -37,7 +37,6 @@ class CareerPathCourseAuthoring(BaseModel):
 
 
 class CareerPathCreate(BaseModel):
-    organization_id: UUID
     org_unit_id: UUID | None = None
     slug: str = Field(min_length=1, max_length=100)
     name: str = Field(min_length=1, max_length=255)
