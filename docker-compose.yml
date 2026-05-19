@@ -31,6 +31,99 @@ services:
       timeout: 3s
       retries: 10
 
+  # =========================================================================
+  # Garage S3-compatible object storage.
+  # Legacy backend/ also runs garage on :3900 — backend-new shifts to :3910
+  # so both stacks can coexist during cutover.
+  # =========================================================================
+  garage:
+    image: dxflrs/garage:v2.3.0
+    container_name: abridgeai-garage
+    command: ["/garage", "server", "--single-node", "--default-bucket"]
+    restart: unless-stopped
+    environment:
+      GARAGE_DEFAULT_ACCESS_KEY: ${AWS_ACCESS_KEY_ID:-GK1234567890abcdef1234567890abcdef}
+      GARAGE_DEFAULT_SECRET_KEY: ${AWS_SECRET_ACCESS_KEY:-1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef}
+      GARAGE_DEFAULT_BUCKET: ${S3_BUCKET_NAME:-abridgeai-local}
+    ports:
+      - "3910:3900"
+    volumes:
+      - ./garage.toml:/etc/garage.toml:ro
+      - abridgeai_garage_data:/var/lib/garage
+    healthcheck:
+      test: ["CMD", "/garage", "status"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # CORS bootstrap — runs once after garage is up to install the bucket policy
+  # so the browser-side direct-upload flow (W4.5+W4.6+W4.7) works.
+  garage-cors:
+    image: amazon/aws-cli:latest
+    container_name: abridgeai-garage-cors
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        aws configure set default.s3.addressing_style path
+        until aws --endpoint-url=http://garage:3900 s3api head-bucket --bucket "$$S3_BUCKET_NAME" >/dev/null 2>&1; do
+          echo "waiting for garage bucket $$S3_BUCKET_NAME..."
+          sleep 1
+        done
+        aws --endpoint-url=http://garage:3900 s3api put-bucket-cors \
+          --bucket "$$S3_BUCKET_NAME" \
+          --cors-configuration file:///garage-cors.json
+        echo "garage CORS configured for bucket $$S3_BUCKET_NAME"
+    environment:
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-GK1234567890abcdef1234567890abcdef}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef}
+      AWS_DEFAULT_REGION: garage
+      S3_BUCKET_NAME: ${S3_BUCKET_NAME:-abridgeai-local}
+    volumes:
+      - ./garage-cors.json:/garage-cors.json:ro
+    depends_on:
+      garage:
+        condition: service_started
+    restart: "no"
+
+  # =========================================================================
+  # Neo4j knowledge graph.
+  # Ports shifted to 7475/7688 so legacy backend/ on 7474/7687 can coexist.
+  # APOC enabled for KG-extraction features in abridgeai/features/kg/.
+  # =========================================================================
+  neo4j:
+    image: neo4j:5-community
+    container_name: abridgeai-neo4j
+    restart: unless-stopped
+    environment:
+      NEO4J_AUTH: ${NEO4J_USER:-neo4j}/${NEO4J_PASSWORD:-abridgeai-neo4j-dev}
+      NEO4J_PLUGINS: '["apoc"]'
+      NEO4J_dbms_security_procedures_unrestricted: "apoc.*"
+      NEO4J_dbms_security_procedures_allowlist: "apoc.*"
+      NEO4J_server_memory_heap_initial__size: 512m
+      NEO4J_server_memory_heap_max__size: 1G
+      NEO4J_server_memory_pagecache_size: 512m
+    ports:
+      - "7475:7474"
+      - "7688:7687"
+    volumes:
+      - abridgeai_neo4j_data:/data
+      - abridgeai_neo4j_logs:/logs
+      - abridgeai_neo4j_plugins:/plugins
+    healthcheck:
+      test:
+        - "CMD-SHELL"
+        - "cypher-shell -u $${NEO4J_USER:-neo4j} -p $${NEO4J_PASSWORD:-abridgeai-neo4j-dev} 'RETURN 1' || exit 1"
+      interval: 10s
+      timeout: 10s
+      retries: 20
+      start_period: 30s
+
 volumes:
   abridgeai_pg_data:
   abridgeai_redis_data:
+  abridgeai_garage_data:
+  abridgeai_neo4j_data:
+  abridgeai_neo4j_logs:
+  abridgeai_neo4j_plugins:

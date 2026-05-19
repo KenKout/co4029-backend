@@ -78,4 +78,10 @@ regexes = [
   '''(?i)(replace[_-]?me|changeme|example|placeholder|dummy)''',
   '''sk-(proj-)?(xxx|XXX|abc|test|fake|example|placeholder)+''',
   '''sk-[Aa]{48}''',
+  # Public Garage dev fixture credentials shared with legacy backend/.
+  # These are well-known dummy keys hardcoded in docker-compose defaults
+  # for local single-node Garage clusters; not real S3 credentials.
+  '''GK1234567890abcdef1234567890abcdef''',
+  '''1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef''',
+  '''0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef''',
 ]
