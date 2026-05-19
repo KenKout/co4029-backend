@@ -25,6 +25,7 @@ from abridgeai.features.materials.schemas.public import (
     MaterialTypeLiteral,
 )
 from abridgeai.features.materials.schemas.request import (
+    MaterialLinkExisting,
     MaterialUpdate,
     MaterialUploadComplete,
     MaterialUploadInit,
@@ -37,6 +38,7 @@ from abridgeai.features.materials.schemas.status import (
 
 __all__ = [
     "MaterialAuthoring",
+    "MaterialLinkExisting",
     "MaterialPublic",
     "MaterialStreamUrl",
     "MaterialTypeLiteral",

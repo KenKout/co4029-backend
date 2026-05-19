@@ -1,14 +1,13 @@
 from __future__ import annotations
 
-from importlib import resources
-from typing import Any
 from uuid import UUID
 
-from sqlalchemy import delete, func, select, text, true
+from sqlalchemy import delete, func, select, true
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import InstrumentedAttribute
+from sqlalchemy.orm import InstrumentedAttribute, selectinload
 from sqlalchemy.sql.elements import ColumnElement
 
+from abridgeai.features.access_control.models import Role, UserRoleAssignment
 from abridgeai.features.courses.models import (
     Course,
     Lesson,
@@ -17,12 +16,7 @@ from abridgeai.features.courses.models import (
     ModuleItem,
     ModulePrerequisite,
 )
-
-_AUTHORING_CONTENT_TREE_SQL = text(
-    resources.files("abridgeai.features.courses.queries.sql")
-    .joinpath("authoring_content_tree.sql")
-    .read_text(encoding="utf-8")
-)
+from abridgeai.features.identity.models import StorageObject
 
 
 def _archived_filter(
@@ -70,20 +64,19 @@ async def list_courses_assigned_to_teacher(
     the course. Active = not soft-deleted AND ``active_until`` IS NULL
     or in the future.
     """
-    join_sql = text(
-        """
-        SELECT c.id
-        FROM courses c
-        JOIN user_role_assignments ura ON ura.course_id = c.id
-        JOIN roles r ON r.id = ura.role_id
-        WHERE ura.user_id = :user_id
-          AND ura.scope_kind = 'course'
-          AND r.code = 'teacher'
-          AND ura.deleted_at IS NULL
-          AND (ura.active_until IS NULL OR ura.active_until > NOW())
-        """
+    id_stmt = (
+        select(UserRoleAssignment.course_id)
+        .join(Role, Role.id == UserRoleAssignment.role_id)
+        .where(
+            UserRoleAssignment.user_id == user_id,
+            UserRoleAssignment.scope_kind == "course",
+            Role.code == "teacher",
+            UserRoleAssignment.deleted_at.is_(None),
+            (UserRoleAssignment.active_until.is_(None))
+            | (UserRoleAssignment.active_until > func.now()),
+        )
     )
-    ids = [row[0] for row in await db.execute(join_sql, {"user_id": user_id})]
+    ids = [row[0] for row in (await db.execute(id_stmt)).all() if row[0] is not None]
     if not ids:
         return []
     stmt = (
@@ -109,27 +102,33 @@ async def get_course_for_authoring(db: AsyncSession, course_id: UUID) -> Course 
     return await db.get(Course, course_id)
 
 
-async def get_course_content_authoring(
+async def get_course_with_content_tree(
     db: AsyncSession,
     course_id: UUID,
     *,
     include_archived: bool = False,
-) -> dict[str, Any] | None:
-    """Full authoring tree (drafts included).
+) -> Course | None:
+    """Course + modules + items + polymorphic targets (lesson/quiz/interview).
 
-    Mirror of :func:`get_published_course_content` shape, but no
-    status='published' gate. ``include_archived`` toggles the archived
-    filter at every level (course, modules, lessons). Soft-deleted rows
-    are still excluded.
+    Eager-loads modules → items → lesson/quiz/interview_config in 4 queries
+    (one selectinload per branch). Soft-deleted rows are excluded by callers.
+    Returns the ORM ``Course`` instance with relationships hydrated, or
+    ``None`` if the course is missing or soft-deleted.
     """
-    result = await db.execute(
-        _AUTHORING_CONTENT_TREE_SQL,
-        {"course_id": course_id, "include_archived": include_archived},
+    stmt = (
+        select(Course)
+        .where(Course.id == course_id, Course.deleted_at.is_(None))
+        .options(
+            selectinload(Course.modules).selectinload(Module.items).selectinload(ModuleItem.lesson),
+            selectinload(Course.modules).selectinload(Module.items).selectinload(ModuleItem.quiz),
+            selectinload(Course.modules)
+            .selectinload(Module.items)
+            .selectinload(ModuleItem.interview_config),
+        )
     )
-    row = result.one_or_none()
-    if row is None or row.course is None:
-        return None
-    return {"course": row.course, "modules": row.modules, "items": row.items}
+    if not include_archived:
+        stmt = stmt.where(Course.status != "archived")
+    return (await db.execute(stmt)).scalar_one_or_none()
 
 
 async def list_modules_for_authoring(db: AsyncSession, course_id: UUID) -> list[Module]:
@@ -183,17 +182,6 @@ async def get_lesson_resource(db: AsyncSession, resource_id: UUID) -> LessonReso
     return await db.get(LessonResource, resource_id)
 
 
-_AUTHORING_RESOURCE_STORAGE_TARGET_SQL = text(
-    """
-    SELECT so.bucket AS bucket, so.object_key AS object_key
-    FROM lesson_resources lr
-    JOIN storage_objects so ON so.id = lr.storage_object_id
-    WHERE lr.id = :resource_id
-      AND lr.deleted_at IS NULL
-    """
-)
-
-
 async def get_authoring_resource_storage_target(
     db: AsyncSession, resource_id: UUID
 ) -> tuple[str, str] | None:
@@ -206,8 +194,15 @@ async def get_authoring_resource_storage_target(
     ``None`` for missing resources or resources without an attached
     storage object.
     """
-    result = await db.execute(_AUTHORING_RESOURCE_STORAGE_TARGET_SQL, {"resource_id": resource_id})
-    row = result.one_or_none()
+    stmt = (
+        select(StorageObject.bucket, StorageObject.object_key)
+        .join(LessonResource, LessonResource.storage_object_id == StorageObject.id)
+        .where(
+            LessonResource.id == resource_id,
+            LessonResource.deleted_at.is_(None),
+        )
+    )
+    row = (await db.execute(stmt)).one_or_none()
     if row is None:
         return None
     return row.bucket, row.object_key
@@ -255,13 +250,15 @@ async def replace_module_prerequisites(
 
 
 __all__ = [
-    "get_course_content_authoring",
+    "get_authoring_resource_storage_target",
     "get_course_for_authoring",
+    "get_course_with_content_tree",
     "get_lesson",
     "get_lesson_resource",
     "get_module",
     "get_module_item",
     "list_all_lesson_resources",
+    "list_courses_assigned_to_teacher",
     "list_courses_for_owner",
     "list_courses_in_org_unit",
     "list_lessons_for_authoring",

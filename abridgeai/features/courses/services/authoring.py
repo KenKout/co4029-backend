@@ -107,35 +107,35 @@ def _apply_patch(model: object, payload: object) -> None:
 
 async def _require_course(db: AsyncSession, course_id: UUID) -> Course:
     course = await authoring_queries.get_course_for_authoring(db, course_id)
-    if course is None:
+    if course is None or course.deleted_at is not None:
         raise NotFoundError(f"Course {course_id} not found")
     return course
 
 
 async def _require_module(db: AsyncSession, module_id: UUID) -> Module:
     module = await authoring_queries.get_module(db, module_id)
-    if module is None:
+    if module is None or module.deleted_at is not None:
         raise NotFoundError(f"Module {module_id} not found")
     return module
 
 
 async def _require_lesson(db: AsyncSession, lesson_id: UUID) -> Lesson:
     lesson = await authoring_queries.get_lesson(db, lesson_id)
-    if lesson is None:
+    if lesson is None or lesson.deleted_at is not None:
         raise NotFoundError(f"Lesson {lesson_id} not found")
     return lesson
 
 
 async def _require_resource(db: AsyncSession, resource_id: UUID) -> LessonResource:
     resource = await authoring_queries.get_lesson_resource(db, resource_id)
-    if resource is None:
+    if resource is None or resource.deleted_at is not None:
         raise NotFoundError(f"Lesson resource {resource_id} not found")
     return resource
 
 
 async def _require_module_item(db: AsyncSession, item_id: UUID) -> ModuleItem:
     item = await authoring_queries.get_module_item(db, item_id)
-    if item is None:
+    if item is None or item.deleted_at is not None:
         raise NotFoundError(f"ModuleItem {item_id} not found")
     return item
 
@@ -474,31 +474,110 @@ async def get_authoring_content(
 ) -> dict[str, Any]:
     """Authoring content tree for ``course_id`` (drafts included).
 
-    Wraps :func:`authoring_queries.get_course_content_authoring` and
-    raises :class:`NotFoundError` for an unknown / soft-deleted course
-    so the router gets a 404 instead of an empty 200.
-
-    Composes the flat (course, modules, items) shape from SQL into the
-    nested ``CourseContentAuthoring``-friendly tree the SPA expects:
-    every module gets its ``items`` collection (sorted by ``position``,
-    each item carrying its inline polymorphic target). Without this
-    step the SPA's lesson / quiz / interview counts on the
-    course-manage page render as zero.
+    Delegates eager-loading to :func:`authoring_queries.get_course_with_content_tree`
+    and composes the dict shape the schema layer expects.
     """
-    tree = await authoring_queries.get_course_content_authoring(
+    course = await authoring_queries.get_course_with_content_tree(
         db, course_id, include_archived=include_archived
     )
-    if tree is None:
+    if course is None:
         raise NotFoundError(f"Course {course_id} not found")
 
-    items_by_module: dict[Any, list[Any]] = {}
-    for item in tree.get("items") or []:
-        items_by_module.setdefault(item["module_id"], []).append(item)
-    for grouped in items_by_module.values():
-        grouped.sort(key=lambda it: it["position"])
-    for module in tree.get("modules") or []:
-        module["items"] = items_by_module.get(module["id"], [])
-    return tree
+    modules_out = []
+    for module in sorted(course.modules, key=lambda m: m.position):
+        if module.deleted_at is not None:
+            continue
+        if not include_archived and module.status == "archived":
+            continue
+
+        items_out = []
+        for item in sorted(module.items, key=lambda i: i.position):
+            if item.deleted_at is not None:
+                continue
+            target = None
+            if item.lesson and item.lesson.deleted_at is None:
+                target = {
+                    "id": item.lesson.id,
+                    "title": item.lesson.title,
+                    "slug": item.lesson.slug,
+                    "lesson_type": item.lesson.lesson_type,
+                    "status": item.lesson.status,
+                    "summary": item.lesson.summary,
+                    "estimated_minutes": item.lesson.estimated_minutes,
+                    "difficulty": item.lesson.difficulty,
+                }
+            elif item.quiz and item.quiz.deleted_at is None:
+                target = {
+                    "id": item.quiz.id,
+                    "title": item.quiz.title,
+                    "status": item.quiz.status,
+                }
+            elif item.interview_config and item.interview_config.deleted_at is None:
+                target = {
+                    "id": item.interview_config.id,
+                    "title": item.interview_config.title,
+                    "status": item.interview_config.status,
+                }
+
+            items_out.append(
+                {
+                    "id": item.id,
+                    "module_id": item.module_id,
+                    "item_type": item.item_type,
+                    "lesson_id": item.lesson_id,
+                    "quiz_id": item.quiz_id,
+                    "interview_config_id": item.interview_config_id,
+                    "position": item.position,
+                    "unlock_rule_json": item.unlock_rule_json,
+                    "target": target,
+                    "created_at": item.created_at,
+                    "updated_at": item.updated_at,
+                    "created_by": item.created_by,
+                    "updated_by": item.updated_by,
+                    "deleted_at": item.deleted_at,
+                    "deleted_by": item.deleted_by,
+                }
+            )
+
+        module_dict = {
+            "id": module.id,
+            "course_id": module.course_id,
+            "title": module.title,
+            "description": module.description,
+            "position": module.position,
+            "status": module.status,
+            "estimated_minutes": module.estimated_minutes,
+            "requires_all_lessons_unlocked": module.requires_all_lessons_unlocked,
+            "items": items_out,
+            "prerequisites": [],
+            "created_by": module.created_by,
+            "updated_by": module.updated_by,
+            "created_at": module.created_at,
+            "updated_at": module.updated_at,
+            "deleted_at": module.deleted_at,
+            "deleted_by": module.deleted_by,
+        }
+        modules_out.append(module_dict)
+
+    course_dict = {
+        "id": course.id,
+        "organization_id": course.organization_id,
+        "org_unit_id": course.org_unit_id,
+        "owner_user_id": course.owner_user_id,
+        "slug": course.slug,
+        "title": course.title,
+        "description": course.description,
+        "status": course.status,
+        "level": course.level,
+        "thumbnail_object_id": course.thumbnail_object_id,
+        "estimated_minutes": course.estimated_minutes,
+        "expected_completion_days": course.expected_completion_days,
+        "enrollment_cap": course.enrollment_cap,
+        "created_at": course.created_at,
+        "updated_at": course.updated_at,
+    }
+
+    return {"course": course_dict, "modules": modules_out}
 
 
 async def get_authoring_lesson(db: AsyncSession, lesson_id: UUID) -> LessonAuthoring:

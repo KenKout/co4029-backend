@@ -79,7 +79,23 @@ class MaterialUpdate(_StrictRequest):
     ai_processing_enabled: bool | None = None
 
 
+class MaterialLinkExisting(_StrictRequest):
+    """Body for ``POST /teacher/lessons/{id}/materials/link``.
+
+    Links an already-uploaded storage object into the AI Material Hub
+    without triggering upload or processing. Used when a lesson resource
+    is uploaded and should also appear as a material.
+    """
+
+    storage_object_id: UUID
+    title: str = Field(max_length=255)
+    material_type: MaterialTypeLiteral | None = None
+    ai_processing_enabled: bool = False
+    visible_to_students: bool = False
+
+
 __all__ = [
+    "MaterialLinkExisting",
     "MaterialUpdate",
     "MaterialUploadComplete",
     "MaterialUploadInit",

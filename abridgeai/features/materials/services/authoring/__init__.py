@@ -63,6 +63,7 @@ from abridgeai.features.materials.services.authoring._reads import (
     get_authoring_stream_url,
     get_lesson_processing_summary_view,
     get_processing_progress,
+    link_existing_material,
     list_authoring_materials,
     update_material,
 )
@@ -97,6 +98,7 @@ __all__ = [
     "get_processing_progress",
     "get_settings",
     "init_upload",
+    "link_existing_material",
     "list_authoring_materials",
     "reprocess_material",
     "request_simple_upload",

@@ -47,6 +47,7 @@ from abridgeai.features.materials.api import public as materials_api
 from abridgeai.features.materials.models import LearningMaterialVersion
 from abridgeai.features.materials.schemas import (
     MaterialAuthoring,
+    MaterialLinkExisting,
     MaterialUpdate,
     MaterialUploadComplete,
     MaterialUploadInit,
@@ -532,6 +533,23 @@ async def list_materials(
     """List materials (any state) on a lesson — teacher view."""
     del current_user
     return await authoring_service.list_authoring_materials(db, lesson_id)
+
+
+@router.post(
+    "/lessons/{lesson_id}/materials/link",
+    response_model=MaterialAuthoring,
+    status_code=status.HTTP_201_CREATED,
+)
+async def link_existing_material(
+    lesson_id: UUID,
+    payload: MaterialLinkExisting,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_LESSON)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> MaterialAuthoring:
+    """Link an already-uploaded storage object as a material (no upload, no AI processing)."""
+    result = await authoring_service.link_existing_material(db, lesson_id, payload, current_user)
+    await db.commit()
+    return result
 
 
 @router.get(

@@ -452,6 +452,20 @@ class ModuleItem(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftDelete
         back_populates="items",
         foreign_keys=[module_id],
     )
+    lesson: Mapped[Lesson | None] = relationship(
+        foreign_keys=[lesson_id],
+        lazy="noload",
+    )
+    quiz: Mapped[Any] = relationship(
+        "Quiz",
+        foreign_keys=[quiz_id],
+        lazy="noload",
+    )
+    interview_config: Mapped[Any] = relationship(
+        "InterviewConfig",
+        foreign_keys=[interview_config_id],
+        lazy="noload",
+    )
 
 
 class LessonUnlockConfig(BaseModel):

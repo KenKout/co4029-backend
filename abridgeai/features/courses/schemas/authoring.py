@@ -209,7 +209,23 @@ class LessonResourceAuthoring(LessonResourcePublic):
     deleted_by: UUID | None = None
 
 
+class ModuleItemTarget(BaseModel):
+    """Polymorphic target for authoring items — wider than LessonPublic."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    title: str
+    slug: str | None = None
+    lesson_type: str | None = None
+    status: str | None = None
+    summary: str | None = None
+    estimated_minutes: int | None = None
+    difficulty: str | None = None
+
+
 class ModuleItemAuthoring(ModuleItemPublic):
+    target: ModuleItemTarget | None = None  # type: ignore[assignment]
     lesson_id: UUID | None = None
     quiz_id: UUID | None = None
     interview_config_id: UUID | None = None

@@ -25,6 +25,7 @@ from abridgeai.features.materials.queries import (
 from abridgeai.features.materials.schemas import (
     LessonProcessingSummary,
     MaterialAuthoring,
+    MaterialLinkExisting,
     MaterialStreamUrl,
     MaterialUpdate,
     ProcessingProgress,
@@ -149,3 +150,49 @@ async def get_lesson_processing_summary_view(
     """
     counts = await get_lesson_processing_summary(db, lesson_id)
     return LessonProcessingSummary(lesson_id=lesson_id, **counts)
+
+
+async def link_existing_material(
+    db: AsyncSession,
+    lesson_id: UUID,
+    payload: MaterialLinkExisting,
+    actor: CurrentUser,
+) -> MaterialAuthoring:
+    """Create a material record linked to an already-uploaded storage object.
+
+    No upload flow, no AI processing enqueued. The material appears in
+    the AI Hub as a draft that the teacher can later enable processing on.
+    """
+    from datetime import UTC, datetime  # noqa: PLC0415
+
+    material_type = payload.material_type or "other"
+
+    material = LearningMaterial(
+        lesson_id=lesson_id,
+        title=payload.title,
+        material_type=material_type,
+        ai_processing_enabled=payload.ai_processing_enabled,
+        visible_to_students=payload.visible_to_students,
+    )
+    db.add(material)
+    await flush_or_conflict(db)
+    await db.refresh(material)
+
+    version = LearningMaterialVersion(
+        material_id=material.id,
+        storage_object_id=payload.storage_object_id,
+        version_no=1,
+        is_current=True,
+        processing_status="pending",
+        uploaded_by=actor.user_id,
+        uploaded_at=datetime.now(tz=UTC),
+    )
+    db.add(version)
+    await flush_or_conflict(db)
+    await db.refresh(version)
+
+    material.current_version_id = version.id
+    await flush_or_conflict(db)
+    await db.refresh(material)
+
+    return await _present_material(db, material)
