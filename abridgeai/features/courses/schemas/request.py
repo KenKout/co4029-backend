@@ -28,6 +28,35 @@ class _StrictRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class LessonUnlockConfig(_StrictRequest):
+    """Pydantic v2 sibling that re-asserts the lesson-unlock range gates.
+
+    Per plan §3894 / §3927, the same ``ef_min_unlock`` and
+    ``tau_unlock`` ranges enforced as DB CHECK constraints on
+    :class:`~abridgeai.features.courses.models.Lesson` are also enforced
+    at the application boundary so request handlers / services can reject
+    malformed input before issuing INSERT / UPDATE.
+    """
+
+    ef_min_unlock: float = 2.0
+    tau_unlock: float = 0.8
+    requires_interview_pass: bool = False
+
+    @field_validator("ef_min_unlock")
+    @classmethod
+    def _check_ef_min_unlock_range(cls, value: float) -> float:
+        if not (1.3 <= value <= 2.5):
+            raise ValueError("ef_min_unlock must be in [1.3, 2.5]")
+        return value
+
+    @field_validator("tau_unlock")
+    @classmethod
+    def _check_tau_unlock_range(cls, value: float) -> float:
+        if not (0.0 < value <= 1.0):
+            raise ValueError("tau_unlock must be in (0.0, 1.0]")
+        return value
+
+
 class CourseCreate(_StrictRequest):
     org_unit_id: UUID | None = None
     slug: str = Field(max_length=100)
@@ -220,6 +249,7 @@ __all__ = [
     "LessonCreate",
     "LessonResourceCreate",
     "LessonResourceUpdate",
+    "LessonUnlockConfig",
     "LessonUpdate",
     "ModuleCreate",
     "ModuleItemReorder",

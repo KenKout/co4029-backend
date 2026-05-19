@@ -18,5 +18,23 @@ module.exports = {
       error_file: "/home/co4029/.pm2/logs/abridgeai-backend-err.log",
       merge_logs: true,
     },
+    {
+      name: "abridgeai-worker",
+      cwd: "/home/co4029/co4029_projects/backend-new",
+      script: "/home/co4029/co4029_projects/backend-new/.venv/bin/arq",
+      args: "abridgeai.workers.arq_app.WorkerSettings",
+      interpreter: "none",
+      autorestart: true,
+      max_restarts: 10,
+      restart_delay: 2000,
+      kill_timeout: 10000,
+      max_memory_restart: "2000M",
+      env: {
+        PYTHONUNBUFFERED: "1",
+      },
+      out_file: "/home/co4029/.pm2/logs/abridgeai-worker-out.log",
+      error_file: "/home/co4029/.pm2/logs/abridgeai-worker-err.log",
+      merge_logs: true,
+    },
   ],
 };

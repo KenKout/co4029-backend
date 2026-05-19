@@ -20,16 +20,6 @@ filter via :mod:`features.courses.services.administration`.
 their ``UPDATE`` / ``SELECT`` statements but do NOT commit. This
 router commits on the success path of each write so a service-level
 exception leaves the transaction unchanged.
-
-**T7 (orm-consolidation)**: the four intra-feature ``text()`` sites
-(updated_by touch + three stats aggregations) were migrated to ORM
-``select(...) / db.get(...)``. The remaining ``_LIST_PROCESSING_JOBS_SQL``
-is a cross-feature read joining ``processing_jobs`` /
-``ai_model_calls`` / ``generation_runs`` -- those tables are owned by
-other features and Wave 5 will route the query through their public
-APIs once they exist. Soft-delete filter is auto-applied to every
-``courses`` SELECT via :mod:`abridgeai.core.db.soft_delete` so manual
-``deleted_at IS NULL`` clauses are no longer needed.
 """
 
 from __future__ import annotations
@@ -38,16 +28,21 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel
-from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from abridgeai.core.db import get_db
 from abridgeai.core.exceptions import NotFoundError
 from abridgeai.core.security import CurrentUser
 from abridgeai.features.access_control.policies import require_permission
-from abridgeai.features.courses.models import Course
-from abridgeai.features.courses.schemas import CourseAuthoring
+from abridgeai.features.courses.schemas import (
+    AdminCoursePage,
+    CourseAuthoring,
+    CourseProcessingAudit,
+    CourseStats,
+    CourseStatusCount,
+    ProcessingJobRow,
+    TopOwnerRow,
+)
 from abridgeai.features.courses.services import administration as administration_service
 
 router = APIRouter(prefix="/admin", tags=["courses-admin"])
@@ -55,101 +50,11 @@ router = APIRouter(prefix="/admin", tags=["courses-admin"])
 _REQUIRE_ADMIN = require_permission("system.administer")
 
 
-class AdminCoursePage(BaseModel):
-    """Cursor-paginated admin view of every course (T3.5 ``CursorPage``)."""
-
-    items: list[CourseAuthoring]
-    next_cursor: str | None = None
-
-
-class CourseProcessingAudit(BaseModel):
-    """Aggregate AI-processing audit for a single course (T3.5 service shape)."""
-
-    course_id: UUID
-    total_cost_usd: float
-    total_input_tokens: int
-    total_output_tokens: int
-    total_calls: int
-    pipeline_runs: int
-    processing_jobs: int
-    generation_runs: int
-    first_call_at: str | None = None
-    last_call_at: str | None = None
-
-
-class ProcessingJobRow(BaseModel):
-    """Row returned by ``GET /admin/courses/{id}/processing``.
-
-    ``processing_jobs`` has no direct ``course_id`` FK in the baseline
-    schema -- jobs join to course context via ``ai_model_calls`` (and
-    optionally ``generation_runs``). The forward-ref pattern (raw SQL
-    here, ORM model when Phase 6 lands) mirrors T3.8's roster
-    endpoint.
-    """
-
-    id: UUID
-    entity_type: str
-    entity_id: UUID
-    job_type: str
-    status: str
-    progress_percent: int
-    error_message: str | None = None
-    retry_count: int
-    started_at: str | None = None
-    finished_at: str | None = None
-    created_at: str
-    updated_at: str
-
-
-class CourseStatusCount(BaseModel):
-    status: str
-    count: int
-
-
-class TopOwnerRow(BaseModel):
-    owner_user_id: UUID
-    draft_count: int
-
-
-class CourseStats(BaseModel):
-    """Org-wide aggregate counts for the admin dashboard."""
-
-    total_courses: int
-    soft_deleted_courses: int
-    by_status: list[CourseStatusCount]
-    top_draft_owners: list[TopOwnerRow]
-
-
 def _not_found(detail: str) -> HTTPException:
     return HTTPException(
         status_code=status.HTTP_404_NOT_FOUND,
         detail={"error": "not_found", "message": detail},
     )
-
-
-_LIST_PROCESSING_JOBS_SQL = text(
-    """
-    SELECT DISTINCT
-        pj.id              AS id,
-        pj.entity_type     AS entity_type,
-        pj.entity_id       AS entity_id,
-        pj.job_type        AS job_type,
-        pj.status          AS status,
-        pj.progress_percent AS progress_percent,
-        pj.error_message   AS error_message,
-        pj.retry_count     AS retry_count,
-        pj.started_at      AS started_at,
-        pj.finished_at     AS finished_at,
-        pj.created_at      AS created_at,
-        pj.updated_at      AS updated_at
-    FROM processing_jobs pj
-    LEFT JOIN ai_model_calls amc ON amc.processing_job_id = pj.id
-    LEFT JOIN generation_runs gr ON gr.id = amc.generation_run_id
-    WHERE gr.course_id = :course_id
-    ORDER BY pj.created_at DESC
-    LIMIT :limit
-    """
-)
 
 
 def _isoformat(value: object) -> str | None:
@@ -202,10 +107,6 @@ async def restore_soft_deleted_course(
     except NotFoundError as exc:
         raise _not_found(str(exc)) from exc
 
-    course_orm = await db.get(Course, course_id)
-    if course_orm is not None:
-        course_orm.updated_by = admin.user_id
-
     await db.commit()
     return restored
 
@@ -251,12 +152,8 @@ async def list_course_processing_jobs(
     The baseline schema has no ``processing_jobs.course_id`` FK; the
     join walks ``ai_model_calls.processing_job_id`` and
     ``generation_runs.course_id`` to assemble the per-course view.
-    Replace with the canonical ORM helper when Phase 6's
-    ``ProcessingJob`` model lands.
     """
-    rows = (
-        await db.execute(_LIST_PROCESSING_JOBS_SQL, {"course_id": course_id, "limit": limit})
-    ).mappings()
+    rows = await administration_service.list_course_processing_jobs(db, course_id, limit=limit)
     return [
         ProcessingJobRow(
             id=row["id"],
@@ -295,42 +192,19 @@ async def get_course_stats(
       bypasses the loader filter via
       ``execution_options(include_deleted=True)``.
     """
-    by_status_stmt = (
-        select(Course.status, func.count().label("status_count"))
-        .group_by(Course.status)
-        .order_by(Course.status)
+    stats = await administration_service.get_course_stats(
+        db, top_draft_owners_limit=top_draft_owners_limit
     )
-    by_status_rows = (await db.execute(by_status_stmt)).all()
-
-    totals_stmt = (
-        select(
-            func.count().filter(Course.deleted_at.is_(None)).label("active_total"),
-            func.count().filter(Course.deleted_at.is_not(None)).label("soft_deleted_total"),
-        )
-        .select_from(Course)
-        .execution_options(include_deleted=True)
-    )
-    totals_row = (await db.execute(totals_stmt)).one()
-
-    top_owners_stmt = (
-        select(Course.owner_user_id, func.count().label("draft_count"))
-        .where(Course.status == "draft")
-        .group_by(Course.owner_user_id)
-        .order_by(func.count().desc(), Course.owner_user_id)
-        .limit(top_draft_owners_limit)
-    )
-    top_owner_rows = (await db.execute(top_owners_stmt)).all()
-
     return CourseStats(
-        total_courses=int(totals_row.active_total or 0),
-        soft_deleted_courses=int(totals_row.soft_deleted_total or 0),
+        total_courses=stats["total_courses"],
+        soft_deleted_courses=stats["soft_deleted_courses"],
         by_status=[
-            CourseStatusCount(status=row.status, count=int(row.status_count))
-            for row in by_status_rows
+            CourseStatusCount(status=row["status"], count=row["count"])
+            for row in stats["by_status"]
         ],
         top_draft_owners=[
-            TopOwnerRow(owner_user_id=row.owner_user_id, draft_count=int(row.draft_count))
-            for row in top_owner_rows
+            TopOwnerRow(owner_user_id=row["owner_user_id"], draft_count=row["draft_count"])
+            for row in stats["top_draft_owners"]
         ],
     )
 

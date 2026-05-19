@@ -54,10 +54,11 @@ async def restore_soft_deleted_course(
     Children (modules, lessons, ...) keep their current state — see the
     administration query module's docstring for the rationale.
     """
-    del actor
     restored = await admin_queries.restore_soft_deleted_course(db, course_id)
     if not restored:
         raise NotFoundError(f"No soft-deleted course {course_id} to restore")
+
+    await admin_queries.stamp_updated_by(db, course_id, actor.user_id)
 
     course = await admin_queries.get_course_including_deleted(db, course_id)
     if course is None:  # pragma: no cover  -- restore_soft_deleted_course returned True
@@ -75,8 +76,22 @@ async def get_course_processing_audit(db: AsyncSession, course_id: UUID) -> dict
     return await admin_queries.get_course_processing_audit(db, course_id)
 
 
+async def list_course_processing_jobs(
+    db: AsyncSession, course_id: UUID, *, limit: int = 50
+) -> list[dict[str, Any]]:
+    """Recent processing_jobs rows tied to course_id."""
+    return await admin_queries.list_course_processing_jobs(db, course_id, limit=limit)
+
+
+async def get_course_stats(db: AsyncSession, *, top_draft_owners_limit: int = 10) -> dict[str, Any]:
+    """Org-wide course aggregates for the admin dashboard."""
+    return await admin_queries.get_course_stats(db, top_draft_owners_limit=top_draft_owners_limit)
+
+
 __all__ = [
     "get_course_processing_audit",
+    "get_course_stats",
     "list_all_courses_admin",
+    "list_course_processing_jobs",
     "restore_soft_deleted_course",
 ]

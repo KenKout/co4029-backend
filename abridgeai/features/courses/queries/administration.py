@@ -19,7 +19,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import and_, or_, select, text
+from sqlalchemy import and_, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from abridgeai.core.pagination.cursor import (
@@ -101,17 +101,6 @@ async def get_course_including_deleted(db: AsyncSession, course_id: UUID) -> Cou
     return (await db.execute(stmt)).scalar_one_or_none()
 
 
-_RESTORE_SOFT_DELETED_SQL = text(
-    """
-    UPDATE courses
-       SET deleted_at = NULL,
-           deleted_by = NULL
-     WHERE id = :course_id
-       AND deleted_at IS NOT NULL
-    """
-)
-
-
 async def restore_soft_deleted_course(db: AsyncSession, course_id: UUID) -> bool:
     """Clear ``deleted_at`` / ``deleted_by`` on the course row.
 
@@ -120,9 +109,18 @@ async def restore_soft_deleted_course(db: AsyncSession, course_id: UUID) -> bool
     administrators who need full-tree restore must escalate via DB ops
     (out of scope for the MVP per plan §4216).
     """
-    result = await db.execute(_RESTORE_SOFT_DELETED_SQL, {"course_id": course_id})
+    stmt = (
+        select(Course)
+        .where(Course.id == course_id, Course.deleted_at.is_not(None))
+        .execution_options(include_deleted=True)
+    )
+    course = (await db.execute(stmt)).scalar_one_or_none()
+    if course is None:
+        return False
+    course.deleted_at = None
+    course.deleted_by = None
     await db.flush()
-    return (getattr(result, "rowcount", 0) or 0) > 0
+    return True
 
 
 _PROCESSING_AUDIT_SQL = text(
@@ -175,9 +173,96 @@ def _normalize_dt(value: object) -> datetime | None:
     return None
 
 
+_LIST_PROCESSING_JOBS_SQL = text(
+    """
+    SELECT DISTINCT
+        pj.id              AS id,
+        pj.entity_type     AS entity_type,
+        pj.entity_id       AS entity_id,
+        pj.job_type        AS job_type,
+        pj.status          AS status,
+        pj.progress_percent AS progress_percent,
+        pj.error_message   AS error_message,
+        pj.retry_count     AS retry_count,
+        pj.started_at      AS started_at,
+        pj.finished_at     AS finished_at,
+        pj.created_at      AS created_at,
+        pj.updated_at      AS updated_at
+    FROM processing_jobs pj
+    LEFT JOIN ai_model_calls amc ON amc.processing_job_id = pj.id
+    LEFT JOIN generation_runs gr ON gr.id = amc.generation_run_id
+    WHERE gr.course_id = :course_id
+    ORDER BY pj.created_at DESC
+    LIMIT :limit
+    """
+)
+
+
+async def list_course_processing_jobs(
+    db: AsyncSession, course_id: UUID, *, limit: int = 50
+) -> list[dict[str, Any]]:
+    """Recent processing_jobs rows tied to course_id via generation_runs."""
+    rows = (
+        await db.execute(_LIST_PROCESSING_JOBS_SQL, {"course_id": course_id, "limit": limit})
+    ).mappings()
+    return [dict(row) for row in rows]
+
+
+async def get_course_stats(db: AsyncSession, *, top_draft_owners_limit: int = 10) -> dict[str, Any]:
+    """Org-wide course aggregates for the admin dashboard."""
+    by_status_stmt = (
+        select(Course.status, func.count().label("status_count"))
+        .group_by(Course.status)
+        .order_by(Course.status)
+    )
+    by_status_rows = (await db.execute(by_status_stmt)).all()
+
+    totals_stmt = (
+        select(
+            func.count().filter(Course.deleted_at.is_(None)).label("active_total"),
+            func.count().filter(Course.deleted_at.is_not(None)).label("soft_deleted_total"),
+        )
+        .select_from(Course)
+        .execution_options(include_deleted=True)
+    )
+    totals_row = (await db.execute(totals_stmt)).one()
+
+    top_owners_stmt = (
+        select(Course.owner_user_id, func.count().label("draft_count"))
+        .where(Course.status == "draft")
+        .group_by(Course.owner_user_id)
+        .order_by(func.count().desc(), Course.owner_user_id)
+        .limit(top_draft_owners_limit)
+    )
+    top_owner_rows = (await db.execute(top_owners_stmt)).all()
+
+    return {
+        "total_courses": int(totals_row.active_total or 0),
+        "soft_deleted_courses": int(totals_row.soft_deleted_total or 0),
+        "by_status": [
+            {"status": row.status, "count": int(row.status_count)} for row in by_status_rows
+        ],
+        "top_draft_owners": [
+            {"owner_user_id": row.owner_user_id, "draft_count": int(row.draft_count)}
+            for row in top_owner_rows
+        ],
+    }
+
+
+async def stamp_updated_by(db: AsyncSession, course_id: UUID, user_id: UUID) -> None:
+    """Set updated_by on a course after restore (audit trail)."""
+    course = await get_course_including_deleted(db, course_id)
+    if course is not None:
+        course.updated_by = user_id
+        await db.flush()
+
+
 __all__ = [
     "get_course_including_deleted",
     "get_course_processing_audit",
+    "get_course_stats",
     "list_all_courses_admin",
+    "list_course_processing_jobs",
     "restore_soft_deleted_course",
+    "stamp_updated_by",
 ]

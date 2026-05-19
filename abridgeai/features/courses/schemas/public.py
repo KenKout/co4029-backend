@@ -169,14 +169,26 @@ class CourseContentPublic(_ORMModel):
     modules: list[ModulePublic] = []
 
 
+class CoursePage(BaseModel):
+    items: list[CoursePublic]
+    next_cursor: str | None = None
+
+
+class ResourceDownloadUrlResponse(BaseModel):
+    url: str
+    expires_at: str
+
+
 __all__ = [
     "CourseContentPublic",
     "CourseLearningOutcomePublic",
+    "CoursePage",
     "CoursePublic",
     "InstructorRead",
     "LessonPublic",
     "LessonResourcePublic",
     "ModuleItemPublic",
     "ModulePublic",
+    "ResourceDownloadUrlResponse",
     "TagPublic",
 ]

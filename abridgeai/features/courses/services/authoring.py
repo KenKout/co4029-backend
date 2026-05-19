@@ -615,6 +615,11 @@ async def get_authoring_resource_download_url(
     return url, expires_at
 
 
+async def list_course_roster(db: AsyncSession, course_id: UUID) -> list[dict[str, Any]]:
+    """Enrolled students for a course (teacher or HOD view)."""
+    return await authoring_queries.list_course_roster(db, course_id)
+
+
 __all__ = [
     "add_lesson",
     "add_lesson_resource",
@@ -630,6 +635,7 @@ __all__ = [
     "get_authoring_resource_download_url",
     "list_authoring_courses_for_user",
     "list_authoring_lesson_resources",
+    "list_course_roster",
     "publish_course",
     "reorder_module_items",
     "set_module_prerequisites",

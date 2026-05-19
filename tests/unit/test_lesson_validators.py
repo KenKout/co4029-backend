@@ -11,7 +11,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from abridgeai.features.courses.models import LessonUnlockConfig
+from abridgeai.features.courses.schemas import LessonUnlockConfig
 
 
 def test_defaults_pass() -> None:

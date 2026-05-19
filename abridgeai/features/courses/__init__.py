@@ -14,12 +14,12 @@ from abridgeai.features.courses.models import (
     Lesson,
     LessonPrerequisite,
     LessonResource,
-    LessonUnlockConfig,
     Module,
     ModuleItem,
     ModulePrerequisite,
     Tag,
 )
+from abridgeai.features.courses.schemas import LessonUnlockConfig
 
 __all__ = [
     "Course",

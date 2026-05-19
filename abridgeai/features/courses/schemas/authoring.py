@@ -252,14 +252,62 @@ class CourseContentAuthoring(BaseModel):
     modules: list[ModuleAuthoring] = []
 
 
+class SlugAvailability(BaseModel):
+    available: bool
+
+
+class OutlineSection(BaseModel):
+    """One section row in ``GET /lessons/{id}/outline``.
+
+    Mirrors the SPA's ``OutlineSectionRead`` interface verbatim. Today
+    this surface returns a single synthetic ``body`` section per lesson
+    until the legacy ``build_lesson_outline`` semantic-section pipeline
+    is ported. The contract is deliberately stable so the SPA can render
+    today and the section list can grow without an API break.
+    """
+
+    id: UUID
+    title: str
+    depth: int = 0
+    chunk_count: int = 0
+    char_count: int = 0
+    page_range: tuple[int, int] = (0, 0)
+    content_role: Literal["body", "summary", "review"] = "body"
+    preview: str = ""
+
+
+class LessonOutline(BaseModel):
+    lesson_id: UUID
+    lesson_title: str
+    sections: list[OutlineSection]
+    suggested_question_count: int = 0
+    min_for_full_coverage: int = 0
+
+
+class StreamUrlResponse(BaseModel):
+    """Response shape for ``GET /teacher/lesson-resources/{id}/download-url``.
+
+    Field name ``stream_url`` (not ``url``) matches the SPA's
+    ``StreamUrlResponse`` TypeScript interface so the existing
+    ``fetchTeacherResourceDownloadUrl`` helper works unchanged.
+    """
+
+    stream_url: str
+    expires_at: datetime
+
+
 __all__ = [
     "CourseAuthoring",
     "CourseContentAuthoring",
     "CourseLearningOutcomeAuthoring",
     "InstructorAuthoring",
     "LessonAuthoring",
+    "LessonOutline",
     "LessonResourceAuthoring",
     "ModuleAuthoring",
     "ModuleItemAuthoring",
+    "OutlineSection",
+    "SlugAvailability",
+    "StreamUrlResponse",
     "TagAuthoring",
 ]

@@ -10,6 +10,16 @@ from __future__ import annotations
 from arq.connections import RedisSettings
 from arq.cron import CronJob, cron
 
+import abridgeai.features.career_paths.models  # noqa: F401
+import abridgeai.features.courses.models  # noqa: F401
+import abridgeai.features.enrollments.models  # noqa: F401
+import abridgeai.features.identity.models  # noqa: F401
+import abridgeai.features.interviews.models  # noqa: F401
+import abridgeai.features.materials.models  # noqa: F401
+import abridgeai.features.notifications.models  # noqa: F401
+import abridgeai.features.progress.models  # noqa: F401
+import abridgeai.features.quizzes.models  # noqa: F401
+import abridgeai.features.spaced_repetition.models  # noqa: F401
 from abridgeai.core.config import get_settings
 from abridgeai.features.interviews.workers import JOBS as INTERVIEW_JOBS
 from abridgeai.features.materials.workers import JOBS as MATERIAL_JOBS

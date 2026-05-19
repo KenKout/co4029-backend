@@ -129,9 +129,30 @@ async def list_courses_in_dept(db: AsyncSession, org_unit_id: UUID) -> list[Cour
     return [CourseAuthoring.model_validate(course) for course in courses]
 
 
+async def list_courses_for_organization(
+    db: AsyncSession, organization_id: UUID | None = None
+) -> list[CourseAuthoring]:
+    """Manager/Admin overview — courses optionally filtered by organization."""
+    courses = await assignment_queries.list_courses_by_organization(db, organization_id)
+    return [CourseAuthoring.model_validate(course) for course in courses]
+
+
+async def list_teachers_with_emails(db: AsyncSession, course_id: UUID) -> list[dict[str, Any]]:
+    """Active teachers for a course with email + display_name."""
+    return await assignment_queries.list_teachers_for_course(db, course_id)
+
+
+async def list_course_roster(db: AsyncSession, course_id: UUID) -> list[dict[str, Any]]:
+    """Enrolled students for a course (HOD/Manager view)."""
+    return await authoring_queries.list_course_roster(db, course_id)
+
+
 __all__ = [
     "assign_teacher_to_course",
+    "list_course_roster",
+    "list_courses_for_organization",
     "list_courses_in_dept",
     "list_teachers_for_course",
+    "list_teachers_with_emails",
     "remove_teacher_from_course",
 ]

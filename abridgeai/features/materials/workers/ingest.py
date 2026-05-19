@@ -31,6 +31,7 @@ from uuid import UUID
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from abridgeai.ai.llm import LLMGateway
 from abridgeai.core.audit import current_actor_var
 from abridgeai.core.db import get_sessionmaker
 from abridgeai.core.observability import (
@@ -138,6 +139,7 @@ async def ingest_material_version_task(
                         material_version_id,
                         pipeline_run_id,
                         source_path=local_path,
+                        llm_gateway=LLMGateway(),
                     )
                 await db.commit()
             except (KeyboardInterrupt, SystemExit):

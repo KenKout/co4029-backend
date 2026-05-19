@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy import delete, func, select, true
@@ -16,7 +17,8 @@ from abridgeai.features.courses.models import (
     ModuleItem,
     ModulePrerequisite,
 )
-from abridgeai.features.identity.models import StorageObject
+from abridgeai.features.enrollments.models import Enrollment
+from abridgeai.features.identity.models import StorageObject, User, UserProfile
 
 
 def _archived_filter(
@@ -249,6 +251,28 @@ async def replace_module_prerequisites(
     await db.flush()
 
 
+async def list_course_roster(db: AsyncSession, course_id: UUID) -> list[dict[str, Any]]:
+    """Enrolled students for a course with user profile info."""
+    stmt = (
+        select(
+            Enrollment.id.label("enrollment_id"),
+            Enrollment.student_id,
+            User.primary_email,
+            UserProfile.display_name,
+            Enrollment.status,
+            Enrollment.enrolled_at,
+            Enrollment.completed_at,
+            Enrollment.dropped_at,
+        )
+        .join(User, User.id == Enrollment.student_id)
+        .outerjoin(UserProfile, UserProfile.user_id == User.id)
+        .where(Enrollment.course_id == course_id)
+        .order_by(Enrollment.enrolled_at.desc())
+    )
+    rows = (await db.execute(stmt)).mappings().all()
+    return [dict(row) for row in rows]
+
+
 __all__ = [
     "get_authoring_resource_storage_target",
     "get_course_for_authoring",
@@ -258,6 +282,7 @@ __all__ = [
     "get_module",
     "get_module_item",
     "list_all_lesson_resources",
+    "list_course_roster",
     "list_courses_assigned_to_teacher",
     "list_courses_for_owner",
     "list_courses_in_org_unit",

@@ -37,13 +37,10 @@ Architectural rules honoured:
 
 from __future__ import annotations
 
-from datetime import datetime
-from typing import Annotated, Literal
+from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel
-from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from abridgeai.core.db import get_db
@@ -67,6 +64,7 @@ from abridgeai.features.courses.schemas import (
     CourseUpdate,
     LessonAuthoring,
     LessonCreate,
+    LessonOutline,
     LessonResourceAuthoring,
     LessonResourceCreate,
     LessonUpdate,
@@ -77,6 +75,10 @@ from abridgeai.features.courses.schemas import (
     ModuleItemUpdate,
     ModulePrerequisiteSet,
     ModuleUpdate,
+    OutlineSection,
+    RosterEntry,
+    SlugAvailability,
+    StreamUrlResponse,
 )
 from abridgeai.features.courses.services import authoring as authoring_service
 
@@ -140,55 +142,12 @@ async def create_course(
     return course
 
 
-class _SlugAvailability(BaseModel):
-    available: bool
-
-
-class _RosterEntry(BaseModel):
-    """Roster row for ``GET /teacher/courses/{course_id}/roster``.
-
-    Same shape as the HOD-scope ``RosterEntry`` in ``assignment.py`` —
-    duplicated here intentionally to keep the authoring router free of
-    cross-router imports. Both should evolve together; if Phase 7 lands
-    a canonical ``EnrollmentRead`` shared schema, both can replace this.
-    """
-
-    enrollment_id: UUID
-    student_id: UUID
-    display_name: str | None = None
-    primary_email: str
-    status: str
-    enrolled_at: datetime
-    completed_at: datetime | None = None
-    dropped_at: datetime | None = None
-
-
-_LIST_ROSTER_SQL = text(
-    """
-    SELECT
-        ce.id           AS enrollment_id,
-        ce.student_id   AS student_id,
-        u.primary_email AS primary_email,
-        up.display_name AS display_name,
-        ce.status       AS status,
-        ce.enrolled_at  AS enrolled_at,
-        ce.completed_at AS completed_at,
-        ce.dropped_at   AS dropped_at
-    FROM course_enrollments ce
-    JOIN users u ON u.id = ce.student_id
-    LEFT JOIN user_profiles up ON up.user_id = u.id
-    WHERE ce.course_id = :course_id
-    ORDER BY ce.enrolled_at DESC
-    """
-)
-
-
-@router.get("/courses/check-slug", response_model=_SlugAvailability)
+@router.get("/courses/check-slug", response_model=SlugAvailability)
 async def check_course_slug(
     slug: Annotated[str, Query(min_length=1, max_length=100)],
     current_user: Annotated[CurrentUser, Depends(_REQUIRE_CREATE)],
     db: Annotated[AsyncSession, Depends(get_db)],
-) -> _SlugAvailability:
+) -> SlugAvailability:
     """Pre-flight check for the new-course form.
 
     Returns ``{"available": true}`` when ``slug`` is free in the caller's
@@ -202,7 +161,7 @@ async def check_course_slug(
         )
     except AppError as exc:
         raise _bad_request(str(exc)) from exc
-    return _SlugAvailability(available=available)
+    return SlugAvailability(available=available)
 
 
 @router.get("/courses", response_model=list[CourseAuthoring])
@@ -260,13 +219,13 @@ async def get_authoring_course_content(
 
 @router.get(
     "/courses/{course_id}/roster",
-    response_model=list[_RosterEntry],
+    response_model=list[RosterEntry],
 )
 async def get_authoring_course_roster(
     course_id: UUID,
     current_user: Annotated[CurrentUser, Depends(_REQUIRE_COURSE_UPDATE)],
     db: Annotated[AsyncSession, Depends(get_db)],
-) -> list[_RosterEntry]:
+) -> list[RosterEntry]:
     """Roster of enrolled students for the teacher's course view.
 
     Same response shape as ``GET /dept/courses/{id}/roster`` (HOD-scope)
@@ -274,8 +233,8 @@ async def get_authoring_course_roster(
     can read their own roster without HOD privileges.
     """
     del current_user
-    rows = (await db.execute(_LIST_ROSTER_SQL, {"course_id": course_id})).mappings()
-    return [_RosterEntry.model_validate(dict(row)) for row in rows]
+    rows = await authoring_service.list_course_roster(db, course_id)
+    return [RosterEntry.model_validate(row) for row in rows]
 
 
 @router.patch("/courses/{course_id}", response_model=CourseAuthoring)
@@ -487,41 +446,12 @@ async def get_authoring_lesson(
         raise _not_found(str(exc)) from exc
 
 
-class _OutlineSection(BaseModel):
-    """One section row in ``GET /lessons/{id}/outline``.
-
-    Mirrors the SPA's ``OutlineSectionRead`` interface verbatim. Today
-    this surface returns a single synthetic ``body`` section per lesson
-    until the legacy ``build_lesson_outline`` semantic-section pipeline
-    is ported (see ``quizzes/ai/pipelines/coverage.py:104``). The
-    contract is deliberately stable so the SPA can render today and
-    the section list can grow without an API break.
-    """
-
-    id: UUID
-    title: str
-    depth: int = 0
-    chunk_count: int = 0
-    char_count: int = 0
-    page_range: tuple[int, int] = (0, 0)
-    content_role: Literal["body", "summary", "review"] = "body"
-    preview: str = ""
-
-
-class _LessonOutline(BaseModel):
-    lesson_id: UUID
-    lesson_title: str
-    sections: list[_OutlineSection]
-    suggested_question_count: int = 0
-    min_for_full_coverage: int = 0
-
-
-@router.get("/lessons/{lesson_id}/outline", response_model=_LessonOutline)
+@router.get("/lessons/{lesson_id}/outline", response_model=LessonOutline)
 async def get_lesson_outline(
     lesson_id: UUID,
     current_user: Annotated[CurrentUser, Depends(_REQUIRE_LESSON)],
     db: Annotated[AsyncSession, Depends(get_db)],
-) -> _LessonOutline:
+) -> LessonOutline:
     """Authoring outline preview (drafts visible).
 
     Surfaces under the teacher router (rather than the learner one) so
@@ -536,11 +466,11 @@ async def get_lesson_outline(
         lesson = await authoring_service.get_authoring_lesson(db, lesson_id)
     except NotFoundError as exc:
         raise _not_found(str(exc)) from exc
-    return _LessonOutline(
+    return LessonOutline(
         lesson_id=lesson.id,
         lesson_title=lesson.title,
         sections=[
-            _OutlineSection(
+            OutlineSection(
                 id=lesson.id,
                 title=lesson.title,
                 depth=0,
@@ -633,27 +563,15 @@ async def delete_lesson_resource(
     await db.commit()
 
 
-class _StreamUrlResponse(BaseModel):
-    """Response shape for ``GET /teacher/lesson-resources/{id}/download-url``.
-
-    Field name ``stream_url`` (not ``url``) matches the SPA's
-    ``StreamUrlResponse`` TypeScript interface so the existing
-    ``fetchTeacherResourceDownloadUrl`` helper works unchanged.
-    """
-
-    stream_url: str
-    expires_at: datetime
-
-
 @router.get(
     "/lesson-resources/{resource_id}/download-url",
-    response_model=_StreamUrlResponse,
+    response_model=StreamUrlResponse,
 )
 async def get_authoring_resource_download_url(
     resource_id: UUID,
     current_user: Annotated[CurrentUser, Depends(_REQUIRE_RESOURCE)],
     db: Annotated[AsyncSession, Depends(get_db)],
-) -> _StreamUrlResponse:
+) -> StreamUrlResponse:
     """Mint a presigned GET URL for a teacher-visible resource.
 
     Same auth as the DELETE sibling — caller must have authoring access
@@ -668,7 +586,7 @@ async def get_authoring_resource_download_url(
         )
     except NotFoundError as exc:
         raise _not_found(str(exc)) from exc
-    return _StreamUrlResponse(stream_url=url, expires_at=expires_at)
+    return StreamUrlResponse(stream_url=url, expires_at=expires_at)
 
 
 __all__ = ["router"]

@@ -25,7 +25,6 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from abridgeai.core.db import get_db
@@ -33,27 +32,19 @@ from abridgeai.core.security import CurrentUser, get_current_user
 from abridgeai.features.courses.schemas import (
     CourseContentPublic,
     CourseLearningOutcomePublic,
+    CoursePage,
     CoursePublic,
     LessonPublic,
     LessonResourcePublic,
     ModuleItemPublic,
     ModulePublic,
+    ResourceDownloadUrlResponse,
     TagPublic,
 )
 from abridgeai.features.courses.services import catalog as catalog_service
 
 router = APIRouter(tags=["courses-learner"])
 me_courses_router = APIRouter(prefix="/me/courses", tags=["courses-learner"])
-
-
-class CoursePage(BaseModel):
-    items: list[CoursePublic]
-    next_cursor: str | None = None
-
-
-class ResourceDownloadUrlResponse(BaseModel):
-    url: str
-    expires_at: str
 
 
 def _not_found(resource: str, ident: str | UUID) -> HTTPException:

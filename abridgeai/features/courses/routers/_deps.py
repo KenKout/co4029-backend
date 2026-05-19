@@ -11,26 +11,12 @@ permission check from :func:`features.access_control.policies.require_course_per
 Each factory in this module returns a FastAPI dependency that:
 
 1. Resolves the path-param sub-resource id to its owning ``course_id`` via
-   an ORM ``select(...).join(...)`` walk -- the soft-delete loader filter
-   (``core/db/soft_delete.py``) is applied automatically to every
-   :class:`SoftDeleteMixin` table touched by the join, so manual
-   ``deleted_at IS NULL`` clauses are unnecessary.
+   :mod:`queries.resolution` -- the soft-delete loader filter is applied
+   automatically to every :class:`SoftDeleteMixin` table touched by the join.
 2. Calls the SAME logic as
    :func:`features.access_control.policies.require_course_permission` --
    owner short-circuit, then ``load_course_permissions`` lookup -- so the
    semantics match course-level endpoints exactly.
-
-Resolution lives inline (helper functions, no separate query module) per
-task T3.7's "keep the sub-resource → course mapping in this file" rule:
-the security perimeter stays independently auditable and the FIX-SEC-1
-grep test asserts every authoring endpoint depends on a wrapper from
-this file (or the course-level :func:`require_course_permission`
-factory), never on a bare :func:`get_current_user`.
-
-T7 (orm-consolidation) migrated this module from raw ``text()`` SELECTs
-to ORM ``select()`` joins. The soft-delete filter is now auto-applied
-via the do_orm_execute listener registered in
-:mod:`abridgeai.core.db.soft_delete`.
 """
 
 from __future__ import annotations
@@ -40,89 +26,22 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import Depends, HTTPException, status
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from abridgeai.core.db import get_db
 from abridgeai.core.security import CurrentUser, get_current_user
 from abridgeai.features.access_control.policies import can_manage_course
-from abridgeai.features.courses.models import (
-    Course,
-    CourseLearningOutcome,
-    Lesson,
-    LessonResource,
-    Module,
-    ModuleItem,
+from abridgeai.features.courses.queries.resolution import (
+    resolve_lesson_to_course,
+    resolve_module_item_to_course,
+    resolve_module_to_course,
+    resolve_outcome_to_course,
+    resolve_resource_to_course,
 )
 
 _DEFAULT_AUTHORING_PERMS: tuple[str, ...] = ("course.update",)
 
 SubResourceDependency = Callable[..., Awaitable[CurrentUser]]
-
-
-async def _resolve_module_to_course(db: AsyncSession, module_id: UUID) -> tuple[UUID, UUID] | None:
-    """Walk ``module_id -> course_id`` via the FK column.
-
-    Returns ``(course_id, owner_user_id)`` or ``None`` when the module
-    is missing / soft-deleted (the soft-delete loader filter hides
-    tombstoned rows on both ``modules`` and ``courses``).
-    """
-    stmt = (
-        select(Module.course_id, Course.owner_user_id)
-        .join(Course, Course.id == Module.course_id)
-        .where(Module.id == module_id)
-    )
-    return (await db.execute(stmt)).tuples().first()
-
-
-async def _resolve_lesson_to_course(db: AsyncSession, lesson_id: UUID) -> tuple[UUID, UUID] | None:
-    """Walk ``lesson_id -> module_id -> course_id`` via FK columns."""
-    stmt = (
-        select(Module.course_id, Course.owner_user_id)
-        .join(Module, Module.course_id == Course.id)
-        .join(Lesson, Lesson.module_id == Module.id)
-        .where(Lesson.id == lesson_id)
-    )
-    return (await db.execute(stmt)).tuples().first()
-
-
-async def _resolve_resource_to_course(
-    db: AsyncSession, resource_id: UUID
-) -> tuple[UUID, UUID] | None:
-    """Walk ``resource_id -> lesson -> module -> course`` via FK columns."""
-    stmt = (
-        select(Module.course_id, Course.owner_user_id)
-        .join(Module, Module.course_id == Course.id)
-        .join(Lesson, Lesson.module_id == Module.id)
-        .join(LessonResource, LessonResource.lesson_id == Lesson.id)
-        .where(LessonResource.id == resource_id)
-    )
-    return (await db.execute(stmt)).tuples().first()
-
-
-async def _resolve_module_item_to_course(
-    db: AsyncSession, module_item_id: UUID
-) -> tuple[UUID, UUID] | None:
-    """Walk ``module_item_id -> module -> course`` via FK columns."""
-    stmt = (
-        select(Module.course_id, Course.owner_user_id)
-        .join(Course, Course.id == Module.course_id)
-        .join(ModuleItem, ModuleItem.module_id == Module.id)
-        .where(ModuleItem.id == module_item_id)
-    )
-    return (await db.execute(stmt)).tuples().first()
-
-
-async def _resolve_outcome_to_course(
-    db: AsyncSession, outcome_id: UUID
-) -> tuple[UUID, UUID] | None:
-    """Walk ``outcome_id -> course`` via the FK column."""
-    stmt = (
-        select(CourseLearningOutcome.course_id, Course.owner_user_id)
-        .join(Course, Course.id == CourseLearningOutcome.course_id)
-        .where(CourseLearningOutcome.id == outcome_id)
-    )
-    return (await db.execute(stmt)).tuples().first()
 
 
 def _not_found(resource: str, resource_id: UUID) -> HTTPException:
@@ -164,7 +83,7 @@ async def _check_course_permission(
 def require_module_authoring_access(
     *perm_codes: str,
 ) -> SubResourceDependency:
-    """Build a dependency that walks ``module_id → course_id`` and enforces course perms.
+    """Build a dependency that walks ``module_id -> course_id`` and enforces course perms.
 
     The path parameter MUST be named ``module_id``.
     """
@@ -175,7 +94,7 @@ def require_module_authoring_access(
         current_user: Annotated[CurrentUser, Depends(get_current_user)],
         db: Annotated[AsyncSession, Depends(get_db)],
     ) -> CurrentUser:
-        resolved = await _resolve_module_to_course(db, module_id)
+        resolved = await resolve_module_to_course(db, module_id)
         if resolved is None:
             raise _not_found("module", module_id)
         course_id, owner_user_id = resolved
@@ -187,7 +106,7 @@ def require_module_authoring_access(
 def require_lesson_authoring_access(
     *perm_codes: str,
 ) -> SubResourceDependency:
-    """Walks ``lesson_id → module_id → course_id`` and enforces course perms.
+    """Walks ``lesson_id -> module_id -> course_id`` and enforces course perms.
 
     The path parameter MUST be named ``lesson_id``.
     """
@@ -198,7 +117,7 @@ def require_lesson_authoring_access(
         current_user: Annotated[CurrentUser, Depends(get_current_user)],
         db: Annotated[AsyncSession, Depends(get_db)],
     ) -> CurrentUser:
-        resolved = await _resolve_lesson_to_course(db, lesson_id)
+        resolved = await resolve_lesson_to_course(db, lesson_id)
         if resolved is None:
             raise _not_found("lesson", lesson_id)
         course_id, owner_user_id = resolved
@@ -210,7 +129,7 @@ def require_lesson_authoring_access(
 def require_resource_authoring_access(
     *perm_codes: str,
 ) -> SubResourceDependency:
-    """Walks ``resource_id → lesson → module → course`` and enforces course perms.
+    """Walks ``resource_id -> lesson -> module -> course`` and enforces course perms.
 
     The path parameter MUST be named ``resource_id``.
     """
@@ -221,7 +140,7 @@ def require_resource_authoring_access(
         current_user: Annotated[CurrentUser, Depends(get_current_user)],
         db: Annotated[AsyncSession, Depends(get_db)],
     ) -> CurrentUser:
-        resolved = await _resolve_resource_to_course(db, resource_id)
+        resolved = await resolve_resource_to_course(db, resource_id)
         if resolved is None:
             raise _not_found("lesson_resource", resource_id)
         course_id, owner_user_id = resolved
@@ -233,7 +152,7 @@ def require_resource_authoring_access(
 def require_module_item_authoring_access(
     *perm_codes: str,
 ) -> SubResourceDependency:
-    """Walks ``module_item_id → module → course`` and enforces course perms.
+    """Walks ``module_item_id -> module -> course`` and enforces course perms.
 
     The path parameter MUST be named ``module_item_id``.
     """
@@ -244,7 +163,7 @@ def require_module_item_authoring_access(
         current_user: Annotated[CurrentUser, Depends(get_current_user)],
         db: Annotated[AsyncSession, Depends(get_db)],
     ) -> CurrentUser:
-        resolved = await _resolve_module_item_to_course(db, module_item_id)
+        resolved = await resolve_module_item_to_course(db, module_item_id)
         if resolved is None:
             raise _not_found("module_item", module_item_id)
         course_id, owner_user_id = resolved
@@ -256,7 +175,7 @@ def require_module_item_authoring_access(
 def require_outcome_authoring_access(
     *perm_codes: str,
 ) -> SubResourceDependency:
-    """Walks ``outcome_id → course`` and enforces course perms.
+    """Walks ``outcome_id -> course`` and enforces course perms.
 
     The path parameter MUST be named ``outcome_id``.
     """
@@ -267,7 +186,7 @@ def require_outcome_authoring_access(
         current_user: Annotated[CurrentUser, Depends(get_current_user)],
         db: Annotated[AsyncSession, Depends(get_db)],
     ) -> CurrentUser:
-        resolved = await _resolve_outcome_to_course(db, outcome_id)
+        resolved = await resolve_outcome_to_course(db, outcome_id)
         if resolved is None:
             raise _not_found("course_outcome", outcome_id)
         course_id, owner_user_id = resolved

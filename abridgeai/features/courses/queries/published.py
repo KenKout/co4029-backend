@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-from importlib import resources
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import select, text
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from abridgeai.core.pagination.cursor import (
@@ -30,6 +29,8 @@ from abridgeai.features.courses.visibility import (
     published_module_clause,
     student_visible_resource_clause,
 )
+from abridgeai.features.enrollments.models import Enrollment
+from abridgeai.features.identity.models import StorageObject
 
 _DEFAULT_LIMIT = 20
 _MAX_LIMIT = 100
@@ -37,13 +38,6 @@ _MAX_LIMIT = 100
 
 def _clamp(limit: int) -> int:
     return min(max(limit, 1), _MAX_LIMIT)
-
-
-_PUBLISHED_CONTENT_TREE_SQL = text(
-    resources.files("abridgeai.features.courses.queries.sql")
-    .joinpath("published_content_tree.sql")
-    .read_text(encoding="utf-8")
-)
 
 
 async def list_published_courses(
@@ -83,40 +77,23 @@ async def list_enrolled_courses(
     limit: int = _DEFAULT_LIMIT,
     cursor: str | None = None,
 ) -> CursorPage[Course]:
-    """Active enrollments → published courses for a student.
-
-    The ``course_enrollments`` table is present in the baseline schema
-    (T0.9 migration 0001) but its ORM model lives in
-    ``features/enrollments`` which ports in Phase 7. Until then we
-    resolve enrolled course ids via raw SQL and re-load Course rows
-    through the ORM so the soft-delete loader-criteria still fires.
-    """
+    """Active enrollments -> published courses for a student."""
     capped = _clamp(limit)
     after = decode_cursor(cursor) if cursor else None
-    after_clause = "AND c.id > :after_id" if after is not None else ""
-    sql = text(
-        f"""
-        SELECT c.id
-        FROM course_enrollments e
-        JOIN courses c ON c.id = e.course_id
-        WHERE e.student_id = :student_id
-          AND e.status = 'active'
-          AND c.status = 'published'
-          AND c.deleted_at IS NULL
-          {after_clause}
-        ORDER BY c.id
-        LIMIT :limit
-        """  # noqa: S608  -- after_clause is a checked-in literal fragment
+    stmt = (
+        select(Course)
+        .join(Enrollment, Enrollment.course_id == Course.id)
+        .where(
+            Enrollment.student_id == user_id,
+            Enrollment.status == "active",
+            published_course_clause(),
+        )
+        .order_by(Course.id)
+        .limit(capped)
     )
-    params: dict[str, Any] = {"student_id": user_id, "limit": capped}
     if after is not None:
-        params["after_id"] = after
-    rows = (await db.execute(sql, params)).all()
-    course_ids = [row.id for row in rows]
-    if not course_ids:
-        return CursorPage(items=[], next_cursor=None)
-    courses_stmt = select(Course).where(Course.id.in_(course_ids)).order_by(Course.id)
-    courses = list((await db.execute(courses_stmt)).scalars().all())
+        stmt = stmt.where(Course.id > after)
+    courses = list((await db.execute(stmt)).scalars().all())
     next_cursor = encode_cursor(courses[-1].id) if len(courses) == capped else None
     return CursorPage(items=courses, next_cursor=next_cursor)
 
@@ -145,18 +122,64 @@ async def get_published_course_by_id(db: AsyncSession, course_id: UUID) -> Cours
 
 
 async def get_published_course_content(db: AsyncSession, course_id: UUID) -> dict[str, Any] | None:
-    """Recursive-CTE fetch of the published course tree.
+    """Fetch the published course tree (course + modules + visible items).
 
-    Returns ``{"course": dict, "modules": list, "items": list}`` or
-    ``None`` when the course is missing / unpublished / soft-deleted.
+    Returns ``{"course": Course, "modules": list[Module], "items": list[dict]}``
+    or ``None`` when the course is missing / unpublished / soft-deleted.
     DRAFT_VISIBILITY rule (plan §4153): items pointing to draft / soft-
     deleted lessons are excluded entirely (not nullified).
     """
-    result = await db.execute(_PUBLISHED_CONTENT_TREE_SQL, {"course_id": course_id})
-    row = result.one_or_none()
-    if row is None or row.course is None:
+    course = await get_published_course_by_id(db, course_id)
+    if course is None:
         return None
-    return {"course": row.course, "modules": row.modules, "items": row.items}
+
+    modules = await list_published_modules(db, course_id)
+
+    if not modules:
+        return {"course": course, "modules": modules, "items": []}
+
+    module_ids = [m.id for m in modules]
+    items_stmt = (
+        select(ModuleItem)
+        .join(Module, Module.id == ModuleItem.module_id)
+        .outerjoin(Lesson, Lesson.id == ModuleItem.lesson_id)
+        .where(
+            ModuleItem.module_id.in_(module_ids),
+            ModuleItem.deleted_at.is_(None),
+            module_item_visible_clause(),
+        )
+        .order_by(ModuleItem.module_id, ModuleItem.position)
+    )
+    items = list((await db.execute(items_stmt)).scalars().all())
+
+    lesson_ids = [item.lesson_id for item in items if item.lesson_id is not None]
+    lessons_by_id: dict[UUID, Lesson] = {}
+    if lesson_ids:
+        lessons_stmt = select(Lesson).where(
+            Lesson.id.in_(lesson_ids),
+            published_lesson_clause(),
+        )
+        lessons = (await db.execute(lessons_stmt)).scalars().all()
+        lessons_by_id = {lesson.id: lesson for lesson in lessons}
+
+    items_data = []
+    for item in items:
+        lesson = lessons_by_id.get(item.lesson_id) if item.lesson_id else None
+        items_data.append(
+            {
+                "id": item.id,
+                "module_id": item.module_id,
+                "item_type": item.item_type,
+                "lesson_id": item.lesson_id,
+                "quiz_id": item.quiz_id,
+                "interview_config_id": item.interview_config_id,
+                "position": item.position,
+                "unlock_rule_json": item.unlock_rule_json,
+                "lesson": lesson,
+            }
+        )
+
+    return {"course": course, "modules": modules, "items": items_data}
 
 
 async def list_published_modules(db: AsyncSession, course_id: UUID) -> list[Module]:
@@ -324,24 +347,6 @@ async def get_user_primary_organization_id(db: AsyncSession, user_id: UUID) -> U
     return org.id if org is not None else None
 
 
-_RESOURCE_STORAGE_TARGET_SQL = text(
-    """
-    SELECT so.bucket AS bucket, so.object_key AS object_key
-    FROM lesson_resources lr
-    JOIN lessons l ON l.id = lr.lesson_id
-    JOIN modules m ON m.id = l.module_id
-    JOIN courses c ON c.id = m.course_id
-    JOIN storage_objects so ON so.id = lr.storage_object_id
-    WHERE lr.id = :resource_id
-      AND lr.visible_to_students = TRUE
-      AND lr.deleted_at IS NULL
-      AND l.status = 'published' AND l.deleted_at IS NULL
-      AND m.status = 'published' AND m.deleted_at IS NULL
-      AND c.status = 'published' AND c.deleted_at IS NULL
-    """
-)
-
-
 async def get_visible_resource_storage_target(
     db: AsyncSession, resource_id: UUID
 ) -> tuple[str, str] | None:
@@ -349,12 +354,25 @@ async def get_visible_resource_storage_target(
 
     The composite visibility predicate inlines the same publish gates as
     :func:`get_visible_lesson_resource` so a 404 surfaces uniformly when
-    any link in the lesson → module → course chain is unpublished /
+    any link in the lesson -> module -> course chain is unpublished /
     soft-deleted, OR when ``visible_to_students`` is FALSE. Caller (the
     catalog service) maps ``None`` to HTTP 404 — existence MUST NOT leak.
     """
-    result = await db.execute(_RESOURCE_STORAGE_TARGET_SQL, {"resource_id": resource_id})
-    row = result.one_or_none()
+    stmt = (
+        select(StorageObject.bucket, StorageObject.object_key)
+        .join(LessonResource, LessonResource.storage_object_id == StorageObject.id)
+        .join(Lesson, Lesson.id == LessonResource.lesson_id)
+        .join(Module, Module.id == Lesson.module_id)
+        .join(Course, Course.id == Module.course_id)
+        .where(
+            LessonResource.id == resource_id,
+            published_course_clause(),
+            published_module_clause(),
+            published_lesson_clause(),
+            student_visible_resource_clause(),
+        )
+    )
+    row = (await db.execute(stmt)).one_or_none()
     if row is None:
         return None
     return row.bucket, row.object_key

@@ -26,6 +26,11 @@ constructor itself touches.
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+
+from arq import create_pool
+from arq.connections import RedisSettings
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -49,6 +54,7 @@ from abridgeai.features.admin.routers import (
 from abridgeai.features.admin.routers import (
     users_router as admin_users_router,
 )
+from abridgeai.features.admin.routers.processing import get_arq_pool as admin_get_arq_pool
 from abridgeai.features.career_paths.routers import (
     authoring_management_router as career_paths_management_router,
 )
@@ -107,6 +113,12 @@ from abridgeai.features.interviews.routers import (
 from abridgeai.features.interviews.routers import (
     learner_router as interviews_learner_router,
 )
+from abridgeai.features.interviews.routers.authoring import (
+    get_arq_pool as interviews_authoring_get_arq_pool,
+)
+from abridgeai.features.interviews.routers.learner import (
+    get_arq_pool as interviews_learner_get_arq_pool,
+)
 from abridgeai.features.materials.routers import (
     authoring_router as materials_authoring_router,
 )
@@ -116,6 +128,7 @@ from abridgeai.features.materials.routers import (
 from abridgeai.features.materials.routers import (
     materials_upload_router,
 )
+from abridgeai.features.materials.routers.authoring import get_arq_pool as materials_get_arq_pool
 from abridgeai.features.notifications.routers import (
     learner_router as notifications_learner_router,
 )
@@ -131,6 +144,7 @@ from abridgeai.features.quizzes.routers import (
 from abridgeai.features.quizzes.routers import (
     learner_router as quizzes_learner_router,
 )
+from abridgeai.features.quizzes.routers.authoring import get_arq_pool as quizzes_get_arq_pool
 from abridgeai.features.spaced_repetition.routers import (
     learner_router as spaced_repetition_learner_router,
 )
@@ -139,6 +153,25 @@ from abridgeai.features.spaced_repetition.routers import (
 )
 
 API_V1_PREFIX = "/api/v1"
+
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
+    settings = get_settings()
+    pool = await create_pool(RedisSettings.from_dsn(settings.redis_url))
+
+    async def _provide_arq_pool() -> object:
+        return pool
+
+    app.dependency_overrides[admin_get_arq_pool] = _provide_arq_pool
+    app.dependency_overrides[interviews_authoring_get_arq_pool] = _provide_arq_pool
+    app.dependency_overrides[interviews_learner_get_arq_pool] = _provide_arq_pool
+    app.dependency_overrides[materials_get_arq_pool] = _provide_arq_pool
+    app.dependency_overrides[quizzes_get_arq_pool] = _provide_arq_pool
+
+    yield
+
+    await pool.aclose()
 
 
 def create_app() -> FastAPI:
@@ -155,6 +188,7 @@ def create_app() -> FastAPI:
         "quizzes, interviews, enrollments, progress, career paths, "
         "notifications, and admin surfaces.",
         version="0.7.0",
+        lifespan=_lifespan,
     )
 
     settings = get_settings()
