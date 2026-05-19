@@ -235,7 +235,11 @@ def create_app() -> FastAPI:
 
     # T0.26 -- health checks (mounted at root so K8s probes + load balancers
     # can hit /healthz, /healthz/deep, /readyz without the /api/v1 prefix).
+    # Also mounted under /api/v1 so the SPA can probe via the same reverse-
+    # proxy /api/v1 path (front-door /healthz at the public host serves the
+    # SPA HTML, not the backend).
     app.include_router(healthz_router)
+    app.include_router(healthz_router, prefix=API_V1_PREFIX)
 
     return app
 
