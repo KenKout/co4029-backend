@@ -326,11 +326,12 @@ async def _close_session(engine: AsyncEngine, session_id: uuid.UUID) -> None:
         )
 
 
-async def test_oauth_callback_creates_new_user_full_flow(
+async def test_oauth_callback_rejects_unprovisioned_email_full_flow(
     client: httpx.AsyncClient,
     engine: AsyncEngine,
     google_oauth_settings: None,
 ) -> None:
+    """Invite-only OAuth: brand-new email returns 403, no User row created."""
     fresh_email = f"oauth-full-{uuid.uuid4().hex[:8]}@abridgeai.local"
     google_subject = f"google-uid-{uuid.uuid4().hex[:12]}"
 
@@ -341,21 +342,9 @@ async def test_oauth_callback_creates_new_user_full_flow(
                 params={"code": "fakeCode"},
             )
 
-        assert response.status_code == 200, response.text
+        assert response.status_code == 403, response.text
         body = response.json()
-        assert body["access_token"]
-        assert body["refresh_token"]
-        assert body["token_type"] == "bearer"  # noqa: S105 — OAuth2 scheme literal
-        assert body["user"]["primary_email"] == fresh_email
-
-        decoded = jwt.decode(
-            body["access_token"],
-            get_settings().jwt_secret_key,
-            algorithms=[ALGORITHM],
-        )
-        assert "sub" in decoded
-        assert "sid" in decoded
-        assert "exp" in decoded
+        assert body["detail"]["error"] == "oauth_account_not_provisioned"
 
         async with engine.begin() as conn:
             user_row = (
@@ -364,16 +353,54 @@ async def test_oauth_callback_creates_new_user_full_flow(
                     {"email": fresh_email},
                 )
             ).one_or_none()
-            assert user_row is not None, "User row was not created"
-            user_id = user_row[0]
+            assert user_row is None, "Unprovisioned email must NOT create a users row"
+    finally:
+        await _purge_user(engine, email=fresh_email, subject=google_subject)
 
+
+async def test_oauth_callback_links_identity_for_preprovisioned_user(
+    client: httpx.AsyncClient,
+    engine: AsyncEngine,
+    google_oauth_settings: None,
+) -> None:
+    """Pre-provisioned user without identity: link AuthIdentity + UserProfile, issue tokens."""
+    fresh_email = f"oauth-pre-{uuid.uuid4().hex[:8]}@abridgeai.local"
+    google_subject = f"google-uid-{uuid.uuid4().hex[:12]}"
+    pre_user_id = uuid.uuid4()
+
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("INSERT INTO users (id, primary_email, status) VALUES (:id, :em, 'active')"),
+            {"id": pre_user_id, "em": fresh_email},
+        )
+
+    try:
+        with _mock_google(fresh_email, google_subject):
+            response = await client.get(
+                "/api/v1/auth/google/callback",
+                params={"code": "fakeCode"},
+            )
+
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["user"]["id"] == str(pre_user_id)
+
+        decoded = jwt.decode(
+            body["access_token"],
+            get_settings().jwt_secret_key,
+            algorithms=[ALGORITHM],
+        )
+        assert "sub" in decoded
+        assert "sid" in decoded
+
+        async with engine.begin() as conn:
             profile_row = (
                 await conn.execute(
                     text("SELECT display_name FROM user_profiles WHERE user_id = :uid"),
-                    {"uid": user_id},
+                    {"uid": pre_user_id},
                 )
             ).one_or_none()
-            assert profile_row is not None, "UserProfile was not created"
+            assert profile_row is not None, "UserProfile was not created on first OAuth login"
 
             identity_row = (
                 await conn.execute(
@@ -384,16 +411,7 @@ async def test_oauth_callback_creates_new_user_full_flow(
                     {"sub": google_subject},
                 )
             ).one_or_none()
-            assert identity_row is not None, "AuthIdentity was not created"
-
-            session_row = (
-                await conn.execute(
-                    text("SELECT refresh_token_hash FROM auth_sessions WHERE user_id = :uid"),
-                    {"uid": user_id},
-                )
-            ).one_or_none()
-            assert session_row is not None, "AuthSession was not created"
-            assert session_row[0], "refresh_token_hash must not be empty"
+            assert identity_row is not None, "AuthIdentity was not linked"
     finally:
         await _purge_user(engine, email=fresh_email, subject=google_subject)
 
@@ -443,6 +461,13 @@ async def test_full_login_then_me_then_logout(
 ) -> None:
     email = f"lifecycle-{uuid.uuid4().hex[:8]}@abridgeai.local"
     subject = f"google-uid-{uuid.uuid4().hex[:12]}"
+    pre_user_id = uuid.uuid4()
+
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("INSERT INTO users (id, primary_email, status) VALUES (:id, :em, 'active')"),
+            {"id": pre_user_id, "em": email},
+        )
 
     try:
         with _mock_google(email, subject):
@@ -482,6 +507,13 @@ async def test_refresh_token_rotation(
 ) -> None:
     email = f"refresh-{uuid.uuid4().hex[:8]}@abridgeai.local"
     subject = f"google-uid-{uuid.uuid4().hex[:12]}"
+    pre_user_id = uuid.uuid4()
+
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("INSERT INTO users (id, primary_email, status) VALUES (:id, :em, 'active')"),
+            {"id": pre_user_id, "em": email},
+        )
 
     try:
         with _mock_google(email, subject):

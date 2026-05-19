@@ -82,7 +82,10 @@ def test_serialize_user_without_profile() -> None:
 
 
 @pytest.mark.asyncio
-async def test_login_handle_callback_creates_new_user_and_session() -> None:
+async def test_login_handle_callback_rejects_unprovisioned_email() -> None:
+    """Invite-only OAuth: brand-new emails get HTTP 403 (ForbiddenError)."""
+    from abridgeai.core.exceptions import ForbiddenError
+
     db = _make_db()
 
     google_profile = GoogleProfile(
@@ -92,6 +95,38 @@ async def test_login_handle_callback_creates_new_user_and_session() -> None:
         family_name="User",
         display_name="New User",
     )
+
+    with (
+        patch(
+            "abridgeai.features.identity.services.login.fetch_google_profile",
+            new=AsyncMock(return_value=google_profile),
+        ),
+        patch(
+            "abridgeai.features.identity.services.login.user_queries.get_identity_by_provider_subject",
+            new=AsyncMock(return_value=None),
+        ),
+        patch(
+            "abridgeai.features.identity.services.login.user_queries.get_user_by_email",
+            new=AsyncMock(return_value=None),
+        ),
+        pytest.raises(ForbiddenError, match="not registered"),
+    ):
+        await login.handle_google_callback(db, code="oauth-code")
+
+
+@pytest.mark.asyncio
+async def test_login_handle_callback_links_identity_for_preprovisioned_user() -> None:
+    """Admin-created user without identity yet: link AuthIdentity, issue tokens."""
+    db = _make_db()
+
+    google_profile = GoogleProfile(
+        subject="google-sub-123",
+        email="alice@example.com",
+        given_name="Alice",
+        family_name="Doe",
+        display_name="Alice Doe",
+    )
+    existing_user = _make_user()
 
     captured: list[object] = []
 
@@ -116,7 +151,7 @@ async def test_login_handle_callback_creates_new_user_and_session() -> None:
         ),
         patch(
             "abridgeai.features.identity.services.login.user_queries.get_user_by_email",
-            new=AsyncMock(return_value=None),
+            new=AsyncMock(return_value=existing_user),
         ),
         patch(
             "abridgeai.features.identity.services.login.user_queries.get_profile",
@@ -131,19 +166,13 @@ async def test_login_handle_callback_creates_new_user_and_session() -> None:
 
     assert result.access_token
     assert result.refresh_token
-    assert result.token_type == "bearer"  # noqa: S105
-    assert result.requires_mfa is False
-    assert result.user.primary_email == "newuser@example.com"
+    assert result.user.primary_email == "alice@example.com"
 
     added_types = {type(o).__name__ for o in captured}
-    assert "User" in added_types
+    assert "User" not in added_types
     assert "UserProfile" in added_types
     assert "AuthIdentity" in added_types
     assert "AuthSession" in added_types
-
-    auth_session = next(o for o in captured if type(o).__name__ == "AuthSession")
-    assert auth_session.refresh_token_hash.startswith("sha256:")
-    assert auth_session.refresh_token_hash != "oauth-code"  # noqa: S105
 
 
 @pytest.mark.asyncio

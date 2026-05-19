@@ -19,7 +19,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response,
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from abridgeai.core.db import get_db
-from abridgeai.core.exceptions import AppError, UnauthorizedError
+from abridgeai.core.exceptions import AppError, ForbiddenError, UnauthorizedError
 from abridgeai.core.security import CurrentUser, get_current_user
 from abridgeai.features.identity.schemas import (
     GoogleLoginResponse,
@@ -75,6 +75,11 @@ async def google_callback(
         )
     except UnauthorizedError as exc:
         raise _unauthorized(str(exc)) from exc
+    except ForbiddenError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"error": "oauth_account_not_provisioned", "message": str(exc)},
+        ) from exc
     except AppError as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,

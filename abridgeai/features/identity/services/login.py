@@ -4,7 +4,7 @@ from datetime import timedelta
 from typing import TYPE_CHECKING
 
 from abridgeai.core.config import get_settings
-from abridgeai.core.exceptions import NotFoundError
+from abridgeai.core.exceptions import ForbiddenError, NotFoundError
 from abridgeai.core.security import (
     create_access_token,
     generate_token,
@@ -37,10 +37,10 @@ async def handle_google_callback(
 ) -> TokenResponse:
     """Exchange a Google OAuth code for an application token pair.
 
-    Finds an existing identity by ``(provider='google', subject)``; if absent,
-    finds the user by email or creates a brand-new ``User`` + ``UserProfile``,
-    then attaches the new ``AuthIdentity``. Always issues a fresh
-    ``AuthSession`` via :func:`_issue_tokens`.
+    Pre-registration gate (added 2026-05-19): the user *must* already exist in
+    ``users`` (created by an admin) AND have ``status='active'``. Brand-new
+    OAuth profiles are rejected with :class:`ForbiddenError` (HTTP 403) so
+    the platform stays invite-only.
     """
     profile = await fetch_google_profile(code)
     identity = await user_queries.get_identity_by_provider_subject(
@@ -50,13 +50,15 @@ async def handle_google_callback(
     if identity is None:
         user = await user_queries.get_user_by_email(db, profile.email)
         if user is None:
-            user = User(
-                primary_email=profile.email.lower(),
-                status="active",
-                last_login_at=utcnow(),
+            raise ForbiddenError(
+                "This email is not registered. Ask an administrator to add "
+                "your account before signing in."
             )
-            db.add(user)
-            await db.flush()
+        if user.status != "active":
+            raise ForbiddenError(
+                f"Account is {user.status}; sign-in is disabled. Contact an administrator."
+            )
+        if await user_queries.get_profile(db, user.id) is None:
             db.add(
                 UserProfile(
                     user_id=user.id,
@@ -73,10 +75,15 @@ async def handle_google_callback(
                 provider_email=profile.email.lower(),
             )
         )
+        user.last_login_at = utcnow()
     else:
         user = await user_queries.get_user(db, identity.user_id)
         if user is None:
             raise NotFoundError("OAuth user not found")
+        if user.status != "active":
+            raise ForbiddenError(
+                f"Account is {user.status}; sign-in is disabled. Contact an administrator."
+            )
         user.last_login_at = utcnow()
 
     return await _issue_tokens(db, user=user, ip_address=ip_address, user_agent=user_agent)
@@ -103,6 +110,7 @@ async def _issue_tokens(
     db.add(session)
     await db.commit()
     await db.refresh(session)
+    await db.refresh(user)
     profile = await user_queries.get_profile(db, user.id)
     return TokenResponse(
         access_token=create_access_token(user_id=user.id, session_id=session.id),

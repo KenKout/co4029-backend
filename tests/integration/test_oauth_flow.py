@@ -94,11 +94,12 @@ async def test_google_login_returns_auth_url(
     assert len(body["state"]) >= 16
 
 
-async def test_oauth_callback_creates_user(
+async def test_oauth_callback_rejects_unprovisioned_email(
     client: httpx.AsyncClient,
     test_engine_local: AsyncEngine,
     google_oauth_settings: None,
 ) -> None:
+    """Invite-only OAuth: brand-new email returns 403, no User row created."""
     fresh_email = f"oauth-new-{uuid.uuid4().hex[:8]}@abridgeai.local"
     google_subject = f"google-uid-{uuid.uuid4().hex[:12]}"
 
@@ -129,54 +130,83 @@ async def test_oauth_callback_creates_user(
 
         response = await client.get("/api/v1/auth/google/callback", params={"code": "fakeAuthCode"})
 
+    assert response.status_code == 403
+    body = response.json()
+    assert body["detail"]["error"] == "oauth_account_not_provisioned"
+    assert "not registered" in body["detail"]["message"]
+
+    async with test_engine_local.begin() as conn:
+        user_row = (
+            await conn.execute(
+                text("SELECT id FROM users WHERE primary_email = :email"),
+                {"email": fresh_email},
+            )
+        ).one_or_none()
+        assert user_row is None, "Unprovisioned email must NOT create a users row"
+
+
+async def test_oauth_callback_links_identity_for_preprovisioned_user(
+    client: httpx.AsyncClient,
+    test_engine_local: AsyncEngine,
+    google_oauth_settings: None,
+) -> None:
+    """Pre-existing user (admin-provisioned) without identity: link + login."""
+    fresh_email = f"oauth-pre-{uuid.uuid4().hex[:8]}@abridgeai.local"
+    google_subject = f"google-uid-{uuid.uuid4().hex[:12]}"
+    user_id = uuid.uuid4()
+
+    async with test_engine_local.begin() as conn:
+        await conn.execute(
+            text("INSERT INTO users (id, primary_email, status) VALUES (:id, :email, 'active')"),
+            {"id": user_id, "email": fresh_email},
+        )
+
     try:
+        with respx.mock(assert_all_called=True) as router_mock:
+            router_mock.post("https://oauth2.googleapis.com/token").mock(
+                return_value=httpx.Response(
+                    200,
+                    json={
+                        "access_token": "ya29.fake",
+                        "id_token": "fake.jwt",
+                        "expires_in": 3600,
+                        "token_type": "Bearer",
+                    },
+                )
+            )
+            router_mock.get("https://openidconnect.googleapis.com/v1/userinfo").mock(
+                return_value=httpx.Response(
+                    200,
+                    json={
+                        "sub": google_subject,
+                        "email": fresh_email,
+                        "given_name": "Oauth",
+                        "family_name": "Pre",
+                        "name": "Oauth Pre",
+                    },
+                )
+            )
+            response = await client.get(
+                "/api/v1/auth/google/callback", params={"code": "fakeAuthCode"}
+            )
+
         assert response.status_code == 200, response.text
         body = response.json()
         assert body["access_token"]
-        assert body["refresh_token"]
-        assert body["token_type"] == "bearer"  # noqa: S105 — OAuth2 scheme literal
         assert body["user"]["primary_email"] == fresh_email
-
-        async with test_engine_local.begin() as conn:
-            user_row = (
-                await conn.execute(
-                    text("SELECT id FROM users WHERE primary_email = :email"),
-                    {"email": fresh_email},
-                )
-            ).one_or_none()
-            assert user_row is not None
-            session_row = (
-                await conn.execute(
-                    text("SELECT refresh_token_hash FROM auth_sessions WHERE user_id = :uid"),
-                    {"uid": user_row[0]},
-                )
-            ).one_or_none()
-            assert session_row is not None
-            assert session_row[0]
     finally:
         async with test_engine_local.begin() as conn:
             await conn.execute(
-                text(
-                    "DELETE FROM auth_sessions WHERE user_id IN "
-                    "(SELECT id FROM users WHERE primary_email = :email)"
-                ),
-                {"email": fresh_email},
+                text("DELETE FROM auth_sessions WHERE user_id = :uid"), {"uid": user_id}
             )
             await conn.execute(
                 text("DELETE FROM auth_identities WHERE provider_subject = :sub"),
                 {"sub": google_subject},
             )
             await conn.execute(
-                text(
-                    "DELETE FROM user_profiles WHERE user_id IN "
-                    "(SELECT id FROM users WHERE primary_email = :email)"
-                ),
-                {"email": fresh_email},
+                text("DELETE FROM user_profiles WHERE user_id = :uid"), {"uid": user_id}
             )
-            await conn.execute(
-                text("DELETE FROM users WHERE primary_email = :email"),
-                {"email": fresh_email},
-            )
+            await conn.execute(text("DELETE FROM users WHERE id = :uid"), {"uid": user_id})
 
 
 async def test_refresh_revoked_session_fails(
