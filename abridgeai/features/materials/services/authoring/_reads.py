@@ -11,16 +11,21 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 from uuid import UUID
 
+from abridgeai.core.config import get_settings
 from abridgeai.core.db.conflict_mapper import flush_or_conflict
 from abridgeai.core.security import CurrentUser
 from abridgeai.features.materials.models import LearningMaterial, LearningMaterialVersion
 from abridgeai.features.materials.queries import (
+    get_authoring_stream_target_for_material,
     get_latest_processing_job,
+    get_lesson_processing_summary,
     get_material_for_authoring,
     list_all_materials,
 )
 from abridgeai.features.materials.schemas import (
+    LessonProcessingSummary,
     MaterialAuthoring,
+    MaterialStreamUrl,
     MaterialUpdate,
     ProcessingProgress,
 )
@@ -28,6 +33,7 @@ from abridgeai.features.materials.services.authoring._common import (
     present_version,
     require_material,
 )
+from abridgeai.infrastructure.s3 import create_stream_url
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -105,3 +111,41 @@ async def update_material(
     await flush_or_conflict(db)
     await db.refresh(material)
     return await _present_material(db, material)
+
+
+async def get_authoring_stream_url(db: AsyncSession, material_id: UUID) -> MaterialStreamUrl | None:
+    """Mint a presigned GET URL for a teacher previewing a material.
+
+    Authoring sibling of
+    :func:`features.materials.services.catalog.get_stream_url_for_material`.
+    Skips the learner ``visible_to_students`` and ``processing_status='ready'``
+    gates so a teacher can review hidden / mid-pipeline materials. Returns
+    ``None`` (router maps to 404) when the material is missing, soft-deleted,
+    or has no current version with a resolvable storage object.
+    """
+    target = await get_authoring_stream_target_for_material(db, material_id)
+    if target is None:
+        return None
+    settings = get_settings()
+    safe_title = target.title.replace('"', "")
+    url, _ = await create_stream_url(
+        target,
+        response_headers={"Content-Disposition": f'attachment; filename="{safe_title}"'},
+    )
+    from datetime import UTC, datetime, timedelta  # noqa: PLC0415
+
+    expires_at = datetime.now(tz=UTC) + timedelta(seconds=settings.s3_url_ttl_seconds)
+    return MaterialStreamUrl(url=url, expires_at=expires_at)
+
+
+async def get_lesson_processing_summary_view(
+    db: AsyncSession, lesson_id: UUID
+) -> LessonProcessingSummary:
+    """Aggregate processing-status counts across every material under a lesson.
+
+    Wraps :func:`get_lesson_processing_summary` with a typed DTO. Returns
+    a row of zeroes for a lesson with no materials so the SPA can render
+    the empty-state without an extra null check.
+    """
+    counts = await get_lesson_processing_summary(db, lesson_id)
+    return LessonProcessingSummary(lesson_id=lesson_id, **counts)

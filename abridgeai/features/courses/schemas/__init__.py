@@ -46,6 +46,7 @@ from abridgeai.features.courses.schemas.request import (
     LessonUpdate,
     ModuleCreate,
     ModuleItemReorder,
+    ModuleItemUpdate,
     ModulePrerequisiteSet,
     ModuleUpdate,
 )
@@ -76,6 +77,7 @@ __all__ = [
     "ModuleItemAuthoring",
     "ModuleItemPublic",
     "ModuleItemReorder",
+    "ModuleItemUpdate",
     "ModulePrerequisiteSet",
     "ModulePublic",
     "ModuleUpdate",

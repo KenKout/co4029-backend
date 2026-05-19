@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from abridgeai.features.materials.models import (
@@ -94,7 +94,51 @@ async def get_material_with_versions(
     return material, versions
 
 
+_LESSON_PROCESSING_SUMMARY_SQL = text(
+    """
+    SELECT
+        COUNT(DISTINCT lm.id) AS materials_total,
+        COUNT(lmv.id) AS versions_total,
+        COUNT(*) FILTER (WHERE lmv.processing_status = 'pending') AS pending_versions,
+        COUNT(*) FILTER (
+            WHERE lmv.processing_status IN (
+                'extracting', 'chunking', 'embedding', 'enriching', 'building_kg'
+            )
+        ) AS processing_versions,
+        COUNT(*) FILTER (WHERE lmv.processing_status = 'ready') AS completed_versions,
+        COUNT(*) FILTER (WHERE lmv.processing_status = 'failed') AS failed_versions
+    FROM learning_materials lm
+    LEFT JOIN learning_material_versions lmv
+      ON lmv.material_id = lm.id
+     AND lmv.deleted_at IS NULL
+    WHERE lm.lesson_id = :lesson_id
+      AND lm.deleted_at IS NULL
+    """
+)
+
+
+async def get_lesson_processing_summary(db: AsyncSession, lesson_id: UUID) -> dict[str, int]:
+    """Roll-up of processing counts across every material under ``lesson_id``.
+
+    Single SQL pass with ``FILTER`` aggregates so the response is cheap
+    even with many materials. The 5 in-flight statuses
+    (``extracting``, ``chunking``, ``embedding``, ``enriching``,
+    ``building_kg``) collapse into one ``processing_versions`` bucket;
+    the SPA renders them as a single "in progress" badge.
+    """
+    row = (await db.execute(_LESSON_PROCESSING_SUMMARY_SQL, {"lesson_id": lesson_id})).one()
+    return {
+        "materials_total": int(row.materials_total or 0),
+        "versions_total": int(row.versions_total or 0),
+        "pending_versions": int(row.pending_versions or 0),
+        "processing_versions": int(row.processing_versions or 0),
+        "completed_versions": int(row.completed_versions or 0),
+        "failed_versions": int(row.failed_versions or 0),
+    }
+
+
 __all__ = [
+    "get_lesson_processing_summary",
     "get_material_for_authoring",
     "get_material_with_versions",
     "list_all_materials",

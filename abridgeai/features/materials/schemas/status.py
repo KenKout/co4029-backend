@@ -51,7 +51,25 @@ class ProcessingProgress(BaseModel):
     error_message: str | None = None
 
 
+class LessonProcessingSummary(BaseModel):
+    """Aggregate processing-status counts for every material under a lesson.
+
+    Used by the teacher's lesson-manage page to render a single roll-up
+    badge ("3 of 5 processed") instead of polling every material's
+    progress separately.
+    """
+
+    lesson_id: UUID
+    materials_total: int
+    versions_total: int
+    pending_versions: int
+    processing_versions: int
+    completed_versions: int
+    failed_versions: int
+
+
 __all__ = [
+    "LessonProcessingSummary",
     "ProcessingProgress",
     "ProcessingStatusLiteral",
 ]

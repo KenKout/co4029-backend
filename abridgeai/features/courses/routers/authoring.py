@@ -38,7 +38,7 @@ Architectural rules honoured:
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -57,6 +57,7 @@ from abridgeai.features.access_control.policies import (
 from abridgeai.features.courses.routers._deps import (
     require_lesson_authoring_access,
     require_module_authoring_access,
+    require_module_item_authoring_access,
     require_resource_authoring_access,
 )
 from abridgeai.features.courses.schemas import (
@@ -73,6 +74,7 @@ from abridgeai.features.courses.schemas import (
     ModuleCreate,
     ModuleItemAuthoring,
     ModuleItemReorder,
+    ModuleItemUpdate,
     ModulePrerequisiteSet,
     ModuleUpdate,
 )
@@ -86,6 +88,7 @@ _REQUIRE_COURSE_UPDATE = require_course_permission("course_id", "course.update")
 _REQUIRE_COURSE_PUBLISH = require_course_permission("course_id", "course.publish")
 _REQUIRE_COURSE_DELETE = require_course_permission("course_id", "course.delete")
 _REQUIRE_MODULE = require_module_authoring_access()
+_REQUIRE_MODULE_ITEM = require_module_item_authoring_access()
 _REQUIRE_LESSON = require_lesson_authoring_access()
 _REQUIRE_RESOURCE = require_resource_authoring_access()
 
@@ -402,6 +405,48 @@ async def reorder_module_items(
     return items
 
 
+@router.patch(
+    "/module-items/{module_item_id}",
+    response_model=ModuleItemAuthoring,
+)
+async def update_module_item(
+    module_item_id: UUID,
+    payload: ModuleItemUpdate,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_MODULE_ITEM)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> ModuleItemAuthoring:
+    """Patch an item's ``unlock_rule_json`` (only mutable field).
+
+    Position changes go through ``PUT /modules/{id}/items/reorder``;
+    identity (lesson_id / quiz_id / interview_config_id) is immutable.
+    """
+    try:
+        item = await authoring_service.update_module_item(db, module_item_id, payload, current_user)
+    except NotFoundError as exc:
+        raise _not_found(str(exc)) from exc
+    except ConflictError as exc:
+        raise _conflict(str(exc)) from exc
+    await db.commit()
+    return item
+
+
+@router.delete(
+    "/module-items/{module_item_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def delete_module_item(
+    module_item_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_MODULE_ITEM)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> None:
+    """Soft-delete a module item (un-pins from the order; target survives)."""
+    try:
+        await authoring_service.delete_module_item(db, module_item_id, current_user)
+    except NotFoundError as exc:
+        raise _not_found(str(exc)) from exc
+    await db.commit()
+
+
 @router.post(
     "/modules/{module_id}/lessons",
     response_model=LessonAuthoring,
@@ -440,6 +485,75 @@ async def get_authoring_lesson(
         return await authoring_service.get_authoring_lesson(db, lesson_id)
     except NotFoundError as exc:
         raise _not_found(str(exc)) from exc
+
+
+class _OutlineSection(BaseModel):
+    """One section row in ``GET /lessons/{id}/outline``.
+
+    Mirrors the SPA's ``OutlineSectionRead`` interface verbatim. Today
+    this surface returns a single synthetic ``body`` section per lesson
+    until the legacy ``build_lesson_outline`` semantic-section pipeline
+    is ported (see ``quizzes/ai/pipelines/coverage.py:104``). The
+    contract is deliberately stable so the SPA can render today and
+    the section list can grow without an API break.
+    """
+
+    id: UUID
+    title: str
+    depth: int = 0
+    chunk_count: int = 0
+    char_count: int = 0
+    page_range: tuple[int, int] = (0, 0)
+    content_role: Literal["body", "summary", "review"] = "body"
+    preview: str = ""
+
+
+class _LessonOutline(BaseModel):
+    lesson_id: UUID
+    lesson_title: str
+    sections: list[_OutlineSection]
+    suggested_question_count: int = 0
+    min_for_full_coverage: int = 0
+
+
+@router.get("/lessons/{lesson_id}/outline", response_model=_LessonOutline)
+async def get_lesson_outline(
+    lesson_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_LESSON)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> _LessonOutline:
+    """Authoring outline preview (drafts visible).
+
+    Surfaces under the teacher router (rather than the learner one) so
+    the auth boundary matches the SPA's ``useLessonOutline`` consumer
+    pages, and so drafts surface during course assembly. Returns a
+    single synthetic ``body`` section until ``build_lesson_outline``
+    lands; the contract matches the eventual semantic-section
+    response field-for-field.
+    """
+    del current_user
+    try:
+        lesson = await authoring_service.get_authoring_lesson(db, lesson_id)
+    except NotFoundError as exc:
+        raise _not_found(str(exc)) from exc
+    return _LessonOutline(
+        lesson_id=lesson.id,
+        lesson_title=lesson.title,
+        sections=[
+            _OutlineSection(
+                id=lesson.id,
+                title=lesson.title,
+                depth=0,
+                chunk_count=0,
+                char_count=0,
+                page_range=(0, 0),
+                content_role="body",
+                preview=(lesson.summary or "")[:200],
+            )
+        ],
+        suggested_question_count=0,
+        min_for_full_coverage=0,
+    )
 
 
 @router.get(

@@ -30,6 +30,7 @@ from abridgeai.features.materials.schemas.request import (
     MaterialUploadInit,
 )
 from abridgeai.features.materials.schemas.status import (
+    LessonProcessingSummary,
     ProcessingProgress,
     ProcessingStatusLiteral,
 )
@@ -43,6 +44,7 @@ __all__ = [
     "MaterialUploadComplete",
     "MaterialUploadInit",
     "MaterialVersionAuthoring",
+    "LessonProcessingSummary",
     "ProcessingProgress",
     "ProcessingStatusLiteral",
 ]

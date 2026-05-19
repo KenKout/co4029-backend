@@ -64,6 +64,7 @@ from abridgeai.features.courses.schemas import (
     ModuleAuthoring,
     ModuleCreate,
     ModuleItemAuthoring,
+    ModuleItemUpdate,
     ModuleUpdate,
 )
 from abridgeai.infrastructure.s3 import create_stream_url
@@ -130,6 +131,13 @@ async def _require_resource(db: AsyncSession, resource_id: UUID) -> LessonResour
     if resource is None:
         raise NotFoundError(f"Lesson resource {resource_id} not found")
     return resource
+
+
+async def _require_module_item(db: AsyncSession, item_id: UUID) -> ModuleItem:
+    item = await authoring_queries.get_module_item(db, item_id)
+    if item is None:
+        raise NotFoundError(f"ModuleItem {item_id} not found")
+    return item
 
 
 async def create_course(
@@ -324,6 +332,41 @@ async def delete_lesson_resource(db: AsyncSession, resource_id: UUID, actor: Cur
     await soft_delete_cascade(db, resource, actor_id=actor.user_id)
 
 
+async def update_module_item(
+    db: AsyncSession,
+    item_id: UUID,
+    payload: ModuleItemUpdate,
+    actor: CurrentUser,
+) -> ModuleItemAuthoring:
+    """Patch a single ``ModuleItem`` row (only ``unlock_rule_json`` is mutable).
+
+    Position changes go through :func:`reorder_module_items`; identity
+    (lesson_id / quiz_id / interview_config_id) is immutable per the
+    XOR check on the table. Service-level allowlist mirrors the schema.
+    """
+    del actor
+    item = await _require_module_item(db, item_id)
+    data = payload.model_dump(exclude_unset=True)
+    if "unlock_rule_json" in data and data["unlock_rule_json"] is not None:
+        item.unlock_rule_json = data["unlock_rule_json"]
+    await _flush_or_conflict(db)
+    await db.refresh(item)
+    return ModuleItemAuthoring.model_validate(item)
+
+
+async def delete_module_item(db: AsyncSession, item_id: UUID, actor: CurrentUser) -> None:
+    """Soft-delete a single ``ModuleItem`` row (does NOT cascade to the lesson).
+
+    The polymorphic target (lesson / quiz / interview_config) survives
+    because removing an item only un-pins it from this module's order.
+    Sibling items keep their existing positions; callers who want a
+    repacked 1..N ordering should follow up with
+    :func:`reorder_module_items`.
+    """
+    item = await _require_module_item(db, item_id)
+    await soft_delete_cascade(db, item, actor_id=actor.user_id)
+
+
 async def reorder_module_items(
     db: AsyncSession,
     module_id: UUID,
@@ -486,6 +529,7 @@ __all__ = [
     "check_course_slug_available",
     "create_course",
     "delete_lesson_resource",
+    "delete_module_item",
     "get_authoring_content",
     "get_authoring_course",
     "get_authoring_lesson",
@@ -498,4 +542,5 @@ __all__ = [
     "update_course",
     "update_lesson",
     "update_module",
+    "update_module_item",
 ]

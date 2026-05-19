@@ -51,6 +51,8 @@ from abridgeai.features.materials.schemas import (
     MaterialUploadInit,
     ProcessingProgress,
 )
+from abridgeai.features.materials.schemas.public import MaterialStreamUrl
+from abridgeai.features.materials.schemas.status import LessonProcessingSummary
 from abridgeai.features.materials.services import authoring as authoring_service
 from abridgeai.features.materials.services.authoring import (
     CompletedPartIn,
@@ -465,6 +467,24 @@ async def list_materials(
     return await authoring_service.list_authoring_materials(db, lesson_id)
 
 
+@router.get(
+    "/lessons/{lesson_id}/processing-summary",
+    response_model=LessonProcessingSummary,
+)
+async def lesson_processing_summary(
+    lesson_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_LESSON)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> LessonProcessingSummary:
+    """Roll-up of processing-status counts across the lesson's materials.
+
+    Lets the teacher's lesson-manage page render one badge instead of
+    polling every material's individual progress endpoint.
+    """
+    del current_user
+    return await authoring_service.get_lesson_processing_summary_view(db, lesson_id)
+
+
 @router.get("/materials/{material_id}", response_model=MaterialAuthoring)
 async def get_material(
     material_id: UUID,
@@ -492,6 +512,30 @@ async def processing_summary(
     if progress is None:
         raise _not_found("material", material_id)
     return progress
+
+
+@router.get(
+    "/materials/{material_id}/stream-url",
+    response_model=MaterialStreamUrl,
+)
+async def get_material_stream_url(
+    material_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_MATERIAL)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> MaterialStreamUrl:
+    """Mint a presigned GET URL for the teacher's preview pane.
+
+    Authoring sibling of ``GET /materials/{material_id}/stream-url`` —
+    skips the learner ``visible_to_students`` and ``processing_status='ready'``
+    gates so a teacher can preview hidden / mid-pipeline materials. Auth
+    same as the other ``/teacher/materials/{id}`` endpoints (course
+    authoring scope).
+    """
+    del current_user
+    stream = await authoring_service.get_authoring_stream_url(db, material_id)
+    if stream is None:
+        raise _not_found("material", material_id)
+    return stream
 
 
 @router.patch("/materials/{material_id}", response_model=MaterialAuthoring)

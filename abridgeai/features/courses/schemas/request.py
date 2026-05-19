@@ -187,6 +187,19 @@ class ModuleItemReorder(_StrictRequest):
     new_order: list[UUID]
 
 
+class ModuleItemUpdate(_StrictRequest):
+    """Patch payload for ``PATCH /teacher/module-items/{item_id}``.
+
+    Only the unstructured ``unlock_rule_json`` carrier is mutable; the
+    polymorphic identity (lesson_id / quiz_id / interview_config_id),
+    item_type, and position are managed via reorder + create / delete
+    flows so a teacher cannot use PATCH to violate the XOR check or
+    the position UNIQUE.
+    """
+
+    unlock_rule_json: dict[str, Any] | None = None
+
+
 class CoursePublishRequest(_StrictRequest):
     """Explicit confirmation gate before transitioning a course to published."""
 
@@ -210,6 +223,7 @@ __all__ = [
     "LessonUpdate",
     "ModuleCreate",
     "ModuleItemReorder",
+    "ModuleItemUpdate",
     "ModulePrerequisiteSet",
     "ModuleUpdate",
 ]

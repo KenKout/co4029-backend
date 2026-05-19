@@ -75,6 +75,24 @@ _STREAM_TARGET_SQL = text(
 )
 
 
+_AUTHORING_STREAM_TARGET_SQL = text(
+    """
+    SELECT so.bucket       AS bucket,
+           so.object_key   AS object_key,
+           lm.title        AS title
+    FROM learning_materials lm
+    JOIN learning_material_versions lmv
+      ON lmv.id = lm.current_version_id
+    JOIN storage_objects so
+      ON so.id = lmv.storage_object_id
+    WHERE lm.id = :material_id
+      AND lm.deleted_at IS NULL
+      AND lmv.deleted_at IS NULL
+      AND so.deleted_at IS NULL
+    """
+)
+
+
 async def list_chunks_preview(
     db: AsyncSession, material_id: UUID, *, limit: int
 ) -> list[DocumentChunk]:
@@ -121,8 +139,27 @@ async def get_stream_target_for_material(
     return MaterialStreamTarget(bucket=row.bucket, object_key=row.object_key, title=row.title)
 
 
+async def get_authoring_stream_target_for_material(
+    db: AsyncSession, material_id: UUID
+) -> MaterialStreamTarget | None:
+    """Authoring sibling of :func:`get_stream_target_for_material`.
+
+    Drops the learner gates (``visible_to_students=TRUE`` and
+    ``processing_status='ready'``) so a teacher can preview hidden /
+    mid-pipeline materials during course assembly. Soft-delete and
+    ``is_current`` are NOT enforced here — versioning is handled at the
+    service layer (the teacher always streams the current version).
+    """
+    result = await db.execute(_AUTHORING_STREAM_TARGET_SQL, {"material_id": material_id})
+    row = result.one_or_none()
+    if row is None:
+        return None
+    return MaterialStreamTarget(bucket=row.bucket, object_key=row.object_key, title=row.title)
+
+
 __all__ = [
     "MaterialStreamTarget",
+    "get_authoring_stream_target_for_material",
     "get_stream_target_for_material",
     "list_chunks_preview",
 ]

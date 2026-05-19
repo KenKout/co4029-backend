@@ -72,6 +72,10 @@ from abridgeai.core.config import get_settings
 from abridgeai.core.db import Base, get_db
 from abridgeai.core.security import create_access_token, generate_token, hash_secret
 from abridgeai.features.courses.routers import authoring_router
+from abridgeai.features.courses.routers.learner import router as courses_learner_router
+from abridgeai.features.materials.routers.authoring import (
+    router as materials_authoring_router,
+)
 
 for _stub_name in ("interview_configs",):
     if _stub_name not in Base.metadata.tables:
@@ -125,6 +129,8 @@ async def app(
 
     fastapi_app = FastAPI()
     fastapi_app.include_router(authoring_router, prefix="/api/v1")
+    fastapi_app.include_router(materials_authoring_router, prefix="/api/v1")
+    fastapi_app.include_router(courses_learner_router, prefix="/api/v1")
     fastapi_app.dependency_overrides[get_db] = _override_get_db
     yield fastapi_app
     fastapi_app.dependency_overrides.clear()
@@ -1123,3 +1129,111 @@ async def test_get_authoring_resource_download_url_not_found(
         headers={"Authorization": f"Bearer {admin_bearer}"},
     )
     assert response.status_code == 404
+
+
+async def test_update_module_item_unlock_rule(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    scenario: dict[str, uuid.UUID | str],
+) -> None:
+    """``PATCH /teacher/module-items/{id}`` updates ``unlock_rule_json``.
+
+    The schema explicitly allowlists this single field — position +
+    polymorphic identity are immutable here (reorder + create / delete
+    are the only ways to change them).
+    """
+    response = await client.patch(
+        f"/api/v1/teacher/module-items/{scenario['item_a1']}",
+        json={"unlock_rule_json": {"requires_quiz_pass": True}},
+        headers={"Authorization": f"Bearer {admin_bearer}"},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["id"] == str(scenario["item_a1"])
+
+
+async def test_delete_module_item_soft_deletes(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    scenario: dict[str, uuid.UUID | str],
+    engine: AsyncEngine,
+) -> None:
+    """``DELETE /teacher/module-items/{id}`` soft-deletes the row.
+
+    Sibling positions stay intact; the lesson/quiz target survives
+    because module_items is just an ordering link.
+    """
+    response = await client.delete(
+        f"/api/v1/teacher/module-items/{scenario['item_a3']}",
+        headers={"Authorization": f"Bearer {admin_bearer}"},
+    )
+    assert response.status_code == 204, response.text
+    async with engine.begin() as conn:
+        row = (
+            await conn.execute(
+                text("SELECT deleted_at FROM module_items WHERE id = :id"),
+                {"id": scenario["item_a3"]},
+            )
+        ).one()
+    assert row.deleted_at is not None
+
+
+async def test_lesson_processing_summary_zero_when_no_materials(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    scenario: dict[str, uuid.UUID | str],
+) -> None:
+    """``GET /teacher/lessons/{id}/processing-summary`` returns zeroes for an
+    empty lesson — the SPA should never have to null-check the response.
+    """
+    response = await client.get(
+        f"/api/v1/teacher/lessons/{scenario['lesson_a']}/processing-summary",
+        headers={"Authorization": f"Bearer {admin_bearer}"},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["lesson_id"] == str(scenario["lesson_a"])
+    for key in (
+        "materials_total",
+        "versions_total",
+        "pending_versions",
+        "processing_versions",
+        "completed_versions",
+        "failed_versions",
+    ):
+        assert body[key] == 0
+
+
+async def test_get_lesson_outline_returns_synthetic_section(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    scenario: dict[str, uuid.UUID | str],
+) -> None:
+    """``GET /lessons/{id}/outline`` returns the SPA-expected shape.
+
+    Until ``build_lesson_outline`` is ported the response carries one
+    synthetic ``body`` section so the SPA renders the empty-state
+    correctly. Contract: same field set as the eventual semantic-section
+    response, so the frontend doesn't need a feature flag.
+    """
+    response = await client.get(
+        f"/api/v1/teacher/lessons/{scenario['lesson_a']}/outline",
+        headers={"Authorization": f"Bearer {admin_bearer}"},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["lesson_id"] == str(scenario["lesson_a"])
+    assert isinstance(body["sections"], list)
+    assert len(body["sections"]) >= 1
+    sample = body["sections"][0]
+    for key in (
+        "id",
+        "title",
+        "depth",
+        "chunk_count",
+        "char_count",
+        "page_range",
+        "content_role",
+        "preview",
+    ):
+        assert key in sample
