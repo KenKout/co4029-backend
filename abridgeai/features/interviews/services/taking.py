@@ -23,6 +23,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
+from abridgeai.core.db.conflict_mapper import flush_or_conflict
 from abridgeai.core.exceptions import AppError, ForbiddenError, NotFoundError
 from abridgeai.core.security import CurrentUser, utcnow
 from abridgeai.features.interviews.ai.stages.followup import maybe_generate_followup
@@ -114,7 +115,7 @@ async def start_session(
         input_mode=input_mode,
     )
     db.add(session)
-    await db.flush()
+    await flush_or_conflict(db)
 
     first_question = await _first_published_question(db, config_id)
     if first_question is not None:
@@ -125,7 +126,7 @@ async def start_session(
                 sequence_no=1,
             )
         )
-        await db.flush()
+        await flush_or_conflict(db)
 
     await db.refresh(session)
     return session
@@ -168,7 +169,7 @@ async def take_session_step(
             metadata_json={"kind": "answer"},
         )
     )
-    await db.flush()
+    await flush_or_conflict(db)
 
     current_question: InterviewQuestion | None = None
     if current_session_question.interview_question_id is not None:
@@ -195,7 +196,7 @@ async def take_session_step(
                 metadata_json={"kind": "followup"},
             )
         )
-        await db.flush()
+        await flush_or_conflict(db)
         return {
             "next_question": None,
             "is_finished": False,
@@ -219,7 +220,7 @@ async def take_session_step(
             sequence_no=sequence_no,
         )
     )
-    await db.flush()
+    await flush_or_conflict(db)
     return {
         "next_question": next_question,
         "is_finished": False,

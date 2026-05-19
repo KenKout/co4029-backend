@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from abridgeai.core.db import get_db
-from abridgeai.core.exceptions import AppError, NotFoundError
+from abridgeai.core.exceptions import AppError, ConflictError, NotFoundError
 from abridgeai.core.security import CurrentUser
 from abridgeai.features.access_control.policies import (
     require_any_permission,
@@ -75,7 +75,10 @@ async def create_career_path(
     current_user: Annotated[CurrentUser, Depends(_REQUIRE_PATH_CREATE)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> CareerPathAuthoring:
-    result = await authoring_service.create_career_path(db, payload, current_user)
+    try:
+        result = await authoring_service.create_career_path(db, payload, current_user)
+    except ConflictError as exc:
+        raise _conflict(str(exc)) from exc
     await db.commit()
     return result
 
@@ -128,6 +131,8 @@ async def update_career_path(
         )
     except NotFoundError as exc:
         raise _not_found(str(exc)) from exc
+    except ConflictError as exc:
+        raise _conflict(str(exc)) from exc
     await db.commit()
     return result
 

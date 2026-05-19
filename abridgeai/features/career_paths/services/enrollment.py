@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from uuid import UUID
 
+from abridgeai.core.db.conflict_mapper import flush_or_conflict
 from abridgeai.core.exceptions import AppError, NotFoundError
 from abridgeai.features.career_paths.models import StudentCareerEnrollment
 from abridgeai.features.career_paths.queries import authoring as authoring_queries
@@ -89,7 +90,7 @@ async def enroll_student_in_path(
         existing.completed_at = None
         existing.started_at = datetime.now(tz=UTC)
         existing.updated_by = actor.user_id
-        await db.flush()
+        await flush_or_conflict(db)
         return _to_authoring_enrollment(existing)
 
     enrollment = StudentCareerEnrollment(
@@ -100,7 +101,7 @@ async def enroll_student_in_path(
         updated_by=actor.user_id,
     )
     db.add(enrollment)
-    await db.flush()
+    await flush_or_conflict(db)
     return _to_authoring_enrollment(enrollment)
 
 
@@ -118,7 +119,7 @@ async def unenroll_student(
         raise NotFoundError(f"No enrollment for path={career_path_id} student={student_id}")
     enrollment.status = "dropped"
     enrollment.updated_by = actor.user_id
-    await db.flush()
+    await flush_or_conflict(db)
     return _to_authoring_enrollment(enrollment)
 
 

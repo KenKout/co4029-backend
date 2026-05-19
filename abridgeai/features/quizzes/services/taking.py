@@ -21,6 +21,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING
 from uuid import UUID
 
+from abridgeai.core.db.conflict_mapper import flush_or_conflict
 from abridgeai.core.exceptions import AppError, NotFoundError
 from abridgeai.core.security import CurrentUser, utcnow
 from abridgeai.features.quizzes.models import (
@@ -227,7 +228,7 @@ async def start_attempt(
         idempotency_key=idempotency_key,
     )
     db.add(attempt)
-    await db.flush()
+    await flush_or_conflict(db)
     await db.refresh(attempt)
 
     attempt.cards_in_cooldown = [  # type: ignore[attr-defined]
@@ -278,7 +279,7 @@ async def answer_attempt(
         points_awarded=Decimal("1") if is_correct else Decimal("0"),
     )
     db.add(answer)
-    await db.flush()
+    await flush_or_conflict(db)
     await db.refresh(answer)
     return answer
 
@@ -323,7 +324,7 @@ async def submit_attempt(
     attempt.score_points = score_points
     attempt.score_percent = score_percent
     attempt.passed = score_percent >= quiz.passing_score_percent
-    await db.flush()
+    await flush_or_conflict(db)
     await db.refresh(attempt)
     return attempt
 

@@ -20,6 +20,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
+from abridgeai.core.db.conflict_mapper import flush_or_conflict
 from abridgeai.core.db.recursive_delete import soft_delete_cascade
 from abridgeai.core.exceptions import NotFoundError
 from abridgeai.core.security import CurrentUser
@@ -115,7 +116,7 @@ async def complete_upload(
     version.processing_status = "pending"
     version.processed_at = None
     material.current_version_id = version.id
-    await db.flush()
+    await flush_or_conflict(db)
 
     pipeline_run_id = uuid4()
     job = ProcessingJob(
@@ -125,7 +126,7 @@ async def complete_upload(
         status="pending",
     )
     db.add(job)
-    await db.flush()
+    await flush_or_conflict(db)
     await db.refresh(job)
 
     if arq_pool is not None:
@@ -173,7 +174,7 @@ async def reprocess_material(
     version.processing_status = "pending"
     version.processing_error = None
     version.processed_at = None
-    await db.flush()
+    await flush_or_conflict(db)
 
     pipeline_run_id = uuid4()
     job = ProcessingJob(
@@ -183,7 +184,7 @@ async def reprocess_material(
         status="pending",
     )
     db.add(job)
-    await db.flush()
+    await flush_or_conflict(db)
     await db.refresh(job)
 
     if arq_pool is not None:

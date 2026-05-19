@@ -28,6 +28,12 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 from uuid import UUID
 
+from abridgeai.core.db.conflict_mapper import (
+    flush_or_conflict as _flush_or_conflict,
+)
+from abridgeai.core.db.conflict_mapper import (
+    register_conflict_mappings,
+)
 from abridgeai.core.db.recursive_delete import soft_delete_cascade
 from abridgeai.core.exceptions import AppError, NotFoundError
 from abridgeai.core.security import CurrentUser
@@ -63,6 +69,22 @@ if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
 _OFFSET = 100_000
+
+
+register_conflict_mappings(
+    {
+        "uq_courses_org_slug": "course_slug_taken: a course with this slug already exists in this organization",  # noqa: E501
+        "modules_course_id_position_key": "module_position_taken: another module already occupies this position in the course",  # noqa: E501
+        "uq_modules_course_position": "module_position_taken: another module already occupies this position in the course",  # noqa: E501
+        "lessons_module_id_slug_key": "lesson_slug_taken: a lesson with this slug already exists in this module",  # noqa: E501
+        "uq_lessons_module_slug": "lesson_slug_taken: a lesson with this slug already exists in this module",  # noqa: E501
+        "lesson_resources_lesson_id_position_key": "lesson_resource_position_taken: another resource already occupies this position in the lesson",  # noqa: E501
+        "uq_lesson_resources_position": "lesson_resource_position_taken: another resource already occupies this position in the lesson",  # noqa: E501
+        "module_items_module_id_position_key": "module_item_position_taken: another item already occupies this position in the module",  # noqa: E501
+        "uq_module_items_position": "module_item_position_taken: another item already occupies this position in the module",  # noqa: E501
+        "uq_course_learning_outcomes_position": "course_outcome_position_taken: another outcome already occupies this position in the course",  # noqa: E501
+    }
+)
 
 
 def _apply_patch(model: object, payload: object) -> None:
@@ -110,18 +132,39 @@ async def create_course(
     and ownership always tracks the requesting principal. This prevents a
     teacher in Org A from creating a course in Org B (or under another
     teacher's name) by sending a forged payload.
+
+    A duplicate ``(organization_id, slug)`` is mapped to :class:`ConflictError`
+    (HTTP 409) instead of bubbling the raw ``IntegrityError`` up to a 500.
     """
-    org_id = await get_user_primary_organization_id(db, owner.user_id)
-    if org_id is None:
-        raise AppError(f"User {owner.user_id} has no primary organization; cannot create a course.")
+    org_id = await _resolve_owner_org(db, owner)
     data = payload.model_dump()
     data["organization_id"] = org_id
     data["owner_user_id"] = owner.user_id
     course = Course(**data)
     db.add(course)
-    await db.flush()
+    await _flush_or_conflict(db)
     await db.refresh(course)
     return CourseAuthoring.model_validate(course)
+
+
+async def check_course_slug_available(db: AsyncSession, *, slug: str, owner: CurrentUser) -> bool:
+    """Pre-flight check used by the SPA before submitting a new-course form.
+
+    Resolves the owner's primary org the same way :func:`create_course`
+    does so the answer matches what the actual write would do; returns
+    ``True`` when the slug is free for that org. Soft-deleted rows are
+    excluded (the partial UNIQUE INDEX behind ``uq_courses_org_slug``
+    already excludes them).
+    """
+    org_id = await _resolve_owner_org(db, owner)
+    return not await authoring_queries.course_slug_exists(db, organization_id=org_id, slug=slug)
+
+
+async def _resolve_owner_org(db: AsyncSession, owner: CurrentUser) -> UUID:
+    org_id = await get_user_primary_organization_id(db, owner.user_id)
+    if org_id is None:
+        raise AppError(f"User {owner.user_id} has no primary organization; cannot create a course.")
+    return org_id
 
 
 async def update_course(
@@ -133,7 +176,7 @@ async def update_course(
     del actor
     course = await _require_course(db, course_id)
     _apply_patch(course, payload)
-    await db.flush()
+    await _flush_or_conflict(db)
     await db.refresh(course)
     return CourseAuthoring.model_validate(course)
 
@@ -177,7 +220,7 @@ async def add_module(
     data["course_id"] = course_id
     module = Module(**data)
     db.add(module)
-    await db.flush()
+    await _flush_or_conflict(db)
     await db.refresh(module)
     return ModuleAuthoring.model_validate(module)
 
@@ -191,7 +234,7 @@ async def update_module(
     del actor
     module = await _require_module(db, module_id)
     _apply_patch(module, payload)
-    await db.flush()
+    await _flush_or_conflict(db)
     await db.refresh(module)
     return ModuleAuthoring.model_validate(module)
 
@@ -208,7 +251,10 @@ async def add_lesson(
     Both inserts run in the same transaction. If the ``ModuleItem``
     insert fails the caller's outer transaction will roll back the
     lesson too; we ``flush`` (not commit) so service composition stays
-    atomic at the router boundary.
+    atomic at the router boundary. Either flush may surface a UNIQUE
+    collision (duplicate ``(module_id, slug)`` on the lesson, duplicate
+    ``(module_id, position)`` on the auto-item) which
+    :func:`_flush_or_conflict` translates to :class:`ConflictError`.
     """
     del actor
     module = await _require_module(db, module_id)
@@ -216,7 +262,7 @@ async def add_lesson(
     data["module_id"] = module.id
     lesson = Lesson(**data)
     db.add(lesson)
-    await db.flush()
+    await _flush_or_conflict(db)
 
     next_pos = await authoring_queries.next_module_item_position(db, module.id)
     item = ModuleItem(
@@ -226,7 +272,7 @@ async def add_lesson(
         position=next_pos,
     )
     db.add(item)
-    await db.flush()
+    await _flush_or_conflict(db)
     await db.refresh(lesson)
     return LessonAuthoring.model_validate(lesson)
 
@@ -240,7 +286,7 @@ async def update_lesson(
     del actor
     lesson = await _require_lesson(db, lesson_id)
     _apply_patch(lesson, payload)
-    await db.flush()
+    await _flush_or_conflict(db)
     await db.refresh(lesson)
     return LessonAuthoring.model_validate(lesson)
 
@@ -257,7 +303,7 @@ async def add_lesson_resource(
     data["lesson_id"] = lesson.id
     resource = LessonResource(**data)
     db.add(resource)
-    await db.flush()
+    await _flush_or_conflict(db)
     await db.refresh(resource)
     return LessonResourceAuthoring.model_validate(resource)
 
@@ -294,11 +340,11 @@ async def reorder_module_items(
             raise NotFoundError(f"ModuleItem {item_id} not found in module {module_id}")
         item.position = _OFFSET + idx
         items_by_id[item_id] = item
-    await db.flush()
+    await _flush_or_conflict(db)
 
     for idx, item_id in enumerate(item_ids, start=1):
         items_by_id[item_id].position = idx
-    await db.flush()
+    await _flush_or_conflict(db)
 
     return [
         ModuleItemAuthoring.model_validate(item)
@@ -332,6 +378,7 @@ __all__ = [
     "add_lesson_resource",
     "add_module",
     "archive_course",
+    "check_course_slug_available",
     "create_course",
     "delete_lesson_resource",
     "publish_course",

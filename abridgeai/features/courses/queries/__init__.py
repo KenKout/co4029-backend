@@ -17,6 +17,7 @@ from abridgeai.features.courses.queries.assignment import (
     revoke_teacher_assignment,
 )
 from abridgeai.features.courses.queries.authoring import (
+    course_slug_exists,
     get_course_content_authoring,
     get_course_for_authoring,
     get_lesson,
@@ -54,6 +55,7 @@ from abridgeai.features.courses.queries.published import (
 
 __all__ = [
     "CursorPage",
+    "course_slug_exists",
     "decode_cursor",
     "encode_cursor",
     "find_active_teacher_assignment",

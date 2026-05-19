@@ -5,6 +5,10 @@ from decimal import Decimal
 from typing import TYPE_CHECKING
 from uuid import UUID
 
+from abridgeai.core.db.conflict_mapper import (
+    flush_or_conflict,
+    register_conflict_mappings,
+)
 from abridgeai.features.progress.models import LessonProgress, MaterialEngagement
 from abridgeai.features.progress.queries import (
     get_lesson_estimated_seconds,
@@ -26,6 +30,13 @@ _AUTO_COMPLETION_THRESHOLD = Decimal("80")
 _DEFAULT_ESTIMATED_SECONDS = 600
 
 
+register_conflict_mappings(
+    {
+        "uq_lesson_progress_user_lesson": "lesson_progress_already_recorded: progress for this lesson already exists for the user",  # noqa: E501
+    }
+)
+
+
 async def record_material_engagement(
     db: AsyncSession,
     *,
@@ -44,11 +55,9 @@ async def record_material_engagement(
         ended_at=payload.ended_at,
     )
     db.add(engagement)
-    await db.flush()
+    await flush_or_conflict(db)
 
-    lesson_id = await get_lesson_id_for_material_version(
-        db, payload.material_version_id
-    )
+    lesson_id = await get_lesson_id_for_material_version(db, payload.material_version_id)
     if lesson_id is not None:
         await update_lesson_progress(db, user_id=user_id, lesson_id=lesson_id)
 
@@ -62,17 +71,13 @@ async def update_lesson_progress(
     user_id: UUID,
     lesson_id: UUID,
 ) -> LessonProgressPublic:
-    engagements = await list_my_engagement_for_lesson(
-        db, user_id=user_id, lesson_id=lesson_id
-    )
+    engagements = await list_my_engagement_for_lesson(db, user_id=user_id, lesson_id=lesson_id)
     total_seconds = sum(e.engagement_seconds for e in engagements)
     max_scroll = _max_scroll_percent(engagements)
 
     estimated_seconds = await get_lesson_estimated_seconds(db, lesson_id)
     target_seconds = estimated_seconds or _DEFAULT_ESTIMATED_SECONDS
-    completion_percent_decimal = _completion_percent(
-        total_seconds, target_seconds, max_scroll
-    )
+    completion_percent_decimal = _completion_percent(total_seconds, target_seconds, max_scroll)
     auto_complete = completion_percent_decimal >= _AUTO_COMPLETION_THRESHOLD
     if auto_complete:
         completion_percent_decimal = Decimal("100")
@@ -100,16 +105,14 @@ async def update_lesson_progress(
     else:
         progress.status = "not_started"
 
-    await db.flush()
+    await flush_or_conflict(db)
     await db.refresh(progress)
     return LessonProgressPublic.model_validate(progress)
 
 
 def _max_scroll_percent(engagements: list[MaterialEngagement]) -> Decimal | None:
     values = [
-        e.scroll_position_percent
-        for e in engagements
-        if e.scroll_position_percent is not None
+        e.scroll_position_percent for e in engagements if e.scroll_position_percent is not None
     ]
     if not values:
         return None

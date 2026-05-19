@@ -40,11 +40,12 @@ from __future__ import annotations
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from abridgeai.core.db import get_db
-from abridgeai.core.exceptions import AppError, NotFoundError
+from abridgeai.core.exceptions import AppError, ConflictError, NotFoundError
 from abridgeai.core.security import CurrentUser
 from abridgeai.features.access_control.policies import (
     require_course_permission,
@@ -98,6 +99,13 @@ def _bad_request(detail: str) -> HTTPException:
     )
 
 
+def _conflict(detail: str) -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail={"error": "conflict", "message": detail},
+    )
+
+
 @router.post(
     "/courses",
     response_model=CourseAuthoring,
@@ -114,9 +122,40 @@ async def create_course(
     course; ownership / scope is enforced on subsequent edits via
     :func:`require_course_permission`.
     """
-    course = await authoring_service.create_course(db, payload, current_user)
+    try:
+        course = await authoring_service.create_course(db, payload, current_user)
+    except ConflictError as exc:
+        raise _conflict(str(exc)) from exc
+    except AppError as exc:
+        raise _bad_request(str(exc)) from exc
     await db.commit()
     return course
+
+
+class _SlugAvailability(BaseModel):
+    available: bool
+
+
+@router.get("/courses/check-slug", response_model=_SlugAvailability)
+async def check_course_slug(
+    slug: Annotated[str, Query(min_length=1, max_length=100)],
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_CREATE)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> _SlugAvailability:
+    """Pre-flight check for the new-course form.
+
+    Returns ``{"available": true}`` when ``slug`` is free in the caller's
+    primary organization, ``false`` otherwise. Same auth as ``POST
+    /teacher/courses`` so a 200 here implies the create attempt would not
+    be rejected for permission reasons.
+    """
+    try:
+        available = await authoring_service.check_course_slug_available(
+            db, slug=slug, owner=current_user
+        )
+    except AppError as exc:
+        raise _bad_request(str(exc)) from exc
+    return _SlugAvailability(available=available)
 
 
 @router.patch("/courses/{course_id}", response_model=CourseAuthoring)
@@ -130,6 +169,8 @@ async def update_course(
         course = await authoring_service.update_course(db, course_id, payload, current_user)
     except NotFoundError as exc:
         raise _not_found(str(exc)) from exc
+    except ConflictError as exc:
+        raise _conflict(str(exc)) from exc
     await db.commit()
     return course
 
@@ -179,6 +220,8 @@ async def create_module(
         module = await authoring_service.add_module(db, course_id, payload, current_user)
     except NotFoundError as exc:
         raise _not_found(str(exc)) from exc
+    except ConflictError as exc:
+        raise _conflict(str(exc)) from exc
     await db.commit()
     return module
 
@@ -194,6 +237,8 @@ async def update_module(
         module = await authoring_service.update_module(db, module_id, payload, current_user)
     except NotFoundError as exc:
         raise _not_found(str(exc)) from exc
+    except ConflictError as exc:
+        raise _conflict(str(exc)) from exc
     await db.commit()
     return module
 
@@ -260,6 +305,8 @@ async def create_lesson(
         lesson = await authoring_service.add_lesson(db, module_id, payload, current_user)
     except NotFoundError as exc:
         raise _not_found(str(exc)) from exc
+    except ConflictError as exc:
+        raise _conflict(str(exc)) from exc
     await db.commit()
     return lesson
 
@@ -275,6 +322,8 @@ async def update_lesson(
         lesson = await authoring_service.update_lesson(db, lesson_id, payload, current_user)
     except NotFoundError as exc:
         raise _not_found(str(exc)) from exc
+    except ConflictError as exc:
+        raise _conflict(str(exc)) from exc
     await db.commit()
     return lesson
 
@@ -294,6 +343,8 @@ async def create_lesson_resource(
         resource = await authoring_service.add_lesson_resource(db, lesson_id, payload, current_user)
     except NotFoundError as exc:
         raise _not_found(str(exc)) from exc
+    except ConflictError as exc:
+        raise _conflict(str(exc)) from exc
     await db.commit()
     return resource
 

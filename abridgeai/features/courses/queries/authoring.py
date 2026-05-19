@@ -115,6 +115,25 @@ async def get_module(db: AsyncSession, module_id: UUID) -> Module | None:
     return await db.get(Module, module_id)
 
 
+async def course_slug_exists(db: AsyncSession, *, organization_id: UUID, slug: str) -> bool:
+    """Whether an active (non-soft-deleted) course already uses ``slug`` in ``organization_id``.
+
+    Mirrors the partial UNIQUE INDEX behind ``uq_courses_org_slug`` (see
+    migration 0002): the constraint is scoped to rows where
+    ``deleted_at IS NULL``, so the check must apply the same predicate.
+    """
+    stmt = (
+        select(func.count())
+        .select_from(Course)
+        .where(
+            Course.organization_id == organization_id,
+            Course.slug == slug,
+            Course.deleted_at.is_(None),
+        )
+    )
+    return bool(int((await db.execute(stmt)).scalar_one()))
+
+
 async def get_lesson(db: AsyncSession, lesson_id: UUID) -> Lesson | None:
     return await db.get(Lesson, lesson_id)
 

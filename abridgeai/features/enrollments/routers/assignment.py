@@ -25,7 +25,7 @@ from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from abridgeai.core.db import get_db
-from abridgeai.core.exceptions import NotFoundError
+from abridgeai.core.exceptions import ConflictError, NotFoundError
 from abridgeai.core.security import CurrentUser
 from abridgeai.features.access_control.policies import (
     require_any_permission,
@@ -54,9 +54,7 @@ class CSVImportPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
-_REQUIRE_ENROLLMENT_READ = require_any_permission(
-    "course.enrollment.read", "system.administer"
-)
+_REQUIRE_ENROLLMENT_READ = require_any_permission("course.enrollment.read", "system.administer")
 _REQUIRE_COURSE_ENROLLMENT_READ = require_course_permission(
     "course_id", "course.enrollment.read", "system.administer"
 )
@@ -106,9 +104,7 @@ async def manager_bulk_enroll(
     current_user: Annotated[CurrentUser, Depends(_REQUIRE_COURSE_ENROLLMENT_CREATE)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> BulkEnrollResult:
-    result = await manager_service.bulk_enroll_students(
-        db, course_id, payload, current_user
-    )
+    result = await manager_service.bulk_enroll_students(db, course_id, payload, current_user)
     await db.commit()
     return result
 
@@ -163,9 +159,7 @@ async def manager_csv_import(
     except csv.Error as exc:
         raise _bad_request(f"invalid_csv: {exc.__class__.__name__}") from exc
 
-    result = await manager_service.bulk_import_students_from_csv(
-        db, course_id, rows, current_user
-    )
+    result = await manager_service.bulk_import_students_from_csv(db, course_id, rows, current_user)
     await db.commit()
     return result
 
@@ -194,12 +188,10 @@ async def create_invitation_code(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> InvitationCodeAuthoring:
     try:
-        result = await manager_service.create_invitation_code(
-            db, course_id, payload, current_user
-        )
+        result = await manager_service.create_invitation_code(db, course_id, payload, current_user)
     except NotFoundError as exc:
         raise _not_found(str(exc)) from exc
-    except ValueError as exc:
+    except ConflictError as exc:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail={"error": "conflict", "message": str(exc)},
@@ -219,9 +211,7 @@ async def update_invitation_code(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> InvitationCodeAuthoring:
     try:
-        result = await manager_service.update_invitation_code(
-            db, code_id, payload, current_user
-        )
+        result = await manager_service.update_invitation_code(db, code_id, payload, current_user)
     except NotFoundError as exc:
         raise _not_found(str(exc)) from exc
     await db.commit()

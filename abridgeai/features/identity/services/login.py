@@ -4,6 +4,10 @@ from datetime import timedelta
 from typing import TYPE_CHECKING
 
 from abridgeai.core.config import get_settings
+from abridgeai.core.db.conflict_mapper import (
+    flush_or_conflict,
+    register_conflict_mappings,
+)
 from abridgeai.core.exceptions import ForbiddenError, NotFoundError
 from abridgeai.core.security import (
     create_access_token,
@@ -23,6 +27,14 @@ from abridgeai.features.identity.schemas import TokenResponse
 from abridgeai.infrastructure.google_oauth import fetch_google_profile
 
 from .profile import serialize_user
+
+register_conflict_mappings(
+    {
+        "uq_auth_identity_provider_subject": "auth_identity_provider_taken: this provider account is already linked to another user",  # noqa: E501
+        "auth_sessions_refresh_token_hash_key": "auth_session_token_already_recorded: this refresh-token hash already exists",  # noqa: E501  # nosec B105 -- error message, not a credential
+        "users_primary_email_key": "user_email_taken: this email is already registered",
+    }
+)
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -108,6 +120,7 @@ async def _issue_tokens(
         user_agent=user_agent,
     )
     db.add(session)
+    await flush_or_conflict(db)
     await db.commit()
     await db.refresh(session)
     await db.refresh(user)

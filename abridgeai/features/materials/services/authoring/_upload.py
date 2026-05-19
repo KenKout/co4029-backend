@@ -23,6 +23,10 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 from uuid import UUID
 
+from abridgeai.core.db.conflict_mapper import (
+    flush_or_conflict,
+    register_conflict_mappings,
+)
 from abridgeai.core.exceptions import AppError, NotFoundError
 from abridgeai.core.security import CurrentUser
 from abridgeai.features.materials.models import LearningMaterial, LearningMaterialVersion
@@ -57,6 +61,15 @@ if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
 
+register_conflict_mappings(
+    {
+        "learning_material_versions_material_id_version_no_key": "material_version_taken: another version with this number already exists for the material",  # noqa: E501
+        "uq_learning_material_versions_material_version_no": "material_version_taken: another version with this number already exists for the material",  # noqa: E501
+        "uq_storage_objects_bucket_key": "storage_object_key_taken: another storage object with this bucket+key already exists",  # noqa: E501
+    }
+)
+
+
 def _get_settings() -> object:
     """Indirection so ``monkeypatch.setattr("...authoring.get_settings", ...)`` wins.
 
@@ -87,7 +100,7 @@ async def init_upload(
         visible_to_students=False,
     )
     db.add(material)
-    await db.flush()
+    await flush_or_conflict(db)
     await db.refresh(material)
 
     storage_object_id = await create_storage_object(
@@ -112,7 +125,7 @@ async def init_upload(
         uploaded_at=datetime.now(tz=UTC),
     )
     db.add(version)
-    await db.flush()
+    await flush_or_conflict(db)
     await db.refresh(version)
 
     object_key = f"materials/{material.id}/{version.id}/{payload.filename}"
@@ -269,4 +282,4 @@ async def abort_multipart(
     storage_view = await resolve_storage_view(db, version)
     await abort_multipart_upload(storage_view, upload_id)
     version.processing_status = "cancelled"
-    await db.flush()
+    await flush_or_conflict(db)

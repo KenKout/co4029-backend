@@ -3,6 +3,10 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 from uuid import UUID
 
+from abridgeai.core.db.conflict_mapper import (
+    flush_or_conflict,
+    register_conflict_mappings,
+)
 from abridgeai.core.db.recursive_delete import soft_delete_cascade
 from abridgeai.core.exceptions import AppError, NotFoundError
 from abridgeai.features.career_paths.models import CareerPath, CareerPathCourse
@@ -20,6 +24,16 @@ if TYPE_CHECKING:
     from abridgeai.core.security import CurrentUser
 
 _OFFSET = 100_000
+
+
+register_conflict_mappings(
+    {
+        "career_paths_organization_id_slug_key": "career_path_slug_taken: a career path with this slug already exists in this organization",  # noqa: E501
+        "uq_career_paths_org_slug": "career_path_slug_taken: a career path with this slug already exists in this organization",  # noqa: E501
+        "career_path_courses_career_path_id_position_key": "career_path_course_position_taken: another course already occupies this position in the path",  # noqa: E501
+        "career_path_courses_career_path_id_course_id_key": "career_path_course_already_attached: this course is already attached to the path",  # noqa: E501
+    }
+)
 
 
 def _to_authoring(path: CareerPath) -> CareerPathAuthoring:
@@ -83,7 +97,7 @@ async def create_career_path(
         updated_by=actor.user_id,
     )
     db.add(path)
-    await db.flush()
+    await flush_or_conflict(db)
     await db.refresh(path)
     return _to_authoring(path)
 
@@ -99,7 +113,7 @@ async def update_career_path(
     for key, value in data.items():
         setattr(path, key, value)
     path.updated_by = actor.user_id
-    await db.flush()
+    await flush_or_conflict(db)
     await db.refresh(path)
     return _to_authoring(path)
 
@@ -132,7 +146,7 @@ async def add_course_to_path(
         is_required=is_required,
     )
     db.add(link)
-    await db.flush()
+    await flush_or_conflict(db)
     del actor
     rows = await authoring_queries.list_authoring_career_path_courses(db, career_path_id)
     target = next(row for row in rows if row["course_id"] == course_id)
@@ -148,10 +162,10 @@ async def _make_room_for_position(
         return
     for idx, link in enumerate(affected):
         link.position = _OFFSET + idx
-    await db.flush()
+    await flush_or_conflict(db)
     for idx, link in enumerate(affected, start=1):
         link.position = target_position + idx
-    await db.flush()
+    await flush_or_conflict(db)
 
 
 async def remove_course_from_path(
@@ -184,11 +198,11 @@ async def reorder_courses_in_path(
 
     for idx, course_id in enumerate(course_ids):
         existing_by_course[course_id].position = _OFFSET + idx
-    await db.flush()
+    await flush_or_conflict(db)
 
     for idx, course_id in enumerate(course_ids, start=1):
         existing_by_course[course_id].position = idx
-    await db.flush()
+    await flush_or_conflict(db)
 
     rows = await authoring_queries.list_authoring_career_path_courses(db, career_path_id)
     return [CareerPathCourseAuthoring.model_validate(row) for row in rows]

@@ -115,6 +115,8 @@ async def create_interview_config(
         config = await authoring_service.create_interview_config(
             db, course_id, payload, current_user
         )
+    except ConflictError as exc:
+        raise _conflict(str(exc)) from exc
     except AppError as exc:
         raise _bad_request(str(exc)) from exc
     await db.commit()
@@ -149,6 +151,8 @@ async def update_interview_config(
         )
     except NotFoundError as exc:
         raise _not_found("interview_config", config_id) from exc
+    except ConflictError as exc:
+        raise _conflict(str(exc)) from exc
     except AppError as exc:
         raise _bad_request(str(exc)) from exc
     await db.commit()
@@ -244,6 +248,8 @@ async def create_question(
         question = await authoring_service.add_question(db, config_id, payload, current_user)
     except NotFoundError as exc:
         raise _not_found("interview_config", config_id) from exc
+    except ConflictError as exc:
+        raise _conflict(str(exc)) from exc
     except AppError as exc:
         raise _bad_request(str(exc)) from exc
     await db.commit()
@@ -267,6 +273,8 @@ async def update_question(
         )
     except NotFoundError as exc:
         raise _not_found("interview_question", question_id) from exc
+    except ConflictError as exc:
+        raise _conflict(str(exc)) from exc
     except AppError as exc:
         raise _bad_request(str(exc)) from exc
     await db.commit()
@@ -328,6 +336,8 @@ async def create_outcome(
         outcome = await authoring_service.add_outcome(db, config_id, payload, current_user)
     except NotFoundError as exc:
         raise _not_found("interview_config", config_id) from exc
+    except ConflictError as exc:
+        raise _conflict(str(exc)) from exc
     except AppError as exc:
         raise _bad_request(str(exc)) from exc
     await db.commit()
@@ -351,6 +361,8 @@ async def update_outcome(
         )
     except NotFoundError as exc:
         raise _not_found("interview_outcome", outcome_id) from exc
+    except ConflictError as exc:
+        raise _conflict(str(exc)) from exc
     except AppError as exc:
         raise _bad_request(str(exc)) from exc
     await db.commit()

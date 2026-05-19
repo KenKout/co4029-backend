@@ -29,6 +29,10 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
+from abridgeai.core.db.conflict_mapper import (
+    flush_or_conflict,
+    register_conflict_mappings,
+)
 from abridgeai.core.db.recursive_delete import soft_delete_cascade
 from abridgeai.core.exceptions import AppError, ConflictError, NotFoundError
 from abridgeai.core.security import CurrentUser, utcnow
@@ -52,6 +56,22 @@ if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
 _DEFAULT_PASSING_SCORE = Decimal("70.00")
+
+
+register_conflict_mappings(
+    {
+        "quiz_questions_quiz_id_position_key": "quiz_question_position_taken: another question already occupies this position in the quiz",  # noqa: E501
+        "uq_quiz_questions_position": "quiz_question_position_taken: another question already occupies this position in the quiz",  # noqa: E501
+        "quiz_question_options_question_id_option_key_key": "quiz_option_key_taken: another option with this key already exists for this question",  # noqa: E501
+        "uq_quiz_question_options_key": "quiz_option_key_taken: another option with this key already exists for this question",  # noqa: E501
+        "quiz_question_options_question_id_position_key": "quiz_option_position_taken: another option already occupies this position",  # noqa: E501
+        "uq_quiz_question_options_position": "quiz_option_position_taken: another option already occupies this position",  # noqa: E501
+        "uq_quiz_question_revisions_number": "quiz_revision_number_taken: this revision number already exists for the question",  # noqa: E501
+        "uq_quiz_attempts_number": "quiz_attempt_number_taken: this attempt number already exists for the student",  # noqa: E501
+        "uq_quiz_attempt_answers_question": "quiz_attempt_answer_already_recorded: this question has already been answered for this attempt",  # noqa: E501
+        "quiz_attempts_idempotency_key_key": "quiz_attempt_idempotency_key_replayed: this idempotency key has already been used",  # noqa: E501
+    }
+)
 
 
 def _apply_patch(model: object, payload: object) -> None:
@@ -194,9 +214,9 @@ async def create_quiz(
         created_by=actor.user_id,
     )
     db.add(quiz)
-    await db.flush()
+    await flush_or_conflict(db)
     await _ensure_module_item(db, module_id=module_id, quiz_id=quiz.id)
-    await db.flush()
+    await flush_or_conflict(db)
     await db.refresh(quiz)
     return quiz
 
@@ -210,7 +230,7 @@ async def update_quiz(
     del actor
     quiz = await _require_quiz(db, quiz_id)
     _apply_patch(quiz, payload)
-    await db.flush()
+    await flush_or_conflict(db)
     await db.refresh(quiz)
     return quiz
 
@@ -224,7 +244,7 @@ async def publish_quiz(db: AsyncSession, quiz_id: UUID, actor: CurrentUser) -> Q
     quiz.status = "published"
     quiz.published_at = utcnow()
     await _ensure_module_item(db, module_id=quiz.module_id, quiz_id=quiz.id)
-    await db.flush()
+    await flush_or_conflict(db)
     await db.refresh(quiz)
     return quiz
 
@@ -233,7 +253,7 @@ async def archive_quiz(db: AsyncSession, quiz_id: UUID, actor: CurrentUser) -> Q
     del actor
     quiz = await _require_quiz(db, quiz_id)
     quiz.status = "archived"
-    await db.flush()
+    await flush_or_conflict(db)
     await db.refresh(quiz)
     return quiz
 
@@ -282,7 +302,7 @@ async def create_question(
         reviewed_at=utcnow() if getattr(payload, "review_status", None) == "approved" else None,
     )
     db.add(question)
-    await db.flush()
+    await flush_or_conflict(db)
 
     for position, option_payload in enumerate(options_payload, start=1):
         db.add(
@@ -303,7 +323,7 @@ async def create_question(
             created_by=actor.user_id,
         )
     )
-    await db.flush()
+    await flush_or_conflict(db)
     await db.refresh(question)
     return question
 
@@ -337,7 +357,7 @@ async def update_question(
 
     question.reviewed_by = actor.user_id
     question.reviewed_at = utcnow()
-    await db.flush()
+    await flush_or_conflict(db)
     await db.refresh(question)
     return question
 
@@ -401,7 +421,7 @@ async def delete_question(db: AsyncSession, question_id: UUID, actor: CurrentUse
     for new_position, sibling in enumerate(siblings, start=1):
         if sibling.position != new_position:
             sibling.position = new_position
-    await db.flush()
+    await flush_or_conflict(db)
 
 
 async def start_generation_run(
@@ -436,7 +456,7 @@ async def start_generation_run(
             from sqlalchemy import delete as sa_delete  # noqa: PLC0415
 
             await db.execute(sa_delete(QuizQuestion).where(QuizQuestion.quiz_id == quiz.id))
-            await db.flush()
+            await flush_or_conflict(db)
 
     base_config = dict(getattr(payload, "config_json", None) or {})
     coverage_options = getattr(payload, "coverage_options", None)
@@ -472,7 +492,7 @@ async def start_generation_run(
         config_json=generation_config,
     )
     db.add(run)
-    await db.flush()
+    await flush_or_conflict(db)
 
     if quiz is None:
         quiz = Quiz(
@@ -484,7 +504,7 @@ async def start_generation_run(
             created_by=actor.user_id,
         )
         db.add(quiz)
-        await db.flush()
+        await flush_or_conflict(db)
     else:
         quiz.generation_run_id = run.id
     run.config_json = dict(run.config_json) | {"quiz_id": str(quiz.id)}

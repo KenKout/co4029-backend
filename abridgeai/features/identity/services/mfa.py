@@ -8,6 +8,10 @@ from uuid import UUID
 import pyotp
 
 from abridgeai.core.config import get_settings
+from abridgeai.core.db.conflict_mapper import (
+    flush_or_conflict,
+    register_conflict_mappings,
+)
 from abridgeai.core.exceptions import NotFoundError, UnauthorizedError
 from abridgeai.core.security import (
     decrypt_secret,
@@ -30,6 +34,13 @@ from abridgeai.features.identity.schemas import (
     MfaRecoveryCodesResponse,
     MfaTotpVerifyRequest,
     MfaVerifyRequest,
+)
+
+register_conflict_mappings(
+    {
+        "uq_mfa_recovery_factor_code": "mfa_recovery_code_taken: this recovery code value has already been used for the factor",  # noqa: E501
+        "auth_sessions_refresh_token_hash_key": "auth_session_token_already_recorded: this refresh-token hash already exists",  # noqa: E501  # nosec B105 -- error message, not a credential
+    }
 )
 
 if TYPE_CHECKING:
@@ -144,7 +155,7 @@ async def _replace_recovery_codes(db: AsyncSession, factor_id: UUID) -> list[str
     codes = [f"{secrets.token_hex(4)}-{secrets.token_hex(4)}" for _ in range(_RECOVERY_CODE_COUNT)]
     for code in codes:
         db.add(MfaRecoveryCode(factor_id=factor_id, code_hash=hash_secret(code)))
-    await db.flush()
+    await flush_or_conflict(db)
     return codes
 
 

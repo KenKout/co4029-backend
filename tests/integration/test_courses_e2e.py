@@ -53,6 +53,8 @@ from sqlalchemy.ext.asyncio import (
 import abridgeai.features.access_control.models  # noqa: F401  -- register FK targets
 import abridgeai.features.identity.models  # noqa: F401  -- register users FK target
 import abridgeai.features.interviews.models  # noqa: F401  -- T6.1 registers interview_* tables
+import abridgeai.features.materials.models  # noqa: F401  -- learning_materials FK target for lessons.primary_material_id
+import abridgeai.features.quizzes.models  # noqa: F401  -- quizzes FK target for module_items.quiz_id
 from abridgeai.core.config import get_settings
 from abridgeai.core.db import Base, get_db
 from abridgeai.core.security import create_access_token, generate_token, hash_secret
@@ -289,9 +291,7 @@ async def test_full_course_lifecycle_manager_teacher_student(
 
     # 1. Manager creates the course in HOD's org_unit so the HOD can staff it.
     create_payload = {
-        "organization_id": str(seeded_users.organization_id),
         "org_unit_id": str(seeded_users.org_unit_id),
-        "owner_user_id": str(seeded_users.manager_id),  # service overrides to actor anyway
         "slug": new_slug,
         "title": "E2E Lifecycle Course",
         "description": "Phase 3 e2e proof",
@@ -451,9 +451,7 @@ async def test_hod_oversight_dept_courses_view(
     create_response = await client.post(
         "/api/v1/teacher/courses",
         json={
-            "organization_id": str(seeded_users.organization_id),
             "org_unit_id": str(seeded_users.org_unit_id),
-            "owner_user_id": str(seeded_users.manager_id),
             "slug": f"hod-dept-{suffix}",
             "title": "HOD Oversight Course",
         },
@@ -515,9 +513,7 @@ async def test_admin_soft_delete_then_restore(
     create_response = await client.post(
         "/api/v1/teacher/courses",
         json={
-            "organization_id": str(seeded_users.organization_id),
             "org_unit_id": str(seeded_users.org_unit_id),
-            "owner_user_id": str(seeded_users.manager_id),
             "slug": f"admin-restore-{suffix}",
             "title": "Admin Restore Course",
         },
@@ -590,9 +586,7 @@ async def test_draft_module_excluded_from_student_content_tree(
     create_response = await client.post(
         "/api/v1/teacher/courses",
         json={
-            "organization_id": str(seeded_users.organization_id),
             "org_unit_id": str(seeded_users.org_unit_id),
-            "owner_user_id": str(seeded_users.manager_id),
             "slug": f"draft-module-{suffix}",
             "title": "Draft Visibility Course",
         },

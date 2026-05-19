@@ -4,8 +4,12 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
 
+from abridgeai.core.db.conflict_mapper import (
+    flush_or_conflict,
+    register_conflict_mappings,
+)
 from abridgeai.core.db.recursive_delete import soft_delete_cascade
-from abridgeai.core.exceptions import NotFoundError
+from abridgeai.core.exceptions import ConflictError, NotFoundError
 from abridgeai.features.enrollments.models import Enrollment, InvitationCode
 from abridgeai.features.enrollments.queries import authoring as authoring_queries
 from abridgeai.features.enrollments.schemas import (
@@ -25,6 +29,14 @@ if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
     from abridgeai.core.security import CurrentUser
+
+
+register_conflict_mappings(
+    {
+        "course_enrollments_course_id_student_id_key": "enrollment_already_exists: this student is already enrolled in this course",  # noqa: E501
+        "course_invitation_codes_code_key": "invitation_code_taken: an invitation code with this value already exists",  # noqa: E501
+    }
+)
 
 
 def _to_authoring(enrollment: Enrollment) -> EnrollmentAuthoring:
@@ -87,9 +99,7 @@ async def _resolve_user_ids(
         for email in emails:
             user_id = found_by_email.get(email)
             if user_id is None:
-                failures.append(
-                    BulkEnrollFailure(identifier=email, reason="user_not_found")
-                )
+                failures.append(BulkEnrollFailure(identifier=email, reason="user_not_found"))
                 continue
             if user_id not in resolved:
                 resolved.append(user_id)
@@ -115,7 +125,7 @@ async def _create_enrollment(
         updated_by=actor_id,
     )
     db.add(enrollment)
-    await db.flush()
+    await flush_or_conflict(db)
     return enrollment
 
 
@@ -138,17 +148,13 @@ async def bulk_enroll_students(
     for user_id in candidate_ids:
         existing = await authoring_queries.find_enrollment(db, course_id, user_id)
         if existing is not None and existing.status != "dropped":
-            failures.append(
-                BulkEnrollFailure(
-                    identifier=str(user_id), reason="already_enrolled"
-                )
-            )
+            failures.append(BulkEnrollFailure(identifier=str(user_id), reason="already_enrolled"))
             continue
         if existing is not None and existing.status == "dropped":
             existing.status = "active"
             existing.dropped_at = None
             existing.updated_by = actor.user_id
-            await db.flush()
+            await flush_or_conflict(db)
             enrolled.append(user_id)
             continue
         await _create_enrollment(
@@ -171,13 +177,11 @@ async def unenroll_student(
 ) -> EnrollmentAuthoring:
     enrollment = await authoring_queries.find_enrollment(db, course_id, user_id)
     if enrollment is None:
-        raise NotFoundError(
-            f"No enrollment for course={course_id} user={user_id}"
-        )
+        raise NotFoundError(f"No enrollment for course={course_id} user={user_id}")
     enrollment.status = "dropped"
     enrollment.dropped_at = datetime.now(UTC)
     enrollment.updated_by = actor.user_id
-    await db.flush()
+    await flush_or_conflict(db)
     await db.refresh(enrollment)
     return _to_authoring(enrollment)
 
@@ -242,7 +246,7 @@ async def bulk_import_students_from_csv(
             existing.status = "active"
             existing.dropped_at = None
             existing.updated_by = actor.user_id
-            await db.flush()
+            await flush_or_conflict(db)
         else:
             await _create_enrollment(
                 db,
@@ -253,9 +257,7 @@ async def bulk_import_students_from_csv(
             )
         enrolled.append(user_id)
 
-    return CSVImportResult(
-        enrolled=enrolled, created_users=created_users, failures=failures
-    )
+    return CSVImportResult(enrolled=enrolled, created_users=created_users, failures=failures)
 
 
 async def list_invitation_codes_for_course(
@@ -271,17 +273,15 @@ async def create_invitation_code(
     payload: InvitationCodeCreate,
     actor: CurrentUser,
 ) -> InvitationCodeAuthoring:
-    organization_id = await authoring_queries.get_course_organization_id(
-        db, course_id
-    )
+    organization_id = await authoring_queries.get_course_organization_id(db, course_id)
     if organization_id is None:
         raise NotFoundError(f"Course {course_id} not found")
 
-    existing = await authoring_queries.find_invitation_code_by_string(
-        db, payload.code
-    )
+    existing = await authoring_queries.find_invitation_code_by_string(db, payload.code)
     if existing is not None:
-        raise ValueError(f"Invitation code {payload.code!r} already exists")
+        raise ConflictError(
+            f"invitation_code_taken: invitation code {payload.code!r} already exists"
+        )
 
     code = InvitationCode(
         course_id=course_id,
@@ -295,7 +295,7 @@ async def create_invitation_code(
         updated_by=actor.user_id,
     )
     db.add(code)
-    await db.flush()
+    await flush_or_conflict(db)
     return _to_code_authoring(code)
 
 
@@ -312,13 +312,11 @@ async def update_invitation_code(
     for key, value in data.items():
         setattr(code, key, value)
     code.updated_by = actor.user_id
-    await db.flush()
+    await flush_or_conflict(db)
     return _to_code_authoring(code)
 
 
-async def delete_invitation_code(
-    db: AsyncSession, code_id: UUID, actor: CurrentUser
-) -> None:
+async def delete_invitation_code(db: AsyncSession, code_id: UUID, actor: CurrentUser) -> None:
     code = await authoring_queries.get_invitation_code(db, code_id)
     if code is None:
         raise NotFoundError(f"Invitation code {code_id} not found")

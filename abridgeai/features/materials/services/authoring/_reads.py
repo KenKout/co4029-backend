@@ -11,6 +11,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 from uuid import UUID
 
+from abridgeai.core.db.conflict_mapper import flush_or_conflict
 from abridgeai.core.security import CurrentUser
 from abridgeai.features.materials.models import LearningMaterial, LearningMaterialVersion
 from abridgeai.features.materials.queries import (
@@ -101,6 +102,6 @@ async def update_material(
     data = payload.model_dump(exclude_unset=True)
     for key, value in data.items():
         setattr(material, key, value)
-    await db.flush()
+    await flush_or_conflict(db)
     await db.refresh(material)
     return await _present_material(db, material)

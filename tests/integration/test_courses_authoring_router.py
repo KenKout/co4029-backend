@@ -65,6 +65,8 @@ from sqlalchemy.ext.asyncio import (
 import abridgeai.features.access_control.models  # noqa: F401  -- register FK targets
 import abridgeai.features.identity.models  # noqa: F401  -- register users FK target
 import abridgeai.features.interviews.models  # noqa: F401  -- T6.1 registers interview_* tables
+import abridgeai.features.materials.models  # noqa: F401  -- learning_materials FK target for lessons.primary_material_id
+import abridgeai.features.quizzes.models  # noqa: F401  -- quizzes FK target for module_items.quiz_id
 from abridgeai.core.config import get_settings
 from abridgeai.core.db import Base, get_db
 from abridgeai.core.security import create_access_token, generate_token, hash_secret
@@ -703,3 +705,174 @@ async def test_create_course_rejects_forged_organization_id(
         headers={"Authorization": f"Bearer {manager_bearer}"},
     )
     assert response.status_code == 422, response.text
+
+
+async def test_create_course_duplicate_slug_returns_409(
+    client: httpx.AsyncClient,
+    manager_bearer: str,
+    engine: AsyncEngine,
+) -> None:
+    """Re-submitting the same slug must surface as 409, not the legacy 500.
+
+    Regression for the ``UniqueViolation`` on ``uq_courses_org_slug`` —
+    duplicate (organization_id, slug) used to bubble out as a 500
+    IntegrityError; the service now maps it to ``ConflictError`` and the
+    router renders 409 with the stable error code ``conflict``.
+    """
+    suffix = uuid.uuid4().hex[:8]
+    body = {
+        "slug": f"dup-{suffix}",
+        "title": f"Dup Slug Course {suffix}",
+    }
+    first = await client.post(
+        "/api/v1/teacher/courses",
+        json=body,
+        headers={"Authorization": f"Bearer {manager_bearer}"},
+    )
+    assert first.status_code == 201, first.text
+    created_id = first.json()["id"]
+    try:
+        second = await client.post(
+            "/api/v1/teacher/courses",
+            json=body,
+            headers={"Authorization": f"Bearer {manager_bearer}"},
+        )
+        assert second.status_code == 409, second.text
+        detail = second.json()["detail"]
+        assert detail["error"] == "conflict"
+        assert "course_slug_taken" in detail["message"]
+    finally:
+        async with engine.begin() as conn:
+            await conn.execute(text("DELETE FROM courses WHERE id = :id"), {"id": created_id})
+
+
+async def test_check_course_slug_reports_availability(
+    client: httpx.AsyncClient,
+    manager_bearer: str,
+    engine: AsyncEngine,
+) -> None:
+    """``GET /teacher/courses/check-slug`` returns ``available=true`` for a
+    free slug and ``available=false`` once a course occupies that slug in
+    the caller's primary organization.
+
+    Frontend uses this for inline validation on the new-course form so
+    teachers see a duplicate before submission instead of after a 409.
+    """
+    suffix = uuid.uuid4().hex[:8]
+    free_slug = f"check-{suffix}"
+    auth = {"Authorization": f"Bearer {manager_bearer}"}
+
+    free_resp = await client.get(
+        f"/api/v1/teacher/courses/check-slug?slug={free_slug}",
+        headers=auth,
+    )
+    assert free_resp.status_code == 200, free_resp.text
+    assert free_resp.json() == {"available": True}
+
+    create_resp = await client.post(
+        "/api/v1/teacher/courses",
+        json={"slug": free_slug, "title": "Slug Check Course"},
+        headers=auth,
+    )
+    assert create_resp.status_code == 201, create_resp.text
+    created_id = create_resp.json()["id"]
+    try:
+        taken_resp = await client.get(
+            f"/api/v1/teacher/courses/check-slug?slug={free_slug}",
+            headers=auth,
+        )
+        assert taken_resp.status_code == 200, taken_resp.text
+        assert taken_resp.json() == {"available": False}
+    finally:
+        async with engine.begin() as conn:
+            await conn.execute(text("DELETE FROM courses WHERE id = :id"), {"id": created_id})
+
+
+async def test_check_course_slug_requires_create_permission(
+    client: httpx.AsyncClient,
+    student_bearer: str,
+) -> None:
+    """A student token (no ``course.create``) must be denied. Same auth
+    contract as ``POST /teacher/courses`` so the SPA cannot probe for
+    existing slugs from an unauthorized session.
+    """
+    response = await client.get(
+        "/api/v1/teacher/courses/check-slug?slug=anything",
+        headers={"Authorization": f"Bearer {student_bearer}"},
+    )
+    assert response.status_code == 403
+
+
+async def test_create_module_duplicate_position_returns_409(
+    client: httpx.AsyncClient,
+    manager_bearer: str,
+    scenario: dict[str, uuid.UUID | str],
+) -> None:
+    """``uq_modules_course_position`` collisions surface as 409.
+
+    The seeded course already has a Module at position 1; a second
+    request targeting the same position must be rejected without a
+    500 IntegrityError.
+    """
+    response = await client.post(
+        f"/api/v1/teacher/courses/{scenario['course_a']}/modules",
+        json={
+            "course_id": str(scenario["course_a"]),
+            "title": "Dup-Position Module",
+            "position": 1,
+        },
+        headers={"Authorization": f"Bearer {manager_bearer}"},
+    )
+    assert response.status_code == 409, response.text
+    detail = response.json()["detail"]
+    assert detail["error"] == "conflict"
+    assert "module_position_taken" in detail["message"]
+
+
+async def test_create_lesson_duplicate_slug_returns_409(
+    client: httpx.AsyncClient,
+    manager_bearer: str,
+    scenario: dict[str, uuid.UUID | str],
+) -> None:
+    """``uq_lessons_module_slug`` collisions surface as 409.
+
+    The seeded module already has ``lesson-a``; a second lesson with the
+    same slug under the same module must return 409.
+    """
+    response = await client.post(
+        f"/api/v1/teacher/modules/{scenario['module_a']}/lessons",
+        json={
+            "module_id": str(scenario["module_a"]),
+            "slug": "lesson-a",
+            "title": "Dup-Slug Lesson",
+            "lesson_type": "video",
+        },
+        headers={"Authorization": f"Bearer {manager_bearer}"},
+    )
+    assert response.status_code == 409, response.text
+    detail = response.json()["detail"]
+    assert detail["error"] == "conflict"
+    assert "lesson_slug_taken" in detail["message"]
+
+
+async def test_create_lesson_resource_duplicate_position_returns_409(
+    client: httpx.AsyncClient,
+    manager_bearer: str,
+    scenario: dict[str, uuid.UUID | str],
+) -> None:
+    """``uq_lesson_resources_position`` collisions surface as 409."""
+    response = await client.post(
+        f"/api/v1/teacher/lessons/{scenario['lesson_a']}/resources",
+        json={
+            "lesson_id": str(scenario["lesson_a"]),
+            "title": "Dup-Position Resource",
+            "resource_type": "pdf",
+            "storage_object_id": str(scenario["storage_object_id"]),
+            "position": 1,
+        },
+        headers={"Authorization": f"Bearer {manager_bearer}"},
+    )
+    assert response.status_code == 409, response.text
+    detail = response.json()["detail"]
+    assert detail["error"] == "conflict"
+    assert "lesson_resource_position_taken" in detail["message"]

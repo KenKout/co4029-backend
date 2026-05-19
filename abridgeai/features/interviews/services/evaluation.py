@@ -27,6 +27,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
+from abridgeai.core.db.conflict_mapper import flush_or_conflict
 from abridgeai.core.exceptions import NotFoundError
 from abridgeai.core.security import utcnow
 from abridgeai.features.interviews.ai.stages.evaluation import evaluate_session
@@ -207,7 +208,7 @@ async def _persist_outcome_evaluations(
                 evidence_excerpt=None,
             )
         )
-    await db.flush()
+    await flush_or_conflict(db)
 
 
 def _format_rubric_reasoning(rubric_scores: RubricScores) -> str:
@@ -247,7 +248,7 @@ async def _persist_gap_report(
             report_json=dict(draft.report_json),
         )
     )
-    await db.flush()
+    await flush_or_conflict(db)
 
 
 __all__ = ["evaluate_and_generate_report"]

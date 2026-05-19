@@ -23,6 +23,10 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
+from abridgeai.core.db.conflict_mapper import (
+    flush_or_conflict,
+    register_conflict_mappings,
+)
 from abridgeai.core.db.recursive_delete import soft_delete_cascade
 from abridgeai.core.exceptions import AppError, NotFoundError
 from abridgeai.core.security import CurrentUser, utcnow
@@ -54,6 +58,17 @@ async def _require_config(db: AsyncSession, config_id: UUID) -> InterviewConfig:
     if config is None:
         raise NotFoundError(f"Interview config {config_id} not found")
     return config
+
+
+register_conflict_mappings(
+    {
+        "interview_outcomes_interview_config_id_position_key": "interview_outcome_position_taken: another outcome already occupies this position in the config",  # noqa: E501
+        "uq_interview_outcomes_position": "interview_outcome_position_taken: another outcome already occupies this position in the config",  # noqa: E501
+        "interview_questions_interview_config_id_position_key": "interview_question_position_taken: another question already occupies this position in the config",  # noqa: E501
+        "uq_interview_questions_position": "interview_question_position_taken: another question already occupies this position in the config",  # noqa: E501
+        "uq_interview_outcome_evaluations": "interview_outcome_evaluation_already_recorded: this outcome has already been evaluated for this session",  # noqa: E501
+    }
+)
 
 
 async def _require_question(
@@ -134,7 +149,7 @@ async def create_interview_config(
         created_by=actor.user_id,
     )
     db.add(config)
-    await db.flush()
+    await flush_or_conflict(db)
     await db.refresh(config)
     return config
 
@@ -148,7 +163,7 @@ async def update_interview_config(
     del actor
     config = await _require_config(db, config_id)
     _apply_patch(config, payload)
-    await db.flush()
+    await flush_or_conflict(db)
     await db.refresh(config)
     return config
 
@@ -163,7 +178,7 @@ async def publish_interview_config(
     config.status = "published"
     config.published_at = utcnow()
     await _ensure_module_item(db, module_id=config.module_id, interview_config_id=config.id)
-    await db.flush()
+    await flush_or_conflict(db)
     await db.refresh(config)
     return config
 
@@ -174,7 +189,7 @@ async def archive_interview_config(
     del actor
     config = await _require_config(db, config_id)
     config.status = "archived"
-    await db.flush()
+    await flush_or_conflict(db)
     await db.refresh(config)
     return config
 
@@ -211,7 +226,7 @@ async def add_question(
         created_by=actor.user_id,
     )
     db.add(question)
-    await db.flush()
+    await flush_or_conflict(db)
     await db.refresh(question)
     return question
 
@@ -229,7 +244,7 @@ async def update_question(
         setattr(question, key, value)
     question.reviewed_by = actor.user_id
     question.reviewed_at = utcnow()
-    await db.flush()
+    await flush_or_conflict(db)
     await db.refresh(question)
     return question
 
@@ -262,7 +277,7 @@ async def add_outcome(
         created_by=actor.user_id,
     )
     db.add(outcome)
-    await db.flush()
+    await flush_or_conflict(db)
     await db.refresh(outcome)
     return outcome
 
@@ -277,7 +292,7 @@ async def update_outcome(
     del actor
     outcome = await _require_outcome(db, config_id, outcome_id)
     _apply_patch(outcome, payload)
-    await db.flush()
+    await flush_or_conflict(db)
     await db.refresh(outcome)
     return outcome
 
