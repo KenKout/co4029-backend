@@ -206,8 +206,6 @@ def test_course_content_public_no_leak() -> None:
 def test_request_strict_extras_rejected() -> None:
     with pytest.raises(ValidationError):
         CourseCreate(
-            organization_id=uuid4(),
-            owner_user_id=uuid4(),
             slug="s",
             title="t",
             sneaky_field="nope",  # type: ignore[call-arg]

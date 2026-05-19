@@ -629,3 +629,77 @@ def test_no_bare_get_current_user_on_write_endpoints() -> None:
     ).read_text(encoding="utf-8")
     bare = re.findall(r"Depends\(get_current_user\)", src)
     assert bare == [], f"authoring.py uses bare Depends(get_current_user): {bare}"
+
+
+async def test_create_course_resolves_org_from_token(
+    client: httpx.AsyncClient,
+    manager_bearer: str,
+    seeded_users: SeededUsers,
+    engine: AsyncEngine,
+) -> None:
+    """``POST /teacher/courses`` derives ``organization_id`` and
+    ``owner_user_id`` from the bearer token, NOT the payload.
+
+    Regression for the FK violation triggered by the SPA hardcoding a
+    placeholder UUID. The endpoint must:
+      1. accept payloads that omit org/owner entirely;
+      2. reject payloads that include them (strict-extras);
+      3. write the manager's primary org and the manager as owner.
+    """
+    suffix = uuid.uuid4().hex[:8]
+    response = await client.post(
+        "/api/v1/teacher/courses",
+        json={
+            "slug": f"smoke-{suffix}",
+            "title": f"Smoke Course {suffix}",
+            "description": "regression for forged organization_id",
+            "level": "beginner",
+        },
+        headers={"Authorization": f"Bearer {manager_bearer}"},
+    )
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["organization_id"] == str(seeded_users.organization_id)
+    assert body["owner_user_id"] == str(seeded_users.manager_id)
+    assert body["status"] == "draft"
+    try:
+        async with engine.begin() as conn:
+            row = (
+                await conn.execute(
+                    text(
+                        "SELECT organization_id, owner_user_id, status FROM courses WHERE id = :id"
+                    ),
+                    {"id": body["id"]},
+                )
+            ).one()
+        assert row.organization_id == seeded_users.organization_id
+        assert row.owner_user_id == seeded_users.manager_id
+        assert row.status == "draft"
+    finally:
+        async with engine.begin() as conn:
+            await conn.execute(text("DELETE FROM courses WHERE id = :id"), {"id": body["id"]})
+
+
+async def test_create_course_rejects_forged_organization_id(
+    client: httpx.AsyncClient,
+    manager_bearer: str,
+) -> None:
+    """A forged ``organization_id`` in the payload must be rejected at the
+    schema layer (extra='forbid'), not silently honoured.
+
+    This is the exact wire shape the SPA was sending before the fix
+    (placeholder UUID + redundant owner_user_id); without strict-extras the
+    backend would have happily passed it through to Postgres.
+    """
+    forged_org = "00000000-0000-0000-0000-000000000001"
+    response = await client.post(
+        "/api/v1/teacher/courses",
+        json={
+            "organization_id": forged_org,
+            "owner_user_id": forged_org,
+            "slug": f"forge-{uuid.uuid4().hex[:8]}",
+            "title": "Forged",
+        },
+        headers={"Authorization": f"Bearer {manager_bearer}"},
+    )
+    assert response.status_code == 422, response.text

@@ -38,7 +38,12 @@ from abridgeai.features.courses.models import (
     Module,
     ModuleItem,
 )
-from abridgeai.features.courses.queries import authoring as authoring_queries
+from abridgeai.features.courses.queries import (
+    authoring as authoring_queries,
+)
+from abridgeai.features.courses.queries import (
+    get_user_primary_organization_id,
+)
 from abridgeai.features.courses.schemas import (
     CourseAuthoring,
     CourseCreate,
@@ -98,13 +103,19 @@ async def _require_resource(db: AsyncSession, resource_id: UUID) -> LessonResour
 async def create_course(
     db: AsyncSession, payload: CourseCreate, owner: CurrentUser
 ) -> CourseAuthoring:
-    """Create a new course owned by ``owner``.
+    """Create a new course owned by ``owner`` in their primary organization.
 
-    ``status`` defaults to ``draft`` per the ORM server default; the
-    payload's ``owner_user_id`` is overridden with ``owner.user_id`` so
-    teachers cannot create courses on behalf of other users.
+    Both ``organization_id`` and ``owner_user_id`` are server-authoritative:
+    the org is resolved from the token via the access-control public surface,
+    and ownership always tracks the requesting principal. This prevents a
+    teacher in Org A from creating a course in Org B (or under another
+    teacher's name) by sending a forged payload.
     """
+    org_id = await get_user_primary_organization_id(db, owner.user_id)
+    if org_id is None:
+        raise AppError(f"User {owner.user_id} has no primary organization; cannot create a course.")
     data = payload.model_dump()
+    data["organization_id"] = org_id
     data["owner_user_id"] = owner.user_id
     course = Course(**data)
     db.add(course)

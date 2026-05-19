@@ -118,6 +118,14 @@ async def scenario(engine: AsyncEngine) -> AsyncIterator[dict]:
         )
         await conn.execute(
             text(
+                "INSERT INTO user_role_assignments "
+                "(user_id, role_id, scope_kind, organization_id) "
+                "SELECT :user, id, 'organization', :org FROM roles WHERE code = 'teacher'"
+            ),
+            {"user": owner_id, "org": org_id},
+        )
+        await conn.execute(
+            text(
                 "INSERT INTO courses "
                 "(id, organization_id, owner_user_id, slug, title, status) "
                 "VALUES (:id, :org, :owner, :slug, 'Authoring Test Course', 'draft')"
@@ -167,6 +175,10 @@ async def scenario(engine: AsyncEngine) -> AsyncIterator[dict]:
         await conn.execute(
             text("DELETE FROM courses WHERE organization_id = :o"),
             {"o": org_id},
+        )
+        await conn.execute(
+            text("DELETE FROM user_role_assignments WHERE user_id = :id"),
+            {"id": owner_id},
         )
         await conn.execute(text("DELETE FROM users WHERE id = :id"), {"id": owner_id})
         await conn.execute(text("DELETE FROM organizations WHERE id = :id"), {"id": org_id})
@@ -347,8 +359,6 @@ async def test_publish_course_widens_status(
         new_course = await authoring_service.create_course(
             session,
             CourseCreate(
-                organization_id=scenario["org_id"],
-                owner_user_id=scenario["owner_id"],
                 slug=f"create-{suffix}",
                 title="Lifecycle Course",
             ),

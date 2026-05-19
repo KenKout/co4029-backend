@@ -29,9 +29,7 @@ class _StrictRequest(BaseModel):
 
 
 class CourseCreate(_StrictRequest):
-    organization_id: UUID
     org_unit_id: UUID | None = None
-    owner_user_id: UUID
     slug: str = Field(max_length=100)
     title: str = Field(max_length=255)
     description: str | None = None
