@@ -1,0 +1,22 @@
+module.exports = {
+  apps: [
+    {
+      name: "abridgeai-backend",
+      cwd: "/home/co4029/co4029_projects/backend-new",
+      script: "/home/co4029/co4029_projects/backend-new/.venv/bin/uvicorn",
+      args: "abridgeai.api:create_app --factory --host 0.0.0.0 --port 8000",
+      interpreter: "none",
+      autorestart: true,
+      max_restarts: 10,
+      restart_delay: 2000,
+      kill_timeout: 5000,
+      max_memory_restart: "1500M",
+      env: {
+        PYTHONUNBUFFERED: "1",
+      },
+      out_file: "/home/co4029/.pm2/logs/abridgeai-backend-out.log",
+      error_file: "/home/co4029/.pm2/logs/abridgeai-backend-err.log",
+      merge_logs: true,
+    },
+  ],
+};
