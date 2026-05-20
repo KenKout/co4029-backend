@@ -302,17 +302,16 @@ async def start_generation(
     quiz = await db.get(Quiz, quiz_id)
     if quiz is None:
         raise _not_found("quiz", quiz_id)
-    enqueue_payload = _AttrShim(
-        {
-            **payload.model_dump(),
-            "quiz_id": quiz_id,
-        }
-    )
+    # Phase 2 of FR-5 schema port: pass the strictly-typed Pydantic
+    # ``QuizGenerationRequest`` straight through to the service layer.
+    # The route's ``{quiz_id}`` always wins over any body-side
+    # ``quiz_id`` (defence in depth — the router is the trust boundary).
+    payload_with_route_quiz = payload.model_copy(update={"quiz_id": quiz_id})
     try:
         run = await authoring_service.start_generation_run(
             db,
             quiz.module_id,
-            enqueue_payload,
+            payload_with_route_quiz,
             current_user,
             arq_pool=arq_pool,
         )

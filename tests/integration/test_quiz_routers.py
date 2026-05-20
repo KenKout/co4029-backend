@@ -295,10 +295,12 @@ async def test_generation_lifecycle_enqueue_and_poll(
     gen_resp = await client.post(
         f"/api/v1/teacher/quizzes/{quiz_id}/generate",
         json={
-            "mode": "full",
-            "target_count": 5,
+            "title": "Generated Quiz",
+            "question_count": 5,
+            "question_types": ["multiple_choice"],
+            "generation_mode": "topic",
             "focus_topics": [],
-            "source_lessons": [],
+            "source_lesson_ids": [],
         },
         headers=_auth(admin_bearer),
     )
