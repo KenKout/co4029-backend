@@ -23,12 +23,23 @@ on ``config_json``, then re-raise so ARQ records the job-level failure.
 Coverage-mode outline pre-computation
 -------------------------------------
 :func:`pipelines.coverage.run_coverage_pipeline` requires precomputed
-``outlines`` + ``budget`` because ``build_lesson_outline`` /
-``allocate_question_budget`` haven't been ported to backend-new yet
-(documented in the coverage pipeline docstring). T5.13 dispatches to
-coverage with ``outlines=None`` / ``budget=None`` so the pipeline
-raises a clear ``ValueError`` until the outline helpers land — matches
-the staged port of T5.12.
+``outlines`` + ``budget``. Phase 3 of the FR-5 schema port (T5.14)
+landed :mod:`abridgeai.features.quizzes.ai.outline`, so this dispatcher
+now precomputes both before invoking coverage:
+
+1. Read ``source_lesson_ids`` from ``config_json`` (FR-5 schema field).
+2. ``build_lesson_outline(db, lesson_ids, slides_per_section=...)``
+   reads ``document_chunks`` and groups them — pure SQL + Python, no
+   LLM calls, cheap to run inside the worker tick.
+3. ``allocate_question_budget(outlines, total=question_count, ...)``
+   computes the per-section question count using the
+   ``coverage_options`` block from the schema.
+4. Pass both into :func:`run_coverage_pipeline`.
+
+If ``source_lesson_ids`` is empty or no chunks exist, coverage falls
+back to ``ValueError`` (legacy behaviour). The schema layer rejects
+malformed coverage config at the HTTP boundary so this dispatcher only
+sees validated payloads.
 """
 
 from __future__ import annotations
@@ -40,6 +51,10 @@ from abridgeai.ai.knowledge_graph.schemas import KGContext
 from abridgeai.ai.models import GenerationRun
 from abridgeai.core.exceptions import NotFoundError
 from abridgeai.core.security import utcnow
+from abridgeai.features.quizzes.ai.outline import (
+    allocate_question_budget,
+    build_lesson_outline,
+)
 from abridgeai.features.quizzes.ai.pipelines import (
     coverage as coverage_pipeline,
 )
@@ -65,6 +80,76 @@ def _config_uuid(config: dict[str, Any] | None, key: str) -> UUID | None:
         return UUID(str(raw))
     except (TypeError, ValueError):
         return None
+
+
+def _config_uuid_list(config: dict[str, Any], key: str) -> list[UUID]:
+    """Parse a ``list[str]`` of UUIDs from ``config_json`` into ``list[UUID]``.
+
+    Silently drops malformed entries — the schema layer already rejects
+    non-UUID strings at the HTTP boundary, so this is just defence in
+    depth for hand-crafted runs. Empty list when the key is missing.
+    """
+    raw = config.get(key) or []
+    if not isinstance(raw, list):
+        return []
+    out: list[UUID] = []
+    for item in raw:
+        try:
+            out.append(UUID(str(item)))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+async def _precompute_coverage_inputs(
+    db: AsyncSession, config: dict[str, Any]
+) -> tuple[list[Any], dict[str, int]]:
+    """Build outlines + allocate budget for coverage mode.
+
+    Returns ``(outlines, budget)``. Raises ``ValueError`` if the run
+    config doesn't have ``source_lesson_ids`` or no chunks exist for
+    them — same surface as the legacy pipeline so existing test
+    expectations carry over.
+    """
+    lesson_ids = _config_uuid_list(config, "source_lesson_ids")
+    if not lesson_ids:
+        raise ValueError(
+            "coverage mode requires source_lesson_ids in config_json"
+        )
+
+    cov_opts = config.get("coverage_options") or {}
+    if not isinstance(cov_opts, dict):
+        cov_opts = {}
+
+    outlines = await build_lesson_outline(
+        db,
+        lesson_ids,
+        slides_per_section=int(cov_opts.get("slides_per_section") or 4),
+    )
+    if not outlines:
+        raise ValueError(
+            "coverage mode: no document chunks found for source_lesson_ids"
+        )
+
+    question_count = int(config.get("question_count") or 0)
+    if question_count <= 0:
+        raise ValueError(
+            "coverage mode requires positive question_count in config_json"
+        )
+
+    section_ids = cov_opts.get("section_ids")
+    if section_ids is not None and not isinstance(section_ids, list):
+        section_ids = None
+
+    budget = allocate_question_budget(
+        outlines,
+        total=question_count,
+        min_per_section=int(cov_opts.get("min_per_section") or 1),
+        max_per_section=int(cov_opts.get("max_per_section") or 5),
+        skip_summaries=bool(cov_opts.get("skip_summaries", True)),
+        section_ids=section_ids,
+    )
+    return outlines, budget
 
 
 async def run_quiz_generation(db: AsyncSession, generation_run_id: UUID) -> None:
@@ -115,13 +200,14 @@ async def run_quiz_generation(db: AsyncSession, generation_run_id: UUID) -> None
         else:
             generation_mode = str(config.get("generation_mode") or "topic").strip().lower()
             if generation_mode == "coverage":
+                outlines, budget = await _precompute_coverage_inputs(db, config)
                 await coverage_pipeline.run_coverage_pipeline(
                     db=db,
                     run=run,
                     quiz=quiz,
                     config=config,
-                    outlines=None,
-                    budget=None,
+                    outlines=outlines,
+                    budget=budget,
                     kg_context=KGContext(),
                 )
             else:
