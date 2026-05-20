@@ -241,6 +241,12 @@ allow_indirect_imports = true
 ignore_imports = [
     "abridgeai.features.spaced_repetition.routers.learner -> abridgeai.features.spaced_repetition.queries",
     "abridgeai.features.spaced_repetition.routers.teacher -> abridgeai.features.spaced_repetition.queries",
+    # Sub-resource permission deps resolve child-id → course_id via ORM JOINs.
+    # No business logic — pure FK-chain resolution for the permission check.
+    "abridgeai.features.courses.routers._deps -> abridgeai.features.courses.queries.resolution",
+    # Lazy import inside function body to break circular dep at module load.
+    # Resolves user's primary org_id for the list-paths default filter.
+    "abridgeai.features.career_paths.routers.authoring -> abridgeai.features.career_paths.queries.published",
 ]
 
 [[tool.importlinter.contracts]]
@@ -273,6 +279,12 @@ ignore_imports = [
     # remediation services as a side-effect channel; no public API exists.
     "abridgeai.features.spaced_repetition.workers.scan_due_cards -> abridgeai.features.notifications.services.dispatch",
     "abridgeai.features.spaced_repetition.services.remediation -> abridgeai.features.notifications.services.dispatch",
+    # Courses queries JOIN cross-feature models for ORM-hydrated reads.
+    # These are read-only JOINs (no writes to foreign tables); the ORM
+    # approach replaces raw SQL that previously bypassed the linter.
+    "abridgeai.features.courses.queries.** -> abridgeai.features.access_control.models",
+    "abridgeai.features.courses.queries.** -> abridgeai.features.identity.models",
+    "abridgeai.features.courses.queries.** -> abridgeai.features.enrollments.models",
 ]
 
 [[tool.importlinter.contracts]]
