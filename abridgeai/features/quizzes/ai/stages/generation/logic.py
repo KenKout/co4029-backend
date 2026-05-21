@@ -42,6 +42,7 @@ async def generate_questions(
     db: AsyncSession,
     *,
     pipeline_run_id: UUID,
+    parent_run_id: UUID | None = None,
     previous_questions: list[str] | None = None,
     gateway: LLMGateway | None = None,
 ) -> list[GeneratedQuestion]:
@@ -109,7 +110,7 @@ async def generate_questions(
         db=db,
         stage_name=_STAGE_NAME,
         pipeline_run_id=pipeline_run_id,
-        parent_run_id=pipeline_run_id,
+        parent_run_id=parent_run_id,
     )
     return parse_generation_response(result.content_json)
 

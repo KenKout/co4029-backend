@@ -15,6 +15,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
+from abridgeai.features.quizzes.ai.pipelines._synthetic_outline import resolve_outline_inputs
+from abridgeai.features.quizzes.ai.pipelines._telemetry import log_validator_aborted_run
 from abridgeai.features.quizzes.ai.stages.dedup import discard_duplicates
 from abridgeai.features.quizzes.ai.stages.generation import generate_questions
 from abridgeai.features.quizzes.ai.stages.ideation import ideate_for_outline
@@ -83,7 +85,7 @@ async def run_full_pipeline(
     if not chunks:
         raise ValueError("Quiz pipeline aborted: retrieval produced zero chunks")
 
-    effective_outlines, effective_budget = _resolve_outline_inputs(
+    effective_outlines, effective_budget = resolve_outline_inputs(
         outlines, budget, chunks, template_target
     )
 
@@ -106,6 +108,7 @@ async def run_full_pipeline(
         kg_context=kg_context,
         db=db,
         pipeline_run_id=pipeline_run_id,
+        parent_run_id=run.id,
     )
     candidate_dicts: list[dict[str, Any]] = [c.model_dump() for c in candidates]
 
@@ -118,12 +121,20 @@ async def run_full_pipeline(
         questions=candidate_dicts,
         db=db,
         pipeline_run_id=pipeline_run_id,
+        audit_parent_run_id=run.id,
         config=config,
     )
     accepted, rejected, _ = apply_verdicts(candidate_dicts, verdicts)
 
     kept, drops = await discard_duplicates(db, quiz, accepted)
     if not kept:
+        log_validator_aborted_run(
+            candidates=candidate_dicts,
+            rejected=rejected,
+            drops=drops,
+            verdicts=verdicts,
+            log_prefix="quiz_pipeline_aborted",
+        )
         raise ValueError(
             "Quiz pipeline aborted: no questions survived "
             f"(generated={len(candidate_dicts)}, "
@@ -154,40 +165,6 @@ async def run_full_pipeline(
         }
     }
     return persisted
-
-
-def _resolve_outline_inputs(
-    outlines: list[Any] | None,
-    budget: dict[str, int] | None,
-    chunks: list[ChunkWithDistance],
-    template_target: int,
-) -> tuple[list[Any], dict[str, int]]:
-    if outlines and budget:
-        return outlines, budget
-    section_id = "synthetic-section"
-    chunk_ids = [str(chunk.chunk_id) for chunk in chunks]
-    section = _SyntheticSection(id=section_id, chunk_ids=chunk_ids)
-    return [_SyntheticOutline(sections=[section])], {section_id: template_target}
-
-
-class _SyntheticSection:
-    __slots__ = ("chunk_ids", "content_role", "depth", "id", "page_range", "preview", "title")
-
-    def __init__(self, *, id: str, chunk_ids: list[str]) -> None:  # noqa: A002
-        self.id = id
-        self.chunk_ids = chunk_ids
-        self.title = "Lesson material"
-        self.depth = 1
-        self.page_range = (1, 1)
-        self.content_role = "core"
-        self.preview = ""
-
-
-class _SyntheticOutline:
-    __slots__ = ("sections",)
-
-    def __init__(self, *, sections: list[_SyntheticSection]) -> None:
-        self.sections = sections
 
 
 __all__ = ["run_full_pipeline"]

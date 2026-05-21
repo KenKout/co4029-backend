@@ -46,6 +46,7 @@ async def validate_questions(
     *,
     pipeline_run_id: UUID | None = None,
     parent_run_id: UUID | None = None,
+    audit_parent_run_id: UUID | None = None,
     config: Mapping[str, Any] | None = None,
     gateway: LLMGateway | None = None,
 ) -> tuple[LLMResult, list[Verdict]]:
@@ -113,7 +114,7 @@ async def validate_questions(
         db=db,
         stage_name=VALIDATION_STAGE_NAME,
         pipeline_run_id=run_id,
-        parent_run_id=run_id,
+        parent_run_id=audit_parent_run_id,
     )
 
     payload = llm_result.content_json if isinstance(llm_result.content_json, dict) else {}

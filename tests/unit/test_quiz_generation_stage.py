@@ -110,6 +110,7 @@ async def test_generation_passes_audit_metadata() -> None:
     gateway = AsyncMock()
     gateway.generate_json = AsyncMock(return_value=_llm_result(_good_payload()))
     run_id = uuid4()
+    parent_id = uuid4()
 
     await generate_questions(
         title="Q",
@@ -119,6 +120,7 @@ async def test_generation_passes_audit_metadata() -> None:
         kg_context=None,
         db=AsyncMock(),
         pipeline_run_id=run_id,
+        parent_run_id=parent_id,
         gateway=gateway,
     )
 
@@ -127,7 +129,7 @@ async def test_generation_passes_audit_metadata() -> None:
     assert kwargs["role"] is LLMRole.GENERATION
     assert kwargs["stage_name"] == "generation"
     assert kwargs["pipeline_run_id"] == run_id
-    assert kwargs["parent_run_id"] == run_id
+    assert kwargs["parent_run_id"] == parent_id
     assert "Source context:" in kwargs["user_prompt"]
 
 
