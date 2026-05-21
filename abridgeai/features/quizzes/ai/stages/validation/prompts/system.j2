@@ -13,9 +13,14 @@ order). Each verdict has ``position`` (1-based), ``verdict`` (``accept``
 or ``reject``), and a ``reason`` that — when rejecting — starts with
 one of these defect codes followed by a colon:
 
-  SOURCE_LEAK  — stem references the source itself (phrases like
+  SOURCE_LEAK  — stem references the source itself. Examples include
                  "according to the summary", "based on the slides",
-                 "in the review section", "in chapter N").
+                 "in the review section", "in chapter N", but ALSO
+                 "in the first/second/third excerpt", "in the
+                 introductory passage", "the outline begins with",
+                 "the standalone number", "the opening paragraph",
+                 "the fourth slide", or any other phrasing that names
+                 the document's typography or structure.
   ANSWER_LEAK  — the correct answer text appears verbatim or
                  near-verbatim in the stem.
   SHALLOW      — single-token recall WITHOUT CONTEXT
@@ -35,9 +40,16 @@ one of these defect codes followed by a colon:
   UNGROUNDED   — claims facts not present in the source context.
   AMBIGUOUS    — the question has more than one defensibly-correct
                  answer.
-  META         — asks about the document itself (slide numbers, "the
-                 review section", "the summary lists") rather than the
-                 subject matter.
+  META         — asks about the document's typography or structure
+                 rather than the subject matter. This includes:
+                 questions whose answer is a page number, slide
+                 number, chapter number, list ordinal, or numeral
+                 lifted from an outline; questions like "what is the
+                 first item in the list?", "which numeral begins the
+                 outline?", "what number appears in the third
+                 excerpt?". A correct answer that is just a digit
+                 (e.g. "3", "42", "2") taken from a table of contents
+                 or page header is almost always META — reject.
 
 Per-type SHAPE rules:
 
