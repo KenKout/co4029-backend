@@ -1,19 +1,21 @@
 """Admin-surface data accessors for the access-control feature.
 
-INSERT flows use ``text()`` rather than ``db.add()`` because the ORM
-unit-of-work walks ``Base.metadata.sorted_tables`` to compute insertion
-order, which triggers cross-feature FK resolution against ``courses``
-(Phase 3) and ``users`` (:mod:`features.identity`). Same pattern is used
-by :mod:`abridgeai.features.access_control.policies` for its inline
-``courses`` SELECT. SELECTs do not trigger this resolution and continue
-using ``select()`` for type-safe row hydration.
+INSERT flows use :func:`sqlalchemy.insert` against the mapped class
+(e.g. ``insert(UserRoleAssignment).values(...)``) rather than
+``db.add()``. ``db.add()`` triggers the ORM unit-of-work which walks
+``Base.metadata.sorted_tables`` to compute insertion order, and that
+walk fails with :class:`NoReferencedTableError` whenever a
+cross-feature FK target (e.g. ``users``, ``courses``) hasn't been
+imported into ``Base.metadata`` yet — which is the common case in
+test setup and lazy-loaded surfaces. The Core-level ``insert()``
+construct skips the metadata walk entirely while still keeping the
+column references type-safe (no raw SQL strings).
 
 DELETE flows on :class:`SoftDeleteMixin` tables go through
 :func:`abridgeai.core.db.recursive_delete.soft_delete_cascade`. Raw
-``DELETE FROM`` would bypass the ``hard_delete_guard`` listener and erase
-the audit trail; ``soft_delete_cascade`` stamps ``deleted_at`` /
-``deleted_by`` and flushes via ``session.flush()`` (no ORM
-unit-of-work-driven INSERT order resolution).
+``DELETE FROM`` would bypass the ``hard_delete_guard`` listener and
+erase the audit trail; ``soft_delete_cascade`` stamps ``deleted_at`` /
+``deleted_by`` and flushes via ``session.flush()``.
 """
 
 from __future__ import annotations
@@ -21,7 +23,7 @@ from __future__ import annotations
 from datetime import datetime
 from uuid import UUID, uuid4
 
-from sqlalchemy import select, text
+from sqlalchemy import insert, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from abridgeai.core.db.recursive_delete import soft_delete_cascade
@@ -77,19 +79,6 @@ async def list_assignments_for_user(db: AsyncSession, user_id: UUID) -> list[Use
     return list(result.scalars().all())
 
 
-_INSERT_ASSIGNMENT_SQL = text(
-    """
-    INSERT INTO user_role_assignments
-        (id, user_id, role_id, scope_kind,
-         organization_id, org_unit_id, course_id,
-         granted_by, active_until)
-    VALUES (:id, :user_id, :role_id, :scope_kind,
-            :organization_id, :org_unit_id, :course_id,
-            :granted_by, :active_until)
-    """
-)
-
-
 async def insert_assignment(
     db: AsyncSession,
     *,
@@ -104,18 +93,17 @@ async def insert_assignment(
 ) -> UserRoleAssignment:
     new_id = uuid4()
     await db.execute(
-        _INSERT_ASSIGNMENT_SQL,
-        {
-            "id": new_id,
-            "user_id": user_id,
-            "role_id": role_id,
-            "scope_kind": scope_kind,
-            "organization_id": organization_id,
-            "org_unit_id": org_unit_id,
-            "course_id": course_id,
-            "granted_by": granted_by,
-            "active_until": active_until,
-        },
+        insert(UserRoleAssignment).values(
+            id=new_id,
+            user_id=user_id,
+            role_id=role_id,
+            scope_kind=scope_kind,
+            organization_id=organization_id,
+            org_unit_id=org_unit_id,
+            course_id=course_id,
+            granted_by=granted_by,
+            active_until=active_until,
+        )
     )
     await db.flush()
     fetched = await db.execute(select(UserRoleAssignment).where(UserRoleAssignment.id == new_id))
@@ -147,19 +135,6 @@ async def list_grants_for_user(db: AsyncSession, user_id: UUID) -> list[UserPerm
     return list(result.scalars().all())
 
 
-_INSERT_GRANT_SQL = text(
-    """
-    INSERT INTO user_permission_grants
-        (id, user_id, permission_id, scope_kind,
-         organization_id, org_unit_id, course_id,
-         granted_by, expires_at)
-    VALUES (:id, :user_id, :permission_id, :scope_kind,
-            :organization_id, :org_unit_id, :course_id,
-            :granted_by, :expires_at)
-    """
-)
-
-
 async def insert_grant(
     db: AsyncSession,
     *,
@@ -174,18 +149,17 @@ async def insert_grant(
 ) -> UserPermissionGrant:
     new_id = uuid4()
     await db.execute(
-        _INSERT_GRANT_SQL,
-        {
-            "id": new_id,
-            "user_id": user_id,
-            "permission_id": permission_id,
-            "scope_kind": scope_kind,
-            "organization_id": organization_id,
-            "org_unit_id": org_unit_id,
-            "course_id": course_id,
-            "granted_by": granted_by,
-            "expires_at": expires_at,
-        },
+        insert(UserPermissionGrant).values(
+            id=new_id,
+            user_id=user_id,
+            permission_id=permission_id,
+            scope_kind=scope_kind,
+            organization_id=organization_id,
+            org_unit_id=org_unit_id,
+            course_id=course_id,
+            granted_by=granted_by,
+            expires_at=expires_at,
+        )
     )
     await db.flush()
     fetched = await db.execute(select(UserPermissionGrant).where(UserPermissionGrant.id == new_id))
@@ -219,17 +193,6 @@ async def list_memberships_for_organization(
     return list(result.scalars().all())
 
 
-_INSERT_MEMBERSHIP_SQL = text(
-    """
-    INSERT INTO organization_memberships
-        (id, user_id, organization_id, org_unit_id,
-         status, student_code, employee_code)
-    VALUES (:id, :user_id, :organization_id, :org_unit_id,
-            :status, :student_code, :employee_code)
-    """
-)
-
-
 async def insert_membership(
     db: AsyncSession,
     *,
@@ -242,16 +205,15 @@ async def insert_membership(
 ) -> OrganizationMembership:
     new_id = uuid4()
     await db.execute(
-        _INSERT_MEMBERSHIP_SQL,
-        {
-            "id": new_id,
-            "user_id": user_id,
-            "organization_id": organization_id,
-            "org_unit_id": org_unit_id,
-            "status": status,
-            "student_code": student_code,
-            "employee_code": employee_code,
-        },
+        insert(OrganizationMembership).values(
+            id=new_id,
+            user_id=user_id,
+            organization_id=organization_id,
+            org_unit_id=org_unit_id,
+            status=status,
+            student_code=student_code,
+            employee_code=employee_code,
+        )
     )
     await db.flush()
     fetched = await db.execute(

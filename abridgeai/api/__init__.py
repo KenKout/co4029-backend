@@ -39,6 +39,9 @@ from abridgeai.core.config import get_settings
 from abridgeai.core.observability.audit_log import AuditLogMiddleware
 from abridgeai.core.security.headers import SecurityHeadersMiddleware
 from abridgeai.features.access_control.routers import admin_router as access_control_admin_router
+from abridgeai.features.access_control.routers import (
+    organizations_router as access_control_organizations_router,
+)
 from abridgeai.features.admin.routers import (
     ai_costs_router as admin_ai_costs_router,
 )
@@ -202,6 +205,7 @@ def create_app() -> FastAPI:
 
     # Phase 2 -- access control
     app.include_router(access_control_admin_router, prefix=API_V1_PREFIX)
+    app.include_router(access_control_organizations_router, prefix=API_V1_PREFIX)
 
     # Phase 3 -- courses
     app.include_router(courses_learner_router, prefix=API_V1_PREFIX)
