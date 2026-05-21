@@ -90,6 +90,7 @@ async def hybrid_search_for_anchor(
             # initial ordering before re-scoring anyway.
             distance=row.distance if row.distance is not None else 1.0 - row.fused_score,
             embedding=row.embedding,
+            metadata=row.metadata,
         )
         for row in fused
     ]

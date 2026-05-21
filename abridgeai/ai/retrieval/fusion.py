@@ -48,6 +48,7 @@ class FusedChunk:
     sources: frozenset[str]
     distance: float | None
     embedding: list[float] | None = None
+    metadata: dict[str, object] | None = None
 
 
 def reciprocal_rank_fusion(
@@ -106,6 +107,7 @@ def reciprocal_rank_fusion(
             sources=frozenset({"vector"}),
             distance=sem_hit.distance,
             embedding=sem_hit.embedding,
+            metadata=sem_hit.metadata,
         )
     for bm25_hit in bm25_hits:
         existing = metadata.get(bm25_hit.chunk_id)
@@ -120,6 +122,7 @@ def reciprocal_rank_fusion(
                 sources=frozenset({"bm25"}),
                 distance=None,
                 embedding=None,
+                metadata=bm25_hit.metadata,
             )
         else:
             metadata[bm25_hit.chunk_id] = FusedChunk(
@@ -132,6 +135,7 @@ def reciprocal_rank_fusion(
                 sources=existing.sources | frozenset({"bm25"}),
                 distance=existing.distance,
                 embedding=existing.embedding,
+                metadata=existing.metadata if existing.metadata is not None else bm25_hit.metadata,
             )
 
     # Compute fused scores.
@@ -153,6 +157,7 @@ def reciprocal_rank_fusion(
                 sources=base.sources,
                 distance=base.distance,
                 embedding=base.embedding,
+                metadata=base.metadata,
             )
         )
 

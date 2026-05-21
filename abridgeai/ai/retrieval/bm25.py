@@ -53,10 +53,11 @@ class ChunkWithRank:
     lesson_id: UUID | None
     content: str
     rank: float
+    metadata: dict[str, object] | None = None
 
 
 _SELECT_CLAUSE = (
-    "SELECT id, material_version_id, course_id, lesson_id, content, "
+    "SELECT id, material_version_id, course_id, lesson_id, content, metadata, "
     "       ts_rank_cd(content_tsv, query) AS rank "
     "FROM document_chunks, "
     "     plainto_tsquery('simple', :query_text) AS query "
@@ -129,6 +130,7 @@ async def bm25_search(
             lesson_id=row["lesson_id"],
             content=row["content"],
             rank=float(row["rank"]),
+            metadata=row.get("metadata") if isinstance(row.get("metadata"), dict) else None,
         )
         for row in rows
     ]

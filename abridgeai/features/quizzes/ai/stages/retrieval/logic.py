@@ -30,6 +30,7 @@ from uuid import UUID
 from abridgeai.ai.llm.embeddings import EmbeddingClient
 from abridgeai.ai.llm.voyage_rerank import VoyageRerankClient
 from abridgeai.ai.retrieval import ChunkWithDistance, mmr_diversify, vector_search
+from abridgeai.ai.retrieval.role_filter import split_by_role
 from abridgeai.core.config import Settings, get_settings
 from abridgeai.features.quizzes.ai.stages.retrieval.anchors import (
     MAX_ANCHORS,
@@ -196,8 +197,12 @@ async def retrieve_chunks(
             RERANK_POOL_CAP,
             max(final_top_k, final_top_k * RERANK_POOL_MULTIPLIER),
         )
+        # Cap summary/review/front_matter chunks before MMR (legacy
+        # ``_split_by_role`` parity) so cover slides + ToC + recap
+        # pages cannot soak up the rerank pool.
+        body_priority = split_by_role(merged, mmr_top_k)
         diversified = mmr_diversify(
-            merged,
+            body_priority,
             top_k=mmr_top_k,
             lambda_diversity=DEFAULT_MMR_LAMBDA,
         )
@@ -211,8 +216,10 @@ async def retrieve_chunks(
         )
         return reranked, primary_embedding, capped_anchors
 
+    # Same body-priority cap on the MMR-only path.
+    body_priority = split_by_role(merged, final_top_k)
     diversified = mmr_diversify(
-        merged,
+        body_priority,
         top_k=final_top_k,
         lambda_diversity=DEFAULT_MMR_LAMBDA,
     )
