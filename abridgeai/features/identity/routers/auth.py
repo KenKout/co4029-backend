@@ -20,7 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from abridgeai.core.db import get_db
 from abridgeai.core.exceptions import AppError, ForbiddenError, UnauthorizedError
-from abridgeai.core.security import CurrentUser, get_current_user
+from abridgeai.core.security import CurrentUser, get_current_user_pre_mfa
 from abridgeai.features.identity.schemas import (
     GoogleLoginResponse,
     RefreshTokenRequest,
@@ -101,10 +101,16 @@ async def refresh(
 
 @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
 async def logout(
-    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+    current_user: Annotated[CurrentUser, Depends(get_current_user_pre_mfa)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> Response:
-    """Revoke the bearer-token session. Idempotent."""
+    """Revoke the bearer-token session. Idempotent.
+
+    Uses ``get_current_user_pre_mfa`` so a user who is mid-MFA (fresh
+    post-login session, ``mfa_verified_at IS NULL``) can still log out
+    without first completing MFA — abandoning the login flow is the
+    whole point.
+    """
     await session_service.logout(db, session_id=current_user.session_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 

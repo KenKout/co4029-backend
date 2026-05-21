@@ -27,7 +27,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from abridgeai.core.db import get_db
 from abridgeai.core.exceptions import AppError, NotFoundError, UnauthorizedError
-from abridgeai.core.security import CurrentUser, get_current_user, utcnow
+from abridgeai.core.security import (
+    CurrentUser,
+    get_current_user,
+    get_current_user_pre_mfa,
+    utcnow,
+)
 from abridgeai.features.identity.models import AuthSession, User
 from abridgeai.features.identity.schemas import (
     MfaChallengeResponse,
@@ -110,14 +115,16 @@ async def verify_totp_enrollment(
 
 @router.post("/challenge", response_model=MfaChallengeResponse)
 async def create_mfa_challenge(
-    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+    current_user: Annotated[CurrentUser, Depends(get_current_user_pre_mfa)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> MfaChallengeResponse:
     """Issue a 5-minute MFA challenge for the current session.
 
     Used during step-up flows (e.g. before sensitive actions) and as the
     second leg of a login that flagged ``requires_mfa`` in
-    :class:`TokenResponse`.
+    :class:`TokenResponse`. Uses ``get_current_user_pre_mfa`` so a fresh
+    post-login session (``mfa_verified_at IS NULL``) can still mint a
+    challenge — that's the whole point of this endpoint.
     """
     user, session = await _load_principal(db, current_user)
     try:
@@ -129,7 +136,7 @@ async def create_mfa_challenge(
 @router.post("/verify", status_code=status.HTTP_204_NO_CONTENT)
 async def verify_mfa_challenge(
     payload: MfaVerifyRequest,
-    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+    current_user: Annotated[CurrentUser, Depends(get_current_user_pre_mfa)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> Response:
     """Consume a challenge using a TOTP code or single-use recovery code.
@@ -137,7 +144,8 @@ async def verify_mfa_challenge(
     On success the challenge row gets ``consumed_at`` stamped and
     ``session.mfa_verified_at`` is refreshed; callers can subsequently use
     ``/auth/me/mfa/recovery-codes/regenerate`` within the freshness
-    window.
+    window. Pre-MFA gate so the post-login session can complete the
+    second leg.
     """
     user, session = await _load_principal(db, current_user)
     try:

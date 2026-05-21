@@ -154,7 +154,14 @@ _RESOLVE_PRINCIPAL_SQL = text(
            u.status       AS user_status,
            s.id           AS session_id,
            s.revoked_at   AS revoked_at,
-           s.expires_at   AS expires_at
+           s.expires_at   AS expires_at,
+           s.mfa_verified_at AS mfa_verified_at,
+           EXISTS (
+               SELECT 1 FROM mfa_factors f
+               WHERE f.user_id = u.id
+                 AND f.verified_at IS NOT NULL
+                 AND f.disabled_at IS NULL
+           ) AS user_has_verified_mfa
     FROM users u
     JOIN auth_sessions s ON s.user_id = u.id
     WHERE s.id = :session_id
@@ -163,22 +170,36 @@ _RESOLVE_PRINCIPAL_SQL = text(
 )
 
 
-async def get_current_user(
+def _mfa_required() -> HTTPException:
+    """403 raised when the caller's session has not completed MFA but
+    the user has at least one verified MFA factor on record. Frontend
+    distinguishes this from generic 403 via ``error: 'mfa_required'``
+    and redirects to ``/login/mfa``.
+    """
+    return HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail={"error": "mfa_required"},
+    )
+
+
+async def _resolve_principal(
     request: Request,
-    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer_scheme)] = None,
-    db: Annotated[AsyncSession, Depends(get_db)] = None,  # type: ignore[assignment]
-) -> CurrentUser:
-    """Resolve the authenticated principal from a bearer token.
+    credentials: HTTPAuthorizationCredentials | None,
+    db: AsyncSession,
+) -> tuple[CurrentUser, bool, bool]:
+    """Shared core of bearer-token resolution.
 
-    Validates the JWT, confirms the referenced ``auth_sessions`` row is live
-    (not revoked, not expired) and the ``users`` row is active. Raises
-    ``HTTPException(401)`` on missing / invalid tokens or revoked sessions
-    and ``HTTPException(403)`` on inactive users.
+    Returns a tuple ``(current_user, mfa_pending, has_verified_mfa)``:
 
-    The returned :class:`CurrentUser` carries an EMPTY permission set --
-    permission resolution lives in ``features.access_control.policies`` so
-    this module avoids a cross-feature import and the import-linter
-    ``features-are-independent`` contract stays green.
+    - ``mfa_pending`` is ``True`` when the user owns a verified MFA
+      factor but the current session has not yet been marked
+      ``mfa_verified_at``.
+    - ``has_verified_mfa`` mirrors the underlying flag for callers that
+      want to gate an action ("reveal recovery codes only after MFA").
+
+    Raises ``HTTPException(401)`` for invalid tokens / dead sessions
+    and ``HTTPException(403)`` for inactive users. The caller decides
+    whether to additionally raise ``mfa_required``.
     """
     if credentials is None:
         raise _unauthorized()
@@ -206,6 +227,9 @@ async def get_current_user(
             detail={"error": "user_inactive"},
         )
 
+    has_verified_mfa = bool(row["user_has_verified_mfa"])
+    mfa_pending = has_verified_mfa and row["mfa_verified_at"] is None
+
     current = CurrentUser(user_id=row["user_id"], session_id=row["session_id"])
     request.state.user = current
     # Bind the actor for the rest of this request's contextvars.Context.
@@ -215,6 +239,53 @@ async def get_current_user(
     # propagates this UUID to PostgreSQL via ``set_config('app.actor_id',
     # ..., true)`` on every transaction begin.
     current_actor_var.set(current.user_id)
+    return current, mfa_pending, has_verified_mfa
+
+
+async def get_current_user(
+    request: Request,
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer_scheme)] = None,
+    db: Annotated[AsyncSession, Depends(get_db)] = None,  # type: ignore[assignment]
+) -> CurrentUser:
+    """Resolve the authenticated principal from a bearer token.
+
+    Validates the JWT, confirms the referenced ``auth_sessions`` row is live
+    (not revoked, not expired) and the ``users`` row is active. Raises
+    ``HTTPException(401)`` on missing / invalid tokens or revoked sessions
+    and ``HTTPException(403)`` on inactive users.
+
+    MFA gate: when the user has at least one verified MFA factor and the
+    current session has NOT yet completed MFA verification, this raises
+    ``HTTPException(403, {"error": "mfa_required"})``. The frontend
+    intercepts that response and redirects to ``/login/mfa``. Endpoints
+    that legitimately need to run before MFA (challenge / verify /
+    logout) depend on :func:`get_current_user_pre_mfa` instead.
+
+    The returned :class:`CurrentUser` carries an EMPTY permission set --
+    permission resolution lives in ``features.access_control.policies`` so
+    this module avoids a cross-feature import and the import-linter
+    ``features-are-independent`` contract stays green.
+    """
+    current, mfa_pending, _has_verified_mfa = await _resolve_principal(request, credentials, db)
+    if mfa_pending:
+        raise _mfa_required()
+    return current
+
+
+async def get_current_user_pre_mfa(
+    request: Request,
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer_scheme)] = None,
+    db: Annotated[AsyncSession, Depends(get_db)] = None,  # type: ignore[assignment]
+) -> CurrentUser:
+    """Same as :func:`get_current_user` but DOES NOT enforce the MFA gate.
+
+    Intended for the endpoints that must run while the session still has
+    ``mfa_verified_at IS NULL`` so the user can complete MFA — namely
+    ``POST /auth/mfa/challenge``, ``POST /auth/mfa/verify`` and
+    ``POST /auth/logout``. Every other endpoint should use
+    :func:`get_current_user`.
+    """
+    current, _mfa_pending, _has_verified_mfa = await _resolve_principal(request, credentials, db)
     return current
 
 
@@ -228,6 +299,7 @@ __all__ = [
     "encrypt_secret",
     "generate_token",
     "get_current_user",
+    "get_current_user_pre_mfa",
     "hash_secret",
     "utcnow",
     "verify_secret",
