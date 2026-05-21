@@ -120,6 +120,10 @@ async def _purge(session: AsyncSession, users_data: dict, roles_data: dict) -> N
         {"ids": user_ids},
     )
     await session.execute(
+        text("DELETE FROM organization_memberships WHERE user_id = ANY(:ids)"),
+        {"ids": user_ids},
+    )
+    await session.execute(
         text("DELETE FROM user_profiles WHERE user_id = ANY(:ids)"),
         {"ids": user_ids},
     )
@@ -218,6 +222,33 @@ async def _insert_assignments(
         )
 
 
+async def _insert_memberships(
+    session: AsyncSession,
+    *,
+    org_id: str,
+    user_ids: list[str],
+    org_unit_id: str | None,
+) -> None:
+    """Seed organization_memberships rows for the test cohort.
+
+    Non-admin users (student/teacher/hod/manager) belong to the test
+    organization via membership -- this is the source of truth that
+    ``access_control.api.public.get_user_primary_org`` consults to
+    resolve a user's primary org. The admin user (scope=global) is
+    intentionally excluded: platform admins have no implicit primary
+    org and must use endpoints with explicit org_id.
+    """
+    for uid in user_ids:
+        await session.execute(
+            text(
+                "INSERT INTO organization_memberships "
+                "(id, user_id, organization_id, org_unit_id, status) "
+                "VALUES (gen_random_uuid(), :user_id, :org_id, :org_unit_id, 'active')"
+            ),
+            {"user_id": uid, "org_id": org_id, "org_unit_id": org_unit_id},
+        )
+
+
 @pytest_asyncio.fixture(scope="session")
 async def seeded_users(test_engine: AsyncEngine) -> SeededUsers:
     users_data = _load_yaml("users.yaml")
@@ -229,6 +260,7 @@ async def seeded_users(test_engine: AsyncEngine) -> SeededUsers:
     admin_id = next(
         u["id"] for u in users_data["users"] if u["primary_email"].endswith("admin@abridgeai.local")
     )
+    member_user_ids = [u["id"] for u in users_data["users"] if u["id"] != admin_id]
 
     async with test_engine.begin() as conn:
         session = AsyncSession(bind=conn, expire_on_commit=False)
@@ -240,6 +272,12 @@ async def seeded_users(test_engine: AsyncEngine) -> SeededUsers:
         await _insert_course(session, course, org["id"], admin_id)
         role_id_by_code = await _lookup_role_ids(session, [r["code"] for r in roles_data["roles"]])
         await _insert_assignments(session, roles_data["assignments"], role_id_by_code)
+        await _insert_memberships(
+            session,
+            org_id=org["id"],
+            user_ids=member_user_ids,
+            org_unit_id=org_unit["id"],
+        )
         await session.flush()
 
     by_email = {u["primary_email"]: UUID(u["id"]) for u in users_data["users"]}
