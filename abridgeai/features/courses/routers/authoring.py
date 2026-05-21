@@ -414,6 +414,29 @@ async def delete_module_item(
     await db.commit()
 
 
+@router.get(
+    "/modules/{module_id}/lessons",
+    response_model=list[LessonAuthoring],
+)
+async def list_module_lessons_for_authoring(
+    module_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_MODULE)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> list[LessonAuthoring]:
+    """List all lessons under ``module_id`` (drafts included) for authoring.
+
+    Authoring sibling of the learner-facing ``GET /modules/{id}/lessons``
+    in :mod:`courses.routers.learner`: that endpoint filters to
+    published-only, which hides drafts from teachers building a quiz on
+    a yet-unpublished module. The FR-5 quiz generation panel needs the
+    full list, so this authoring variant skips the publish filter.
+    """
+    try:
+        return await authoring_service.list_authoring_lessons(db, module_id)
+    except NotFoundError as exc:
+        raise _not_found(str(exc)) from exc
+
+
 @router.post(
     "/modules/{module_id}/lessons",
     response_model=LessonAuthoring,

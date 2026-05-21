@@ -346,7 +346,7 @@ def test_router_metadata() -> None:
         ("/teacher/modules/{module_id}", ("PATCH",)),
         ("/teacher/modules/{module_id}/prerequisites", ("PUT",)),
         ("/teacher/modules/{module_id}/items/reorder", ("PUT",)),
-        ("/teacher/modules/{module_id}/lessons", ("POST",)),
+        ("/teacher/modules/{module_id}/lessons", ("GET", "POST")),
         ("/teacher/lessons/{lesson_id}", ("PATCH",)),
         ("/teacher/lessons/{lesson_id}/resources", ("POST",)),
         ("/teacher/lesson-resources/{resource_id}", ("DELETE",)),
@@ -518,6 +518,41 @@ async def test_post_lesson_auto_creates_module_item(
             {"m": scenario["module_a"], "l": new_lesson_id},
         )
         assert result.one().n == 1
+
+
+async def test_list_module_lessons_for_authoring_includes_drafts(
+    client: httpx.AsyncClient,
+    manager_bearer: str,
+    scenario: dict[str, uuid.UUID | str],
+) -> None:
+    """Authoring GET returns drafts (sibling of learner endpoint that publishes-only filters).
+
+    FR-5 quiz panel needs the full list when teacher is building a quiz on
+    a yet-unpublished module — see ``courses.routers.authoring``.
+    """
+    response = await client.get(
+        f"/api/v1/teacher/modules/{scenario['module_a']}/lessons",
+        headers={"Authorization": f"Bearer {manager_bearer}"},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert isinstance(body, list)
+    # The scenario fixture provisions draft lessons; learner endpoint would
+    # filter them out, authoring must surface them.
+    assert len(body) >= 1
+    for lesson in body:
+        assert lesson["module_id"] == str(scenario["module_a"])
+
+
+async def test_list_module_lessons_for_authoring_unknown_module_returns_404(
+    client: httpx.AsyncClient,
+    manager_bearer: str,
+) -> None:
+    response = await client.get(
+        f"/api/v1/teacher/modules/{uuid.uuid4()}/lessons",
+        headers={"Authorization": f"Bearer {manager_bearer}"},
+    )
+    assert response.status_code == 404
 
 
 async def test_reorder_module_items_no_unique_violation(
