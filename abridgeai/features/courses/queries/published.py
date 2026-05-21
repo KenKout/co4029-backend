@@ -333,15 +333,16 @@ async def list_published_course_outcomes(
 
 
 async def get_user_primary_organization_id(db: AsyncSession, user_id: UUID) -> UUID | None:
-    """Resolve the requesting user's organization for org-scoped catalog reads.
+    """Resolve the requesting user's primary organization for catalog scoping.
 
-    Delegates to :func:`access_control.api.public.get_user_primary_org`
-    so the cross-feature read goes through the canonical typed surface
-    (T31). ``scope_kind='global'`` is intentionally excluded by the
-    upstream surface — platform admins do not implicitly belong to one
-    org and must hit endpoints that accept an explicit org param.
-    Returns ``None`` for users with no scoped membership; the router
-    then treats the catalog as empty.
+    Delegates to :func:`access_control.api.public.get_user_primary_org`,
+    which now resolves via ``organization_memberships`` first (the
+    intended source of truth), falling back to org-scoped role
+    assignments for backwards compatibility. ``scope_kind='global'`` is
+    intentionally excluded by the upstream surface — platform admins do
+    not implicitly belong to one org and must hit endpoints that accept
+    an explicit org param. Returns ``None`` for users with no membership
+    AND no org-scoped role; the router then treats the catalog as empty.
     """
     org = await access_control_api.get_user_primary_org(db, user_id)
     return org.id if org is not None else None
