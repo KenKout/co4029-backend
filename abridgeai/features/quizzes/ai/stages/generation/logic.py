@@ -42,6 +42,7 @@ async def generate_questions(
     db: AsyncSession,
     *,
     pipeline_run_id: UUID,
+    parent_run_id: UUID | None = None,
     previous_questions: list[str] | None = None,
     gateway: LLMGateway | None = None,
 ) -> list[GeneratedQuestion]:
@@ -86,7 +87,7 @@ async def generate_questions(
         "prompts/user.j2",
         title=title,
         difficulty=config.get("difficulty") or "medium",
-        question_types=config.get("question_types") or ["mcq"],
+        question_types=config.get("question_types") or ["multiple_choice"],
         focus_topics=list(config.get("focus_topics") or []),
         avoid_topics=list(config.get("avoid_topics") or []),
         extra_instructions=(config.get("extra_instructions") or "").strip(),
@@ -109,7 +110,7 @@ async def generate_questions(
         db=db,
         stage_name=_STAGE_NAME,
         pipeline_run_id=pipeline_run_id,
-        parent_run_id=pipeline_run_id,
+        parent_run_id=parent_run_id,
     )
     return parse_generation_response(result.content_json)
 

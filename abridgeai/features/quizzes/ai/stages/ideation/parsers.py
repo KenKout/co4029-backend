@@ -26,6 +26,14 @@ from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from abridgeai.ai.llm.errors import ResponseFormatError
 
+_LEGACY_TYPE_ALIASES: dict[str, str] = {
+    "mcq": "multiple_choice",
+    "fill_in_the_blank": "fill_blank",
+    "true/false": "true_false",
+    "tf": "true_false",
+}
+_VALID_TYPES = frozenset({"multiple_choice", "true_false", "short_answer", "fill_blank"})
+
 
 class Template(BaseModel):
     """A single ideated quiz template.
@@ -38,11 +46,22 @@ class Template(BaseModel):
     position: int = 0
     section_id: str = Field(..., min_length=1)
     topic: str = ""
-    question_type: str = "mcq"
+    question_type: str = "multiple_choice"
     bloom_level: str = "understand"
     difficulty: str = "medium"
     source_chunk_ids: list[str] = Field(default_factory=list)
     rationale: str = ""
+
+    @field_validator("question_type", mode="before")
+    @classmethod
+    def _normalize_question_type(cls, value: Any) -> str:  # noqa: ANN401 -- raw LLM JSON
+        """Map legacy aliases (mcq / fill_in_the_blank / tf) onto DB
+        vocabulary; fall back to multiple_choice for unknown spellings."""
+        if not isinstance(value, str):
+            return "multiple_choice"
+        cleaned = value.strip().lower()
+        canonical = _LEGACY_TYPE_ALIASES.get(cleaned, cleaned)
+        return canonical if canonical in _VALID_TYPES else "multiple_choice"
 
     @field_validator("source_chunk_ids", mode="before")
     @classmethod

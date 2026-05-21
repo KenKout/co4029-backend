@@ -12,11 +12,14 @@ Avoid topics (REJECT any question that touches these):
 {% endfor %}{% endif %}
 
 Generated questions to judge:
-{% for question in questions %}Q{{ loop.index }}. {{ question.prompt_text }}
-  Options:
+{% for question in questions %}{% set qtype = question.get('question_type') or 'multiple_choice' %}Q{{ loop.index }}. [{{ qtype }}] {{ question.prompt_text }}
+  {% if qtype == 'multiple_choice' %}Options:
   {% for key, value in question.options.items() %}{{ key }}: {{ value }}
   {% endfor %}Correct: {{ question.correct_answer }}
-  Explanation: {{ question.explanation }}
+  {% elif qtype == 'true_false' %}Correct: {{ question.correct_answer }}
+  {% elif qtype == 'fill_blank' %}Correct (one entry per blank, in order): {{ question.correct_answer }}
+  {% else %}Correct: {{ question.correct_answer }}
+  {% endif %}Explanation: {{ question.explanation }}
 {% if not loop.last %}
 {% endif %}{% endfor %}
 

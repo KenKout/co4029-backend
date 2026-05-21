@@ -7,7 +7,10 @@ Target Bloom distribution: {{ bloom_distribution }}
 Generate exactly {{ template_count }} templates total.
 
 Per-section budget (sum equals total): {{ budget }}
-{% if focus_topics %}
+
+Allowed question types (pick from these for every template):
+{% for qt in question_types %}- {{ qt }}
+{% endfor %}{% if focus_topics %}
 
 Focus topics (distribute coverage across these; do not stray to unrelated topics):
 {% for topic in focus_topics %}- {{ topic }}
@@ -31,7 +34,7 @@ Return JSON in this shape:
       "position": 1,
       "section_id": "sec_abc",
       "topic": "What this template tests",
-      "question_type": "mcq",
+      "question_type": "multiple_choice",
       "bloom_level": "understand",
       "difficulty": "medium",
       "source_chunk_ids": ["uuid-from-section-abc"],

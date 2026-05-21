@@ -30,7 +30,7 @@ Extra teacher instructions:
 
 Question templates (produce one question per template, in order):
 {%- for tpl in templates %}
-{{ loop.index }}. [{{ tpl.bloom_level or 'understand' }}/{{ tpl.difficulty or 'medium' }}/{{ tpl.question_type or 'mcq' }}] {{ tpl.topic or '(no topic)' }}{% if tpl.section_id %} — section: {{ tpl.section_id }}{% endif %}{% if tpl.source_chunk_ids %} — source_chunk_ids: {{ tpl.source_chunk_ids }}{% endif %}
+{{ loop.index }}. [{{ tpl.bloom_level or 'understand' }}/{{ tpl.difficulty or 'medium' }}/{{ tpl.question_type or 'multiple_choice' }}] {{ tpl.topic or '(no topic)' }}{% if tpl.section_id %} — section: {{ tpl.section_id }}{% endif %}{% if tpl.source_chunk_ids %} — source_chunk_ids: {{ tpl.source_chunk_ids }}{% endif %}
 {%- endfor %}
 {%- endif %}
 {%- if previous_questions %}
@@ -44,17 +44,48 @@ Previously generated questions in this run (your new question MUST be conceptual
 Source context:
 {{ chunks_block }}
 
-Return JSON in this shape:
+Return JSON in this shape (one entry per template, in order, matching
+the template's ``question_type``):
 {
   "questions": [
     {
       "position": 1,
-      "question_type": "mcq",
+      "question_type": "multiple_choice",
       "question": "...",
       "options": {"A": "...", "B": "...", "C": "...", "D": "..."},
       "correct_answer": "B",
       "explanation": "...",
       "bloom_level": "understand",
+      "difficulty": "medium",
+      "source_refs": ["chunk uuid"]
+    },
+    {
+      "position": 2,
+      "question_type": "true_false",
+      "question": "Data warehouses are subject-oriented.",
+      "correct_answer": "True",
+      "explanation": "...",
+      "bloom_level": "understand",
+      "difficulty": "easy",
+      "source_refs": ["chunk uuid"]
+    },
+    {
+      "position": 3,
+      "question_type": "short_answer",
+      "question": "What architectural property describes a data warehouse storing historical snapshots indexed by time?",
+      "correct_answer": "time-variant",
+      "explanation": "...",
+      "bloom_level": "remember",
+      "difficulty": "easy",
+      "source_refs": ["chunk uuid"]
+    },
+    {
+      "position": 4,
+      "question_type": "fill_blank",
+      "question": "A data warehouse is ___, ___, time-variant, and ___.",
+      "correct_answer": ["subject-oriented", "integrated", "non-volatile"],
+      "explanation": "...",
+      "bloom_level": "remember",
       "difficulty": "medium",
       "source_refs": ["chunk uuid"]
     }

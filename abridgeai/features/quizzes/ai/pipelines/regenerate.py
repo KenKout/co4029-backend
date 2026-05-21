@@ -95,6 +95,7 @@ async def run_question_regeneration(
         kg_context=kg_context,
         db=db,
         pipeline_run_id=pipeline_run_id,
+        parent_run_id=run.id,
         previous_questions=previous_questions,
     )
     if not candidates:
@@ -108,6 +109,7 @@ async def run_question_regeneration(
         questions=candidate_dicts,
         db=db,
         pipeline_run_id=pipeline_run_id,
+        audit_parent_run_id=run.id,
         config=config,
     )
     accepted, rejected, _ = apply_verdicts(candidate_dicts, verdicts)

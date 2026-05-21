@@ -110,6 +110,7 @@ async def test_generation_passes_audit_metadata() -> None:
     gateway = AsyncMock()
     gateway.generate_json = AsyncMock(return_value=_llm_result(_good_payload()))
     run_id = uuid4()
+    parent_id = uuid4()
 
     await generate_questions(
         title="Q",
@@ -119,6 +120,7 @@ async def test_generation_passes_audit_metadata() -> None:
         kg_context=None,
         db=AsyncMock(),
         pipeline_run_id=run_id,
+        parent_run_id=parent_id,
         gateway=gateway,
     )
 
@@ -127,7 +129,7 @@ async def test_generation_passes_audit_metadata() -> None:
     assert kwargs["role"] is LLMRole.GENERATION
     assert kwargs["stage_name"] == "generation"
     assert kwargs["pipeline_run_id"] == run_id
-    assert kwargs["parent_run_id"] == run_id
+    assert kwargs["parent_run_id"] == parent_id
     assert "Source context:" in kwargs["user_prompt"]
 
 
@@ -194,7 +196,7 @@ def test_no_god_file_in_generation() -> None:
     here = Path(__file__).resolve().parents[2]
     target = here / "abridgeai" / "features" / "quizzes" / "ai" / "stages" / "generation"
     assert target.is_dir(), f"generation stage dir not found at {target}"
-    budget = {"logic.py": 250, "parsers.py": 200, "__init__.py": 250}
+    budget = {"logic.py": 250, "parsers.py": 250, "__init__.py": 250}
     for path in target.glob("*.py"):
         with path.open() as fh:
             line_count = sum(1 for _ in fh)

@@ -51,6 +51,7 @@ from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 
 from abridgeai.core.db import get_sessionmaker
+from abridgeai.features.quizzes.ai.pipelines._telemetry import log_validator_aborted_run
 from abridgeai.features.quizzes.ai.stages.dedup import discard_duplicates
 from abridgeai.features.quizzes.ai.stages.generation import generate_questions
 from abridgeai.features.quizzes.ai.stages.ideation import ideate_for_outline
@@ -157,6 +158,7 @@ async def run_coverage_pipeline(
                     kg_context=kg_context,
                     db=task_db,
                     pipeline_run_id=pipeline_run_id,
+                    parent_run_id=run.id,
                     previous_questions=None,
                 )
                 await task_db.commit()
@@ -198,6 +200,7 @@ async def run_coverage_pipeline(
         questions=questions,
         db=db,
         pipeline_run_id=pipeline_run_id,
+        audit_parent_run_id=run.id,
         config=config,
     )
     accepted, rejected, _reasons = apply_verdicts(questions, verdicts)
@@ -205,6 +208,13 @@ async def run_coverage_pipeline(
     # Step 5 — dedup against the existing quiz + within-batch.
     kept, drops = await discard_duplicates(db, quiz, accepted)
     if not kept:
+        log_validator_aborted_run(
+            candidates=questions,
+            rejected=rejected,
+            drops=drops,
+            verdicts=verdicts,
+            log_prefix="coverage_pipeline_aborted",
+        )
         raise ValueError(
             "coverage mode: no questions survived "
             f"(generated={len(questions)}, "

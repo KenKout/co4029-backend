@@ -1,0 +1,135 @@
+"""Question-type-aware grader.
+
+Centralises the answer-grading logic so the ``answer_attempt`` service
+stays small. Each question type has its own grader function returning a
+``GradeResult`` (``is_correct``, ``points_awarded``).
+
+Conventions
+-----------
+* MCQ + true_false: grade by looking up the selected option's
+  ``is_correct`` flag (the canonical answer). The legacy contract used
+  one ``selected_option_id`` per answer; we honour that and ignore the
+  multi-select list shape until the platform actually adds multi-select
+  questions.
+* short_answer: case-insensitive whitespace-normalised exact match
+  against ``original_generated_payload['correct_answer']``. Treats
+  hyphenated and unhyphenated variants as equivalent
+  ("time-variant" == "time variant").
+* fill_blank: positional list compare. Student's drag-drop slots are
+  serialised into ``answer_text`` as a JSON array; mismatches in length
+  fail outright.
+"""
+
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass
+from decimal import Decimal
+from typing import TYPE_CHECKING
+
+from abridgeai.features.quizzes.models import QuizQuestion, QuizQuestionOption
+
+if TYPE_CHECKING:
+    from uuid import UUID
+
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+
+@dataclass(frozen=True)
+class GradeResult:
+    is_correct: bool
+    points_awarded: Decimal
+
+
+_ZERO = GradeResult(is_correct=False, points_awarded=Decimal("0"))
+_ONE = GradeResult(is_correct=True, points_awarded=Decimal("1"))
+
+
+async def grade_answer(
+    db: AsyncSession,
+    *,
+    question_id: UUID,
+    selected_option_id: UUID | None,
+    answer_text: str | None,
+) -> GradeResult:
+    """Grade one answer against its question's canonical answer."""
+    question = await db.get(QuizQuestion, question_id)
+    if question is None:
+        return _ZERO
+
+    qtype = question.question_type
+    if qtype in {"multiple_choice", "true_false"}:
+        return await _grade_by_option(db, selected_option_id)
+    if qtype == "short_answer":
+        return _grade_short_answer(question, answer_text)
+    if qtype == "fill_blank":
+        return _grade_fill_blank(question, answer_text)
+    return _ZERO
+
+
+async def _grade_by_option(
+    db: AsyncSession, selected_option_id: UUID | None
+) -> GradeResult:
+    if selected_option_id is None:
+        return _ZERO
+    option = await db.get(QuizQuestionOption, selected_option_id)
+    if option is None:
+        return _ZERO
+    return _ONE if option.is_correct else _ZERO
+
+
+def _grade_short_answer(question: QuizQuestion, answer_text: str | None) -> GradeResult:
+    expected = _expected_short_answer(question)
+    if not expected or not answer_text:
+        return _ZERO
+    return _ONE if _normalize_text(answer_text) == _normalize_text(expected) else _ZERO
+
+
+def _grade_fill_blank(question: QuizQuestion, answer_text: str | None) -> GradeResult:
+    expected = _expected_fill_blank(question)
+    submitted = _parse_fill_blank_submission(answer_text)
+    if not expected or len(expected) != len(submitted):
+        return _ZERO
+    for sub, exp in zip(submitted, expected, strict=True):
+        if _normalize_text(sub) != _normalize_text(exp):
+            return _ZERO
+    return _ONE
+
+
+def _expected_short_answer(question: QuizQuestion) -> str | None:
+    payload = question.original_generated_payload or {}
+    expected = payload.get("correct_answer")
+    return expected if isinstance(expected, str) else None
+
+
+def _expected_fill_blank(question: QuizQuestion) -> list[str]:
+    payload = question.original_generated_payload or {}
+    blanks = payload.get("correct_answer")
+    if isinstance(blanks, list):
+        return [str(b) for b in blanks if isinstance(b, str)]
+    return []
+
+
+def _parse_fill_blank_submission(answer_text: str | None) -> list[str]:
+    """Decode the student's drag-drop submission.
+
+    The frontend serialises slot values as a JSON array (one entry per
+    blank). We accept a comma-separated string as a fallback so manual
+    API users / curl smoke tests still work.
+    """
+    if not answer_text:
+        return []
+    try:
+        parsed = json.loads(answer_text)
+    except (TypeError, ValueError):
+        return [piece.strip() for piece in answer_text.split(",") if piece.strip()]
+    if isinstance(parsed, list):
+        return [str(item) for item in parsed]
+    return []
+
+
+def _normalize_text(value: str) -> str:
+    return " ".join(value.replace("-", " ").lower().split())
+
+
+__all__ = ["GradeResult", "grade_answer"]

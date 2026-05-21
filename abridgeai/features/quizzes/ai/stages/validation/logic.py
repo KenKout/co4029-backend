@@ -46,6 +46,7 @@ async def validate_questions(
     *,
     pipeline_run_id: UUID | None = None,
     parent_run_id: UUID | None = None,
+    audit_parent_run_id: UUID | None = None,
     config: Mapping[str, Any] | None = None,
     gateway: LLMGateway | None = None,
 ) -> tuple[LLMResult, list[Verdict]]:
@@ -113,7 +114,7 @@ async def validate_questions(
         db=db,
         stage_name=VALIDATION_STAGE_NAME,
         pipeline_run_id=run_id,
-        parent_run_id=run_id,
+        parent_run_id=audit_parent_run_id,
     )
 
     payload = llm_result.content_json if isinstance(llm_result.content_json, dict) else {}
@@ -133,7 +134,15 @@ def _question_for_review(question: dict[str, Any]) -> dict[str, Any]:
 
     raw_options = question.get("options") or []
     options: dict[str, str] = {}
-    correct: str | None = question.get("correct_answer")
+    raw_correct = question.get("correct_answer")
+    correct: str | None = None
+    if isinstance(raw_correct, str):
+        correct = raw_correct
+    elif isinstance(raw_correct, list):
+        # fill_blank stores an ordered list of blanks; render
+        # semicolon-separated so the validator can read it without
+        # special casing JSON.
+        correct = "; ".join(str(item) for item in raw_correct)
 
     if isinstance(raw_options, list):
         for opt in raw_options:
@@ -148,6 +157,7 @@ def _question_for_review(question: dict[str, Any]) -> dict[str, Any]:
         options = {str(k): str(v) for k, v in raw_options.items()}
 
     return {
+        "question_type": question.get("question_type", "multiple_choice"),
         "prompt_text": question.get("prompt_text", ""),
         "options": options,
         "correct_answer": correct or "",

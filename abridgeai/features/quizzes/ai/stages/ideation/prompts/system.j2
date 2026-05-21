@@ -22,5 +22,11 @@ Hard rules:
       angle of the same chunk in its `topic` and `rationale`.
 - If `focus_topics` is non-empty, every template must touch one of them.
 - If `avoid_topics` is non-empty, no template may touch those topics.
+- ``question_type`` MUST be one of: ``multiple_choice``, ``true_false``,
+  ``short_answer``, ``fill_blank``. If the user prompt's ``allowed_types``
+  list is provided, every template's ``question_type`` MUST be drawn
+  from that list. Spread the requested types reasonably across the
+  templates (e.g. with two types and a budget of 6, aim for ~3 of each
+  rather than 6 of one).
 - All other rules from IDEATION_SYSTEM_PROMPT apply (anti-leak, no
   meta-questions about the source).
