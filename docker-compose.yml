@@ -46,7 +46,7 @@ services:
       GARAGE_DEFAULT_SECRET_KEY: ${AWS_SECRET_ACCESS_KEY:-1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef}
       GARAGE_DEFAULT_BUCKET: ${S3_BUCKET_NAME:-abridgeai-local}
     ports:
-      - "3900:3900"
+      - "3910:3900"
     volumes:
       - ./garage.toml:/etc/garage.toml:ro
       - abridgeai_garage_data:/var/lib/garage
