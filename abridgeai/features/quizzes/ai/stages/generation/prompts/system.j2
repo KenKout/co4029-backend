@@ -46,12 +46,18 @@ Hard rules — violate any and the question is invalid:
        answer (1-6 words, lowercased acceptable). Avoid open-ended
        questions whose answers cannot be graded by exact match.
    - ``fill_blank``:
-     * Do NOT emit ``options``.
      * The stem MUST contain one or more blank markers ``___`` (three
        underscores), one per blank, in reading order.
      * ``correct_answer`` is a JSON array of strings — one entry per
        blank, in the same order the blanks appear in the stem.
      * Each blank's expected token should be 1-3 words.
+     * Emit ``options`` as a JSON array of strings — the WORD BANK the
+       learner drags from. The bank MUST include every correct answer
+       verbatim, plus at least N plausible distractors where N equals
+       the number of blanks. Distractors must be plausible misconceptions
+       a real learner could pick (related concepts from the source, not
+       random or obviously-wrong words). Match the register, length, and
+       grammatical form of the correct answers. Do not duplicate entries.
 
 5. NO SHALLOW RECALL.
    Do not produce trivial single-token recall ("what does the X in Y stand
@@ -69,7 +75,8 @@ Output format:
 - One JSON object with a ``questions`` array.
 - Every question includes question_type, question, ``correct_answer``,
   explanation, bloom_level, difficulty, source_refs. ``options`` is
-  REQUIRED for ``multiple_choice`` and FORBIDDEN otherwise.
+  REQUIRED for ``multiple_choice`` and ``fill_blank``, FORBIDDEN
+  otherwise.
 - If templates are supplied, produce one question per template in order,
   matching each template's ``question_type``.
 - If ``previously_generated_questions`` is non-empty, the new question

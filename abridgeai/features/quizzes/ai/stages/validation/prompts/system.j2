@@ -44,8 +44,9 @@ Per-type SHAPE rules:
 * ``fill_blank``: the stem must contain at least one ``___`` (three
   underscores) blank marker. ``correct_answer`` must be a non-empty
   list of strings whose length equals the number of blanks in the
-  stem. The ``options`` field is intentionally absent or empty — do
-  NOT reject for "missing options".
+  stem. The ``options`` field is the drag-and-drop word bank — it
+  MUST contain every correct answer verbatim, plus at least one
+  distractor.
 
 Per-type AMBIGUOUS guidance:
 

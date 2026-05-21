@@ -192,6 +192,113 @@ def test_parser_handles_malformed_options() -> None:
     assert correct[0].option_key == "B"
 
 
+def test_parser_emits_word_bank_for_fill_blank() -> None:
+    """fill_blank questions ship a drag-and-drop word bank as ``options``.
+
+    Each correct answer must be present verbatim and flagged
+    ``is_correct=True``; distractors must be flagged ``is_correct=False``;
+    keys + positions must satisfy the ``quiz_question_options``
+    UNIQUE(question_id, option_key) and UNIQUE(question_id, position)
+    constraints (option_key fits VARCHAR(5)).
+    """
+    payload: dict[str, object] = {
+        "questions": [
+            {
+                "question": "A data warehouse is ___, ___, time-variant, and ___.",
+                "question_type": "fill_blank",
+                "correct_answer": ["subject-oriented", "integrated", "non-volatile"],
+                "options": [
+                    "subject-oriented",
+                    "integrated",
+                    "non-volatile",
+                    "transactional",
+                    "operational",
+                ],
+                "explanation": "Inmon's four-property definition.",
+                "bloom_level": "remember",
+                "difficulty": "medium",
+            }
+        ]
+    }
+    parsed = parse_generation_response(payload)
+    assert len(parsed) == 1
+    q = parsed[0]
+    assert q.question_type == "fill_blank"
+    assert len(q.options) == 5
+    correct_texts = {opt.option_text for opt in q.options if opt.is_correct}
+    assert correct_texts == {"subject-oriented", "integrated", "non-volatile"}
+    distractor_texts = {opt.option_text for opt in q.options if not opt.is_correct}
+    assert distractor_texts == {"transactional", "operational"}
+    keys = [opt.option_key for opt in q.options]
+    positions = [opt.position for opt in q.options]
+    assert keys == ["O01", "O02", "O03", "O04", "O05"]
+    assert positions == [1, 2, 3, 4, 5]
+    assert all(len(k) <= 5 for k in keys)
+
+
+def test_parser_rejects_fill_blank_without_distractor() -> None:
+    """A bank with only correct answers gives the answer away — reject."""
+    payload: dict[str, object] = {
+        "questions": [
+            {
+                "question": "A data warehouse is ___ updatable.",
+                "question_type": "fill_blank",
+                "correct_answer": ["non"],
+                "options": ["non"],
+                "explanation": "x",
+                "bloom_level": "remember",
+                "difficulty": "easy",
+            }
+        ]
+    }
+    assert parse_generation_response(payload) == []
+
+
+def test_parser_rejects_fill_blank_without_options() -> None:
+    """Missing word bank means the FE has nothing to render — reject."""
+    payload: dict[str, object] = {
+        "questions": [
+            {
+                "question": "A data warehouse is ___ updatable.",
+                "question_type": "fill_blank",
+                "correct_answer": ["non"],
+                "explanation": "x",
+                "bloom_level": "remember",
+                "difficulty": "easy",
+            }
+        ]
+    }
+    assert parse_generation_response(payload) == []
+
+
+def test_parser_backfills_missing_correct_answer_into_bank() -> None:
+    """If the LLM forgets to put a correct answer in ``options``, the
+    parser prepends it so the bank still contains the right answer
+    (the validator can still reject on quality grounds, but we don't
+    drop the question outright).
+    """
+    payload: dict[str, object] = {
+        "questions": [
+            {
+                "question": "A data warehouse is ___ updatable.",
+                "question_type": "fill_blank",
+                "correct_answer": ["non"],
+                "options": ["always", "sometimes", "never"],
+                "explanation": "x",
+                "bloom_level": "remember",
+                "difficulty": "easy",
+            }
+        ]
+    }
+    parsed = parse_generation_response(payload)
+    assert len(parsed) == 1
+    texts = [opt.option_text for opt in parsed[0].options]
+    assert "non" in texts
+    correct = [opt for opt in parsed[0].options if opt.is_correct]
+    assert len(correct) == 1
+    assert correct[0].option_text == "non"
+
+
 def test_no_god_file_in_generation() -> None:
     here = Path(__file__).resolve().parents[2]
     target = here / "abridgeai" / "features" / "quizzes" / "ai" / "stages" / "generation"

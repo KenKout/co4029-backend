@@ -38,6 +38,33 @@ def validate_fill_blank(question: GeneratedQuestion) -> None:
         raise ValueError("fill_blank requires correct_answer as a non-empty list")
     if not all(isinstance(b, str) and b.strip() for b in blanks):
         raise ValueError("fill_blank correct_answer entries must be non-empty strings")
+    # Word-bank invariants. Every correct answer MUST be present
+    # verbatim (case-insensitive) so the learner can drag it into a
+    # slot. The bank MUST also include at least one distractor — a
+    # bank consisting only of correct answers gives the answer away.
+    bank_texts = [opt.option_text for opt in question.options]
+    if not bank_texts:
+        raise ValueError("fill_blank requires a non-empty options word bank")
+    bank_lower = {text.lower() for text in bank_texts}
+    correct_lower = {b.lower() for b in blanks}
+    missing = correct_lower - bank_lower
+    if missing:
+        raise ValueError(
+            "fill_blank options word bank is missing correct answers: "
+            f"{sorted(missing)}"
+        )
+    correct_count = sum(1 for opt in question.options if opt.is_correct)
+    if correct_count != len(correct_lower):
+        raise ValueError(
+            "fill_blank options must mark every distinct correct answer "
+            "as is_correct=True exactly once"
+        )
+    distractor_count = len(question.options) - correct_count
+    if distractor_count < 1:
+        raise ValueError(
+            "fill_blank options word bank must include at least one "
+            "distractor in addition to the correct answers"
+        )
 
 
 def validate_short_answer(question: GeneratedQuestion) -> None:
