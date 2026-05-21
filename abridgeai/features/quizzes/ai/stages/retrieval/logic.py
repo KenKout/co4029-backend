@@ -9,28 +9,49 @@ they only orchestrate it. Audit threading goes through
 ``EmbeddingClient.embed_query`` (T2.4): every embedding call carries
 ``pipeline_run_id`` so ``ai_model_calls`` rows roll up to the parent
 run.
+
+Phase 4 — contextual rerank
+---------------------------
+When ``settings.voyage_api_key`` is set, the post-MMR pool is reranked
+by Voyage rerank-2.5 (cross-encoder) before being capped at
+``final_top_k``. Cross-encoder logic lives in the sibling
+``rerank.py`` module; this orchestrator only decides whether to call
+it. The reranker is a graceful enhancement: when the key is unset OR
+the call fails, retrieval falls back to the MMR-only path so quiz
+generation never blocks on the rerank provider.
 """
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from abridgeai.ai.llm.embeddings import EmbeddingClient
+from abridgeai.ai.llm.voyage_rerank import VoyageRerankClient
 from abridgeai.ai.retrieval import ChunkWithDistance, mmr_diversify, vector_search
+from abridgeai.core.config import Settings, get_settings
 from abridgeai.features.quizzes.ai.stages.retrieval.anchors import (
     MAX_ANCHORS,
     build_query_anchors,
 )
+from abridgeai.features.quizzes.ai.stages.retrieval.rerank import rerank_pool
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
     from abridgeai.features.quizzes.models import Quiz
 
+logger = logging.getLogger(__name__)
+
 DEFAULT_PER_ANCHOR_TOP_K = 20
 DEFAULT_FINAL_TOP_K = 12
 DEFAULT_MMR_LAMBDA = 0.5
+
+# When rerank is enabled we widen MMR output so the cross-encoder has a
+# meaningful pool to score, then collapse back to ``final_top_k``.
+RERANK_POOL_MULTIPLIER = 3
+RERANK_POOL_CAP = 30
 
 
 async def retrieve_chunks(
@@ -45,6 +66,8 @@ async def retrieve_chunks(
     per_anchor_top_k: int = DEFAULT_PER_ANCHOR_TOP_K,
     final_top_k: int = DEFAULT_FINAL_TOP_K,
     embedding_client: EmbeddingClient | None = None,
+    rerank_client: VoyageRerankClient | None = None,
+    settings: Settings | None = None,
 ) -> tuple[list[ChunkWithDistance], list[float], list[str]]:
     """Multi-anchor retrieval composing vector_search + MMR.
 
@@ -142,6 +165,39 @@ async def retrieve_chunks(
         return [], primary_embedding, capped_anchors
 
     merged = sorted(pool.values(), key=lambda c: c.distance)
+
+    # Resolve rerank knob: caller may inject a stub client (test seam) OR
+    # let us read settings. When no key is present, skip — MMR-only path.
+    active_settings = settings or get_settings()
+    voyage_key = (
+        active_settings.voyage_api_key.get_secret_value()
+        if active_settings.voyage_api_key is not None
+        else None
+    )
+    rerank_enabled = rerank_client is not None or bool(voyage_key)
+
+    if rerank_enabled:
+        # Widen MMR output so the cross-encoder has a meaningful pool to
+        # score, then collapse back to ``final_top_k`` after rerank.
+        mmr_top_k = min(
+            RERANK_POOL_CAP,
+            max(final_top_k, final_top_k * RERANK_POOL_MULTIPLIER),
+        )
+        diversified = mmr_diversify(
+            merged,
+            top_k=mmr_top_k,
+            lambda_diversity=DEFAULT_MMR_LAMBDA,
+        )
+        reranked = await rerank_pool(
+            diversified,
+            anchor=capped_anchors[0],
+            final_top_k=final_top_k,
+            client=rerank_client,
+            settings=active_settings,
+            voyage_key=voyage_key,
+        )
+        return reranked, primary_embedding, capped_anchors
+
     diversified = mmr_diversify(
         merged,
         top_k=final_top_k,
