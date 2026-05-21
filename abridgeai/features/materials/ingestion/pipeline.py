@@ -299,8 +299,20 @@ async def _persist_chunks(
         )
 
     rows: list[DocumentChunk] = []
+    zero_vector_indices: list[int] = []
     for raw, embedding in zip(raw_chunks, embeddings, strict=True):
         content_hash = hashlib.sha256(raw.content.encode("utf-8")).hexdigest()
+        # Detect zero-vector embeddings (silent provider failure mode —
+        # the LAN gateway has been observed returning all-zero arrays
+        # on transient backend hiccups). Persisting these as NULL was
+        # the original bug in this module: vector_search filters
+        # ``WHERE embedding IS NOT NULL`` so a NULL row is invisible
+        # to retrieval, and the quiz pipeline silently runs on BM25
+        # scraps and hallucinates ungrounded questions. Fail loudly
+        # instead so reprocess can fix it on the next attempt.
+        if not any(v != 0.0 for v in embedding):
+            zero_vector_indices.append(raw.chunk_index)
+            continue
         rows.append(
             DocumentChunk(
                 course_id=ctx.course_id,
@@ -311,10 +323,20 @@ async def _persist_chunks(
                 chunk_type=ctx.material.material_type,
                 content=raw.content,
                 metadata_json=_build_chunk_metadata(raw, ctx=ctx),
-                embedding=embedding if any(v != 0.0 for v in embedding) else None,
+                embedding=embedding,
                 content_hash=content_hash,
             )
         )
+
+    if zero_vector_indices:
+        raise RuntimeError(
+            f"embedding provider returned zero vectors for chunks "
+            f"{zero_vector_indices} of material_version {ctx.version.id}; "
+            f"refusing to persist NULL embeddings (vector_search filters "
+            f"NULL rows, leaving downstream quiz/RAG pipelines with no "
+            f"retrievable content). Reprocess to retry."
+        )
+
     db.add_all(rows)
     await db.flush()
     return [
