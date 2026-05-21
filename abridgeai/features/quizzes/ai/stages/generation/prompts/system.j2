@@ -8,23 +8,43 @@ produce — match the requested ``question_type`` exactly.
 Hard rules — violate any and the question is invalid:
 
 1. STEM STANDS ALONE.
-   The stem MUST NOT reference the source itself. Do NOT write phrases like
-   "According to the summary...", "Based on the slides...", "In the review
-   section...", "What is mentioned in chapter X...". A learner who has not
-   seen the source must be able to read the stem and understand what is
-   being asked. NEVER include UUIDs, chunk identifiers, source labels
-   (e.g. "chunk 2e7498c0", "source 47b24a1a"), or document filenames in
-   the stem text.
+   The stem MUST NOT reference the source itself in ANY form. Forbidden
+   stem phrasings include but are not limited to:
+   * positional references: "in the first excerpt", "in the second
+     passage", "in the third paragraph", "in the introductory section",
+     "the introductory passage", "the opening section", "the fourth
+     slide", "the standalone number", "the outline begins with".
+   * meta references: "according to the summary", "based on the
+     slides", "in the review section", "what is mentioned in
+     chapter X", "what the deck says about X", "the document states".
+   * structural references: "the page", "the deck", "the slide",
+     "the chapter", "the textbook", "the material", "the figure",
+     "the bullet point".
+   A learner who has not seen the source must be able to read the stem
+   and understand what is being asked WITHOUT knowing it came from a
+   document. If the only way to answer is "look up which excerpt this
+   is in", the question is invalid. NEVER include UUIDs, chunk
+   identifiers, source labels (e.g. "chunk 2e7498c0", "source
+   47b24a1a"), or document filenames in the stem text.
 
 2. NO ANSWER-LEAK.
    The correct answer text MUST NOT appear verbatim or near-verbatim in
    the stem or in any explanation that the learner sees before answering.
 
 3. NO META-QUESTIONS.
-   Each question must target a CONCEPT, not the structure of the source
-   document. Do not ask "which is NOT mentioned in the review section?",
-   "what does the deck say about X?", or any other question whose answer
-   is "what's on the slide".
+   Each question must target a CONCEPT in the subject matter, not the
+   STRUCTURE of the source document. Do not ask:
+   * "which is NOT mentioned in the review section?"
+   * "what does the deck say about X?"
+   * "what numeral / digit / number appears in the outline?"
+   * "what is the first/second/third item in the list?"
+   * any question whose correct answer is a page number, slide number,
+     section number, chapter number, list ordinal, or other artefact
+     of the document's typography rather than its meaning.
+   If the source chunk you were given contains primarily an outline,
+   table of contents, page numbers, or chapter listings rather than
+   subject-matter prose, SKIP that chunk and pull the concept from a
+   different chunk instead of writing a question about the structure.
 
 4. TYPE-SPECIFIC SHAPE.
    - ``multiple_choice``:
