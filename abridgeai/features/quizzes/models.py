@@ -254,6 +254,11 @@ class QuizQuestion(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftDele
         JSONB, nullable=False, server_default=text("'[]'::jsonb")
     )
     original_generated_payload: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    imported_from_question_id: Mapped[uuid.UUID | None] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("quiz_questions.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     reviewed_by: Mapped[uuid.UUID | None] = mapped_column(
         PGUUID(as_uuid=True),
         ForeignKey("users.id", ondelete="SET NULL"),

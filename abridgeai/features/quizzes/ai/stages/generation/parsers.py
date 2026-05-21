@@ -128,7 +128,26 @@ def question_for_review(question: GeneratedQuestion | dict[str, Any]) -> dict[st
     right shape rules per type. For non-MCQ questions we surface the
     expected answer text/list so the validator can judge groundedness.
     """
-    data = question.model_dump() if isinstance(question, GeneratedQuestion) else question
+    data: dict[str, Any]
+    if isinstance(question, dict):
+        data = question
+    elif hasattr(question, "model_dump"):
+        data = question.model_dump()
+    else:
+        # Fallback for duck-typed candidate objects used in tests — read
+        # their attributes directly.
+        data = {
+            "prompt_text": getattr(question, "prompt_text", None),
+            "question_type": getattr(question, "question_type", None),
+            "options": getattr(question, "options", None),
+            "explanation": getattr(question, "explanation", None),
+            "bloom_level": getattr(question, "bloom_level", None),
+            "difficulty": getattr(question, "difficulty", None),
+            "source_refs": getattr(question, "source_refs", None),
+            "original_generated_payload": getattr(
+                question, "original_generated_payload", None
+            ),
+        }
     options = data.get("options") or []
     options_dict: dict[str, str] = {}
     correct: str | None = None

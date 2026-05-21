@@ -29,6 +29,10 @@ from abridgeai.features.quizzes.schemas.authoring import (
     QuizQuestionAuthoring,
     QuizQuestionOptionAuthoring,
 )
+from abridgeai.features.quizzes.schemas.bank import (
+    QuestionBankEntry,
+    QuestionBankImportRequest,
+)
 from abridgeai.features.quizzes.schemas.public import (
     QuestionTypeLiteral,
     QuizForTakingPublic,
@@ -50,6 +54,8 @@ __all__ = [
     "CoverageOptions",
     "GenerationMode",
     "GenerationRunStatus",
+    "QuestionBankEntry",
+    "QuestionBankImportRequest",
     "QuestionRegenerationRequest",
     "QuestionType",
     "QuestionTypeLiteral",

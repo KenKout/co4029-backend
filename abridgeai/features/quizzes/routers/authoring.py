@@ -50,13 +50,20 @@ from abridgeai.features.quizzes.routers._deps import (
     require_quiz_authoring_access,
 )
 from abridgeai.features.quizzes.schemas import (
+    QuestionBankEntry,
+    QuestionBankImportRequest,
     QuizAuthoring,
     QuizForAuthoringPublic,
     QuizGenerationRequest,
     QuizGenerationRunRead,
     QuizQuestionAuthoring,
 )
-from abridgeai.features.quizzes.services import authoring as authoring_service
+from abridgeai.features.quizzes.services import (
+    authoring as authoring_service,
+)
+from abridgeai.features.quizzes.services import (
+    question_bank as question_bank_service,
+)
 from abridgeai.features.quizzes.services.authoring import QuizPublishValidationError
 
 router = APIRouter(prefix="/teacher", tags=["quizzes-authoring"])
@@ -442,6 +449,85 @@ async def regenerate_question(
     except NotFoundError as exc:
         raise _not_found("quiz_question", question_id) from exc
     return _generation_run_view(run, quiz_id)
+
+
+@router.get(
+    "/courses/{course_id}/question-bank",
+    response_model=list[QuestionBankEntry],
+)
+async def list_question_bank(  # noqa: PLR0913 -- filters mirror service signature
+    course_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_COURSE_UPDATE)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    module_id: UUID | None = None,
+    lesson_id: UUID | None = None,
+    question_type: str | None = None,
+    bloom_level: str | None = None,
+    difficulty: str | None = None,
+    review_status: str | None = "approved",
+    search: str | None = None,
+    exclude_quiz_id: UUID | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> list[QuestionBankEntry]:
+    """Browse authored questions across the course for cross-quiz reuse.
+
+    Defaults to ``review_status='approved'`` so only vetted questions
+    surface; pass ``review_status=`` (empty) to widen. ``exclude_quiz_id``
+    is convenient for the modal launched from a target quiz so its own
+    questions don't appear in the bank list.
+    """
+    del current_user  # permission already enforced by Depends
+    try:
+        rows = await question_bank_service.list_bank_entries(
+            db,
+            course_id=course_id,
+            module_id=module_id,
+            lesson_id=lesson_id,
+            question_type=question_type,
+            bloom_level=bloom_level,
+            difficulty=difficulty,
+            review_status=review_status if review_status else None,
+            search=search,
+            exclude_quiz_id=exclude_quiz_id,
+            limit=limit,
+            offset=offset,
+        )
+    except AppError as exc:
+        raise _bad_request(str(exc)) from exc
+    return [QuestionBankEntry.model_validate(row) for row in rows]
+
+
+@router.post(
+    "/quizzes/{quiz_id}/questions/import",
+    response_model=list[QuizQuestionAuthoring],
+    status_code=status.HTTP_201_CREATED,
+)
+async def import_questions_from_bank(
+    quiz_id: UUID,
+    payload: QuestionBankImportRequest,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_QUIZ)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> list[QuizQuestionAuthoring]:
+    """Clone bank questions into ``quiz_id``.
+
+    Each clone has a fresh id, ``review_status='pending'``, and an
+    ``imported_from_question_id`` back-pointer. Options are cloned in
+    place. Source questions must live in the same course as the target.
+    """
+    try:
+        cloned = await question_bank_service.import_questions(
+            db,
+            target_quiz_id=quiz_id,
+            source_question_ids=payload.source_question_ids,
+            actor=current_user,
+        )
+    except NotFoundError as exc:
+        raise _not_found("quiz_question", quiz_id) from exc
+    except AppError as exc:
+        raise _bad_request(str(exc)) from exc
+    await db.commit()
+    return [QuizQuestionAuthoring.model_validate(question) for question in cloned]
 
 
 class _AttrShim:

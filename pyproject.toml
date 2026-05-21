@@ -204,6 +204,7 @@ ignore_imports = [
     "abridgeai.features.quizzes.services.taking -> sqlalchemy",
     "abridgeai.features.quizzes.services.grader -> sqlalchemy",
     "abridgeai.features.quizzes.services.generation -> sqlalchemy",
+    "abridgeai.features.quizzes.services.question_bank -> sqlalchemy",
     "abridgeai.features.interviews.services.authoring -> sqlalchemy",
     "abridgeai.features.interviews.services.taking -> sqlalchemy",
     "abridgeai.features.interviews.services.evaluation -> sqlalchemy",
@@ -294,6 +295,10 @@ ignore_imports = [
     # router (lesson is a courses-feature concept). Cross-feature import
     # is one-way: quizzes' outline builder hydrates from materials.
     "abridgeai.features.courses.routers.authoring -> abridgeai.features.quizzes.ai.outline",
+    # Question bank service joins courses.Module to surface the parent
+    # module title alongside each bank entry. Read-only ORM read; the
+    # service never writes courses tables.
+    "abridgeai.features.quizzes.services.question_bank -> abridgeai.features.courses.models",
 ]
 
 [[tool.importlinter.contracts]]
