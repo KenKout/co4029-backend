@@ -25,7 +25,11 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from abridgeai.core.db import get_db
-from abridgeai.core.security import CurrentUser, get_current_user
+from abridgeai.core.security import (
+    CurrentUser,
+    get_current_user,
+    get_current_user_pre_mfa,
+)
 from abridgeai.features.access_control.api import public as access_control_api
 from abridgeai.features.access_control.services import (
     get_effective_permissions,
@@ -62,9 +66,16 @@ async def _load_user(db: AsyncSession, current_user: CurrentUser) -> User:
 
 @router.get("", response_model=UserRead)
 async def read_me(
-    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+    current_user: Annotated[CurrentUser, Depends(get_current_user_pre_mfa)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> UserRead:
+    """Return the signed-in user's identity.
+
+    Uses ``get_current_user_pre_mfa`` so the SPA can hydrate basic
+    identity (name, avatar) on the ``/login/mfa`` page before the user
+    completes the second factor. All other endpoints stay behind the
+    full ``get_current_user`` MFA gate.
+    """
     user = await _load_user(db, current_user)
     return await get_current_user_read(db, user)
 
