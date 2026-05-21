@@ -243,3 +243,121 @@ def test_no_god_file_in_retrieval_stage() -> None:
         with path.open() as fh:
             line_count = sum(1 for _ in fh)
         assert line_count <= 250, f"{path.name} has {line_count} LOC > 250"
+
+
+# ---------------------------------------------------------------------------
+# Phase 4 — Voyage rerank wiring
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_retrieve_chunks_reorders_pool_when_rerank_client_injected(
+    fake_embedding_client: AsyncMock,
+) -> None:
+    """When a rerank client is passed, the post-MMR pool is reordered by
+    Voyage scores and capped at ``final_top_k``."""
+    from abridgeai.ai.llm.voyage_rerank import RerankResult
+
+    db = AsyncMock()
+    quiz = _quiz_stub()
+    config = {"focus_topics": ["alpha"]}
+
+    # 20 vector hits → MMR widens pool (rerank path) → rerank reorders
+    hits = [_chunk(distance=0.05 + i * 0.01, content=f"hit-{i}") for i in range(20)]
+
+    rerank_client = AsyncMock()
+    # Return scores that promote index 5 then 0 then 9 (out of natural order)
+    rerank_client.rerank = AsyncMock(
+        return_value=(
+            [
+                RerankResult(index=5, relevance_score=0.99),
+                RerankResult(index=0, relevance_score=0.92),
+                RerankResult(index=9, relevance_score=0.87),
+                RerankResult(index=2, relevance_score=0.55),
+            ],
+            42,
+        )
+    )
+
+    with patch(
+        "abridgeai.features.quizzes.ai.stages.retrieval.logic.vector_search",
+        AsyncMock(return_value=hits),
+    ):
+        chunks, _, _ = await retrieve_chunks(
+            db,
+            run_id=uuid4(),
+            quiz=quiz,
+            config=config,
+            kg_context_enabled=False,
+            embedding_client=fake_embedding_client,
+            rerank_client=rerank_client,
+            final_top_k=4,
+        )
+
+    assert rerank_client.rerank.await_count == 1
+    rerank_call = rerank_client.rerank.await_args
+    assert rerank_call.args[0] == "alpha"  # primary anchor
+    # Voyage saw at least final_top_k * RERANK_POOL_MULTIPLIER docs
+    assert len(rerank_call.args[1]) >= 4
+    assert len(chunks) == 4
+
+
+@pytest.mark.asyncio
+async def test_retrieve_chunks_falls_back_when_rerank_raises(
+    fake_embedding_client: AsyncMock,
+) -> None:
+    """A provider error must not propagate — caller gets MMR-only top-K."""
+    from abridgeai.ai.llm.errors import ProviderError
+
+    db = AsyncMock()
+    quiz = _quiz_stub()
+    config = {"focus_topics": ["alpha"]}
+    hits = [_chunk(distance=0.05 + i * 0.01, content=f"hit-{i}") for i in range(15)]
+
+    rerank_client = AsyncMock()
+    rerank_client.rerank = AsyncMock(side_effect=ProviderError("voyage 503"))
+
+    with patch(
+        "abridgeai.features.quizzes.ai.stages.retrieval.logic.vector_search",
+        AsyncMock(return_value=hits),
+    ):
+        chunks, _, _ = await retrieve_chunks(
+            db,
+            run_id=uuid4(),
+            quiz=quiz,
+            config=config,
+            kg_context_enabled=False,
+            embedding_client=fake_embedding_client,
+            rerank_client=rerank_client,
+            final_top_k=5,
+        )
+
+    assert rerank_client.rerank.await_count == 1
+    assert len(chunks) == 5  # fallback path still returns final_top_k
+
+
+@pytest.mark.asyncio
+async def test_retrieve_chunks_skips_rerank_when_no_key_no_client(
+    fake_embedding_client: AsyncMock,
+) -> None:
+    """Default settings have no Voyage key — MMR-only path runs."""
+    db = AsyncMock()
+    quiz = _quiz_stub()
+    config = {"focus_topics": ["alpha"]}
+    hits = [_chunk(distance=0.05 + i * 0.01, content=f"hit-{i}") for i in range(10)]
+
+    with patch(
+        "abridgeai.features.quizzes.ai.stages.retrieval.logic.vector_search",
+        AsyncMock(return_value=hits),
+    ):
+        chunks, _, _ = await retrieve_chunks(
+            db,
+            run_id=uuid4(),
+            quiz=quiz,
+            config=config,
+            kg_context_enabled=False,
+            embedding_client=fake_embedding_client,
+            final_top_k=6,
+        )
+
+    assert len(chunks) == 6

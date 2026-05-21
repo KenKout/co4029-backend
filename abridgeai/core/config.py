@@ -110,6 +110,14 @@ class Settings(BaseSettings):
     embedding_dimensions: int = 3072
     embedding_timeout_seconds: float = 30.0
 
+    # Voyage rerank-2.5 (Phase 4 contextual-RAG upgrade). 200M tokens free
+    # tier covers our scale; when the key is unset rerank is skipped and
+    # retrieval falls back to the MMR-only path.
+    voyage_api_key: SecretStr | None = None
+    voyage_base_url: str = "https://api.voyageai.com/v1"
+    voyage_rerank_model: str = "rerank-2.5"
+    voyage_rerank_timeout_seconds: float = 15.0
+
     # T2.3: S3 / Garage object storage. ``aws_endpoint_url`` is the
     # server-side hostname (None → AWS default); ``aws_public_endpoint_url``
     # is the browser-reachable hostname for presigned URLs (falls back to
