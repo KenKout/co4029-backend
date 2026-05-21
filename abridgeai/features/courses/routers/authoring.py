@@ -483,7 +483,7 @@ async def get_lesson_outline(
     current_user: Annotated[CurrentUser, Depends(_REQUIRE_LESSON)],
     db: Annotated[AsyncSession, Depends(get_db)],
     slides_per_section: Annotated[int, Query(ge=1, le=20)] = 4,
-    section_grouping: Annotated[Literal["auto", "fixed"], Query()] = "fixed",
+    section_grouping: Annotated[Literal["auto", "fixed"], Query()] = "auto",
 ) -> LessonOutline:
     """Authoring outline preview (drafts visible).
 
