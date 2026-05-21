@@ -78,3 +78,4 @@ eval/results/run-*.json
 !eval/results/baseline-*.json
 !eval/results/.gitkeep
 !eval/results/README.md
+openapi-snapshot.json
