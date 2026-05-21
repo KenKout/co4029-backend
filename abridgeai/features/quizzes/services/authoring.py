@@ -541,6 +541,10 @@ async def start_generation_run(
     await flush_or_conflict(db)
 
     if quiz is None:
+        if not payload.title:
+            raise AppError(
+                "title is required when creating a new quiz"
+            )
         quiz = Quiz(
             course_id=course_id,
             module_id=module_id,

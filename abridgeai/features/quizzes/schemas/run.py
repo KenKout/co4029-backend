@@ -259,14 +259,6 @@ class QuizGenerationRequest(BaseModel):
         return self
 
     @model_validator(mode="after")
-    def _check_title_required(self) -> QuizGenerationRequest:
-        if self.quiz_id is None and not self.title:
-            raise ValueError(
-                "title is required when creating a new quiz (quiz_id is null)"
-            )
-        return self
-
-    @model_validator(mode="after")
     def _check_coverage_options(self) -> QuizGenerationRequest:
         if self.generation_mode == "coverage" and self.coverage_options is None:
             # Don't reject — fall back to defaults so opt-in coverage
