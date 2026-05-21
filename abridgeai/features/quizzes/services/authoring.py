@@ -214,6 +214,29 @@ async def _quiz_has_in_flight_run(db: AsyncSession, quiz_id: UUID) -> bool:
     return (await db.execute(stmt)).first() is not None
 
 
+async def get_latest_generation_run(
+    db: AsyncSession, quiz_id: UUID
+) -> GenerationRun | None:
+    """Return the most recent ``GenerationRun`` for ``quiz_id`` (any status).
+
+    Powers the SPA's quiz-generation panel reattach-on-mount: instead
+    of stashing the active run id in the browser, the SPA asks the
+    server for the latest run on every mount. That makes the run
+    handle survive cross-device sessions, tab closes, and lets a
+    second teacher viewing the same quiz see the in-flight run too.
+    Returns ``None`` when the quiz has never been generated.
+    """
+    from sqlalchemy import select  # noqa: PLC0415
+
+    stmt = (
+        select(GenerationRun)
+        .where(GenerationRun.config_json["quiz_id"].astext == str(quiz_id))
+        .order_by(GenerationRun.created_at.desc())
+        .limit(1)
+    )
+    return (await db.execute(stmt)).scalar_one_or_none()
+
+
 async def _add_quiz_source_lessons(db: AsyncSession, quiz_id: UUID, lesson_ids: list[UUID]) -> None:
     if not lesson_ids:
         return

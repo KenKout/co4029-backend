@@ -332,6 +332,30 @@ async def start_generation(
 
 
 @router.get(
+    "/quizzes/{quiz_id}/generation-runs/latest",
+    response_model=QuizGenerationRunRead | None,
+)
+async def get_latest_quiz_generation_run(
+    quiz_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_QUIZ)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> QuizGenerationRunRead | None:
+    """Return the most recent ``GenerationRun`` for this quiz, if any.
+
+    Lets the SPA reattach to an in-flight (or terminal) run on mount
+    without persisting handles in the browser — survives cross-device
+    sessions, tab closes, and lets a second teacher viewing the same
+    quiz see the in-flight run too. Returns ``null`` (HTTP 200) when
+    the quiz has never been generated.
+    """
+    del current_user
+    run = await authoring_service.get_latest_generation_run(db, quiz_id)
+    if run is None:
+        return None
+    return _generation_run_view(run, quiz_id)
+
+
+@router.get(
     "/quizzes/{quiz_id}/generation-runs/{run_id}",
     response_model=QuizGenerationRunRead,
 )
