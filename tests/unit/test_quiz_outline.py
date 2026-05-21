@@ -35,6 +35,8 @@ def _chunk(
     section: str = "",
     page: int | None = None,
     role: str = "body",
+    semantic_title: str | None = None,
+    page_at_top_level: bool = False,
 ) -> DocumentChunk:
     """Build a duck-typed chunk that satisfies the outline component.
 
@@ -43,10 +45,22 @@ def _chunk(
     enough — no need to spin up the full SQLAlchemy ORM for pure
     grouping logic. Cast keeps the typed signatures in
     ``outline.py`` strict without forcing real DB rows in unit tests.
+
+    ``semantic_title`` writes ``metadata.semantic.section_title`` to
+    simulate the LLM-enriched per-chunk topic title.
+    ``page_at_top_level=True`` writes ``metadata.page`` (current
+    chunker layout); ``False`` writes the legacy
+    ``metadata.source_location.page`` instead.
     """
     metadata: dict[str, object] = {"section": section, "content_role": role}
     if page is not None:
-        metadata["source_location"] = {"page": page}
+        if page_at_top_level:
+            metadata["page"] = page
+            metadata["page_range"] = [page, page]
+        else:
+            metadata["source_location"] = {"page": page}
+    if semantic_title is not None:
+        metadata["semantic"] = {"section_title": semantic_title}
     fake = SimpleNamespace(
         id=chunk_id,
         lesson_id=_LESSON_ID,
@@ -152,6 +166,60 @@ def test_group_sections_picks_up_page_range() -> None:
     sections = _group_sections(chunks)
     assert len(sections) == 1
     assert sections[0].page_range == (3, 5)
+
+
+def test_group_sections_uses_semantic_title_over_synthetic_page_marker() -> None:
+    """Real-world chunker layout: every chunk has ``metadata.section`` =
+    ``Page N`` (synthetic boundary) but also enriched
+    ``metadata.semantic.section_title`` (per-page LLM topic title).
+
+    Builder must:
+    1. Use the semantic title for the section heading
+    2. NOT fall back to the slide-deck 4-chunk grouping (each semantic
+       title is unique → one section per chunk)
+    3. Read pages from top-level ``metadata.page``
+    """
+    chunks = [
+        _chunk(
+            chunk_id=UUID(int=i),
+            content=f"page-{i}-content",
+            section=f"Page {i}",
+            page=i,
+            page_at_top_level=True,
+            semantic_title=title,
+        )
+        for i, title in enumerate(
+            ["Introduction to DSS", "Definition of Data", "Knowledge Discovery"],
+            start=1,
+        )
+    ]
+    sections = _group_sections(chunks)
+    assert len(sections) == 3
+    titles = [s.title for s in sections]
+    assert titles == [
+        "Introduction to DSS",
+        "Definition of Data",
+        "Knowledge Discovery",
+    ]
+    assert [s.page_range for s in sections] == [(1, 1), (2, 2), (3, 3)]
+
+
+def test_chunk_page_reads_top_level_metadata() -> None:
+    """Top-level ``metadata.page`` (current chunker) must take precedence
+    over the legacy ``metadata.source_location.page`` path."""
+    chunks = [
+        _chunk(
+            chunk_id=UUID(int=42),
+            content="pagey",
+            section="Course > Mod > Less > Same Heading",
+            page=7,
+            page_at_top_level=True,
+            semantic_title="Some Topic",
+        ),
+    ]
+    sections = _group_sections(chunks)
+    assert len(sections) == 1
+    assert sections[0].page_range == (7, 7)
 
 
 # --- allocate_question_budget -----------------------------------------------
