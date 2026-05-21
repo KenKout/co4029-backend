@@ -121,7 +121,7 @@ async def _precompute_coverage_inputs(
     if not isinstance(cov_opts, dict):
         cov_opts = {}
 
-    section_grouping = str(cov_opts.get("section_grouping") or "fixed")
+    section_grouping = str(cov_opts.get("section_grouping") or "auto")
     outlines = await build_lesson_outline(
         db,
         lesson_ids,

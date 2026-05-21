@@ -114,18 +114,18 @@ class CoverageOptions(BaseModel):
     (slide decks). Lower this to ``1`` for one-question-per-slide
     coverage; raise it for coarser grouping."""
 
-    section_grouping: Literal["auto", "fixed"] = "fixed"
+    section_grouping: Literal["auto", "fixed"] = "auto"
     """How the outline builder draws section boundaries.
 
-    ``"fixed"`` (default) force-bundles ``slides_per_section`` consecutive
-    chunks per section regardless of semantic enrichment. Matches the
-    legacy panel UX where users see ~ceil(N/slides_per_section) sections.
+    ``"auto"`` (default) honors per-chunk semantic enrichment (LLM-derived
+    topic titles) — each unique topic becomes its own section. Faithful
+    to the data: a slide-deck PDF where every page has a distinct
+    enriched title produces one section per topic. This is the
+    post-migration shape — coarser legacy-style bundling is opt-in.
 
-    ``"auto"`` honors per-chunk semantic enrichment (LLM-derived topic
-    titles) — each unique topic becomes its own section. Slide-deck PDFs
-    where every page has a distinct enriched title will produce one
-    section per page, which is faithful to the data but produces many
-    small sections in the panel UI."""
+    ``"fixed"`` force-bundles ``slides_per_section`` consecutive chunks
+    per section regardless of semantic enrichment. Matches the legacy
+    panel UX where users saw ~ceil(N/slides_per_section) sections."""
 
     parallelism: Annotated[int, Field(ge=1, le=32)] | None = None
     """Bounded concurrency for the per-template generation stage.

@@ -56,6 +56,7 @@ from abridgeai.ai.chunking import (
 )
 from abridgeai.ai.chunking.base import RawChunk
 from abridgeai.ai.chunking.cache import ChunkingCache
+from abridgeai.ai.chunking.contextual import build_contextual_text
 from abridgeai.ai.extraction import (
     ExtractedContent,
     UnsupportedMimeError,
@@ -456,8 +457,15 @@ async def _run_stages(
             await db.flush()
             return
 
+        # Anthropic Contextual Retrieval: prepend Stage C section_title +
+        # context_sentence onto each chunk before embedding so the vector
+        # captures topic context, not just bare paragraph text. Reduces
+        # retrieval failure ~35% on BEIR-style benchmarks. ``content``
+        # itself is unchanged in DB — only the embedder input is
+        # contextualized.
+        embed_inputs = [build_contextual_text(c) for c in raw_chunks]
         embeddings = await embed_client.embed(
-            [c.content for c in raw_chunks],
+            embed_inputs,
             db=db,
             pipeline_run_id=pipeline_run_id,
             parent_job_id=job.id,
