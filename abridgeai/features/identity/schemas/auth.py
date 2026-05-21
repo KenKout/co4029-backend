@@ -56,3 +56,16 @@ class MfaVerifyRequest(BaseModel):
     challenge_id: UUID
     code: str | None = Field(default=None, min_length=6, max_length=8)
     recovery_code: str | None = None
+
+
+class MfaStatusResponse(BaseModel):
+    """Surface the user's MFA enrollment + current-session MFA state.
+
+    ``enrolled`` is True when the user has at least one active TOTP
+    factor (``verified_at IS NOT NULL AND disabled_at IS NULL``).
+    ``mfa_verified_at`` is the current ``auth_sessions.mfa_verified_at``
+    so the SPA can show a "verified <ago>" badge if it wants.
+    """
+
+    enrolled: bool
+    mfa_verified_at: datetime | None = None

@@ -34,10 +34,12 @@ from abridgeai.core.security import (
     utcnow,
 )
 from abridgeai.features.identity.models import AuthSession, User
+from abridgeai.features.identity.queries import sessions as session_queries
 from abridgeai.features.identity.schemas import (
     MfaChallengeResponse,
     MfaEnrollResponse,
     MfaRecoveryCodesResponse,
+    MfaStatusResponse,
     MfaTotpVerifyRequest,
     MfaVerifyRequest,
 )
@@ -72,6 +74,26 @@ async def _load_principal(db: AsyncSession, current_user: CurrentUser) -> tuple[
     if user is None or session is None:
         raise _unauthorized("Session not found")
     return user, session
+
+
+@router.get("/status", response_model=MfaStatusResponse)
+async def get_mfa_status(
+    current_user: Annotated[CurrentUser, Depends(get_current_user_pre_mfa)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> MfaStatusResponse:
+    """Return whether the caller has enrolled MFA + current-session state.
+
+    Powers the SPA's settings page so it can render "Two-factor enabled
+    ✓" instead of always showing the Enable button. Uses the pre-MFA
+    dependency so the answer is reachable from the ``/login/mfa`` flow
+    too (the SPA renders the user's name there).
+    """
+    enrolled = await session_queries.user_has_verified_mfa(db, current_user.user_id)
+    session = await db.get(AuthSession, current_user.session_id)
+    return MfaStatusResponse(
+        enrolled=enrolled,
+        mfa_verified_at=session.mfa_verified_at if session is not None else None,
+    )
 
 
 @router.post("/totp/enroll", response_model=MfaEnrollResponse)
