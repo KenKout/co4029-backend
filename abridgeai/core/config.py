@@ -118,6 +118,19 @@ class Settings(BaseSettings):
     voyage_rerank_model: str = "rerank-2.5"
     voyage_rerank_timeout_seconds: float = 15.0
 
+    # Phase 3 — Contextual BM25 hybrid search (Anthropic guide). When
+    # ``hybrid_bm25_enabled`` is True the retriever runs vector_search
+    # AND bm25_search at recall_k each, then fuses with weighted
+    # Reciprocal Rank Fusion (semantic_weight + bm25_weight should sum
+    # to 1.0). Defaults mirror the Anthropic cookbook (0.8 / 0.2 with
+    # recall=150). The knob defaults OFF so existing deployments behave
+    # unchanged until operators flip it; flipping is a runtime env var,
+    # no code change.
+    hybrid_bm25_enabled: bool = False
+    hybrid_recall_k: int = Field(default=150, ge=10, le=1000)
+    hybrid_semantic_weight: float = Field(default=0.8, ge=0.0, le=1.0)
+    hybrid_bm25_weight: float = Field(default=0.2, ge=0.0, le=1.0)
+
     # T2.3: S3 / Garage object storage. ``aws_endpoint_url`` is the
     # server-side hostname (None → AWS default); ``aws_public_endpoint_url``
     # is the browser-reachable hostname for presigned URLs (falls back to
