@@ -46,6 +46,7 @@ from abridgeai.features.quizzes.models import (
     QuizSourceLesson,
 )
 from abridgeai.features.quizzes.queries import authoring as authoring_queries
+from abridgeai.features.quizzes.schemas import QuizGenerationRequest
 from abridgeai.features.quizzes.services.publish_gate import (
     QuizPublishValidationError,
     assert_t_exp_set_for_all_questions,
@@ -427,7 +428,7 @@ async def delete_question(db: AsyncSession, question_id: UUID, actor: CurrentUse
 async def start_generation_run(
     db: AsyncSession,
     module_id: UUID,
-    payload: Any,  # noqa: ANN401  -- DTO lands in T5.14.
+    payload: QuizGenerationRequest,
     actor: CurrentUser,
     *,
     arq_pool: object | None,
@@ -441,45 +442,51 @@ async def start_generation_run(
     committed before :func:`enqueue_job` returns. The task name is the
     canonical Python function name registered on the ARQ worker
     (T5.15: reconciled from the legacy ``generate_quiz`` alias).
+
+    Phase 2 of the FR-5 schema port (T5.14): the legacy ``getattr``
+    defensive accessors were removed in favour of direct attribute
+    access. The schema layer (``QuizGenerationRequest``) is now strict
+    (``extra="forbid"``, all fields typed), so every name read here is
+    guaranteed to resolve. If you find yourself reaching for
+    ``getattr`` again, fix the schema first — don't smuggle in
+    untyped fields through the service.
     """
     course_id = await _resolve_module_course(db, module_id)
 
     quiz: Quiz | None = None
-    quiz_id_in = getattr(payload, "quiz_id", None)
-    if quiz_id_in is not None:
-        quiz = await _require_quiz(db, quiz_id_in)
+    if payload.quiz_id is not None:
+        quiz = await _require_quiz(db, payload.quiz_id)
         if quiz.module_id != module_id:
             raise AppError("Quiz must belong to this module")
         if await _quiz_has_in_flight_run(db, quiz.id):
             raise ConflictError("quiz_generation_in_progress")
-        if not getattr(payload, "append", False):
+        if not payload.append:
             from sqlalchemy import delete as sa_delete  # noqa: PLC0415
 
             await db.execute(sa_delete(QuizQuestion).where(QuizQuestion.quiz_id == quiz.id))
             await flush_or_conflict(db)
 
-    base_config = dict(getattr(payload, "config_json", None) or {})
-    coverage_options = getattr(payload, "coverage_options", None)
-    coverage_dump: Any = None
-    if coverage_options is not None:
-        coverage_dump = (
-            coverage_options.model_dump()
-            if hasattr(coverage_options, "model_dump")
-            else coverage_options
-        )
-    generation_config = base_config | {
-        "question_count": getattr(payload, "question_count", None),
-        "question_types": getattr(payload, "question_types", None),
-        "difficulty": getattr(payload, "difficulty", None),
-        "bloom_distribution": getattr(payload, "bloom_distribution", None),
-        "include_prerequisites": getattr(payload, "include_prerequisites", None),
-        "model_preference": getattr(payload, "model_preference", None),
-        "source_lesson_ids": [str(x) for x in getattr(payload, "source_lesson_ids", []) or []],
-        "generation_mode": getattr(payload, "generation_mode", None),
-        "focus_topics": getattr(payload, "focus_topics", None),
-        "avoid_topics": getattr(payload, "avoid_topics", None),
-        "extra_instructions": getattr(payload, "extra_instructions", None),
-        "append": getattr(payload, "append", False),
+    base_config = dict(payload.config_json)
+    coverage_dump: dict[str, Any] | None = (
+        payload.coverage_options.model_dump()
+        if payload.coverage_options is not None
+        else None
+    )
+    # Structured FR-5 fields shadow ``config_json`` on conflict — the
+    # schema layer documents this contract, so the merge order matters.
+    generation_config: dict[str, Any] = base_config | {
+        "question_count": payload.question_count,
+        "question_types": list(payload.question_types),
+        "difficulty": payload.difficulty,
+        "bloom_distribution": dict(payload.bloom_distribution),
+        "include_prerequisites": payload.include_prerequisites,
+        "model_preference": payload.model_preference,
+        "source_lesson_ids": [str(x) for x in payload.source_lesson_ids],
+        "generation_mode": payload.generation_mode,
+        "focus_topics": list(payload.focus_topics),
+        "avoid_topics": list(payload.avoid_topics),
+        "extra_instructions": payload.extra_instructions,
+        "append": payload.append,
         "coverage_options": coverage_dump,
     }
     run = GenerationRun(
@@ -498,8 +505,8 @@ async def start_generation_run(
         quiz = Quiz(
             course_id=course_id,
             module_id=module_id,
-            title=getattr(payload, "title", None) or "Generated quiz",
-            description=getattr(payload, "description", None),
+            title=payload.title,
+            description=payload.description,
             generation_run_id=run.id,
             created_by=actor.user_id,
         )
@@ -508,8 +515,7 @@ async def start_generation_run(
     else:
         quiz.generation_run_id = run.id
     run.config_json = dict(run.config_json) | {"quiz_id": str(quiz.id)}
-    lesson_ids = list(getattr(payload, "source_lesson_ids", []) or [])
-    await _add_quiz_source_lessons(db, quiz.id, lesson_ids)
+    await _add_quiz_source_lessons(db, quiz.id, list(payload.source_lesson_ids))
     await db.commit()
     await db.refresh(run)
 

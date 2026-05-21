@@ -259,20 +259,21 @@ class SlugAvailability(BaseModel):
 class OutlineSection(BaseModel):
     """One section row in ``GET /lessons/{id}/outline``.
 
-    Mirrors the SPA's ``OutlineSectionRead`` interface verbatim. Today
-    this surface returns a single synthetic ``body`` section per lesson
-    until the legacy ``build_lesson_outline`` semantic-section pipeline
-    is ported. The contract is deliberately stable so the SPA can render
-    today and the section list can grow without an API break.
+    Mirrors the SPA's ``OutlineSectionRead`` interface verbatim.
+
+    The ``id`` is a deterministic slug like ``sec_<lesson8>_<title-slug>_<page>``
+    (see :func:`abridgeai.features.quizzes.ai.outline._section_id`), NOT a
+    database UUID. Stable across re-runs against the same chunks so
+    ``coverage_options.section_ids`` keeps working between calls.
     """
 
-    id: UUID
+    id: str
     title: str
     depth: int = 0
     chunk_count: int = 0
     char_count: int = 0
     page_range: tuple[int, int] = (0, 0)
-    content_role: Literal["body", "summary", "review"] = "body"
+    content_role: Literal["body", "summary", "review", "front_matter"] = "body"
     preview: str = ""
 
 

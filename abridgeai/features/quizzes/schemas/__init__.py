@@ -37,17 +37,21 @@ from abridgeai.features.quizzes.schemas.public import (
     QuizQuestionPublic,
 )
 from abridgeai.features.quizzes.schemas.run import (
-    GenerationModeLiteral,
-    GenerationRunStatusLiteral,
+    CoverageOptions,
+    GenerationMode,
+    GenerationRunStatus,
     QuestionRegenerationRequest,
+    QuestionType,
     QuizGenerationRequest,
     QuizGenerationRunRead,
 )
 
 __all__ = [
-    "GenerationModeLiteral",
-    "GenerationRunStatusLiteral",
+    "CoverageOptions",
+    "GenerationMode",
+    "GenerationRunStatus",
     "QuestionRegenerationRequest",
+    "QuestionType",
     "QuestionTypeLiteral",
     "QuizAttemptRead",
     "QuizAttemptStart",

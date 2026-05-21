@@ -37,7 +37,7 @@ Architectural rules honoured:
 
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Literal, cast
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -81,6 +81,14 @@ from abridgeai.features.courses.schemas import (
     StreamUrlResponse,
 )
 from abridgeai.features.courses.services import authoring as authoring_service
+from abridgeai.features.quizzes.ai.outline import build_lesson_outline
+
+# Whitelist of ``content_role`` values surfaced by ``OutlineSection``.
+# Anything else returned by the chunk metadata is coerced to "body" so
+# the response stays inside the literal type defined by the schema.
+_ALLOWED_OUTLINE_ROLES: frozenset[str] = frozenset(
+    {"body", "summary", "review", "front_matter"}
+)
 
 router = APIRouter(prefix="/teacher", tags=["courses-authoring"])
 
@@ -456,22 +464,76 @@ async def get_lesson_outline(
 
     Surfaces under the teacher router (rather than the learner one) so
     the auth boundary matches the SPA's ``useLessonOutline`` consumer
-    pages, and so drafts surface during course assembly. Returns a
-    single synthetic ``body`` section until ``build_lesson_outline``
-    lands; the contract matches the eventual semantic-section
-    response field-for-field.
+    pages, and so drafts surface during course assembly.
+
+    Phase 3 of the FR-5 schema port (T5.14): now invokes the real
+    :func:`abridgeai.features.quizzes.ai.outline.build_lesson_outline`
+    against the lesson's ``document_chunks``. Falls back to a single
+    synthetic ``body`` section sourced from the lesson summary when no
+    chunks have been ingested yet — keeps the SPA renderable for
+    lessons that don't have material attached.
+
+    ``suggested_question_count`` mirrors the legacy heuristic: 1
+    question per eligible body section, capped to a 1..50 band.
+    ``min_for_full_coverage`` reports the same number so the SPA can
+    surface "you need at least N questions for coverage mode" copy.
     """
     del current_user
     try:
         lesson = await authoring_service.get_authoring_lesson(db, lesson_id)
     except NotFoundError as exc:
         raise _not_found(str(exc)) from exc
+
+    # Pure SQL + Python — safe to invoke synchronously inside the route.
+    # No LLM calls, no embedding lookups, just chunk metadata grouping.
+    outlines = await build_lesson_outline(db, [lesson.id])
+    if outlines and outlines[0].sections:
+        outline = outlines[0]
+        body_sections = sum(
+            1 for s in outline.sections if s.content_role == "body"
+        )
+        # Cap suggestion to the legacy 1..50 band — the schema enforces
+        # the same on ``QuizGenerationRequest.question_count``, so the
+        # SPA can pre-fill the field without an extra clamp on the
+        # frontend.
+        suggested = max(1, min(50, body_sections or len(outline.sections)))
+        # Narrow ``content_role`` (free-form string from chunk metadata)
+        # down to the OutlineSection literal — anything outside the
+        # whitelist falls back to "body" so the API contract stays tight.
+        return LessonOutline(
+            lesson_id=lesson.id,
+            lesson_title=lesson.title,
+            sections=[
+                OutlineSection(
+                    id=s.id,
+                    title=s.title,
+                    depth=s.depth,
+                    chunk_count=len(s.chunk_ids),
+                    char_count=s.char_count,
+                    page_range=s.page_range,
+                    content_role=cast(
+                        Literal["body", "summary", "review", "front_matter"],
+                        s.content_role
+                        if s.content_role in _ALLOWED_OUTLINE_ROLES
+                        else "body",
+                    ),
+                    preview=s.preview,
+                )
+                for s in outline.sections
+            ],
+            suggested_question_count=suggested,
+            min_for_full_coverage=max(body_sections, 1),
+        )
+
+    # Fallback: lesson has no chunks yet (material not ingested).
+    # Surface a single synthetic body section so the panel still
+    # renders something coherent and the teacher can pick topic mode.
     return LessonOutline(
         lesson_id=lesson.id,
         lesson_title=lesson.title,
         sections=[
             OutlineSection(
-                id=lesson.id,
+                id=f"sec_{str(lesson.id)[:8]}_lesson_0",
                 title=lesson.title,
                 depth=0,
                 chunk_count=0,

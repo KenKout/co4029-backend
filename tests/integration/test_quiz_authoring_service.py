@@ -38,6 +38,10 @@ from abridgeai.core.config import get_settings
 from abridgeai.core.db import Base
 from abridgeai.core.security import CurrentUser
 from abridgeai.features.quizzes.models import Quiz
+from abridgeai.features.quizzes.schemas import (
+    CoverageOptions,
+    QuizGenerationRequest,
+)
 from abridgeai.features.quizzes.services import authoring as authoring_service
 
 for _stub_name in ("interview_configs", "learning_materials", "learning_material_versions"):
@@ -209,24 +213,15 @@ async def test_start_generation_run_creates_run_quiz_and_enqueues_job(
     scenario: dict,
 ) -> None:
     arq_pool = SimpleNamespace(enqueue_job=AsyncMock(return_value=None))
-    payload = SimpleNamespace(
-        quiz_id=None,
+    payload = QuizGenerationRequest(
         title="AI-Generated Quiz",
         description="Created by start_generation_run",
         question_count=5,
         question_types=["multiple_choice"],
         difficulty="medium",
-        bloom_distribution={"understand": 1.0},
+        bloom_distribution={"understand": 1},
         include_prerequisites=True,
-        model_preference=None,
-        source_lesson_ids=[],
         generation_mode="topic",
-        focus_topics=[],
-        avoid_topics=[],
-        extra_instructions=None,
-        append=False,
-        coverage_options=None,
-        config_json={},
     )
 
     async with session_factory() as session:
@@ -242,8 +237,93 @@ async def test_start_generation_run_creates_run_quiz_and_enqueues_job(
     assert run.status == "pending"
     assert run.config_json["quiz_id"]
     assert run.module_id == scenario["module_id"]
+    # Phase 2 of FR-5: every structured field lands in
+    # ``GenerationRun.config_json`` verbatim. Verifies the service
+    # layer reads them via direct attribute access (no getattr).
+    cfg = run.config_json
+    assert cfg["question_count"] == 5
+    assert cfg["question_types"] == ["multiple_choice"]
+    assert cfg["difficulty"] == "medium"
+    assert cfg["bloom_distribution"] == {"understand": 1}
+    assert cfg["include_prerequisites"] is True
+    assert cfg["generation_mode"] == "topic"
+    assert cfg["focus_topics"] == []
+    assert cfg["avoid_topics"] == []
+    assert cfg["coverage_options"] is None
+    assert cfg["append"] is False
     arq_pool.enqueue_job.assert_awaited_once()
     invocation = arq_pool.enqueue_job.await_args
     assert invocation.args[0] == "run_quiz_generation_task"
     assert invocation.args[1] == scenario["owner_id"]
     assert invocation.args[2] == run.id
+
+
+@pytest.mark.asyncio
+async def test_start_generation_run_persists_full_fr5_payload(
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict,
+) -> None:
+    """Full FR-5 coverage payload survives the service layer with all
+    nested structured fields preserved in ``config_json``."""
+    arq_pool = SimpleNamespace(enqueue_job=AsyncMock(return_value=None))
+    payload = QuizGenerationRequest(
+        title="Coverage Run",
+        question_count=8,
+        question_types=["multiple_choice", "short_answer"],
+        difficulty="mixed",
+        bloom_distribution={"remember": 2, "understand": 3, "apply": 3},
+        generation_mode="coverage",
+        focus_topics=["matrices", "vectors"],
+        avoid_topics=["geometry"],
+        extra_instructions="Avoid trick questions.",
+        coverage_options=CoverageOptions(
+            min_per_section=1,
+            max_per_section=3,
+            skip_summaries=True,
+            slides_per_section=4,
+            parallelism=8,
+        ),
+    )
+
+    async with session_factory() as session:
+        run = await authoring_service.start_generation_run(
+            session,
+            scenario["module_id"],
+            payload,
+            _actor(scenario["owner_id"]),
+            arq_pool=arq_pool,
+        )
+
+    cfg = run.config_json
+    assert cfg["generation_mode"] == "coverage"
+    assert cfg["focus_topics"] == ["matrices", "vectors"]
+    assert cfg["avoid_topics"] == ["geometry"]
+    assert cfg["extra_instructions"] == "Avoid trick questions."
+    # Coverage options serialise to dict (not the Pydantic model) so
+    # the ARQ worker can JSON-roundtrip via ``GenerationRun.config_json``.
+    assert isinstance(cfg["coverage_options"], dict)
+    assert cfg["coverage_options"]["min_per_section"] == 1
+    assert cfg["coverage_options"]["max_per_section"] == 3
+    assert cfg["coverage_options"]["parallelism"] == 8
+
+
+@pytest.mark.asyncio
+async def test_start_generation_run_no_arq_skips_enqueue(
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict,
+) -> None:
+    """When ``arq_pool=None`` the run is persisted but no job is
+    enqueued — used by tests and by the dev-mode synchronous path."""
+    payload = QuizGenerationRequest(title="No-ARQ Run")
+
+    async with session_factory() as session:
+        run = await authoring_service.start_generation_run(
+            session,
+            scenario["module_id"],
+            payload,
+            _actor(scenario["owner_id"]),
+            arq_pool=None,
+        )
+
+    assert run.status == "pending"
+    assert run.config_json["quiz_id"]

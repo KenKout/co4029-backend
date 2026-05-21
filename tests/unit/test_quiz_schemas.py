@@ -268,20 +268,192 @@ def test_generation_request_extras_rejected() -> None:
     with pytest.raises(ValidationError):
         QuizGenerationRequest.model_validate(
             {
-                "mode": "full",
+                "title": "Untitled",
                 "unknown": "boom",
             }
         )
 
 
-def test_generation_request_target_count_bounds() -> None:
-    ok = QuizGenerationRequest(mode="full", target_count=10)
-    assert ok.target_count == 10
+def test_generation_request_question_count_bounds() -> None:
+    ok = QuizGenerationRequest(title="x", question_count=10)
+    assert ok.question_count == 10
 
     with pytest.raises(ValidationError):
-        QuizGenerationRequest(mode="full", target_count=0)
+        QuizGenerationRequest(title="x", question_count=0)
     with pytest.raises(ValidationError):
-        QuizGenerationRequest(mode="full", target_count=999)
+        QuizGenerationRequest(title="x", question_count=999)
+
+
+def test_generation_request_minimal_topic_mode_defaults() -> None:
+    """A bare-minimum FR-5 payload (just ``title``) should preserve the
+    legacy topic-mode defaults so existing callers don't break."""
+    r = QuizGenerationRequest(title="Untitled")
+    assert r.generation_mode == "topic"
+    assert r.question_count == 3
+    assert r.question_types == ["multiple_choice"]
+    assert r.difficulty == "mixed"
+    assert r.focus_topics == []
+    assert r.avoid_topics == []
+    assert r.append is False
+    assert r.coverage_options is None
+
+
+def test_generation_request_question_type_rejects_legacy_mcq() -> None:
+    """The DB CHECK constraint accepts ``multiple_choice`` only; the
+    legacy ``mcq`` alias is removed and must fail at the schema layer."""
+    with pytest.raises(ValidationError) as exc_info:
+        QuizGenerationRequest(title="x", question_types=["mcq"])  # type: ignore[list-item]
+    assert exc_info.value.errors()[0]["type"] == "literal_error"
+
+
+def test_generation_request_topic_strings_cleaned() -> None:
+    """``focus_topics`` / ``avoid_topics`` strip whitespace, drop empties,
+    and clamp each entry to 200 chars."""
+    long = "x" * 300
+    r = QuizGenerationRequest(
+        title="x",
+        focus_topics=["  vectors  ", "", "   ", "matrices", long],
+        avoid_topics=["  systems  "],
+    )
+    assert r.focus_topics == ["vectors", "matrices", "x" * 200]
+    assert r.avoid_topics == ["systems"]
+
+
+def test_generation_request_topic_list_max_length() -> None:
+    """At most 10 entries per topic list (post-cleanup)."""
+    with pytest.raises(ValidationError):
+        QuizGenerationRequest(
+            title="x",
+            focus_topics=[f"topic-{i}" for i in range(11)],
+        )
+
+
+def test_generation_request_bloom_distribution_total_capped() -> None:
+    """Sum of bloom counts must be ``<= question_count``."""
+    ok = QuizGenerationRequest(
+        title="x",
+        question_count=5,
+        bloom_distribution={"remember": 2, "understand": 3},
+    )
+    assert sum(ok.bloom_distribution.values()) == 5
+
+    with pytest.raises(ValidationError) as exc_info:
+        QuizGenerationRequest(
+            title="x",
+            question_count=3,
+            bloom_distribution={"remember": 5},
+        )
+    assert "exceeds question_count" in exc_info.value.errors()[0]["msg"]
+
+
+def test_generation_request_bloom_distribution_negative_rejected() -> None:
+    with pytest.raises(ValidationError):
+        QuizGenerationRequest(
+            title="x",
+            question_count=5,
+            bloom_distribution={"remember": -1},
+        )
+
+
+def test_generation_request_bloom_distribution_unknown_key_rejected() -> None:
+    """Unknown bloom keys fail at the Pydantic boundary, not in the AI stage."""
+    with pytest.raises(ValidationError):
+        QuizGenerationRequest(
+            title="x",
+            bloom_distribution={"transcend": 1},  # type: ignore[dict-item]
+        )
+
+
+def test_generation_request_coverage_mode_defaults_materialised() -> None:
+    """Opt-in coverage mode without explicit options gets the default
+    ``CoverageOptions`` block so downstream code can rely on it."""
+    r = QuizGenerationRequest(title="x", generation_mode="coverage")
+    assert r.coverage_options is not None
+    assert r.coverage_options.min_per_section == 1
+    assert r.coverage_options.max_per_section == 5
+
+
+def test_generation_request_topic_mode_keeps_options_none() -> None:
+    """Topic mode does NOT materialise coverage_options."""
+    r = QuizGenerationRequest(title="x", generation_mode="topic")
+    assert r.coverage_options is None
+
+
+def test_generation_request_full_fr5_roundtrip() -> None:
+    """Full FR-5 payload survives ``model_validate -> model_dump`` cleanly."""
+    payload = {
+        "title": "Final Exam",
+        "description": "End of unit",
+        "question_count": 10,
+        "question_types": ["multiple_choice", "short_answer"],
+        "difficulty": "medium",
+        "bloom_distribution": {"remember": 2, "understand": 3, "apply": 5},
+        "include_prerequisites": True,
+        "model_preference": "openai:gpt-4o-mini",
+        "generation_mode": "coverage",
+        "focus_topics": ["vectors", "matrices"],
+        "avoid_topics": ["systems"],
+        "extra_instructions": "Avoid trick questions.",
+        "append": False,
+        "coverage_options": {
+            "min_per_section": 1,
+            "max_per_section": 3,
+            "skip_summaries": True,
+            "slides_per_section": 4,
+            "parallelism": 8,
+        },
+    }
+    r = QuizGenerationRequest.model_validate(payload)
+    dumped = r.model_dump()
+    # Re-validate the dump — guarantees the schema is its own fixed point.
+    r2 = QuizGenerationRequest.model_validate(dumped)
+    assert r2.coverage_options is not None
+    assert r2.coverage_options.parallelism == 8
+    assert r2.bloom_distribution["apply"] == 5
+    assert r2.focus_topics == ["vectors", "matrices"]
+
+
+def test_coverage_options_min_le_max_validator() -> None:
+    from abridgeai.features.quizzes.schemas import CoverageOptions  # noqa: PLC0415
+
+    ok = CoverageOptions(min_per_section=2, max_per_section=5)
+    assert ok.min_per_section == 2
+
+    with pytest.raises(ValidationError) as exc_info:
+        CoverageOptions(min_per_section=8, max_per_section=2)
+    assert "min_per_section cannot exceed max_per_section" in str(exc_info.value)
+
+
+def test_coverage_options_parallelism_bounds() -> None:
+    from abridgeai.features.quizzes.schemas import CoverageOptions  # noqa: PLC0415
+
+    assert CoverageOptions(parallelism=None).parallelism is None
+    assert CoverageOptions(parallelism=1).parallelism == 1
+    assert CoverageOptions(parallelism=32).parallelism == 32
+    with pytest.raises(ValidationError):
+        CoverageOptions(parallelism=0)
+    with pytest.raises(ValidationError):
+        CoverageOptions(parallelism=33)
+
+
+def test_coverage_options_extras_rejected() -> None:
+    from abridgeai.features.quizzes.schemas import CoverageOptions  # noqa: PLC0415
+
+    with pytest.raises(ValidationError):
+        CoverageOptions.model_validate(
+            {"min_per_section": 1, "max_per_section": 5, "unknown": "x"}
+        )
+
+
+def test_question_regeneration_request_extras_rejected() -> None:
+    from abridgeai.features.quizzes.schemas import QuestionRegenerationRequest  # noqa: PLC0415
+
+    ok = QuestionRegenerationRequest(question_id=uuid4())
+    assert ok.question_id is not None
+    with pytest.raises(ValidationError):
+        QuestionRegenerationRequest.model_validate(
+            {"question_id": str(uuid4()), "wat": 1}
+        )
 
 
 def test_generation_run_orm_compat() -> None:

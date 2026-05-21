@@ -665,10 +665,12 @@ async def test_full_generation_lifecycle_publish_take_score(
     gen_resp = await client.post(
         f"/api/v1/teacher/quizzes/{quiz_id}/generate",
         json={
-            "mode": "full",
-            "target_count": 3,
+            "title": "Photosynthesis Quiz",
+            "question_count": 3,
+            "question_types": ["multiple_choice"],
+            "generation_mode": "topic",
             "focus_topics": ["photosynthesis"],
-            "source_lessons": [str(scenario["lesson_id"])],
+            "source_lesson_ids": [str(scenario["lesson_id"])],
         },
         headers=_auth(admin_bearer),
     )
