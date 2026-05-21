@@ -395,6 +395,10 @@ async def test_list_admin_users_smoke(
             "/api/v1/admin/users?role_code=teacher&limit=10",
             headers=_auth(token),
         )
+        q_filter = await client.get(
+            "/api/v1/admin/users?q=admin&limit=10",
+            headers=_auth(token),
+        )
     finally:
         await _purge_sessions(engine, seeded_users.admin_id)
     assert no_filter.status_code == 200, no_filter.text
@@ -403,6 +407,12 @@ async def test_list_admin_users_smoke(
     assert isinstance(no_filter.json(), list)
     assert isinstance(status_filter.json(), list)
     assert isinstance(role_filter.json(), list)
+    assert q_filter.status_code == 200, q_filter.text
+    q_rows = q_filter.json()
+    assert isinstance(q_rows, list)
+    # Each row must expose ``display_name`` (nullable) for the search UI.
+    for row in q_rows:
+        assert "display_name" in row
 
 
 async def test_disable_revokes_sessions(
