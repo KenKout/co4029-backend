@@ -54,18 +54,28 @@ async def glue_by_similarity(
     *,
     threshold: float = 0.72,
     max_window_tokens: int = 2000,
-    min_window_tokens: int = 0,
+    min_window_tokens: int = 30,
 ) -> list[RawChunk]:
     """Merge adjacent chunks whose embeddings exceed ``threshold``.
 
     Greedy linear pass preserves reading order (jumping around would lose
     continuity). Force-breaks on role change so Stage C never has to
     classify a mixed window.
+
+    When ``embedder is None`` the similarity merge is skipped, but the
+    ``min_window_tokens`` absorb pass still runs so single-member windows
+    below the threshold (slide-divider artefacts like ``"38"`` or
+    ``"Case Study"``) are merged into a same-role neighbour.
     """
     if not chunks:
         return []
     if embedder is None:
-        return [_single_member_window(c, group_id=i) for i, c in enumerate(chunks)]
+        windows = [_single_member_window(c, group_id=i) for i, c in enumerate(chunks)]
+        if min_window_tokens > 0:
+            windows = _absorb_tiny_windows(
+                windows, min_tokens=min_window_tokens, max_tokens=max_window_tokens
+            )
+        return windows
 
     embeddings = await embedder.embed([c.content for c in chunks])
     if len(embeddings) != len(chunks):

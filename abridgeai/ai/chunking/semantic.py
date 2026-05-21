@@ -50,7 +50,7 @@ class SemanticChunker:
         overlap_tokens: int = 80,
         glue_threshold: float = 0.72,
         max_window_tokens: int = 2000,
-        min_window_tokens: int = 0,
+        min_window_tokens: int = 30,
         parallelism: int = 4,
     ) -> None:
         self._max_tokens = max_tokens
