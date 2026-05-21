@@ -69,3 +69,18 @@ class MfaStatusResponse(BaseModel):
 
     enrolled: bool
     mfa_verified_at: datetime | None = None
+
+
+class MfaDisableRequest(BaseModel):
+    """Disable MFA on the caller's account.
+
+    Requires proof-of-possession to prevent a stolen access token from
+    silently turning off the second factor: the caller must present
+    either a current TOTP code or a single-use recovery code. The code
+    is verified against the user's currently-active TOTP factor; on
+    success that factor (and any pending unverified ones) is marked
+    ``disabled_at`` and recovery codes are wiped.
+    """
+
+    code: str | None = Field(default=None, min_length=6, max_length=8)
+    recovery_code: str | None = None

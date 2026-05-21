@@ -30,6 +30,7 @@ from abridgeai.features.identity.models import (
 from abridgeai.features.identity.queries import mfa as mfa_queries
 from abridgeai.features.identity.schemas import (
     MfaChallengeResponse,
+    MfaDisableRequest,
     MfaEnrollResponse,
     MfaRecoveryCodesResponse,
     MfaTotpVerifyRequest,
@@ -143,6 +144,41 @@ async def regenerate_recovery_codes(db: AsyncSession, user: User) -> MfaRecovery
     recovery_codes = await _replace_recovery_codes(db, factor.id)
     await db.commit()
     return MfaRecoveryCodesResponse(recovery_codes=recovery_codes)
+
+
+async def disable_mfa(
+    db: AsyncSession,
+    user: User,
+    payload: MfaDisableRequest,
+) -> None:
+    """Turn off MFA for ``user`` after verifying proof-of-possession.
+
+    Step-up gate: caller must present either a current TOTP code or a
+    single-use recovery code matching the active factor. On success
+    every not-yet-disabled factor (verified TOTP + pending enrollments)
+    is marked ``disabled_at = utcnow()`` and recovery codes for the
+    active factor are wiped. The session's ``mfa_verified_at`` is left
+    intact so the rest of the request can finish normally; a fresh
+    login will not be MFA-gated until the user re-enrolls.
+    """
+    factor = await mfa_queries.get_verified_totp_factor(db, user.id)
+    if factor is None:
+        raise NotFoundError("Verified MFA factor not found")
+
+    verified = False
+    if payload.code:
+        verified = _verify_totp(factor, payload.code)
+    if not verified and payload.recovery_code:
+        verified = await _consume_recovery_code(db, factor.id, payload.recovery_code)
+    if not verified:
+        raise UnauthorizedError("Invalid MFA verification code")
+
+    now = utcnow()
+    active_factors = await mfa_queries.list_active_factors_for_user(db, user.id)
+    for active in active_factors:
+        active.disabled_at = now
+    await mfa_queries.delete_recovery_codes_for_factor(db, factor.id)
+    await db.commit()
 
 
 def _verify_totp(factor: MfaFactor, code: str) -> bool:

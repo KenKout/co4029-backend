@@ -81,5 +81,22 @@ async def list_unused_recovery_codes(db: AsyncSession, factor_id: UUID) -> list[
     return list(result.scalars().all())
 
 
+async def list_active_factors_for_user(db: AsyncSession, user_id: UUID) -> list[MfaFactor]:
+    """Return all of the user's not-yet-disabled factors (verified or pending).
+
+    Used by ``disable_mfa`` to mark every live factor row ``disabled_at``
+    in one shot — both the active verified TOTP and any half-finished
+    enrollment attempts (``verified_at IS NULL``) — so a future
+    ``GET /status`` call cleanly reports ``enrolled=False``.
+    """
+    result = await db.execute(
+        select(MfaFactor).where(
+            MfaFactor.user_id == user_id,
+            MfaFactor.disabled_at.is_(None),
+        )
+    )
+    return list(result.scalars().all())
+
+
 async def mark_recovery_code_used(db: AsyncSession, code: MfaRecoveryCode) -> None:
     code.used_at = datetime.now(UTC)
