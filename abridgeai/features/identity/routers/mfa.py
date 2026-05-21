@@ -37,6 +37,7 @@ from abridgeai.features.identity.models import AuthSession, User
 from abridgeai.features.identity.queries import sessions as session_queries
 from abridgeai.features.identity.schemas import (
     MfaChallengeResponse,
+    MfaDisableRequest,
     MfaEnrollResponse,
     MfaRecoveryCodesResponse,
     MfaStatusResponse,
@@ -206,6 +207,33 @@ async def regenerate_recovery_codes(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(exc),
         ) from exc
+
+
+@router.post("/disable", status_code=status.HTTP_204_NO_CONTENT)
+async def disable_mfa(
+    payload: MfaDisableRequest,
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> Response:
+    """Turn off MFA after verifying a TOTP or recovery code.
+
+    Uses the strict ``get_current_user`` (post-MFA) dep so the caller
+    has already cleared the gate for the current request, but still
+    requires a fresh code in the body so a stolen access token alone
+    cannot silently disable the second factor. On success every active
+    factor is marked ``disabled_at`` and recovery codes are wiped; the
+    caller's session keeps its existing ``mfa_verified_at`` so no
+    redirect happens, and the next login will go straight through with
+    no challenge until the user re-enrolls.
+    """
+    user, _session = await _load_principal(db, current_user)
+    try:
+        await mfa_service.disable_mfa(db, user, payload)
+    except NotFoundError as exc:
+        raise _not_found(str(exc)) from exc
+    except UnauthorizedError as exc:
+        raise _unauthorized(str(exc)) from exc
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 __all__ = ["router"]

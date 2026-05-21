@@ -127,6 +127,7 @@ def test_router_metadata() -> None:
     assert ("/auth/me/mfa/challenge", ("POST",)) in paths
     assert ("/auth/me/mfa/verify", ("POST",)) in paths
     assert ("/auth/me/mfa/recovery-codes/regenerate", ("POST",)) in paths
+    assert ("/auth/me/mfa/disable", ("POST",)) in paths
 
 
 async def test_unauthenticated_returns_401(client: httpx.AsyncClient) -> None:
@@ -278,3 +279,127 @@ async def test_recovery_codes_regenerate_requires_fresh_mfa(
             )
         ).scalar_one()
         assert codes_for_user == 10
+
+
+async def test_disable_mfa_marks_factor_disabled_and_wipes_recovery_codes(
+    client: httpx.AsyncClient,
+    auth_session: tuple[uuid.UUID, str],
+    test_engine_local: AsyncEngine,
+    seeded_users: SeededUsers,
+) -> None:
+    _, token = auth_session
+    headers = {"Authorization": f"Bearer {token}"}
+
+    enroll = (await client.post("/api/v1/auth/me/mfa/totp/enroll", headers=headers)).json()
+    totp = pyotp.TOTP(enroll["secret"])
+    await client.post(
+        "/api/v1/auth/me/mfa/totp/verify",
+        headers=headers,
+        json={"factor_id": enroll["factor_id"], "code": totp.now()},
+    )
+
+    disable = await client.post(
+        "/api/v1/auth/me/mfa/disable",
+        headers=headers,
+        json={"code": totp.now()},
+    )
+    assert disable.status_code == 204, disable.text
+
+    async with test_engine_local.begin() as conn:
+        active_count = (
+            await conn.execute(
+                text(
+                    "SELECT COUNT(*) FROM mfa_factors "
+                    "WHERE user_id = :uid AND disabled_at IS NULL"
+                ),
+                {"uid": seeded_users.student_id},
+            )
+        ).scalar_one()
+        assert active_count == 0
+        recovery_count = (
+            await conn.execute(
+                text(
+                    "SELECT COUNT(*) FROM mfa_recovery_codes WHERE factor_id IN "
+                    "(SELECT id FROM mfa_factors WHERE user_id = :uid)"
+                ),
+                {"uid": seeded_users.student_id},
+            )
+        ).scalar_one()
+        assert recovery_count == 0
+
+
+async def test_disable_mfa_rejects_invalid_code(
+    client: httpx.AsyncClient,
+    auth_session: tuple[uuid.UUID, str],
+    test_engine_local: AsyncEngine,
+    seeded_users: SeededUsers,
+) -> None:
+    _, token = auth_session
+    headers = {"Authorization": f"Bearer {token}"}
+
+    enroll = (await client.post("/api/v1/auth/me/mfa/totp/enroll", headers=headers)).json()
+    totp = pyotp.TOTP(enroll["secret"])
+    await client.post(
+        "/api/v1/auth/me/mfa/totp/verify",
+        headers=headers,
+        json={"factor_id": enroll["factor_id"], "code": totp.now()},
+    )
+
+    bad = await client.post(
+        "/api/v1/auth/me/mfa/disable",
+        headers=headers,
+        json={"code": "000000"},
+    )
+    assert bad.status_code == 401, bad.text
+
+    async with test_engine_local.begin() as conn:
+        active_count = (
+            await conn.execute(
+                text(
+                    "SELECT COUNT(*) FROM mfa_factors "
+                    "WHERE user_id = :uid AND disabled_at IS NULL "
+                    "AND verified_at IS NOT NULL"
+                ),
+                {"uid": seeded_users.student_id},
+            )
+        ).scalar_one()
+        assert active_count == 1, "active factor must remain when code is wrong"
+
+
+async def test_disable_mfa_accepts_recovery_code(
+    client: httpx.AsyncClient,
+    auth_session: tuple[uuid.UUID, str],
+    test_engine_local: AsyncEngine,
+    seeded_users: SeededUsers,
+) -> None:
+    _, token = auth_session
+    headers = {"Authorization": f"Bearer {token}"}
+
+    enroll = (await client.post("/api/v1/auth/me/mfa/totp/enroll", headers=headers)).json()
+    totp = pyotp.TOTP(enroll["secret"])
+    initial = (
+        await client.post(
+            "/api/v1/auth/me/mfa/totp/verify",
+            headers=headers,
+            json={"factor_id": enroll["factor_id"], "code": totp.now()},
+        )
+    ).json()["recovery_codes"]
+
+    disable = await client.post(
+        "/api/v1/auth/me/mfa/disable",
+        headers=headers,
+        json={"recovery_code": initial[0]},
+    )
+    assert disable.status_code == 204, disable.text
+
+    async with test_engine_local.begin() as conn:
+        disabled_count = (
+            await conn.execute(
+                text(
+                    "SELECT COUNT(*) FROM mfa_factors "
+                    "WHERE user_id = :uid AND disabled_at IS NOT NULL"
+                ),
+                {"uid": seeded_users.student_id},
+            )
+        ).scalar_one()
+        assert disabled_count == 1
