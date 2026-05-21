@@ -285,6 +285,14 @@ ignore_imports = [
     "abridgeai.features.courses.queries.** -> abridgeai.features.access_control.models",
     "abridgeai.features.courses.queries.** -> abridgeai.features.identity.models",
     "abridgeai.features.courses.queries.** -> abridgeai.features.enrollments.models",
+    # FR-3 outline builder reads DocumentChunk rows to group lesson chunks
+    # into sections. Read-only access to the materials model; writes still
+    # go through materials' own services.
+    "abridgeai.features.quizzes.ai.outline -> abridgeai.features.materials.models",
+    # FR-3 outline route exposes the builder result via the courses
+    # router (lesson is a courses-feature concept). Cross-feature import
+    # is one-way: quizzes' outline builder hydrates from materials.
+    "abridgeai.features.courses.routers.authoring -> abridgeai.features.quizzes.ai.outline",
 ]
 
 [[tool.importlinter.contracts]]
