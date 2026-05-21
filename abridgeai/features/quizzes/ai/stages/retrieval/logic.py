@@ -35,6 +35,9 @@ from abridgeai.features.quizzes.ai.stages.retrieval.anchors import (
     MAX_ANCHORS,
     build_query_anchors,
 )
+from abridgeai.features.quizzes.ai.stages.retrieval.hybrid import (
+    hybrid_search_for_anchor,
+)
 from abridgeai.features.quizzes.ai.stages.retrieval.rerank import rerank_pool
 
 if TYPE_CHECKING:
@@ -135,6 +138,7 @@ async def retrieve_chunks(
     lesson_ids = _maybe_uuid_list(config.get("lesson_ids") or config.get("source_lesson_ids"))
 
     client = embedding_client or EmbeddingClient()
+    active_settings = settings or get_settings()
     pool: dict[UUID, ChunkWithDistance] = {}
     primary_embedding: list[float] = []
 
@@ -148,14 +152,24 @@ async def retrieve_chunks(
         if index == 0:
             primary_embedding = embedding
 
-        hits = await vector_search(
-            db,
-            embedding,
-            course_id=course_id,
-            lesson_ids=lesson_ids,
-            top_k=per_anchor_top_k,
-            include_embeddings=True,
-        )
+        if active_settings.hybrid_bm25_enabled:
+            hits = await hybrid_search_for_anchor(
+                db,
+                anchor_text=anchor,
+                embedding=embedding,
+                course_id=course_id,
+                lesson_ids=lesson_ids,
+                settings=active_settings,
+            )
+        else:
+            hits = await vector_search(
+                db,
+                embedding,
+                course_id=course_id,
+                lesson_ids=lesson_ids,
+                top_k=per_anchor_top_k,
+                include_embeddings=True,
+            )
         for hit in hits:
             existing = pool.get(hit.chunk_id)
             if existing is None or hit.distance < existing.distance:
@@ -168,7 +182,6 @@ async def retrieve_chunks(
 
     # Resolve rerank knob: caller may inject a stub client (test seam) OR
     # let us read settings. When no key is present, skip — MMR-only path.
-    active_settings = settings or get_settings()
     voyage_key = (
         active_settings.voyage_api_key.get_secret_value()
         if active_settings.voyage_api_key is not None

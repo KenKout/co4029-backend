@@ -361,3 +361,94 @@ async def test_retrieve_chunks_skips_rerank_when_no_key_no_client(
         )
 
     assert len(chunks) == 6
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 — Contextual BM25 hybrid retrieval
+# ---------------------------------------------------------------------------
+
+
+def _settings_with_hybrid(enabled: bool) -> object:
+    """Build a minimal Settings stand-in for the hybrid knob."""
+    from abridgeai.core.config import get_settings
+
+    settings = get_settings()
+    object.__setattr__(settings, "hybrid_bm25_enabled", enabled)
+    return settings
+
+
+@pytest.mark.asyncio
+async def test_retrieve_chunks_dispatches_to_hybrid_when_enabled(
+    fake_embedding_client: AsyncMock,
+) -> None:
+    """When hybrid_bm25_enabled=True the orchestrator calls
+    hybrid_search_for_anchor instead of plain vector_search."""
+    db = AsyncMock()
+    quiz = _quiz_stub()
+    config = {"focus_topics": ["alpha"]}
+
+    hits = [_chunk(distance=0.05 + i * 0.01, content=f"hit-{i}") for i in range(8)]
+    settings = _settings_with_hybrid(True)
+
+    with (
+        patch(
+            "abridgeai.features.quizzes.ai.stages.retrieval.logic.hybrid_search_for_anchor",
+            AsyncMock(return_value=hits),
+        ) as mock_hybrid,
+        patch(
+            "abridgeai.features.quizzes.ai.stages.retrieval.logic.vector_search",
+            AsyncMock(side_effect=AssertionError("vector_search must not be called")),
+        ),
+    ):
+        chunks, _, _ = await retrieve_chunks(
+            db,
+            run_id=uuid4(),
+            quiz=quiz,
+            config=config,
+            kg_context_enabled=False,
+            embedding_client=fake_embedding_client,
+            final_top_k=4,
+            settings=settings,
+        )
+
+    assert mock_hybrid.await_count == 1
+    call_kwargs = mock_hybrid.await_args.kwargs
+    assert call_kwargs["anchor_text"] == "alpha"
+    assert call_kwargs["settings"] is settings
+    assert len(chunks) == 4
+
+
+@pytest.mark.asyncio
+async def test_retrieve_chunks_uses_vector_only_when_hybrid_disabled(
+    fake_embedding_client: AsyncMock,
+) -> None:
+    """Default settings (hybrid_bm25_enabled=False) skip the hybrid path."""
+    db = AsyncMock()
+    quiz = _quiz_stub()
+    config = {"focus_topics": ["alpha"]}
+    hits = [_chunk(distance=0.05 + i * 0.01, content=f"hit-{i}") for i in range(8)]
+    settings = _settings_with_hybrid(False)
+
+    with (
+        patch(
+            "abridgeai.features.quizzes.ai.stages.retrieval.logic.hybrid_search_for_anchor",
+            AsyncMock(side_effect=AssertionError("hybrid must not be called")),
+        ),
+        patch(
+            "abridgeai.features.quizzes.ai.stages.retrieval.logic.vector_search",
+            AsyncMock(return_value=hits),
+        ) as mock_vs,
+    ):
+        chunks, _, _ = await retrieve_chunks(
+            db,
+            run_id=uuid4(),
+            quiz=quiz,
+            config=config,
+            kg_context_enabled=False,
+            embedding_client=fake_embedding_client,
+            final_top_k=4,
+            settings=settings,
+        )
+
+    assert mock_vs.await_count == 1
+    assert len(chunks) == 4
