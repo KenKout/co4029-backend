@@ -163,7 +163,13 @@ class QuizGenerationRequest(BaseModel):
     legacy ``POST /modules/{id}/quizzes/generate`` shape so payloads
     coming from the SPA's existing form do not need rewriting."""
 
-    title: Annotated[str, Field(min_length=1, max_length=255)]
+    title: Annotated[str | None, Field(min_length=1, max_length=255)] = None
+    """Required when creating a fresh quiz (``quiz_id is None``).
+    Ignored when targeting an existing quiz — the route's
+    ``{quiz_id}`` already pins the row, so the title doesn't need to
+    travel through the body. The cross-field check in
+    :meth:`_check_title_required` enforces this contract."""
+
     description: str | None = None
 
     # --- Generation budget ---
@@ -249,6 +255,14 @@ class QuizGenerationRequest(BaseModel):
             raise ValueError(
                 f"bloom_distribution total ({total}) exceeds "
                 f"question_count ({self.question_count})"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _check_title_required(self) -> QuizGenerationRequest:
+        if self.quiz_id is None and not self.title:
+            raise ValueError(
+                "title is required when creating a new quiz (quiz_id is null)"
             )
         return self
 

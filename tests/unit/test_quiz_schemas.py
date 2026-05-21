@@ -298,6 +298,29 @@ def test_generation_request_minimal_topic_mode_defaults() -> None:
     assert r.coverage_options is None
 
 
+def test_generation_request_title_optional_when_quiz_id_set() -> None:
+    """When the route already pins the quiz (``POST /quizzes/{id}/generate``)
+    the body shouldn't have to carry a redundant title — the route's
+    ``{quiz_id}`` becomes the body's ``quiz_id`` defence-in-depth and
+    the title is ignored. This unblocks the SPA's regenerate flow which
+    has no UX surface for an unused title."""
+    quiz_id = uuid4()
+    r = QuizGenerationRequest(quiz_id=quiz_id, question_count=5)
+    assert r.title is None
+    assert r.quiz_id == quiz_id
+
+
+def test_generation_request_title_required_when_creating_new_quiz() -> None:
+    """Conversely, when ``quiz_id is None`` the service has to mint a
+    fresh ``Quiz`` row and needs a title, so the schema must reject
+    titleless payloads up front rather than letting them fail at the
+    ORM layer."""
+    with pytest.raises(ValidationError) as exc_info:
+        QuizGenerationRequest(question_count=5)
+    msg = str(exc_info.value)
+    assert "title is required" in msg
+
+
 def test_generation_request_question_type_rejects_legacy_mcq() -> None:
     """The DB CHECK constraint accepts ``multiple_choice`` only; the
     legacy ``mcq`` alias is removed and must fail at the schema layer."""
