@@ -16,7 +16,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from uuid import UUID
 
-from sqlalchemy import text
+from sqlalchemy import exists, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from abridgeai.features.access_control.api._dto import (
@@ -24,6 +24,12 @@ from abridgeai.features.access_control.api._dto import (
     OrgUnitDTO,
     PermissionDTO,
     RoleAssignmentDTO,
+)
+from abridgeai.features.access_control.models import (
+    Organization,
+    OrganizationMembership,
+    Role,
+    UserRoleAssignment,
 )
 from abridgeai.features.access_control.policies import (
     can_manage_course,
@@ -33,30 +39,9 @@ from abridgeai.features.access_control.policies import (
     require_permission,
 )
 
-_ROLE_ASSIGNMENTS_FOR_USER_SQL = text(
-    """
-    SELECT ura.id,
-           ura.user_id,
-           ura.role_id,
-           r.code AS role_code,
-           ura.scope_kind,
-           ura.organization_id,
-           ura.org_unit_id,
-           ura.course_id,
-           ura.active_from,
-           ura.active_until
-    FROM user_role_assignments ura
-    JOIN roles r ON r.id = ura.role_id
-    WHERE ura.user_id = :user_id
-      AND ura.deleted_at IS NULL
-      AND r.deleted_at IS NULL
-      AND ura.active_from <= :at
-      AND (ura.active_until IS NULL OR ura.active_until > :at)
-    ORDER BY ura.active_from DESC, ura.id
-    """
-)
-
-
+# Recursive CTE — the cleanest expression of the ancestor walk is the raw
+# SQL form. SQLAlchemy supports recursive CTEs via Query.cte(recursive=True)
+# but the ORM equivalent is harder to read than the inline ``text()``.
 _ORG_UNIT_ANCESTORS_SQL = text(
     """
     WITH RECURSIVE org_unit_tree AS (
@@ -91,36 +76,10 @@ _ORG_UNIT_ANCESTORS_SQL = text(
 )
 
 
-_USER_PRIMARY_ORG_SQL = text(
-    """
-    SELECT o.id, o.slug, o.name, o.status
-    FROM user_role_assignments ura
-    JOIN organizations o ON o.id = ura.organization_id
-    WHERE ura.user_id = :user_id
-      AND ura.scope_kind IN ('organization', 'org_unit', 'course')
-      AND ura.organization_id IS NOT NULL
-      AND ura.deleted_at IS NULL
-      AND (ura.active_until IS NULL OR ura.active_until > NOW())
-      AND o.deleted_at IS NULL
-    ORDER BY ura.created_at DESC NULLS LAST
-    LIMIT 1
-    """
-)
-
-
-_IS_MEMBER_OF_ORG_SQL = text(
-    """
-    SELECT 1
-    FROM organization_memberships
-    WHERE user_id = :user_id
-      AND organization_id = :org_id
-      AND status = 'active'
-      AND deleted_at IS NULL
-    LIMIT 1
-    """
-)
-
-
+# UNION across two source tables (role-derived + direct grants) with
+# DISTINCT semantics. The ORM equivalent (``select().union(select())``)
+# is verbose and the column projection is small + well-documented, so
+# the raw form here is the right tool.
 _ACTIVE_PERMISSIONS_SQL = text(
     """
     SELECT DISTINCT p.id, p.code, p.name, p.description
@@ -157,12 +116,41 @@ async def get_role_assignments_for_user(
     *,
     at: datetime | None = None,
 ) -> list[RoleAssignmentDTO]:
-    rows = (
-        await db.execute(
-            _ROLE_ASSIGNMENTS_FOR_USER_SQL,
-            {"user_id": user_id, "at": _now_at(at)},
+    """Return all currently-active role assignments for ``user_id``.
+
+    Includes every scope (global, organization, org_unit, course); the
+    ``RoleAssignmentDTO.scope_kind`` field tells callers what they got.
+    Filters out soft-deleted assignments and roles, and rows whose
+    ``active_until`` window has elapsed.
+    """
+    at_value = _now_at(at)
+    stmt = (
+        select(
+            UserRoleAssignment.id,
+            UserRoleAssignment.user_id,
+            UserRoleAssignment.role_id,
+            Role.code.label("role_code"),
+            UserRoleAssignment.scope_kind,
+            UserRoleAssignment.organization_id,
+            UserRoleAssignment.org_unit_id,
+            UserRoleAssignment.course_id,
+            UserRoleAssignment.active_from,
+            UserRoleAssignment.active_until,
         )
-    ).mappings()
+        .join(Role, Role.id == UserRoleAssignment.role_id)
+        .where(
+            UserRoleAssignment.user_id == user_id,
+            UserRoleAssignment.deleted_at.is_(None),
+            Role.deleted_at.is_(None),
+            UserRoleAssignment.active_from <= at_value,
+            or_(
+                UserRoleAssignment.active_until.is_(None),
+                UserRoleAssignment.active_until > at_value,
+            ),
+        )
+        .order_by(UserRoleAssignment.active_from.desc(), UserRoleAssignment.id)
+    )
+    rows = (await db.execute(stmt)).mappings()
     return [RoleAssignmentDTO.model_validate(dict(row)) for row in rows]
 
 
@@ -183,23 +171,81 @@ async def get_org_unit_ancestors(db: AsyncSession, org_unit_id: UUID) -> list[Or
 
 
 async def get_user_primary_org(db: AsyncSession, user_id: UUID) -> OrgDTO | None:
-    """Resolve the user's most recent active org-scoped assignment.
+    """Resolve the user's primary organization via membership.
 
-    Replaces the duplicated ``get_user_primary_organization_id`` helpers in
-    ``features/courses/queries/published.py`` and
-    ``features/career_paths/queries/published.py``: returns a typed
-    :class:`OrgDTO` rather than just an id. ``scope_kind='global'`` is
-    intentionally excluded: platform admins are not implicitly members.
+    Source-of-truth order:
+
+    1. **Active organization_memberships row** — the intended path.
+       ``status='active'`` only; soft-deleted rows excluded. When the user
+       has multiple memberships, the most recent (``created_at DESC``)
+       wins.
+    2. **Role-assignment fallback** — used when the user has no active
+       membership but does have an org-scoped role. Preserves backwards
+       compatibility for legacy data and edge cases where access is
+       granted directly via roles without a corresponding membership.
+
+    ``scope_kind='global'`` is intentionally NOT picked up by either path:
+    platform admins are not implicitly members of any single org and must
+    use endpoints that accept an explicit ``organization_id`` parameter.
+    Returns ``None`` for users with neither a membership nor an org-scoped
+    role assignment.
     """
-    row = (await db.execute(_USER_PRIMARY_ORG_SQL, {"user_id": user_id})).mappings().one_or_none()
-    if row is None:
-        return None
-    return OrgDTO.model_validate(dict(row))
+    # Path 1: membership-first
+    membership_stmt = (
+        select(Organization)
+        .join(
+            OrganizationMembership,
+            OrganizationMembership.organization_id == Organization.id,
+        )
+        .where(
+            OrganizationMembership.user_id == user_id,
+            OrganizationMembership.status == "active",
+            OrganizationMembership.deleted_at.is_(None),
+            Organization.deleted_at.is_(None),
+        )
+        .order_by(OrganizationMembership.created_at.desc().nullslast())
+        .limit(1)
+    )
+    org = (await db.execute(membership_stmt)).scalar_one_or_none()
+    if org is not None:
+        return OrgDTO.model_validate(org, from_attributes=True)
+
+    # Path 2: role-assignment fallback (back-compat)
+    role_stmt = (
+        select(Organization)
+        .join(
+            UserRoleAssignment,
+            UserRoleAssignment.organization_id == Organization.id,
+        )
+        .where(
+            UserRoleAssignment.user_id == user_id,
+            UserRoleAssignment.scope_kind.in_(("organization", "org_unit", "course")),
+            UserRoleAssignment.organization_id.is_not(None),
+            UserRoleAssignment.deleted_at.is_(None),
+            or_(
+                UserRoleAssignment.active_until.is_(None),
+                UserRoleAssignment.active_until > func.now(),
+            ),
+            Organization.deleted_at.is_(None),
+        )
+        .order_by(UserRoleAssignment.created_at.desc().nullslast())
+        .limit(1)
+    )
+    org = (await db.execute(role_stmt)).scalar_one_or_none()
+    return OrgDTO.model_validate(org, from_attributes=True) if org is not None else None
 
 
 async def is_user_member_of_org(db: AsyncSession, *, user_id: UUID, org_id: UUID) -> bool:
-    result = await db.execute(_IS_MEMBER_OF_ORG_SQL, {"user_id": user_id, "org_id": org_id})
-    return result.scalar_one_or_none() is not None
+    """Return True iff the user has an active, non-deleted membership in ``org_id``."""
+    stmt = select(
+        exists().where(
+            OrganizationMembership.user_id == user_id,
+            OrganizationMembership.organization_id == org_id,
+            OrganizationMembership.status == "active",
+            OrganizationMembership.deleted_at.is_(None),
+        )
+    )
+    return bool((await db.execute(stmt)).scalar())
 
 
 async def get_active_permissions(
