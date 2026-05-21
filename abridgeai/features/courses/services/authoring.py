@@ -585,6 +585,21 @@ async def get_authoring_lesson(db: AsyncSession, lesson_id: UUID) -> LessonAutho
     return LessonAuthoring.model_validate(lesson)
 
 
+async def list_authoring_lessons(
+    db: AsyncSession, module_id: UUID
+) -> list[LessonAuthoring]:
+    """All non-soft-deleted lessons under ``module_id`` (drafts included).
+
+    Authoring sibling of :func:`catalog.list_published_lessons_for_module`:
+    no ``status='published'`` filter, no module-published filter — teachers
+    must see drafts to manage them. Caller layer enforces authoring
+    permission (``require_module_authoring_access``).
+    """
+    await _require_module(db, module_id)
+    rows = await authoring_queries.list_lessons_for_authoring(db, module_id)
+    return [LessonAuthoring.model_validate(r) for r in rows]
+
+
 async def list_authoring_lesson_resources(
     db: AsyncSession, lesson_id: UUID
 ) -> list[LessonResourceAuthoring]:
