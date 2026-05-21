@@ -140,8 +140,18 @@ def question_for_review(question: GeneratedQuestion | dict[str, Any]) -> dict[st
                 if opt.get("is_correct"):
                     correct = key
     payload = data.get("original_generated_payload") or {}
-    if data.get("question_type") in {"short_answer", "fill_blank"}:
+    qtype = data.get("question_type")
+    if qtype in {"short_answer", "fill_blank"}:
         correct_text = payload.get("correct_answer")
+    elif qtype == "true_false":
+        # Map the canonical option keys ("T"/"F") to the literal strings
+        # the validator's system prompt expects ("True"/"False").
+        if correct == "T":
+            correct_text = "True"
+        elif correct == "F":
+            correct_text = "False"
+        else:
+            correct_text = correct
     else:
         correct_text = correct
     return {

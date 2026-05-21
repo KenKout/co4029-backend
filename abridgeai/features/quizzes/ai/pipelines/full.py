@@ -19,6 +19,7 @@ from abridgeai.features.quizzes.ai.pipelines._synthetic_outline import resolve_o
 from abridgeai.features.quizzes.ai.pipelines._telemetry import log_validator_aborted_run
 from abridgeai.features.quizzes.ai.stages.dedup import discard_duplicates
 from abridgeai.features.quizzes.ai.stages.generation import generate_questions
+from abridgeai.features.quizzes.ai.stages.generation.parsers import question_for_review
 from abridgeai.features.quizzes.ai.stages.ideation import ideate_for_outline
 from abridgeai.features.quizzes.ai.stages.persistence import persist_questions
 from abridgeai.features.quizzes.ai.stages.retrieval import (
@@ -115,10 +116,16 @@ async def run_full_pipeline(
     if not candidate_dicts:
         raise ValueError("Quiz pipeline aborted: generation produced zero candidates")
 
+    # Project each candidate into the validator's compact view *before*
+    # calling the LLM — this surfaces non-MCQ ``correct_answer`` (which
+    # lives in ``original_generated_payload``) so the validator can judge
+    # groundedness instead of rejecting on "empty correct answer".
+    review_dicts = [question_for_review(c) for c in candidates]
+
     _, verdicts = await validate_questions(
         title=quiz.title,
         chunks=chunks,
-        questions=candidate_dicts,
+        questions=review_dicts,
         db=db,
         pipeline_run_id=pipeline_run_id,
         audit_parent_run_id=run.id,

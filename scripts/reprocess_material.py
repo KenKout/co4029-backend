@@ -10,8 +10,10 @@ Usage:
 
 The script:
   1. Looks up the latest version of the material
-  2. Marks it pending and clears existing chunks
-  3. Enqueues an arq job for ``ingest_material_version_task``
+  2. Picks any user with ``role='admin'`` (or the first user) as the
+     fake actor — only used for audit columns on the ingestion job
+  3. Enqueues an arq job for ``ingest_material_version_task`` with
+     signature (actor_id, version_id, pipeline_run_id)
   4. Prints the job id; the worker (pm2 abridgeai-worker) picks it up
 
 Stage C semantic enrichment is cached on content hash, so re-runs hit
@@ -19,7 +21,10 @@ the cache and don't incur fresh LLM cost. Only the embeddings are
 recomputed (cheap).
 
 Notes / pitfalls:
-  - The arq queue name is read from ``settings.arq_queue_name``.
+  - arq_app.WorkerSettings uses the default queue; we don't pass
+    ``_queue_name`` (Settings has no such attribute).
+  - The task signature is (ctx, actor_id, version_id, pipeline_run_id);
+    pipeline_run_id is a fresh UUID per reprocess.
   - Worker must be running (``pm2 status abridgeai-worker``).
   - Watch progress with: ``pm2 logs abridgeai-worker --lines 50``
   - The script exits as soon as the job is enqueued; processing
@@ -30,7 +35,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from arq import create_pool
 from arq.connections import RedisSettings
@@ -38,6 +43,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from abridgeai.core.config import get_settings
+from abridgeai.features.identity.models import User
 from abridgeai.features.materials.models import (
     LearningMaterial,
     LearningMaterialVersion,
@@ -67,22 +73,33 @@ async def main(material_id: UUID) -> None:
             print(f"ERROR: no version for material {material_id}", file=sys.stderr)
             sys.exit(1)
 
+        # Pick any user as the actor — only used for audit columns. The
+        # ingestion task itself doesn't require admin privileges.
+        actor = await db.scalar(select(User).limit(1))
+        if actor is None:
+            print("ERROR: no users in DB to act as reprocess actor", file=sys.stderr)
+            sys.exit(1)
+
         print(f"material: {material.title!r}")
         print(f"version_id: {version.id}")
         print(f"current status: {version.processing_status}")
+        print(f"actor: {actor.id}")
 
     redis_settings = RedisSettings.from_dsn(settings.redis_url)
     pool = await create_pool(redis_settings)
+    pipeline_run_id = uuid4()
     try:
         job = await pool.enqueue_job(
             "ingest_material_version_task",
-            str(version.id),
-            _queue_name=settings.arq_queue_name,
+            actor.id,
+            version.id,
+            pipeline_run_id,
         )
         if job is None:
             print("ERROR: failed to enqueue (already queued?)", file=sys.stderr)
             sys.exit(2)
         print(f"enqueued job: {job.job_id}")
+        print(f"pipeline_run_id: {pipeline_run_id}")
     finally:
         await pool.close()
     await engine.dispose()
