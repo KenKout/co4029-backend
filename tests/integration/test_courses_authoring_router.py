@@ -346,7 +346,8 @@ def test_router_metadata() -> None:
         ("/teacher/modules/{module_id}", ("PATCH",)),
         ("/teacher/modules/{module_id}/prerequisites", ("PUT",)),
         ("/teacher/modules/{module_id}/items/reorder", ("PUT",)),
-        ("/teacher/modules/{module_id}/lessons", ("GET", "POST")),
+        ("/teacher/modules/{module_id}/lessons", ("GET",)),
+        ("/teacher/modules/{module_id}/lessons", ("POST",)),
         ("/teacher/lessons/{lesson_id}", ("PATCH",)),
         ("/teacher/lessons/{lesson_id}/resources", ("POST",)),
         ("/teacher/lesson-resources/{resource_id}", ("DELETE",)),
@@ -1272,3 +1273,48 @@ async def test_get_lesson_outline_returns_synthetic_section(
         "preview",
     ):
         assert key in sample
+
+
+async def test_get_lesson_outline_accepts_grouping_query_params(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    scenario: dict[str, uuid.UUID | str],
+) -> None:
+    """``GET /lessons/{id}/outline`` honors ``slides_per_section`` and
+    ``section_grouping`` query params.
+
+    The synthetic-section fallback (no chunks ingested for ``lesson_a``)
+    doesn't exercise the grouping logic itself, but the endpoint must
+    accept the params without 422 — that's what the SPA dropdown wires
+    through. End-to-end grouping behaviour is covered by
+    ``test_quiz_outline.py``.
+    """
+    for grouping in ("auto", "fixed"):
+        for size in (1, 4, 16):
+            response = await client.get(
+                f"/api/v1/teacher/lessons/{scenario['lesson_a']}/outline",
+                params={
+                    "slides_per_section": size,
+                    "section_grouping": grouping,
+                },
+                headers={"Authorization": f"Bearer {admin_bearer}"},
+            )
+            assert response.status_code == 200, (
+                f"failed for grouping={grouping} size={size}: {response.text}"
+            )
+
+    # Out-of-range slides_per_section is rejected with 422 (Field ge=1, le=20).
+    response = await client.get(
+        f"/api/v1/teacher/lessons/{scenario['lesson_a']}/outline",
+        params={"slides_per_section": 0},
+        headers={"Authorization": f"Bearer {admin_bearer}"},
+    )
+    assert response.status_code == 422, response.text
+
+    # Unknown grouping value rejected with 422 (Literal validation).
+    response = await client.get(
+        f"/api/v1/teacher/lessons/{scenario['lesson_a']}/outline",
+        params={"section_grouping": "invalid"},
+        headers={"Authorization": f"Bearer {admin_bearer}"},
+    )
+    assert response.status_code == 422, response.text

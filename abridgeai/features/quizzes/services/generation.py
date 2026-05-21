@@ -121,10 +121,12 @@ async def _precompute_coverage_inputs(
     if not isinstance(cov_opts, dict):
         cov_opts = {}
 
+    section_grouping = str(cov_opts.get("section_grouping") or "fixed")
     outlines = await build_lesson_outline(
         db,
         lesson_ids,
         slides_per_section=int(cov_opts.get("slides_per_section") or 4),
+        force_bundle=(section_grouping == "fixed"),
     )
     if not outlines:
         raise ValueError(
