@@ -126,6 +126,14 @@ async def scenario(engine: AsyncEngine) -> AsyncIterator[dict]:
         )
         await conn.execute(
             text(
+                "INSERT INTO organization_memberships "
+                "(id, user_id, organization_id, status) "
+                "VALUES (gen_random_uuid(), :user, :org, 'active')"
+            ),
+            {"user": owner_id, "org": org_id},
+        )
+        await conn.execute(
+            text(
                 "INSERT INTO courses "
                 "(id, organization_id, owner_user_id, slug, title, status) "
                 "VALUES (:id, :org, :owner, :slug, 'Authoring Test Course', 'draft')"
@@ -178,6 +186,10 @@ async def scenario(engine: AsyncEngine) -> AsyncIterator[dict]:
         )
         await conn.execute(
             text("DELETE FROM user_role_assignments WHERE user_id = :id"),
+            {"id": owner_id},
+        )
+        await conn.execute(
+            text("DELETE FROM organization_memberships WHERE user_id = :id"),
             {"id": owner_id},
         )
         await conn.execute(text("DELETE FROM users WHERE id = :id"), {"id": owner_id})

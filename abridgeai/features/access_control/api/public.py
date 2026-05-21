@@ -16,7 +16,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from uuid import UUID
 
-from sqlalchemy import exists, func, or_, select, text
+from sqlalchemy import exists, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from abridgeai.features.access_control.api._dto import (
@@ -173,25 +173,18 @@ async def get_org_unit_ancestors(db: AsyncSession, org_unit_id: UUID) -> list[Or
 async def get_user_primary_org(db: AsyncSession, user_id: UUID) -> OrgDTO | None:
     """Resolve the user's primary organization via membership.
 
-    Source-of-truth order:
+    Sole source of truth: ``organization_memberships``. ``status='active'``
+    only; soft-deleted rows excluded. When a user has multiple memberships
+    the most recent (``created_at DESC``) wins.
 
-    1. **Active organization_memberships row** — the intended path.
-       ``status='active'`` only; soft-deleted rows excluded. When the user
-       has multiple memberships, the most recent (``created_at DESC``)
-       wins.
-    2. **Role-assignment fallback** — used when the user has no active
-       membership but does have an org-scoped role. Preserves backwards
-       compatibility for legacy data and edge cases where access is
-       granted directly via roles without a corresponding membership.
-
-    ``scope_kind='global'`` is intentionally NOT picked up by either path:
-    platform admins are not implicitly members of any single org and must
-    use endpoints that accept an explicit ``organization_id`` parameter.
-    Returns ``None`` for users with neither a membership nor an org-scoped
-    role assignment.
+    Role assignments are NOT consulted -- belonging-to-org and
+    permissions-in-org are independent concepts. ``scope_kind='global'``
+    is therefore irrelevant: platform admins are not implicitly members
+    of any single org and must use endpoints that accept an explicit
+    ``organization_id`` parameter. Returns ``None`` for users with no
+    active membership.
     """
-    # Path 1: membership-first
-    membership_stmt = (
+    stmt = (
         select(Organization)
         .join(
             OrganizationMembership,
@@ -206,32 +199,7 @@ async def get_user_primary_org(db: AsyncSession, user_id: UUID) -> OrgDTO | None
         .order_by(OrganizationMembership.created_at.desc().nullslast())
         .limit(1)
     )
-    org = (await db.execute(membership_stmt)).scalar_one_or_none()
-    if org is not None:
-        return OrgDTO.model_validate(org, from_attributes=True)
-
-    # Path 2: role-assignment fallback (back-compat)
-    role_stmt = (
-        select(Organization)
-        .join(
-            UserRoleAssignment,
-            UserRoleAssignment.organization_id == Organization.id,
-        )
-        .where(
-            UserRoleAssignment.user_id == user_id,
-            UserRoleAssignment.scope_kind.in_(("organization", "org_unit", "course")),
-            UserRoleAssignment.organization_id.is_not(None),
-            UserRoleAssignment.deleted_at.is_(None),
-            or_(
-                UserRoleAssignment.active_until.is_(None),
-                UserRoleAssignment.active_until > func.now(),
-            ),
-            Organization.deleted_at.is_(None),
-        )
-        .order_by(UserRoleAssignment.created_at.desc().nullslast())
-        .limit(1)
-    )
-    org = (await db.execute(role_stmt)).scalar_one_or_none()
+    org = (await db.execute(stmt)).scalar_one_or_none()
     return OrgDTO.model_validate(org, from_attributes=True) if org is not None else None
 
 

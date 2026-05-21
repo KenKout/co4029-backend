@@ -172,10 +172,14 @@ async def test_primary_org_via_membership(
 
 
 @pytest.mark.asyncio
-async def test_primary_org_via_role_fallback(
+async def test_primary_org_role_alone_returns_none(
     engine: AsyncEngine, session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
-    """No membership but org-scoped role → returns role's org (back-compat)."""
+    """Org-scoped role WITHOUT membership → None.
+
+    Membership is the sole source of truth. Permissions-in-org and
+    belonging-to-org are independent concepts.
+    """
     user_id = uuid.uuid4()
     org_id = uuid.uuid4()
     await _seed_user(engine, user_id, f"role-only-{user_id.hex[:6]}@test.local")
@@ -185,17 +189,16 @@ async def test_primary_org_via_role_fallback(
     try:
         async with session_factory() as session:
             org = await get_user_primary_org(session, user_id)
-        assert org is not None
-        assert org.id == org_id
+        assert org is None, "role assignments must NOT confer primary-org membership"
     finally:
         await _cleanup(engine, [user_id], [org_id])
 
 
 @pytest.mark.asyncio
-async def test_primary_org_membership_takes_precedence(
+async def test_primary_org_membership_wins_when_role_points_elsewhere(
     engine: AsyncEngine, session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
-    """Both membership AND role pointing to different orgs → membership wins."""
+    """Membership in org A + role in org B → membership org A wins."""
     user_id = uuid.uuid4()
     membership_org = uuid.uuid4()
     role_org = uuid.uuid4()
@@ -209,7 +212,7 @@ async def test_primary_org_membership_takes_precedence(
         async with session_factory() as session:
             org = await get_user_primary_org(session, user_id)
         assert org is not None
-        assert org.id == membership_org, "membership must take precedence over role"
+        assert org.id == membership_org
     finally:
         await _cleanup(engine, [user_id], [membership_org, role_org])
 
@@ -218,7 +221,7 @@ async def test_primary_org_membership_takes_precedence(
 async def test_primary_org_global_admin_returns_none(
     engine: AsyncEngine, session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
-    """Global admin with no membership / org-scoped role → None."""
+    """Global admin with no membership → None."""
     user_id = uuid.uuid4()
     await _seed_user(engine, user_id, f"global-admin-{user_id.hex[:6]}@test.local")
     await _seed_global_admin_assignment(engine, user_id)
@@ -232,10 +235,10 @@ async def test_primary_org_global_admin_returns_none(
 
 
 @pytest.mark.asyncio
-async def test_primary_org_inactive_membership_excluded_falls_through(
+async def test_primary_org_inactive_membership_returns_none(
     engine: AsyncEngine, session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
-    """Inactive membership → not selected; falls through to role fallback."""
+    """Inactive membership + role → None (no fallback)."""
     user_id = uuid.uuid4()
     membership_org = uuid.uuid4()
     role_org = uuid.uuid4()
@@ -248,8 +251,7 @@ async def test_primary_org_inactive_membership_excluded_falls_through(
     try:
         async with session_factory() as session:
             org = await get_user_primary_org(session, user_id)
-        assert org is not None
-        assert org.id == role_org, "inactive membership skipped; role fallback wins"
+        assert org is None, "inactive membership skipped, no role fallback"
     finally:
         await _cleanup(engine, [user_id], [membership_org, role_org])
 
@@ -258,7 +260,7 @@ async def test_primary_org_inactive_membership_excluded_falls_through(
 async def test_primary_org_soft_deleted_membership_excluded(
     engine: AsyncEngine, session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
-    """Soft-deleted membership → ignored; returns None when no fallback."""
+    """Soft-deleted membership → ignored; returns None."""
     user_id = uuid.uuid4()
     org_id = uuid.uuid4()
     await _seed_user(engine, user_id, f"soft-del-{user_id.hex[:6]}@test.local")
