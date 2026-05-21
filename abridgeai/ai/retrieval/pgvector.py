@@ -61,7 +61,11 @@ class ChunkWithDistance:
     (:func:`abridgeai.ai.retrieval.mmr.mmr_diversify`) need ``embedding``
     to be populated; pass ``include_embeddings=True`` to
     :func:`vector_search` to opt in (default skips the column to save
-    bandwidth).
+    bandwidth). ``metadata`` carries the JSONB ``document_chunks.metadata``
+    column verbatim — downstream role-aware filters
+    (:mod:`abridgeai.ai.retrieval.role_filter`) read
+    ``metadata['content_role']`` to deprioritize summary / review /
+    front_matter chunks during quiz generation.
     """
 
     chunk_id: UUID
@@ -71,10 +75,11 @@ class ChunkWithDistance:
     content: str
     distance: float
     embedding: list[float] | None = None
+    metadata: dict[str, object] | None = None
 
 
 _SELECT_COLS = (
-    "id, material_version_id, course_id, lesson_id, content, "
+    "id, material_version_id, course_id, lesson_id, content, metadata, "
     "(embedding <=> CAST(:query_embedding AS halfvec)) AS distance"
 )
 _SELECT_COLS_WITH_EMB = _SELECT_COLS + ", embedding"
@@ -191,6 +196,7 @@ async def vector_search(
             content=row["content"],
             distance=float(row["distance"]),
             embedding=_parse_vector(row["embedding"]) if include_embeddings else None,
+            metadata=row.get("metadata") if isinstance(row.get("metadata"), dict) else None,
         )
         for row in rows
     ]
