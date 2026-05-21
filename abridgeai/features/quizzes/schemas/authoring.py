@@ -94,6 +94,7 @@ class QuizQuestionAuthoring(QuizQuestionPublic):
     expected_ef_ceiling: Decimal | None = None
     source_refs: list[Any] = []
     original_generated_payload: dict[str, Any] | None = None
+    imported_from_question_id: UUID | None = None
     reviewed_by: UUID | None = None
     reviewed_at: datetime | None = None
     published_at: datetime | None = None
