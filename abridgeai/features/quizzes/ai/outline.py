@@ -88,14 +88,24 @@ async def build_lesson_outline(
     lesson_ids: list[UUID],
     *,
     slides_per_section: int = _SLIDE_GROUP_SIZE,
+    force_bundle: bool = False,
 ) -> list[LessonOutline]:
     """Load chunks for ``lesson_ids`` and group into one outline per lesson.
 
-    ``slides_per_section`` only matters when the source has no real headings
-    (raw slide deck) — in that case it controls how many consecutive slides
-    are bundled into a single ``OutlineSection``. Default 4. Pass 1 for
-    "one section per slide" granularity (use sparingly — coverage mode
-    will then generate one question per slide which is many LLM calls).
+    ``slides_per_section`` controls how many consecutive chunks are bundled
+    into a single ``OutlineSection`` when the slide-deck fallback fires.
+    Default 4. Pass 1 for "one section per slide" granularity (use
+    sparingly — coverage mode will then generate one question per slide
+    which is many LLM calls).
+
+    ``force_bundle`` (default ``False``) overrides semantic-aware grouping
+    and forces ``_group_slide_deck`` regardless of whether the chunks have
+    real or semantic headings. Useful when the user explicitly wants
+    fixed-size bundling from the panel UI ("4 pages/section" knob) instead
+    of one section per detected topic. When ``False`` (auto mode), the
+    builder uses heading + semantic enrichment to draw boundaries — that
+    can produce very many sections for slide-deck PDFs where every page
+    has its own topic.
 
     Returns one ``LessonOutline`` per lesson that has at least one chunk.
     Lessons with no chunks are silently skipped — the caller (route layer)
@@ -123,7 +133,11 @@ async def build_lesson_outline(
         lesson_chunks = by_lesson.get(lesson_id)
         if not lesson_chunks:
             continue
-        sections = _group_sections(lesson_chunks, slides_per_section=slides_per_section)
+        sections = _group_sections(
+            lesson_chunks,
+            slides_per_section=slides_per_section,
+            force_bundle=force_bundle,
+        )
         outlines.append(
             LessonOutline(
                 lesson_id=lesson_id,
@@ -141,6 +155,7 @@ def _group_sections(
     chunks: Sequence[DocumentChunk],
     *,
     slides_per_section: int = _SLIDE_GROUP_SIZE,
+    force_bundle: bool = False,
 ) -> list[OutlineSection]:
     """Walk chunks in order, open a new section on heading change.
 
@@ -150,9 +165,18 @@ def _group_sections(
       (b) No real headings present (raw slide deck — heading is empty or
           synthetic ``Page N`` / ``Slide N`` only) → fallback to grouping
           ``slides_per_section`` consecutive slides per section.
+
+    When ``force_bundle=True`` always falls through to the slide-deck
+    bundling path even if chunks have semantic-enriched headings. The
+    panel UI uses this to give the user a fixed-size grouping knob ("4
+    pages/section") regardless of how the chunker enriched per-page
+    semantic titles.
     """
     if not chunks:
         return []
+
+    if force_bundle:
+        return _group_slide_deck(chunks, slides_per_section=slides_per_section)
 
     has_any_real_heading = any(_is_real_heading(c) for c in chunks)
     if not has_any_real_heading:

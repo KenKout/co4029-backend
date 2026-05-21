@@ -222,6 +222,52 @@ def test_chunk_page_reads_top_level_metadata() -> None:
     assert sections[0].page_range == (7, 7)
 
 
+def test_group_sections_force_bundles_when_size_knob_set() -> None:
+    """When ``force_bundle=True``, builder bundles by ``slides_per_section``
+    regardless of semantic titles — gives user the legacy 'gọn' grouping
+    for slide-deck PDFs.
+    """
+    chunks = [
+        _chunk(
+            chunk_id=UUID(int=i),
+            content=f"page-{i}",
+            section=f"Page {i}",
+            page=i,
+            page_at_top_level=True,
+            semantic_title=f"Topic {i}",  # all unique → would normally be one section per chunk
+        )
+        for i in range(1, 9)
+    ]
+    sections = _group_sections(chunks, slides_per_section=4, force_bundle=True)
+    assert len(sections) == 2
+    assert [len(s.chunk_ids) for s in sections] == [4, 4]
+    # Title comes from first chunk's semantic title (slide-deck path)
+    assert sections[0].title == "Topic 1"
+    assert sections[1].title == "Topic 5"
+    assert sections[0].page_range == (1, 4)
+    assert sections[1].page_range == (5, 8)
+
+
+def test_group_sections_auto_mode_yields_per_topic_sections() -> None:
+    """Counterpart to the force_bundle test — ``force_bundle=False`` (default)
+    keeps semantic-aware boundary detection so each unique semantic title
+    becomes its own section."""
+    chunks = [
+        _chunk(
+            chunk_id=UUID(int=i),
+            content=f"page-{i}",
+            section=f"Page {i}",
+            page=i,
+            page_at_top_level=True,
+            semantic_title=f"Topic {i}",
+        )
+        for i in range(1, 9)
+    ]
+    sections = _group_sections(chunks, slides_per_section=4)  # force_bundle defaults to False
+    assert len(sections) == 8
+    assert [s.title for s in sections] == [f"Topic {i}" for i in range(1, 9)]
+
+
 # --- allocate_question_budget -----------------------------------------------
 
 

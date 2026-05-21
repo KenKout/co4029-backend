@@ -482,6 +482,8 @@ async def get_lesson_outline(
     lesson_id: UUID,
     current_user: Annotated[CurrentUser, Depends(_REQUIRE_LESSON)],
     db: Annotated[AsyncSession, Depends(get_db)],
+    slides_per_section: Annotated[int, Query(ge=1, le=20)] = 4,
+    section_grouping: Annotated[Literal["auto", "fixed"], Query()] = "fixed",
 ) -> LessonOutline:
     """Authoring outline preview (drafts visible).
 
@@ -509,7 +511,12 @@ async def get_lesson_outline(
 
     # Pure SQL + Python — safe to invoke synchronously inside the route.
     # No LLM calls, no embedding lookups, just chunk metadata grouping.
-    outlines = await build_lesson_outline(db, [lesson.id])
+    outlines = await build_lesson_outline(
+        db,
+        [lesson.id],
+        slides_per_section=slides_per_section,
+        force_bundle=(section_grouping == "fixed"),
+    )
     if outlines and outlines[0].sections:
         outline = outlines[0]
         body_sections = sum(
