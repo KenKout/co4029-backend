@@ -87,7 +87,7 @@ async def generate_questions(
         "prompts/user.j2",
         title=title,
         difficulty=config.get("difficulty") or "medium",
-        question_types=config.get("question_types") or ["mcq"],
+        question_types=config.get("question_types") or ["multiple_choice"],
         focus_topics=list(config.get("focus_topics") or []),
         avoid_topics=list(config.get("avoid_topics") or []),
         extra_instructions=(config.get("extra_instructions") or "").strip(),

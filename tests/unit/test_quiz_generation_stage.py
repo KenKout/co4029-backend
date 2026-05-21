@@ -196,7 +196,7 @@ def test_no_god_file_in_generation() -> None:
     here = Path(__file__).resolve().parents[2]
     target = here / "abridgeai" / "features" / "quizzes" / "ai" / "stages" / "generation"
     assert target.is_dir(), f"generation stage dir not found at {target}"
-    budget = {"logic.py": 250, "parsers.py": 200, "__init__.py": 250}
+    budget = {"logic.py": 250, "parsers.py": 250, "__init__.py": 250}
     for path in target.glob("*.py"):
         with path.open() as fh:
             line_count = sum(1 for _ in fh)

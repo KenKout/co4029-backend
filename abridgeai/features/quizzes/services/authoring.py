@@ -127,16 +127,59 @@ async def _ensure_module_item(db: AsyncSession, *, module_id: UUID, quiz_id: UUI
     )
 
 
-def _validate_mcq_options(options: list[Any]) -> None:
-    if len(options) != 4:
-        raise AppError("MCQ questions must have exactly four options")
-    keys = [str(option.option_key).strip().upper() for option in options]
-    if set(keys) != {"A", "B", "C", "D"}:
-        raise AppError("MCQ option keys must be A, B, C, D")
-    if any(not str(option.option_text).strip() for option in options):
-        raise AppError("Question option text is required")
-    if sum(1 for option in options if option.is_correct) != 1:
-        raise AppError("MCQ questions must have exactly one correct option")
+_LEGACY_TYPE_ALIASES: dict[str, str] = {
+    "mcq": "multiple_choice",
+    "fill_in_the_blank": "fill_blank",
+    "true/false": "true_false",
+    "tf": "true_false",
+}
+
+
+def _normalize_question_type(raw: Any) -> str:  # noqa: ANN401 -- arbitrary DTO field
+    """Map legacy aliases onto the DB ``question_type`` vocabulary.
+
+    Mirrors :func:`abridgeai.features.quizzes.ai.stages.generation.parsers._normalize_question_type`
+    so the manual authoring path accepts the same legacy spellings the
+    AI-generated path does (no client-visible behavior change).
+    """
+    if not isinstance(raw, str):
+        return "multiple_choice"
+    cleaned = raw.strip().lower()
+    return _LEGACY_TYPE_ALIASES.get(cleaned, cleaned)
+
+
+def _validate_question_options(question_type: str, options: list[Any]) -> None:
+    """Type-aware option validation for the manual authoring path.
+
+    Mirrors the per-type shape rules enforced by the AI generation
+    parser (``stages/generation/parsers.GeneratedQuestion``):
+
+    * ``multiple_choice`` — exactly 4 options keyed A-D, exactly 1 correct.
+    * ``true_false`` — exactly 2 options keyed T/F, exactly 1 correct.
+    * ``short_answer`` / ``fill_blank`` — no options at all (the
+      expected answer is carried on the question's
+      ``original_generated_payload``).
+    """
+    if question_type == "multiple_choice":
+        if len(options) != 4:
+            raise AppError("multiple_choice questions must have exactly four options")
+        keys = [str(option.option_key).strip().upper() for option in options]
+        if set(keys) != {"A", "B", "C", "D"}:
+            raise AppError("multiple_choice option keys must be A, B, C, D")
+        if any(not str(option.option_text).strip() for option in options):
+            raise AppError("Question option text is required")
+        if sum(1 for option in options if option.is_correct) != 1:
+            raise AppError("multiple_choice questions must have exactly one correct option")
+    elif question_type == "true_false":
+        if len(options) != 2:
+            raise AppError("true_false questions must have exactly two options")
+        keys = [str(option.option_key).strip().upper() for option in options]
+        if set(keys) != {"T", "F"}:
+            raise AppError("true_false option keys must be T, F")
+        if sum(1 for option in options if option.is_correct) != 1:
+            raise AppError("true_false questions must have exactly one correct option")
+    elif options:
+        raise AppError(f"{question_type} questions do not support options")
 
 
 async def _next_question_position(db: AsyncSession, quiz_id: UUID) -> int:
@@ -276,12 +319,8 @@ async def create_question(
     if not payload.prompt_text.strip():
         raise AppError("Question text is required")
     options_payload = list(payload.options or [])
-    question_type = payload.question_type
-    if question_type in {"mcq", "multiple_choice"}:
-        _validate_mcq_options(options_payload)
-        question_type = "multiple_choice"
-    elif options_payload:
-        raise AppError("Only MCQ questions support options")
+    question_type = _normalize_question_type(payload.question_type)
+    _validate_question_options(question_type, options_payload)
 
     next_position = await _next_question_position(db, quiz_id)
     question = QuizQuestion(
@@ -368,8 +407,8 @@ async def _update_question_options(
     question: QuizQuestion,
     option_payloads: list[Any],
 ) -> None:
-    if question.question_type not in {"mcq", "multiple_choice"}:
-        raise AppError("Only MCQ questions support option editing")
+    if question.question_type not in {"multiple_choice", "true_false"}:
+        raise AppError("Only multiple_choice and true_false questions support option editing")
 
     from sqlalchemy import select  # noqa: PLC0415
 

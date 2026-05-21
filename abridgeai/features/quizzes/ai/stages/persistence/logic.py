@@ -28,13 +28,6 @@ if TYPE_CHECKING:
     from abridgeai.ai.retrieval import ChunkWithDistance
 
 
-# Internal pipeline + LLM prompt use "mcq"; the DB ``question_type``
-# CHECK constraint accepts "multiple_choice" (see migration).
-# Transitional shim — the next commit migrates the entire pipeline to
-# the DB vocabulary and removes this map.
-_DB_QUESTION_TYPE_ALIASES = {"mcq": "multiple_choice"}
-
-
 class _RunLike(Protocol):
     """Stub of ``GenerationRun`` — only ``requested_by`` is read."""
 
@@ -115,12 +108,10 @@ async def persist_questions(
     persisted: list[QuizQuestion] = []
     for offset, payload in enumerate(questions, start=1):
         structured_refs = _structure_source_refs(payload.get("source_refs"), chunks)
-        raw_qtype = payload["question_type"]
-        db_qtype = _DB_QUESTION_TYPE_ALIASES.get(raw_qtype, raw_qtype)
         question = QuizQuestion(
             quiz_id=quiz.id,
             position=start_position + offset,
-            question_type=db_qtype,
+            question_type=payload["question_type"],
             prompt_text=payload["prompt_text"],
             hint_text=payload.get("hint_text"),
             explanation=payload.get("explanation"),

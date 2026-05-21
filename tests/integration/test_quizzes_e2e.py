@@ -574,10 +574,12 @@ def llm_mocks(scenario: dict[str, UUID], monkeypatch: pytest.MonkeyPatch) -> dic
         db: AsyncSession,
         *,
         pipeline_run_id: UUID,
+        parent_run_id: UUID | None = None,
         previous_questions: list[str] | None = None,
         gateway: Any = None,
     ) -> list[Any]:
         del title, config, chunks, templates, kg_context, previous_questions, gateway
+        del parent_run_id
         captured["stages"].append({"stage": "generation"})
         await _emit_audit(
             db,
@@ -595,10 +597,11 @@ def llm_mocks(scenario: dict[str, UUID], monkeypatch: pytest.MonkeyPatch) -> dic
         *,
         pipeline_run_id: UUID | None = None,
         parent_run_id: UUID | None = None,
+        audit_parent_run_id: UUID | None = None,
         config: dict[str, Any] | None = None,
         gateway: Any = None,
     ) -> tuple[Any, list[Any]]:
-        del title, chunks, config, gateway, parent_run_id
+        del title, chunks, config, gateway, parent_run_id, audit_parent_run_id
         captured["stages"].append({"stage": "validation"})
         await _emit_audit(
             db,

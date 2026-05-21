@@ -198,6 +198,7 @@ async def ideate_for_outline(
         template_count=template_count,
         budget=dict(budget),
         outline_text=outline_text,
+        question_types=list(config.get("question_types") or ["multiple_choice"]),
         focus_topics=list(config.get("focus_topics") or []),
         avoid_topics=list(config.get("avoid_topics") or []),
         extra_instructions=(config.get("extra_instructions") or "").strip()

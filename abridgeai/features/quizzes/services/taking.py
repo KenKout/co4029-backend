@@ -38,6 +38,7 @@ from abridgeai.features.quizzes.schemas.public import (
     QuizPublic,
     QuizQuestionPublic,
 )
+from abridgeai.features.quizzes.services.grader import grade_answer
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -251,18 +252,23 @@ async def answer_attempt(
 ) -> QuizAttemptAnswer:
     """Record one answer for an in-flight attempt.
 
-    Computes ``is_correct`` server-side by looking up the selected
-    option's truth flag — the request payload's correctness field (if
-    any) is discarded so a malicious client cannot self-grade.
+    Computes ``is_correct`` server-side via the type-aware grader so a
+    malicious client cannot self-grade. Multiple-choice and true_false
+    answers grade by option lookup; short_answer and fill_blank grade
+    by comparing the submitted text against the canonical answer
+    stored on ``QuizQuestion.original_generated_payload``.
     """
     del actor
     attempt = await _require_attempt(db, attempt_id)
 
     selected_option_id = getattr(payload, "selected_option_id", None)
-    is_correct = False
-    if selected_option_id is not None:
-        option = await db.get(QuizQuestionOption, selected_option_id)
-        is_correct = bool(option and option.is_correct)
+    answer_text = getattr(payload, "answer_text", None)
+    grade = await grade_answer(
+        db,
+        question_id=payload.question_id,  # type: ignore[attr-defined]
+        selected_option_id=selected_option_id,
+        answer_text=answer_text,
+    )
 
     t_actual_ms = getattr(payload, "t_actual_ms", None)
     if t_actual_ms is None:
@@ -272,11 +278,11 @@ async def answer_attempt(
         attempt_id=attempt.id,
         question_id=payload.question_id,  # type: ignore[attr-defined]
         selected_option_id=selected_option_id,
-        answer_text=getattr(payload, "answer_text", None),
-        is_correct=is_correct,
+        answer_text=answer_text,
+        is_correct=grade.is_correct,
         hint_used=bool(getattr(payload, "hint_used", False)),
         t_actual_ms=t_actual_ms,
-        points_awarded=Decimal("1") if is_correct else Decimal("0"),
+        points_awarded=grade.points_awarded,
     )
     db.add(answer)
     await flush_or_conflict(db)
