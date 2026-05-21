@@ -2,9 +2,10 @@
 
 Per-type helpers that the main parser delegates to. ``multiple_choice``
 keeps the LLM's option dict / list, ``true_false`` synthesizes a
-canonical T/F pair from the correct flag, and ``short_answer`` /
-``fill_blank`` return ``[]`` (their answers live on
-``original_generated_payload`` instead).
+canonical T/F pair from the correct flag, ``fill_blank`` projects the
+LLM's word-bank array into canonical option rows (correct entries +
+distractors, ``is_correct`` flagged), and ``short_answer`` returns
+``[]`` (its answer lives on ``original_generated_payload`` instead).
 """
 
 from __future__ import annotations
@@ -21,6 +22,8 @@ def normalize_options(
         return _normalize_mcq_options(options_raw, correct)
     if question_type == "true_false":
         return _normalize_true_false_options(options_raw, correct)
+    if question_type == "fill_blank":
+        return _normalize_fill_blank_options(options_raw, correct)
     return []
 
 
@@ -38,6 +41,79 @@ def coerce_fill_blank_answer(raw: Any) -> list[str]:  # noqa: ANN401 -- raw LLM 
                 return [piece.strip() for piece in candidate.split(sep) if piece.strip()]
         return [candidate]
     return []
+
+
+def _normalize_fill_blank_options(
+    options_raw: Any,  # noqa: ANN401 -- raw LLM JSON
+    correct: Any,  # noqa: ANN401 -- raw LLM JSON
+) -> list[dict[str, Any]]:
+    """Return canonical word-bank option rows for ``fill_blank``.
+
+    The LLM is asked to emit ``options`` as a JSON array of strings —
+    the bank from which the learner drags into ``___`` slots. We:
+
+    1. Coerce the bank to a deduped list of strings (case-insensitive
+       dedup, original casing preserved).
+    2. Coerce ``correct_answer`` via the shared blank-list parser and
+       prepend any missing correct answers to the bank so the bank is
+       guaranteed to contain every correct entry verbatim.
+    3. Mark each entry ``is_correct=True`` iff its lowercased text
+       matches a lowercased correct-answer token.
+    4. Assign canonical keys ``O01..O99`` and 1-based positions. Keys
+       fit inside the DB ``option_key VARCHAR(5)`` constraint.
+
+    Bank entries beyond 99 are dropped (a bank that large is malformed
+    anyway). Returns ``[]`` if neither bank nor correct answers parse.
+    """
+    correct_list = coerce_fill_blank_answer(correct)
+    correct_lookup = {entry.lower() for entry in correct_list}
+
+    bank: list[str] = []
+    seen: set[str] = set()
+    if isinstance(options_raw, list):
+        for raw in options_raw:
+            text = _coerce_fill_blank_option(raw)
+            if not text:
+                continue
+            key = text.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            bank.append(text)
+
+    # Ensure every correct answer is present in the bank verbatim. If
+    # the LLM forgot one, prepend it so the learner can still reach the
+    # right answer; ``validate_fill_blank`` will still run and reject if
+    # the bank ends up too small to be a meaningful exercise.
+    for answer in correct_list:
+        if answer.lower() in seen:
+            continue
+        seen.add(answer.lower())
+        bank.insert(0, answer)
+
+    bank = bank[:99]
+    return [
+        {
+            "option_key": f"O{position:02d}",
+            "option_text": text,
+            "is_correct": text.lower() in correct_lookup,
+            "position": position,
+        }
+        for position, text in enumerate(bank, start=1)
+    ]
+
+
+def _coerce_fill_blank_option(raw: Any) -> str:  # noqa: ANN401 -- raw LLM JSON
+    """Coerce one bank entry into a stripped string, accepting either a
+    bare string or ``{"option_text": "..."}`` / ``{"text": "..."}``.
+    """
+    if isinstance(raw, str):
+        return raw.strip()
+    if isinstance(raw, dict):
+        text = raw.get("option_text") or raw.get("text") or raw.get("value")
+        if isinstance(text, str):
+            return text.strip()
+    return ""
 
 
 def _normalize_mcq_options(

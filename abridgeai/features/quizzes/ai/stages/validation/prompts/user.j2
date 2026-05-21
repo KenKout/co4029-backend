@@ -18,7 +18,8 @@ Generated questions to judge:
   {% endfor %}Correct: {{ question.correct_answer }}
   {% elif qtype == 'true_false' %}Correct: {{ question.correct_answer }}
   {% elif qtype == 'fill_blank' %}Correct (one entry per blank, in order): {{ question.correct_answer }}
-  {% else %}Correct: {{ question.correct_answer }}
+  {% if question.options %}Word bank: {{ question.options.values() | list }}
+  {% endif %}{% else %}Correct: {{ question.correct_answer }}
   {% endif %}Explanation: {{ question.explanation }}
 {% if not loop.last %}
 {% endif %}{% endfor %}
