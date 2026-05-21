@@ -31,7 +31,7 @@ _SECTION_MARKER_RE = re.compile(
 )
 _PARAGRAPH_SPLIT_RE = re.compile(r"\n{2,}")
 _SENTENCE_END_RE = re.compile(r"(?<=[.!?])\s+(?=[A-Z])")
-_TIKTOKEN_ENCODING_NAME = "cl100k_base"
+_TIKTOKEN_ENCODING_NAME = "o200k_base"
 
 _tokenizer_cache: Any = None
 
