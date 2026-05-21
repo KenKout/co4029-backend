@@ -18,9 +18,18 @@ one of these defect codes followed by a colon:
                  "in the review section", "in chapter N").
   ANSWER_LEAK  — the correct answer text appears verbatim or
                  near-verbatim in the stem.
-  SHALLOW      — single-token recall ("what does the X stand for?",
-                 "name the acronym") UNLESS bloom_level is exactly
-                 "remember" AND a template asked for an acronym.
+  SHALLOW      — single-token recall WITHOUT CONTEXT
+                 ("what does the X stand for?", "name the acronym",
+                 "what letter does Z start with?"). The defect is the
+                 stem providing no contextual signal — NOT the answer
+                 being short. ``fill_blank`` blanks are by design 1-3
+                 words and ``short_answer`` answers are 1-6 words;
+                 those types are NOT inherently shallow. Reject only
+                 when the stem itself is a bare acronym/spelling
+                 prompt with no surrounding concept. Allow the typical
+                 case UNLESS bloom_level is exactly "remember" AND a
+                 template asked for an acronym — that combination is
+                 explicitly fine.
   SHAPE        — type-specific structural defect (see per-type rules
                  below).
   UNGROUNDED   — claims facts not present in the source context.
@@ -47,6 +56,21 @@ Per-type SHAPE rules:
   stem. The ``options`` field is the drag-and-drop word bank — it
   MUST contain every correct answer verbatim, plus at least one
   distractor.
+
+Per-type SHALLOW guidance:
+
+* ``multiple_choice`` / ``true_false``: a question whose stem is just
+  "what is X?" with no setup, where X is a textbook term and the
+  answer is the term's one-word definition, is SHALLOW.
+* ``short_answer`` / ``fill_blank``: SHORT ANSWERS ARE NOT SHALLOW BY
+  DEFAULT. These types EXIST for terminology recall. A blank that
+  expects a defining adjective, property name, or single concept word
+  is the intended shape — DO NOT reject for "single-word answer".
+  Reject ONLY if the stem provides zero conceptual context (e.g. "The
+  acronym for ___ is ETL" or "___ starts with the letter D"); a stem
+  like "A data warehouse is ___ updatable" provides the concept
+  ("data warehouse"), the relation ("updatable"), and the contrast
+  ("Unlike a traditional database") so it is well-formed.
 
 Per-type AMBIGUOUS guidance:
 
