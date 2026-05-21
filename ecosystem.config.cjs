@@ -2,8 +2,8 @@ module.exports = {
   apps: [
     {
       name: "abridgeai-backend",
-      cwd: "/home/co4029/co4029_projects/backend-new",
-      script: "/home/co4029/co4029_projects/backend-new/.venv/bin/uvicorn",
+      cwd: "/root/co4029/backend",
+      script: "/root/co4029/backend/.venv/bin/uvicorn",
       args: "abridgeai.api:create_app --factory --host 0.0.0.0 --port 8000",
       interpreter: "none",
       autorestart: true,
@@ -14,14 +14,14 @@ module.exports = {
       env: {
         PYTHONUNBUFFERED: "1",
       },
-      out_file: "/home/co4029/.pm2/logs/abridgeai-backend-out.log",
-      error_file: "/home/co4029/.pm2/logs/abridgeai-backend-err.log",
+      out_file: "/root/.pm2/logs/abridgeai-backend-out.log",
+      error_file: "/root/.pm2/logs/abridgeai-backend-err.log",
       merge_logs: true,
     },
     {
       name: "abridgeai-worker",
-      cwd: "/home/co4029/co4029_projects/backend-new",
-      script: "/home/co4029/co4029_projects/backend-new/.venv/bin/arq",
+      cwd: "/root/co4029/backend",
+      script: "/root/co4029/backend/.venv/bin/arq",
       args: "abridgeai.workers.arq_app.WorkerSettings",
       interpreter: "none",
       autorestart: true,
@@ -32,8 +32,8 @@ module.exports = {
       env: {
         PYTHONUNBUFFERED: "1",
       },
-      out_file: "/home/co4029/.pm2/logs/abridgeai-worker-out.log",
-      error_file: "/home/co4029/.pm2/logs/abridgeai-worker-err.log",
+      out_file: "/root/.pm2/logs/abridgeai-worker-out.log",
+      error_file: "/root/.pm2/logs/abridgeai-worker-err.log",
       merge_logs: true,
     },
   ],

@@ -32,6 +32,7 @@ async def list_users(
     status_filter: str | None,
     role_code: str | None,
     organization_id: UUID | None,
+    q: str | None,
     limit: int,
     offset: int,
 ) -> list[dict[str, Any]]:
@@ -42,6 +43,7 @@ async def list_users(
                 "status_filter": status_filter,
                 "role_code": role_code,
                 "organization_id": organization_id,
+                "q": q,
                 "limit": limit,
                 "offset": offset,
             },

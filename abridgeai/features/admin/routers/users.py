@@ -37,6 +37,7 @@ class UserListRow(BaseModel):
     user_id: UUID
     primary_email: str
     status: str
+    display_name: str | None = None
     last_login_at: Any | None = None
     created_at: Any
     updated_at: Any
@@ -59,6 +60,7 @@ async def list_users(
     db: Annotated[AsyncSession, Depends(get_db)],
     user_status: Annotated[str | None, Query(alias="status")] = None,
     role_code: Annotated[str | None, Query()] = None,
+    q: Annotated[str | None, Query(min_length=1, max_length=200)] = None,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> list[UserListRow]:
@@ -68,6 +70,7 @@ async def list_users(
         status_filter=user_status,
         role_code=role_code,
         organization_id=org_id,
+        q=q,
         limit=limit,
         offset=offset,
     )
