@@ -216,8 +216,10 @@ def _section_from_group(group: list[DocumentChunk]) -> OutlineSection:
     title = _short_title(full_path) or _slide_title_from_group(group)
 
     # Page range
-    pages = [p for p in (_chunk_page(c) for c in group) if p is not None]
-    page_range = (min(pages), max(pages)) if pages else (0, 0)
+    ranges = [r for r in (_chunk_page_range(c) for c in group) if r is not None]
+    page_range = (
+        (min(r[0] for r in ranges), max(r[1] for r in ranges)) if ranges else (0, 0)
+    )
 
     # Content role: mode of chunk roles, ties go to "body".
     role_counter = Counter(
@@ -254,9 +256,67 @@ def _section_from_group(group: list[DocumentChunk]) -> OutlineSection:
 
 
 def _section_heading(chunk: DocumentChunk) -> str:
-    """Read the chunk's heading path from metadata."""
+    """Read the chunk's heading path from metadata.
+
+    Prefers ``metadata.semantic.section_title`` (LLM-enriched per-chunk
+    topic title) over the synthetic ``metadata.section`` ("Page N" /
+    "Slide N") emitted by the page-marker extractor. The semantic title
+    is the human-meaningful label set by the chunking pipeline; the
+    synthetic one is the boundary marker we use only as fallback.
+    """
     metadata = chunk.metadata_json or {}
+    semantic = metadata.get("semantic") or {}
+    semantic_title = semantic.get("section_title")
+    if isinstance(semantic_title, str) and semantic_title.strip():
+        return semantic_title.strip()
     return str(metadata.get("section") or "")
+
+
+def _chunk_page(chunk: DocumentChunk) -> int | None:
+    """Resolve a chunk's page number from metadata.
+
+    Reads (in order):
+      1. ``metadata.page`` — top-level integer page (current chunker)
+      2. ``metadata.page_range[0]`` — first page of a range
+      3. ``metadata.source_location.page`` / ``.slide`` — legacy schema
+
+    Returns ``None`` if no page hint is available.
+    """
+    metadata = chunk.metadata_json or {}
+    page = metadata.get("page")
+    if isinstance(page, int):
+        return page
+    page_range = metadata.get("page_range")
+    if isinstance(page_range, list) and page_range and isinstance(page_range[0], int):
+        return page_range[0]
+    loc = metadata.get("source_location") or {}
+    legacy_page = loc.get("page")
+    if isinstance(legacy_page, int):
+        return legacy_page
+    legacy_slide = loc.get("slide")
+    if isinstance(legacy_slide, int):
+        return legacy_slide
+    return None
+
+
+def _chunk_page_range(chunk: DocumentChunk) -> tuple[int, int] | None:
+    """Resolve a chunk's full page range from metadata.
+
+    Used by ``_section_from_group`` to compute group page ranges without
+    losing multi-page chunks. Returns ``None`` if no page info exists.
+    """
+    metadata = chunk.metadata_json or {}
+    page_range = metadata.get("page_range")
+    if (
+        isinstance(page_range, list)
+        and len(page_range) == 2
+        and all(isinstance(p, int) for p in page_range)
+    ):
+        return (page_range[0], page_range[1])
+    page = _chunk_page(chunk)
+    if page is not None:
+        return (page, page)
+    return None
 
 
 def _short_title(full_path: str) -> str:
@@ -279,18 +339,6 @@ def _heading_depth(full_path: str) -> int:
     if len(parts) <= 3:
         return 1
     return max(1, len(parts) - 3)
-
-
-def _chunk_page(chunk: DocumentChunk) -> int | None:
-    metadata = chunk.metadata_json or {}
-    loc = metadata.get("source_location") or {}
-    page = loc.get("page")
-    if isinstance(page, int):
-        return page
-    slide = loc.get("slide")
-    if isinstance(slide, int):
-        return slide
-    return None
 
 
 def _slide_title_from_group(group: list[DocumentChunk]) -> str:
