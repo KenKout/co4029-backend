@@ -145,32 +145,44 @@ async def run_coverage_pipeline(
         chunk_uuids = _coerce_chunk_uuids(template.get("source_chunk_ids"))
         if not chunk_uuids:
             return None
-        async with semaphore, sessionmaker_() as task_db:
-            try:
-                section_chunks = await _load_chunks_by_id(task_db, chunk_uuids)
-                if not section_chunks:
+        max_attempts = 2
+        for attempt in range(max_attempts):
+            async with semaphore, sessionmaker_() as task_db:
+                try:
+                    section_chunks = await _load_chunks_by_id(task_db, chunk_uuids)
+                    if not section_chunks:
+                        return None
+                    candidates = await generate_questions(
+                        title=quiz.title,
+                        config=config | {"question_count": 1},
+                        chunks=section_chunks,
+                        templates=[template],
+                        kg_context=kg_context,
+                        db=task_db,
+                        pipeline_run_id=pipeline_run_id,
+                        parent_run_id=run.id,
+                        previous_questions=None,
+                    )
+                    await task_db.commit()
+                    if candidates:
+                        return candidates[0].model_dump()
+                except Exception as exc:  # noqa: BLE001 — one bad template
+                    await task_db.rollback()
+                    if attempt < max_attempts - 1:
+                        logger.info(
+                            "coverage: template position=%s attempt %s failed, retrying: %s",
+                            template.get("position"),
+                            attempt + 1,
+                            exc,
+                        )
+                        continue
+                    logger.warning(
+                        "coverage: template position=%s generation failed: %s",
+                        template.get("position"),
+                        exc,
+                    )
                     return None
-                candidates = await generate_questions(
-                    title=quiz.title,
-                    config=config | {"question_count": 1},
-                    chunks=section_chunks,
-                    templates=[template],
-                    kg_context=kg_context,
-                    db=task_db,
-                    pipeline_run_id=pipeline_run_id,
-                    parent_run_id=run.id,
-                    previous_questions=None,
-                )
-                await task_db.commit()
-            except Exception as exc:  # noqa: BLE001 — one bad template
-                await task_db.rollback()
-                logger.warning(
-                    "coverage: template position=%s generation failed: %s",
-                    template.get("position"),
-                    exc,
-                )
-                return None
-        return candidates[0].model_dump() if candidates else None
+        return None
 
     # ``return_exceptions=False`` matches legacy: per-template ``except``
     # already swallowed task-local failures into ``None``, so gather only
