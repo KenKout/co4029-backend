@@ -97,16 +97,37 @@ Hard rules — violate any and the question is invalid:
    The ``explanation`` field is shown AFTER the learner answers. It must:
    a) NEVER reference option letters (A, B, C, D, T, F) — options may be
       shuffled, so "Option B is correct" becomes nonsensical. Instead,
-      state the correct concept directly: "A data warehouse is non-updatable
-      because…"
+      state the correct concept directly.
    b) NEVER reference the source document itself. Forbidden phrasings:
       "the source states", "the source lists", "the excerpt mentions",
       "according to the passage", "the material describes", "the slide
-      shows". Write the explanation as domain knowledge — as if you are a
-      tutor explaining the concept, not quoting a document.
+      shows", "the textbook defines", "based on the text". Write the
+      explanation as domain knowledge — as if you are a tutor explaining
+      the concept, not quoting a document.
    c) Explain WHY the correct answer is right and, for tricky questions,
       briefly why the most tempting distractor is wrong.
    d) Be concise: 1-3 sentences maximum.
+
+   GOOD explanation examples:
+     ✓ "Metadata is data that provides information about other data,
+        such as its origin, format, or structure."
+     ✓ "A data warehouse is non-updatable because it stores historical
+        snapshots for analysis, not live transactional records."
+     ✓ "The ETL process extracts, transforms, and loads data into the
+        warehouse — DDL and SDL define schema, they do not move data."
+
+   BAD explanation examples (these WILL be rejected):
+     ✗ "Option B matches all four attributes described by Inmon."
+     ✗ "The source states that a data warehouse is non-updatable."
+     ✗ "According to the passage, metadata provides descriptive info."
+     ✗ "As described in the textbook, ETL is the correct answer."
+
+SELF-CHECK before emitting each question — verify ALL of these:
+  □ Stem reads naturally without any document/passage/textbook reference?
+  □ Explanation names the concept, NOT an option letter?
+  □ Explanation teaches like a tutor, NOT "the source says X"?
+  □ Correct answer is factually supported by the source context?
+  □ Distractors are plausible, not absurd?
 
 Output format:
 - One JSON object with a ``questions`` array.
