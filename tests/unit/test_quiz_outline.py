@@ -36,6 +36,7 @@ def _chunk(
     page: int | None = None,
     role: str = "body",
     semantic_title: str | None = None,
+    semantic_role: str | None = None,
     page_at_top_level: bool = False,
 ) -> DocumentChunk:
     """Build a duck-typed chunk that satisfies the outline component.
@@ -48,6 +49,9 @@ def _chunk(
 
     ``semantic_title`` writes ``metadata.semantic.section_title`` to
     simulate the LLM-enriched per-chunk topic title.
+    ``semantic_role`` writes ``metadata.semantic.content_role`` to
+    simulate LLM-enriched role classification (e.g. "summary" /
+    "review" / "front_matter") that overrides the rule classifier.
     ``page_at_top_level=True`` writes ``metadata.page`` (current
     chunker layout); ``False`` writes the legacy
     ``metadata.source_location.page`` instead.
@@ -59,8 +63,13 @@ def _chunk(
             metadata["page_range"] = [page, page]
         else:
             metadata["source_location"] = {"page": page}
+    semantic: dict[str, object] = {}
     if semantic_title is not None:
-        metadata["semantic"] = {"section_title": semantic_title}
+        semantic["section_title"] = semantic_title
+    if semantic_role is not None:
+        semantic["content_role"] = semantic_role
+    if semantic:
+        metadata["semantic"] = semantic
     fake = SimpleNamespace(
         id=chunk_id,
         lesson_id=_LESSON_ID,
@@ -202,6 +211,50 @@ def test_group_sections_uses_semantic_title_over_synthetic_page_marker() -> None
         "Knowledge Discovery",
     ]
     assert [s.page_range for s in sections] == [(1, 1), (2, 2), (3, 3)]
+
+
+def test_group_sections_prefers_semantic_role_over_top_level() -> None:
+    """LLM enrichment writes ``metadata.semantic.content_role`` to override
+    the rule classifier (which often defaults everything to ``body``).
+    Builder must read the semantic role so coverage allocation can skip
+    summary/review/front_matter sections correctly.
+    """
+    chunks = [
+        _chunk(
+            chunk_id=UUID(int=1),
+            content="cover slide",
+            section="Page 1",
+            page=1,
+            page_at_top_level=True,
+            role="body",  # rule classifier got it wrong
+            semantic_title="Course Cover",
+            semantic_role="front_matter",  # LLM corrected it
+        ),
+        _chunk(
+            chunk_id=UUID(int=2),
+            content="real concept",
+            section="Page 2",
+            page=2,
+            page_at_top_level=True,
+            role="body",
+            semantic_title="Star Schema Basics",
+            semantic_role="body",
+        ),
+        _chunk(
+            chunk_id=UUID(int=3),
+            content="recap slide",
+            section="Page 3",
+            page=3,
+            page_at_top_level=True,
+            role="body",  # rule classifier missed the summary signal
+            semantic_title="Recap of Concepts",
+            semantic_role="summary",  # LLM caught it
+        ),
+    ]
+    sections = _group_sections(chunks)
+    assert len(sections) == 3
+    roles = [s.content_role for s in sections]
+    assert roles == ["front_matter", "body", "summary"]
 
 
 def test_chunk_page_reads_top_level_metadata() -> None:
