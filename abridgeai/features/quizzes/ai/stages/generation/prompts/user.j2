@@ -30,7 +30,7 @@ Extra teacher instructions:
 
 Question templates (produce one question per template, in order):
 {%- for tpl in templates %}
-{{ loop.index }}. [{{ tpl.bloom_level or 'understand' }}/{{ tpl.difficulty or 'medium' }}/{{ tpl.question_type or 'multiple_choice' }}] {{ tpl.topic or '(no topic)' }}{% if tpl.section_id %} — section: {{ tpl.section_id }}{% endif %}{% if tpl.source_chunk_ids %} — source_chunk_ids: {{ tpl.source_chunk_ids }}{% endif %}
+{{ loop.index }}. [{{ tpl.bloom_level or 'understand' }}/{{ tpl.difficulty or 'medium' }}/{{ tpl.question_type or 'multiple_choice' }}] {{ tpl.topic or '(no topic)' }}{% if tpl.get('section_id') %} — section: {{ tpl.section_id }}{% endif %}{% if tpl.get('source_chunk_ids') %} — source_chunk_ids: {{ tpl.source_chunk_ids }}{% endif %}
 {%- endfor %}
 {%- endif %}
 {%- if previous_questions %}
