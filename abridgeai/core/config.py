@@ -52,6 +52,14 @@ class Settings(BaseSettings):
     allowed_origins: str = ""
 
     database_url: str = "postgresql+psycopg://abridgeai:abridgeai@localhost:5432/abridgeai"
+    # Separate database for the pytest suite. MUST point at a throwaway
+    # database (created via `docker compose exec postgres createdb abridgeai_test`
+    # or similar). When pytest is imported, the ``database_url`` field is
+    # automatically rewritten to point at this URL via a model validator —
+    # see ``_swap_to_test_db_under_pytest`` below. This means every test
+    # fixture that reaches into ``get_settings().database_url`` lands on
+    # the test DB without per-file fixture updates.
+    test_database_url: str = ""
     db_pool_size: int = Field(default=5, ge=1, le=100)
     db_max_overflow: int = Field(default=10, ge=0, le=100)
     db_pool_timeout_seconds: float = Field(default=30.0, gt=0)
@@ -161,6 +169,44 @@ class Settings(BaseSettings):
                 "environment='production'; provide a strong secret "
                 "(>=32 bytes of entropy) via JWT_SECRET_KEY"
             )
+        return self
+
+    @model_validator(mode="after")
+    def _swap_to_test_db_under_pytest(self) -> Settings:
+        """When pytest is running, transparently rewrite ``database_url`` to
+        ``test_database_url`` so every fixture (including per-file ones that
+        do ``create_async_engine(get_settings().database_url)``) lands on
+        the throwaway test DB.
+
+        Past sessions leaked 276 ``@test.local`` users into the live DB
+        before this guard existed. The check is single-funnel: pytest is
+        never imported in the runtime, so this only fires under tests.
+        """
+        import sys
+
+        if "pytest" not in sys.modules:
+            return self
+
+        test_url = (self.test_database_url or "").strip()
+        if not test_url:
+            raise ValueError(
+                "TEST_DATABASE_URL is not set. Refusing to run pytest "
+                "against the production database (would leak fixture "
+                "users into live data). Create a throwaway DB and set "
+                "TEST_DATABASE_URL in .env or your shell. Example:\n"
+                "  docker compose exec postgres createdb -U abridgeai abridgeai_test\n"
+                "  export TEST_DATABASE_URL='postgresql+psycopg://abridgeai:...@localhost:5433/abridgeai_test'"
+            )
+        if test_url == self.database_url:
+            raise ValueError(
+                "TEST_DATABASE_URL is identical to DATABASE_URL. Use a "
+                "separate database — the test suite seeds disposable "
+                "@test.local users that must not leak into production."
+            )
+        # Rewrite in-place so any code path that hits ``settings.database_url``
+        # (whether via the global ``test_engine`` fixture or an ad-hoc one) is
+        # automatically funnelled to the test DB.
+        object.__setattr__(self, "database_url", test_url)
         return self
 
     @model_validator(mode="after")
