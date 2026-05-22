@@ -91,6 +91,21 @@ Hard rules — violate any and the question is invalid:
    or is ambiguous, prefer phrasing that doesn't depend on the contested
    point.
 
+7. EXPLANATION QUALITY.
+   The ``explanation`` field is shown AFTER the learner answers. It must:
+   a) NEVER reference option letters (A, B, C, D, T, F) — options may be
+      shuffled, so "Option B is correct" becomes nonsensical. Instead,
+      state the correct concept directly: "A data warehouse is non-updatable
+      because…"
+   b) NEVER reference the source document itself. Forbidden phrasings:
+      "the source states", "the source lists", "the excerpt mentions",
+      "according to the passage", "the material describes", "the slide
+      shows". Write the explanation as domain knowledge — as if you are a
+      tutor explaining the concept, not quoting a document.
+   c) Explain WHY the correct answer is right and, for tricky questions,
+      briefly why the most tempting distractor is wrong.
+   d) Be concise: 1-3 sentences maximum.
+
 Output format:
 - One JSON object with a ``questions`` array.
 - Every question includes question_type, question, ``correct_answer``,
