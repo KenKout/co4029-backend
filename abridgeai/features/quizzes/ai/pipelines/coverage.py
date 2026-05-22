@@ -77,6 +77,12 @@ logger = logging.getLogger(__name__)
 # see notepad. Callers can override via ``coverage_options.parallelism``.
 _DEFAULT_PARALLELISM = 4
 
+# Default per-template attempt budget. ``2`` = one retry on transient
+# failure (gateway 5xx, parse error, empty candidates). Mirrors the
+# ``CoverageOptions.max_attempts`` schema default; callers override via
+# ``coverage_options.max_attempts``.
+_DEFAULT_MAX_ATTEMPTS = 2
+
 
 async def run_coverage_pipeline(
     db: AsyncSession,
@@ -137,6 +143,7 @@ async def run_coverage_pipeline(
     # Step 2 — per-template fanout under a bounded semaphore.
     parallelism = _resolve_parallelism(config)
     semaphore = asyncio.Semaphore(max(1, parallelism))
+    max_attempts = _resolve_max_attempts(config)
     sessionmaker_ = get_sessionmaker()
 
     async def _generate_for_template(
@@ -145,7 +152,6 @@ async def run_coverage_pipeline(
         chunk_uuids = _coerce_chunk_uuids(template.get("source_chunk_ids"))
         if not chunk_uuids:
             return None
-        max_attempts = 2
         for attempt in range(max_attempts):
             async with semaphore, sessionmaker_() as task_db:
                 try:
@@ -247,6 +253,7 @@ async def run_coverage_pipeline(
                 "requested_questions": sum(budget.values()),
                 "received_questions": len(questions),
                 "parallelism": parallelism,
+                "max_attempts": max_attempts,
             },
             "validation": {"accepted": len(accepted), "rejected": rejected},
             "dedup": {
@@ -279,6 +286,29 @@ def _resolve_parallelism(config: dict[str, Any]) -> int:
         return int(raw)
     except (TypeError, ValueError):
         return _DEFAULT_PARALLELISM
+
+
+def _resolve_max_attempts(config: dict[str, Any]) -> int:
+    """Pick the per-template attempt budget from coverage_options.
+
+    Resolution order:
+      1. ``config['coverage_options']['max_attempts']`` if set.
+      2. Module default (:data:`_DEFAULT_MAX_ATTEMPTS`).
+
+    Bad values (non-int, < 1) silently fall back to the default rather
+    than failing the whole run — schema validation already rejects
+    out-of-bounds inputs at the API surface, so this branch only
+    triggers on direct programmatic misuse.
+    """
+    coverage_options = config.get("coverage_options") or {}
+    raw = coverage_options.get("max_attempts")
+    if raw is None:
+        return _DEFAULT_MAX_ATTEMPTS
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return _DEFAULT_MAX_ATTEMPTS
+    return value if value >= 1 else _DEFAULT_MAX_ATTEMPTS
 
 
 def _coerce_chunk_uuids(raw_ids: object) -> list[UUID]:

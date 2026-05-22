@@ -358,7 +358,9 @@ async def test_coverage_one_section_failure_is_absorbed(
         budget=inputs["budget"],
     )
 
-    assert mocks["generate"].await_count == 3
+    # 3 sections × 1 attempt for #1 and #3 (both succeed first try)
+    # + 2 attempts for #2 (raises both times, gets retried once) = 4 total.
+    assert mocks["generate"].await_count == 4
     assert len(mocks["validate"].call_args.kwargs["questions"]) == 2
     assert len(result) == 2
 
@@ -416,6 +418,108 @@ async def test_coverage_propagates_validation_exception(
 
     assert mocks["dedup"].await_count == 0
     assert mocks["persist"].await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_coverage_max_attempts_one_disables_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``coverage_options.max_attempts=1`` reverts to legacy single-shot
+    semantics: a failing template is dropped after one call, no retry.
+    """
+    mocks = _install_default_stage_mocks(monkeypatch, section_count=3)
+    inputs = _coverage_inputs(section_count=3)
+    inputs["config"]["coverage_options"] = {"max_attempts": 1}
+
+    candidates = [_candidate_mock(i + 1) for i in range(3)]
+
+    async def _flaky_generate(**kw: Any) -> list[Any]:
+        position = kw["templates"][0]["position"]
+        if position == 2:
+            raise RuntimeError("LLM hiccup")
+        return [candidates[position - 1]]
+
+    mocks["generate"] = AsyncMock(side_effect=_flaky_generate)
+    monkeypatch.setattr(coverage_pipeline, "generate_questions", mocks["generate"])
+    mocks["validate"] = AsyncMock(
+        return_value=(MagicMock(), [MagicMock(position=i) for i in (1, 2)])
+    )
+    monkeypatch.setattr(coverage_pipeline, "validate_questions", mocks["validate"])
+
+    await run_coverage_pipeline(
+        db=MagicMock(),
+        run=_run(),
+        quiz=_quiz(),
+        config=inputs["config"],
+        outlines=inputs["outlines"],
+        budget=inputs["budget"],
+    )
+
+    # 3 sections, no retry on the failing one = 3 total calls.
+    assert mocks["generate"].await_count == 3
+
+
+@pytest.mark.asyncio
+async def test_coverage_max_attempts_three_recovers_on_third_try(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``max_attempts=3`` lets a transient failure recover on the 3rd try."""
+    mocks = _install_default_stage_mocks(monkeypatch, section_count=2)
+    inputs = _coverage_inputs(section_count=2)
+    inputs["config"]["coverage_options"] = {"max_attempts": 3}
+
+    candidates = [_candidate_mock(i + 1) for i in range(2)]
+    call_counts: dict[int, int] = {1: 0, 2: 0}
+
+    async def _eventually_succeed(**kw: Any) -> list[Any]:
+        position = kw["templates"][0]["position"]
+        call_counts[position] += 1
+        if position == 2 and call_counts[position] < 3:
+            raise RuntimeError("LLM hiccup")
+        return [candidates[position - 1]]
+
+    mocks["generate"] = AsyncMock(side_effect=_eventually_succeed)
+    monkeypatch.setattr(coverage_pipeline, "generate_questions", mocks["generate"])
+    mocks["validate"] = AsyncMock(
+        return_value=(MagicMock(), [MagicMock(position=i) for i in (1, 2)])
+    )
+    monkeypatch.setattr(coverage_pipeline, "validate_questions", mocks["validate"])
+
+    result = await run_coverage_pipeline(
+        db=MagicMock(),
+        run=_run(),
+        quiz=_quiz(),
+        config=inputs["config"],
+        outlines=inputs["outlines"],
+        budget=inputs["budget"],
+    )
+
+    # Position 1: 1 call. Position 2: 3 calls (2 fail, 1 succeed) = 4 total.
+    assert mocks["generate"].await_count == 4
+    assert len(result) == 2
+
+
+@pytest.mark.asyncio
+async def test_coverage_max_attempts_recorded_in_audit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Resolved ``max_attempts`` should appear in the audit log so
+    operators can verify the knob took effect."""
+    _install_default_stage_mocks(monkeypatch, section_count=2)
+    inputs = _coverage_inputs(section_count=2)
+    inputs["config"]["coverage_options"] = {"max_attempts": 4}
+
+    run = _run()
+    await run_coverage_pipeline(
+        db=MagicMock(),
+        run=run,
+        quiz=_quiz(),
+        config=inputs["config"],
+        outlines=inputs["outlines"],
+        budget=inputs["budget"],
+    )
+
+    assert run.config_json["pipeline"]["generation"]["max_attempts"] == 4
 
 
 def test_coverage_pipeline_module_is_under_soft_cap() -> None:
