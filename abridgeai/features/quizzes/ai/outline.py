@@ -246,9 +246,7 @@ def _section_from_group(group: list[DocumentChunk]) -> OutlineSection:
     )
 
     # Content role: mode of chunk roles, ties go to "body".
-    role_counter = Counter(
-        (c.metadata_json or {}).get("content_role", "body") for c in group
-    )
+    role_counter = Counter(_chunk_role(c) for c in group)
     if role_counter:
         most_common = role_counter.most_common()
         # Tie-break: prefer body if it ties with anything else.
@@ -294,6 +292,25 @@ def _section_heading(chunk: DocumentChunk) -> str:
     if isinstance(semantic_title, str) and semantic_title.strip():
         return semantic_title.strip()
     return str(metadata.get("section") or "")
+
+
+def _chunk_role(chunk: DocumentChunk) -> str:
+    """Resolve a chunk's content role from metadata.
+
+    Prefers ``metadata.semantic.content_role`` (LLM-enriched, knows
+    "summary" / "review" / "front_matter" beyond what the rule
+    classifier catches) over top-level ``metadata.content_role`` (rule
+    classifier output, defaults to "body" for anything unrecognised).
+    Without this priority, slide-deck PDFs end up with every chunk
+    tagged "body" at the top level, defeating ``skip_summaries`` in
+    coverage allocation and inflating the eligible section count.
+    """
+    metadata = chunk.metadata_json or {}
+    semantic = metadata.get("semantic") or {}
+    semantic_role = semantic.get("content_role")
+    if isinstance(semantic_role, str) and semantic_role.strip():
+        return semantic_role.strip()
+    return str(metadata.get("content_role") or "body")
 
 
 def _chunk_page(chunk: DocumentChunk) -> int | None:
