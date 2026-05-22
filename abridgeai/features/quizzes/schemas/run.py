@@ -133,6 +133,13 @@ class CoverageOptions(BaseModel):
     Capped at 32 so callers cannot DoS the provider or exhaust the pool.
     """
 
+    max_attempts: Annotated[int, Field(ge=1, le=5)] = 2
+    """How many times each per-template generation may run before the
+    template is dropped. ``1`` disables retry (legacy single-shot
+    behaviour); ``2`` (default) retries once on transient failures
+    (gateway 5xx, parse error, empty candidates). Capped at 5 so a
+    pathological template cannot stall the whole run."""
+
     @model_validator(mode="after")
     def _check_min_le_max(self) -> CoverageOptions:
         if self.min_per_section > self.max_per_section:
