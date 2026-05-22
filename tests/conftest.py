@@ -47,6 +47,13 @@ def _async_url(database_url: str) -> str:
 
 @pytest_asyncio.fixture(scope="session")
 async def test_engine() -> AsyncEngine:
+    # The Settings model swaps ``database_url`` to ``test_database_url``
+    # automatically when pytest is imported (see
+    # ``Settings._swap_to_test_db_under_pytest``). That single funnel covers
+    # every per-file fixture that does ``create_async_engine(get_settings().database_url)``
+    # — we don't have to rewrite ~30 such fixtures. If TEST_DATABASE_URL is
+    # unset or identical to DATABASE_URL, Settings construction itself will
+    # raise before we get here.
     settings = get_settings()
     engine = create_async_engine(_async_url(settings.database_url), pool_pre_ping=True)
     yield engine
