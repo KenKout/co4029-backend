@@ -567,9 +567,20 @@ class _AttrShim:
     def __init__(self, data: dict[str, Any]) -> None:
         self._data = dict(data)
 
-    def model_dump(self, exclude_unset: bool = False, mode: str | None = None) -> dict[str, Any]:
+    def model_dump(
+        self,
+        exclude_unset: bool = False,
+        mode: str | None = None,
+        exclude: set[str] | None = None,
+        include: set[str] | None = None,
+    ) -> dict[str, Any]:
         del exclude_unset, mode
-        return dict(self._data)
+        data = dict(self._data)
+        if include is not None:
+            data = {k: v for k, v in data.items() if k in include}
+        if exclude:
+            data = {k: v for k, v in data.items() if k not in exclude}
+        return data
 
     def __getattr__(self, name: str) -> Any:  # noqa: ANN401  -- shim returns whatever the dict holds
         if name.startswith("_"):
