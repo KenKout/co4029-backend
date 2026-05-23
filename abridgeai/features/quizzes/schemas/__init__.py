@@ -18,6 +18,9 @@ from __future__ import annotations
 
 from abridgeai.features.quizzes.schemas.attempt import (
     QuizAttemptRead,
+    QuizAttemptReviewOption,
+    QuizAttemptReviewQuestion,
+    QuizAttemptReviewRead,
     QuizAttemptStart,
     QuizAttemptStatusLiteral,
     QuizAttemptSubmit,
@@ -60,6 +63,9 @@ __all__ = [
     "QuestionType",
     "QuestionTypeLiteral",
     "QuizAttemptRead",
+    "QuizAttemptReviewOption",
+    "QuizAttemptReviewQuestion",
+    "QuizAttemptReviewRead",
     "QuizAttemptStart",
     "QuizAttemptStatusLiteral",
     "QuizAttemptSubmit",

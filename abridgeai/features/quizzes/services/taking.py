@@ -33,6 +33,12 @@ from abridgeai.features.quizzes.models import (
 )
 from abridgeai.features.quizzes.queries import authoring as authoring_queries
 from abridgeai.features.quizzes.queries import published as published_queries
+from abridgeai.features.quizzes.schemas.attempt import (
+    QuizAttemptRead,
+    QuizAttemptReviewOption,
+    QuizAttemptReviewQuestion,
+    QuizAttemptReviewRead,
+)
 from abridgeai.features.quizzes.schemas.public import (
     QuizForTakingPublic,
     QuizPublic,
@@ -360,9 +366,65 @@ async def get_attempt_history(
     return list(attempts)
 
 
+async def get_attempt_review(
+    db: AsyncSession,
+    *,
+    attempt_id: UUID,
+    actor: CurrentUser,
+) -> QuizAttemptReviewRead | None:
+    """Project a submitted attempt + its answers + correct options.
+
+    Returns ``None`` (router → 404) when the attempt doesn't belong to the
+    caller or hasn't been submitted yet — review surface only opens after
+    the student locks in their answers.
+    """
+    attempt = await published_queries.get_attempt_for_review(
+        db, attempt_id=attempt_id, user_id=actor.user_id
+    )
+    if attempt is None:
+        return None
+
+    answers_by_question: dict[UUID, QuizAttemptAnswer] = {
+        a.question_id: a for a in attempt.answers
+    }
+
+    questions_with_options = await published_queries.list_quiz_questions_with_options(
+        db, attempt.quiz_id
+    )
+
+    review_questions: list[QuizAttemptReviewQuestion] = []
+    for question, options in questions_with_options:
+        ans = answers_by_question.get(question.id)
+        review_questions.append(
+            QuizAttemptReviewQuestion(
+                question_id=question.id,
+                position=question.position,
+                question_type=question.question_type,
+                prompt_text=question.prompt_text,
+                explanation=question.explanation,
+                hint_text=question.hint_text,
+                options=[
+                    QuizAttemptReviewOption.model_validate(opt) for opt in options
+                ],
+                selected_option_id=ans.selected_option_id if ans else None,
+                answer_text=ans.answer_text if ans else None,
+                is_correct=ans.is_correct if ans else False,
+                points_awarded=ans.points_awarded if ans else Decimal("0"),
+                hint_used=ans.hint_used if ans else False,
+                t_actual_ms=ans.t_actual_ms if ans else None,
+            )
+        )
+
+    return QuizAttemptReviewRead(
+        attempt=QuizAttemptRead.model_validate(attempt),
+        questions=review_questions,
+    )
+
+
 __all__ = [
     "answer_attempt",
     "get_attempt_history",
+    "get_attempt_review",
     "get_published_quiz",
     "start_attempt",
     "submit_attempt",
