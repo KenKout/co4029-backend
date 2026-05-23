@@ -158,11 +158,43 @@ async def get_published_course_content_for_learner(
 
     Mirror of :func:`get_published_course_content` — returns ``None``
     when the course is missing / unpublished / soft-deleted.
+
+    Modules are converted to dicts before Pydantic validation to avoid
+    triggering lazy-loaded ``Module.items`` relationship access outside
+    an async greenlet context (MissingGreenlet).
     """
     tree = await get_published_course_content(db, course_id)
     if tree is None:
         return None
-    return CourseContentPublic.model_validate(tree)
+
+    # Group items_data by module_id so each ModulePublic gets its items
+    # without touching the lazy ORM relationship.
+    # items_data dicts use key "lesson" but ModuleItemPublic expects "target".
+    items_by_module: dict = {}
+    for item in tree.get("items", []):
+        mid = str(item["module_id"])
+        items_by_module.setdefault(mid, []).append({
+            "id": item["id"],
+            "module_id": item["module_id"],
+            "item_type": item["item_type"],
+            "position": item["position"],
+            "target": item.get("lesson"),
+        })
+
+    modules_data = []
+    for m in tree["modules"]:
+        modules_data.append({
+            "id": m.id,
+            "course_id": m.course_id,
+            "title": m.title,
+            "position": m.position,
+            "items": items_by_module.get(str(m.id), []),
+        })
+
+    return CourseContentPublic.model_validate({
+        "course": tree["course"],
+        "modules": modules_data,
+    })
 
 
 async def list_published_modules_for_course(
