@@ -80,4 +80,51 @@ async def post_material_engagement(
     return result
 
 
+@router.post(
+    "/me/progress/lessons/{lesson_id}/complete",
+    response_model=LessonProgressPublic,
+    status_code=status.HTTP_200_OK,
+)
+async def mark_lesson_complete(
+    lesson_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> LessonProgressPublic:
+    """Coursera-style 'mark as complete' button.
+
+    Idempotent — re-calling on a completed lesson refreshes
+    ``last_activity_at`` but keeps ``completion_percent=100``.
+    """
+    result = await tracking.mark_lesson_complete(
+        db, user_id=current_user.user_id, lesson_id=lesson_id
+    )
+    await db.commit()
+    return result
+
+
+@router.post(
+    "/me/progress/lessons/{lesson_id}/uncomplete",
+    response_model=LessonProgressPublic,
+    status_code=status.HTTP_200_OK,
+)
+async def unmark_lesson_complete(
+    lesson_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> LessonProgressPublic:
+    """Undo a manual mark-as-complete — recomputes status from engagement.
+
+    Returns 404 when no progress row exists (nothing to undo). If the
+    engagement aggregate would still auto-complete the lesson, the row
+    stays completed.
+    """
+    result = await tracking.unmark_lesson_complete(
+        db, user_id=current_user.user_id, lesson_id=lesson_id
+    )
+    if result is None:
+        raise _not_found("lesson_progress", lesson_id)
+    await db.commit()
+    return result
+
+
 __all__ = ["router"]
