@@ -37,6 +37,63 @@ register_conflict_mappings(
 )
 
 
+async def mark_lesson_complete(
+    db: AsyncSession,
+    *,
+    user_id: UUID,
+    lesson_id: UUID,
+) -> LessonProgressPublic:
+    """Manually flip a lesson to ``completed`` (Coursera-style mark-as-complete).
+
+    Idempotent — calling on an already-completed row keeps it complete and
+    refreshes ``last_activity_at``. Always sets ``completion_percent=100``
+    even if engagement-based completion is below the auto threshold; the
+    student is asserting they're done.
+
+    Creates the row if missing (e.g. a learner who never opened the lesson
+    but skips to mark complete from the curriculum view).
+    """
+    progress = await get_my_lesson_progress(db, user_id=user_id, lesson_id=lesson_id)
+    if progress is None:
+        progress = LessonProgress(
+            user_id=user_id,
+            lesson_id=lesson_id,
+            status="completed",
+            completion_percent=Decimal("100"),
+            total_time_seconds=0,
+        )
+        db.add(progress)
+    else:
+        progress.status = "completed"
+        progress.completion_percent = Decimal("100")
+    progress.last_activity_at = _utcnow()
+    await flush_or_conflict(db)
+    await db.refresh(progress)
+    return LessonProgressPublic.model_validate(progress)
+
+
+async def unmark_lesson_complete(
+    db: AsyncSession,
+    *,
+    user_id: UUID,
+    lesson_id: UUID,
+) -> LessonProgressPublic | None:
+    """Undo a manual completion — recompute status from engagement.
+
+    If the engagement aggregate would still auto-complete the lesson
+    (≥ ``_AUTO_COMPLETION_THRESHOLD``), the row stays ``completed`` (the
+    student watched/read enough to satisfy the threshold even without
+    manual marking). Otherwise the row reverts to ``in_progress`` (any
+    engagement at all) or ``not_started``.
+
+    Returns ``None`` when no row exists — there's nothing to undo.
+    """
+    progress = await get_my_lesson_progress(db, user_id=user_id, lesson_id=lesson_id)
+    if progress is None:
+        return None
+    return await update_lesson_progress(db, user_id=user_id, lesson_id=lesson_id)
+
+
 async def record_material_engagement(
     db: AsyncSession,
     *,
@@ -138,4 +195,9 @@ def _utcnow() -> datetime:
     return datetime.now(tz=UTC)
 
 
-__all__ = ["record_material_engagement", "update_lesson_progress"]
+__all__ = [
+    "mark_lesson_complete",
+    "record_material_engagement",
+    "unmark_lesson_complete",
+    "update_lesson_progress",
+]
