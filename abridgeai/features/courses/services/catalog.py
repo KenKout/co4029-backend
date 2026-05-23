@@ -268,7 +268,12 @@ async def get_published_module_for_learner(
 async def list_visible_module_items_for_learner(
     db: AsyncSession, module_id: UUID
 ) -> list[ModuleItemPublic] | None:
-    """Visible items under a published module; ``None`` if the module is unpublished."""
+    """Visible items under a published module; ``None`` if the module is unpublished.
+
+    Items come back as dicts with ``target`` already hydrated to the
+    matching ``Lesson`` / ``Quiz`` row (see
+    :func:`list_visible_module_items`); we just hand them to Pydantic.
+    """
     module = await get_published_module_by_id(db, module_id)
     if module is None:
         return None

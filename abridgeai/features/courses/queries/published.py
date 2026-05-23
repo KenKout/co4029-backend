@@ -331,18 +331,26 @@ async def get_visible_lesson_resource(db: AsyncSession, resource_id: UUID) -> Le
     return (await db.execute(stmt)).scalar_one_or_none()
 
 
-async def list_visible_module_items(db: AsyncSession, module_id: UUID) -> list[ModuleItem]:
+async def list_visible_module_items(db: AsyncSession, module_id: UUID) -> list[dict[str, Any]]:
     """``ModuleItem`` rows under ``module_id`` that point to non-draft targets.
 
     Per the DRAFT_VISIBILITY rule (plan §4153) items pointing to draft /
-    soft-deleted lessons are EXCLUDED, not nullified. Quiz / interview
-    items also resolve to ``false`` until Phase 5 / Phase 6 wire their
-    own published clauses (see T3.3 :func:`module_item_visible_clause`).
+    soft-deleted lessons / quizzes are EXCLUDED, not nullified. Returns
+    plain dicts shaped for :class:`ModuleItemPublic.model_validate`,
+    with ``target`` populated from the joined :class:`Lesson` /
+    :class:`Quiz` row so the polymorphic field is hydrated without
+    relying on lazy ORM relationship access (would raise
+    ``MissingGreenlet`` outside the awaited session).
     """
+    # Lazy import to avoid breaking import-linter's
+    # ``Features are independent`` contract at module load.
+    from abridgeai.features.quizzes.models import Quiz
+
     stmt = (
         select(ModuleItem)
         .join(Module, Module.id == ModuleItem.module_id)
-        .join(Lesson, Lesson.id == ModuleItem.lesson_id, isouter=True)
+        .outerjoin(Lesson, Lesson.id == ModuleItem.lesson_id)
+        .outerjoin(Quiz, Quiz.id == ModuleItem.quiz_id)
         .where(
             ModuleItem.module_id == module_id,
             published_module_clause(),
@@ -350,7 +358,50 @@ async def list_visible_module_items(db: AsyncSession, module_id: UUID) -> list[M
         )
         .order_by(ModuleItem.position)
     )
-    return list((await db.execute(stmt)).scalars().all())
+    items = list((await db.execute(stmt)).scalars().all())
+
+    lesson_ids = [item.lesson_id for item in items if item.lesson_id is not None]
+    lessons_by_id: dict[UUID, Lesson] = {}
+    if lesson_ids:
+        lessons_stmt = select(Lesson).where(
+            Lesson.id.in_(lesson_ids),
+            published_lesson_clause(),
+        )
+        lessons_by_id = {
+            lesson.id: lesson
+            for lesson in (await db.execute(lessons_stmt)).scalars().all()
+        }
+
+    quiz_ids = [item.quiz_id for item in items if item.quiz_id is not None]
+    quizzes_by_id: dict[UUID, Any] = {}
+    if quiz_ids:
+        quizzes_stmt = select(Quiz).where(
+            Quiz.id.in_(quiz_ids),
+            Quiz.status == "published",
+        )
+        quizzes_by_id = {
+            quiz.id: quiz
+            for quiz in (await db.execute(quizzes_stmt)).scalars().all()
+        }
+
+    payload: list[dict[str, Any]] = []
+    for item in items:
+        if item.item_type == "lesson":
+            target = lessons_by_id.get(item.lesson_id) if item.lesson_id else None
+        elif item.item_type == "quiz":
+            target = quizzes_by_id.get(item.quiz_id) if item.quiz_id else None
+        else:
+            target = None
+        payload.append(
+            {
+                "id": item.id,
+                "module_id": item.module_id,
+                "item_type": item.item_type,
+                "position": item.position,
+                "target": target,
+            }
+        )
+    return payload
 
 
 async def list_published_course_tags(db: AsyncSession, course_id: UUID) -> list[Tag]:
