@@ -121,10 +121,26 @@ class LessonPublic(_ORMModel):
 
     Per §A2, ``position`` is absent here — lesson ordering is determined
     by the parent :class:`ModuleItemPublic.position` field.
+
+    ``lesson_type`` drives the student-side renderer (``video`` → video
+    player, ``reading`` → notes / primary-material reader, etc). The
+    DDL CHECK constraint ``lessons_lesson_type_check`` keeps the column
+    inside the ``video|reading|interactive|interview|quiz`` enum.
+
+    ``summary`` / ``notes_markdown`` / ``primary_material_id`` are
+    surfaced because the reader pane needs them to render the lesson
+    body — without them the student-side fell back to a video-shaped
+    skeleton even for ``reading`` lessons.
     """
 
     id: UUID
     title: str
+    lesson_type: str
+    summary: str | None = None
+    notes_markdown: str | None = None
+    primary_material_id: UUID | None = None
+    estimated_minutes: int | None = None
+    difficulty: str | None = None
 
 
 class QuizSummaryPublic(_ORMModel):
