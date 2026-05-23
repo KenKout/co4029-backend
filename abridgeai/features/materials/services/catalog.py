@@ -124,7 +124,11 @@ async def get_stream_url_for_material(
         response_headers={"Content-Disposition": f'attachment; filename="{safe_title}"'},
     )
     expires_at = datetime.now(tz=UTC) + timedelta(seconds=ttl)
-    return MaterialStreamUrl(url=url, expires_at=expires_at)
+    return MaterialStreamUrl(
+        url=url,
+        expires_at=expires_at,
+        material_version_id=target.material_version_id,
+    )
 
 
 async def list_visible_chunks_preview(
