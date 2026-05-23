@@ -76,10 +76,15 @@ class MaterialStreamUrl(_ORMModel):
     The TTL is decided by the backend (plan §4719 — "do NOT bake
     presigned URL TTL into schema"); the schema only carries the
     resolved ``expires_at`` for the client to know when to re-fetch.
+
+    ``material_version_id`` is the FK that engagement events report
+    against (per plan §C14 / §A13 — engagement is version-scoped, so
+    re-uploading a material does not pollute existing engagement rows).
     """
 
     url: str
     expires_at: datetime
+    material_version_id: UUID | None = None
 
 
 __all__ = [

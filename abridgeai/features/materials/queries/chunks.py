@@ -26,6 +26,7 @@ own ``deleted_at`` column does not exist.
 
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass
 from uuid import UUID
 
@@ -52,13 +53,15 @@ class MaterialStreamTarget:
     bucket: str
     object_key: str
     title: str
+    material_version_id: uuid.UUID | None = None
 
 
 _STREAM_TARGET_SQL = text(
     """
-    SELECT so.bucket       AS bucket,
-           so.object_key   AS object_key,
-           lm.title        AS title
+    SELECT so.bucket             AS bucket,
+           so.object_key         AS object_key,
+           lm.title              AS title,
+           lmv.id                AS material_version_id
     FROM learning_materials lm
     JOIN learning_material_versions lmv
       ON lmv.id = lm.current_version_id
@@ -136,7 +139,12 @@ async def get_stream_target_for_material(
     row = result.one_or_none()
     if row is None:
         return None
-    return MaterialStreamTarget(bucket=row.bucket, object_key=row.object_key, title=row.title)
+    return MaterialStreamTarget(
+        bucket=row.bucket,
+        object_key=row.object_key,
+        title=row.title,
+        material_version_id=row.material_version_id,
+    )
 
 
 async def get_authoring_stream_target_for_material(

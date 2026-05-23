@@ -136,7 +136,11 @@ async def get_authoring_stream_url(db: AsyncSession, material_id: UUID) -> Mater
     from datetime import UTC, datetime, timedelta  # noqa: PLC0415
 
     expires_at = datetime.now(tz=UTC) + timedelta(seconds=settings.s3_url_ttl_seconds)
-    return MaterialStreamUrl(url=url, expires_at=expires_at)
+    return MaterialStreamUrl(
+        url=url,
+        expires_at=expires_at,
+        material_version_id=target.material_version_id,
+    )
 
 
 async def get_lesson_processing_summary_view(
