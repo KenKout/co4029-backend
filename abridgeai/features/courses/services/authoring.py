@@ -52,8 +52,8 @@ from abridgeai.features.courses.queries import (
 from abridgeai.features.courses.queries import (
     find_active_teacher_assignment,
     get_teacher_role_id,
-    insert_teacher_assignment,
     get_user_primary_organization_id,
+    insert_teacher_assignment,
 )
 from abridgeai.features.courses.schemas import (
     CourseAuthoring,

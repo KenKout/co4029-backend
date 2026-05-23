@@ -37,6 +37,7 @@ from abridgeai.features.courses.queries.authoring import (
     replace_module_prerequisites,
 )
 from abridgeai.features.courses.queries.published import (
+    get_course_instructor,
     get_published_course_by_id,
     get_published_course_by_slug,
     get_published_course_content,
@@ -73,6 +74,7 @@ __all__ = [
     "get_published_course_by_id",
     "get_published_course_by_slug",
     "get_published_course_content",
+    "get_course_instructor",
     "get_published_lesson_by_id",
     "get_published_module_by_id",
     "get_teacher_role_id",

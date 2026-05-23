@@ -127,6 +127,20 @@ class LessonPublic(_ORMModel):
     title: str
 
 
+class QuizSummaryPublic(_ORMModel):
+    """Slim quiz projection embedded inside :class:`ModuleItemPublic.target`.
+
+    Mirrors :class:`abridgeai.features.quizzes.schemas.public.QuizPublic`
+    on the wire (``id`` + ``title``) but lives in the courses schema
+    package so the cross-feature import-linter contract stays intact.
+    The field surface intentionally matches :class:`LessonPublic` so
+    frontend code can address ``item.target.{id,title}`` polymorphically.
+    """
+
+    id: UUID
+    title: str
+
+
 class LessonResourcePublic(_ORMModel):
     """Public projection of a lesson resource.
 
@@ -145,17 +159,22 @@ class LessonResourcePublic(_ORMModel):
 class ModuleItemPublic(_ORMModel):
     """Polymorphic ordering row — public projection.
 
-    Phase 5 widens :attr:`target` to
-    ``LessonPublic | QuizPublic | InterviewPublic``; for T3.2 only
-    ``LessonPublic`` exists, and quiz / interview rows surface
-    ``target = None``.
+    :attr:`target` widens with each phase as content types come online:
+
+    * ``LessonPublic`` — Phase 3 (T3.2) baseline.
+    * ``QuizSummaryPublic`` — Phase 5 (FR-5); slim shape mirroring
+      :class:`abridgeai.features.quizzes.schemas.public.QuizPublic`.
+    * Phase 6 will add ``InterviewPublic``.
+
+    Pydantic v2 discriminates dict-shape on a best-fit basis; both
+    branches share ``{id, title}`` so tagging is unambiguous.
     """
 
     id: UUID
     module_id: UUID
     item_type: Literal["lesson", "quiz", "interview"]
     position: int
-    target: LessonPublic | None = None
+    target: LessonPublic | QuizSummaryPublic | None = None
 
 
 class CourseContentPublic(_ORMModel):
@@ -189,6 +208,7 @@ __all__ = [
     "LessonResourcePublic",
     "ModuleItemPublic",
     "ModulePublic",
+    "QuizSummaryPublic",
     "ResourceDownloadUrlResponse",
     "TagPublic",
 ]

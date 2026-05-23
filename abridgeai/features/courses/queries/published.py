@@ -30,7 +30,7 @@ from abridgeai.features.courses.visibility import (
     student_visible_resource_clause,
 )
 from abridgeai.features.enrollments.models import Enrollment
-from abridgeai.features.identity.models import StorageObject
+from abridgeai.features.identity.models import StorageObject, User, UserProfile
 
 _DEFAULT_LIMIT = 20
 _MAX_LIMIT = 100
@@ -121,14 +121,53 @@ async def get_published_course_by_id(db: AsyncSession, course_id: UUID) -> Cours
     return (await db.execute(stmt)).scalar_one_or_none()
 
 
+async def get_course_instructor(db: AsyncSession, course_id: UUID) -> dict[str, Any] | None:
+    """Compose the instructor block for a course's public detail page.
+
+    Joins ``courses.owner_user_id → users.id → user_profiles.user_id`` and
+    returns ``{user_id, display_name, avatar_url, headline}`` shaped for
+    :class:`abridgeai.features.courses.schemas.public.InstructorRead`.
+    Returns ``None`` when the course is unpublished, the owner row is
+    missing, or the owner has no ``user_profiles`` row.
+
+    ``avatar_url`` and ``headline`` are reserved for future expansion;
+    today both fall back to ``None`` because the baseline DDL stores
+    avatars in ``storage_objects`` (not directly URLed) and there is
+    no ``headline`` column on ``user_profiles`` (only ``bio``).
+    """
+    stmt = (
+        select(
+            User.id.label("user_id"),
+            UserProfile.display_name,
+            UserProfile.bio,
+        )
+        .join(Course, Course.owner_user_id == User.id)
+        .outerjoin(UserProfile, UserProfile.user_id == User.id)
+        .where(Course.id == course_id, published_course_clause())
+    )
+    row = (await db.execute(stmt)).first()
+    if row is None or row.display_name is None:
+        return None
+    return {
+        "user_id": row.user_id,
+        "display_name": row.display_name,
+        "avatar_url": None,
+        "headline": row.bio,
+    }
+
+
 async def get_published_course_content(db: AsyncSession, course_id: UUID) -> dict[str, Any] | None:
     """Fetch the published course tree (course + modules + visible items).
 
     Returns ``{"course": Course, "modules": list[Module], "items": list[dict]}``
     or ``None`` when the course is missing / unpublished / soft-deleted.
     DRAFT_VISIBILITY rule (plan §4153): items pointing to draft / soft-
-    deleted lessons are excluded entirely (not nullified).
+    deleted lessons / quizzes are excluded entirely (not nullified).
     """
+    # Lazy import to avoid breaking import-linter's
+    # ``Features are independent`` contract at module load.
+    from abridgeai.features.quizzes.models import Quiz
+
     course = await get_published_course_by_id(db, course_id)
     if course is None:
         return None
@@ -143,6 +182,7 @@ async def get_published_course_content(db: AsyncSession, course_id: UUID) -> dic
         select(ModuleItem)
         .join(Module, Module.id == ModuleItem.module_id)
         .outerjoin(Lesson, Lesson.id == ModuleItem.lesson_id)
+        .outerjoin(Quiz, Quiz.id == ModuleItem.quiz_id)
         .where(
             ModuleItem.module_id.in_(module_ids),
             ModuleItem.deleted_at.is_(None),
@@ -162,9 +202,20 @@ async def get_published_course_content(db: AsyncSession, course_id: UUID) -> dic
         lessons = (await db.execute(lessons_stmt)).scalars().all()
         lessons_by_id = {lesson.id: lesson for lesson in lessons}
 
+    quiz_ids = [item.quiz_id for item in items if item.quiz_id is not None]
+    quizzes_by_id: dict[UUID, Any] = {}
+    if quiz_ids:
+        quizzes_stmt = select(Quiz).where(
+            Quiz.id.in_(quiz_ids),
+            Quiz.status == "published",
+        )
+        quizzes = (await db.execute(quizzes_stmt)).scalars().all()
+        quizzes_by_id = {quiz.id: quiz for quiz in quizzes}
+
     items_data = []
     for item in items:
         lesson = lessons_by_id.get(item.lesson_id) if item.lesson_id else None
+        quiz = quizzes_by_id.get(item.quiz_id) if item.quiz_id else None
         items_data.append(
             {
                 "id": item.id,
@@ -176,6 +227,7 @@ async def get_published_course_content(db: AsyncSession, course_id: UUID) -> dic
                 "position": item.position,
                 "unlock_rule_json": item.unlock_rule_json,
                 "lesson": lesson,
+                "quiz": quiz,
             }
         )
 

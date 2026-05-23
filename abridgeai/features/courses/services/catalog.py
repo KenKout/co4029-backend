@@ -18,6 +18,7 @@ from uuid import UUID
 
 from abridgeai.features.courses.queries import (
     CursorPage,
+    get_course_instructor,
     get_published_course_by_id,
     get_published_course_by_slug,
     get_published_course_content,
@@ -38,6 +39,7 @@ from abridgeai.features.courses.schemas import (
     CourseContentPublic,
     CourseLearningOutcomePublic,
     CoursePublic,
+    InstructorRead,
     LessonPublic,
     LessonResourcePublic,
     ModuleItemPublic,
@@ -124,6 +126,24 @@ async def list_enrolled_courses_for_user(
     )
 
 
+async def _course_with_instructor(db: AsyncSession, course: object) -> CoursePublic:
+    """Validate ``course`` (ORM row OR dict) into :class:`CoursePublic` with
+    the instructor block hydrated from ``UserProfile``.
+
+    Single helper so list / detail / content paths share one composition
+    rule. Falls back to ``instructor=None`` when the owner has no
+    ``user_profiles`` row — the public DTO already declares
+    ``instructor: InstructorRead | None = None``.
+    """
+    public = CoursePublic.model_validate(course)
+    instructor_data = await get_course_instructor(db, public.id)
+    if instructor_data is not None:
+        public = public.model_copy(
+            update={"instructor": InstructorRead.model_validate(instructor_data)}
+        )
+    return public
+
+
 async def get_published_course_detail(
     db: AsyncSession,
     course_id_or_slug: str | UUID,
@@ -148,13 +168,15 @@ async def get_published_course_detail(
                 "(see Reconciliation §A11)"
             )
         course = await get_published_course_by_slug(db, str(course_id_or_slug), organization_id)
-    return None if course is None else CoursePublic.model_validate(course)
+    if course is None:
+        return None
+    return await _course_with_instructor(db, course)
 
 
 async def get_published_course_content_for_learner(
     db: AsyncSession, course_id: UUID
 ) -> CourseContentPublic | None:
-    """Full published content tree (course + modules + items + lessons).
+    """Full published content tree (course + modules + items + lessons + quizzes).
 
     Mirror of :func:`get_published_course_content` — returns ``None``
     when the course is missing / unpublished / soft-deleted.
@@ -162,23 +184,28 @@ async def get_published_course_content_for_learner(
     Modules are converted to dicts before Pydantic validation to avoid
     triggering lazy-loaded ``Module.items`` relationship access outside
     an async greenlet context (MissingGreenlet).
+
+    The course block is composed via :func:`_course_with_instructor` so
+    the public DTO carries ``instructor`` alongside the modules.
     """
     tree = await get_published_course_content(db, course_id)
     if tree is None:
         return None
 
     # Group items_data by module_id so each ModulePublic gets its items
-    # without touching the lazy ORM relationship.
-    # items_data dicts use key "lesson" but ModuleItemPublic expects "target".
+    # without touching the lazy ORM relationship. Quiz items map their
+    # ``quiz`` row into ``target`` so the polymorphic field is populated
+    # for both ``lesson`` and ``quiz`` rows.
     items_by_module: dict = {}
     for item in tree.get("items", []):
         mid = str(item["module_id"])
+        target = item.get("quiz") if item["item_type"] == "quiz" else item.get("lesson")
         items_by_module.setdefault(mid, []).append({
             "id": item["id"],
             "module_id": item["module_id"],
             "item_type": item["item_type"],
             "position": item["position"],
-            "target": item.get("lesson"),
+            "target": target,
         })
 
     modules_data = []
@@ -191,8 +218,9 @@ async def get_published_course_content_for_learner(
             "items": items_by_module.get(str(m.id), []),
         })
 
+    course_public = await _course_with_instructor(db, tree["course"])
     return CourseContentPublic.model_validate({
-        "course": tree["course"],
+        "course": course_public,
         "modules": modules_data,
     })
 

@@ -299,6 +299,13 @@ ignore_imports = [
     # module title alongside each bank entry. Read-only ORM read; the
     # service never writes courses tables.
     "abridgeai.features.quizzes.services.question_bank -> abridgeai.features.courses.models",
+    # Courses visibility + content tree filter on Quiz.status='published'
+    # to gate quiz-typed module items inside published course payloads.
+    # Read-only ORM JOIN — no writes to quizzes tables. Lazy-imported
+    # at call time inside the visibility helper / queries function so
+    # module load order stays one-way (quizzes never imports courses).
+    "abridgeai.features.courses.visibility -> abridgeai.features.quizzes.models",
+    "abridgeai.features.courses.queries.published -> abridgeai.features.quizzes.models",
 ]
 
 [[tool.importlinter.contracts]]
