@@ -104,16 +104,15 @@ def student_visible_resource_clause() -> ColumnElement[bool]:
 
 
 def published_quiz_clause() -> ColumnElement[bool]:
-    """Forward reference — raises until Phase 5 lands ``features.quizzes.models``.
+    """SQL: ``quizzes.status = 'published'``.
 
-    The Phase-5 implementation will return ``Quiz.status == 'published'``.
-    Until then, calling this raises :class:`NotImplementedError` so the
-    queries layer (T3.4) can detect missing wiring at composition time
-    rather than emitting silently-broken SQL.
+    Assumes :class:`Quiz` is in the ``FROM`` clause of the composing
+    query. Phase-5 implementation lit; quiz items now flow through
+    student-facing content trees on the same predicate as lessons.
     """
-    raise NotImplementedError(
-        "published_quiz_clause: features.quizzes.models pending Phase 5 (T5.x)"
-    )
+    from abridgeai.features.quizzes.models import Quiz
+
+    return Quiz.status == "published"
 
 
 def published_interview_clause() -> ColumnElement[bool]:
@@ -162,7 +161,7 @@ def module_item_visible_clause() -> ColumnElement[bool]:
     """
     return case(
         (ModuleItem.item_type == "lesson", Lesson.status == "published"),
-        (ModuleItem.item_type == "quiz", false()),
+        (ModuleItem.item_type == "quiz", published_quiz_clause()),
         (ModuleItem.item_type == "interview", false()),
         else_=false(),
     )
