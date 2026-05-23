@@ -119,9 +119,13 @@ async def get_stream_url_for_material(
     settings = get_settings()
     ttl = min(settings.s3_url_ttl_seconds, _LEARNER_STREAM_TTL_CAP_SECONDS)
     safe_title = _escape_filename(target.title)
+    # ``inline`` so the browser renders the file in-place (iframe PDF viewer,
+    # video tag) rather than forcing a download. The frontend "Download"
+    # button can still trigger a save via the HTML5 ``download`` attribute
+    # or a dedicated authoring endpoint when needed.
     url, _ = await create_stream_url(
         target,
-        response_headers={"Content-Disposition": f'attachment; filename="{safe_title}"'},
+        response_headers={"Content-Disposition": f'inline; filename="{safe_title}"'},
     )
     expires_at = datetime.now(tz=UTC) + timedelta(seconds=ttl)
     return MaterialStreamUrl(
