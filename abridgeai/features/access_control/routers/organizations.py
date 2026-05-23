@@ -33,6 +33,7 @@ from abridgeai.features.access_control.schemas.admin import (
     OrganizationDomainCreate,
     OrganizationDomainPatch,
     OrganizationDomainRead,
+    OrganizationListPage,
     OrganizationPatch,
     OrganizationRead,
     OrgUnitCreate,
@@ -70,27 +71,34 @@ def _not_found(detail: str) -> HTTPException:
 # ---------------------------------------------------------------------------
 
 
-@router.get("/admin/organizations", response_model=list[OrganizationRead])
+@router.get("/admin/organizations", response_model=OrganizationListPage)
 async def list_organizations_endpoint(
     _user: Annotated[CurrentUser, Depends(_REQUIRE_ORG_MANAGE)],
     db: Annotated[AsyncSession, Depends(get_db)],
     include_deleted: bool = False,
     org_status: str | None = None,
     limit: int = 100,
-    offset: int = 0,
-) -> list[OrganizationRead]:
+    cursor: str | None = None,
+) -> OrganizationListPage:
     if limit < 1 or limit > 500:
         raise _bad_request("limit must be between 1 and 500")
-    if offset < 0:
-        raise _bad_request("offset must be >= 0")
-    rows = await org_service.list_organizations(
-        db,
-        include_deleted=include_deleted,
-        status=org_status,
-        limit=limit,
-        offset=offset,
+    try:
+        page = await org_service.list_organizations(
+            db,
+            include_deleted=include_deleted,
+            status=org_status,
+            limit=limit,
+            cursor=cursor,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": "invalid_cursor", "message": str(exc)},
+        ) from exc
+    return OrganizationListPage(
+        items=[OrganizationRead.model_validate(r) for r in page.items],
+        next_cursor=page.next_cursor,
     )
-    return [OrganizationRead.model_validate(r) for r in rows]
 
 
 @router.post(

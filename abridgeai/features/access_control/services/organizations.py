@@ -16,6 +16,11 @@ from typing import TYPE_CHECKING
 from uuid import UUID
 
 from abridgeai.core.exceptions import AppError, NotFoundError
+from abridgeai.core.pagination import (
+    CursorPage,
+    decode_composite_cursor,
+    encode_composite_cursor,
+)
 from abridgeai.features.access_control.models import (
     Organization,
     OrganizationDomain,
@@ -48,15 +53,37 @@ async def list_organizations(
     include_deleted: bool = False,
     status: str | None = None,
     limit: int = 100,
-    offset: int = 0,
-) -> list[Organization]:
-    return await org_queries.list_organizations(
+    cursor: str | None = None,
+) -> CursorPage[Organization]:
+    """Cursor-paginated organisation list ordered by ``(name ASC, id ASC)``.
+
+    ``cursor`` is opaque (round-trips through
+    :func:`encode_composite_cursor` / :func:`decode_composite_cursor`).
+    ``next_cursor`` is set when the page filled to ``limit`` (more rows
+    may exist); ``None`` otherwise.
+    """
+    after_name: str | None = None
+    after_id: UUID | None = None
+    if cursor:
+        sort_value, last_id = decode_composite_cursor(cursor)
+        if not isinstance(sort_value, str):
+            raise ValueError("Invalid cursor")
+        after_name = sort_value
+        after_id = last_id
+    rows = await org_queries.list_organizations(
         db,
         include_deleted=include_deleted,
         status=status,
         limit=limit,
-        offset=offset,
+        after_name=after_name,
+        after_id=after_id,
     )
+    next_cursor = (
+        encode_composite_cursor(rows[-1].name, rows[-1].id)
+        if len(rows) == limit
+        else None
+    )
+    return CursorPage(items=rows, next_cursor=next_cursor)
 
 
 async def count_organizations(

@@ -3,12 +3,14 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
-from sqlalchemy import select, text
+from sqlalchemy import select, text, tuple_
 
 from abridgeai.features.access_control.api import public as access_control_api
 from abridgeai.features.career_paths.models import CareerPath
 
 if TYPE_CHECKING:
+    from datetime import datetime
+
     from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -17,7 +19,8 @@ async def list_published_career_paths(
     *,
     organization_id: UUID,
     limit: int = 20,
-    offset: int = 0,
+    after_created_at: datetime | None = None,
+    after_id: UUID | None = None,
 ) -> list[CareerPath]:
     stmt = (
         select(CareerPath)
@@ -26,10 +29,13 @@ async def list_published_career_paths(
             CareerPath.status == "published",
             CareerPath.deleted_at.is_(None),
         )
-        .order_by(CareerPath.created_at.desc())
+        .order_by(CareerPath.created_at.desc(), CareerPath.id.desc())
         .limit(limit)
-        .offset(offset)
     )
+    if after_created_at is not None and after_id is not None:
+        stmt = stmt.where(
+            tuple_(CareerPath.created_at, CareerPath.id) < (after_created_at, after_id)
+        )
     return list((await db.execute(stmt)).scalars().all())
 
 

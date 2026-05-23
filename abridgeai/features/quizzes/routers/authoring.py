@@ -52,6 +52,7 @@ from abridgeai.features.quizzes.routers._deps import (
 from abridgeai.features.quizzes.schemas import (
     QuestionBankEntry,
     QuestionBankImportRequest,
+    QuestionBankPage,
     QuizAuthoring,
     QuizForAuthoringPublic,
     QuizGenerationRequest,
@@ -477,7 +478,7 @@ async def regenerate_question(
 
 @router.get(
     "/courses/{course_id}/question-bank",
-    response_model=list[QuestionBankEntry],
+    response_model=QuestionBankPage,
 )
 async def list_question_bank(  # noqa: PLR0913 -- filters mirror service signature
     course_id: UUID,
@@ -492,18 +493,19 @@ async def list_question_bank(  # noqa: PLR0913 -- filters mirror service signatu
     search: str | None = None,
     exclude_quiz_id: UUID | None = None,
     limit: int = 50,
-    offset: int = 0,
-) -> list[QuestionBankEntry]:
+    cursor: str | None = None,
+) -> QuestionBankPage:
     """Browse authored questions across the course for cross-quiz reuse.
 
     Defaults to ``review_status='approved'`` so only vetted questions
     surface; pass ``review_status=`` (empty) to widen. ``exclude_quiz_id``
     is convenient for the modal launched from a target quiz so its own
-    questions don't appear in the bank list.
+    questions don't appear in the bank list. ``cursor`` is opaque and
+    round-trips through subsequent calls.
     """
     del current_user  # permission already enforced by Depends
     try:
-        rows = await question_bank_service.list_bank_entries(
+        page = await question_bank_service.list_bank_entries(
             db,
             course_id=course_id,
             module_id=module_id,
@@ -515,11 +517,14 @@ async def list_question_bank(  # noqa: PLR0913 -- filters mirror service signatu
             search=search,
             exclude_quiz_id=exclude_quiz_id,
             limit=limit,
-            offset=offset,
+            cursor=cursor,
         )
     except AppError as exc:
         raise _bad_request(str(exc)) from exc
-    return [QuestionBankEntry.model_validate(row) for row in rows]
+    return QuestionBankPage(
+        items=[QuestionBankEntry.model_validate(row) for row in page.items],
+        next_cursor=page.next_cursor,
+    )
 
 
 @router.post(

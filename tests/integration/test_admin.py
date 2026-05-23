@@ -404,11 +404,18 @@ async def test_list_admin_users_smoke(
     assert no_filter.status_code == 200, no_filter.text
     assert status_filter.status_code == 200, status_filter.text
     assert role_filter.status_code == 200, role_filter.text
-    assert isinstance(no_filter.json(), list)
-    assert isinstance(status_filter.json(), list)
-    assert isinstance(role_filter.json(), list)
+    no_filter_payload = no_filter.json()
+    status_filter_payload = status_filter.json()
+    role_filter_payload = role_filter.json()
+    assert isinstance(no_filter_payload, dict)
+    assert isinstance(no_filter_payload["items"], list)
+    assert "next_cursor" in no_filter_payload
+    assert isinstance(status_filter_payload["items"], list)
+    assert isinstance(role_filter_payload["items"], list)
     assert q_filter.status_code == 200, q_filter.text
-    q_rows = q_filter.json()
+    q_payload = q_filter.json()
+    assert isinstance(q_payload, dict)
+    q_rows = q_payload["items"]
     assert isinstance(q_rows, list)
     # Each row must expose ``display_name`` (nullable) for the search UI.
     for row in q_rows:

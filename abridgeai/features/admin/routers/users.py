@@ -43,6 +43,18 @@ class UserListRow(BaseModel):
     updated_at: Any
 
 
+class UserListPage(BaseModel):
+    """Cursor-paginated admin user listing.
+
+    ``next_cursor`` is opaque and round-trips through subsequent calls.
+    Set when the page is full (more rows may exist); ``None`` otherwise.
+    Reconciliation §A10/§D2: cursor pagination, not offset.
+    """
+
+    items: list[UserListRow]
+    next_cursor: str | None = None
+
+
 class DisableUserOut(BaseModel):
     user_id: UUID
     status: str
@@ -54,7 +66,7 @@ class EnableUserOut(BaseModel):
     status: str
 
 
-@router.get("", response_model=list[UserListRow])
+@router.get("", response_model=UserListPage)
 async def list_users(
     user: Annotated[CurrentUser, Depends(_REQUIRE_READ)],
     db: Annotated[AsyncSession, Depends(get_db)],
@@ -62,19 +74,28 @@ async def list_users(
     role_code: Annotated[str | None, Query()] = None,
     q: Annotated[str | None, Query(min_length=1, max_length=200)] = None,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
-    offset: Annotated[int, Query(ge=0)] = 0,
-) -> list[UserListRow]:
+    cursor: Annotated[str | None, Query()] = None,
+) -> UserListPage:
     org_id = await resolve_admin_scope(db, user)
-    rows = await users_service.list_users(
-        db,
-        status_filter=user_status,
-        role_code=role_code,
-        organization_id=org_id,
-        q=q,
-        limit=limit,
-        offset=offset,
+    try:
+        page = await users_service.list_users(
+            db,
+            status_filter=user_status,
+            role_code=role_code,
+            organization_id=org_id,
+            q=q,
+            limit=limit,
+            cursor=cursor,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": "invalid_cursor", "message": str(exc)},
+        ) from exc
+    return UserListPage(
+        items=[UserListRow.model_validate(r) for r in page.items],
+        next_cursor=page.next_cursor,
     )
-    return [UserListRow.model_validate(r) for r in rows]
 
 
 @router.get("/{user_id}")

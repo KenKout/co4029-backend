@@ -6,6 +6,7 @@ layer because they need transactional grouping with ``db.commit()``.
 
 from __future__ import annotations
 
+from datetime import datetime
 from importlib import resources
 from typing import Any
 from uuid import UUID
@@ -34,7 +35,8 @@ async def list_users(
     organization_id: UUID | None,
     q: str | None,
     limit: int,
-    offset: int,
+    after_created_at: datetime | None,
+    after_id: UUID | None,
 ) -> list[dict[str, Any]]:
     rows = (
         await db.execute(
@@ -45,7 +47,8 @@ async def list_users(
                 "organization_id": organization_id,
                 "q": q,
                 "limit": limit,
-                "offset": offset,
+                "after_created_at": after_created_at,
+                "after_id": after_id,
             },
         )
     ).mappings()

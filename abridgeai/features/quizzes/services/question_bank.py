@@ -18,13 +18,19 @@ boundary itself.
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, func, or_, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from abridgeai.core.exceptions import AppError, NotFoundError
+from abridgeai.core.pagination import (
+    CursorPage,
+    decode_composite_cursor,
+    encode_composite_cursor,
+)
 from abridgeai.core.security import CurrentUser
 from abridgeai.features.courses.models import Module
 from abridgeai.features.quizzes.models import (
@@ -73,21 +79,29 @@ async def list_bank_entries(  # noqa: PLR0913 -- filter knobs are intentionally 
     search: str | None = None,
     exclude_quiz_id: UUID | None = None,
     limit: int = 50,
-    offset: int = 0,
-) -> list[dict[str, Any]]:
-    """Return scoped bank rows ordered by recency.
+    cursor: str | None = None,
+) -> CursorPage[dict[str, Any]]:
+    """Cursor-paginated bank rows ordered by ``(updated_at DESC, id DESC)``.
 
     ``review_status`` defaults to ``approved`` so teachers see only
     vetted questions; pass ``None`` to include every state. Soft-
     deleted rows are filtered automatically by SoftDeleteMixin.
 
-    The result is a list of plain dicts shaped to feed
-    :class:`QuestionBankEntry` directly.
+    The result wraps a list of plain dicts shaped to feed
+    :class:`QuestionBankEntry` directly. ``cursor`` is opaque and
+    round-trips through subsequent calls.
     """
     if limit < 1 or limit > 200:
         raise AppError("limit must be between 1 and 200")
-    if offset < 0:
-        raise AppError("offset must be non-negative")
+
+    after_updated_at: datetime | None = None
+    after_id: UUID | None = None
+    if cursor:
+        sort_value, last_id = decode_composite_cursor(cursor)
+        if not isinstance(sort_value, datetime):
+            raise AppError("Invalid cursor")
+        after_updated_at = sort_value
+        after_id = last_id
 
     stmt = (
         select(QuizQuestion, Quiz, Module)
@@ -96,10 +110,15 @@ async def list_bank_entries(  # noqa: PLR0913 -- filter knobs are intentionally 
         .where(Quiz.course_id == course_id)
         .where(QuizQuestion.deleted_at.is_(None))
         .where(Quiz.deleted_at.is_(None))
-        .order_by(QuizQuestion.updated_at.desc())
+        .order_by(QuizQuestion.updated_at.desc(), QuizQuestion.id.desc())
         .limit(limit)
-        .offset(offset)
     )
+
+    if after_updated_at is not None and after_id is not None:
+        stmt = stmt.where(
+            tuple_(QuizQuestion.updated_at, QuizQuestion.id)
+            < (after_updated_at, after_id)
+        )
 
     if module_id is not None:
         stmt = stmt.where(Quiz.module_id == module_id)
@@ -142,7 +161,7 @@ async def list_bank_entries(  # noqa: PLR0913 -- filter knobs are intentionally 
         # here so the bank entry serialiser sees options without the
         # ORM having a real relationship.
         setattr(question, "options", options_by_question.get(question.id, []))  # noqa: B010 -- dynamic attr
-    return [
+    items = [
         {
             "question": question,
             "quiz_id": quiz.id,
@@ -153,6 +172,12 @@ async def list_bank_entries(  # noqa: PLR0913 -- filter knobs are intentionally 
         }
         for question, quiz, module in rows
     ]
+    next_cursor = (
+        encode_composite_cursor(questions[-1].updated_at, questions[-1].id)
+        if len(questions) == limit
+        else None
+    )
+    return CursorPage(items=items, next_cursor=next_cursor)
 
 
 async def import_questions(

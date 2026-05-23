@@ -242,10 +242,10 @@ async def test_list_bank_returns_only_approved_within_course(
 ) -> None:
     """Default review_status='approved' + course scope hides drafts and foreign quizzes."""
     async with session_factory() as session:
-        rows = await bank_service.list_bank_entries(
+        page = await bank_service.list_bank_entries(
             session, course_id=bank_fixture.course_id
         )
-    ids = {row["question"].id for row in rows}
+    ids = {row["question"].id for row in page.items}
     assert bank_fixture.approved_question_id in ids
     assert bank_fixture.pending_question_id not in ids  # filtered by review_status
     assert bank_fixture.other_course_question_id not in ids  # foreign course
@@ -257,10 +257,10 @@ async def test_list_bank_can_widen_review_status(
 ) -> None:
     """``review_status=None`` returns drafts + edits + approvals."""
     async with session_factory() as session:
-        rows = await bank_service.list_bank_entries(
+        page = await bank_service.list_bank_entries(
             session, course_id=bank_fixture.course_id, review_status=None
         )
-    ids = {row["question"].id for row in rows}
+    ids = {row["question"].id for row in page.items}
     assert bank_fixture.approved_question_id in ids
     assert bank_fixture.pending_question_id in ids
 
@@ -270,13 +270,13 @@ async def test_list_bank_filter_by_question_type(
     bank_fixture: BankFixture,
 ) -> None:
     async with session_factory() as session:
-        rows = await bank_service.list_bank_entries(
+        page = await bank_service.list_bank_entries(
             session,
             course_id=bank_fixture.course_id,
             review_status=None,
             question_type="true_false",
         )
-    ids = {row["question"].id for row in rows}
+    ids = {row["question"].id for row in page.items}
     assert ids == {bank_fixture.pending_question_id}
 
 
@@ -285,12 +285,12 @@ async def test_list_bank_search_matches_prompt(
     bank_fixture: BankFixture,
 ) -> None:
     async with session_factory() as session:
-        rows = await bank_service.list_bank_entries(
+        page = await bank_service.list_bank_entries(
             session,
             course_id=bank_fixture.course_id,
             search="Approved",
         )
-    ids = {row["question"].id for row in rows}
+    ids = {row["question"].id for row in page.items}
     assert ids == {bank_fixture.approved_question_id}
 
 
@@ -300,12 +300,13 @@ async def test_list_bank_exclude_quiz_filters_out_target(
 ) -> None:
     """``exclude_quiz_id`` removes the target quiz from the listing."""
     async with session_factory() as session:
-        rows = await bank_service.list_bank_entries(
+        page = await bank_service.list_bank_entries(
             session,
             course_id=bank_fixture.course_id,
             exclude_quiz_id=bank_fixture.source_quiz_id,
         )
-    assert rows == []
+    assert page.items == []
+    assert page.next_cursor is None
 
 
 async def test_import_clones_with_new_ids_and_lineage(

@@ -19,7 +19,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import insert, select, update
+from sqlalchemy import insert, select, tuple_, update
 
 from abridgeai.core.db.recursive_delete import soft_delete_cascade
 from abridgeai.features.access_control.models import (
@@ -44,14 +44,19 @@ async def list_organizations(
     include_deleted: bool = False,
     status: str | None = None,
     limit: int = 100,
-    offset: int = 0,
+    after_name: str | None = None,
+    after_id: UUID | None = None,
 ) -> list[Organization]:
     stmt = select(Organization)
     if not include_deleted:
         stmt = stmt.where(Organization.deleted_at.is_(None))
     if status is not None:
         stmt = stmt.where(Organization.status == status)
-    stmt = stmt.order_by(Organization.name).limit(limit).offset(offset)
+    if after_name is not None and after_id is not None:
+        stmt = stmt.where(
+            tuple_(Organization.name, Organization.id) > (after_name, after_id)
+        )
+    stmt = stmt.order_by(Organization.name, Organization.id).limit(limit)
     result = await db.execute(stmt)
     return list(result.scalars().all())
 

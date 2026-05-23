@@ -6,6 +6,11 @@ from uuid import UUID
 
 from abridgeai.core.db.conflict_mapper import flush_or_conflict
 from abridgeai.core.exceptions import AppError, NotFoundError
+from abridgeai.core.pagination import (
+    CursorPage,
+    decode_composite_cursor,
+    encode_composite_cursor,
+)
 from abridgeai.features.career_paths.models import StudentCareerEnrollment
 from abridgeai.features.career_paths.queries import authoring as authoring_queries
 from abridgeai.features.career_paths.queries import student as student_queries
@@ -191,21 +196,40 @@ async def list_published_paths(
     *,
     organization_id: UUID,
     limit: int,
-    offset: int,
-) -> list[CareerPathPublic]:
+    cursor: str | None,
+) -> CursorPage[CareerPathPublic]:
+    """Cursor-paginated published career paths ordered by ``(created_at DESC, id DESC)``."""
     from abridgeai.features.career_paths.queries import (
         list_published_career_path_courses,
         list_published_career_paths,
     )
 
+    after_created_at: datetime | None = None
+    after_id: UUID | None = None
+    if cursor:
+        sort_value, last_id = decode_composite_cursor(cursor)
+        if not isinstance(sort_value, datetime):
+            raise ValueError("Invalid cursor")
+        after_created_at = sort_value
+        after_id = last_id
+
     paths = await list_published_career_paths(
-        db, organization_id=organization_id, limit=limit, offset=offset
+        db,
+        organization_id=organization_id,
+        limit=limit,
+        after_created_at=after_created_at,
+        after_id=after_id,
     )
     results: list[CareerPathPublic] = []
     for path in paths:
         courses = await list_published_career_path_courses(db, path.id)
         results.append(_to_path_public(path, courses))
-    return results
+    next_cursor = (
+        encode_composite_cursor(paths[-1].created_at, paths[-1].id)
+        if len(paths) == limit
+        else None
+    )
+    return CursorPage(items=results, next_cursor=next_cursor)
 
 
 async def list_published_paths_for_user(
@@ -213,15 +237,15 @@ async def list_published_paths_for_user(
     *,
     user_id: UUID,
     limit: int,
-    offset: int,
-) -> list[CareerPathPublic]:
+    cursor: str | None,
+) -> CursorPage[CareerPathPublic]:
     from abridgeai.features.career_paths.queries import get_user_primary_organization_id
 
     organization_id = await get_user_primary_organization_id(db, user_id)
     if organization_id is None:
-        return []
+        return CursorPage(items=[], next_cursor=None)
     return await list_published_paths(
-        db, organization_id=organization_id, limit=limit, offset=offset
+        db, organization_id=organization_id, limit=limit, cursor=cursor
     )
 
 

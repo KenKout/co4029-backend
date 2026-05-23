@@ -35,6 +35,18 @@ class QuestionBankEntry(BaseModel):
     course_id: UUID
 
 
+class QuestionBankPage(BaseModel):
+    """Cursor-paginated question-bank listing.
+
+    ``next_cursor`` is opaque and round-trips through subsequent calls.
+    Set when the page filled to ``limit`` (more rows may exist); ``None``
+    otherwise. Reconciliation §A10/§D2: cursor pagination, not offset.
+    """
+
+    items: list[QuestionBankEntry]
+    next_cursor: str | None = None
+
+
 class QuestionBankImportRequest(BaseModel):
     """Body for ``POST /teacher/quizzes/{quiz_id}/questions/import``."""
 
@@ -52,4 +64,5 @@ class QuestionBankImportRequest(BaseModel):
 __all__ = [
     "QuestionBankEntry",
     "QuestionBankImportRequest",
+    "QuestionBankPage",
 ]

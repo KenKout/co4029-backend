@@ -35,6 +35,7 @@ from abridgeai.features.quizzes.schemas.authoring import (
 from abridgeai.features.quizzes.schemas.bank import (
     QuestionBankEntry,
     QuestionBankImportRequest,
+    QuestionBankPage,
 )
 from abridgeai.features.quizzes.schemas.public import (
     QuestionTypeLiteral,
@@ -59,6 +60,7 @@ __all__ = [
     "GenerationRunStatus",
     "QuestionBankEntry",
     "QuestionBankImportRequest",
+    "QuestionBankPage",
     "QuestionRegenerationRequest",
     "QuestionType",
     "QuestionTypeLiteral",
