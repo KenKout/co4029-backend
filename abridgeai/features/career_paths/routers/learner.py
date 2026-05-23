@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from abridgeai.core.db import get_db
 from abridgeai.core.security import CurrentUser, get_current_user
 from abridgeai.features.career_paths.schemas import (
+    CareerPathListPage,
     CareerPathProgressRead,
     CareerPathPublic,
     MyCareerEnrollmentRead,
@@ -26,21 +27,27 @@ def _not_found(detail: str) -> HTTPException:
     )
 
 
-@router.get("", response_model=list[CareerPathPublic])
+@router.get("", response_model=CareerPathListPage)
 async def list_published_paths(
     current_user: Annotated[CurrentUser, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
     limit: int = 20,
-    offset: int = 0,
-) -> list[CareerPathPublic]:
+    cursor: str | None = None,
+) -> CareerPathListPage:
     capped = max(1, min(limit, 100))
-    safe_offset = max(0, offset)
-    return await enrollment_service.list_published_paths_for_user(
-        db,
-        user_id=current_user.user_id,
-        limit=capped,
-        offset=safe_offset,
-    )
+    try:
+        page = await enrollment_service.list_published_paths_for_user(
+            db,
+            user_id=current_user.user_id,
+            limit=capped,
+            cursor=cursor,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": "invalid_cursor", "message": str(exc)},
+        ) from exc
+    return CareerPathListPage(items=page.items, next_cursor=page.next_cursor)
 
 
 @router.get("/{slug}", response_model=CareerPathPublic)

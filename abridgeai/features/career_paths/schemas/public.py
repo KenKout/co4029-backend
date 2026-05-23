@@ -28,6 +28,18 @@ class CareerPathPublic(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class CareerPathListPage(BaseModel):
+    """Cursor-paginated published career paths.
+
+    ``next_cursor`` is opaque and round-trips through subsequent calls.
+    Set when the page filled to ``limit`` (more rows may exist); ``None``
+    otherwise. Reconciliation §A10/§D2: cursor pagination, not offset.
+    """
+
+    items: list[CareerPathPublic]
+    next_cursor: str | None = None
+
+
 class MyCareerEnrollmentRead(BaseModel):
     career_path_id: UUID
     slug: str
@@ -58,6 +70,7 @@ class CareerPathProgressRead(BaseModel):
 
 __all__ = [
     "CareerPathCoursePublic",
+    "CareerPathListPage",
     "CareerPathProgressRead",
     "CareerPathPublic",
     "CourseProgressSummary",

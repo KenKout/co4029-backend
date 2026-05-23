@@ -9,12 +9,18 @@ disable time stay revoked so the user must complete a fresh OAuth round-trip.
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from sqlalchemy import text
 
 from abridgeai.core.exceptions import NotFoundError
+from abridgeai.core.pagination import (
+    CursorPage,
+    decode_composite_cursor,
+    encode_composite_cursor,
+)
 from abridgeai.features.admin.queries import users as user_queries
 
 if TYPE_CHECKING:
@@ -74,17 +80,40 @@ async def list_users(
     organization_id: UUID | None,
     q: str | None,
     limit: int,
-    offset: int,
-) -> list[dict[str, Any]]:
-    return await user_queries.list_users(
+    cursor: str | None,
+) -> CursorPage[dict[str, Any]]:
+    """Cursor-paginated admin user list ordered by ``(created_at DESC, id DESC)``.
+
+    ``cursor`` is an opaque base64 token round-tripped through
+    :func:`encode_composite_cursor` / :func:`decode_composite_cursor`.
+    ``next_cursor`` is set when the page filled to ``limit`` (more rows
+    may exist); ``None`` otherwise.
+    """
+    after_created_at: datetime | None = None
+    after_id: UUID | None = None
+    if cursor:
+        sort_value, last_id = decode_composite_cursor(cursor)
+        if not isinstance(sort_value, datetime):
+            raise ValueError("Invalid cursor")
+        after_created_at = sort_value
+        after_id = last_id
+
+    rows = await user_queries.list_users(
         db,
         status_filter=status_filter,
         role_code=role_code,
         organization_id=organization_id,
         q=q,
         limit=limit,
-        offset=offset,
+        after_created_at=after_created_at,
+        after_id=after_id,
     )
+    next_cursor = (
+        encode_composite_cursor(rows[-1]["created_at"], rows[-1]["user_id"])
+        if len(rows) == limit
+        else None
+    )
+    return CursorPage(items=rows, next_cursor=next_cursor)
 
 
 async def user_detail(db: AsyncSession, *, user_id: UUID) -> dict[str, Any]:

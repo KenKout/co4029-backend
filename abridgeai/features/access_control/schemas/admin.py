@@ -158,6 +158,18 @@ class OrganizationRead(_ORM):
     updated_at: datetime
 
 
+class OrganizationListPage(BaseModel):
+    """Cursor-paginated organisation listing.
+
+    ``next_cursor`` is opaque and round-trips through subsequent calls.
+    Set when the page filled to ``limit`` (more rows may exist); ``None``
+    otherwise. Reconciliation §A10/§D2: cursor pagination, not offset.
+    """
+
+    items: list[OrganizationRead]
+    next_cursor: str | None = None
+
+
 # ---------------------------------------------------------------------------
 # Organization domains
 # ---------------------------------------------------------------------------

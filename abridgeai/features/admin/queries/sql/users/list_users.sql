@@ -1,9 +1,11 @@
--- Paginated user list with optional status / role / org / search filters.
+-- Cursor-paginated user list with optional status / role / org / search filters.
 -- :status_filter (text | NULL)            -- match users.status, NULL = any.
 -- :role_code     (text | NULL)            -- filter to users with at least one active assignment of role.
 -- :organization_id (uuid | NULL)          -- when NULL: global; when set: must have a non-deleted org membership.
 -- :q             (text | NULL)            -- substring match against primary_email or profile display_name (case-insensitive).
--- :limit, :offset                         -- pagination.
+-- :after_created_at (timestamptz | NULL)  -- cursor: created_at of last row from previous page.
+-- :after_id       (uuid | NULL)           -- cursor: id of last row from previous page (tiebreaker).
+-- :limit                                  -- page size cap.
 SELECT
     u.id              AS user_id,
     u.primary_email   AS primary_email,
@@ -41,5 +43,7 @@ WHERE (CAST(:status_filter AS text) IS NULL OR u.status = CAST(:status_filter AS
   AND (CAST(:q AS text) IS NULL
        OR u.primary_email ILIKE '%' || CAST(:q AS text) || '%'
        OR p.display_name ILIKE '%' || CAST(:q AS text) || '%')
-ORDER BY u.created_at DESC, u.id
-LIMIT :limit OFFSET :offset;
+  AND (CAST(:after_created_at AS timestamptz) IS NULL
+       OR (u.created_at, u.id) < (CAST(:after_created_at AS timestamptz), CAST(:after_id AS uuid)))
+ORDER BY u.created_at DESC, u.id DESC
+LIMIT :limit;
