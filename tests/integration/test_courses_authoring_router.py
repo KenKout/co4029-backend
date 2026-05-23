@@ -722,6 +722,10 @@ async def test_create_course_resolves_org_from_token(
         assert row.status == "draft"
     finally:
         async with engine.begin() as conn:
+            await conn.execute(
+                text("DELETE FROM user_role_assignments WHERE course_id = :id"),
+                {"id": body["id"]},
+            )
             await conn.execute(text("DELETE FROM courses WHERE id = :id"), {"id": body["id"]})
 
 
@@ -786,6 +790,10 @@ async def test_create_course_duplicate_slug_returns_409(
         assert "course_slug_taken" in detail["message"]
     finally:
         async with engine.begin() as conn:
+            await conn.execute(
+                text("DELETE FROM user_role_assignments WHERE course_id = :id"),
+                {"id": created_id},
+            )
             await conn.execute(text("DELETE FROM courses WHERE id = :id"), {"id": created_id})
 
 
@@ -828,6 +836,10 @@ async def test_check_course_slug_reports_availability(
         assert taken_resp.json() == {"available": False}
     finally:
         async with engine.begin() as conn:
+            await conn.execute(
+                text("DELETE FROM user_role_assignments WHERE course_id = :id"),
+                {"id": created_id},
+            )
             await conn.execute(text("DELETE FROM courses WHERE id = :id"), {"id": created_id})
 
 

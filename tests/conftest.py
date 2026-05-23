@@ -122,10 +122,12 @@ async def _purge(session: AsyncSession, users_data: dict, roles_data: dict) -> N
     org_unit_id = roles_data["test_org_unit"]["id"]
     course_id = roles_data["test_course"]["id"]
 
+    # 1. Remove all role assignments for test users (covers course-scoped ones too).
     await session.execute(
         text("DELETE FROM user_role_assignments WHERE user_id = ANY(:ids)"),
         {"ids": user_ids},
     )
+    # 2. Remove memberships + profiles.
     await session.execute(
         text("DELETE FROM organization_memberships WHERE user_id = ANY(:ids)"),
         {"ids": user_ids},
@@ -134,7 +136,26 @@ async def _purge(session: AsyncSession, users_data: dict, roles_data: dict) -> N
         text("DELETE FROM user_profiles WHERE user_id = ANY(:ids)"),
         {"ids": user_ids},
     )
+    # 3. Delete the seeded test course + any extra courses tests may have created
+    #    (e.g. via POST /teacher/courses). Both reference test users as owner_user_id.
+    #    First remove any course-scoped role assignments that reference these courses
+    #    (created by auto-assign-teacher logic) to avoid FK violations.
+    #    Delete by course_id directly to handle all cases regardless of organization_id.
+    await session.execute(
+        text(
+            "DELETE FROM user_role_assignments "
+            "WHERE scope_kind = 'course' AND course_id IN ("
+            "  SELECT id FROM courses WHERE organization_id = :org_id"
+            ")"
+        ),
+        {"org_id": org_id},
+    )
     await session.execute(text("DELETE FROM courses WHERE id = :id"), {"id": course_id})
+    await session.execute(
+        text("DELETE FROM courses WHERE owner_user_id = ANY(:ids)"),
+        {"ids": user_ids},
+    )
+    # 4. Org unit, users, org.
     await session.execute(text("DELETE FROM org_units WHERE id = :id"), {"id": org_unit_id})
     await session.execute(text("DELETE FROM users WHERE id = ANY(:ids)"), {"ids": user_ids})
     await session.execute(text("DELETE FROM organizations WHERE id = :id"), {"id": org_id})

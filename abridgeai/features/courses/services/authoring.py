@@ -28,7 +28,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from abridgeai.core.db.conflict_mapper import (
     flush_or_conflict as _flush_or_conflict,
@@ -50,6 +50,9 @@ from abridgeai.features.courses.queries import (
     authoring as authoring_queries,
 )
 from abridgeai.features.courses.queries import (
+    find_active_teacher_assignment,
+    get_teacher_role_id,
+    insert_teacher_assignment,
     get_user_primary_organization_id,
 )
 from abridgeai.features.courses.schemas import (
@@ -153,6 +156,9 @@ async def create_course(
 
     A duplicate ``(organization_id, slug)`` is mapped to :class:`ConflictError`
     (HTTP 409) instead of bubbling the raw ``IntegrityError`` up to a 500.
+
+    The creator is automatically assigned as a teacher on the new course so
+    the course appears in their "My Courses" list and the dept teachers tab.
     """
     org_id = await _resolve_owner_org(db, owner)
     data = payload.model_dump()
@@ -162,6 +168,24 @@ async def create_course(
     db.add(course)
     await _flush_or_conflict(db)
     await db.refresh(course)
+
+    # Auto-assign the creator as teacher so the course shows up in their
+    # authoring list and in the dept teachers tab immediately.
+    existing = await find_active_teacher_assignment(
+        db, course_id=course.id, user_id=owner.user_id
+    )
+    if existing is None:
+        role_id = await get_teacher_role_id(db)
+        await insert_teacher_assignment(
+            db,
+            assignment_id=uuid4(),
+            course_id=course.id,
+            user_id=owner.user_id,
+            role_id=role_id,
+            organization_id=org_id,
+            granted_by=owner.user_id,
+        )
+
     return CourseAuthoring.model_validate(course)
 
 
