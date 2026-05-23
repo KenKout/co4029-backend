@@ -105,8 +105,60 @@ class QuizAttemptRead(BaseModel):
     correct_count: int | None = None
 
 
+class QuizAttemptReviewOption(BaseModel):
+    """Option projection used for attempt review.
+
+    Surfaces ``is_correct`` (which the student is normally not allowed to
+    see at quiz-take time) because review happens *after* the attempt is
+    submitted/graded — there's nothing left to cheat at.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    option_key: str
+    option_text: str
+    is_correct: bool
+    position: int
+
+
+class QuizAttemptReviewQuestion(BaseModel):
+    """One question + the student's answer + the correct answer."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    question_id: UUID
+    position: int
+    question_type: str
+    prompt_text: str
+    explanation: str | None = None
+    hint_text: str | None = None
+
+    options: list[QuizAttemptReviewOption] = []
+
+    # Student's submitted answer (None when they skipped the question).
+    selected_option_id: UUID | None = None
+    answer_text: str | None = None
+    is_correct: bool = False
+    points_awarded: Decimal = Decimal("0")
+    hint_used: bool = False
+    t_actual_ms: int | None = None
+
+
+class QuizAttemptReviewRead(BaseModel):
+    """Full review payload — attempt summary + per-question breakdown."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    attempt: QuizAttemptRead
+    questions: list[QuizAttemptReviewQuestion]
+
+
 __all__ = [
     "QuizAttemptRead",
+    "QuizAttemptReviewOption",
+    "QuizAttemptReviewQuestion",
+    "QuizAttemptReviewRead",
     "QuizAttemptStart",
     "QuizAttemptStatusLiteral",
     "QuizAttemptSubmit",

@@ -36,7 +36,15 @@ from uuid import UUID
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from abridgeai.features.quizzes.models import Quiz, QuizAttempt
+from sqlalchemy.orm import selectinload
+
+from abridgeai.features.quizzes.models import (
+    Quiz,
+    QuizAttempt,
+    QuizAttemptAnswer,
+    QuizQuestion,
+    QuizQuestionOption,
+)
 
 
 class CooldownActive(Exception):  # noqa: N818  # spec-mandated name (T5.3 §5498)
@@ -178,10 +186,65 @@ async def get_quiz_for_taking(
     return quiz
 
 
+async def get_attempt_for_review(
+    db: AsyncSession,
+    *,
+    attempt_id: UUID,
+    user_id: UUID,
+) -> QuizAttempt | None:
+    """Load an attempt + its answers for the calling student.
+
+    Returns ``None`` (router → 404) when the attempt doesn't exist,
+    belongs to a different student, or is still in flight (review only
+    surfaces after submission). Eagerly loads ``answers`` so the service
+    layer can project them without further round-trips.
+    """
+    stmt = (
+        select(QuizAttempt)
+        .where(
+            QuizAttempt.id == attempt_id,
+            QuizAttempt.student_id == user_id,
+            QuizAttempt.status.in_(("submitted", "graded")),
+        )
+        .options(selectinload(QuizAttempt.answers))
+    )
+    return (await db.execute(stmt)).scalar_one_or_none()
+
+
+async def list_quiz_questions_with_options(
+    db: AsyncSession, quiz_id: UUID
+) -> list[tuple[QuizQuestion, list[QuizQuestionOption]]]:
+    """Load questions + options for a quiz, ordered by position.
+
+    Returns pairs ``(question, [options])`` so the projection layer doesn't
+    need another round-trip and we don't need to monkey-patch a relationship
+    that isn't declared on ``QuizQuestion``.
+    """
+    stmt = (
+        select(QuizQuestion)
+        .where(QuizQuestion.quiz_id == quiz_id)
+        .order_by(QuizQuestion.position)
+    )
+    questions = list((await db.execute(stmt)).scalars().all())
+    if not questions:
+        return []
+    options_stmt = (
+        select(QuizQuestionOption)
+        .where(QuizQuestionOption.question_id.in_([q.id for q in questions]))
+        .order_by(QuizQuestionOption.question_id, QuizQuestionOption.position)
+    )
+    options_by_question: dict[UUID, list[QuizQuestionOption]] = {}
+    for opt in (await db.execute(options_stmt)).scalars().all():
+        options_by_question.setdefault(opt.question_id, []).append(opt)
+    return [(q, options_by_question.get(q.id, [])) for q in questions]
+
+
 __all__ = [
     "CooldownActive",
     "MaxAttemptsReached",
+    "get_attempt_for_review",
     "get_published_quiz",
     "get_quiz_for_taking",
     "list_published_quizzes_for_module",
+    "list_quiz_questions_with_options",
 ]

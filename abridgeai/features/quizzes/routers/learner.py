@@ -30,6 +30,7 @@ from abridgeai.core.exceptions import NotFoundError
 from abridgeai.core.security import CurrentUser, get_current_user, utcnow
 from abridgeai.features.quizzes.schemas import (
     QuizAttemptRead,
+    QuizAttemptReviewRead,
     QuizAttemptStart,
     QuizForTakingPublic,
     QuizPublic,
@@ -189,6 +190,29 @@ async def get_attempt(
     if attempt is None or attempt.student_id != current_user.user_id:
         raise _not_found("quiz_attempt", attempt_id)
     return QuizAttemptRead.model_validate(attempt)
+
+
+@router.get(
+    "/attempts/{attempt_id}/review",
+    response_model=QuizAttemptReviewRead,
+)
+async def get_attempt_review(
+    attempt_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> QuizAttemptReviewRead:
+    """Full review payload — attempt summary + per-question correctness.
+
+    Returns 404 when the attempt is missing, belongs to a different student,
+    or hasn't been submitted yet (review only opens after submission so
+    correct-option flags can't leak mid-attempt).
+    """
+    review = await taking_service.get_attempt_review(
+        db, attempt_id=attempt_id, actor=current_user
+    )
+    if review is None:
+        raise _not_found("quiz_attempt", attempt_id)
+    return review
 
 
 @router.get("/me/quizzes/{quiz_id}/attempts", response_model=list[QuizAttemptRead])
