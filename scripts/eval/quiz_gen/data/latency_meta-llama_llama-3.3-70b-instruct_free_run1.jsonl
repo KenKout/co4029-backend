@@ -1,0 +1,2 @@
+{"model": "meta-llama/llama-3.3-70b-instruct:free", "run": 1, "lesson_id": "46741c12-ff9d-48ac-9804-24753f6386eb", "wall_seconds": 77.52673855800822, "prompt_tokens": 3992, "completion_tokens": 2710, "total_tokens": 6702, "n_questions": 12, "ts": "2026-05-23T17:43:54.726250+00:00"}
+{"model": "meta-llama/llama-3.3-70b-instruct:free", "run": 1, "lesson_id": "db69e743-d24f-47b6-be6e-946628a542e7", "wall_seconds": 67.99597275300766, "prompt_tokens": 2839, "completion_tokens": 3257, "total_tokens": 6096, "n_questions": 13, "ts": "2026-05-23T17:43:55.498216+00:00"}

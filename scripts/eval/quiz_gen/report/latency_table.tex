@@ -1,0 +1,15 @@
+\begin{table}[htbp]
+\centering
+\caption{Per-call generation latency (seconds, full lesson generation = 12 questions)}
+\label{tab:gen_latency}
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{|l|c|c|c|c|c|}
+\hline
+\textbf{Model} & \textbf{mean} & \textbf{p50} & \textbf{p90} & \textbf{p99} & \textbf{max} \\
+\hline
+gpt-oss-120b & 32.6 & 32.2 & 43.5 & 43.5 & 43.5 \\
+gemma-4-31b-it & 125.6 & 130.1 & 140.9 & 140.9 & 140.9 \\
+llama-3.3-70b & 81.6 & 91.9 & 95.0 & 95.0 & 95.0 \\
+\hline
+\end{tabular}
+\end{table}

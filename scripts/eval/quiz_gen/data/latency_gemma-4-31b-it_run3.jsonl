@@ -1,0 +1,2 @@
+{"model": "gemma-4-31b-it", "run": 3, "lesson_id": "46741c12-ff9d-48ac-9804-24753f6386eb", "wall_seconds": 140.85410889600462, "prompt_tokens": 4034, "completion_tokens": 5045, "total_tokens": 9079, "n_questions": 12, "ts": "2026-05-23T17:44:55.179174+00:00"}
+{"model": "gemma-4-31b-it", "run": 3, "lesson_id": "db69e743-d24f-47b6-be6e-946628a542e7", "wall_seconds": 136.17593345399655, "prompt_tokens": 2748, "completion_tokens": 4873, "total_tokens": 7621, "n_questions": 12, "ts": "2026-05-23T17:44:52.038413+00:00"}

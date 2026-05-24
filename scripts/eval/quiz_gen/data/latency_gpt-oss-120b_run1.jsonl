@@ -1,0 +1,2 @@
+{"model": "gpt-oss-120b", "run": 1, "lesson_id": "46741c12-ff9d-48ac-9804-24753f6386eb", "wall_seconds": 32.18656272199587, "prompt_tokens": 3901, "completion_tokens": 4162, "total_tokens": 8063, "n_questions": 12, "ts": "2026-05-23T17:42:35.862308+00:00"}
+{"model": "gpt-oss-120b", "run": 1, "lesson_id": "db69e743-d24f-47b6-be6e-946628a542e7", "wall_seconds": 28.92791823099833, "prompt_tokens": 2592, "completion_tokens": 3814, "total_tokens": 6406, "n_questions": 12, "ts": "2026-05-23T17:42:32.915897+00:00"}
