@@ -26,6 +26,26 @@ class GoogleProfile:
     display_name: str
 
 
+def _google_error_message(response: httpx.Response, default: str) -> str:
+    try:
+        payload = response.json()
+    except ValueError:
+        return default
+
+    if not isinstance(payload, dict):
+        return default
+
+    error_description = payload.get("error_description")
+    if isinstance(error_description, str) and error_description:
+        return f"{default}: {error_description}"
+
+    error = payload.get("error")
+    if isinstance(error, str) and error:
+        return f"{default}: {error}"
+
+    return default
+
+
 def build_authorization_url(state: str, settings: Settings | None = None) -> str:
     settings = settings or get_settings()
     if not settings.google_client_id or not settings.google_redirect_uri:
@@ -65,13 +85,26 @@ async def fetch_google_profile(code: str, settings: Settings | None = None) -> G
                 "redirect_uri": settings.google_redirect_uri,
             },
         )
-        token_response.raise_for_status()
+        try:
+            token_response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            raise AppError(
+                _google_error_message(token_response, "Google sign-in failed")
+            ) from exc
         access_token = token_response.json()["access_token"]
         userinfo_response = await client.get(
             "https://openidconnect.googleapis.com/v1/userinfo",
             headers={"Authorization": f"Bearer {access_token}"},
         )
-        userinfo_response.raise_for_status()
+        try:
+            userinfo_response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            raise AppError(
+                _google_error_message(
+                    userinfo_response,
+                    "Google sign-in failed while loading your profile",
+                )
+            ) from exc
 
     payload = userinfo_response.json()
     email = payload.get("email")

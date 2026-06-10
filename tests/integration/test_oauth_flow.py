@@ -209,6 +209,27 @@ async def test_oauth_callback_links_identity_for_preprovisioned_user(
             await conn.execute(text("DELETE FROM users WHERE id = :uid"), {"uid": user_id})
 
 
+async def test_oauth_callback_invalid_google_code_returns_400(
+    client: httpx.AsyncClient,
+    google_oauth_settings: None,
+) -> None:
+    with respx.mock(assert_all_called=True) as router_mock:
+        router_mock.post("https://oauth2.googleapis.com/token").mock(
+            return_value=httpx.Response(
+                400,
+                json={
+                    "error": "invalid_grant",
+                    "error_description": "Bad Request",
+                },
+            )
+        )
+
+        response = await client.get("/api/v1/auth/google/callback", params={"code": "used-code"})
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Google sign-in failed: Bad Request"
+
+
 async def test_refresh_revoked_session_fails(
     client: httpx.AsyncClient,
     test_engine_local: AsyncEngine,
