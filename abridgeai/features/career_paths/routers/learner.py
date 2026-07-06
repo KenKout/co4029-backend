@@ -12,9 +12,11 @@ from abridgeai.features.career_paths.schemas import (
     CareerPathListPage,
     CareerPathProgressRead,
     CareerPathPublic,
+    CareerReadinessSnapshotRead,
     MyCareerEnrollmentRead,
 )
 from abridgeai.features.career_paths.services import enrollment as enrollment_service
+from abridgeai.features.career_paths.services import readiness as readiness_service
 
 router = APIRouter(prefix="/career-paths", tags=["career-paths-learner"])
 me_router = APIRouter(prefix="/me/career-enrollments", tags=["career-paths-learner"])
@@ -85,6 +87,23 @@ async def get_my_career_path_progress(
         db,
         career_path_id=career_path_id,
         student_id=current_user.user_id,
+    )
+
+
+@me_router.get(
+    "/{career_path_id}/readiness-history",
+    response_model=list[CareerReadinessSnapshotRead],
+)
+async def get_my_readiness_history(
+    career_path_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> list[CareerReadinessSnapshotRead]:
+    """Most-recent-first readiness snapshots for the calling student (FR-6.8)."""
+    return await readiness_service.get_my_readiness_history(
+        db,
+        student_id=current_user.user_id,
+        career_path_id=career_path_id,
     )
 
 

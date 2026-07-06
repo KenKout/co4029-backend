@@ -225,9 +225,7 @@ async def list_published_paths(
         courses = await list_published_career_path_courses(db, path.id)
         results.append(_to_path_public(path, courses))
     next_cursor = (
-        encode_composite_cursor(paths[-1].created_at, paths[-1].id)
-        if len(paths) == limit
-        else None
+        encode_composite_cursor(paths[-1].created_at, paths[-1].id) if len(paths) == limit else None
     )
     return CursorPage(items=results, next_cursor=next_cursor)
 

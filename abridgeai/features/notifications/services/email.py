@@ -9,6 +9,12 @@ email *would* have been sent.
 Per the task body: "STUB the actual SMTP call -- log 'would send email'
 and mark a metadata flag. Email backend wiring is Phase 9 cutover
 concern."
+
+DESCOPED (2026-06-10, gap-analysis phase-07): the requirements appendix
+defines notifications as in-app only (FR-4.6/FR-6.3 — no email FR
+exists), so this stub is intentionally NOT being wired to SMTP. Keep
+the channel plumbing (preferences, delivery_status) so a future email
+requirement only needs a transport implementation here.
 """
 
 from __future__ import annotations

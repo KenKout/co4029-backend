@@ -27,6 +27,7 @@ from abridgeai.features.access_control.api._dto import (
 )
 from abridgeai.features.access_control.models import (
     Organization,
+    OrganizationDomain,
     OrganizationMembership,
     Role,
     UserRoleAssignment,
@@ -216,6 +217,61 @@ async def is_user_member_of_org(db: AsyncSession, *, user_id: UUID, org_id: UUID
     return bool((await db.execute(stmt)).scalar())
 
 
+async def find_auto_provision_org_id(db: AsyncSession, *, email_domain: str) -> UUID | None:
+    """Organization id whose registered email domain auto-provisions accounts.
+
+    FR-2.7/FR-2.9: matches ``organization_domains.domain`` (CITEXT —
+    case-insensitive exact match, no subdomain wildcards) with
+    ``auto_provision = TRUE`` against an ``active`` organization. Returns
+    ``None`` when no such domain exists — callers keep the invite-only
+    rejection in that case.
+    """
+    stmt = (
+        select(OrganizationDomain.organization_id)
+        .join(Organization, Organization.id == OrganizationDomain.organization_id)
+        .where(
+            OrganizationDomain.domain == email_domain,
+            OrganizationDomain.auto_provision.is_(True),
+            OrganizationDomain.deleted_at.is_(None),
+            Organization.status == "active",
+            Organization.deleted_at.is_(None),
+        )
+        .limit(1)
+    )
+    return (await db.execute(stmt)).scalar_one_or_none()
+
+
+async def grant_default_student_access(
+    db: AsyncSession, *, user_id: UUID, organization_id: UUID
+) -> None:
+    """Attach an auto-provisioned user to an org with the Student role.
+
+    Creates an active ``organization_memberships`` row plus an
+    org-scoped ``user_role_assignments`` row for the ``student`` role
+    (least privilege; ``granted_by`` stays NULL — system-granted).
+    Idempotent at the caller level: only invoked for brand-new users.
+    """
+    role_id = (
+        await db.execute(select(Role.id).where(Role.code == "student", Role.deleted_at.is_(None)))
+    ).scalar_one()
+    db.add(
+        OrganizationMembership(
+            user_id=user_id,
+            organization_id=organization_id,
+            status="active",
+        )
+    )
+    db.add(
+        UserRoleAssignment(
+            user_id=user_id,
+            role_id=role_id,
+            scope_kind="organization",
+            organization_id=organization_id,
+        )
+    )
+    await db.flush()
+
+
 async def get_active_permissions(
     db: AsyncSession, user_id: UUID, *, at: datetime | None = None
 ) -> list[PermissionDTO]:
@@ -231,8 +287,10 @@ __all__ = [
     "PermissionDTO",
     "RoleAssignmentDTO",
     "can_manage_course",
+    "find_auto_provision_org_id",
     "get_active_permissions",
     "get_org_unit_ancestors",
+    "grant_default_student_access",
     "get_role_assignments_for_user",
     "get_user_primary_org",
     "is_user_member_of_org",

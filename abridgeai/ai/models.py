@@ -51,8 +51,14 @@ _PROCESSING_JOB_STATUS_CHECK = (
 class AIModelCall(UUIDPrimaryKeyMixin, Base):
     __tablename__ = "ai_model_calls"
     __table_args__ = (
+        # Pipeline calls attribute via a generation_run/processing_job parent;
+        # session-runtime calls (e.g. interview_followup) have no parent and
+        # attribute via stage_name instead. A row with no attribution at all
+        # is still a bug. Relaxed in migration 0018.
         CheckConstraint(
-            "generation_run_id IS NOT NULL OR processing_job_id IS NOT NULL",
+            "generation_run_id IS NOT NULL "
+            "OR processing_job_id IS NOT NULL "
+            "OR stage_name IS NOT NULL",
             name="ck_ai_model_calls_parent_ref",
         ),
         CheckConstraint(

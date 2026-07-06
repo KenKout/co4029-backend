@@ -22,7 +22,9 @@ import abridgeai.features.progress.models  # noqa: F401
 import abridgeai.features.quizzes.models  # noqa: F401
 import abridgeai.features.spaced_repetition.models  # noqa: F401
 from abridgeai.core.config import get_settings
+from abridgeai.features.career_paths.workers import snapshot_career_readiness_task
 from abridgeai.features.interviews.workers import JOBS as INTERVIEW_JOBS
+from abridgeai.features.interviews.workers.lifecycle import sweep_interview_sessions_task
 from abridgeai.features.materials.workers import JOBS as MATERIAL_JOBS
 from abridgeai.features.materials.workers.cron import cleanup_orphaned_uploads_task
 from abridgeai.features.notifications.workers import JOBS as NOTIFICATION_JOBS
@@ -61,6 +63,11 @@ class WorkerSettings:
     cron_jobs: list[CronJob] = [
         cron(cleanup_orphaned_uploads_task, hour={3}, minute=0),
         cron(scan_due_cards_task, minute=0),
+        # Finalise stale in-progress voice interview sessions every 5 minutes.
+        cron(sweep_interview_sessions_task, minute=set(range(0, 60, 5))),
+        # FR-6.8 — nightly career readiness snapshots (one row per active
+        # career enrollment) feeding manager aggregates + student history.
+        cron(snapshot_career_readiness_task, hour={2}, minute=30),
     ]
 
 

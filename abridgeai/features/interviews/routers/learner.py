@@ -24,12 +24,14 @@ depth.
 
 from __future__ import annotations
 
+import logging
 from typing import Annotated, Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from abridgeai.core.config import get_settings
 from abridgeai.core.db import get_db
 from abridgeai.core.exceptions import AppError, ForbiddenError, NotFoundError
 from abridgeai.core.security import CurrentUser, get_current_user
@@ -40,17 +42,21 @@ from abridgeai.features.interviews.schemas import (
     InterviewForTakingPublic,
     InterviewOutcomePublic,
     InterviewQuestionPublic,
-    InterviewRubricScore,
     InterviewSessionFinishResponse,
     InterviewSessionPublic,
     InterviewSessionStartRequest,
     InterviewSessionStartResponse,
     InterviewSubmitAnswerRequest,
     InterviewSubmitAnswerResponse,
+    RealtimeTokenResponse,
 )
+from abridgeai.features.interviews.schemas.integrity import IntegrityEventBatchRequest
+from abridgeai.features.interviews.services import real_time as realtime_service
 from abridgeai.features.interviews.services import taking as taking_service
 
 router = APIRouter(tags=["interviews-learner"])
+
+logger = logging.getLogger(__name__)
 
 _REQUIRE_SESSION_OWNER = require_session_owner_access()
 
@@ -66,6 +72,20 @@ def _bad_request(message: str) -> HTTPException:
     return HTTPException(
         status_code=status.HTTP_400_BAD_REQUEST,
         detail={"error": "bad_request", "message": message},
+    )
+
+
+def _conflict(message: str) -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail={"error": "conflict", "message": message},
+    )
+
+
+def _voice_unavailable() -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        detail={"error": "voice_unavailable", "message": "Voice interviews are not enabled"},
     )
 
 
@@ -176,6 +196,96 @@ async def start_session(
     )
 
 
+@router.post(
+    "/interview-sessions/{session_id}/realtime-token",
+    response_model=RealtimeTokenResponse,
+)
+async def realtime_token(
+    session_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_SESSION_OWNER)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> RealtimeTokenResponse:
+    """Mint a LiveKit join token (+ agent dispatch) for a voice session.
+
+    Ownership + existence are enforced by ``_REQUIRE_SESSION_OWNER``. Here we
+    additionally gate on the voice feature flag and the session's
+    mode/status, persist the room name on first call (idempotent), and return
+    a short-lived participant token. Phase 3's agent worker is dispatched by
+    the token's room-config when the room is first created.
+    """
+    settings = get_settings()
+    if not settings.interview_voice_enabled:
+        raise _voice_unavailable()
+
+    from abridgeai.features.interviews.models import InterviewSession  # noqa: PLC0415
+
+    session = await db.get(InterviewSession, session_id)
+    if session is None:  # pragma: no cover - dep already 404s; defensive
+        raise _not_found("interview_session", session_id)
+    if session.input_mode not in ("voice", "hybrid"):
+        raise _conflict("session is not a voice interview")
+    if session.status != "in_progress":
+        raise _conflict(f"session is not in progress (status={session.status})")
+
+    room_name = session.livekit_room_name or realtime_service.build_room_name(session_id)
+    if session.livekit_room_name is None:
+        session.livekit_room_name = room_name
+        await db.commit()
+
+    try:
+        return realtime_service.mint_participant_token(
+            session_id=session_id,
+            student_id=current_user.user_id,
+            room_name=room_name,
+            settings=settings,
+        )
+    except ValueError as exc:  # credentials missing despite the flag
+        raise _voice_unavailable() from exc
+
+
+@router.post(
+    "/interview-sessions/{session_id}/integrity-events",
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def record_integrity_events(
+    session_id: UUID,
+    payload: IntegrityEventBatchRequest,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_SESSION_OWNER)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> dict[str, int]:
+    """Best-effort ingest of browser integrity signals for a live session.
+
+    Owner/existence enforced by the dep. Events are recorded only while the
+    session is ``in_progress`` (late events for finished sessions are silently
+    dropped — this never blocks the interview). Post-session / teacher review
+    only; never surfaced to the student.
+    """
+    from abridgeai.features.interviews.models import (  # noqa: PLC0415
+        AssessmentIntegrityEvent,
+        InterviewSession,
+    )
+
+    session = await db.get(InterviewSession, session_id)
+    if session is None:  # pragma: no cover - dep already 404s; defensive
+        raise _not_found("interview_session", session_id)
+    if session.status != "in_progress":
+        return {"accepted": 0}
+
+    for item in payload.events:
+        db.add(
+            AssessmentIntegrityEvent(
+                assessment_kind="interview",
+                interview_session_id=session_id,
+                student_id=current_user.user_id,
+                event_type=item.event_type,
+                severity=item.severity,
+                metadata_json=dict(item.metadata),
+            )
+        )
+    await db.commit()
+    return {"accepted": len(payload.events)}
+
+
 @router.get("/interview-sessions/{session_id}", response_model=InterviewSessionPublic)
 async def get_session(
     session_id: UUID,
@@ -232,7 +342,36 @@ async def respond_to_session(
         ) from exc
     except AppError as exc:
         raise _bad_request(str(exc)) from exc
-    await db.commit()
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001 — surface the real error to logs + client
+        await db.rollback()
+        logger.exception(
+            "respond_to_session: unhandled error (session=%s)", session_id
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={
+                "error": "internal_error",
+                "error_class": type(exc).__name__,
+                "message": str(exc) or "unhandled error in respond_to_session",
+            },
+        ) from exc
+    try:
+        await db.commit()
+    except Exception as exc:  # noqa: BLE001 — commit-time IntegrityError etc.
+        await db.rollback()
+        logger.exception(
+            "respond_to_session: commit failed (session=%s)", session_id
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={
+                "error": "internal_error",
+                "error_class": type(exc).__name__,
+                "message": str(exc) or "commit failed in respond_to_session",
+            },
+        ) from exc
     next_question = result.get("next_question")
     return InterviewSubmitAnswerResponse(
         next_question=(
@@ -267,13 +406,31 @@ async def finish_session(
             status_code=status.HTTP_403_FORBIDDEN,
             detail={"error": "forbidden", "message": str(exc)},
         ) from exc
-    rubric_scores = _rubric_scores_from_session(session)
-    total = (session.internal_summary_json or {}).get("total_score")
+    except AppError as exc:
+        raise _bad_request(str(exc)) from exc
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001 — surface real error to logs + client
+        await db.rollback()
+        logger.exception(
+            "finish_session: unhandled error (session=%s)", session_id
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={
+                "error": "internal_error",
+                "error_class": type(exc).__name__,
+                "message": str(exc) or "unhandled error in finish_session",
+            },
+        ) from exc
+    # Thesis §4.3: the student-facing result is binary pass/fail ONLY — no
+    # score, no per-outcome breakdown. The rubric total + per-outcome verdicts
+    # live in internal_summary_json / InterviewOutcomeEvaluation for teachers.
     return InterviewSessionFinishResponse(
         session_id=session.id,
         status=session.status,
-        total_score=_decimal_or_none(total),
-        rubric_scores=rubric_scores,
+        total_score=None,
+        rubric_scores=[],
         pass_verdict=session.pass_verdict,
         ended_at=session.ended_at,
     )
@@ -307,11 +464,32 @@ async def list_my_sessions(
     current_user: Annotated[CurrentUser, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> list[InterviewSessionPublic]:
+    from sqlalchemy import select  # noqa: PLC0415
+
+    from abridgeai.features.interviews.models import InterviewConfig  # noqa: PLC0415
+
     sessions = await taking_service.get_user_sessions(db, current_user.user_id)
+    # Batch-fetch the parent config title + course for each distinct config so the
+    # student history list is self-describing (the session row only carries the id).
+    config_ids = {s.interview_config_id for s in sessions}
+    config_meta: dict[UUID, tuple[str, UUID]] = {}
+    if config_ids:
+        rows = (
+            await db.execute(
+                select(
+                    InterviewConfig.id,
+                    InterviewConfig.title,
+                    InterviewConfig.course_id,
+                ).where(InterviewConfig.id.in_(config_ids))
+            )
+        ).all()
+        config_meta = {row.id: (row.title, row.course_id) for row in rows}
     return [
         InterviewSessionPublic(
             session_id=s.id,
             interview_config_id=s.interview_config_id,
+            interview_title=config_meta.get(s.interview_config_id, (None, None))[0],
+            course_id=config_meta.get(s.interview_config_id, (None, None))[1],
             status=s.status,
             input_mode=s.input_mode,
             attempt_number=s.attempt_number,
@@ -344,24 +522,6 @@ async def _first_session_question(db: AsyncSession, session_id: UUID) -> object 
     if sq is None or sq.interview_question_id is None:
         return None
     return await db.get(InterviewQuestion, sq.interview_question_id)
-
-
-def _decimal_or_none(value: object) -> object | None:
-    if value is None:
-        return None
-    from decimal import Decimal  # noqa: PLC0415
-
-    if isinstance(value, Decimal):
-        return value
-    try:
-        return Decimal(str(value))
-    except (ValueError, ArithmeticError):
-        return None
-
-
-def _rubric_scores_from_session(session: object) -> list[InterviewRubricScore]:
-    del session
-    return []
 
 
 def _gap_report_view(report: Any) -> GapReportRead:  # noqa: ANN401  -- ORM row, typed via duck shape

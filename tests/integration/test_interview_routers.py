@@ -366,6 +366,7 @@ async def _seed_published_config(
 ) -> uuid.UUID:
     config_id = uuid.uuid4()
     question_id = uuid.uuid4()
+    outcome_id = uuid.uuid4()
     async with engine.begin() as conn:
         await conn.execute(
             text(
@@ -384,6 +385,17 @@ async def _seed_published_config(
                 "        'approved', false, '[]'::jsonb, :u)"
             ),
             {"id": question_id, "cfg": config_id, "u": actor_id},
+        )
+        # Thesis §4.3: a startable interview must have at least one learning
+        # outcome (start_session blocks outcome-less configs).
+        await conn.execute(
+            text(
+                "INSERT INTO interview_outcomes "
+                "(id, interview_config_id, position, outcome_text, outcome_type, "
+                " importance_weight, created_by) "
+                "VALUES (:id, :cfg, 1, 'Understand recursion', 'knowledge', 3, :u)"
+            ),
+            {"id": outcome_id, "cfg": config_id, "u": actor_id},
         )
     return config_id
 
@@ -507,7 +519,7 @@ async def test_audio_storage_object_id_accepted_but_not_transcribed(
 # ---------------------------------------------------------------------------
 
 
-async def test_finish_returns_score_and_enqueues_evaluation(
+async def test_finish_returns_status_and_enqueues_evaluation(
     client: httpx.AsyncClient,
     engine: AsyncEngine,
     scenario: dict[str, uuid.UUID],
@@ -611,3 +623,879 @@ def test_no_bare_get_current_user_on_authoring_writes() -> None:
     code_only = re.sub(r'"""[\s\S]*?"""', "", src)
     bare = re.findall(r"Depends\(get_current_user\)", code_only)
     assert bare == [], f"authoring.py uses bare Depends(get_current_user): {bare}"
+
+
+async def test_get_interview_config_with_existing_questions_does_not_500(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    scenario: dict[str, uuid.UUID],
+    seeded_users: SeededUsers,
+    engine: AsyncEngine,
+) -> None:
+    """Regression: GET /teacher/interview-configs/{id} must not trigger async
+    lazy-load on the ``questions`` relationship when rows already exist.
+
+    Previously _populate_aggregates iterated ``data.questions`` on the ORM
+    instance returned by db.get(); since the GET handler did not eager-load
+    that relationship, sqlalchemy attempted sync lazy loading in an async
+    session and raised MissingGreenlet, surfacing as a 500. The frontend
+    rendered that as "Interview set not found".
+    """
+    create_resp = await client.post(
+        f"/api/v1/teacher/courses/{scenario['course_id']}/interview-configs",
+        json={
+            "title": "Has Questions",
+            "course_id": str(scenario["course_id"]),
+            "module_id": str(scenario["module_id"]),
+            "supported_modes": "text",
+        },
+        headers=_auth(admin_bearer),
+    )
+    assert create_resp.status_code == 201, create_resp.text
+    config_id = create_resp.json()["id"]
+
+    # Insert a question directly so the relationship has unloaded rows on
+    # the next GET (no in-process identity-map prefetch).
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO interview_questions ("
+                "  id, interview_config_id, prompt_text, question_type,"
+                "  review_status, ai_generated, position, created_by"
+                ") VALUES ("
+                "  :id, :cid, 'What is recursion?', 'conceptual',"
+                "  'approved', false, 1, :uid"
+                ")"
+            ),
+            {
+                "id": uuid.uuid4(),
+                "cid": uuid.UUID(config_id),
+                "uid": seeded_users.admin_id,
+            },
+        )
+
+    get_resp = await client.get(
+        f"/api/v1/teacher/interview-configs/{config_id}",
+        headers=_auth(admin_bearer),
+    )
+    assert get_resp.status_code == 200, get_resp.text
+    payload = get_resp.json()
+    assert payload["config"]["id"] == config_id
+    assert len(payload["questions"]) == 1
+
+
+async def test_publish_rejects_when_no_approved_question(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    scenario: dict[str, uuid.UUID],
+    seeded_users: SeededUsers,
+    engine: AsyncEngine,
+) -> None:
+    """Regression: publish must reject configs with no approved questions.
+
+    Without this gate, AI-generated drafts (all stored as review_status='pending'
+    until reviewed) reach the student-facing fetch, which filters
+    review_status='approved' and silently returns first_question=null — the
+    learner UI then shows a blank/voice-agent-silent screen with no diagnostic.
+    """
+    create_resp = await client.post(
+        f"/api/v1/teacher/courses/{scenario['course_id']}/interview-configs",
+        json={
+            "title": "Pending Only",
+            "course_id": str(scenario["course_id"]),
+            "module_id": str(scenario["module_id"]),
+            "supported_modes": "text",
+        },
+        headers=_auth(admin_bearer),
+    )
+    assert create_resp.status_code == 201, create_resp.text
+    config_id = create_resp.json()["id"]
+
+    # Only a pending question exists — publish must fail.
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO interview_questions ("
+                "  id, interview_config_id, prompt_text, question_type,"
+                "  review_status, ai_generated, position, created_by"
+                ") VALUES ("
+                "  :id, :cid, 'Pending question', 'conceptual',"
+                "  'pending', true, 1, :uid"
+                ")"
+            ),
+            {
+                "id": uuid.uuid4(),
+                "cid": uuid.UUID(config_id),
+                "uid": seeded_users.admin_id,
+            },
+        )
+
+    publish_resp = await client.post(
+        f"/api/v1/teacher/interview-configs/{config_id}/publish",
+        headers=_auth(admin_bearer),
+    )
+    assert publish_resp.status_code == 400, publish_resp.text
+    assert "interview_no_approved_questions" in publish_resp.text
+
+    # Approving the question lifts the question block — but §4.3 also requires
+    # at least one learning outcome before publish can succeed.
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "UPDATE interview_questions SET review_status='approved' "
+                "WHERE interview_config_id = :cid"
+            ),
+            {"cid": uuid.UUID(config_id)},
+        )
+    publish_no_outcome = await client.post(
+        f"/api/v1/teacher/interview-configs/{config_id}/publish",
+        headers=_auth(admin_bearer),
+    )
+    assert publish_no_outcome.status_code == 400, publish_no_outcome.text
+    assert "interview_no_outcomes" in publish_no_outcome.text
+
+    # Adding an outcome lifts the final block.
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO interview_outcomes ("
+                "  id, interview_config_id, position, outcome_text, outcome_type,"
+                "  importance_weight, created_by"
+                ") VALUES ("
+                "  :id, :cid, 1, 'Understand recursion', 'knowledge', 3, :uid"
+                ")"
+            ),
+            {
+                "id": uuid.uuid4(),
+                "cid": uuid.UUID(config_id),
+                "uid": seeded_users.admin_id,
+            },
+        )
+    publish_again = await client.post(
+        f"/api/v1/teacher/interview-configs/{config_id}/publish",
+        headers=_auth(admin_bearer),
+    )
+    assert publish_again.status_code == 200, publish_again.text
+    assert publish_again.json()["status"] == "published"
+
+
+async def test_start_session_rejects_config_without_outcomes(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    scenario: dict[str, uuid.UUID],
+    seeded_users: SeededUsers,
+    engine: AsyncEngine,
+) -> None:
+    """Regression (thesis §4.3): starting an interview whose config has zero
+    learning outcomes is a guaranteed automatic fail with nothing to evaluate.
+
+    Pre-fix, such sessions ran to completion then showed "you did not meet
+    enough learning outcomes" because the per-outcome verdict gate had an empty
+    set (total=0 → unconditional fail). The guard now blocks the start instead.
+    """
+    config_id = uuid.uuid4()
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO interview_configs ("
+                "  id, course_id, module_id, title, status, supported_modes,"
+                "  created_by, published_at"
+                ") VALUES ("
+                "  :cid, :course, :module, 'No Outcomes Repro', 'published',"
+                "  'text', :uid, NOW()"
+                ")"
+            ),
+            {
+                "cid": config_id,
+                "course": scenario["course_id"],
+                "module": scenario["module_id"],
+                "uid": seeded_users.admin_id,
+            },
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO interview_questions ("
+                "  id, interview_config_id, prompt_text, question_type,"
+                "  review_status, ai_generated, position, created_by"
+                ") VALUES ("
+                "  :qid, :cid, 'What is recursion?', 'conceptual',"
+                "  'approved', true, 1, :uid"
+                ")"
+            ),
+            {"qid": uuid.uuid4(), "cid": config_id, "uid": seeded_users.admin_id},
+        )
+
+    student_sid = await _seed_session(engine, seeded_users.student_id)
+    try:
+        student_bearer = create_access_token(
+            user_id=seeded_users.student_id, session_id=student_sid
+        )
+        start_resp = await client.post(
+            f"/api/v1/interview-configs/{config_id}/sessions",
+            json={"input_mode": "text"},
+            headers=_auth(student_bearer),
+        )
+        assert start_resp.status_code == 400, start_resp.text
+        assert "interview_no_outcomes" in start_resp.text
+    finally:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("DELETE FROM auth_sessions WHERE id = :id"),
+                {"id": student_sid},
+            )
+
+
+async def test_start_session_self_heals_stale_empty_session(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    scenario: dict[str, uuid.UUID],
+    seeded_users: SeededUsers,
+    engine: AsyncEngine,
+) -> None:
+    """Regression: a stale in_progress session created before any question
+    was approved must NOT block the learner forever once questions reach
+    review_status='approved'.
+
+    Repro:
+      1. Insert a published config with only pending questions.
+      2. Insert an in_progress session for the student with zero attached
+         interview_session_questions (mirrors the pre-fix race where
+         start_session ran while _first_published_question returned None).
+      3. Approve the question.
+      4. POST /sessions — must return the same session id (idempotent) AND
+         the first_question payload (self-healed attachment).
+    """
+    config_id = uuid.uuid4()
+    question_id = uuid.uuid4()
+    session_id = uuid.uuid4()
+
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO interview_configs ("
+                "  id, course_id, module_id, title, status, supported_modes,"
+                "  lock_quiz_ef_until_pass, created_by, published_at"
+                ") VALUES ("
+                "  :cid, :course, :module, 'Stale Session Repro', 'published',"
+                "  'text', false, :uid, NOW()"
+                ")"
+            ),
+            {
+                "cid": config_id,
+                "course": scenario["course_id"],
+                "module": scenario["module_id"],
+                "uid": seeded_users.admin_id,
+            },
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO interview_questions ("
+                "  id, interview_config_id, prompt_text, question_type,"
+                "  review_status, ai_generated, position, created_by"
+                ") VALUES ("
+                "  :qid, :cid, 'What is recursion?', 'conceptual',"
+                "  'pending', true, 1, :uid"
+                ")"
+            ),
+            {
+                "qid": question_id,
+                "cid": config_id,
+                "uid": seeded_users.admin_id,
+            },
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO interview_outcomes ("
+                "  id, interview_config_id, position, outcome_text, outcome_type,"
+                "  importance_weight, created_by"
+                ") VALUES (:oid, :cid, 1, 'Understand recursion', 'knowledge', 3, :uid)"
+            ),
+            {"oid": uuid.uuid4(), "cid": config_id, "uid": seeded_users.admin_id},
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO interview_sessions ("
+                "  id, interview_config_id, student_id, attempt_number,"
+                "  status, input_mode, started_at"
+                ") VALUES ("
+                "  :sid, :cid, :uid, 1, 'in_progress', 'text', NOW()"
+                ")"
+            ),
+            {
+                "sid": session_id,
+                "cid": config_id,
+                "uid": seeded_users.student_id,
+            },
+        )
+
+    # Teacher approves the question now.
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "UPDATE interview_questions SET review_status='approved' "
+                "WHERE id = :qid"
+            ),
+            {"qid": question_id},
+        )
+
+    # Mint a student session + bearer.
+    student_sid = await _seed_session(engine, seeded_users.student_id)
+    try:
+        student_bearer = create_access_token(
+            user_id=seeded_users.student_id, session_id=student_sid
+        )
+        start_resp = await client.post(
+            f"/api/v1/interview-configs/{config_id}/sessions",
+            json={"input_mode": "text"},
+            headers=_auth(student_bearer),
+        )
+        assert start_resp.status_code == 201, start_resp.text
+        body = start_resp.json()
+        # Same session reused (idempotent) AND self-healed with the question.
+        assert body["session_id"] == str(session_id)
+        assert body["first_question"] is not None
+        assert body["first_question"]["id"] == str(question_id)
+    finally:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("DELETE FROM auth_sessions WHERE id = :id"),
+                {"id": student_sid},
+            )
+
+
+async def test_start_session_upgrades_input_mode_when_config_allows(
+    client: httpx.AsyncClient,
+    scenario: dict[str, uuid.UUID],
+    seeded_users: SeededUsers,
+    engine: AsyncEngine,
+) -> None:
+    """Regression: a stale text session must be upgradeable to voice when
+    the config is hybrid.
+
+    Pre-fix, ``start_session`` short-circuited on any in_progress session
+    without checking whether the caller asked for a different input_mode.
+    A student whose first POST landed as ``text`` then got HTTP 409
+    "session is not a voice interview" from ``/realtime-token`` because
+    the session row stayed at ``input_mode='text'`` forever.
+    """
+    config_id = uuid.uuid4()
+    question_id = uuid.uuid4()
+    session_id = uuid.uuid4()
+
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO interview_configs ("
+                "  id, course_id, module_id, title, status, supported_modes,"
+                "  lock_quiz_ef_until_pass, created_by, published_at"
+                ") VALUES ("
+                "  :cid, :course, :module, 'Mode Upgrade Repro', 'published',"
+                "  'hybrid', false, :uid, NOW()"
+                ")"
+            ),
+            {
+                "cid": config_id,
+                "course": scenario["course_id"],
+                "module": scenario["module_id"],
+                "uid": seeded_users.admin_id,
+            },
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO interview_questions ("
+                "  id, interview_config_id, prompt_text, question_type,"
+                "  review_status, ai_generated, position, created_by"
+                ") VALUES ("
+                "  :qid, :cid, 'What is recursion?', 'conceptual',"
+                "  'approved', false, 1, :uid"
+                ")"
+            ),
+            {
+                "qid": question_id,
+                "cid": config_id,
+                "uid": seeded_users.admin_id,
+            },
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO interview_outcomes ("
+                "  id, interview_config_id, position, outcome_text, outcome_type,"
+                "  importance_weight, created_by"
+                ") VALUES (:oid, :cid, 1, 'Understand recursion', 'knowledge', 3, :uid)"
+            ),
+            {"oid": uuid.uuid4(), "cid": config_id, "uid": seeded_users.admin_id},
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO interview_sessions ("
+                "  id, interview_config_id, student_id, attempt_number,"
+                "  status, input_mode, started_at"
+                ") VALUES ("
+                "  :sid, :cid, :uid, 1, 'in_progress', 'text', NOW()"
+                ")"
+            ),
+            {
+                "sid": session_id,
+                "cid": config_id,
+                "uid": seeded_users.student_id,
+            },
+        )
+
+    student_sid = await _seed_session(engine, seeded_users.student_id)
+    try:
+        student_bearer = create_access_token(
+            user_id=seeded_users.student_id, session_id=student_sid
+        )
+        start_resp = await client.post(
+            f"/api/v1/interview-configs/{config_id}/sessions",
+            json={"input_mode": "voice"},
+            headers=_auth(student_bearer),
+        )
+        assert start_resp.status_code == 201, start_resp.text
+        assert start_resp.json()["session_id"] == str(session_id)
+
+        # Verify the upgrade persisted on the session row.
+        async with engine.begin() as conn:
+            row = (
+                await conn.execute(
+                    text("SELECT input_mode FROM interview_sessions WHERE id = :sid"),
+                    {"sid": session_id},
+                )
+            ).first()
+        assert row is not None and row[0] == "voice"
+    finally:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("DELETE FROM auth_sessions WHERE id = :id"),
+                {"id": student_sid},
+            )
+
+
+async def test_start_session_does_not_upgrade_when_config_text_only(
+    client: httpx.AsyncClient,
+    scenario: dict[str, uuid.UUID],
+    seeded_users: SeededUsers,
+    engine: AsyncEngine,
+) -> None:
+    """Regression: a text-only config must NOT silently flip a session to voice.
+
+    Defence-in-depth: the realtime-token endpoint also gates on input_mode,
+    but the upgrade helper itself should refuse to grant a mode the config
+    forbids.
+    """
+    config_id = uuid.uuid4()
+    question_id = uuid.uuid4()
+    session_id = uuid.uuid4()
+
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO interview_configs ("
+                "  id, course_id, module_id, title, status, supported_modes,"
+                "  lock_quiz_ef_until_pass, created_by, published_at"
+                ") VALUES ("
+                "  :cid, :course, :module, 'Text Only Repro', 'published',"
+                "  'text', false, :uid, NOW()"
+                ")"
+            ),
+            {
+                "cid": config_id,
+                "course": scenario["course_id"],
+                "module": scenario["module_id"],
+                "uid": seeded_users.admin_id,
+            },
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO interview_questions ("
+                "  id, interview_config_id, prompt_text, question_type,"
+                "  review_status, ai_generated, position, created_by"
+                ") VALUES ("
+                "  :qid, :cid, 'Explain Big-O.', 'conceptual',"
+                "  'approved', false, 1, :uid"
+                ")"
+            ),
+            {
+                "qid": question_id,
+                "cid": config_id,
+                "uid": seeded_users.admin_id,
+            },
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO interview_outcomes ("
+                "  id, interview_config_id, position, outcome_text, outcome_type,"
+                "  importance_weight, created_by"
+                ") VALUES (:oid, :cid, 1, 'Understand recursion', 'knowledge', 3, :uid)"
+            ),
+            {"oid": uuid.uuid4(), "cid": config_id, "uid": seeded_users.admin_id},
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO interview_sessions ("
+                "  id, interview_config_id, student_id, attempt_number,"
+                "  status, input_mode, started_at"
+                ") VALUES ("
+                "  :sid, :cid, :uid, 1, 'in_progress', 'text', NOW()"
+                ")"
+            ),
+            {
+                "sid": session_id,
+                "cid": config_id,
+                "uid": seeded_users.student_id,
+            },
+        )
+
+    student_sid = await _seed_session(engine, seeded_users.student_id)
+    try:
+        student_bearer = create_access_token(
+            user_id=seeded_users.student_id, session_id=student_sid
+        )
+        start_resp = await client.post(
+            f"/api/v1/interview-configs/{config_id}/sessions",
+            json={"input_mode": "voice"},
+            headers=_auth(student_bearer),
+        )
+        # Idempotency still returns the existing session, but mode stays text.
+        assert start_resp.status_code == 201, start_resp.text
+        async with engine.begin() as conn:
+            row = (
+                await conn.execute(
+                    text("SELECT input_mode FROM interview_sessions WHERE id = :sid"),
+                    {"sid": session_id},
+                )
+            ).first()
+        assert row is not None and row[0] == "text"
+    finally:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("DELETE FROM auth_sessions WHERE id = :id"),
+                {"id": student_sid},
+            )
+
+
+async def test_respond_surfaces_unhandled_error_with_class_and_message(
+    client: httpx.AsyncClient,
+    engine: AsyncEngine,
+    scenario: dict[str, uuid.UUID],
+    seeded_users: SeededUsers,
+    monkeypatch: object,
+) -> None:
+    """Regression: when something inside ``take_session_step`` raises an
+    unexpected exception, the route must NOT return a bare ``Internal
+    Server Error`` body. Returning the exception class + message lets ops
+    diagnose the failure from the user's screenshot alone.
+    """
+    from abridgeai.features.interviews.services import taking as taking_service  # noqa: PLC0415
+
+    async def _explode(*_args: object, **_kwargs: object) -> dict[str, Any]:
+        raise RuntimeError("boom: simulated unhandled error")
+
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        taking_service, "take_session_step", _explode
+    )
+
+    config_id = await _seed_published_config(
+        engine,
+        course_id=scenario["course_id"],
+        module_id=scenario["module_id"],
+        actor_id=seeded_users.admin_id,
+    )
+    student_sid = await _seed_session(engine, seeded_users.student_id)
+    try:
+        student_token = create_access_token(
+            user_id=seeded_users.student_id, session_id=student_sid
+        )
+        start_resp = await client.post(
+            f"/api/v1/interview-configs/{config_id}/sessions",
+            json={"input_mode": "text"},
+            headers=_auth(student_token),
+        )
+        assert start_resp.status_code == 201, start_resp.text
+        body = start_resp.json()
+        session_id = body["session_id"]
+        first_question = body["first_question"]
+        assert first_question is not None
+
+        respond_resp = await client.post(
+            f"/api/v1/interview-sessions/{session_id}/respond",
+            json={
+                "session_id": session_id,
+                "session_question_id": first_question["id"],
+                "answer_text": "an answer",
+            },
+            headers=_auth(student_token),
+        )
+        assert respond_resp.status_code == 500, respond_resp.text
+        detail = respond_resp.json()["detail"]
+        assert detail["error"] == "internal_error"
+        assert detail["error_class"] == "RuntimeError"
+        assert "boom" in detail["message"]
+    finally:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("DELETE FROM auth_sessions WHERE id = :id"),
+                {"id": student_sid},
+            )
+
+
+async def test_respond_succeeds_when_followup_stage_raises(
+    client: httpx.AsyncClient,
+    engine: AsyncEngine,
+    scenario: dict[str, uuid.UUID],
+    seeded_users: SeededUsers,
+    monkeypatch: object,
+) -> None:
+    """Regression: a failing follow-up LLM call must not 500 the /respond
+    endpoint.
+
+    Pre-fix, ``maybe_generate_followup`` let any exception (missing
+    LLM_API_KEY → ConfigError, provider down, etc.) propagate. The router
+    only mapped ``AppError`` → 400, so anything else surfaced as HTTP 500
+    and the student's answer was lost because the transaction rolled back
+    before the answer-record commit. The fix wraps the LLM call inside
+    ``maybe_generate_followup`` so the stage falls back to ``None`` and
+    the answer commits normally.
+
+    We patch ``LLMGateway.generate_json`` (NOT the stage itself) so the
+    test exercises the real best-effort try/except added by the fix.
+    """
+    from abridgeai.ai.llm import gateway as gateway_module  # noqa: PLC0415
+
+    async def _boom(*_args: object, **_kwargs: object) -> object:
+        raise RuntimeError("simulated gateway failure")
+
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        gateway_module.LLMGateway, "generate_json", _boom
+    )
+
+    config_id = await _seed_published_config(
+        engine,
+        course_id=scenario["course_id"],
+        module_id=scenario["module_id"],
+        actor_id=seeded_users.admin_id,
+    )
+    student_sid = await _seed_session(engine, seeded_users.student_id)
+    try:
+        student_token = create_access_token(
+            user_id=seeded_users.student_id, session_id=student_sid
+        )
+
+        start_resp = await client.post(
+            f"/api/v1/interview-configs/{config_id}/sessions",
+            json={"input_mode": "text"},
+            headers=_auth(student_token),
+        )
+        assert start_resp.status_code == 201, start_resp.text
+        body = start_resp.json()
+        session_id = body["session_id"]
+        first_question = body["first_question"]
+        assert first_question is not None
+
+        respond_resp = await client.post(
+            f"/api/v1/interview-sessions/{session_id}/respond",
+            json={
+                "session_id": session_id,
+                "session_question_id": first_question["id"],
+                "answer_text": "Recursion is when a function calls itself.",
+            },
+            headers=_auth(student_token),
+        )
+        # Pre-fix this was 500; post-fix the answer commits and the route
+        # responds normally (is_finished=True because the seeded config has
+        # only one approved question).
+        assert respond_resp.status_code == 200, respond_resp.text
+        payload = respond_resp.json()
+        assert payload["ai_followup_text"] is None
+        assert payload["is_finished"] is True
+
+        # Verify the answer DID land in the DB despite the follow-up failure.
+        async with engine.begin() as conn:
+            row = (
+                await conn.execute(
+                    text(
+                        "SELECT COUNT(*) FROM interview_session_messages "
+                        "WHERE session_id = :sid AND role = 'user'"
+                    ),
+                    {"sid": uuid.UUID(session_id)},
+                )
+            ).scalar_one()
+        assert int(row) == 1
+    finally:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("DELETE FROM auth_sessions WHERE id = :id"),
+                {"id": student_sid},
+            )
+
+
+# ---------------------------------------------------------------------------
+# Result visibility — thesis p53/p77 student/teacher split
+# ---------------------------------------------------------------------------
+
+
+async def test_my_sessions_carries_title_and_no_leakage(
+    client: httpx.AsyncClient,
+    engine: AsyncEngine,
+    scenario: dict[str, uuid.UUID],
+    seeded_users: SeededUsers,
+) -> None:
+    """Thesis p53: student history list carries the interview title + binary
+    verdict ONLY — never transcript / score / rubric / per-outcome data.
+
+    Durable leakage guard: fails if a future change widens the student DTO with
+    any teacher-only field.
+    """
+    config_id = await _seed_published_config(
+        engine,
+        course_id=scenario["course_id"],
+        module_id=scenario["module_id"],
+        actor_id=seeded_users.admin_id,
+    )
+    student_sid = await _seed_session(engine, seeded_users.student_id)
+    student_token = create_access_token(user_id=seeded_users.student_id, session_id=student_sid)
+    try:
+        start_resp = await client.post(
+            f"/api/v1/interview-configs/{config_id}/sessions",
+            json={"input_mode": "text"},
+            headers=_auth(student_token),
+        )
+        assert start_resp.status_code == 201, start_resp.text
+
+        resp = await client.get(
+            "/api/v1/me/interview-sessions", headers=_auth(student_token)
+        )
+        assert resp.status_code == 200, resp.text
+        rows = resp.json()
+        assert len(rows) >= 1
+        assert "interview_title" in rows[0]
+        serialized = json.dumps(rows).lower()
+        for forbidden in (
+            "transcript",
+            "total_score",
+            "rubric",
+            "internal_summary",
+            "hidden_reasoning",
+            "verdict_met",
+            "evidence",
+        ):
+            assert forbidden not in serialized, f"student list leaks {forbidden!r}"
+    finally:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("DELETE FROM auth_sessions WHERE id = :id"),
+                {"id": student_sid},
+            )
+
+
+async def test_teacher_lists_config_sessions_and_blocks_non_owner(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    engine: AsyncEngine,
+    scenario: dict[str, uuid.UUID],
+    seeded_users: SeededUsers,
+) -> None:
+    """Teacher (config owner) lists attempts; a student (no authoring access)
+    is denied — the attempts list is a teacher-only surface (thesis p77)."""
+    config_id = await _seed_published_config(
+        engine,
+        course_id=scenario["course_id"],
+        module_id=scenario["module_id"],
+        actor_id=seeded_users.admin_id,
+    )
+    student_sid = await _seed_session(engine, seeded_users.student_id)
+    student_token = create_access_token(user_id=seeded_users.student_id, session_id=student_sid)
+    try:
+        start_resp = await client.post(
+            f"/api/v1/interview-configs/{config_id}/sessions",
+            json={"input_mode": "text"},
+            headers=_auth(student_token),
+        )
+        assert start_resp.status_code == 201, start_resp.text
+
+        # Owner (admin) sees the attempt.
+        owner = await client.get(
+            f"/api/v1/teacher/interview-configs/{config_id}/sessions",
+            headers=_auth(admin_bearer),
+        )
+        assert owner.status_code == 200, owner.text
+        rows = owner.json()
+        assert len(rows) >= 1
+        assert rows[0]["student_id"] == str(seeded_users.student_id)
+
+        # A student has no authoring access — denied.
+        denied = await client.get(
+            f"/api/v1/teacher/interview-configs/{config_id}/sessions",
+            headers=_auth(student_token),
+        )
+        assert denied.status_code in (403, 404), denied.text
+    finally:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("DELETE FROM auth_sessions WHERE id = :id"),
+                {"id": student_sid},
+            )
+
+
+async def test_teacher_transcript_returns_turns_and_blocks_student(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    engine: AsyncEngine,
+    scenario: dict[str, uuid.UUID],
+    seeded_users: SeededUsers,
+) -> None:
+    """Teacher fetches the full Q&A transcript (thesis p77); the student who
+    owns the session is NOT a teacher and cannot hit the authoring endpoint."""
+    config_id = await _seed_published_config(
+        engine,
+        course_id=scenario["course_id"],
+        module_id=scenario["module_id"],
+        actor_id=seeded_users.admin_id,
+    )
+    student_sid = await _seed_session(engine, seeded_users.student_id)
+    student_token = create_access_token(user_id=seeded_users.student_id, session_id=student_sid)
+    try:
+        start_resp = await client.post(
+            f"/api/v1/interview-configs/{config_id}/sessions",
+            json={"input_mode": "text"},
+            headers=_auth(student_token),
+        )
+        assert start_resp.status_code == 201, start_resp.text
+        body = start_resp.json()
+        session_id = body["session_id"]
+        first_q = body["first_question"]
+        assert first_q is not None
+
+        respond = await client.post(
+            f"/api/v1/interview-sessions/{session_id}/respond",
+            json={
+                "session_id": session_id,
+                "session_question_id": first_q["id"],
+                "answer_text": "Recursion calls itself with a smaller input until a base case.",
+            },
+            headers=_auth(student_token),
+        )
+        assert respond.status_code == 200, respond.text
+
+        # Teacher (owner) gets the transcript with the student's answer.
+        transcript = await client.get(
+            f"/api/v1/teacher/interview-sessions/{session_id}/transcript",
+            headers=_auth(admin_bearer),
+        )
+        assert transcript.status_code == 200, transcript.text
+        turns = transcript.json()["turns"]
+        user_turns = [tn for tn in turns if tn["role"] == "user"]
+        assert any("recursion" in (tn["content_text"] or "").lower() for tn in user_turns)
+
+        # The student cannot reach the teacher transcript endpoint.
+        denied = await client.get(
+            f"/api/v1/teacher/interview-sessions/{session_id}/transcript",
+            headers=_auth(student_token),
+        )
+        assert denied.status_code in (403, 404), denied.text
+    finally:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("DELETE FROM auth_sessions WHERE id = :id"),
+                {"id": student_sid},
+            )

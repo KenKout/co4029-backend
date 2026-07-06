@@ -184,11 +184,14 @@ async def _module_lesson_ids(db: AsyncSession, module_id: UUID | None) -> list[U
     if module_id is None:
         return []
 
+    # Lesson.position is intentionally absent (§A2) — lesson ordering lives
+    # on the parent module_items.position link, not on lessons itself.
     stmt = text(
-        "SELECT id FROM lessons "
-        "WHERE module_id = :module_id "
-        "  AND deleted_at IS NULL "
-        "ORDER BY position"
+        "SELECT l.id FROM lessons l "
+        "JOIN module_items mi ON mi.lesson_id = l.id AND mi.deleted_at IS NULL "
+        "WHERE l.module_id = :module_id "
+        "  AND l.deleted_at IS NULL "
+        "ORDER BY mi.position"
     )
     result = await db.execute(stmt, {"module_id": module_id})
     return [row[0] for row in result.all() if row[0] is not None]

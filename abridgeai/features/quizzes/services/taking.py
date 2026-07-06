@@ -74,6 +74,18 @@ class AllCardsInCooldownError(AppError):
         self.cards_due_at = cards_due_at
 
 
+class InterviewPassRequiredError(AppError):
+    """The quiz's module has an interview config with
+    ``lock_quiz_ef_until_pass = TRUE`` that the student has not passed
+    (FR-5.3). The router maps this to HTTP 403.
+    """
+
+    def __init__(self, module_id: UUID, interview_config_id: UUID) -> None:
+        super().__init__("Interview pass required before quiz progression")
+        self.module_id = module_id
+        self.interview_config_id = interview_config_id
+
+
 async def get_published_quiz(db: AsyncSession, quiz_id: UUID) -> Quiz | None:
     """Pass-through to :func:`published_queries.get_published_quiz`.
 
@@ -179,6 +191,49 @@ async def _load_cooldown_map(
     return {row[0]: row[1] for row in result.all()}
 
 
+async def _ensure_interview_pass_lock(db: AsyncSession, *, quiz_id: UUID, student_id: UUID) -> None:
+    """FR-5.3 — block quiz progression until the module interview is passed.
+
+    Looks up a published interview config with ``lock_quiz_ef_until_pass``
+    on the quiz's module. The module linkage goes through
+    ``module_items.quiz_id`` (courses feature) so this uses raw SQL — same
+    cross-feature precedent as :func:`_load_cooldown_map` (T7.5.5). The
+    pass check itself goes through the spaced_repetition public API.
+    Disabled by the ``LESSON_GATING_ENFORCED=false`` emergency switch.
+    """
+    from sqlalchemy import text  # noqa: PLC0415
+
+    from abridgeai.core.config import get_settings  # noqa: PLC0415
+    from abridgeai.features.spaced_repetition.api import public as sr_public  # noqa: PLC0415
+
+    if not get_settings().lesson_gating_enforced:
+        return
+    row = (
+        await db.execute(
+            text(
+                "SELECT c.id, c.module_id FROM interview_configs c "
+                "JOIN module_items mi ON mi.module_id = c.module_id "
+                "WHERE mi.quiz_id = :quiz_id "
+                "  AND mi.deleted_at IS NULL "
+                "  AND c.deleted_at IS NULL "
+                "  AND c.status = 'published' "
+                "  AND c.lock_quiz_ef_until_pass = TRUE "
+                "ORDER BY c.created_at ASC, c.id ASC "
+                "LIMIT 1"
+            ),
+            {"quiz_id": str(quiz_id)},
+        )
+    ).first()
+    if row is None:
+        return
+    config_id, module_id = row
+    passed = await sr_public.has_passing_interview_for_module(
+        db, student_id=student_id, module_id=module_id
+    )
+    if not passed:
+        raise InterviewPassRequiredError(module_id, config_id)
+
+
 async def start_attempt(
     db: AsyncSession,
     quiz_id: UUID,
@@ -215,6 +270,9 @@ async def start_attempt(
     UC-LEARN-01 Alt 1a.
     """
     quiz = await _require_quiz(db, quiz_id)
+
+    await _ensure_interview_pass_lock(db, quiz_id=quiz_id, student_id=actor.user_id)
+
     questions = await _load_quiz_questions_for_taking(db, quiz_id)
 
     cooldown_map = await _load_cooldown_map(
@@ -384,9 +442,7 @@ async def get_attempt_review(
     if attempt is None:
         return None
 
-    answers_by_question: dict[UUID, QuizAttemptAnswer] = {
-        a.question_id: a for a in attempt.answers
-    }
+    answers_by_question: dict[UUID, QuizAttemptAnswer] = {a.question_id: a for a in attempt.answers}
 
     questions_with_options = await published_queries.list_quiz_questions_with_options(
         db, attempt.quiz_id
@@ -403,9 +459,7 @@ async def get_attempt_review(
                 prompt_text=question.prompt_text,
                 explanation=question.explanation,
                 hint_text=question.hint_text,
-                options=[
-                    QuizAttemptReviewOption.model_validate(opt) for opt in options
-                ],
+                options=[QuizAttemptReviewOption.model_validate(opt) for opt in options],
                 selected_option_id=ans.selected_option_id if ans else None,
                 answer_text=ans.answer_text if ans else None,
                 is_correct=ans.is_correct if ans else False,

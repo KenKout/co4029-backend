@@ -40,6 +40,10 @@ class LessonOverviewItem(BaseModel):
     status: LessonStatus
     kr_estimate: float
     due_count: int
+    # Raw unlock-gate verdict (FR-4.5). ``status`` folds eligibility AND
+    # engagement into one display value ("locked" also means "no progress
+    # yet"); consumers gating ACCESS must use this field, not ``status``.
+    eligible: bool = True
 
 
 class HistogramBucket(BaseModel):

@@ -68,11 +68,21 @@ class CareerPathProgressRead(BaseModel):
     courses: list[CourseProgressSummary]
 
 
+class CareerReadinessSnapshotRead(BaseModel):
+    """One historical readiness point for the calling student (FR-6.8)."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    readiness_score: float
+    captured_at: datetime
+
+
 __all__ = [
     "CareerPathCoursePublic",
     "CareerPathListPage",
     "CareerPathProgressRead",
     "CareerPathPublic",
+    "CareerReadinessSnapshotRead",
     "CourseProgressSummary",
     "MyCareerEnrollmentRead",
 ]

@@ -38,7 +38,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from abridgeai.core.db import get_db
-from abridgeai.core.exceptions import NotFoundError
+from abridgeai.core.exceptions import ConflictError, NotFoundError
 from abridgeai.core.security import CurrentUser, get_current_user
 from abridgeai.features.access_control.policies import can_manage_course, require_permission
 from abridgeai.features.courses.api import public as courses_api
@@ -51,6 +51,7 @@ from abridgeai.features.materials.schemas import (
     MaterialUpdate,
     MaterialUploadComplete,
     MaterialUploadInit,
+    MaterialVersionAuthoring,
     ProcessingProgress,
 )
 from abridgeai.features.materials.schemas.public import MaterialStreamUrl
@@ -672,6 +673,53 @@ async def reprocess_material(
         processing_job_id=result.processing_job_id,
         pipeline_run_id=result.pipeline_run_id,
     )
+
+
+@router.get(
+    "/materials/{material_id}/versions",
+    response_model=list[MaterialVersionAuthoring],
+)
+async def list_material_versions(
+    material_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_MATERIAL)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> list[MaterialVersionAuthoring]:
+    """Version history (newest first) with per-version processing state (FR-3.4/3.5)."""
+    del current_user
+    try:
+        return await authoring_service.list_material_versions(db, material_id)
+    except NotFoundError as exc:
+        raise _not_found("material", material_id) from exc
+
+
+@router.post(
+    "/materials/{material_id}/versions/{version_id}/rollback",
+    response_model=MaterialVersionAuthoring,
+)
+async def rollback_material_version(
+    material_id: UUID,
+    version_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_VERSION)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> MaterialVersionAuthoring:
+    """FR-3.4 — flip the current version back to a prior ``ready`` one.
+
+    Pointer swap only (chunks are version-scoped); 409 when the target
+    is already current or never finished processing.
+    """
+    try:
+        result = await authoring_service.rollback_material_version(
+            db, material_id, version_id, current_user
+        )
+    except NotFoundError as exc:
+        raise _not_found("material_version", version_id) from exc
+    except ConflictError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"error": "rollback_rejected", "message": str(exc)},
+        ) from exc
+    await db.commit()
+    return result
 
 
 @router.delete("/materials/{material_id}", status_code=status.HTTP_204_NO_CONTENT)

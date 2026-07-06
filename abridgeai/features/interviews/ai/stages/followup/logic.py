@@ -17,10 +17,15 @@ Design constraints (plan §6414-6453):
 * Pure return contract: the caller (services/take_session_step) handles
   persistence and audio generation. This stage only returns the follow-up
   text or ``None``.
+* Best-effort: ANY exception inside the LLM call is swallowed and the
+  stage returns ``None``. A student typing an answer must NEVER get a
+  500 because the optional follow-up couldn't be generated — the answer
+  itself must still be recorded and the session must still advance.
 """
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
@@ -48,6 +53,8 @@ if TYPE_CHECKING:
     )
 
 
+logger = logging.getLogger(__name__)
+
 FOLLOWUP_STAGE_NAME = "interview_followup"
 
 
@@ -71,7 +78,10 @@ async def maybe_generate_followup(
 
     Otherwise calls the gateway with ``LLMRole.INTERVIEW_FOLLOWUP`` and
     returns the parsed follow-up text — or ``None`` when the LLM judges
-    the answer sufficient or returns a malformed payload.
+    the answer sufficient, returns a malformed payload, or the call
+    itself fails (missing credentials, provider down, etc.). The follow-
+    up is a nice-to-have, never a hard dependency of the answer-record
+    path.
     """
 
     answer = (student_answer or "").strip()
@@ -83,26 +93,40 @@ async def maybe_generate_followup(
 
     chunk_views = [_chunk_for_prompt(chunk) for chunk in related_chunks or []]
 
-    system_prompt = render_prompt("prompts/system.j2")
-    user_prompt = render_prompt(
-        "prompts/user.j2",
-        question_text=current_question.prompt_text,
-        student_answer=answer,
-        related_chunks=chunk_views,
-    )
+    try:
+        system_prompt = render_prompt("prompts/system.j2")
+        user_prompt = render_prompt(
+            "prompts/user.j2",
+            question_text=current_question.prompt_text,
+            student_answer=answer,
+            related_chunks=chunk_views,
+        )
 
-    gateway = gateway or LLMGateway()
-    llm_result = await gateway.generate_json(
-        role=LLMRole.INTERVIEW_FOLLOWUP,
-        system_prompt=system_prompt,
-        user_prompt=user_prompt,
-        db=db,
-        stage_name=FOLLOWUP_STAGE_NAME,
-        pipeline_run_id=pipeline_run_id,
-    )
+        gateway = gateway or LLMGateway()
+        # SAVEPOINT around the gateway call: it flushes an ``ai_model_calls``
+        # audit row, and any DB-level failure there (constraint violation,
+        # provider-error row, ...) must roll back ONLY this savepoint. Without
+        # it a failed flush poisons the request session (PendingRollbackError),
+        # and the next flush in ``take_session_step`` 500s the whole /respond
+        # request even though the follow-up is best-effort.
+        async with db.begin_nested():
+            llm_result = await gateway.generate_json(
+                role=LLMRole.INTERVIEW_FOLLOWUP,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                db=db,
+                stage_name=FOLLOWUP_STAGE_NAME,
+                pipeline_run_id=pipeline_run_id,
+            )
 
-    payload = llm_result.content_json if isinstance(llm_result.content_json, dict) else None
-    verdict: FollowupVerdict = parse_followup_response(payload)
+        payload = llm_result.content_json if isinstance(llm_result.content_json, dict) else None
+        verdict: FollowupVerdict = parse_followup_response(payload)
+    except Exception:  # noqa: BLE001 — follow-up is best-effort; never bubble to /respond
+        logger.exception(
+            "interview followup stage failed; advancing without follow-up (session=%s)",
+            session.id,
+        )
+        return None
 
     if verdict.is_sufficient:
         return None

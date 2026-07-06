@@ -13,10 +13,19 @@ from __future__ import annotations
 
 from abridgeai.features.interviews.ai.stages.evaluation.logic import (
     EVALUATION_STAGE_NAME,
+    evaluate_outcomes,
     evaluate_session,
+)
+from abridgeai.features.interviews.ai.stages.evaluation.outcome_verdicts import (
+    OutcomeVerdict,
+    OutcomeVerdicts,
+    build_outcome_verdicts,
 )
 from abridgeai.features.interviews.ai.stages.evaluation.parsers import (
     parse_evaluation_response,
+)
+from abridgeai.features.interviews.ai.stages.evaluation.parsers_outcome_verdicts import (
+    parse_outcome_verdicts,
 )
 from abridgeai.features.interviews.ai.stages.evaluation.rubric import (
     DEFAULT_CRITERIA,
@@ -32,11 +41,16 @@ __all__ = [
     "DEFAULT_CRITERIA",
     "EVALUATION_STAGE_NAME",
     "CriterionScore",
+    "OutcomeVerdict",
+    "OutcomeVerdicts",
     "ResponseEvaluation",
     "RubricScores",
     "aggregate_rubric_scores",
     "build_criterion_score",
+    "build_outcome_verdicts",
+    "evaluate_outcomes",
     "evaluate_session",
     "parse_evaluation_response",
+    "parse_outcome_verdicts",
     "resolve_rubric",
 ]

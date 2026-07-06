@@ -96,6 +96,30 @@ class StudentPathProgressAuthoring(BaseModel):
     course_count: int
 
 
+class StudentReadinessRead(BaseModel):
+    """Per-student latest readiness snapshot — manager drill-down row.
+
+    Carries score + identity only; per-interview rubric details are
+    intentionally excluded (FR-6.8 / FR-5.7).
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    student_id: UUID
+    student_email: str
+    readiness_score: float
+    captured_at: datetime
+
+
+class PathReadinessOverview(BaseModel):
+    """Org-scoped readiness aggregate for one career path (FR-6.8)."""
+
+    career_path_id: UUID
+    average_score: float | None = None
+    student_count: int
+    students: list[StudentReadinessRead]
+
+
 __all__ = [
     "CareerPathAuthoring",
     "CareerPathCourseAdd",
@@ -104,6 +128,8 @@ __all__ = [
     "CareerPathCreate",
     "CareerPathStudentEnroll",
     "CareerPathUpdate",
+    "PathReadinessOverview",
     "StudentCareerEnrollmentAuthoring",
     "StudentPathProgressAuthoring",
+    "StudentReadinessRead",
 ]

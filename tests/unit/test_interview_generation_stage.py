@@ -51,8 +51,11 @@ def _llm_result(content_json: dict[str, object]) -> LLMResult:
     )
 
 
-def _fake_run() -> SimpleNamespace:
-    return SimpleNamespace(id=uuid4())
+def _fake_run(question_count: int | None = None) -> SimpleNamespace:
+    config_json: dict[str, object] = {}
+    if question_count is not None:
+        config_json["question_count"] = question_count
+    return SimpleNamespace(id=uuid4(), config_json=config_json)
 
 
 def _fake_config(supplementary: str | None = None, persona: str = "neutral") -> SimpleNamespace:
@@ -138,6 +141,48 @@ async def test_generates_n_questions() -> None:
     kwargs = gateway.generate_json.await_args.kwargs
     assert kwargs["role"] is LLMRole.INTERVIEW_GENERATION
     assert kwargs["stage_name"] == "interview_generation"
+
+
+@pytest.mark.asyncio
+async def test_form_question_count_drives_prompt_and_caps_drafts() -> None:
+    """The teacher's form count (run.config_json) must be honoured exactly:
+    it both reaches the prompt and caps how many drafts are returned."""
+    gateway = AsyncMock()
+    # LLM returns 8 questions, but the teacher asked for 3.
+    gateway.generate_json = AsyncMock(return_value=_llm_result(_eight_questions()))
+
+    drafts = await generate_interview_questions(
+        AsyncMock(),
+        run=_fake_run(question_count=3),
+        config=_fake_config(),
+        context=_FakeContext(),
+        outcomes=_fake_outcomes(),
+        gateway=gateway,
+    )
+
+    user_prompt: str = gateway.generate_json.await_args.kwargs["user_prompt"]
+    assert "Total questions to produce: 3" in user_prompt
+    assert len(drafts) == 3  # capped to the requested count, not the LLM's 8
+
+
+@pytest.mark.asyncio
+async def test_form_count_overrides_supplementary_default() -> None:
+    """When both are present, the form count wins over the legacy
+    supplementary-instructions override."""
+    gateway = AsyncMock()
+    gateway.generate_json = AsyncMock(return_value=_llm_result(_eight_questions()))
+
+    await generate_interview_questions(
+        AsyncMock(),
+        run=_fake_run(question_count=5),
+        config=_fake_config(supplementary='{"question_count": 12}'),
+        context=_FakeContext(),
+        outcomes=_fake_outcomes(),
+        gateway=gateway,
+    )
+
+    user_prompt: str = gateway.generate_json.await_args.kwargs["user_prompt"]
+    assert "Total questions to produce: 5" in user_prompt
 
 
 @pytest.mark.asyncio

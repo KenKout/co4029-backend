@@ -162,10 +162,12 @@ async def get_published_course_content(db: AsyncSession, course_id: UUID) -> dic
     Returns ``{"course": Course, "modules": list[Module], "items": list[dict]}``
     or ``None`` when the course is missing / unpublished / soft-deleted.
     DRAFT_VISIBILITY rule (plan §4153): items pointing to draft / soft-
-    deleted lessons / quizzes are excluded entirely (not nullified).
+    deleted lessons / quizzes / interview configs are excluded entirely
+    (not nullified).
     """
     # Lazy import to avoid breaking import-linter's
     # ``Features are independent`` contract at module load.
+    from abridgeai.features.interviews.models import InterviewConfig
     from abridgeai.features.quizzes.models import Quiz
 
     course = await get_published_course_by_id(db, course_id)
@@ -183,6 +185,7 @@ async def get_published_course_content(db: AsyncSession, course_id: UUID) -> dic
         .join(Module, Module.id == ModuleItem.module_id)
         .outerjoin(Lesson, Lesson.id == ModuleItem.lesson_id)
         .outerjoin(Quiz, Quiz.id == ModuleItem.quiz_id)
+        .outerjoin(InterviewConfig, InterviewConfig.id == ModuleItem.interview_config_id)
         .where(
             ModuleItem.module_id.in_(module_ids),
             ModuleItem.deleted_at.is_(None),
@@ -212,10 +215,25 @@ async def get_published_course_content(db: AsyncSession, course_id: UUID) -> dic
         quizzes = (await db.execute(quizzes_stmt)).scalars().all()
         quizzes_by_id = {quiz.id: quiz for quiz in quizzes}
 
+    interview_ids = [
+        item.interview_config_id for item in items if item.interview_config_id is not None
+    ]
+    interviews_by_id: dict[UUID, Any] = {}
+    if interview_ids:
+        interviews_stmt = select(InterviewConfig).where(
+            InterviewConfig.id.in_(interview_ids),
+            InterviewConfig.status == "published",
+        )
+        interviews = (await db.execute(interviews_stmt)).scalars().all()
+        interviews_by_id = {cfg.id: cfg for cfg in interviews}
+
     items_data = []
     for item in items:
         lesson = lessons_by_id.get(item.lesson_id) if item.lesson_id else None
         quiz = quizzes_by_id.get(item.quiz_id) if item.quiz_id else None
+        interview = (
+            interviews_by_id.get(item.interview_config_id) if item.interview_config_id else None
+        )
         items_data.append(
             {
                 "id": item.id,
@@ -228,6 +246,7 @@ async def get_published_course_content(db: AsyncSession, course_id: UUID) -> dic
                 "unlock_rule_json": item.unlock_rule_json,
                 "lesson": lesson,
                 "quiz": quiz,
+                "interview": interview,
             }
         )
 
@@ -335,15 +354,17 @@ async def list_visible_module_items(db: AsyncSession, module_id: UUID) -> list[d
     """``ModuleItem`` rows under ``module_id`` that point to non-draft targets.
 
     Per the DRAFT_VISIBILITY rule (plan §4153) items pointing to draft /
-    soft-deleted lessons / quizzes are EXCLUDED, not nullified. Returns
-    plain dicts shaped for :class:`ModuleItemPublic.model_validate`,
-    with ``target`` populated from the joined :class:`Lesson` /
-    :class:`Quiz` row so the polymorphic field is hydrated without
-    relying on lazy ORM relationship access (would raise
+    soft-deleted lessons / quizzes / interview configs are EXCLUDED,
+    not nullified. Returns plain dicts shaped for
+    :class:`ModuleItemPublic.model_validate`, with ``target`` populated
+    from the joined :class:`Lesson` / :class:`Quiz` /
+    :class:`InterviewConfig` row so the polymorphic field is hydrated
+    without relying on lazy ORM relationship access (would raise
     ``MissingGreenlet`` outside the awaited session).
     """
     # Lazy import to avoid breaking import-linter's
     # ``Features are independent`` contract at module load.
+    from abridgeai.features.interviews.models import InterviewConfig
     from abridgeai.features.quizzes.models import Quiz
 
     stmt = (
@@ -351,6 +372,7 @@ async def list_visible_module_items(db: AsyncSession, module_id: UUID) -> list[d
         .join(Module, Module.id == ModuleItem.module_id)
         .outerjoin(Lesson, Lesson.id == ModuleItem.lesson_id)
         .outerjoin(Quiz, Quiz.id == ModuleItem.quiz_id)
+        .outerjoin(InterviewConfig, InterviewConfig.id == ModuleItem.interview_config_id)
         .where(
             ModuleItem.module_id == module_id,
             published_module_clause(),
@@ -368,8 +390,7 @@ async def list_visible_module_items(db: AsyncSession, module_id: UUID) -> list[d
             published_lesson_clause(),
         )
         lessons_by_id = {
-            lesson.id: lesson
-            for lesson in (await db.execute(lessons_stmt)).scalars().all()
+            lesson.id: lesson for lesson in (await db.execute(lessons_stmt)).scalars().all()
         }
 
     quiz_ids = [item.quiz_id for item in items if item.quiz_id is not None]
@@ -379,9 +400,19 @@ async def list_visible_module_items(db: AsyncSession, module_id: UUID) -> list[d
             Quiz.id.in_(quiz_ids),
             Quiz.status == "published",
         )
-        quizzes_by_id = {
-            quiz.id: quiz
-            for quiz in (await db.execute(quizzes_stmt)).scalars().all()
+        quizzes_by_id = {quiz.id: quiz for quiz in (await db.execute(quizzes_stmt)).scalars().all()}
+
+    interview_ids = [
+        item.interview_config_id for item in items if item.interview_config_id is not None
+    ]
+    interviews_by_id: dict[UUID, Any] = {}
+    if interview_ids:
+        interviews_stmt = select(InterviewConfig).where(
+            InterviewConfig.id.in_(interview_ids),
+            InterviewConfig.status == "published",
+        )
+        interviews_by_id = {
+            cfg.id: cfg for cfg in (await db.execute(interviews_stmt)).scalars().all()
         }
 
     payload: list[dict[str, Any]] = []
@@ -390,6 +421,10 @@ async def list_visible_module_items(db: AsyncSession, module_id: UUID) -> list[d
             target = lessons_by_id.get(item.lesson_id) if item.lesson_id else None
         elif item.item_type == "quiz":
             target = quizzes_by_id.get(item.quiz_id) if item.quiz_id else None
+        elif item.item_type == "interview":
+            target = (
+                interviews_by_id.get(item.interview_config_id) if item.interview_config_id else None
+            )
         else:
             target = None
         payload.append(

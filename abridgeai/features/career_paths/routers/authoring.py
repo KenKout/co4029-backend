@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from abridgeai.core.db import get_db
 from abridgeai.core.exceptions import AppError, ConflictError, NotFoundError
 from abridgeai.core.security import CurrentUser
+from abridgeai.features.access_control.api import public as access_control_api
 from abridgeai.features.access_control.policies import (
     require_any_permission,
     require_permission,
@@ -21,11 +22,13 @@ from abridgeai.features.career_paths.schemas import (
     CareerPathCreate,
     CareerPathStudentEnroll,
     CareerPathUpdate,
+    PathReadinessOverview,
     StudentCareerEnrollmentAuthoring,
     StudentPathProgressAuthoring,
 )
 from abridgeai.features.career_paths.services import authoring as authoring_service
 from abridgeai.features.career_paths.services import enrollment as enrollment_service
+from abridgeai.features.career_paths.services import readiness as readiness_service
 
 management_router = APIRouter(prefix="/management/career-paths", tags=["career-paths-authoring"])
 teacher_router = APIRouter(prefix="/teacher/career-paths", tags=["career-paths-authoring"])
@@ -63,6 +66,28 @@ def _bad_request(detail: str) -> HTTPException:
         status_code=status.HTTP_400_BAD_REQUEST,
         detail={"error": "bad_request", "message": detail},
     )
+
+
+async def _ensure_caller_in_path_org(
+    db: AsyncSession, current_user: CurrentUser, career_path_id: UUID
+) -> None:
+    """FR-2.6 — managers only see roster/readiness for paths in THEIR org.
+
+    The permission deps above are permission-level (global scope); a
+    manager from org B with ``course.enrollment.read`` must not read
+    org A's student emails. Membership in the path's organization OR
+    ``system.administer`` passes; everything else 404s (no existence
+    leak — matches the resource-not-found shape).
+    """
+    path = await authoring_service.get_career_path(db, career_path_id)
+    if await access_control_api.is_user_member_of_org(
+        db, user_id=current_user.user_id, org_id=path.organization_id
+    ):
+        return
+    permissions = await access_control_api.get_active_permissions(db, current_user.user_id)
+    if any(p.code == "system.administer" for p in permissions):
+        return
+    raise _not_found(f"Career path {career_path_id} not found")
 
 
 @management_router.post(
@@ -333,8 +358,26 @@ async def list_path_roster_progress(
     current_user: Annotated[CurrentUser, Depends(_REQUIRE_PATH_ROSTER_READ)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> list[StudentPathProgressAuthoring]:
-    del current_user
+    await _ensure_caller_in_path_org(db, current_user, career_path_id)
     return await enrollment_service.get_roster_progress(db, career_path_id)
+
+
+@management_router.get(
+    "/{career_path_id}/readiness",
+    response_model=PathReadinessOverview,
+)
+async def get_path_readiness_overview(
+    career_path_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_PATH_ROSTER_READ)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> PathReadinessOverview:
+    """Readiness aggregate (FR-6.8): latest snapshot per actively-enrolled
+    student + path average. Rubric details are never included.
+
+    Org-scoped (FR-2.6): caller must belong to the path's organization
+    or hold ``system.administer`` — same gate as the roster read."""
+    await _ensure_caller_in_path_org(db, current_user, career_path_id)
+    return await readiness_service.get_path_readiness_overview(db, career_path_id)
 
 
 __all__ = ["management_router", "teacher_router"]

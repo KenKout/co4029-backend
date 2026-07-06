@@ -48,20 +48,20 @@ if TYPE_CHECKING:
 
 
 class GenerationRunRef(Protocol):
-    """Structural reference to ``GenerationRun`` — keeps this stage off
-    the ``features.quizzes`` import path. The owning ORM lives in
-    :mod:`abridgeai.features.quizzes.models` for now (per T5.1
-    stop-gap); routing the dep through a Protocol upholds the
-    "features-are-independent" import-linter contract.
+    """Structural reference to ``GenerationRun`` — keeps this stage off the
+    ``features.quizzes`` import path (upholds the "features-are-independent"
+    import-linter contract). ``config_json`` carries the teacher's generation
+    request, incl. the ``question_count`` typed in the form.
     """
 
     id: UUID
+    config_json: dict[str, Any]
 
 
 _STAGE_NAME = "interview_generation"
-_DEFAULT_QUESTION_COUNT = 10
-_MIN_QUESTION_COUNT = 8
-_MAX_QUESTION_COUNT = 12
+_DEFAULT_QUESTION_COUNT = 8
+_MIN_QUESTION_COUNT = 1
+_MAX_QUESTION_COUNT = 50
 _DEFAULT_TYPE_MIX: dict[str, int] = {"technical": 60, "behavioral": 30, "situational": 10}
 
 
@@ -86,40 +86,19 @@ async def generate_interview_questions(
 ) -> list[InterviewQuestionDraft]:
     """Run one INTERVIEW_GENERATION LLM call and return parsed drafts.
 
-    The caller (T6.10 pipeline) is responsible for persisting the drafts
-    as :class:`InterviewQuestion` rows after the VALIDATION stage (T6.6)
-    accepts them.
-
-    Parameters
-    ----------
-    db
-        Async session — passed through to the gateway for audit rows.
-    run
-        Parent generation run; ``run.id`` is threaded into
-        ``ai_model_calls`` so cost attribution rolls up correctly.
-    config
-        :class:`InterviewConfig` carrying title + persona +
-        ``supplementary_instructions`` (which may include rubric weights
-        as embedded JSON).
-    context
-        Retrieval result from T6.4. Provides ``chunks``.
-    outcomes
-        Pre-existing outcomes the questions must link to. May be empty;
-        the prompt instructs the LLM to emit ``null`` ``linked_outcome_id``
-        in that case.
-    gateway
-        Inject a custom :class:`LLMGateway` (test seam).
-
-    Returns
-    -------
-    list[InterviewQuestionDraft]
-        Parsed drafts. Bad LLM rows are dropped in
-        :func:`parse_generation_response`; an empty list signals
-        "every question failed validation".
+    The caller (T6.10 pipeline) persists accepted drafts as
+    :class:`InterviewQuestion` rows after the VALIDATION stage (T6.6).
+    ``run.id`` is threaded into ``ai_model_calls`` for cost attribution and
+    ``run.config_json`` supplies the teacher's ``question_count``. ``outcomes``
+    may be empty (prompt emits ``null`` ``linked_outcome_id`` then). Bad LLM
+    rows are dropped; an empty list means every question failed parsing.
     """
 
     type_mix = _resolve_type_mix(config.supplementary_instructions)
-    question_count = _resolve_question_count(config.supplementary_instructions)
+    question_count = _resolve_question_count(
+        run_config_json=getattr(run, "config_json", None),
+        supplementary=config.supplementary_instructions,
+    )
     persona = config.persona or "neutral"
 
     user_prompt = render_prompt(
@@ -146,7 +125,7 @@ async def generate_interview_questions(
         pipeline_run_id=run.id,
         parent_run_id=run.id,
     )
-    drafts = parse_generation_response(result.content_json)
+    drafts = parse_generation_response(result.content_json, max_questions=question_count)
     return _link_outcomes_round_robin(drafts, outcomes)
 
 
@@ -177,21 +156,40 @@ def _resolve_type_mix(supplementary: str | None) -> dict[str, int]:
     return {key: round(value * 100 / total) for key, value in cleaned.items()}
 
 
-def _resolve_question_count(supplementary: str | None) -> int:
-    """Clamp the override (if any) into [8, 12]; default 10."""
+def _resolve_question_count(
+    *,
+    run_config_json: dict[str, Any] | None,
+    supplementary: str | None,
+) -> int:
+    """Resolve question count, clamped to [1, 50].
+
+    Precedence: form value (``run_config_json["question_count"]``) →
+    ``supplementary_instructions`` JSON override → default.
+    """
+    from_form = _coerce_question_count(
+        run_config_json.get("question_count") if isinstance(run_config_json, dict) else None
+    )
+    if from_form is not None:
+        return from_form
+
     parsed = _try_parse_rubric(supplementary)
-    if parsed is None:
-        return _DEFAULT_QUESTION_COUNT
-    raw = parsed.get("question_count")
+    if parsed is not None:
+        from_supplementary = _coerce_question_count(parsed.get("question_count"))
+        if from_supplementary is not None:
+            return from_supplementary
+
+    return _DEFAULT_QUESTION_COUNT
+
+
+def _coerce_question_count(raw: object) -> int | None:
+    """Parse + clamp a raw count to [1, 50]; None if unusable."""
+    if raw is None or isinstance(raw, bool):
+        return None
     try:
         count = int(raw)  # type: ignore[arg-type]
     except (TypeError, ValueError):
-        return _DEFAULT_QUESTION_COUNT
-    if count < _MIN_QUESTION_COUNT:
-        return _MIN_QUESTION_COUNT
-    if count > _MAX_QUESTION_COUNT:
-        return _MAX_QUESTION_COUNT
-    return count
+        return None
+    return max(_MIN_QUESTION_COUNT, min(_MAX_QUESTION_COUNT, count))
 
 
 def _try_parse_rubric(supplementary: str | None) -> dict[str, Any] | None:

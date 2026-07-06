@@ -27,6 +27,7 @@ from abridgeai.features.interviews.ai.stages.evaluation import (
     CriterionScore,
     ResponseEvaluation,
     aggregate_rubric_scores,
+    evaluate_outcomes,
     evaluate_session,
     parse_evaluation_response,
     resolve_rubric,
@@ -298,6 +299,166 @@ async def test_audit_stage_name_and_role() -> None:
     kwargs = gateway.generate_json.await_args.kwargs
     assert kwargs["stage_name"] == "evaluation"
     assert EVALUATION_STAGE_NAME == "evaluation"
+    assert kwargs["pipeline_run_id"] == pipeline_run_id
+    from abridgeai.ai.llm import LLMRole
+
+    assert kwargs["role"] == LLMRole.INTERVIEW_EVALUATION
+
+
+# ─────────────────── Per-outcome verdict stage (thesis §4.3) ───────────────────
+
+
+def _make_outcome_with_id(
+    outcome_id: UUID, text: str = "Understands idempotency"
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        id=outcome_id, outcome_text=text, outcome_type="knowledge", importance_weight=3
+    )
+
+
+def _verdict_payload(verdicts: list[dict]) -> SimpleNamespace:
+    return SimpleNamespace(content_json={"verdicts": verdicts})
+
+
+def _gateway_one(payload: SimpleNamespace) -> SimpleNamespace:
+    return SimpleNamespace(generate_json=AsyncMock(return_value=payload))
+
+
+@pytest.mark.asyncio
+async def test_evaluate_outcomes_one_verdict_per_outcome() -> None:
+    session = _make_session()
+    q1 = uuid4()
+    o1, o2 = uuid4(), uuid4()
+    outcomes = [_make_outcome_with_id(o1, "Knows REST"), _make_outcome_with_id(o2, "Knows SQL")]
+    questions = [_make_question(q1, "Explain REST.")]
+    answers = [_make_answer(q1, "REST is stateless; resources via verbs.")]
+    gateway = _gateway_one(
+        _verdict_payload(
+            [
+                {"outcome_id": str(o1), "met": True, "reasoning": "Covered statelessness.",
+                 "evidence": "REST is stateless"},
+                {"outcome_id": str(o2), "met": False, "reasoning": "No SQL shown.",
+                 "evidence": None},
+            ]
+        )
+    )
+    db = AsyncMock()
+
+    result = await evaluate_outcomes(
+        db,
+        session=session,
+        outcomes=outcomes,
+        questions=questions,
+        answers=answers,
+        pipeline_run_id=uuid4(),
+        gateway=gateway,
+    )
+
+    assert result.total == 2
+    assert result.met_count == 1
+    by_id = {v.outcome_id: v for v in result.verdicts}
+    assert by_id[o1].met is True
+    assert by_id[o2].met is False
+    # Single batch call for the whole transcript.
+    assert gateway.generate_json.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_evaluate_outcomes_missing_verdict_defaults_not_met() -> None:
+    session = _make_session()
+    q1 = uuid4()
+    o1, o2 = uuid4(), uuid4()
+    outcomes = [_make_outcome_with_id(o1), _make_outcome_with_id(o2)]
+    questions = [_make_question(q1)]
+    answers = [_make_answer(q1, "A partial answer.")]
+    # LLM only returns a verdict for o1.
+    gateway = _gateway_one(
+        _verdict_payload([{"outcome_id": str(o1), "met": True, "reasoning": "ok"}])
+    )
+    db = AsyncMock()
+
+    result = await evaluate_outcomes(
+        db,
+        session=session,
+        outcomes=outcomes,
+        questions=questions,
+        answers=answers,
+        pipeline_run_id=None,
+        gateway=gateway,
+    )
+
+    by_id = {v.outcome_id: v for v in result.verdicts}
+    assert by_id[o1].met is True
+    assert by_id[o2].met is False  # defaulted — safe direction
+    assert result.met_count == 1
+
+
+@pytest.mark.asyncio
+async def test_evaluate_outcomes_no_answers_all_not_met_no_llm() -> None:
+    session = _make_session()
+    o1 = uuid4()
+    outcomes = [_make_outcome_with_id(o1)]
+    gateway = SimpleNamespace(generate_json=AsyncMock())
+    db = AsyncMock()
+
+    result = await evaluate_outcomes(
+        db,
+        session=session,
+        outcomes=outcomes,
+        questions=[],
+        answers=[],
+        pipeline_run_id=None,
+        gateway=gateway,
+    )
+
+    assert result.total == 1
+    assert result.met_count == 0
+    gateway.generate_json.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_evaluate_outcomes_empty_outcomes_returns_empty() -> None:
+    session = _make_session()
+    gateway = SimpleNamespace(generate_json=AsyncMock())
+    db = AsyncMock()
+
+    result = await evaluate_outcomes(
+        db,
+        session=session,
+        outcomes=[],
+        questions=[_make_question(uuid4())],
+        answers=[_make_answer(uuid4(), "answer")],
+        pipeline_run_id=None,
+        gateway=gateway,
+    )
+
+    assert result.total == 0
+    gateway.generate_json.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_evaluate_outcomes_audit_stage_and_role() -> None:
+    session = _make_session()
+    q1 = uuid4()
+    o1 = uuid4()
+    pipeline_run_id = uuid4()
+    gateway = _gateway_one(
+        _verdict_payload([{"outcome_id": str(o1), "met": True, "reasoning": "ok"}])
+    )
+    db = AsyncMock()
+
+    await evaluate_outcomes(
+        db,
+        session=session,
+        outcomes=[_make_outcome_with_id(o1)],
+        questions=[_make_question(q1)],
+        answers=[_make_answer(q1, "Answer.")],
+        pipeline_run_id=pipeline_run_id,
+        gateway=gateway,
+    )
+
+    kwargs = gateway.generate_json.await_args.kwargs
+    assert kwargs["stage_name"] == "evaluation"
     assert kwargs["pipeline_run_id"] == pipeline_run_id
     from abridgeai.ai.llm import LLMRole
 

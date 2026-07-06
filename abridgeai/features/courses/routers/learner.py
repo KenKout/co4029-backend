@@ -27,6 +27,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from abridgeai.core.config import get_settings
 from abridgeai.core.db import get_db
 from abridgeai.core.security import CurrentUser, get_current_user
 from abridgeai.features.courses.schemas import (
@@ -68,6 +69,47 @@ async def _resolve_org_or_400(db: AsyncSession, current_user: CurrentUser) -> UU
             "current user has no organization membership; cannot resolve catalog scope"
         )
     return org_id
+
+
+async def _ensure_lesson_unlocked(
+    db: AsyncSession, current_user: CurrentUser, lesson_id: UUID
+) -> None:
+    """FR-4.5 server-side gate: 403 with unlock requirements when locked.
+
+    Combines the three unlock gates (prerequisites, SR coverage τ over
+    cards with EF ≥ ef_min_unlock, optional interview pass) via the
+    spaced_repetition public API. Disabled globally by the
+    ``LESSON_GATING_ENFORCED=false`` emergency switch.
+
+    The SR public API is imported lazily: its unlock helper reads back
+    through ``courses.api.public``, so a module-level import here would
+    create a circular import at app start-up.
+    """
+    if not get_settings().lesson_gating_enforced:
+        return
+
+    from abridgeai.features.spaced_repetition.api import public as sr_public  # noqa: PLC0415
+
+    unlock = await sr_public.check_lesson_unlock(
+        db, student_id=current_user.user_id, lesson_id=lesson_id
+    )
+    if unlock.eligible:
+        return
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail={
+            "error": "lesson_locked",
+            "lesson_id": str(lesson_id),
+            "current_ratio": unlock.current_ratio,
+            "required_ratio": unlock.required_ratio,
+            "total_cards": unlock.total_cards,
+            "passing_cards": unlock.passing_cards,
+            "prerequisites_met": unlock.prereq_lesson_ids_unlocked,
+            "interview_pass_required": unlock.interview_pass_required,
+            "interview_passed": unlock.interview_passed,
+            "next_unlock_estimate": unlock.next_unlock_estimate,
+        },
+    )
 
 
 @router.get("/courses", response_model=CoursePage)
@@ -220,24 +262,26 @@ async def list_module_lessons(
 @router.get("/lessons/{lesson_id}", response_model=LessonPublic)
 async def get_lesson(
     lesson_id: UUID,
-    _user: Annotated[CurrentUser, Depends(get_current_user)],
+    user: Annotated[CurrentUser, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> LessonPublic:
     lesson = await catalog_service.get_published_lesson_for_learner(db, lesson_id)
     if lesson is None:
         raise _not_found("lesson", lesson_id)
+    await _ensure_lesson_unlocked(db, user, lesson_id)
     return lesson
 
 
 @router.get("/lessons/{lesson_id}/resources", response_model=list[LessonResourcePublic])
 async def list_lesson_resources(
     lesson_id: UUID,
-    _user: Annotated[CurrentUser, Depends(get_current_user)],
+    user: Annotated[CurrentUser, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> list[LessonResourcePublic]:
     resources = await catalog_service.list_visible_lesson_resources_for_learner(db, lesson_id)
     if resources is None:
         raise _not_found("lesson", lesson_id)
+    await _ensure_lesson_unlocked(db, user, lesson_id)
     return resources
 
 
@@ -247,9 +291,12 @@ async def list_lesson_resources(
 )
 async def get_lesson_resource_download_url(
     resource_id: UUID,
-    _user: Annotated[CurrentUser, Depends(get_current_user)],
+    user: Annotated[CurrentUser, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> ResourceDownloadUrlResponse:
+    lesson_id = await catalog_service.get_visible_resource_lesson_id(db, resource_id)
+    if lesson_id is not None:
+        await _ensure_lesson_unlocked(db, user, lesson_id)
     download = await catalog_service.get_lesson_resource_download_url(db, resource_id)
     if download is None:
         raise _not_found("lesson_resource", resource_id)

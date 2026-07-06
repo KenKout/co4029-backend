@@ -92,6 +92,11 @@ from abridgeai.features.courses.routers import (
     me_courses_router,
 )
 from abridgeai.features.interviews.ai.pipelines import generation as interview_pipeline
+from abridgeai.features.interviews.ai.stages.evaluation.outcome_verdicts import (
+    OutcomeVerdict,
+    OutcomeVerdicts,
+    build_outcome_verdicts,
+)
 from abridgeai.features.interviews.ai.stages.evaluation.rubric import (
     CriterionScore,
     ResponseEvaluation,
@@ -714,6 +719,35 @@ def llm_mocks(scenario: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> dict
 
     monkeypatch.setattr(evaluation_service, "evaluate_session", _fake_evaluate)
 
+    # §4.3 per-outcome verdict gate — return "met" for every configured outcome
+    # so the e2e session passes; the verdicts are built from the outcomes the
+    # stage is actually handed (ids resolved from the seeded config).
+    async def _fake_evaluate_outcomes(
+        db: AsyncSession,
+        *,
+        session: Any,
+        outcomes: list[Any],
+        questions: list[Any],
+        answers: list[Any],
+        pipeline_run_id: UUID | None = None,
+        gateway: Any = None,
+    ) -> OutcomeVerdicts:
+        del db, session, questions, answers, pipeline_run_id, gateway
+        captured["stages"].append({"stage": "outcome_verdicts"})
+        return build_outcome_verdicts(
+            [
+                OutcomeVerdict(
+                    outcome_id=outcome.id,
+                    met=True,
+                    reasoning="Demonstrated in the transcript.",
+                    evidence="candidate said ...",
+                )
+                for outcome in outcomes
+            ]
+        )
+
+    monkeypatch.setattr(evaluation_service, "evaluate_outcomes", _fake_evaluate_outcomes)
+
     async def _fake_gap_report(
         db: AsyncSession,
         *,
@@ -1089,6 +1123,15 @@ async def test_audio_object_id_persisted_without_transcription(
             ),
             {"id": question_id, "cfg": config_id, "u": seeded_users.admin_id},
         )
+        await conn.execute(
+            text(
+                "INSERT INTO interview_outcomes ("
+                "id, interview_config_id, position, outcome_text, outcome_type, "
+                " importance_weight, created_by) "
+                "VALUES (:id, :cfg, 1, 'Define recursion', 'knowledge', 3, :u)"
+            ),
+            {"id": uuid.uuid4(), "cfg": config_id, "u": seeded_users.admin_id},
+        )
 
     # Track gateway calls made specifically during this scenario.
     pre_count = len(llm_mocks["gateway_roles"])
@@ -1227,6 +1270,81 @@ async def test_create_interview_outcome_duplicate_position_returns_409(
         assert "interview_outcome_position_taken" in detail["message"]
     finally:
         async with engine.begin() as conn:
+            # Config creation inserts a module_items row (the /content reader
+            # renders one row per item); delete it before the config to avoid
+            # the module_items_interview_config_id_fkey violation.
+            await conn.execute(
+                text("DELETE FROM module_items WHERE interview_config_id = :c"),
+                {"c": config_id},
+            )
+            await conn.execute(
+                text("DELETE FROM interview_outcomes WHERE interview_config_id = :c"),
+                {"c": config_id},
+            )
+            await conn.execute(
+                text("DELETE FROM interview_configs WHERE id = :c"),
+                {"c": config_id},
+            )
+
+
+async def test_delete_interview_outcome_removes_it(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    scenario: dict[str, Any],
+    engine: AsyncEngine,
+) -> None:
+    """DELETE /interview-configs/{id}/outcomes/{outcome_id} soft-deletes the
+    outcome so it no longer appears in the authoring projection.
+
+    Backs the new teacher outcome-editor UI — without a delete endpoint the
+    editor could add but never remove a mistaken outcome.
+    """
+    create_resp = await client.post(
+        f"/api/v1/teacher/courses/{scenario['course_id']}/interview-configs",
+        json={
+            "title": "Outcome-Delete Probe",
+            "course_id": str(scenario["course_id"]),
+            "module_id": str(scenario["module_id"]),
+            "supported_modes": "text",
+        },
+        headers=_auth(admin_bearer),
+    )
+    assert create_resp.status_code == 201, create_resp.text
+    config_id = UUID(create_resp.json()["id"])
+    try:
+        created = await client.post(
+            f"/api/v1/teacher/interview-configs/{config_id}/outcomes",
+            json={
+                "position": 1,
+                "outcome_text": "Outcome to be deleted",
+                "outcome_type": "knowledge",
+                "importance_weight": 2,
+            },
+            headers=_auth(admin_bearer),
+        )
+        assert created.status_code == 201, created.text
+        outcome_id = created.json()["id"]
+
+        deleted = await client.delete(
+            f"/api/v1/teacher/interview-configs/{config_id}/outcomes/{outcome_id}",
+            headers=_auth(admin_bearer),
+        )
+        assert deleted.status_code == 204, deleted.text
+
+        # Authoring projection no longer lists the outcome.
+        authoring = await client.get(
+            f"/api/v1/teacher/interview-configs/{config_id}",
+            headers=_auth(admin_bearer),
+        )
+        assert authoring.status_code == 200, authoring.text
+        outcome_ids = [o["id"] for o in authoring.json()["outcomes"]]
+        assert outcome_id not in outcome_ids
+    finally:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("DELETE FROM module_items WHERE interview_config_id = :c"),
+                {"c": config_id},
+            )
             await conn.execute(
                 text("DELETE FROM interview_outcomes WHERE interview_config_id = :c"),
                 {"c": config_id},

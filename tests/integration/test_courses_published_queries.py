@@ -24,20 +24,23 @@ from abridgeai.features.courses.queries import (
     list_published_lessons,
     list_published_modules,
     list_visible_lesson_resources,
+    list_visible_module_items,
 )
+
+# Import sibling feature models so SQLAlchemy can resolve the string-name
+# relationships on ModuleItem ('Quiz', interview config) when this file runs
+# standalone — mapper configuration needs every referenced class registered.
+from abridgeai.features.interviews import models as _interviews_models  # noqa: F401
+from abridgeai.features.quizzes import models as _quizzes_models  # noqa: F401
 
 
 def _async_url(database_url: str) -> str:
     if "+psycopg_async" in database_url:
         return database_url
     if database_url.startswith("postgresql+psycopg://"):
-        return database_url.replace(
-            "postgresql+psycopg://", "postgresql+psycopg_async://", 1
-        )
+        return database_url.replace("postgresql+psycopg://", "postgresql+psycopg_async://", 1)
     if database_url.startswith("postgresql://"):
-        return database_url.replace(
-            "postgresql://", "postgresql+psycopg_async://", 1
-        )
+        return database_url.replace("postgresql://", "postgresql+psycopg_async://", 1)
     return database_url
 
 
@@ -54,9 +57,7 @@ def _ensure_head() -> None:
 @pytest_asyncio.fixture
 async def engine() -> AsyncIterator[AsyncEngine]:
     _ensure_head()
-    eng = create_async_engine(
-        _async_url(get_settings().database_url), pool_pre_ping=True
-    )
+    eng = create_async_engine(_async_url(get_settings().database_url), pool_pre_ping=True)
     yield eng
     await eng.dispose()
 
@@ -77,6 +78,8 @@ async def fixture_data(engine: AsyncEngine) -> AsyncIterator[dict]:
             published module M1
                 module_item I-vis -> published lesson L-pub
                 module_item I-hidden -> draft lesson L-draft
+                module_item I-iv-vis -> published interview config IC-pub
+                module_item I-iv-hidden -> draft interview config IC-draft
             draft module M-draft (with 1 published lesson) — entire subtree hidden
         lesson L-pub has 2 resources: 1 visible, 1 hidden
     """
@@ -95,6 +98,10 @@ async def fixture_data(engine: AsyncEngine) -> AsyncIterator[dict]:
     item_hidden = uuid.uuid4()
     resource_visible = uuid.uuid4()
     resource_hidden = uuid.uuid4()
+    interview_pub = uuid.uuid4()
+    interview_draft = uuid.uuid4()
+    item_interview_visible = uuid.uuid4()
+    item_interview_hidden = uuid.uuid4()
 
     async with engine.begin() as conn:
         await conn.execute(
@@ -111,10 +118,7 @@ async def fixture_data(engine: AsyncEngine) -> AsyncIterator[dict]:
             },
         )
         await conn.execute(
-            text(
-                "INSERT INTO users (id, primary_email, status) "
-                "VALUES (:id, :email, 'active')"
-            ),
+            text("INSERT INTO users (id, primary_email, status) VALUES (:id, :email, 'active')"),
             {"id": owner, "email": f"owner-{owner.hex[:8]}@test.local"},
         )
         await conn.execute(
@@ -172,6 +176,34 @@ async def fixture_data(engine: AsyncEngine) -> AsyncIterator[dict]:
         )
         await conn.execute(
             text(
+                "INSERT INTO interview_configs (id, course_id, module_id, title, status) VALUES "
+                "(:ic1, :c, :m, 'Pub Interview', 'published'), "
+                "(:ic2, :c, :m, 'Draft Interview', 'draft')"
+            ),
+            {
+                "ic1": interview_pub,
+                "ic2": interview_draft,
+                "c": pub_course,
+                "m": pub_module,
+            },
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO module_items "
+                "(id, module_id, item_type, interview_config_id, position) VALUES "
+                "(:i3, :m, 'interview', :ic1, 3), "
+                "(:i4, :m, 'interview', :ic2, 4)"
+            ),
+            {
+                "i3": item_interview_visible,
+                "i4": item_interview_hidden,
+                "m": pub_module,
+                "ic1": interview_pub,
+                "ic2": interview_draft,
+            },
+        )
+        await conn.execute(
+            text(
                 "INSERT INTO lesson_resources "
                 "(id, lesson_id, title, resource_type, position, visible_to_students) VALUES "
                 "(:r1, :l, 'Visible', 'pdf', 1, TRUE), "
@@ -195,6 +227,10 @@ async def fixture_data(engine: AsyncEngine) -> AsyncIterator[dict]:
         "item_hidden": item_hidden,
         "resource_visible": resource_visible,
         "resource_hidden": resource_hidden,
+        "interview_pub": interview_pub,
+        "interview_draft": interview_draft,
+        "item_interview_visible": item_interview_visible,
+        "item_interview_hidden": item_interview_hidden,
     }
     yield data
 
@@ -208,6 +244,10 @@ async def fixture_data(engine: AsyncEngine) -> AsyncIterator[dict]:
             {"ids": [pub_module, draft_module]},
         )
         await conn.execute(
+            text("DELETE FROM interview_configs WHERE id = ANY(:ids)"),
+            {"ids": [interview_pub, interview_draft]},
+        )
+        await conn.execute(
             text("DELETE FROM lessons WHERE id = ANY(:ids)"),
             {"ids": [pub_lesson, draft_lesson, draft_module_lesson]},
         )
@@ -219,9 +259,7 @@ async def fixture_data(engine: AsyncEngine) -> AsyncIterator[dict]:
             text("DELETE FROM courses WHERE id = ANY(:ids)"),
             {"ids": [pub_course, draft_course, org_b_course]},
         )
-        await conn.execute(
-            text("DELETE FROM users WHERE id = :id"), {"id": owner}
-        )
+        await conn.execute(text("DELETE FROM users WHERE id = :id"), {"id": owner})
         await conn.execute(
             text("DELETE FROM organizations WHERE id = ANY(:ids)"),
             {"ids": [org_a, org_b]},
@@ -233,9 +271,7 @@ async def test_list_published_courses_excludes_drafts(
     fixture_data: dict,
 ) -> None:
     async with session_factory() as session:
-        page = await list_published_courses(
-            session, organization_id=fixture_data["org_a"]
-        )
+        page = await list_published_courses(session, organization_id=fixture_data["org_a"])
     ids = [c.id for c in page.items]
     assert fixture_data["pub_course"] in ids
     assert fixture_data["draft_course"] not in ids
@@ -247,13 +283,46 @@ async def test_get_published_course_content_excludes_draft_lesson_item(
     fixture_data: dict,
 ) -> None:
     async with session_factory() as session:
-        tree = await get_published_course_content(
-            session, fixture_data["pub_course"]
-        )
+        tree = await get_published_course_content(session, fixture_data["pub_course"])
     assert tree is not None
     item_ids = {item["id"] for item in tree["items"]}
-    assert str(fixture_data["item_visible"]) in item_ids
-    assert str(fixture_data["item_hidden"]) not in item_ids
+    assert fixture_data["item_visible"] in item_ids
+    assert fixture_data["item_hidden"] not in item_ids
+
+
+async def test_get_published_course_content_filters_interview_items(
+    session_factory: async_sessionmaker[AsyncSession],
+    fixture_data: dict,
+) -> None:
+    """FR-3.6: published interview config visible + hydrated; draft excluded.
+
+    Exercises the real CASE + outer-join path — a missing/draft config
+    leaves the join NULL which must exclude the row, not surface it.
+    """
+    async with session_factory() as session:
+        tree = await get_published_course_content(session, fixture_data["pub_course"])
+    assert tree is not None
+    items_by_id = {str(item["id"]): item for item in tree["items"]}
+    assert str(fixture_data["item_interview_visible"]) in items_by_id
+    assert str(fixture_data["item_interview_hidden"]) not in items_by_id
+    visible = items_by_id[str(fixture_data["item_interview_visible"])]
+    assert visible["interview"] is not None
+    assert visible["interview"].id == fixture_data["interview_pub"]
+    assert visible["interview"].title == "Pub Interview"
+
+
+async def test_list_visible_module_items_hydrates_interview_target(
+    session_factory: async_sessionmaker[AsyncSession],
+    fixture_data: dict,
+) -> None:
+    async with session_factory() as session:
+        items = await list_visible_module_items(session, fixture_data["pub_module"])
+    by_id = {str(item["id"]): item for item in items}
+    assert str(fixture_data["item_interview_visible"]) in by_id
+    assert str(fixture_data["item_interview_hidden"]) not in by_id
+    target = by_id[str(fixture_data["item_interview_visible"])]["target"]
+    assert target is not None
+    assert target.id == fixture_data["interview_pub"]
 
 
 async def test_get_published_course_content_excludes_draft_module(
@@ -261,13 +330,11 @@ async def test_get_published_course_content_excludes_draft_module(
     fixture_data: dict,
 ) -> None:
     async with session_factory() as session:
-        tree = await get_published_course_content(
-            session, fixture_data["pub_course"]
-        )
+        tree = await get_published_course_content(session, fixture_data["pub_course"])
     assert tree is not None
-    module_ids = {m["id"] for m in tree["modules"]}
-    assert str(fixture_data["pub_module"]) in module_ids
-    assert str(fixture_data["draft_module"]) not in module_ids
+    module_ids = {m.id for m in tree["modules"]}
+    assert fixture_data["pub_module"] in module_ids
+    assert fixture_data["draft_module"] not in module_ids
 
 
 async def test_get_published_course_by_slug_org_scoped(
@@ -275,15 +342,9 @@ async def test_get_published_course_by_slug_org_scoped(
     fixture_data: dict,
 ) -> None:
     async with session_factory() as session:
-        course_a = await get_published_course_by_slug(
-            session, "shared-slug", fixture_data["org_a"]
-        )
-        course_b = await get_published_course_by_slug(
-            session, "shared-slug", fixture_data["org_b"]
-        )
-        course_other = await get_published_course_by_slug(
-            session, "shared-slug", uuid.uuid4()
-        )
+        course_a = await get_published_course_by_slug(session, "shared-slug", fixture_data["org_a"])
+        course_b = await get_published_course_by_slug(session, "shared-slug", fixture_data["org_b"])
+        course_other = await get_published_course_by_slug(session, "shared-slug", uuid.uuid4())
     assert course_a is not None
     assert course_a.id == fixture_data["pub_course"]
     assert course_b is not None
@@ -296,9 +357,7 @@ async def test_list_visible_lesson_resources_filters_invisible(
     fixture_data: dict,
 ) -> None:
     async with session_factory() as session:
-        resources = await list_visible_lesson_resources(
-            session, fixture_data["pub_lesson"]
-        )
+        resources = await list_visible_lesson_resources(session, fixture_data["pub_lesson"])
     ids = {r.id for r in resources}
     assert fixture_data["resource_visible"] in ids
     assert fixture_data["resource_hidden"] not in ids
@@ -331,12 +390,8 @@ async def test_get_published_course_by_id_rejects_drafts(
     fixture_data: dict,
 ) -> None:
     async with session_factory() as session:
-        published = await get_published_course_by_id(
-            session, fixture_data["pub_course"]
-        )
-        draft = await get_published_course_by_id(
-            session, fixture_data["draft_course"]
-        )
+        published = await get_published_course_by_id(session, fixture_data["pub_course"])
+        draft = await get_published_course_by_id(session, fixture_data["draft_course"])
     assert published is not None
     assert draft is None
 
@@ -382,9 +437,7 @@ async def test_cursor_pagination_round_trip(
             assert len(seen) == len(page1.items) + len(page2.items)
     finally:
         async with engine.begin() as conn:
-            await conn.execute(
-                text("DELETE FROM courses WHERE id = ANY(:ids)"), {"ids": extra}
-            )
+            await conn.execute(text("DELETE FROM courses WHERE id = ANY(:ids)"), {"ids": extra})
 
 
 def test_no_mechanism_split() -> None:

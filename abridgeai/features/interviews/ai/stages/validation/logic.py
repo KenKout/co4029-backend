@@ -182,7 +182,7 @@ def _run_deterministic_checks(
 def _collect_chunk_ids(context: InterviewRetrievalContext) -> set[UUID]:
     out: set[UUID] = set()
     for chunk in getattr(context, "chunks", []) or []:
-        chunk_id = getattr(chunk, "id", None)
+        chunk_id = getattr(chunk, "chunk_id", None) or getattr(chunk, "id", None)
         if isinstance(chunk_id, UUID):
             out.add(chunk_id)
     return out

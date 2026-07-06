@@ -8,7 +8,6 @@ involved — these are pure SQL builders.
 
 from __future__ import annotations
 
-import pytest
 from sqlalchemy import select
 from sqlalchemy.dialects import postgresql
 
@@ -58,6 +57,29 @@ def test_student_visible_resource_clause_compiles_to_correct_sql() -> None:
     assert "true" in sql.lower()
 
 
+def test_published_quiz_clause_compiles_to_correct_sql() -> None:
+    sql = _compile(published_quiz_clause())
+    assert "quizzes.status" in sql
+    assert "'published'" in sql
+
+
+def test_published_interview_clause_compiles_to_correct_sql() -> None:
+    sql = _compile(published_interview_clause())
+    assert "interview_configs.status" in sql
+    assert "'published'" in sql
+
+
+def test_published_material_clause_compiles_to_correct_sql() -> None:
+    sql = _compile(published_material_clause())
+    assert "learning_materials.visible_to_students" in sql
+    assert "true" in sql.lower()
+    # Current-version readiness gate: correlated EXISTS subquery.
+    assert "EXISTS" in sql
+    assert "learning_material_versions.is_current" in sql
+    assert "learning_material_versions.processing_status" in sql
+    assert "'ready'" in sql
+
+
 def test_module_item_visible_clause_polymorphic() -> None:
     sql = _compile(module_item_visible_clause()).lower()
     assert "case" in sql
@@ -66,30 +88,22 @@ def test_module_item_visible_clause_polymorphic() -> None:
     assert "'quiz'" in sql
     assert "'interview'" in sql
     assert "lessons.status" in sql
+    assert "quizzes.status" in sql
+    assert "interview_configs.status" in sql
     assert "false" in sql
 
 
-@pytest.mark.parametrize(
-    ("clause_fn", "phase_marker"),
-    [
-        (published_quiz_clause, "Phase 5"),
-        (published_interview_clause, "Phase 6"),
-        (published_material_clause, "Phase 4"),
-    ],
-)
-def test_forward_ref_clauses_raise_not_implemented(clause_fn: object, phase_marker: str) -> None:
-    with pytest.raises(NotImplementedError, match=phase_marker):
-        clause_fn()  # type: ignore[operator]
-
-
 def test_clauses_are_pure_sql_no_db_call() -> None:
-    """Each working builder returns a SQL ColumnElement without DB I/O."""
+    """Each builder returns a SQL ColumnElement without DB I/O."""
     from sqlalchemy.sql.elements import ColumnElement
 
     for builder in (
         published_course_clause,
         published_module_clause,
         published_lesson_clause,
+        published_quiz_clause,
+        published_interview_clause,
+        published_material_clause,
         student_visible_resource_clause,
         module_item_visible_clause,
     ):

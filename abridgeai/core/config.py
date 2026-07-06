@@ -159,6 +159,50 @@ class Settings(BaseSettings):
     whisper_model: str = "whisper-1"
     video_frame_sample_fps: float = Field(default=1.0, gt=0, le=30)
 
+    # LiveKit voice-interview (Phase 1+). Target is LiveKit Cloud for dev +
+    # initial prod; ``livekit_ws_url`` is the project WS endpoint
+    # (wss://<project>.livekit.cloud). Voice mode is gated OFF by default so
+    # existing deployments are unaffected until operators flip the flag AND
+    # provide credentials. The key/secret are SecretStr (never logged).
+    interview_voice_enabled: bool = False
+    livekit_ws_url: str | None = None
+    livekit_api_key: SecretStr | None = None
+    livekit_api_secret: SecretStr | None = None
+    livekit_agent_name: str = "interview-agent"
+    interview_voice_token_ttl_seconds: int = Field(default=900, ge=60, le=24 * 60 * 60)
+    # Safety net for voice sessions whose config has no ``time_limit_minutes``:
+    # the stale-session sweep finalises them once they have been idle (no new
+    # message) for this many minutes, so a dropped/abandoned session can never
+    # stay ``in_progress`` forever. Time-limited sessions are unaffected.
+    interview_voice_idle_timeout_minutes: int = Field(default=30, ge=1, le=24 * 60)
+    # FR-4.5 / FR-5.3 — server-side lesson-gating enforcement (prerequisites,
+    # SR coverage threshold τ, interview-pass locks). Emergency off-switch:
+    # set LESSON_GATING_ENFORCED=false to stop blocking learner reads while
+    # keeping the lock indicators visible in dashboards.
+    lesson_gating_enforced: bool = True
+
+    @model_validator(mode="after")
+    def _require_livekit_creds_when_voice_enabled(self) -> Settings:
+        """When voice interviews are enabled, all three LiveKit credentials
+        must be present. Fail fast at startup rather than at first token mint."""
+        if not self.interview_voice_enabled:
+            return self
+        missing = [
+            name
+            for name, value in (
+                ("LIVEKIT_WS_URL", self.livekit_ws_url),
+                ("LIVEKIT_API_KEY", self.livekit_api_key),
+                ("LIVEKIT_API_SECRET", self.livekit_api_secret),
+            )
+            if not value
+        ]
+        if missing:
+            raise ValueError(
+                "INTERVIEW_VOICE_ENABLED=true requires "
+                f"{', '.join(missing)} to be set (LiveKit credentials)."
+            )
+        return self
+
     @model_validator(mode="after")
     def _reject_dev_jwt_secret_in_production(self) -> Settings:
         if self.environment == "production" and self.jwt_secret_key.startswith(

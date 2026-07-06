@@ -27,6 +27,13 @@ from abridgeai.features.spaced_repetition.models import StudentCardState
 from abridgeai.features.spaced_repetition.queries.published import (
     review_compliance_rate as _review_compliance_rate,
 )
+from abridgeai.features.spaced_repetition.queries.unlock_sql import (
+    has_passing_interview_for_module as _has_passing_interview_for_module,
+)
+from abridgeai.features.spaced_repetition.sm2.lesson_unlock import (
+    LessonUnlockStatus,
+    check_lesson_unlock,
+)
 
 from ._dto import CardStateDTO
 
@@ -68,9 +75,27 @@ async def get_compliance_rate(
     return await _review_compliance_rate(db, user_id=student_id, lesson_id=lesson_id)
 
 
+async def has_passing_interview_for_module(
+    db: AsyncSession,
+    *,
+    student_id: UUID,
+    module_id: UUID,
+) -> bool:
+    """True iff the student has a completed interview session with
+    ``pass_verdict = TRUE`` for the module's interview config (FR-5.3).
+
+    Thin wrapper so cross-feature consumers (quizzes attempt-start lock,
+    courses lesson gating) depend on the public-API surface.
+    """
+    return await _has_passing_interview_for_module(db, student_id=student_id, module_id=module_id)
+
+
 __all__ = [
     "CardStateDTO",
+    "LessonUnlockStatus",
+    "check_lesson_unlock",
     "get_card_state",
     "get_compliance_rate",
     "get_due_card_count",
+    "has_passing_interview_for_module",
 ]

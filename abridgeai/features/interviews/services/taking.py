@@ -98,13 +98,36 @@ async def start_session(
     Idempotent: a second ``start`` call while a previous session is
     still ``in_progress`` returns the same row instead of allocating a
     new attempt number — enforces plan §6.3 "1 active per config".
+
+    Self-heal: if the existing live session has zero attached questions
+    (e.g. it was created before any question was approved), attach the
+    first approved question now so the learner doesn't get stuck on an
+    empty session forever.
+
+    Input-mode upgrade: if the caller specifies an ``input_mode`` that
+    differs from the existing session's recorded mode AND the parent
+    config allows it, update the session in-place. Without this, a
+    student whose first ``start`` request landed as ``text`` could never
+    escalate to ``voice``/``hybrid`` — the realtime-token endpoint then
+    rejects them with HTTP 409 "session is not a voice interview".
     """
+    data = payload.model_dump(exclude_unset=True) if payload is not None else {}
+    requested_input_mode = data.get("input_mode") or "text"
+
+    # Thesis §4.3: the pass/fail verdict is judged per learning outcome. Starting
+    # an interview whose config has no outcomes guarantees an automatic fail with
+    # nothing to evaluate — block it so the student never enters a no-win session.
+    outcomes = await authoring_queries.list_outcomes_for_config(db, config_id)
+    if not outcomes:
+        raise AppError(
+            "interview_no_outcomes: this interview has no learning outcomes configured"
+        )
+
     existing = await sessions_queries.get_active_session(db, actor.user_id, config_id)
     if existing is not None:
+        await _ensure_first_question_attached(db, existing.id, config_id)
+        await _maybe_upgrade_input_mode(db, existing, config_id, requested_input_mode)
         return existing
-
-    data = payload.model_dump(exclude_unset=True) if payload is not None else {}
-    input_mode = data.get("input_mode") or "text"
 
     attempt_number = await sessions_queries.get_session_attempt_number(db, actor.user_id, config_id)
     session = InterviewSession(
@@ -112,7 +135,7 @@ async def start_session(
         student_id=actor.user_id,
         attempt_number=attempt_number,
         status="in_progress",
-        input_mode=input_mode,
+        input_mode=requested_input_mode,
     )
     db.add(session)
     await flush_or_conflict(db)
@@ -130,6 +153,75 @@ async def start_session(
 
     await db.refresh(session)
     return session
+
+
+_CONFIG_MODE_ALLOWS: dict[str, set[str]] = {
+    "text": {"text"},
+    "voice": {"voice"},
+    "hybrid": {"text", "voice", "hybrid"},
+}
+
+
+async def _maybe_upgrade_input_mode(
+    db: AsyncSession,
+    session: InterviewSession,
+    config_id: UUID,
+    requested: str,
+) -> None:
+    """Promote ``session.input_mode`` to ``requested`` when permitted.
+
+    No-op when the modes already match or when the parent config does
+    not allow the requested mode. Silent on mismatch by design — the
+    realtime-token endpoint is the right place to reject voice on a
+    text-only config; here we just sync the session to what the caller
+    asked for.
+    """
+    if session.input_mode == requested:
+        return
+    from abridgeai.features.interviews.models import InterviewConfig  # noqa: PLC0415
+
+    config = await db.get(InterviewConfig, config_id)
+    if config is None:
+        return
+    allowed = _CONFIG_MODE_ALLOWS.get(config.supported_modes, set())
+    if requested not in allowed:
+        return
+    session.input_mode = requested
+    await flush_or_conflict(db)
+
+
+async def _ensure_first_question_attached(
+    db: AsyncSession, session_id: UUID, config_id: UUID
+) -> None:
+    """Attach question #1 to ``session_id`` if it has none yet.
+
+    Closes the gap where ``start_session`` short-circuited on a stale
+    ``in_progress`` row created before any question reached
+    ``review_status='approved'``. Without this, approving questions
+    after the fact never reaches the learner's existing session.
+    """
+    from sqlalchemy import func, select  # noqa: PLC0415
+
+    count = (
+        await db.execute(
+            select(func.count(InterviewSessionQuestion.id)).where(
+                InterviewSessionQuestion.session_id == session_id
+            )
+        )
+    ).scalar_one()
+    if int(count) > 0:
+        return
+    first_question = await _first_published_question(db, config_id)
+    if first_question is None:
+        return
+    db.add(
+        InterviewSessionQuestion(
+            session_id=session_id,
+            interview_question_id=first_question.id,
+            sequence_no=1,
+        )
+    )
+    await flush_or_conflict(db)
 
 
 async def take_session_step(

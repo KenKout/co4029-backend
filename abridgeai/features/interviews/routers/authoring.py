@@ -56,12 +56,16 @@ from abridgeai.features.interviews.schemas import (
     InterviewConfigAuthoring,
     InterviewConfigCreate,
     InterviewConfigUpdate,
+    InterviewForAuthoringPublic,
     InterviewGenerationRequest,
     InterviewGenerationRunPublic,
     InterviewOutcomeAuthoring,
     InterviewOutcomeCreate,
     InterviewQuestionAuthoring,
     InterviewQuestionCreate,
+    InterviewSessionSummary,
+    InterviewTranscriptRead,
+    InterviewTranscriptTurn,
 )
 from abridgeai.features.interviews.services import authoring as authoring_service
 
@@ -123,19 +127,32 @@ async def create_interview_config(
     return InterviewConfigAuthoring.model_validate(config)
 
 
-@router.get("/interview-configs/{config_id}", response_model=InterviewConfigAuthoring)
+@router.get("/interview-configs/{config_id}", response_model=InterviewForAuthoringPublic)
 async def get_interview_config(
     config_id: UUID,
     current_user: Annotated[CurrentUser, Depends(_REQUIRE_CONFIG)],
     db: Annotated[AsyncSession, Depends(get_db)],
-) -> InterviewConfigAuthoring:
+) -> InterviewForAuthoringPublic:
     del current_user
     from abridgeai.features.interviews.models import InterviewConfig  # noqa: PLC0415
+
+    from abridgeai.features.interviews.queries import (  # noqa: PLC0415
+        list_outcomes_for_config,
+        list_questions_for_config,
+    )
 
     config = await db.get(InterviewConfig, config_id)
     if config is None:
         raise _not_found("interview_config", config_id)
-    return InterviewConfigAuthoring.model_validate(config)
+
+    outcomes = await list_outcomes_for_config(db, config_id)
+    questions = await list_questions_for_config(db, config_id)
+
+    return InterviewForAuthoringPublic(
+        config=InterviewConfigAuthoring.model_validate(config),
+        outcomes=[InterviewOutcomeAuthoring.model_validate(o) for o in outcomes],
+        questions=[InterviewQuestionAuthoring.model_validate(q) for q in questions],
+    )
 
 
 @router.patch("/interview-configs/{config_id}", response_model=InterviewConfigAuthoring)
@@ -167,6 +184,38 @@ async def publish_interview_config(
 ) -> InterviewConfigAuthoring:
     try:
         config = await authoring_service.publish_interview_config(db, config_id, current_user)
+    except NotFoundError as exc:
+        raise _not_found("interview_config", config_id) from exc
+    except AppError as exc:
+        raise _bad_request(str(exc)) from exc
+    await db.commit()
+    return InterviewConfigAuthoring.model_validate(config)
+
+
+@router.post("/interview-configs/{config_id}/archive", response_model=InterviewConfigAuthoring)
+async def archive_interview_config(
+    config_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_CONFIG)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> InterviewConfigAuthoring:
+    try:
+        config = await authoring_service.archive_interview_config(db, config_id, current_user)
+    except NotFoundError as exc:
+        raise _not_found("interview_config", config_id) from exc
+    except AppError as exc:
+        raise _bad_request(str(exc)) from exc
+    await db.commit()
+    return InterviewConfigAuthoring.model_validate(config)
+
+
+@router.post("/interview-configs/{config_id}/unarchive", response_model=InterviewConfigAuthoring)
+async def unarchive_interview_config(
+    config_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_CONFIG)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> InterviewConfigAuthoring:
+    try:
+        config = await authoring_service.unarchive_interview_config(db, config_id, current_user)
     except NotFoundError as exc:
         raise _not_found("interview_config", config_id) from exc
     except AppError as exc:
@@ -367,6 +416,123 @@ async def update_outcome(
         raise _bad_request(str(exc)) from exc
     await db.commit()
     return InterviewOutcomeAuthoring.model_validate(outcome)
+
+
+@router.delete(
+    "/interview-configs/{config_id}/outcomes/{outcome_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def delete_outcome(
+    config_id: UUID,
+    outcome_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_CONFIG)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> None:
+    try:
+        await authoring_service.delete_outcome(db, config_id, outcome_id, current_user)
+    except NotFoundError as exc:
+        raise _not_found("interview_outcome", outcome_id) from exc
+    await db.commit()
+
+
+@router.get(
+    "/interview-configs/{config_id}/sessions",
+    response_model=list[InterviewSessionSummary],
+)
+async def list_config_sessions(
+    config_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_CONFIG)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> list[InterviewSessionSummary]:
+    """Teacher's per-config attempts list (thesis p77 review surface)."""
+    del current_user
+    from sqlalchemy import text as _text  # noqa: PLC0415
+
+    from abridgeai.features.interviews.queries import sessions as _sessions_q  # noqa: PLC0415
+
+    sessions = await _sessions_q.list_sessions_for_config(db, config_id)
+    student_ids = {s.student_id for s in sessions}
+    names: dict[UUID, str] = {}
+    if student_ids:
+        rows = (
+            await db.execute(
+                _text(
+                    "SELECT u.id, COALESCE(p.display_name, u.primary_email) AS name "
+                    "FROM users u "
+                    "LEFT JOIN user_profiles p ON p.user_id = u.id "
+                    "WHERE u.id = ANY(:ids)"
+                ),
+                {"ids": list(student_ids)},
+            )
+        ).mappings().all()
+        names = {row["id"]: row["name"] for row in rows}
+    return [
+        InterviewSessionSummary(
+            session_id=s.id,
+            student_id=s.student_id,
+            student_name=names.get(s.student_id),
+            attempt_number=s.attempt_number,
+            status=s.status,
+            input_mode=s.input_mode,
+            pass_verdict=s.pass_verdict,
+            started_at=s.started_at,
+            ended_at=s.ended_at,
+        )
+        for s in sessions
+    ]
+
+
+@router.get(
+    "/interview-sessions/{session_id}/transcript",
+    response_model=InterviewTranscriptRead,
+)
+async def get_session_transcript(
+    session_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_SESSION_AUTHORING)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> InterviewTranscriptRead:
+    """Full ordered Q&A transcript for teacher remediation review (thesis p77)."""
+    del current_user
+    from abridgeai.features.interviews.models import (  # noqa: PLC0415
+        InterviewQuestion,
+        InterviewSessionQuestion,
+    )
+    from abridgeai.features.interviews.queries import sessions as _sessions_q  # noqa: PLC0415
+
+    messages = await _sessions_q.list_session_messages(db, session_id)
+    # Resolve each message's question prompt via session_question_id -> question.
+    prompts: dict[UUID, str] = {}
+    sq_ids = {
+        m.session_question_id for m in messages if m.session_question_id is not None
+    }
+    if sq_ids:
+        from sqlalchemy import select as _select  # noqa: PLC0415
+
+        rows = (
+            await db.execute(
+                _select(InterviewSessionQuestion.id, InterviewQuestion.prompt_text)
+                .join(
+                    InterviewQuestion,
+                    InterviewQuestion.id == InterviewSessionQuestion.interview_question_id,
+                )
+                .where(InterviewSessionQuestion.id.in_(sq_ids))
+            )
+        ).all()
+        prompts = {row[0]: row[1] for row in rows}
+
+    turns = [
+        InterviewTranscriptTurn(
+            role=m.role,
+            question_prompt=prompts.get(m.session_question_id)
+            if m.session_question_id is not None
+            else None,
+            content_text=m.content_text,
+            has_audio=m.audio_object_id is not None,
+            created_at=m.created_at,
+        )
+        for m in messages
+    ]
+    return InterviewTranscriptRead(session_id=session_id, turns=turns)
 
 
 @router.get(

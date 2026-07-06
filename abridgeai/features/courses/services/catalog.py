@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from abridgeai.features.courses.queries import (
@@ -25,6 +25,7 @@ from abridgeai.features.courses.queries import (
     get_published_lesson_by_id,
     get_published_module_by_id,
     get_user_primary_organization_id,
+    get_visible_lesson_resource,
     get_visible_resource_storage_target,
     list_enrolled_courses,
     list_published_course_outcomes,
@@ -193,36 +194,50 @@ async def get_published_course_content_for_learner(
         return None
 
     # Group items_data by module_id so each ModulePublic gets its items
-    # without touching the lazy ORM relationship. Quiz items map their
-    # ``quiz`` row into ``target`` so the polymorphic field is populated
-    # for both ``lesson`` and ``quiz`` rows.
-    items_by_module: dict = {}
+    # without touching the lazy ORM relationship. Each item maps its
+    # type-specific row (lesson / quiz / interview config) into
+    # ``target`` so the polymorphic field is populated for all rows.
+    items_by_module: dict[str, list[dict[str, Any]]] = {}
     for item in tree.get("items", []):
         mid = str(item["module_id"])
-        target = item.get("quiz") if item["item_type"] == "quiz" else item.get("lesson")
-        items_by_module.setdefault(mid, []).append({
-            "id": item["id"],
-            "module_id": item["module_id"],
-            "item_type": item["item_type"],
-            "position": item["position"],
-            "target": target,
-        })
+        if item["item_type"] == "quiz":
+            target = item.get("quiz")
+        elif item["item_type"] == "interview":
+            target = item.get("interview")
+        else:
+            # Lesson targets are slimmed: the tree must not carry the
+            # lesson body past the FR-4.5 unlock gate.
+            lesson_row = item.get("lesson")
+            target = _slim_lesson_public(lesson_row) if lesson_row is not None else None
+        items_by_module.setdefault(mid, []).append(
+            {
+                "id": item["id"],
+                "module_id": item["module_id"],
+                "item_type": item["item_type"],
+                "position": item["position"],
+                "target": target,
+            }
+        )
 
     modules_data = []
     for m in tree["modules"]:
-        modules_data.append({
-            "id": m.id,
-            "course_id": m.course_id,
-            "title": m.title,
-            "position": m.position,
-            "items": items_by_module.get(str(m.id), []),
-        })
+        modules_data.append(
+            {
+                "id": m.id,
+                "course_id": m.course_id,
+                "title": m.title,
+                "position": m.position,
+                "items": items_by_module.get(str(m.id), []),
+            }
+        )
 
     course_public = await _course_with_instructor(db, tree["course"])
-    return CourseContentPublic.model_validate({
-        "course": course_public,
-        "modules": modules_data,
-    })
+    return CourseContentPublic.model_validate(
+        {
+            "course": course_public,
+            "modules": modules_data,
+        }
+    )
 
 
 async def list_published_modules_for_course(
@@ -265,6 +280,20 @@ async def get_published_module_for_learner(
     return None if module is None else ModulePublic.model_validate(module)
 
 
+def _slim_lesson_public(lesson: object) -> LessonPublic:
+    """Serialize a lesson WITHOUT its body fields.
+
+    List/tree payloads are navigational: ``notes_markdown`` (the lesson
+    body), ``summary`` and ``primary_material_id`` are only served by the
+    unlock-gated ``GET /lessons/{lesson_id}`` (FR-4.5). Including them in
+    ungated list/tree responses would let locked lesson content leak.
+    """
+    public = LessonPublic.model_validate(lesson)
+    return public.model_copy(
+        update={"summary": None, "notes_markdown": None, "primary_material_id": None}
+    )
+
+
 async def list_visible_module_items_for_learner(
     db: AsyncSession, module_id: UUID
 ) -> list[ModuleItemPublic] | None:
@@ -272,24 +301,35 @@ async def list_visible_module_items_for_learner(
 
     Items come back as dicts with ``target`` already hydrated to the
     matching ``Lesson`` / ``Quiz`` row (see
-    :func:`list_visible_module_items`); we just hand them to Pydantic.
+    :func:`list_visible_module_items`); lesson targets are slimmed via
+    :func:`_slim_lesson_public` before serialization.
     """
     module = await get_published_module_by_id(db, module_id)
     if module is None:
         return None
     items = await list_visible_module_items(db, module_id)
-    return [ModuleItemPublic.model_validate(item) for item in items]
+    slimmed = [
+        {**item, "target": _slim_lesson_public(item["target"])}
+        if item["item_type"] == "lesson" and item["target"] is not None
+        else item
+        for item in items
+    ]
+    return [ModuleItemPublic.model_validate(item) for item in slimmed]
 
 
 async def list_published_lessons_for_module(
     db: AsyncSession, module_id: UUID
 ) -> list[LessonPublic] | None:
-    """Published lessons under a published module; ``None`` (→ 404) otherwise."""
+    """Published lessons under a published module; ``None`` (→ 404) otherwise.
+
+    Body fields are stripped (:func:`_slim_lesson_public`) — the gated
+    lesson-detail endpoint is the only body source.
+    """
     module = await get_published_module_by_id(db, module_id)
     if module is None:
         return None
     lessons = await list_published_lessons(db, module_id)
-    return [LessonPublic.model_validate(lesson) for lesson in lessons]
+    return [_slim_lesson_public(lesson) for lesson in lessons]
 
 
 async def get_published_lesson_for_learner(
@@ -308,6 +348,17 @@ async def list_visible_lesson_resources_for_learner(
         return None
     resources = await list_visible_lesson_resources(db, lesson_id)
     return [LessonResourcePublic.model_validate(r) for r in resources]
+
+
+async def get_visible_resource_lesson_id(db: AsyncSession, resource_id: UUID) -> UUID | None:
+    """Lesson id owning a student-visible resource, or ``None`` when the
+    resource is missing / hidden / under unpublished content.
+
+    Used by the learner router to apply the lesson unlock gate (FR-4.5)
+    to resource downloads without leaking resource existence.
+    """
+    resource = await get_visible_lesson_resource(db, resource_id)
+    return resource.lesson_id if resource else None
 
 
 async def get_lesson_resource_download_url(

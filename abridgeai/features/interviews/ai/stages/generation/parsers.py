@@ -59,14 +59,30 @@ class InterviewQuestionDraft:
     rationale: str = ""
 
 
-def parse_generation_response(payload: Any) -> list[InterviewQuestionDraft]:  # noqa: ANN401 -- raw LLM JSON
-    """Validate raw LLM JSON into drafts; drop bad entries silently."""
+def parse_generation_response(
+    payload: Any,
+    *,
+    max_questions: int | None = None,
+) -> list[InterviewQuestionDraft]:  # noqa: ANN401 -- raw LLM JSON
+    """Validate raw LLM JSON into drafts; drop bad entries silently.
+
+    Parameters
+    ----------
+    payload
+        Raw LLM JSON (dict or list).
+    max_questions
+        Cap the returned list at this length. LLMs sometimes overshoot
+        the requested ``question_count``; we keep the first N valid
+        entries so the teacher sees exactly the number they asked for.
+    """
     raw = _extract_question_list(payload)
     out: list[InterviewQuestionDraft] = []
     for entry in raw:
         draft = _prepare_question(entry)
         if draft is not None:
             out.append(draft)
+            if max_questions is not None and len(out) >= max_questions:
+                break
     return out
 
 

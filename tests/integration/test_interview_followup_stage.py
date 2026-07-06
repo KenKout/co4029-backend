@@ -50,7 +50,22 @@ def _db_with_no_existing_followup() -> AsyncMock:
     result = MagicMock()
     result.scalar_one_or_none = MagicMock(return_value=None)
     db.execute = AsyncMock(return_value=result)
+    db.begin_nested = MagicMock(side_effect=_savepoint_cm)
     return db
+
+
+def _savepoint_cm() -> MagicMock:
+    """A ``begin_nested()`` stand-in yielding an async context manager.
+
+    ``maybe_generate_followup`` wraps the gateway call in
+    ``async with db.begin_nested()`` (SAVEPOINT). A plain ``AsyncMock``
+    attribute returns a coroutine, which is not an async CM, so the helper
+    must hand back an object exposing ``__aenter__``/``__aexit__``.
+    """
+    cm = MagicMock()
+    cm.__aenter__ = AsyncMock(return_value=cm)
+    cm.__aexit__ = AsyncMock(return_value=False)
+    return cm
 
 
 def _db_with_existing_followup() -> AsyncMock:
@@ -199,3 +214,30 @@ async def test_empty_answer_short_circuits_without_db_or_llm() -> None:
     assert result is None
     db.execute.assert_not_called()
     gateway.generate_json.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_gateway_failure_is_swallowed_inside_savepoint() -> None:
+    """A failing gateway/audit write must not bubble to /respond.
+
+    Regression for the ck_ai_model_calls_parent_ref 500: the audit flush
+    raised, the bare ``except`` swallowed it, but the poisoned session then
+    500'd the request. The SAVEPOINT now contains the failure so the stage
+    returns None and the request transaction stays usable.
+    """
+    db = _db_with_no_existing_followup()
+    gateway = SimpleNamespace(
+        generate_json=AsyncMock(side_effect=RuntimeError("audit flush failed"))
+    )
+
+    result = await maybe_generate_followup(
+        db,
+        session=_session_stub(),
+        current_question=_question_stub(),
+        student_answer="It runs callbacks.",
+        gateway=gateway,
+    )
+
+    assert result is None
+    db.begin_nested.assert_called_once()
+    gateway.generate_json.assert_awaited_once()

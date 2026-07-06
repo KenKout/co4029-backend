@@ -24,12 +24,12 @@ Design notes
   ``Mapped`` class that uses :class:`SoftDeleteMixin`. These visibility
   clauses **add** to that — they're status-based publish gates, not
   deletion filters.
-* **Forward references for Phase 4/5/6 entities.** Quizzes, interview
-  configs, and learning-material visibility live in features that
-  T3.3 cannot import (would break the import-linter contracts and
-  introduce a circular ref). Their clause builders raise
-  :class:`NotImplementedError` until Phase 4/5/6 lands the relevant
-  models. T3.4 must not call them yet.
+* **Lazy imports for cross-feature entities.** Quizzes, interview
+  configs, and learning materials live in features that this module
+  cannot import at load time (would break the import-linter contracts
+  and introduce a circular ref). Their clause builders import the
+  mapped class inside the function body — the composing query must
+  join the corresponding table for the predicate to bind.
 
 Composition example (used by T3.4)
 ----------------------------------
@@ -46,7 +46,7 @@ Composition example (used by T3.4)
 
 from __future__ import annotations
 
-from sqlalchemy import false
+from sqlalchemy import and_, false, select
 from sqlalchemy.sql import case
 from sqlalchemy.sql.elements import ColumnElement
 
@@ -116,24 +116,45 @@ def published_quiz_clause() -> ColumnElement[bool]:
 
 
 def published_interview_clause() -> ColumnElement[bool]:
-    """Forward reference — raises until Phase 6 lands ``features.interviews.models``.
+    """SQL: ``interview_configs.status = 'published'``.
 
-    The Phase-6 implementation will return
-    ``InterviewConfig.status == 'published'``.
+    Assumes :class:`InterviewConfig` is in the ``FROM`` clause of the
+    composing query (outer-joined on ``module_items.interview_config_id``);
+    without the join the predicate degrades to NULL → falsy in ``WHERE``.
     """
-    raise NotImplementedError(
-        "published_interview_clause: features.interviews.models pending Phase 6 (T6.x)"
-    )
+    from abridgeai.features.interviews.models import InterviewConfig
+
+    return InterviewConfig.status == "published"
 
 
 def published_material_clause() -> ColumnElement[bool]:
-    """Forward reference — raises until Phase 4 lands ``features.materials.models``.
+    """SQL: material is student-visible AND its current version is ready.
 
-    The Phase-4 implementation will return
-    ``LearningMaterial.visible_to_students.is_(True)`` (per plan §4062).
+    ``learning_materials.visible_to_students IS TRUE`` (plan §4062) AND
+    EXISTS a ``learning_material_versions`` row that is both
+    ``is_current`` and ``processing_status = 'ready'`` — learners must
+    never see a material whose ingestion pipeline has not completed.
+
+    Assumes :class:`LearningMaterial` is in the ``FROM`` clause of the
+    composing query; the version check is a correlated EXISTS subquery.
     """
-    raise NotImplementedError(
-        "published_material_clause: features.materials.models pending Phase 4 (T4.x)"
+    from abridgeai.features.materials.models import (
+        LearningMaterial,
+        LearningMaterialVersion,
+    )
+
+    ready_current_version = (
+        select(LearningMaterialVersion.id)
+        .where(
+            LearningMaterialVersion.material_id == LearningMaterial.id,
+            LearningMaterialVersion.is_current.is_(True),
+            LearningMaterialVersion.processing_status == "ready",
+        )
+        .exists()
+    )
+    return and_(
+        LearningMaterial.visible_to_students.is_(True),
+        ready_current_version,
     )
 
 
@@ -146,22 +167,18 @@ def module_item_visible_clause() -> ColumnElement[bool]:
       query MUST join :class:`Lesson` for this branch to make sense; if
       the join is missing the predicate degrades to NULL on those rows
       which Postgres treats as falsy in ``WHERE``).
-    * ``'quiz'`` → ``false()`` placeholder (Phase 5 swaps in the real
-      ``Quiz.status = 'published'`` predicate).
-    * ``'interview'`` → ``false()`` placeholder (Phase 6 swaps in
-      ``InterviewConfig.status = 'published'``).
+    * ``'quiz'`` → ``quizzes.status = 'published'`` (requires a
+      :class:`Quiz` join on ``module_items.quiz_id``).
+    * ``'interview'`` → ``interview_configs.status = 'published'``
+      (requires an :class:`InterviewConfig` join on
+      ``module_items.interview_config_id``).
     * else → ``false()`` (defensive — the
       ``ck_module_items_item_type_enum`` CHECK constraint already
       restricts the column to those three values).
-
-    Until Phase 5/6 land, only lesson-typed module items are visible to
-    student-facing queries — quiz / interview items appear in authoring
-    queries (which don't apply this clause) but are filtered out of
-    published content trees.
     """
     return case(
         (ModuleItem.item_type == "lesson", Lesson.status == "published"),
         (ModuleItem.item_type == "quiz", published_quiz_clause()),
-        (ModuleItem.item_type == "interview", false()),
+        (ModuleItem.item_type == "interview", published_interview_clause()),
         else_=false(),
     )

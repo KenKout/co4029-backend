@@ -25,6 +25,7 @@ ensures concurrent active sessions don't leak by:
 
 from __future__ import annotations
 
+from datetime import datetime
 from uuid import UUID
 
 from sqlalchemy import func, select
@@ -32,6 +33,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from abridgeai.features.interviews.models import (
     GapReport,
+    InterviewConfig,
     InterviewOutcomeEvaluation,
     InterviewSession,
     InterviewSessionMessage,
@@ -92,6 +94,22 @@ async def get_user_interview_sessions(
     if status is not None:
         stmt = stmt.where(InterviewSession.status == status)
     stmt = stmt.order_by(InterviewSession.started_at.desc()).limit(limit)
+    return list((await db.execute(stmt)).scalars().all())
+
+
+async def list_sessions_for_config(
+    db: AsyncSession, config_id: UUID
+) -> list[InterviewSession]:
+    """All sessions (any student) for one interview config, newest first.
+
+    Powers the teacher's per-config attempts list (thesis p77 review surface).
+    Authorisation is enforced by the router's config-scoped access guard.
+    """
+    stmt = (
+        select(InterviewSession)
+        .where(InterviewSession.interview_config_id == config_id)
+        .order_by(InterviewSession.started_at.desc())
+    )
     return list((await db.execute(stmt)).scalars().all())
 
 
@@ -196,7 +214,59 @@ async def list_session_messages(
     return list((await db.execute(stmt)).scalars().all())
 
 
+async def list_in_progress_voice_sessions_with_limit(
+    db: AsyncSession,
+) -> list[tuple[InterviewSession, int | None]]:
+    """In-progress voice/hybrid sessions paired with their config time-limit.
+
+    Used by the stale-session sweep (Phase 4). Returns ``(session,
+    time_limit_minutes)`` so the caller decides staleness in Python (avoids
+    per-row SQL interval math). ``time_limit_minutes`` may be ``None`` (no
+    limit configured → session is never swept on time).
+    """
+    stmt = (
+        select(InterviewSession, InterviewConfig.time_limit_minutes)
+        .join(InterviewConfig, InterviewConfig.id == InterviewSession.interview_config_id)
+        .where(
+            InterviewSession.status == "in_progress",
+            InterviewSession.input_mode.in_(("voice", "hybrid")),
+        )
+    )
+    rows = (await db.execute(stmt)).all()
+    return [(row[0], row[1]) for row in rows]
+
+
+async def count_user_messages(db: AsyncSession, session_id: UUID) -> int:
+    """Number of student (``role='user'``) turns recorded for a session.
+
+    The sweep uses this to decide whether a stale session has enough
+    transcript to evaluate (>=1) or should simply be marked ``abandoned``.
+    """
+    stmt = select(func.count(InterviewSessionMessage.id)).where(
+        InterviewSessionMessage.session_id == session_id,
+        InterviewSessionMessage.role == "user",
+    )
+    return int((await db.execute(stmt)).scalar_one())
+
+
+async def get_last_activity_at(db: AsyncSession, session_id: UUID) -> datetime | None:
+    """Timestamp of the most recent message in a session, or ``None`` if the
+    session has no messages yet.
+
+    The stale-session sweep uses this as the "idle since" anchor for voice
+    sessions whose config has no ``time_limit_minutes``: a session is finalised
+    once it has been silent (no new message) for the fixed idle window. When
+    there are no messages, callers fall back to ``started_at``.
+    """
+    stmt = select(func.max(InterviewSessionMessage.created_at)).where(
+        InterviewSessionMessage.session_id == session_id,
+    )
+    return (await db.execute(stmt)).scalar_one_or_none()
+
+
 __all__ = [
+    "count_user_messages",
+    "get_last_activity_at",
     "get_active_session",
     "get_gap_report_for_session",
     "get_outcome_evaluations",
@@ -204,5 +274,7 @@ __all__ = [
     "get_session_attempt_number",
     "get_session_with_responses",
     "get_user_interview_sessions",
+    "list_in_progress_voice_sessions_with_limit",
     "list_session_messages",
+    "list_sessions_for_config",
 ]

@@ -36,7 +36,10 @@ from abridgeai.features.quizzes.schemas import (
     QuizPublic,
 )
 from abridgeai.features.quizzes.services import taking as taking_service
-from abridgeai.features.quizzes.services.taking import AllCardsInCooldownError
+from abridgeai.features.quizzes.services.taking import (
+    AllCardsInCooldownError,
+    InterviewPassRequiredError,
+)
 
 router = APIRouter(tags=["quizzes-learner"])
 
@@ -124,6 +127,15 @@ async def start_attempt(
         )
     except NotFoundError as exc:
         raise _not_found("quiz", quiz_id) from exc
+    except InterviewPassRequiredError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "error": "interview_pass_required",
+                "module_id": str(exc.module_id),
+                "interview_config_id": str(exc.interview_config_id),
+            },
+        ) from exc
     except AllCardsInCooldownError as exc:
         retry_after_seconds = max(0, int((exc.retry_available_at - utcnow()).total_seconds()))
         raise HTTPException(
@@ -207,9 +219,7 @@ async def get_attempt_review(
     or hasn't been submitted yet (review only opens after submission so
     correct-option flags can't leak mid-attempt).
     """
-    review = await taking_service.get_attempt_review(
-        db, attempt_id=attempt_id, actor=current_user
-    )
+    review = await taking_service.get_attempt_review(db, attempt_id=attempt_id, actor=current_user)
     if review is None:
         raise _not_found("quiz_attempt", attempt_id)
     return review

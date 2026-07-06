@@ -9,6 +9,7 @@ from abridgeai.core.db.conflict_mapper import (
     register_conflict_mappings,
 )
 from abridgeai.core.exceptions import ForbiddenError, NotFoundError
+from abridgeai.core.observability import get_logger
 from abridgeai.core.security import (
     create_access_token,
     generate_token,
@@ -28,6 +29,8 @@ from abridgeai.infrastructure.google_oauth import fetch_google_profile
 
 from .profile import serialize_user
 
+logger = get_logger(__name__)
+
 register_conflict_mappings(
     {
         "uq_auth_identity_provider_subject": "auth_identity_provider_taken: this provider account is already linked to another user",  # noqa: E501
@@ -37,7 +40,17 @@ register_conflict_mappings(
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+    from uuid import UUID
+
     from sqlalchemy.ext.asyncio import AsyncSession
+
+    # Injected by the auth router from access_control.api.public — the
+    # identity service layer must stay feature-local (enforced by
+    # tests/unit/test_identity_services.py source-grep), so cross-feature
+    # reach happens via these callables, not imports.
+    AutoProvisionOrgResolver = Callable[["AsyncSession", str], Awaitable["UUID | None"]]
+    DefaultAccessGranter = Callable[["AsyncSession", "UUID", "UUID"], Awaitable[None]]
 
 
 async def handle_google_callback(
@@ -46,13 +59,19 @@ async def handle_google_callback(
     code: str,
     ip_address: str | None = None,
     user_agent: str | None = None,
+    resolve_auto_provision_org: AutoProvisionOrgResolver | None = None,
+    grant_default_access: DefaultAccessGranter | None = None,
 ) -> TokenResponse:
     """Exchange a Google OAuth code for an application token pair.
 
     Pre-registration gate (added 2026-05-19): the user *must* already exist in
     ``users`` (created by an admin) AND have ``status='active'``. Brand-new
     OAuth profiles are rejected with :class:`ForbiddenError` (HTTP 403) so
-    the platform stays invite-only.
+    the platform stays invite-only — with ONE exception (FR-2.7/FR-2.9):
+    when the Google-verified email's domain is registered in
+    ``organization_domains`` with ``auto_provision = TRUE`` for an active
+    organization, the account is created on the spot with an org
+    membership and the least-privilege ``student`` role.
     """
     profile = await fetch_google_profile(code)
     identity = await user_queries.get_identity_by_provider_subject(
@@ -61,6 +80,14 @@ async def handle_google_callback(
 
     if identity is None:
         user = await user_queries.get_user_by_email(db, profile.email)
+        if user is None and profile.email_verified:
+            # FR-2.7 gate: never mint accounts from an unverified OIDC email.
+            user = await _auto_provision_user(
+                db,
+                email=profile.email,
+                resolve_auto_provision_org=resolve_auto_provision_org,
+                grant_default_access=grant_default_access,
+            )
         if user is None:
             raise ForbiddenError(
                 "This email is not registered. Ask an administrator to add "
@@ -99,6 +126,42 @@ async def handle_google_callback(
         user.last_login_at = utcnow()
 
     return await _issue_tokens(db, user=user, ip_address=ip_address, user_agent=user_agent)
+
+
+async def _auto_provision_user(
+    db: AsyncSession,
+    *,
+    email: str,
+    resolve_auto_provision_org: AutoProvisionOrgResolver | None,
+    grant_default_access: DefaultAccessGranter | None,
+) -> User | None:
+    """Create a user for a registered auto-provision email domain (FR-2.7).
+
+    Exact CITEXT match on the Google-verified email's domain — no
+    subdomain wildcards, so a spoof-adjacent domain never matches. The
+    injected access_control callables resolve the org and grant the
+    least-privilege defaults (active membership + org-scoped ``student``
+    role). Returns ``None`` when the feature is unwired or no
+    auto-provision domain matches, so the caller keeps the invite-only
+    rejection.
+    """
+    if resolve_auto_provision_org is None or grant_default_access is None:
+        return None
+    domain = email.rsplit("@", 1)[-1].lower()
+    org_id = await resolve_auto_provision_org(db, domain)
+    if org_id is None:
+        return None
+    user = User(primary_email=email.lower(), status="active")
+    db.add(user)
+    await flush_or_conflict(db)
+    await grant_default_access(db, user.id, org_id)
+    logger.info(
+        "identity.user_auto_provisioned",
+        user_id=str(user.id),
+        organization_id=str(org_id),
+        email_domain=domain,
+    )
+    return user
 
 
 async def _issue_tokens(

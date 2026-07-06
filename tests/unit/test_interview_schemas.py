@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from decimal import Decimal
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -25,7 +24,6 @@ from abridgeai.features.interviews.schemas import (
     InterviewQuestionAuthoring,
     InterviewQuestionCreate,
     InterviewQuestionPublic,
-    InterviewRubricScore,
     InterviewSessionFinishResponse,
     InterviewSessionPublic,
     InterviewSessionStartRequest,
@@ -409,24 +407,18 @@ def test_orm_compat_via_from_attributes() -> None:
     assert "difficulty" not in dto.model_dump()
 
 
-def test_session_finish_response_carries_rubric() -> None:
-    outcome_id = uuid4()
-    score = InterviewRubricScore(
-        outcome_id=outcome_id,
-        outcome_text="Explains backprop",
-        verdict_met=True,
-        evidence_excerpt="Mentioned chain rule",
-    )
+def test_session_finish_response_binary_only_defaults() -> None:
+    """§4.3: the student finish response is binary pass/fail. ``total_score`` /
+    ``rubric_scores`` remain on the schema for API stability but default to
+    None / [] — the router never populates them for the learner."""
     finish = InterviewSessionFinishResponse(
         session_id=uuid4(),
         status="completed",
-        total_score=Decimal("0.85"),
-        rubric_scores=[score],
         pass_verdict=True,
     )
     assert finish.pass_verdict is True
-    assert len(finish.rubric_scores) == 1
-    assert finish.rubric_scores[0].verdict_met is True
+    assert finish.total_score is None
+    assert finish.rubric_scores == []
 
 
 def test_for_authoring_compose() -> None:

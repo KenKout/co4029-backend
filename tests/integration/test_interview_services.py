@@ -45,6 +45,10 @@ import abridgeai.features.quizzes.models  # noqa: F401  -- register quiz_attempt
 from abridgeai.core.config import get_settings
 from abridgeai.core.exceptions import ForbiddenError
 from abridgeai.core.security import CurrentUser
+from abridgeai.features.interviews.ai.stages.evaluation.outcome_verdicts import (
+    OutcomeVerdict,
+    build_outcome_verdicts,
+)
 from abridgeai.features.interviews.ai.stages.evaluation.rubric import (
     CriterionScore,
     ResponseEvaluation,
@@ -701,6 +705,18 @@ async def test_evaluate_and_generate_report_persists_outcome_evaluations_and_gap
         "abridgeai.features.interviews.services.evaluation.evaluate_session",
         AsyncMock(return_value=rubric),
     )
+    # §4.3 gate: per-outcome verdicts decide pass/fail. Both outcomes met →
+    # with NULL min_outcomes_to_pass (all-met rule) the session passes.
+    outcome_verdicts = build_outcome_verdicts(
+        [
+            OutcomeVerdict(outcome_id=oid, met=True, reasoning="Demonstrated.", evidence="quote")
+            for oid in seeded["outcome_ids"]
+        ]
+    )
+    monkeypatch.setattr(
+        "abridgeai.features.interviews.services.evaluation.evaluate_outcomes",
+        AsyncMock(return_value=outcome_verdicts),
+    )
     monkeypatch.setattr(
         "abridgeai.features.interviews.services.evaluation.generate_gap_report",
         AsyncMock(return_value=draft),
@@ -745,4 +761,83 @@ async def test_evaluate_and_generate_report_persists_outcome_evaluations_and_gap
     assert report["teacher_summary"] == "Strong overall; gap on complexity reasoning."
     assert refreshed is not None
     assert refreshed.internal_summary_json["total_score"] == 80.0
+    assert refreshed.internal_summary_json["outcomes_met"] == 2
+    assert refreshed.internal_summary_json["outcomes_total"] == 2
     assert refreshed.pass_verdict is True
+
+
+@pytest.mark.asyncio
+async def test_evaluate_and_generate_report_fails_when_outcomes_not_met(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """§4.3: when not enough outcomes are met, the session fails — regardless of
+    the rubric score (which no longer gates pass)."""
+    seeded = await _create_published_config(
+        engine,
+        course_id=scenario["course_id"],
+        module_id=scenario["module_id"],
+        teacher_id=scenario["teacher_id"],
+        outcomes=2,
+    )
+    payload = _CreatePayload(input_mode="text")
+    async with session_factory() as session, session.begin():
+        started = await taking_service.start_session(
+            session, seeded["config_id"], payload, _actor(scenario["student_id"])
+        )
+    session_id = started.id
+
+    # High rubric score (would have passed under old >=60 logic)...
+    rubric = RubricScores(response_evaluations=[], aggregated={"technical_accuracy": 5.0},
+                          total_score=95.0)
+    # ...but only 1 of 2 outcomes met, and NULL threshold requires ALL → FAIL.
+    oids = seeded["outcome_ids"]
+    verdicts = build_outcome_verdicts(
+        [
+            OutcomeVerdict(outcome_id=oids[0], met=True, reasoning="ok", evidence=None),
+            OutcomeVerdict(outcome_id=oids[1], met=False, reasoning="missed", evidence=None),
+        ]
+    )
+    draft = GapReportDraft(
+        discrepancy_score=0.0, theory_score_avg=0.0, practice_score=95.0,
+        strengths=[], weaknesses=[], study_plan=[],
+        student_summary="s", teacher_summary="t", report_json={},
+    )
+    monkeypatch.setattr(
+        "abridgeai.features.interviews.services.evaluation.evaluate_session",
+        AsyncMock(return_value=rubric),
+    )
+    monkeypatch.setattr(
+        "abridgeai.features.interviews.services.evaluation.evaluate_outcomes",
+        AsyncMock(return_value=verdicts),
+    )
+    monkeypatch.setattr(
+        "abridgeai.features.interviews.services.evaluation.generate_gap_report",
+        AsyncMock(return_value=draft),
+    )
+
+    async with session_factory() as session:
+        await evaluation_service.evaluate_and_generate_report(session, session_id)
+
+    async with session_factory() as session:
+        evals = (
+            (
+                await session.execute(
+                    text(
+                        "SELECT outcome_id, verdict_met FROM interview_outcome_evaluations "
+                        "WHERE session_id = :s ORDER BY outcome_id"
+                    ),
+                    {"s": session_id},
+                )
+            )
+            .mappings()
+            .all()
+        )
+        refreshed = await session.get(InterviewSession, session_id)
+
+    # Distinct per-outcome verdicts (NOT all-equal) — the core §4.3 fix.
+    assert {row["verdict_met"] for row in evals} == {True, False}
+    assert refreshed is not None
+    assert refreshed.pass_verdict is False  # high rubric did NOT force a pass

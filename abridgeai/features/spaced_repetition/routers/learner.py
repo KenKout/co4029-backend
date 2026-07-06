@@ -281,6 +281,7 @@ async def get_my_course_sr_overview(
                 status=_classify_status(eligible=unlock.eligible, kr_estimate=kr),
                 kr_estimate=kr,
                 due_count=int(due_count or 0),
+                eligible=unlock.eligible,
             )
         )
     return items

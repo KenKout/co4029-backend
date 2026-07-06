@@ -22,7 +22,6 @@ exception is re-raised so ARQ records the job-level failure for retry.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
@@ -30,7 +29,8 @@ from uuid import UUID
 from abridgeai.core.db.conflict_mapper import flush_or_conflict
 from abridgeai.core.exceptions import NotFoundError
 from abridgeai.core.security import utcnow
-from abridgeai.features.interviews.ai.stages.evaluation import evaluate_session
+from abridgeai.features.interviews.ai.stages.evaluation import evaluate_outcomes, evaluate_session
+from abridgeai.features.interviews.ai.stages.evaluation.outcome_verdicts import OutcomeVerdicts
 from abridgeai.features.interviews.ai.stages.evaluation.rubric import RubricScores
 from abridgeai.features.interviews.ai.stages.gap_report import (
     GapReportDraft,
@@ -38,7 +38,6 @@ from abridgeai.features.interviews.ai.stages.gap_report import (
 )
 from abridgeai.features.interviews.models import (
     GapReport,
-    InterviewOutcome,
     InterviewOutcomeEvaluation,
     InterviewSession,
     InterviewSessionMessage,
@@ -55,10 +54,13 @@ async def evaluate_and_generate_report(db: AsyncSession, session_id: UUID) -> No
 
     Side effects (all in a single transaction):
 
-    1. ``InterviewOutcomeEvaluation`` rows — one per outcome with a
-       boolean verdict derived from the rubric aggregate.
-    2. ``InterviewSession.internal_summary_json`` — gains ``total_score``,
-       ``rubric_aggregated``, and ``pass_verdict``.
+    1. ``InterviewOutcomeEvaluation`` rows — one per outcome with its OWN
+       met/not-met verdict + reasoning + evidence (thesis §4.3), NOT a copied
+       session-total.
+    2. ``InterviewSession.pass_verdict`` — derived from
+       ``met_count >= min_outcomes_to_pass`` (NULL threshold → all outcomes
+       must be met). ``internal_summary_json`` also gains the rubric
+       ``total_score`` / ``rubric_aggregated`` for teacher diagnostics.
     3. ``GapReport`` row — student / teacher summary + ``report_json``.
 
     On exception: rollback, stamp ``internal_summary_json['evaluation_failure']``,
@@ -75,6 +77,18 @@ async def evaluate_and_generate_report(db: AsyncSession, session_id: UUID) -> No
         )
         candidate_answers = await _list_candidate_answers(db, session_id)
 
+        # Thesis §4.3 gate: per-outcome met/not-met verdicts decide pass/fail.
+        outcome_verdicts = await evaluate_outcomes(
+            db,
+            session=session,
+            outcomes=outcomes,
+            questions=questions,
+            answers=candidate_answers,
+            pipeline_run_id=None,
+        )
+
+        # Rubric stays as a teacher-facing diagnostic feeding the Gap Report;
+        # it no longer gates pass/fail (phase-03).
         rubric_scores = await evaluate_session(
             db,
             session=session,
@@ -84,7 +98,14 @@ async def evaluate_and_generate_report(db: AsyncSession, session_id: UUID) -> No
             pipeline_run_id=None,
         )
 
-        course_id, module_id = await _resolve_config_scope(db, session.interview_config_id)
+        config = await authoring_queries.get_interview_for_authoring(
+            db, session.interview_config_id
+        )
+        if config is None:
+            raise NotFoundError(f"Interview config {session.interview_config_id} not found")
+        min_outcomes_to_pass = getattr(config, "min_outcomes_to_pass", None)
+        course_id, module_id = config.course_id, config.module_id
+
         quiz_attempts = await _load_student_quiz_attempts(
             db, student_id=session.student_id, course_id=course_id, module_id=module_id
         )
@@ -100,9 +121,14 @@ async def evaluate_and_generate_report(db: AsyncSession, session_id: UUID) -> No
         )
 
         await _persist_outcome_evaluations(
-            db, session_id=session_id, outcomes=outcomes, rubric_scores=rubric_scores
+            db, session_id=session_id, verdicts=outcome_verdicts
         )
-        _stamp_session_summary(session, rubric_scores=rubric_scores)
+        _stamp_session_summary(
+            session,
+            rubric_scores=rubric_scores,
+            verdicts=outcome_verdicts,
+            min_outcomes_to_pass=min_outcomes_to_pass,
+        )
         await _persist_gap_report(
             db,
             session=session,
@@ -131,13 +157,6 @@ async def _list_candidate_answers(
 ) -> list[InterviewSessionMessage]:
     messages = await sessions_queries.list_session_messages(db, session_id)
     return [m for m in messages if getattr(m, "role", None) == "user"]
-
-
-async def _resolve_config_scope(db: AsyncSession, config_id: UUID) -> tuple[UUID, UUID]:
-    config = await authoring_queries.get_interview_for_authoring(db, config_id)
-    if config is None:
-        raise NotFoundError(f"Interview config {config_id} not found")
-    return config.course_id, config.module_id
 
 
 async def _load_student_quiz_attempts(
@@ -185,47 +204,57 @@ async def _persist_outcome_evaluations(
     db: AsyncSession,
     *,
     session_id: UUID,
-    outcomes: Sequence[InterviewOutcome],
-    rubric_scores: RubricScores,
+    verdicts: OutcomeVerdicts,
 ) -> None:
-    """Insert one :class:`InterviewOutcomeEvaluation` per outcome.
+    """Insert one :class:`InterviewOutcomeEvaluation` per outcome verdict.
 
-    Verdict heuristic: ``verdict_met = total_score >= 60``. The
-    rubric stage scores 0-100; 60 is the conventional pass cutoff
-    (matches the legacy ``interview_outcome_evaluations`` semantics).
-    Per-outcome differentiation is intentionally simple here — the
-    full LLM-driven per-outcome verdicts land in a future stage.
+    Each row carries that outcome's OWN met/not-met verdict, hidden reasoning,
+    and evidence excerpt — the genuine per-outcome judgement from the §4.3
+    verdict stage (not a copied session-total).
     """
-    pass_threshold = 60.0
-    verdict_met = rubric_scores.total_score >= pass_threshold
-    for outcome in outcomes:
+    for verdict in verdicts.verdicts:
         db.add(
             InterviewOutcomeEvaluation(
                 session_id=session_id,
-                outcome_id=outcome.id,
-                verdict_met=verdict_met,
-                hidden_reasoning=_format_rubric_reasoning(rubric_scores),
-                evidence_excerpt=None,
+                outcome_id=verdict.outcome_id,
+                verdict_met=verdict.met,
+                hidden_reasoning=verdict.reasoning,
+                evidence_excerpt=verdict.evidence,
             )
         )
     await flush_or_conflict(db)
 
 
-def _format_rubric_reasoning(rubric_scores: RubricScores) -> str:
-    parts = [f"total={rubric_scores.total_score:.2f}"]
-    for criterion, score in rubric_scores.aggregated.items():
-        parts.append(f"{criterion}={score:.2f}")
-    return ", ".join(parts)
+def _derive_pass_verdict(verdicts: OutcomeVerdicts, min_outcomes_to_pass: int | None) -> bool:
+    """Pass when enough outcomes are met (thesis §4.3).
+
+    ``min_outcomes_to_pass`` is the teacher-configured threshold. When it is
+    NULL/unset we require EVERY outcome to be met — the documented-safe
+    default (a teacher who configured no threshold has not opted into a
+    partial pass). A session with no outcomes cannot pass.
+    """
+    if verdicts.total == 0:
+        return False
+    threshold = min_outcomes_to_pass if min_outcomes_to_pass is not None else verdicts.total
+    return verdicts.met_count >= threshold
 
 
-def _stamp_session_summary(session: InterviewSession, *, rubric_scores: RubricScores) -> None:
-    pass_threshold = 60.0
+def _stamp_session_summary(
+    session: InterviewSession,
+    *,
+    rubric_scores: RubricScores,
+    verdicts: OutcomeVerdicts,
+    min_outcomes_to_pass: int | None,
+) -> None:
     summary: dict[str, Any] = dict(session.internal_summary_json or {})
     summary["total_score"] = float(rubric_scores.total_score)
     summary["rubric_aggregated"] = dict(rubric_scores.aggregated)
+    summary["outcomes_met"] = verdicts.met_count
+    summary["outcomes_total"] = verdicts.total
+    summary["min_outcomes_to_pass"] = min_outcomes_to_pass
     summary["evaluated_at"] = utcnow().isoformat()
     session.internal_summary_json = summary
-    session.pass_verdict = bool(rubric_scores.total_score >= pass_threshold)
+    session.pass_verdict = _derive_pass_verdict(verdicts, min_outcomes_to_pass)
 
 
 async def _persist_gap_report(

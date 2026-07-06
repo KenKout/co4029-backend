@@ -28,8 +28,15 @@ from uuid import UUID
 
 from abridgeai.ai.llm import LLMGateway, LLMRole
 from abridgeai.ai.prompts import render_prompt
+from abridgeai.features.interviews.ai.stages.evaluation.outcome_verdicts import (
+    OutcomeVerdicts,
+    build_outcome_verdicts,
+)
 from abridgeai.features.interviews.ai.stages.evaluation.parsers import (
     parse_evaluation_response,
+)
+from abridgeai.features.interviews.ai.stages.evaluation.parsers_outcome_verdicts import (
+    parse_outcome_verdicts,
 )
 from abridgeai.features.interviews.ai.stages.evaluation.rubric import (
     ResponseEvaluation,
@@ -52,6 +59,99 @@ if TYPE_CHECKING:
 
 
 EVALUATION_STAGE_NAME = "evaluation"
+
+
+async def evaluate_outcomes(
+    db: AsyncSession,
+    *,
+    session: InterviewSession,
+    outcomes: Sequence[InterviewOutcome],
+    questions: Sequence[InterviewQuestion],
+    answers: Sequence[InterviewSessionMessage],
+    pipeline_run_id: UUID | None = None,
+    gateway: LLMGateway | None = None,
+) -> OutcomeVerdicts:
+    """Judge the session transcript against EACH outcome (thesis §4.3).
+
+    Produces one binary met/not-met :class:`OutcomeVerdict` per configured
+    outcome in a SINGLE LLM call (the judge sees the whole transcript and all
+    outcomes at once). This is the authoritative pass signal — the services
+    layer compares ``met_count`` against ``InterviewConfig.min_outcomes_to_pass``.
+
+    Unlike :func:`evaluate_session` (rubric, retained as a teacher diagnostic),
+    this stage does NOT produce numeric scores and never references a model
+    answer. Returns empty verdicts when there are no outcomes or no candidate
+    answers. The stage is side-effect-free; the caller persists.
+    """
+    expected_outcome_ids = [outcome.id for outcome in outcomes]
+    if not expected_outcome_ids:
+        return build_outcome_verdicts([])
+
+    transcript = _build_transcript(questions, answers)
+    if not transcript:
+        # No candidate answers → every outcome defaults to not-met via the parser.
+        return build_outcome_verdicts(
+            parse_outcome_verdicts(None, expected_outcome_ids=expected_outcome_ids)
+        )
+
+    outcome_views = [_outcome_for_verdict(outcome) for outcome in outcomes]
+
+    gateway = gateway or LLMGateway()
+    system_prompt = render_prompt("prompts/outcome_system.j2")
+    user_prompt = render_prompt(
+        "prompts/outcome_user.j2",
+        transcript=transcript,
+        outcomes=outcome_views,
+    )
+
+    llm_result = await gateway.generate_json(
+        role=LLMRole.INTERVIEW_EVALUATION,
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
+        db=db,
+        stage_name=EVALUATION_STAGE_NAME,
+        pipeline_run_id=pipeline_run_id,
+        parent_run_id=pipeline_run_id,
+    )
+
+    payload = llm_result.content_json if isinstance(llm_result.content_json, dict) else None
+    verdicts = parse_outcome_verdicts(payload, expected_outcome_ids=expected_outcome_ids)
+    return build_outcome_verdicts(verdicts)
+
+
+def _build_transcript(
+    questions: Sequence[InterviewQuestion],
+    answers: Sequence[InterviewSessionMessage],
+) -> list[dict[str, str]]:
+    """Pair each candidate answer with its question prompt, in answer order.
+
+    Answers are ``role='user'`` rows; each carries ``session_question_id`` ->
+    ``InterviewQuestion.id``. Answers with no resolvable question still surface
+    (question text empty) so the judge sees the full candidate input.
+    """
+    prompts_by_question = _question_prompts(questions)
+    transcript: list[dict[str, str]] = []
+    for answer in answers:
+        if not _is_candidate_answer(answer):
+            continue
+        response_text = (getattr(answer, "content_text", None) or "").strip()
+        if not response_text:
+            continue
+        question_id = getattr(answer, "session_question_id", None)
+        question_prompt = (
+            prompts_by_question.get(question_id, "") if isinstance(question_id, UUID) else ""
+        )
+        transcript.append({"question": question_prompt, "answer": response_text})
+    return transcript
+
+
+def _outcome_for_verdict(outcome: InterviewOutcome) -> dict[str, Any]:
+    return {
+        "outcome_id": str(outcome.id),
+        "outcome_text": getattr(outcome, "outcome_text", "") or "",
+        "outcome_type": getattr(outcome, "outcome_type", "") or "",
+    }
+
 
 
 async def evaluate_session(

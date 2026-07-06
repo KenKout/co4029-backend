@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import secrets
 from typing import Annotated
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -21,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from abridgeai.core.db import get_db
 from abridgeai.core.exceptions import AppError, ForbiddenError, UnauthorizedError
 from abridgeai.core.security import CurrentUser, get_current_user_pre_mfa
+from abridgeai.features.access_control.api import public as access_control_api
 from abridgeai.features.identity.schemas import (
     GoogleLoginResponse,
     RefreshTokenRequest,
@@ -31,6 +33,20 @@ from abridgeai.features.identity.services import session as session_service
 from abridgeai.infrastructure.google_oauth import build_authorization_url
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+
+
+# FR-2.7/FR-2.9 — domain auto-provisioning adapters. The identity SERVICE
+# layer must stay feature-local (source-grep guard in
+# tests/unit/test_identity_services.py), so the cross-feature reach into
+# access_control happens here and is injected into the login service.
+async def _resolve_auto_provision_org(db: AsyncSession, email_domain: str) -> UUID | None:
+    return await access_control_api.find_auto_provision_org_id(db, email_domain=email_domain)
+
+
+async def _grant_default_access(db: AsyncSession, user_id: UUID, org_id: UUID) -> None:
+    await access_control_api.grant_default_student_access(
+        db, user_id=user_id, organization_id=org_id
+    )
 
 
 def _unauthorized(detail: str) -> HTTPException:
@@ -72,6 +88,8 @@ async def google_callback(
             code=code,
             ip_address=request.client.host if request.client else None,
             user_agent=request.headers.get("user-agent"),
+            resolve_auto_provision_org=_resolve_auto_provision_org,
+            grant_default_access=_grant_default_access,
         )
     except UnauthorizedError as exc:
         raise _unauthorized(str(exc)) from exc

@@ -76,7 +76,9 @@ from abridgeai.features.materials.services.authoring._upload import (
 )
 from abridgeai.features.materials.services.authoring._versions import (
     complete_upload,
+    list_material_versions,
     reprocess_material,
+    rollback_material_version,
     soft_delete_material,
 )
 
@@ -100,8 +102,10 @@ __all__ = [
     "init_upload",
     "link_existing_material",
     "list_authoring_materials",
+    "list_material_versions",
     "reprocess_material",
     "request_simple_upload",
+    "rollback_material_version",
     "resolve_course_id_for_material",
     "soft_delete_material",
     "update_material",

@@ -8,14 +8,17 @@ from abridgeai.features.career_paths.schemas.authoring import (
     CareerPathCreate,
     CareerPathStudentEnroll,
     CareerPathUpdate,
+    PathReadinessOverview,
     StudentCareerEnrollmentAuthoring,
     StudentPathProgressAuthoring,
+    StudentReadinessRead,
 )
 from abridgeai.features.career_paths.schemas.public import (
     CareerPathCoursePublic,
     CareerPathListPage,
     CareerPathProgressRead,
     CareerPathPublic,
+    CareerReadinessSnapshotRead,
     CourseProgressSummary,
     MyCareerEnrollmentRead,
 )
@@ -32,8 +35,11 @@ __all__ = [
     "CareerPathPublic",
     "CareerPathStudentEnroll",
     "CareerPathUpdate",
+    "CareerReadinessSnapshotRead",
     "CourseProgressSummary",
     "MyCareerEnrollmentRead",
+    "PathReadinessOverview",
     "StudentCareerEnrollmentAuthoring",
     "StudentPathProgressAuthoring",
+    "StudentReadinessRead",
 ]

@@ -36,7 +36,14 @@ from abridgeai.features.interviews.schemas.authoring import (
     InterviewOutcomeCreate,
     InterviewQuestionAuthoring,
     InterviewQuestionCreate,
+    InterviewSessionSummary,
+    InterviewTranscriptRead,
+    InterviewTranscriptTurn,
     ReviewStatusLiteral,
+)
+from abridgeai.features.interviews.schemas.integrity import (
+    IntegrityEventBatchRequest,
+    IntegrityEventItem,
 )
 from abridgeai.features.interviews.schemas.public import (
     InterviewConfigPublic,
@@ -47,6 +54,9 @@ from abridgeai.features.interviews.schemas.public import (
     PersonaLiteral,
     QuestionTypeLiteral,
     SupportedModesLiteral,
+)
+from abridgeai.features.interviews.schemas.real_time import (
+    RealtimeTokenResponse,
 )
 from abridgeai.features.interviews.schemas.report import (
     GapReportAuthoringRead,
@@ -77,6 +87,8 @@ __all__ = [
     "InterviewConfigCreate",
     "InterviewConfigPublic",
     "InterviewConfigUpdate",
+    "IntegrityEventBatchRequest",
+    "IntegrityEventItem",
     "InterviewForAuthoringPublic",
     "InterviewForTakingPublic",
     "InterviewGenerationRequest",
@@ -88,6 +100,9 @@ __all__ = [
     "InterviewQuestionCreate",
     "InterviewQuestionPublic",
     "InterviewRubricScore",
+    "InterviewSessionSummary",
+    "InterviewTranscriptRead",
+    "InterviewTranscriptTurn",
     "InterviewSessionFinishResponse",
     "InterviewSessionPublic",
     "InterviewSessionStartRequest",
@@ -97,6 +112,7 @@ __all__ = [
     "OutcomeTypeLiteral",
     "PersonaLiteral",
     "QuestionTypeLiteral",
+    "RealtimeTokenResponse",
     "ReviewStatusLiteral",
     "SessionStatusLiteral",
     "StudyPlanItem",

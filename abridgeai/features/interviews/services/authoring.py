@@ -67,6 +67,7 @@ register_conflict_mappings(
         "interview_questions_interview_config_id_position_key": "interview_question_position_taken: another question already occupies this position in the config",  # noqa: E501
         "uq_interview_questions_position": "interview_question_position_taken: another question already occupies this position in the config",  # noqa: E501
         "uq_interview_outcome_evaluations": "interview_outcome_evaluation_already_recorded: this outcome has already been evaluated for this session",  # noqa: E501
+        "uq_interview_session_questions_sequence": "interview_session_question_sequence_taken: this answer was already submitted — please refresh",  # noqa: E501
     }
 )
 
@@ -150,6 +151,12 @@ async def create_interview_config(
     )
     db.add(config)
     await flush_or_conflict(db)
+    # Surface the draft on the course content tree immediately. The
+    # ``/content`` reader renders one row per ``module_items`` entry, so without
+    # this insert a freshly created draft is invisible until publish. The
+    # frontend already styles non-published items with an amber status badge.
+    await _ensure_module_item(db, module_id=config.module_id, interview_config_id=config.id)
+    await flush_or_conflict(db)
     await db.refresh(config)
     return config
 
@@ -175,6 +182,20 @@ async def publish_interview_config(
     config = await _require_config(db, config_id)
     if config.status == "archived":
         raise AppError(f"Cannot publish archived interview config {config_id}")
+    approved = await authoring_queries.list_questions_for_config(
+        db, config_id, review_status="approved"
+    )
+    if not approved:
+        raise AppError(
+            "interview_no_approved_questions: at least one approved question is required to publish"
+        )
+    # Thesis §4.3: the pass/fail verdict is judged per learning outcome. A
+    # config with zero outcomes can never produce a pass — block publishing it.
+    outcomes = await authoring_queries.list_outcomes_for_config(db, config_id)
+    if not outcomes:
+        raise AppError(
+            "interview_no_outcomes: at least one learning outcome is required to publish"
+        )
     config.status = "published"
     config.published_at = utcnow()
     await _ensure_module_item(db, module_id=config.module_id, interview_config_id=config.id)
@@ -189,6 +210,19 @@ async def archive_interview_config(
     del actor
     config = await _require_config(db, config_id)
     config.status = "archived"
+    await flush_or_conflict(db)
+    await db.refresh(config)
+    return config
+
+
+async def unarchive_interview_config(
+    db: AsyncSession, config_id: UUID, actor: CurrentUser
+) -> InterviewConfig:
+    del actor
+    config = await _require_config(db, config_id)
+    if config.status != "archived":
+        raise AppError(f"Cannot unarchive interview config {config_id} — status is '{config.status}', expected 'archived'")
+    config.status = "draft"
     await flush_or_conflict(db)
     await db.refresh(config)
     return config
@@ -297,6 +331,16 @@ async def update_outcome(
     return outcome
 
 
+async def delete_outcome(
+    db: AsyncSession,
+    config_id: UUID,
+    outcome_id: UUID,
+    actor: CurrentUser,
+) -> None:
+    outcome = await _require_outcome(db, config_id, outcome_id)
+    await soft_delete_cascade(db, outcome, actor_id=actor.user_id)
+
+
 async def start_generation_run(
     db: AsyncSession,
     config_id: UUID,
@@ -390,11 +434,13 @@ __all__ = [
     "archive_interview_config",
     "create_interview_config",
     "delete_interview_config",
+    "delete_outcome",
     "delete_question",
     "get_generation_run",
     "publish_interview_config",
     "regenerate_question",
     "start_generation_run",
+    "unarchive_interview_config",
     "update_interview_config",
     "update_outcome",
     "update_question",

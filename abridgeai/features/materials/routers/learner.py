@@ -41,6 +41,45 @@ def _not_found(material_id: UUID) -> HTTPException:
     )
 
 
+async def _ensure_owning_lesson_unlocked(
+    db: AsyncSession, current_user: CurrentUser, lesson_id: UUID
+) -> None:
+    """FR-4.5 — a material is only readable when its owning lesson is
+    unlocked for the student (prerequisites / SR coverage τ / interview
+    pass). Mirrors the courses learner-router gate; 403 payload shape is
+    identical so the SPA handles both uniformly. Lazy import avoids a
+    circular import at app start-up; disabled by
+    ``LESSON_GATING_ENFORCED=false``.
+    """
+    from abridgeai.core.config import get_settings  # noqa: PLC0415
+
+    if not get_settings().lesson_gating_enforced:
+        return
+
+    from abridgeai.features.spaced_repetition.api import public as sr_public  # noqa: PLC0415
+
+    unlock = await sr_public.check_lesson_unlock(
+        db, student_id=current_user.user_id, lesson_id=lesson_id
+    )
+    if unlock.eligible:
+        return
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail={
+            "error": "lesson_locked",
+            "lesson_id": str(lesson_id),
+            "current_ratio": unlock.current_ratio,
+            "required_ratio": unlock.required_ratio,
+            "total_cards": unlock.total_cards,
+            "passing_cards": unlock.passing_cards,
+            "prerequisites_met": unlock.prereq_lesson_ids_unlocked,
+            "interview_pass_required": unlock.interview_pass_required,
+            "interview_passed": unlock.interview_passed,
+            "next_unlock_estimate": unlock.next_unlock_estimate,
+        },
+    )
+
+
 @router.get("/{material_id}", response_model=MaterialPublic)
 async def get_material(
     material_id: UUID,
@@ -52,6 +91,7 @@ async def get_material(
     )
     if material is None:
         raise _not_found(material_id)
+    await _ensure_owning_lesson_unlocked(db, current_user, material.lesson_id)
     return material
 
 
@@ -61,6 +101,12 @@ async def get_material_stream_url(
     current_user: Annotated[CurrentUser, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> MaterialStreamUrl:
+    material = await catalog_service.get_visible_material_for_user(
+        db, material_id, current_user.user_id
+    )
+    if material is None:
+        raise _not_found(material_id)
+    await _ensure_owning_lesson_unlocked(db, current_user, material.lesson_id)
     stream = await catalog_service.get_stream_url_for_material(
         db, material_id, current_user.user_id
     )
@@ -76,6 +122,12 @@ async def get_material_chunks_preview(
     db: Annotated[AsyncSession, Depends(get_db)],
     limit: Annotated[int, Query(ge=1, le=20)] = 5,
 ) -> list[ChunkPreview]:
+    material = await catalog_service.get_visible_material_for_user(
+        db, material_id, current_user.user_id
+    )
+    if material is None:
+        raise _not_found(material_id)
+    await _ensure_owning_lesson_unlocked(db, current_user, material.lesson_id)
     chunks = await catalog_service.list_visible_chunks_preview(
         db, material_id, current_user.user_id, limit
     )

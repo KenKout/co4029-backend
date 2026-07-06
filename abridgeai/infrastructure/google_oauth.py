@@ -24,26 +24,9 @@ class GoogleProfile:
     given_name: str | None
     family_name: str | None
     display_name: str
-
-
-def _google_error_message(response: httpx.Response, default: str) -> str:
-    try:
-        payload = response.json()
-    except ValueError:
-        return default
-
-    if not isinstance(payload, dict):
-        return default
-
-    error_description = payload.get("error_description")
-    if isinstance(error_description, str) and error_description:
-        return f"{default}: {error_description}"
-
-    error = payload.get("error")
-    if isinstance(error, str) and error:
-        return f"{default}: {error}"
-
-    return default
+    # OIDC ``email_verified`` claim. Domain auto-provisioning (FR-2.7)
+    # MUST only trust verified emails; treated as False when absent.
+    email_verified: bool = False
 
 
 def build_authorization_url(state: str, settings: Settings | None = None) -> str:
@@ -85,26 +68,13 @@ async def fetch_google_profile(code: str, settings: Settings | None = None) -> G
                 "redirect_uri": settings.google_redirect_uri,
             },
         )
-        try:
-            token_response.raise_for_status()
-        except httpx.HTTPStatusError as exc:
-            raise AppError(
-                _google_error_message(token_response, "Google sign-in failed")
-            ) from exc
+        token_response.raise_for_status()
         access_token = token_response.json()["access_token"]
         userinfo_response = await client.get(
             "https://openidconnect.googleapis.com/v1/userinfo",
             headers={"Authorization": f"Bearer {access_token}"},
         )
-        try:
-            userinfo_response.raise_for_status()
-        except httpx.HTTPStatusError as exc:
-            raise AppError(
-                _google_error_message(
-                    userinfo_response,
-                    "Google sign-in failed while loading your profile",
-                )
-            ) from exc
+        userinfo_response.raise_for_status()
 
     payload = userinfo_response.json()
     email = payload.get("email")
@@ -117,6 +87,7 @@ async def fetch_google_profile(code: str, settings: Settings | None = None) -> G
         given_name=payload.get("given_name"),
         family_name=payload.get("family_name"),
         display_name=payload.get("name") or email.split("@", 1)[0],
+        email_verified=payload.get("email_verified") is True,
     )
 
 

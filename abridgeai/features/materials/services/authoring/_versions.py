@@ -21,12 +21,18 @@ from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
 from abridgeai.ai.models import ProcessingJob
-from abridgeai.core.db.conflict_mapper import flush_or_conflict
+from abridgeai.core.db.conflict_mapper import flush_or_conflict, register_conflict_mappings
 from abridgeai.core.db.recursive_delete import soft_delete_cascade
-from abridgeai.core.exceptions import NotFoundError
+from abridgeai.core.exceptions import ConflictError, NotFoundError
 from abridgeai.core.security import CurrentUser
-from abridgeai.features.materials.queries import get_latest_processing_job
-from abridgeai.features.materials.schemas import MaterialUploadComplete
+from abridgeai.features.materials.queries import (
+    get_latest_processing_job,
+    get_material_with_versions,
+)
+from abridgeai.features.materials.schemas import (
+    MaterialUploadComplete,
+    MaterialVersionAuthoring,
+)
 from abridgeai.features.materials.services.authoring._common import (
     MIN_ACCEPTABLE_BYTES,
     SIZE_TOLERANCE_FRACTION,
@@ -48,6 +54,17 @@ from abridgeai.infrastructure.s3 import head_object
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
+
+# §C15 backstop (migration 0017): concurrent current-version flips
+# (complete_upload vs rollback) hit the partial unique index instead of
+# silently leaving two is_current rows; flush_or_conflict maps it to 409.
+register_conflict_mappings(
+    {
+        "uq_learning_material_versions_one_current": (
+            "Another operation is changing this material's current version; retry"
+        ),
+    }
+)
 
 
 async def complete_upload(
@@ -207,3 +224,54 @@ async def soft_delete_material(db: AsyncSession, material_id: UUID, actor: Curre
     """Soft-delete the material + cascade to versions. Does NOT touch S3."""
     material = await require_material(db, material_id)
     await soft_delete_cascade(db, material, actor_id=actor.user_id)
+
+
+async def list_material_versions(
+    db: AsyncSession, material_id: UUID
+) -> list[MaterialVersionAuthoring]:
+    """Full version history (newest first) with processing state (FR-3.4/3.5)."""
+    loaded = await get_material_with_versions(db, material_id)
+    if loaded is None:
+        raise NotFoundError(f"Material {material_id} not found")
+    _, versions = loaded
+    return [MaterialVersionAuthoring.model_validate(v) for v in versions]
+
+
+async def rollback_material_version(
+    db: AsyncSession,
+    material_id: UUID,
+    version_id: UUID,
+    actor: CurrentUser,
+) -> MaterialVersionAuthoring:
+    """Point the material's current version back at a prior ``ready`` one.
+
+    Pure pointer swap (FR-3.4): ``document_chunks`` are version-scoped
+    (``material_version_id``), so a previously-``ready`` version still
+    has its chunks/embeddings — no reprocess is needed. Learner reads
+    (presigned stream URLs, chunk previews) follow
+    ``LearningMaterial.current_version_id`` immediately.
+
+    Raises :class:`ConflictError` (router → 409) when the target is
+    already current or its pipeline never reached ``ready``.
+    """
+    material = await require_material(db, material_id)
+    version = await require_version(db, version_id)
+    if version.material_id != material.id:
+        raise NotFoundError(f"Version {version_id} does not belong to material {material_id}")
+    if version.is_current:
+        raise ConflictError(f"Version {version_id} is already the current version")
+    if version.processing_status != "ready":
+        raise ConflictError(
+            f"Version {version_id} is not ready "
+            f"(processing_status={version.processing_status!r}); "
+            "only fully-processed versions can be rolled back to"
+        )
+
+    # Same dual-source invariant as complete_upload (Reconciliation §C15).
+    await reset_other_versions_current(db, material.id, version.id)
+    version.is_current = True
+    version.updated_by = actor.user_id
+    material.current_version_id = version.id
+    material.updated_by = actor.user_id
+    await flush_or_conflict(db)
+    return MaterialVersionAuthoring.model_validate(version)

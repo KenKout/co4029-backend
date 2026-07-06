@@ -46,7 +46,7 @@ from decimal import Decimal
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from abridgeai.features.interviews.schemas.public import (
     InterviewConfigPublic,
@@ -56,6 +56,10 @@ from abridgeai.features.interviews.schemas.public import (
     PersonaLiteral,
     QuestionTypeLiteral,
     SupportedModesLiteral,
+)
+from abridgeai.features.interviews.schemas.session import (
+    InputModeLiteral,
+    SessionStatusLiteral,
 )
 
 DifficultyLiteral = Literal["junior", "mid_level", "senior"]
@@ -93,12 +97,17 @@ class InterviewConfigCreate(BaseModel):
 
 
 class InterviewConfigUpdate(BaseModel):
-    """Body for ``PATCH /teacher/interviews/{id}`` — partial fields."""
+    """Body for ``PATCH /teacher/interviews/{id}`` — partial fields.
+
+    ``status`` is intentionally omitted here — status transitions
+    (draft → published, published → archived, archived → draft) go
+    through dedicated endpoints (``/publish``, ``/archive``,
+    ``/unarchive``) so the service layer can enforce business rules.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     title: str | None = Field(default=None, max_length=255)
-    status: ConfigStatusLiteral | None = None
     persona: PersonaLiteral | None = None
     supported_modes: SupportedModesLiteral | None = None
     time_limit_minutes: int | None = Field(default=None, ge=1)
@@ -130,6 +139,44 @@ class InterviewConfigAuthoring(InterviewConfigPublic):
     updated_at: datetime
     deleted_at: datetime | None = None
     deleted_by: UUID | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _populate_aggregates(cls, data: Any) -> Any:
+        """Sum importance_weight + count active questions when the caller
+        passes the raw ORM model with the ``questions`` relationship already
+        loaded. Skipped when data is a Pydantic model (nested in
+        InterviewForAuthoringPublic) or when the relationship is unloaded —
+        accessing an unloaded relationship under an AsyncSession raises
+        MissingGreenlet, which previously surfaced as a 500 on
+        GET /teacher/interview-configs/{config_id}. Callers that need the
+        aggregates set must eager-load (selectinload) ``InterviewConfig.questions``.
+        """
+        if isinstance(data, BaseModel):
+            return data
+        from sqlalchemy import inspect as sa_inspect  # noqa: PLC0415
+
+        try:
+            insp = sa_inspect(data)
+        except Exception:  # noqa: BLE001 — defensive: only treat real ORM instances
+            return data
+        unloaded = getattr(insp, "unloaded", set()) if insp is not None else set()
+        if "questions" in unloaded:
+            return data
+        questions = getattr(data, "questions", None)
+        if questions is None:
+            return data
+        if getattr(data, "total_importance_weight", None) is None:
+            data.total_importance_weight = sum(
+                q.importance_weight or 0
+                for q in questions
+                if q.deleted_at is None
+            )
+        if getattr(data, "draft_question_count", None) is None:
+            data.draft_question_count = sum(
+                1 for q in questions if q.deleted_at is None
+            )
+        return data
 
 
 # --------------------------------------------------------------------------- #
@@ -275,6 +322,45 @@ class InterviewForAuthoringPublic(BaseModel):
     questions: list[InterviewQuestionAuthoring] = []
 
 
+class InterviewSessionSummary(BaseModel):
+    """One row in the teacher's per-config attempts list.
+
+    Teacher-only: surfaces the student identity + binary verdict so a teacher
+    can pick an attempt to review (thesis p77 "Teachers can review…").
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    session_id: UUID
+    student_id: UUID
+    student_name: str | None = None
+    attempt_number: int
+    status: SessionStatusLiteral
+    input_mode: InputModeLiteral
+    pass_verdict: bool | None = None
+    started_at: datetime
+    ended_at: datetime | None = None
+
+
+class InterviewTranscriptTurn(BaseModel):
+    """One question/answer turn in a teacher-facing transcript view."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    role: Literal["user", "ai", "system"]
+    question_prompt: str | None = None
+    content_text: str | None = None
+    has_audio: bool = False
+    created_at: datetime
+
+
+class InterviewTranscriptRead(BaseModel):
+    """Full ordered transcript of a session for teacher remediation review."""
+
+    session_id: UUID
+    turns: list[InterviewTranscriptTurn] = []
+
+
 # Suppress unused-import warning — Decimal is exported in case downstream
 # generation-config payloads carry numeric thresholds. Keep available.
 _DECIMAL_AVAILABLE = Decimal
@@ -295,5 +381,8 @@ __all__ = [
     "InterviewOutcomeCreate",
     "InterviewQuestionAuthoring",
     "InterviewQuestionCreate",
+    "InterviewSessionSummary",
+    "InterviewTranscriptRead",
+    "InterviewTranscriptTurn",
     "ReviewStatusLiteral",
 ]

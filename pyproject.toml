@@ -30,9 +30,21 @@ dependencies = [
     "beautifulsoup4>=4.12",
     "pytesseract>=0.3",
     "pillow>=10.0",
+    # LiveKit server SDK: token minting + room/agent dispatch for the voice
+    # interview. Lightweight (no audio/ML deps) so the API/uvicorn image stays
+    # lean; the heavy agent runtime lives in the `interview-agent` extra below.
+    "livekit-api>=1.1,<2",
 ]
 
 [project.optional-dependencies]
+# Voice-interview agent worker runtime (Phase 3). Pulls the LiveKit Agents
+# framework + OpenAI STT/TTS + silero VAD plugins. Installed only on the
+# agent-worker process (`uv sync --extra interview-agent`), never the API.
+interview-agent = [
+    "livekit-agents>=1.5,<2",
+    "livekit-plugins-openai>=1.5,<2",
+    "livekit-plugins-silero>=1.5,<2",
+]
 dev = [
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
@@ -209,6 +221,10 @@ ignore_imports = [
     "abridgeai.features.interviews.services.taking -> sqlalchemy",
     "abridgeai.features.interviews.services.evaluation -> sqlalchemy",
     "abridgeai.features.interviews.services.generation -> sqlalchemy",
+    # lifecycle only imports AsyncSession for type hints (TYPE_CHECKING);
+    # reads go through queries, writes mutate ORM objects. Same carve-out
+    # as the sibling interview services above.
+    "abridgeai.features.interviews.services.lifecycle -> sqlalchemy",
     "abridgeai.features.admin.services.users -> sqlalchemy",
     "abridgeai.features.admin.services.processing -> sqlalchemy",
     "abridgeai.features.admin.services.audit -> sqlalchemy",
@@ -222,6 +238,7 @@ ignore_imports = [
     "abridgeai.features.notifications.services.inbox -> sqlalchemy",
     "abridgeai.features.career_paths.services.authoring -> sqlalchemy",
     "abridgeai.features.career_paths.services.enrollment -> sqlalchemy",
+    "abridgeai.features.career_paths.services.readiness -> sqlalchemy",
     "abridgeai.features.spaced_repetition.services.review -> sqlalchemy",
     "abridgeai.features.spaced_repetition.services.remediation -> sqlalchemy",
 ]
@@ -306,6 +323,15 @@ ignore_imports = [
     # module load order stays one-way (quizzes never imports courses).
     "abridgeai.features.courses.visibility -> abridgeai.features.quizzes.models",
     "abridgeai.features.courses.queries.published -> abridgeai.features.quizzes.models",
+    # Same pattern as the quizzes carve-out above, for interview-typed
+    # module items (FR-3.6): visibility + content tree filter on
+    # InterviewConfig.status = 'published'. Read-only ORM JOIN,
+    # lazy-imported at call time (interviews never imports courses).
+    "abridgeai.features.courses.visibility -> abridgeai.features.interviews.models",
+    "abridgeai.features.courses.queries.published -> abridgeai.features.interviews.models",
+    # Material visibility clause reads LearningMaterial.visible_to_students
+    # (plan §4062). Read-only, lazy-imported at call time.
+    "abridgeai.features.courses.visibility -> abridgeai.features.materials.models",
 ]
 
 [[tool.importlinter.contracts]]

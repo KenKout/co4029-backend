@@ -103,6 +103,8 @@ class InterviewSessionPublic(BaseModel):
 
     session_id: UUID
     interview_config_id: UUID
+    interview_title: str | None = None
+    course_id: UUID | None = None
     status: SessionStatusLiteral
     input_mode: InputModeLiteral
     attempt_number: int
@@ -167,18 +169,25 @@ class InterviewRubricScore(BaseModel):
 class InterviewSessionFinishResponse(BaseModel):
     """Response shape for ``POST /interviews/sessions/{id}/finish``.
 
-    The student's first glimpse of the rubric verdict. Per-outcome
-    ``verdict_met`` flags surface here (so the student knows which
-    outcomes they cleared) but the LLM ``hidden_reasoning`` from
-    :class:`~abridgeai.features.interviews.models.InterviewOutcomeEvaluation`
-    is NEVER returned — that's a teacher-side field.
+    Thesis §4.3: the student-facing result is **binary pass/fail ONLY** — no
+    score, no per-outcome breakdown, no rubric. ``pass_verdict`` is the single
+    meaningful signal here.
+
+    ``total_score`` and ``rubric_scores`` are retained in the schema for
+    backward compatibility but are ALWAYS ``None`` / empty on this learner
+    response; the rubric total + per-outcome ``verdict_met`` + LLM
+    ``hidden_reasoning`` are teacher-only and live in
+    ``InterviewSession.internal_summary_json`` /
+    :class:`~abridgeai.features.interviews.models.InterviewOutcomeEvaluation`.
     """
 
     model_config = ConfigDict(from_attributes=True)
 
     session_id: UUID
     status: SessionStatusLiteral
+    # Deprecated for students (always None) — see §4.3. Kept for API stability.
     total_score: Decimal | None = None
+    # Deprecated for students (always []) — see §4.3. Kept for API stability.
     rubric_scores: list[InterviewRubricScore] = []
     pass_verdict: bool | None = None
     ended_at: datetime | None = None
