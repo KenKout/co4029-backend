@@ -51,10 +51,13 @@ class StudyPlanItem(BaseModel):
 class GapReportRead(BaseModel):
     """Student-facing projection of a ``GapReport`` row.
 
-    Carries the human-readable discrepancy summary, the actionable
-    study plan, and a per-criterion breakdown (outcome → verdict).
-    Internal LLM rationale stays in
-    :class:`GapReportAuthoringRead`.
+    Carries the human-readable discrepancy summary and the actionable
+    study plan. FR-5.7 invariant: the student sees only the pass/fail
+    verdict plus qualitative remediation — NOT numeric rubric scores.
+    ``per_criterion_breakdown`` (criterion-level mean scores, e.g.
+    ``technical_accuracy: 3.2``) is therefore teacher-only and lives on
+    :class:`GapReportAuthoringRead`. Internal LLM rationale likewise
+    stays teacher-side.
     """
 
     model_config = ConfigDict(from_attributes=True)
@@ -65,7 +68,6 @@ class GapReportRead(BaseModel):
     module_id: UUID | None = None
     discrepancy_summary: str | None = None
     study_plan: list[StudyPlanItem] = []
-    per_criterion_breakdown: dict[str, Any] = {}
     generated_at: datetime
 
 
@@ -74,6 +76,11 @@ class GapReportAuthoringRead(GapReportRead):
 
     Inherits the student-facing schema and re-introduces:
 
+    * ``per_criterion_breakdown`` — criterion-level mean rubric scores
+      (e.g. ``technical_accuracy: 3.2``). Teacher-only per FR-5.7: the
+      student view exposes pass/fail + qualitative remediation only, so
+      numeric rubric detail is surfaced here rather than on
+      :class:`GapReportRead`.
     * ``raw_evaluation_json`` — per-response LLM verdicts (the
       backing :class:`~abridgeai.features.interviews.models.InterviewOutcomeEvaluation`
       rows joined into one payload).
@@ -82,6 +89,7 @@ class GapReportAuthoringRead(GapReportRead):
       anchor links so the teacher can drill into the original attempts.
     """
 
+    per_criterion_breakdown: dict[str, Any] = {}
     raw_evaluation_json: dict[str, Any] = {}
     teacher_summary: str | None = None
     source_quiz_attempt_id: UUID | None = None
