@@ -20,7 +20,7 @@
 # requests it, and the commit message must justify it.
 
 default_language_version:
-  python: python3.12
+  python: python3
 
 # Hook scopes are tightened with `files:` regexes; without them mirrors-mypy
 # would walk the entire tree and choke on tests/ or alembic/versions/.
