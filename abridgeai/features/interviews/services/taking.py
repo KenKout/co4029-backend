@@ -20,6 +20,7 @@ HTTP path (latency + retry budget concerns).
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
@@ -41,6 +42,39 @@ if TYPE_CHECKING:
 
 
 _EVALUATE_INTERVIEW_SESSION_TASK = "evaluate_interview_session_task"
+
+# Terminal session statuses — an attempt in any of these has been "used up"
+# and its ``ended_at`` anchors the retake cooldown (FR-5.3). ``in_progress``
+# is excluded: a live session is handled by the idempotent active-session
+# short-circuit, not the cooldown gate.
+_TERMINAL_SESSION_STATUSES = ("completed", "timed_out", "abandoned", "failed")
+
+
+class InterviewCooldownActive(AppError):  # noqa: N818  # mirrors quiz CooldownActive
+    """FR-5.3 — student tried to start a new attempt inside the config's
+    ``cooldown_hours`` window since their last attempt ended.
+
+    Carries ``retry_after`` so the router can surface a ``Retry-After``
+    hint (mapped to HTTP 429). Mirrors the quiz-side
+    :class:`~abridgeai.features.quizzes.queries.published.CooldownActive`.
+    """
+
+    def __init__(self, config_id: UUID, retry_after: datetime) -> None:
+        super().__init__("Interview retake cooldown is still active")
+        self.config_id = config_id
+        self.retry_after = retry_after
+
+
+class InterviewMaxAttemptsReached(AppError):  # noqa: N818  # mirrors quiz MaxAttemptsReached
+    """FR-5.3 — student has used every attempt allowed by ``max_attempts``.
+
+    Mapped to HTTP 409 by the router.
+    """
+
+    def __init__(self, config_id: UUID, max_attempts: int) -> None:
+        super().__init__("Interview attempt limit reached")
+        self.config_id = config_id
+        self.max_attempts = max_attempts
 
 
 async def _require_session(db: AsyncSession, session_id: UUID) -> InterviewSession:
@@ -87,6 +121,54 @@ async def _next_session_sequence(db: AsyncSession, session_id: UUID) -> int:
     return int(row.scalar_one()) + 1
 
 
+async def _enforce_retake_policy(
+    db: AsyncSession,
+    *,
+    config_id: UUID,
+    student_id: UUID,
+) -> None:
+    """FR-5.3 — block a new attempt on ``max_attempts`` / ``cooldown_hours``.
+
+    Loads the config, then applies two gates against the student's
+    *terminal* sessions (live sessions never reach here):
+
+    * **Cooldown** — if ``cooldown_hours`` is set and the most recent
+      terminal attempt ended less than that many hours ago, raise
+      :class:`InterviewCooldownActive` (router → 429).
+    * **Max attempts** — if ``max_attempts`` is set and the count of
+      terminal attempts already meets it, raise
+      :class:`InterviewMaxAttemptsReached` (router → 409).
+
+    NULL / non-positive knobs disable the corresponding gate. The gates
+    are read-time only — no data migration normalises historical rows.
+    """
+    from abridgeai.features.interviews.models import InterviewConfig  # noqa: PLC0415
+
+    config = await db.get(InterviewConfig, config_id)
+    if config is None:
+        return
+
+    cooldown_hours = config.cooldown_hours
+    if cooldown_hours is not None and cooldown_hours > 0:
+        last_ended = await sessions_queries.get_last_terminal_ended_at(
+            db, student_id, config_id, _TERMINAL_SESSION_STATUSES
+        )
+        if last_ended is not None:
+            if last_ended.tzinfo is None:
+                last_ended = last_ended.replace(tzinfo=UTC)
+            retry_after = last_ended + timedelta(hours=cooldown_hours)
+            if retry_after > datetime.now(UTC):
+                raise InterviewCooldownActive(config_id, retry_after)
+
+    max_attempts = config.max_attempts
+    if max_attempts is not None and max_attempts > 0:
+        used = await sessions_queries.count_terminal_sessions(
+            db, student_id, config_id, _TERMINAL_SESSION_STATUSES
+        )
+        if used >= max_attempts:
+            raise InterviewMaxAttemptsReached(config_id, max_attempts)
+
+
 async def start_session(
     db: AsyncSession,
     config_id: UUID,
@@ -119,15 +201,19 @@ async def start_session(
     # nothing to evaluate — block it so the student never enters a no-win session.
     outcomes = await authoring_queries.list_outcomes_for_config(db, config_id)
     if not outcomes:
-        raise AppError(
-            "interview_no_outcomes: this interview has no learning outcomes configured"
-        )
+        raise AppError("interview_no_outcomes: this interview has no learning outcomes configured")
 
     existing = await sessions_queries.get_active_session(db, actor.user_id, config_id)
     if existing is not None:
         await _ensure_first_question_attached(db, existing.id, config_id)
         await _maybe_upgrade_input_mode(db, existing, config_id, requested_input_mode)
         return existing
+
+    # FR-5.3 retake policy — gate a *new* attempt on the config's
+    # ``max_attempts`` ceiling and ``cooldown_hours`` window. Only reached
+    # when there is no live session (the idempotent short-circuit above
+    # returns the in-progress row without consuming a fresh attempt).
+    await _enforce_retake_policy(db, config_id=config_id, student_id=actor.user_id)
 
     attempt_number = await sessions_queries.get_session_attempt_number(db, actor.user_id, config_id)
     session = InterviewSession(

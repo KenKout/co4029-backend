@@ -92,6 +92,7 @@ class InterviewConfigCreate(BaseModel):
     supported_modes: SupportedModesLiteral = "hybrid"
     time_limit_minutes: int | None = Field(default=None, ge=1)
     max_attempts: int | None = Field(default=None, ge=1)
+    cooldown_hours: int | None = Field(default=None, ge=1)
     lock_quiz_ef_until_pass: bool = False
     supplementary_instructions: str | None = None
 
@@ -112,6 +113,7 @@ class InterviewConfigUpdate(BaseModel):
     supported_modes: SupportedModesLiteral | None = None
     time_limit_minutes: int | None = Field(default=None, ge=1)
     max_attempts: int | None = Field(default=None, ge=1)
+    cooldown_hours: int | None = Field(default=None, ge=1)
     min_outcomes_to_pass: int | None = Field(default=None, ge=1)
     lock_quiz_ef_until_pass: bool | None = None
     supplementary_instructions: str | None = None
@@ -168,14 +170,10 @@ class InterviewConfigAuthoring(InterviewConfigPublic):
             return data
         if getattr(data, "total_importance_weight", None) is None:
             data.total_importance_weight = sum(
-                q.importance_weight or 0
-                for q in questions
-                if q.deleted_at is None
+                q.importance_weight or 0 for q in questions if q.deleted_at is None
             )
         if getattr(data, "draft_question_count", None) is None:
-            data.draft_question_count = sum(
-                1 for q in questions if q.deleted_at is None
-            )
+            data.draft_question_count = sum(1 for q in questions if q.deleted_at is None)
         return data
 
 

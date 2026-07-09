@@ -97,9 +97,7 @@ async def get_user_interview_sessions(
     return list((await db.execute(stmt)).scalars().all())
 
 
-async def list_sessions_for_config(
-    db: AsyncSession, config_id: UUID
-) -> list[InterviewSession]:
+async def list_sessions_for_config(db: AsyncSession, config_id: UUID) -> list[InterviewSession]:
     """All sessions (any student) for one interview config, newest first.
 
     Powers the teacher's per-config attempts list (thesis p77 review surface).
@@ -160,6 +158,49 @@ async def get_session_attempt_number(
         InterviewSession.student_id == user_id,
     )
     return int((await db.execute(stmt)).scalar_one()) + 1
+
+
+async def count_terminal_sessions(
+    db: AsyncSession,
+    user_id: UUID,
+    config_id: UUID,
+    terminal_statuses: tuple[str, ...],
+) -> int:
+    """Count the student's finished (non-live) attempts for a config.
+
+    Powers the FR-5.3 ``max_attempts`` gate at ``start_session``. Only
+    terminal statuses count — an ``in_progress`` row is handled by the
+    idempotent active-session short-circuit, not the attempt ceiling.
+    """
+    stmt = select(func.count(InterviewSession.id)).where(
+        InterviewSession.interview_config_id == config_id,
+        InterviewSession.student_id == user_id,
+        InterviewSession.status.in_(terminal_statuses),
+    )
+    return int((await db.execute(stmt)).scalar_one())
+
+
+async def get_last_terminal_ended_at(
+    db: AsyncSession,
+    user_id: UUID,
+    config_id: UUID,
+    terminal_statuses: tuple[str, ...],
+) -> datetime | None:
+    """Most recent ``ended_at`` across the student's finished attempts.
+
+    Anchors the FR-5.3 retake cooldown. Falls back to ``started_at`` when
+    a terminal row somehow has a NULL ``ended_at`` (defensive: timed_out /
+    abandoned rows should always stamp ``ended_at``, but a crash mid-write
+    could leave it null and we still want the cooldown to engage).
+    """
+    stmt = select(
+        func.max(func.coalesce(InterviewSession.ended_at, InterviewSession.started_at))
+    ).where(
+        InterviewSession.interview_config_id == config_id,
+        InterviewSession.student_id == user_id,
+        InterviewSession.status.in_(terminal_statuses),
+    )
+    return (await db.execute(stmt)).scalar_one_or_none()
 
 
 async def get_outcome_evaluations(
@@ -265,8 +306,10 @@ async def get_last_activity_at(db: AsyncSession, session_id: UUID) -> datetime |
 
 
 __all__ = [
+    "count_terminal_sessions",
     "count_user_messages",
     "get_last_activity_at",
+    "get_last_terminal_ended_at",
     "get_active_session",
     "get_gap_report_for_session",
     "get_outcome_evaluations",

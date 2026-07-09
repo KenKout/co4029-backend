@@ -25,6 +25,7 @@ depth.
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime
 from typing import Annotated, Any
 from uuid import UUID
 
@@ -180,6 +181,24 @@ async def start_session(
         session = await taking_service.start_session(db, config_id, payload, current_user)
     except NotFoundError as exc:
         raise _not_found("interview_config", config_id) from exc
+    except taking_service.InterviewCooldownActive as exc:
+        # FR-5.3 — retake cooldown still active; surface Retry-After.
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail={
+                "error": "cooldown_active",
+                "message": str(exc),
+                "retry_after": exc.retry_after.isoformat(),
+            },
+            headers={
+                "Retry-After": str(
+                    max(0, int((exc.retry_after - datetime.now(UTC)).total_seconds()))
+                )
+            },
+        ) from exc
+    except taking_service.InterviewMaxAttemptsReached as exc:
+        # FR-5.3 — attempt ceiling reached.
+        raise _conflict(str(exc)) from exc
     except AppError as exc:
         raise _bad_request(str(exc)) from exc
     await db.commit()
