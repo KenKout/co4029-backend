@@ -27,6 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from abridgeai.core.db import get_db
 from abridgeai.core.exceptions import NotFoundError
+from abridgeai.core.observability import get_logger
 from abridgeai.core.security import CurrentUser, get_current_user, utcnow
 from abridgeai.features.quizzes.schemas import (
     QuizAttemptRead,
@@ -38,10 +39,16 @@ from abridgeai.features.quizzes.schemas import (
 from abridgeai.features.quizzes.services import taking as taking_service
 from abridgeai.features.quizzes.services.taking import (
     AllCardsInCooldownError,
-    InterviewPassRequiredError,
+    CooldownActive,
+    MaxAttemptsReached,
+)
+from abridgeai.features.spaced_repetition.api.public import (
+    dispatch_remediation_for_card_failure,
 )
 
 router = APIRouter(tags=["quizzes-learner"])
+
+_logger = get_logger(__name__)
 
 
 def _not_found(resource: str, resource_id: UUID) -> HTTPException:
@@ -112,6 +119,12 @@ async def start_attempt(
     the quiz is still in SR cooldown — thesis UC-LEARN-01 Alt 1a) to
     HTTP 429 with a ``Retry-After`` header counting down to the earliest
     card's ``due_at``.
+
+    FR-4.3 quiz-level retake policy maps the same way:
+    :class:`CooldownActive` (inside ``cooldown_hours`` of the last
+    submission) → 429 + ``Retry-After``; :class:`MaxAttemptsReached`
+    (``max_attempts`` used up, or a retake with
+    ``allow_retakes=False``) → 409.
     """
     if payload.quiz_id != quiz_id:
         raise HTTPException(
@@ -127,13 +140,22 @@ async def start_attempt(
         )
     except NotFoundError as exc:
         raise _not_found("quiz", quiz_id) from exc
-    except InterviewPassRequiredError as exc:
+    except CooldownActive as exc:
+        retry_after_seconds = max(0, int((exc.retry_after - utcnow()).total_seconds()))
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail={
-                "error": "interview_pass_required",
-                "module_id": str(exc.module_id),
-                "interview_config_id": str(exc.interview_config_id),
+                "reason": "quiz_cooldown_active",
+                "retry_available_at": exc.retry_after.isoformat(),
+            },
+            headers={"Retry-After": str(retry_after_seconds)},
+        ) from exc
+    except MaxAttemptsReached as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "reason": "max_attempts_reached",
+                "max_attempts": exc.max_attempts,
             },
         ) from exc
     except AllCardsInCooldownError as exc:
@@ -165,12 +187,37 @@ async def record_answer(
     current_user: Annotated[CurrentUser, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> QuizAttemptAnswerRead:
-    """Record one answer for an in-flight attempt."""
+    """Record one answer for an in-flight attempt.
+
+    The service fires the SM-2 review inside the same transaction
+    (FR-4.4); any :class:`CardFailedEvent` comes back on
+    ``CardReviewResult.pending_events`` and is dispatched **after**
+    commit (caller-dispatches-after-commit pattern, T7.5.10 BUG-2) so a
+    rolled-back review can never trigger a ghost notification.
+    Remediation failures are logged and never surface to the student.
+    """
     try:
-        answer = await taking_service.answer_attempt(db, attempt_id, payload, current_user)
+        answer, review = await taking_service.answer_attempt(
+            db, attempt_id, payload, current_user
+        )
     except NotFoundError as exc:
         raise _not_found("quiz_attempt", attempt_id) from exc
     await db.commit()
+
+    for event in review.pending_events if review else []:
+        try:
+            await dispatch_remediation_for_card_failure(
+                db,
+                student_id=event.student_id,
+                question_id=event.question_id,
+                quiz_attempt_id=event.quiz_attempt_id,
+            )
+        except Exception:  # noqa: BLE001 — side-effect must not fail the answer
+            _logger.exception(
+                "remediation_dispatch_failed",
+                question_id=str(event.question_id),
+                attempt_id=str(attempt_id),
+            )
     return QuizAttemptAnswerRead.model_validate(answer)
 
 
@@ -219,7 +266,9 @@ async def get_attempt_review(
     or hasn't been submitted yet (review only opens after submission so
     correct-option flags can't leak mid-attempt).
     """
-    review = await taking_service.get_attempt_review(db, attempt_id=attempt_id, actor=current_user)
+    review = await taking_service.get_attempt_review(
+        db, attempt_id=attempt_id, actor=current_user
+    )
     if review is None:
         raise _not_found("quiz_attempt", attempt_id)
     return review

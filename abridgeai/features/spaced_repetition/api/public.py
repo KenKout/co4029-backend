@@ -1,14 +1,24 @@
-"""Typed cross-feature read API for the spaced_repetition feature.
+"""Typed cross-feature API for the spaced_repetition feature.
 
-Sibling features (progress dashboards, admin) import from this module
-instead of issuing raw ``text(...)`` SQL or reaching into
-``features.spaced_repetition.queries`` directly. SR is mostly a
-*consumer* of other features (courses, quizzes); the public surface
-exported here is small by design -- only the three reads that
-external dashboards actually need.
+Sibling features (progress dashboards, admin, quizzes) import from
+this module instead of issuing raw ``text(...)`` SQL or reaching into
+``features.spaced_repetition.queries`` / ``services`` directly.
 
 Reads return Pydantic DTOs (the immutable contract); ORM models
 (``StudentCardState``, ``CardReview``) stay private.
+
+Write surface (FR-4.4 learning loop)
+------------------------------------
+``record_card_review``
+    THE SM-2 entrypoint. The quizzes answer flow calls this after
+    grading so every answer updates ``student_card_state`` +
+    ``card_reviews`` (Q → EF → schedule). Returns
+    :class:`CardReviewResult`, a frozen dataclass (not ORM).
+
+``dispatch_remediation_for_card_failure``
+    Post-commit side-effect for each :class:`CardFailedEvent` found in
+    ``CardReviewResult.pending_events`` — see the
+    caller-dispatches-after-commit pattern in ``services/_events.py``.
 
 Soft-delete: every read here uses ORM ``select()`` (or wraps an
 existing query helper that does) and inherits the soft-delete
@@ -27,12 +37,11 @@ from abridgeai.features.spaced_repetition.models import StudentCardState
 from abridgeai.features.spaced_repetition.queries.published import (
     review_compliance_rate as _review_compliance_rate,
 )
-from abridgeai.features.spaced_repetition.queries.unlock_sql import (
-    has_passing_interview_for_module as _has_passing_interview_for_module,
-)
-from abridgeai.features.spaced_repetition.sm2.lesson_unlock import (
-    LessonUnlockStatus,
-    check_lesson_unlock,
+from abridgeai.features.spaced_repetition.services import (
+    CardFailedEvent,
+    CardReviewResult,
+    dispatch_remediation_for_card_failure,
+    record_card_review,
 )
 
 from ._dto import CardStateDTO
@@ -75,27 +84,13 @@ async def get_compliance_rate(
     return await _review_compliance_rate(db, user_id=student_id, lesson_id=lesson_id)
 
 
-async def has_passing_interview_for_module(
-    db: AsyncSession,
-    *,
-    student_id: UUID,
-    module_id: UUID,
-) -> bool:
-    """True iff the student has a completed interview session with
-    ``pass_verdict = TRUE`` for the module's interview config (FR-5.3).
-
-    Thin wrapper so cross-feature consumers (quizzes attempt-start lock,
-    courses lesson gating) depend on the public-API surface.
-    """
-    return await _has_passing_interview_for_module(db, student_id=student_id, module_id=module_id)
-
-
 __all__ = [
+    "CardFailedEvent",
+    "CardReviewResult",
     "CardStateDTO",
-    "LessonUnlockStatus",
-    "check_lesson_unlock",
+    "dispatch_remediation_for_card_failure",
     "get_card_state",
     "get_compliance_rate",
     "get_due_card_count",
-    "has_passing_interview_for_module",
+    "record_card_review",
 ]

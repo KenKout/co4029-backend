@@ -62,6 +62,7 @@ class QuestionWithQuizDTO(BaseModel):
     source_refs: list[Any]
     course_id: UUID
     module_id: UUID
+    initial_ef: Decimal | None = None
 
 
 class AttemptScoreDTO(BaseModel):

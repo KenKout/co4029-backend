@@ -26,7 +26,7 @@ from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
@@ -452,3 +452,209 @@ async def test_all_in_cooldown_returns_429(
     assert detail["reason"] == "all_cards_in_cooldown"
     assert detail["retry_available_at"]
     assert len(detail["cards_due_at"]) == 5
+
+
+# ---------------------------------------------------------------------------
+# FR-4.3 — quiz-level retake policy (cooldown_hours / max_attempts /
+# allow_retakes) enforced server-side by get_quiz_for_taking.
+# ---------------------------------------------------------------------------
+
+
+async def _set_quiz_policy(
+    engine: AsyncEngine,
+    quiz_id: uuid.UUID,
+    *,
+    cooldown_hours: int | None = None,
+    max_attempts: int | None = None,
+    allow_retakes: bool = True,
+) -> None:
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "UPDATE quizzes SET cooldown_hours = :cd, max_attempts = :ma, "
+                "allow_retakes = :ar WHERE id = :id"
+            ),
+            {"cd": cooldown_hours, "ma": max_attempts, "ar": allow_retakes, "id": quiz_id},
+        )
+
+
+async def _seed_attempt(
+    engine: AsyncEngine,
+    quiz_id: uuid.UUID,
+    student_id: uuid.UUID,
+    *,
+    status: str = "submitted",
+    submitted_hours_ago: int | None = 1,
+) -> None:
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO quiz_attempts "
+                "(id, quiz_id, student_id, attempt_number, status, submitted_at) "
+                "VALUES (uuid_generate_v4(), :quiz, :student, 1, :status, "
+                "CASE WHEN CAST(:hours AS int) IS NULL THEN NULL "
+                "ELSE NOW() - make_interval(hours => :hours) END)"
+            ),
+            {
+                "quiz": quiz_id,
+                "student": student_id,
+                "status": status,
+                "hours": submitted_hours_ago,
+            },
+        )
+
+
+async def _post_start_attempt(
+    engine: AsyncEngine,
+    client: httpx.AsyncClient,
+    quiz_id: uuid.UUID,
+    student_id: uuid.UUID,
+) -> httpx.Response:
+    sid = await _seed_session(engine, student_id)
+    token = create_access_token(user_id=student_id, session_id=sid)
+    try:
+        return await client.post(
+            f"/api/v1/quizzes/{quiz_id}/attempts",
+            json={"quiz_id": str(quiz_id)},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    finally:
+        async with engine.begin() as conn:
+            await conn.execute(text("DELETE FROM auth_sessions WHERE id = :id"), {"id": sid})
+
+
+@pytest.mark.asyncio
+async def test_quiz_cooldown_hours_returns_429(
+    engine: AsyncEngine,
+    client: httpx.AsyncClient,
+    quiz_with_questions: dict,
+) -> None:
+    """A submitted attempt inside ``cooldown_hours`` -> 429 + Retry-After."""
+    quiz_id = quiz_with_questions["quiz_id"]
+    student_id = quiz_with_questions["student_id"]
+    await _set_quiz_policy(engine, quiz_id, cooldown_hours=24)
+    await _seed_attempt(engine, quiz_id, student_id, submitted_hours_ago=1)
+
+    resp = await _post_start_attempt(engine, client, quiz_id, student_id)
+
+    assert resp.status_code == 429, resp.text
+    assert int(resp.headers["Retry-After"]) > 0
+    detail = json.loads(resp.text)["detail"]
+    assert detail["reason"] == "quiz_cooldown_active"
+    assert detail["retry_available_at"]
+
+
+@pytest.mark.asyncio
+async def test_max_attempts_reached_returns_409(
+    engine: AsyncEngine,
+    client: httpx.AsyncClient,
+    quiz_with_questions: dict,
+) -> None:
+    """Attempt count at ``max_attempts`` ceiling -> 409."""
+    quiz_id = quiz_with_questions["quiz_id"]
+    student_id = quiz_with_questions["student_id"]
+    await _set_quiz_policy(engine, quiz_id, max_attempts=1)
+    await _seed_attempt(
+        engine, quiz_id, student_id, status="in_progress", submitted_hours_ago=None
+    )
+
+    resp = await _post_start_attempt(engine, client, quiz_id, student_id)
+
+    assert resp.status_code == 409, resp.text
+    detail = json.loads(resp.text)["detail"]
+    assert detail["reason"] == "max_attempts_reached"
+    assert detail["max_attempts"] == 1
+
+
+@pytest.mark.asyncio
+async def test_allow_retakes_false_second_attempt_409(
+    engine: AsyncEngine,
+    client: httpx.AsyncClient,
+    quiz_with_questions: dict,
+) -> None:
+    """``allow_retakes=FALSE`` clamps the ceiling to one attempt even
+    when ``max_attempts`` is NULL."""
+    quiz_id = quiz_with_questions["quiz_id"]
+    student_id = quiz_with_questions["student_id"]
+    await _set_quiz_policy(engine, quiz_id, allow_retakes=False)
+    await _seed_attempt(engine, quiz_id, student_id, submitted_hours_ago=2)
+
+    resp = await _post_start_attempt(engine, client, quiz_id, student_id)
+
+    assert resp.status_code == 409, resp.text
+    assert json.loads(resp.text)["detail"]["reason"] == "max_attempts_reached"
+
+
+@pytest.mark.asyncio
+async def test_failed_answer_dispatches_remediation_after_commit(
+    engine: AsyncEngine,
+    client: httpx.AsyncClient,
+    quiz_with_questions: dict,
+) -> None:
+    """FR-4.4/FR-4.6 wiring: a q=0 answer triggers exactly one
+    remediation dispatch after the answer transaction commits."""
+    quiz_id = quiz_with_questions["quiz_id"]
+    student_id = quiz_with_questions["student_id"]
+    question_id = quiz_with_questions["question_ids"][0]
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("UPDATE quiz_questions SET expected_response_time_ms = 30000 WHERE quiz_id = :q"),
+            {"q": quiz_id},
+        )
+        wrong_option = (
+            await conn.execute(
+                text(
+                    "SELECT id FROM quiz_question_options "
+                    "WHERE question_id = :q AND is_correct = FALSE LIMIT 1"
+                ),
+                {"q": question_id},
+            )
+        ).scalar_one()
+
+    sid = await _seed_session(engine, student_id)
+    token = create_access_token(user_id=student_id, session_id=sid)
+    headers = {"Authorization": f"Bearer {token}"}
+
+    with patch(
+        "abridgeai.features.quizzes.routers.learner.dispatch_remediation_for_card_failure",
+        new_callable=AsyncMock,
+    ) as dispatch_mock:
+        try:
+            start_resp = await client.post(
+                f"/api/v1/quizzes/{quiz_id}/attempts",
+                json={"quiz_id": str(quiz_id)},
+                headers=headers,
+            )
+            assert start_resp.status_code == 201, start_resp.text
+
+            async with engine.connect() as conn:
+                attempt_id = (
+                    await conn.execute(
+                        text(
+                            "SELECT id FROM quiz_attempts "
+                            "WHERE quiz_id = :q AND student_id = :s"
+                        ),
+                        {"q": quiz_id, "s": student_id},
+                    )
+                ).scalar_one()
+
+            answer_resp = await client.post(
+                f"/api/v1/attempts/{attempt_id}/answers",
+                json={
+                    "question_id": str(question_id),
+                    "selected_option_id": str(wrong_option),
+                    "t_actual_ms": 20000,
+                },
+                headers=headers,
+            )
+        finally:
+            async with engine.begin() as conn:
+                await conn.execute(
+                    text("DELETE FROM auth_sessions WHERE id = :id"), {"id": sid}
+                )
+
+    assert answer_resp.status_code == 201, answer_resp.text
+    dispatch_mock.assert_awaited_once()
+    call_kwargs = dispatch_mock.await_args.kwargs
+    assert call_kwargs["student_id"] == student_id
+    assert call_kwargs["question_id"] == question_id

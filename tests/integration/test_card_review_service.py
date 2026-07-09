@@ -89,6 +89,7 @@ async def _seed_quiz(
     engine: AsyncEngine,
     *,
     t_exp_ms: int | None = 30000,
+    initial_ef: str | None = None,
 ) -> tuple[UUID, UUID, UUID]:
     """Seed organization → user → course → module → quiz → question.
 
@@ -133,14 +134,15 @@ async def _seed_quiz(
         )
         await conn.execute(
             text(
-                "INSERT INTO quizzes (id, course_id, module_id, title, status) "
-                "VALUES (:id, :course, :module, :title, 'draft')"
+                "INSERT INTO quizzes (id, course_id, module_id, title, status, initial_ef) "
+                "VALUES (:id, :course, :module, :title, 'draft', :initial_ef)"
             ),
             {
                 "id": quiz_id,
                 "course": course_id,
                 "module": module_id,
                 "title": "T7.5.5 Quiz",
+                "initial_ef": initial_ef,
             },
         )
         await conn.execute(
@@ -241,6 +243,81 @@ async def test_first_review_correct_q5_calibrated(
     expected_ef_after = 2.5 + 0.6 * 0.1
     assert abs(result.ef_after - expected_ef_after) < 1e-6
     assert result.calibration_active is True
+
+
+@pytest.mark.asyncio
+async def test_initial_ef_seeds_new_card_state(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """FR-4.2: a new card's EF starts from ``Quiz.initial_ef`` when set."""
+    student_id, question_id, attempt_id = await _seed_quiz(engine, initial_ef="2.20")
+    async with session_factory() as session, session.begin():
+        result = await record_card_review(
+            session,
+            student_id=student_id,
+            question_id=question_id,
+            quiz_attempt_id=attempt_id,
+            t_actual_ms=20000,  # rho=0.667 -> q=4 -> delta 0, EF unchanged
+            correct=True,
+            hint_used=False,
+        )
+
+    assert result.ef_before == pytest.approx(2.20)
+    assert result.ef_after == pytest.approx(2.20)
+
+    async with session_factory() as session:
+        review_row = (
+            await session.execute(select(CardReview).where(CardReview.student_id == student_id))
+        ).scalar_one()
+        assert float(review_row.ef_before) == pytest.approx(2.20)
+
+
+@pytest.mark.asyncio
+async def test_initial_ef_null_defaults_to_2_5(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """NULL ``Quiz.initial_ef`` keeps the SM-2 default 2.5 seed."""
+    student_id, question_id, attempt_id = await _seed_quiz(engine, initial_ef=None)
+    async with session_factory() as session, session.begin():
+        result = await record_card_review(
+            session,
+            student_id=student_id,
+            question_id=question_id,
+            quiz_attempt_id=attempt_id,
+            t_actual_ms=20000,
+            correct=True,
+            hint_used=False,
+        )
+    assert result.ef_before == pytest.approx(2.5)
+
+
+@pytest.mark.asyncio
+async def test_t_actual_none_defaults_to_t_exp(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Missing client timing falls back to T_exp (neutral rho=1.0 -> q=3)."""
+    student_id, question_id, attempt_id = await _seed_quiz(engine)
+    async with session_factory() as session, session.begin():
+        result = await record_card_review(
+            session,
+            student_id=student_id,
+            question_id=question_id,
+            quiz_attempt_id=attempt_id,
+            t_actual_ms=None,
+            correct=True,
+            hint_used=False,
+        )
+
+    assert result.q == 3  # rho=1.0 -> max(3, 5 - int(2)) = 3
+
+    async with session_factory() as session:
+        review_row = (
+            await session.execute(select(CardReview).where(CardReview.student_id == student_id))
+        ).scalar_one()
+        assert review_row.t_actual_ms == review_row.t_exp_ms == 30000
 
 
 @pytest.mark.asyncio

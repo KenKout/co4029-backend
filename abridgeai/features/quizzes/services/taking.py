@@ -23,6 +23,7 @@ from uuid import UUID
 
 from abridgeai.core.db.conflict_mapper import flush_or_conflict
 from abridgeai.core.exceptions import AppError, NotFoundError
+from abridgeai.core.observability import get_logger
 from abridgeai.core.security import CurrentUser, utcnow
 from abridgeai.features.quizzes.models import (
     Quiz,
@@ -33,6 +34,10 @@ from abridgeai.features.quizzes.models import (
 )
 from abridgeai.features.quizzes.queries import authoring as authoring_queries
 from abridgeai.features.quizzes.queries import published as published_queries
+from abridgeai.features.quizzes.queries.published import (
+    CooldownActive,
+    MaxAttemptsReached,
+)
 from abridgeai.features.quizzes.schemas.attempt import (
     QuizAttemptRead,
     QuizAttemptReviewOption,
@@ -45,10 +50,16 @@ from abridgeai.features.quizzes.schemas.public import (
     QuizQuestionPublic,
 )
 from abridgeai.features.quizzes.services.grader import grade_answer
+from abridgeai.features.spaced_repetition.api.public import (
+    CardReviewResult,
+    record_card_review,
+)
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
+
+_logger = get_logger(__name__)
 
 _DEFAULT_FAILURE_COOLDOWN_SECONDS = 86400
 
@@ -72,18 +83,6 @@ class AllCardsInCooldownError(AppError):
         super().__init__("All cards in cooldown")
         self.retry_available_at = retry_available_at
         self.cards_due_at = cards_due_at
-
-
-class InterviewPassRequiredError(AppError):
-    """The quiz's module has an interview config with
-    ``lock_quiz_ef_until_pass = TRUE`` that the student has not passed
-    (FR-5.3). The router maps this to HTTP 403.
-    """
-
-    def __init__(self, module_id: UUID, interview_config_id: UUID) -> None:
-        super().__init__("Interview pass required before quiz progression")
-        self.module_id = module_id
-        self.interview_config_id = interview_config_id
 
 
 async def get_published_quiz(db: AsyncSession, quiz_id: UUID) -> Quiz | None:
@@ -191,49 +190,6 @@ async def _load_cooldown_map(
     return {row[0]: row[1] for row in result.all()}
 
 
-async def _ensure_interview_pass_lock(db: AsyncSession, *, quiz_id: UUID, student_id: UUID) -> None:
-    """FR-5.3 — block quiz progression until the module interview is passed.
-
-    Looks up a published interview config with ``lock_quiz_ef_until_pass``
-    on the quiz's module. The module linkage goes through
-    ``module_items.quiz_id`` (courses feature) so this uses raw SQL — same
-    cross-feature precedent as :func:`_load_cooldown_map` (T7.5.5). The
-    pass check itself goes through the spaced_repetition public API.
-    Disabled by the ``LESSON_GATING_ENFORCED=false`` emergency switch.
-    """
-    from sqlalchemy import text  # noqa: PLC0415
-
-    from abridgeai.core.config import get_settings  # noqa: PLC0415
-    from abridgeai.features.spaced_repetition.api import public as sr_public  # noqa: PLC0415
-
-    if not get_settings().lesson_gating_enforced:
-        return
-    row = (
-        await db.execute(
-            text(
-                "SELECT c.id, c.module_id FROM interview_configs c "
-                "JOIN module_items mi ON mi.module_id = c.module_id "
-                "WHERE mi.quiz_id = :quiz_id "
-                "  AND mi.deleted_at IS NULL "
-                "  AND c.deleted_at IS NULL "
-                "  AND c.status = 'published' "
-                "  AND c.lock_quiz_ef_until_pass = TRUE "
-                "ORDER BY c.created_at ASC, c.id ASC "
-                "LIMIT 1"
-            ),
-            {"quiz_id": str(quiz_id)},
-        )
-    ).first()
-    if row is None:
-        return
-    config_id, module_id = row
-    passed = await sr_public.has_passing_interview_for_module(
-        db, student_id=student_id, module_id=module_id
-    )
-    if not passed:
-        raise InterviewPassRequiredError(module_id, config_id)
-
-
 async def start_attempt(
     db: AsyncSession,
     quiz_id: UUID,
@@ -268,11 +224,18 @@ async def start_attempt(
     Cards the student has never attempted (no ``student_card_state``
     row) are *not* in cooldown — they are new material per thesis
     UC-LEARN-01 Alt 1a.
+
+    **FR-4.3 — retake policy.** The quiz loads through
+    :func:`published_queries.get_quiz_for_taking`, which (a) returns
+    ``None`` for draft/archived/soft-deleted quizzes (→ 404; students
+    can no longer attempt unpublished quizzes) and (b) raises
+    :class:`CooldownActive` (→ 429) / :class:`MaxAttemptsReached`
+    (→ 409) per the quiz's ``cooldown_hours`` / ``max_attempts`` /
+    ``allow_retakes`` columns. Both exceptions propagate to the router.
     """
-    quiz = await _require_quiz(db, quiz_id)
-
-    await _ensure_interview_pass_lock(db, quiz_id=quiz_id, student_id=actor.user_id)
-
+    quiz = await published_queries.get_quiz_for_taking(db, quiz_id, actor.user_id)
+    if quiz is None:
+        raise NotFoundError(f"Quiz {quiz_id} not found")
     questions = await _load_quiz_questions_for_taking(db, quiz_id)
 
     cooldown_map = await _load_cooldown_map(
@@ -313,7 +276,7 @@ async def answer_attempt(
     attempt_id: UUID,
     payload: object,
     actor: CurrentUser,
-) -> QuizAttemptAnswer:
+) -> tuple[QuizAttemptAnswer, CardReviewResult | None]:
     """Record one answer for an in-flight attempt.
 
     Computes ``is_correct`` server-side via the type-aware grader so a
@@ -321,6 +284,19 @@ async def answer_attempt(
     answers grade by option lookup; short_answer and fill_blank grade
     by comparing the submitted text against the canonical answer
     stored on ``QuizQuestion.original_generated_payload``.
+
+    **FR-4.4 learning loop.** After the answer persists, the SM-2
+    review fires via :func:`record_card_review` (SR public API): Q is
+    derived from correctness + hint + ρ, EF updates, and the card is
+    rescheduled — all inside this transaction. SR failure never blocks
+    the answer write: a question without T_exp (draft quiz) or a
+    missing question logs a warning and skips the review. The returned
+    :class:`CardReviewResult` (or ``None`` when skipped) carries
+    ``pending_events`` the router must dispatch **after commit**.
+
+    Duplicate reviews are impossible per attempt: the
+    ``uq_quiz_attempt_answers_question`` constraint rejects a second
+    answer for the same question before the review would fire.
     """
     del actor
     attempt = await _require_attempt(db, attempt_id)
@@ -351,7 +327,26 @@ async def answer_attempt(
     db.add(answer)
     await flush_or_conflict(db)
     await db.refresh(answer)
-    return answer
+
+    review_result: CardReviewResult | None = None
+    try:
+        review_result = await record_card_review(
+            db,
+            student_id=attempt.student_id,
+            question_id=answer.question_id,
+            quiz_attempt_id=attempt.id,
+            t_actual_ms=answer.t_actual_ms,
+            correct=answer.is_correct,
+            hint_used=answer.hint_used,
+        )
+    except (NotFoundError, ValueError) as exc:
+        _logger.warning(
+            "sm2_review_skipped",
+            attempt_id=str(attempt.id),
+            question_id=str(answer.question_id),
+            reason=str(exc),
+        )
+    return answer, review_result
 
 
 async def submit_attempt(
@@ -442,7 +437,9 @@ async def get_attempt_review(
     if attempt is None:
         return None
 
-    answers_by_question: dict[UUID, QuizAttemptAnswer] = {a.question_id: a for a in attempt.answers}
+    answers_by_question: dict[UUID, QuizAttemptAnswer] = {
+        a.question_id: a for a in attempt.answers
+    }
 
     questions_with_options = await published_queries.list_quiz_questions_with_options(
         db, attempt.quiz_id
@@ -459,7 +456,9 @@ async def get_attempt_review(
                 prompt_text=question.prompt_text,
                 explanation=question.explanation,
                 hint_text=question.hint_text,
-                options=[QuizAttemptReviewOption.model_validate(opt) for opt in options],
+                options=[
+                    QuizAttemptReviewOption.model_validate(opt) for opt in options
+                ],
                 selected_option_id=ans.selected_option_id if ans else None,
                 answer_text=ans.answer_text if ans else None,
                 is_correct=ans.is_correct if ans else False,
@@ -476,6 +475,9 @@ async def get_attempt_review(
 
 
 __all__ = [
+    "AllCardsInCooldownError",
+    "CooldownActive",
+    "MaxAttemptsReached",
     "answer_attempt",
     "get_attempt_history",
     "get_attempt_review",

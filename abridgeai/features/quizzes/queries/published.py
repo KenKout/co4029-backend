@@ -22,9 +22,8 @@ the quiz to the learner:
    :class:`MaxAttemptsReached` is raised. Service maps to HTTP 409.
 
 Both gates are skipped when the corresponding column is ``NULL``
-(unbounded retakes / no cooldown). ``Quiz.allow_retakes=FALSE`` is
-modelled as ``max_attempts=1`` upstream — the query trusts the
-column values.
+(unbounded retakes / no cooldown). ``Quiz.allow_retakes=FALSE``
+clamps the effective attempt ceiling to 1 inside the gate itself.
 """
 
 from __future__ import annotations
@@ -142,9 +141,11 @@ async def get_quiz_for_taking(
     * :class:`MaxAttemptsReached` when the student has used every
       allowed attempt.
 
-    NULL columns disable the corresponding gate — caller must rely on
-    upstream policy (e.g. ``allow_retakes=FALSE`` is normalised to
-    ``max_attempts=1`` at quiz creation).
+    NULL columns disable the corresponding gate, except
+    ``allow_retakes=FALSE`` which clamps the effective ceiling to a
+    single attempt regardless of ``max_attempts`` (enforced here —
+    creation does NOT normalise the columns, and enforcing at read
+    time covers pre-existing rows without a data migration).
     """
     quiz = await get_published_quiz(db, quiz_id)
     if quiz is None:
@@ -174,14 +175,15 @@ async def get_quiz_for_taking(
     # Max-attempts gate — count student attempts (any status counts;
     # in_progress + abandoned consume an attempt slot just like submitted).
     # ------------------------------------------------------------------
-    if quiz.max_attempts is not None and quiz.max_attempts > 0:
+    effective_max = 1 if not quiz.allow_retakes else quiz.max_attempts
+    if effective_max is not None and effective_max > 0:
         attempts_stmt = select(func.count(QuizAttempt.id)).where(
             QuizAttempt.quiz_id == quiz_id,
             QuizAttempt.student_id == user_id,
         )
         used = (await db.execute(attempts_stmt)).scalar_one()
-        if used >= quiz.max_attempts:
-            raise MaxAttemptsReached(quiz_id=quiz_id, max_attempts=quiz.max_attempts)
+        if used >= effective_max:
+            raise MaxAttemptsReached(quiz_id=quiz_id, max_attempts=effective_max)
 
     return quiz
 

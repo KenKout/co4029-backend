@@ -85,6 +85,7 @@ async def get_question_with_quiz_context(
             QuizQuestion.source_refs,
             Quiz.course_id,
             Quiz.module_id,
+            Quiz.initial_ef,
         )
         .join(Quiz, Quiz.id == QuizQuestion.quiz_id)
         .where(QuizQuestion.id == question_id)
@@ -99,6 +100,7 @@ async def get_question_with_quiz_context(
         source_refs=list(row.source_refs or []),
         course_id=row.course_id,
         module_id=row.module_id,
+        initial_ef=row.initial_ef,
     )
 
 

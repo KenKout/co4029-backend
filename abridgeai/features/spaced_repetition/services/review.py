@@ -80,7 +80,9 @@ class CardReviewResult:
     pending_events: list[CardFailedEvent] = field(default_factory=list)
 
 
-async def _load_quiz_question_meta(db: AsyncSession, question_id: UUID) -> tuple[int, UUID]:
+async def _load_quiz_question_meta(
+    db: AsyncSession, question_id: UUID
+) -> tuple[int, UUID, Decimal | None]:
     t_exp_ms = await get_t_exp_for_question(db, question_id)
     context = await get_question_with_quiz_context(db, question_id)
     if context is None:
@@ -90,11 +92,15 @@ async def _load_quiz_question_meta(db: AsyncSession, question_id: UUID) -> tuple
             f"QuizQuestion {question_id} has no expected_response_time_ms — "
             "T_exp must be set before review (T7.5.9 publish gate)",
         )
-    return int(t_exp_ms), context.quiz_id
+    return int(t_exp_ms), context.quiz_id, context.initial_ef
 
 
 async def _load_or_init_state(
-    db: AsyncSession, *, student_id: UUID, question_id: UUID
+    db: AsyncSession,
+    *,
+    student_id: UUID,
+    question_id: UUID,
+    initial_ef: Decimal | None = None,
 ) -> tuple[StudentCardState, bool]:
     state = await db.get(StudentCardState, (student_id, question_id))
     if state is not None:
@@ -102,7 +108,7 @@ async def _load_or_init_state(
     state = StudentCardState(
         student_id=student_id,
         question_id=question_id,
-        ef=Decimal("2.5"),
+        ef=initial_ef if initial_ef is not None else Decimal("2.5"),
         interval_days=1,
         repetition_count=0,
         due_at=datetime.now(tz=UTC),
@@ -121,7 +127,7 @@ async def record_card_review(
     student_id: UUID,
     question_id: UUID,
     quiz_attempt_id: UUID | None,
-    t_actual_ms: int,
+    t_actual_ms: int | None,
     correct: bool,
     hint_used: bool,
     actor_id: UUID | None = None,  # noqa: ARG001 — reserved for future explicit override
@@ -142,16 +148,25 @@ async def record_card_review(
     ``pending_events`` for the caller to dispatch **after commit** (T7.5.10
     BUG-2 fix). The service itself does not fire anything.
 
+    ``t_actual_ms=None`` (client omitted timing) falls back to
+    ``t_exp_ms`` — neutral ρ=1.0. Incorrect answers still derive Q=0
+    (timing-independent), so the forgetting signal is preserved.
+
+    New cards seed ``ef`` from ``Quiz.initial_ef`` when the teacher set
+    one (FR-4.2); otherwise the SM-2 default 2.5 applies.
+
     Raises:
         NotFoundError: when ``question_id`` does not match any
             ``quiz_questions`` row.
         ValueError: when the question has no ``expected_response_time_ms``
             (T_exp must be set before scheduling — T7.5.9 publish gate).
     """
-    t_exp_ms, quiz_id = await _load_quiz_question_meta(db, question_id)
+    t_exp_ms, quiz_id, initial_ef = await _load_quiz_question_meta(db, question_id)
+    if t_actual_ms is None:
+        t_actual_ms = t_exp_ms
 
     state, _was_created = await _load_or_init_state(
-        db, student_id=student_id, question_id=question_id
+        db, student_id=student_id, question_id=question_id, initial_ef=initial_ef
     )
 
     ef_before_dec = state.ef
