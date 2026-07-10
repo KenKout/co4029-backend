@@ -137,6 +137,7 @@ class InterviewConfigPublic(_ORMModel):
     supported_modes: SupportedModesLiteral
     time_limit_minutes: int | None = None
     max_attempts: int | None = None
+    cooldown_hours: int | None = None
     lock_quiz_ef_until_pass: bool
     published_at: datetime | None = None
 

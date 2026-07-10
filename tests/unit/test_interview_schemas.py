@@ -302,14 +302,20 @@ def test_create_schemas_basic_validation() -> None:
         supported_modes="text",
         time_limit_minutes=30,
         max_attempts=3,
+        cooldown_hours=24,
         lock_quiz_ef_until_pass=True,
         supplementary_instructions="Probe deeply on edge cases",
     )
     assert config.title == "ML Foundations"
     assert config.persona == "strict"
+    # FR-5.3 retake cooldown knob is accepted at config creation.
+    assert config.cooldown_hours == 24
 
-    update = InterviewConfigUpdate(title="Renamed", status="published")
-    assert update.status == "published"
+    # ``status`` is NOT a patchable field — transitions go through the
+    # dedicated /publish|/archive|/unarchive endpoints (extra="forbid").
+    update = InterviewConfigUpdate(title="Renamed", cooldown_hours=12)
+    assert update.title == "Renamed"
+    assert update.cooldown_hours == 12
     assert update.persona is None
 
     outcome = InterviewOutcomeCreate(
@@ -475,10 +481,12 @@ def test_gap_report_authoring_inherits_student_view() -> None:
         course_id=uuid4(),
         discrepancy_summary="Strong on theory, weak on application",
         study_plan=[StudyPlanItem(topic="Backprop", suggested_resources=["Lesson 4"])],
-        per_criterion_breakdown={"backprop": {"verdict": "met"}},
         generated_at=now,
     )
-    assert "raw_evaluation_json" not in student.model_dump()
+    dumped = student.model_dump()
+    assert "raw_evaluation_json" not in dumped
+    # FR-5.7: numeric per-criterion rubric scores must NOT reach the student.
+    assert "per_criterion_breakdown" not in dumped
 
     teacher = GapReportAuthoringRead(
         id=uuid4(),
@@ -486,7 +494,7 @@ def test_gap_report_authoring_inherits_student_view() -> None:
         course_id=uuid4(),
         discrepancy_summary="x",
         study_plan=[],
-        per_criterion_breakdown={},
+        per_criterion_breakdown={"technical_accuracy": 3.2},
         generated_at=now,
         raw_evaluation_json={"q1": {"verdict": "met", "rationale": "..."}},
         teacher_summary="Notable strength on theory.",
@@ -494,6 +502,8 @@ def test_gap_report_authoring_inherits_student_view() -> None:
     )
     assert teacher.teacher_summary is not None
     assert "rationale" in teacher.raw_evaluation_json["q1"]
+    # FR-5.7: per-criterion breakdown is teacher-only and preserved here.
+    assert teacher.per_criterion_breakdown["technical_accuracy"] == 3.2
 
 
 def test_generation_run_orm_compat() -> None:

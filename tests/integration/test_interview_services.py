@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -268,6 +269,8 @@ async def _create_published_config(
     teacher_id: uuid.UUID,
     questions: int = 2,
     outcomes: int = 1,
+    max_attempts: int | None = None,
+    cooldown_hours: int | None = None,
 ) -> dict[str, Any]:
     config_id = uuid.uuid4()
     question_ids = [uuid.uuid4() for _ in range(questions)]
@@ -276,10 +279,19 @@ async def _create_published_config(
         await conn.execute(
             text(
                 "INSERT INTO interview_configs "
-                "(id, course_id, module_id, title, status, supported_modes, created_by) "
-                "VALUES (:id, :c, :m, 'Pub Interview', 'published', 'text', :t)"
+                "(id, course_id, module_id, title, status, supported_modes, created_by, "
+                "max_attempts, cooldown_hours) "
+                "VALUES (:id, :c, :m, 'Pub Interview', 'published', 'text', :t, "
+                ":max_attempts, :cooldown_hours)"
             ),
-            {"id": config_id, "c": course_id, "m": module_id, "t": teacher_id},
+            {
+                "id": config_id,
+                "c": course_id,
+                "m": module_id,
+                "t": teacher_id,
+                "max_attempts": max_attempts,
+                "cooldown_hours": cooldown_hours,
+            },
         )
         for idx, qid in enumerate(question_ids, start=1):
             await conn.execute(
@@ -364,6 +376,154 @@ async def test_start_session_returns_existing_active_session(
 
     assert first.id == second.id
     assert first.attempt_number == 1
+
+
+async def _finish_session(
+    engine: AsyncEngine, session_id: uuid.UUID, *, status_: str, ended_at: Any
+) -> None:
+    """Mark a session terminal with a specific ``ended_at`` for gate tests."""
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("UPDATE interview_sessions SET status = :s, ended_at = :e WHERE id = :id"),
+            {"s": status_, "e": ended_at, "id": session_id},
+        )
+
+
+@pytest.mark.asyncio
+async def test_start_session_cooldown_blocks_new_attempt(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict[str, Any],
+) -> None:
+    """FR-5.3 — a new attempt inside ``cooldown_hours`` is rejected."""
+    seeded = await _create_published_config(
+        engine,
+        course_id=scenario["course_id"],
+        module_id=scenario["module_id"],
+        teacher_id=scenario["teacher_id"],
+        cooldown_hours=24,
+    )
+    payload = _CreatePayload(input_mode="text")
+    async with session_factory() as session, session.begin():
+        first = await taking_service.start_session(
+            session, seeded["config_id"], payload, _actor(scenario["student_id"])
+        )
+    # Finish it one hour ago — well inside the 24h cooldown.
+    await _finish_session(
+        engine,
+        first.id,
+        status_="completed",
+        ended_at=datetime.now(UTC) - timedelta(hours=1),
+    )
+
+    with pytest.raises(taking_service.InterviewCooldownActive) as excinfo:
+        async with session_factory() as session, session.begin():
+            await taking_service.start_session(
+                session, seeded["config_id"], payload, _actor(scenario["student_id"])
+            )
+    assert excinfo.value.retry_after > datetime.now(UTC)
+
+
+@pytest.mark.asyncio
+async def test_start_session_cooldown_elapsed_allows_new_attempt(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict[str, Any],
+) -> None:
+    """FR-5.3 — once the cooldown has elapsed a new attempt is allowed."""
+    seeded = await _create_published_config(
+        engine,
+        course_id=scenario["course_id"],
+        module_id=scenario["module_id"],
+        teacher_id=scenario["teacher_id"],
+        cooldown_hours=2,
+    )
+    payload = _CreatePayload(input_mode="text")
+    async with session_factory() as session, session.begin():
+        first = await taking_service.start_session(
+            session, seeded["config_id"], payload, _actor(scenario["student_id"])
+        )
+    # Finished 3h ago — the 2h cooldown has lapsed.
+    await _finish_session(
+        engine,
+        first.id,
+        status_="completed",
+        ended_at=datetime.now(UTC) - timedelta(hours=3),
+    )
+
+    async with session_factory() as session, session.begin():
+        second = await taking_service.start_session(
+            session, seeded["config_id"], payload, _actor(scenario["student_id"])
+        )
+    assert second.id != first.id
+    assert second.attempt_number == 2
+
+
+@pytest.mark.asyncio
+async def test_start_session_max_attempts_blocks_new_attempt(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict[str, Any],
+) -> None:
+    """FR-5.3 — once ``max_attempts`` terminal sessions exist, block."""
+    seeded = await _create_published_config(
+        engine,
+        course_id=scenario["course_id"],
+        module_id=scenario["module_id"],
+        teacher_id=scenario["teacher_id"],
+        max_attempts=1,
+    )
+    payload = _CreatePayload(input_mode="text")
+    async with session_factory() as session, session.begin():
+        first = await taking_service.start_session(
+            session, seeded["config_id"], payload, _actor(scenario["student_id"])
+        )
+    await _finish_session(
+        engine,
+        first.id,
+        status_="completed",
+        ended_at=datetime.now(UTC) - timedelta(days=30),
+    )
+
+    with pytest.raises(taking_service.InterviewMaxAttemptsReached) as excinfo:
+        async with session_factory() as session, session.begin():
+            await taking_service.start_session(
+                session, seeded["config_id"], payload, _actor(scenario["student_id"])
+            )
+    assert excinfo.value.max_attempts == 1
+
+
+@pytest.mark.asyncio
+async def test_start_session_no_cooldown_when_unset(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict[str, Any],
+) -> None:
+    """FR-5.3 — NULL cooldown/max_attempts leaves retakes unrestricted."""
+    seeded = await _create_published_config(
+        engine,
+        course_id=scenario["course_id"],
+        module_id=scenario["module_id"],
+        teacher_id=scenario["teacher_id"],
+    )
+    payload = _CreatePayload(input_mode="text")
+    async with session_factory() as session, session.begin():
+        first = await taking_service.start_session(
+            session, seeded["config_id"], payload, _actor(scenario["student_id"])
+        )
+    await _finish_session(
+        engine,
+        first.id,
+        status_="completed",
+        ended_at=datetime.now(UTC),
+    )
+    # Immediately retaking is fine — no gate configured.
+    async with session_factory() as session, session.begin():
+        second = await taking_service.start_session(
+            session, seeded["config_id"], payload, _actor(scenario["student_id"])
+        )
+    assert second.id != first.id
+    assert second.attempt_number == 2
 
 
 @pytest.mark.asyncio
@@ -790,8 +950,9 @@ async def test_evaluate_and_generate_report_fails_when_outcomes_not_met(
     session_id = started.id
 
     # High rubric score (would have passed under old >=60 logic)...
-    rubric = RubricScores(response_evaluations=[], aggregated={"technical_accuracy": 5.0},
-                          total_score=95.0)
+    rubric = RubricScores(
+        response_evaluations=[], aggregated={"technical_accuracy": 5.0}, total_score=95.0
+    )
     # ...but only 1 of 2 outcomes met, and NULL threshold requires ALL → FAIL.
     oids = seeded["outcome_ids"]
     verdicts = build_outcome_verdicts(
@@ -801,9 +962,15 @@ async def test_evaluate_and_generate_report_fails_when_outcomes_not_met(
         ]
     )
     draft = GapReportDraft(
-        discrepancy_score=0.0, theory_score_avg=0.0, practice_score=95.0,
-        strengths=[], weaknesses=[], study_plan=[],
-        student_summary="s", teacher_summary="t", report_json={},
+        discrepancy_score=0.0,
+        theory_score_avg=0.0,
+        practice_score=95.0,
+        strengths=[],
+        weaknesses=[],
+        study_plan=[],
+        student_summary="s",
+        teacher_summary="t",
+        report_json={},
     )
     monkeypatch.setattr(
         "abridgeai.features.interviews.services.evaluation.evaluate_session",

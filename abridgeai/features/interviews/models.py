@@ -229,6 +229,10 @@ class InterviewConfig(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftD
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     status: Mapped[str] = mapped_column(String(20), nullable=False, server_default=text("'draft'"))
     max_attempts: Mapped[int | None] = mapped_column(Integer)
+    # FR-5.3 retake cooldown: minimum hours between the end of one attempt and
+    # the start of the next. NULL / <=0 disables the gate. Mirrors
+    # ``Quiz.cooldown_hours``; enforced in ``services/taking.start_session``.
+    cooldown_hours: Mapped[int | None] = mapped_column(Integer)
     min_outcomes_to_pass: Mapped[int | None] = mapped_column(Integer)
     lock_quiz_ef_until_pass: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=text("FALSE")

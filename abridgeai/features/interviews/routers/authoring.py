@@ -135,7 +135,6 @@ async def get_interview_config(
 ) -> InterviewForAuthoringPublic:
     del current_user
     from abridgeai.features.interviews.models import InterviewConfig  # noqa: PLC0415
-
     from abridgeai.features.interviews.queries import (  # noqa: PLC0415
         list_outcomes_for_config,
         list_questions_for_config,
@@ -455,16 +454,20 @@ async def list_config_sessions(
     names: dict[UUID, str] = {}
     if student_ids:
         rows = (
-            await db.execute(
-                _text(
-                    "SELECT u.id, COALESCE(p.display_name, u.primary_email) AS name "
-                    "FROM users u "
-                    "LEFT JOIN user_profiles p ON p.user_id = u.id "
-                    "WHERE u.id = ANY(:ids)"
-                ),
-                {"ids": list(student_ids)},
+            (
+                await db.execute(
+                    _text(
+                        "SELECT u.id, COALESCE(p.display_name, u.primary_email) AS name "
+                        "FROM users u "
+                        "LEFT JOIN user_profiles p ON p.user_id = u.id "
+                        "WHERE u.id = ANY(:ids)"
+                    ),
+                    {"ids": list(student_ids)},
+                )
             )
-        ).mappings().all()
+            .mappings()
+            .all()
+        )
         names = {row["id"]: row["name"] for row in rows}
     return [
         InterviewSessionSummary(
@@ -502,9 +505,7 @@ async def get_session_transcript(
     messages = await _sessions_q.list_session_messages(db, session_id)
     # Resolve each message's question prompt via session_question_id -> question.
     prompts: dict[UUID, str] = {}
-    sq_ids = {
-        m.session_question_id for m in messages if m.session_question_id is not None
-    }
+    sq_ids = {m.session_question_id for m in messages if m.session_question_id is not None}
     if sq_ids:
         from sqlalchemy import select as _select  # noqa: PLC0415
 
@@ -579,8 +580,18 @@ async def get_session_gap_report_authoring(
         ]
     }
 
+    # FR-5.7: per-criterion mean rubric scores are teacher-only. They live
+    # in ``report_json["rubric_aggregated"]`` and are surfaced here (never on
+    # the student-facing GapReportRead).
+    report_json = report.report_json or {}
+    per_criterion = report_json.get("rubric_aggregated") if isinstance(report_json, dict) else None
     base = GapReportAuthoringRead.model_validate(report)
-    return base.model_copy(update={"raw_evaluation_json": raw_evaluation_json})
+    return base.model_copy(
+        update={
+            "raw_evaluation_json": raw_evaluation_json,
+            "per_criterion_breakdown": (per_criterion if isinstance(per_criterion, dict) else {}),
+        }
+    )
 
 
 def _generation_run_view(run: Any) -> InterviewGenerationRunPublic:  # noqa: ANN401  -- ORM row, typed via duck shape

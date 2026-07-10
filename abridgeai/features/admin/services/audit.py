@@ -52,13 +52,22 @@ async def http_audit_search(
     )
 
 
-async def course_data_changes(db: AsyncSession, *, entity_id: UUID) -> dict[str, Any] | None:
-    return await audit_queries.course_data_changes(db, entity_id=entity_id)
+SUPPORTED_DATA_CHANGE_TABLES = audit_queries.SUPPORTED_DATA_CHANGE_TABLES
+
+
+async def data_changes(db: AsyncSession, *, table: str, entity_id: UUID) -> dict[str, Any] | None:
+    """Audit trail for a single row in ``table`` (FR-6.7).
+
+    ``table`` is validated at the router edge against
+    :data:`SUPPORTED_DATA_CHANGE_TABLES`; here we trust it and delegate.
+    """
+    return await audit_queries.data_changes(db, table=table, entity_id=entity_id)
 
 
 __all__ = [
+    "SUPPORTED_DATA_CHANGE_TABLES",
     "HttpAuditUnavailableError",
-    "course_data_changes",
+    "data_changes",
     "http_audit_search",
     "role_changes",
 ]

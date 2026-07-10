@@ -25,6 +25,7 @@ depth.
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime
 from typing import Annotated, Any
 from uuid import UUID
 
@@ -180,6 +181,24 @@ async def start_session(
         session = await taking_service.start_session(db, config_id, payload, current_user)
     except NotFoundError as exc:
         raise _not_found("interview_config", config_id) from exc
+    except taking_service.InterviewCooldownActive as exc:
+        # FR-5.3 — retake cooldown still active; surface Retry-After.
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail={
+                "error": "cooldown_active",
+                "message": str(exc),
+                "retry_after": exc.retry_after.isoformat(),
+            },
+            headers={
+                "Retry-After": str(
+                    max(0, int((exc.retry_after - datetime.now(UTC)).total_seconds()))
+                )
+            },
+        ) from exc
+    except taking_service.InterviewMaxAttemptsReached as exc:
+        # FR-5.3 — attempt ceiling reached.
+        raise _conflict(str(exc)) from exc
     except AppError as exc:
         raise _bad_request(str(exc)) from exc
     await db.commit()
@@ -346,9 +365,7 @@ async def respond_to_session(
         raise
     except Exception as exc:  # noqa: BLE001 — surface the real error to logs + client
         await db.rollback()
-        logger.exception(
-            "respond_to_session: unhandled error (session=%s)", session_id
-        )
+        logger.exception("respond_to_session: unhandled error (session=%s)", session_id)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail={
@@ -361,9 +378,7 @@ async def respond_to_session(
         await db.commit()
     except Exception as exc:  # noqa: BLE001 — commit-time IntegrityError etc.
         await db.rollback()
-        logger.exception(
-            "respond_to_session: commit failed (session=%s)", session_id
-        )
+        logger.exception("respond_to_session: commit failed (session=%s)", session_id)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail={
@@ -412,9 +427,7 @@ async def finish_session(
         raise
     except Exception as exc:  # noqa: BLE001 — surface real error to logs + client
         await db.rollback()
-        logger.exception(
-            "finish_session: unhandled error (session=%s)", session_id
-        )
+        logger.exception("finish_session: unhandled error (session=%s)", session_id)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail={
@@ -541,7 +554,10 @@ def _gap_report_view(report: Any) -> GapReportRead:  # noqa: ANN401  -- ORM row,
                     ],
                 }
             )
-    per_criterion = report_json.get("rubric_aggregated") if isinstance(report_json, dict) else None
+    # FR-5.7: student sees pass/fail + qualitative remediation only. The
+    # per-criterion mean rubric scores (report_json["rubric_aggregated"]) are
+    # deliberately NOT projected here — they are teacher-only via
+    # GapReportAuthoringRead. See interviews/schemas/report.py.
     summary_text = report.student_summary or ""
     return GapReportRead.model_validate(
         {
@@ -551,7 +567,6 @@ def _gap_report_view(report: Any) -> GapReportRead:  # noqa: ANN401  -- ORM row,
             "module_id": report.module_id,
             "discrepancy_summary": summary_text or None,
             "study_plan": study_plan,
-            "per_criterion_breakdown": (per_criterion if isinstance(per_criterion, dict) else {}),
             "generated_at": report.created_at,
         }
     )

@@ -12,11 +12,11 @@ the 400 at framework level when the param is missing).
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Annotated, Any
+from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from abridgeai.core.db import get_db
@@ -61,10 +61,24 @@ class HttpAuditRow(BaseModel):
     created_at: datetime
 
 
-class CourseDataChangeOut(BaseModel):
+class DataChangeOut(BaseModel):
+    """Uniform data-change projection across every auditable entity kind.
+
+    The four supported tables (courses / materials / users /
+    role_assignments) each project this common shape. Entity-specific
+    columns (``slug`` for courses, ``material_type`` + ``lesson_id`` for
+    materials, ``primary_email`` for users, ``scope_kind`` +
+    ``subject_user_id`` for role assignments) ride along in ``extra`` so a
+    single response model serves all four without a per-table class.
+
+    ``organization_id`` is nullable because global entities (users) and,
+    depending on scope, role assignments carry no owning org.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
     entity_id: UUID
     title: str
-    slug: str
     status: str
     created_by: UUID | None = None
     updated_by: UUID | None = None
@@ -72,7 +86,7 @@ class CourseDataChangeOut(BaseModel):
     created_at: datetime
     updated_at: datetime
     deleted_at: datetime | None = None
-    organization_id: UUID
+    organization_id: UUID | None = None
 
 
 @router.get("/role-changes", response_model=list[RoleChangeRow])
@@ -87,28 +101,45 @@ async def get_role_changes(
     return [RoleChangeRow.model_validate(r) for r in rows]
 
 
-@router.get("/data-changes")
+@router.get("/data-changes", response_model=DataChangeOut)
 async def get_data_changes(
     _user: Annotated[CurrentUser, Depends(_REQUIRE_AUDIT)],
     db: Annotated[AsyncSession, Depends(get_db)],
-    table: Annotated[str, Query(description="Entity table; only 'courses' supported in T7.5.")],
+    table: Annotated[
+        str,
+        Query(
+            description=(
+                "Entity table to audit. One of: "
+                f"{', '.join(audit_service.SUPPORTED_DATA_CHANGE_TABLES)}."
+            ),
+        ),
+    ],
     entity_id: Annotated[UUID, Query(description="Target entity primary key.")],
-) -> dict[str, Any]:
-    if table != "courses":
+) -> DataChangeOut:
+    """Who created / last-updated / soft-deleted a single entity (FR-6.7).
+
+    Extended in this pass beyond courses to also cover materials, users,
+    and role assignments. Each table projects the uniform
+    :class:`DataChangeOut` shape plus entity-specific columns.
+    """
+    if table not in audit_service.SUPPORTED_DATA_CHANGE_TABLES:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={
                 "error": "unsupported_table",
-                "message": "data-changes lookup currently supports table='courses' only",
+                "message": (
+                    "data-changes lookup supports table in "
+                    f"{list(audit_service.SUPPORTED_DATA_CHANGE_TABLES)}"
+                ),
             },
         )
-    row = await audit_service.course_data_changes(db, entity_id=entity_id)
+    row = await audit_service.data_changes(db, table=table, entity_id=entity_id)
     if row is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail={"error": "not_found", "resource": "course", "id": str(entity_id)},
+            detail={"error": "not_found", "resource": table, "id": str(entity_id)},
         )
-    return CourseDataChangeOut.model_validate(row).model_dump(mode="json")
+    return DataChangeOut.model_validate(row)
 
 
 @router.get("/http", response_model=list[HttpAuditRow])

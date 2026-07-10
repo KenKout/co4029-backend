@@ -563,6 +563,67 @@ async def test_data_changes_lookup(
     assert body["organization_id"] == str(seeded_users.organization_id)
 
 
+async def test_data_changes_lookup_users(
+    client: httpx.AsyncClient,
+    engine: AsyncEngine,
+    seeded_users: SeededUsers,
+) -> None:
+    """FR-6.7 — data-changes now covers the users table (was courses-only)."""
+    token, _ = await _bearer(engine, seeded_users.admin_id)
+    try:
+        resp = await client.get(
+            f"/api/v1/admin/audit/data-changes?table=users&entity_id={seeded_users.admin_id}",
+            headers=_auth(token),
+        )
+    finally:
+        await _purge_sessions(engine, seeded_users.admin_id)
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["entity_id"] == str(seeded_users.admin_id)
+    # Users carry no owning org / audit-by columns — surfaced as null uniformly.
+    assert body["organization_id"] is None
+    assert body["created_by"] is None
+    # primary_email rides along via the extra="allow" passthrough.
+    assert "primary_email" in body
+
+
+async def test_data_changes_unsupported_table_400(
+    client: httpx.AsyncClient,
+    engine: AsyncEngine,
+    seeded_users: SeededUsers,
+) -> None:
+    """An unknown table 400s before touching the DB (FR-6.7 guard)."""
+    token, _ = await _bearer(engine, seeded_users.admin_id)
+    try:
+        resp = await client.get(
+            f"/api/v1/admin/audit/data-changes?table=quizzes&entity_id={seeded_users.course_id}",
+            headers=_auth(token),
+        )
+    finally:
+        await _purge_sessions(engine, seeded_users.admin_id)
+    assert resp.status_code == 400, resp.text
+    assert resp.json()["detail"]["error"] == "unsupported_table"
+
+
+async def test_data_changes_not_found_404(
+    client: httpx.AsyncClient,
+    engine: AsyncEngine,
+    seeded_users: SeededUsers,
+) -> None:
+    """A supported table with a missing PK 404s (FR-6.7)."""
+    token, _ = await _bearer(engine, seeded_users.admin_id)
+    missing = uuid.uuid4()
+    try:
+        resp = await client.get(
+            f"/api/v1/admin/audit/data-changes?table=materials&entity_id={missing}",
+            headers=_auth(token),
+        )
+    finally:
+        await _purge_sessions(engine, seeded_users.admin_id)
+    assert resp.status_code == 404, resp.text
+    assert resp.json()["detail"]["resource"] == "materials"
+
+
 async def test_http_audit_endpoint_503_when_table_absent(
     client: httpx.AsyncClient,
     engine: AsyncEngine,

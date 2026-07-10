@@ -25,7 +25,22 @@ def _load(name: str) -> TextClause:
 _ROLE_CHANGES_SQL = _load("audit/role_changes.sql")
 _HTTP_AUDIT_SQL = _load("audit/http_audit.sql")
 _HTTP_AUDIT_PROBE_SQL = _load("audit/http_audit_table_exists.sql")
-_DATA_CHANGES_COURSES_SQL = _load("audit/data_changes_courses.sql")
+
+# Data-change lookups, keyed by the ``table`` query param. Every statement
+# projects the same uniform shape (entity_id / title / status / created_by /
+# updated_by / deleted_by / created_at / updated_at / deleted_at /
+# organization_id) plus optional entity-specific columns; the router flattens
+# whatever the row carries.
+_DATA_CHANGES_SQL: dict[str, TextClause] = {
+    "courses": _load("audit/data_changes_courses.sql"),
+    "materials": _load("audit/data_changes_materials.sql"),
+    "users": _load("audit/data_changes_users.sql"),
+    "role_assignments": _load("audit/data_changes_role_assignments.sql"),
+}
+
+# Public tuple of the tables ``data_changes`` accepts — the router validates
+# against this so a bad ``table`` value 400s before touching the DB.
+SUPPORTED_DATA_CHANGE_TABLES: tuple[str, ...] = tuple(_DATA_CHANGES_SQL)
 
 
 async def role_changes(
@@ -71,17 +86,21 @@ async def http_audit_search(
     return [dict(r) for r in rows]
 
 
-async def course_data_changes(db: AsyncSession, *, entity_id: UUID) -> dict[str, Any] | None:
-    row = (
-        (await db.execute(_DATA_CHANGES_COURSES_SQL, {"entity_id": entity_id}))
-        .mappings()
-        .one_or_none()
-    )
+async def data_changes(db: AsyncSession, *, table: str, entity_id: UUID) -> dict[str, Any] | None:
+    """Look up the audit trail for a single row in ``table``.
+
+    ``table`` must be one of :data:`SUPPORTED_DATA_CHANGE_TABLES`; callers
+    are expected to validate before calling (the router 400s on an
+    unsupported value). Returns ``None`` when no matching row exists.
+    """
+    stmt = _DATA_CHANGES_SQL[table]
+    row = (await db.execute(stmt, {"entity_id": entity_id})).mappings().one_or_none()
     return dict(row) if row is not None else None
 
 
 __all__ = [
-    "course_data_changes",
+    "SUPPORTED_DATA_CHANGE_TABLES",
+    "data_changes",
     "http_audit_search",
     "http_audit_table_exists",
     "role_changes",

@@ -144,6 +144,7 @@ async def create_interview_config(
         supported_modes=data.get("supported_modes", "hybrid"),
         time_limit_minutes=data.get("time_limit_minutes"),
         max_attempts=data.get("max_attempts"),
+        cooldown_hours=data.get("cooldown_hours"),
         min_outcomes_to_pass=data.get("min_outcomes_to_pass"),
         lock_quiz_ef_until_pass=bool(data.get("lock_quiz_ef_until_pass", False)),
         supplementary_instructions=data.get("supplementary_instructions"),
@@ -221,7 +222,9 @@ async def unarchive_interview_config(
     del actor
     config = await _require_config(db, config_id)
     if config.status != "archived":
-        raise AppError(f"Cannot unarchive interview config {config_id} — status is '{config.status}', expected 'archived'")
+        raise AppError(
+            f"Cannot unarchive interview config {config_id} — status is '{config.status}', expected 'archived'"
+        )
     config.status = "draft"
     await flush_or_conflict(db)
     await db.refresh(config)
