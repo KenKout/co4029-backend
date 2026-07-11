@@ -53,6 +53,7 @@ from abridgeai.features.quizzes.schemas import (
     QuestionBankEntry,
     QuestionBankImportRequest,
     QuestionBankPage,
+    QuizAttemptTeacherRead,
     QuizAuthoring,
     QuizForAuthoringPublic,
     QuizGenerationRequest,
@@ -198,6 +199,99 @@ async def get_quiz_authoring(
         quiz=QuizAuthoring.model_validate(quiz),
         questions=[QuizQuestionAuthoring.model_validate(q) for q in questions],
     )
+
+
+async def _resolve_student_names(db: AsyncSession, student_ids: set[UUID]) -> dict[UUID, str]:
+    """Batch-resolve ``{student_id: display_name}`` for a set of ids.
+
+    Mirrors ``interviews.routers.authoring.list_config_sessions`` — a
+    single ``users LEFT JOIN user_profiles`` round-trip regardless of how
+    many distinct students are in the result set.
+    """
+    if not student_ids:
+        return {}
+    from sqlalchemy import text as _text  # noqa: PLC0415
+
+    rows = (
+        await db.execute(
+            _text(
+                "SELECT u.id, COALESCE(p.display_name, u.primary_email) AS name "
+                "FROM users u "
+                "LEFT JOIN user_profiles p ON p.user_id = u.id "
+                "WHERE u.id = ANY(:ids)"
+            ),
+            {"ids": list(student_ids)},
+        )
+    ).all()
+    return {row[0]: row[1] for row in rows}
+
+
+def _attempt_teacher_view(
+    attempt: Any,  # noqa: ANN401  -- ORM row
+    quiz_title: str,
+    student_name: str | None,
+) -> QuizAttemptTeacherRead:
+    return QuizAttemptTeacherRead(
+        id=attempt.id,
+        quiz_id=attempt.quiz_id,
+        quiz_title=quiz_title,
+        student_id=attempt.student_id,
+        student_name=student_name,
+        attempt_number=attempt.attempt_number,
+        status=attempt.status,
+        started_at=attempt.started_at,
+        submitted_at=attempt.submitted_at,
+        time_taken_seconds=attempt.time_taken_seconds,
+        score_percent=attempt.score_percent,
+        passed=attempt.passed,
+    )
+
+
+@router.get(
+    "/courses/{course_id}/quiz-attempts",
+    response_model=list[QuizAttemptTeacherRead],
+)
+async def list_course_quiz_attempts(
+    course_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_COURSE_UPDATE)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> list[QuizAttemptTeacherRead]:
+    """Every quiz attempt (any student, any quiz) in this course.
+
+    Powers the teacher's course-wide "Assessments" tab.
+    """
+    del current_user
+    from abridgeai.features.quizzes.queries import analytics as _analytics_q  # noqa: PLC0415
+
+    rows = await _analytics_q.list_attempts_for_course(db, course_id)
+    names = await _resolve_student_names(db, {row.QuizAttempt.student_id for row in rows})
+    return [
+        _attempt_teacher_view(row.QuizAttempt, row.title, names.get(row.QuizAttempt.student_id))
+        for row in rows
+    ]
+
+
+@router.get(
+    "/courses/{course_id}/students/{student_id}/quiz-attempts",
+    response_model=list[QuizAttemptTeacherRead],
+)
+async def list_student_quiz_attempts(
+    course_id: UUID,
+    student_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_COURSE_UPDATE)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> list[QuizAttemptTeacherRead]:
+    """Every quiz attempt by one student across this course's quizzes.
+
+    Powers the teacher's per-student profile page.
+    """
+    del current_user
+    from abridgeai.features.quizzes.queries import analytics as _analytics_q  # noqa: PLC0415
+
+    rows = await _analytics_q.list_attempts_for_student_in_course(db, course_id, student_id)
+    names = await _resolve_student_names(db, {student_id})
+    student_name = names.get(student_id)
+    return [_attempt_teacher_view(row.QuizAttempt, row.title, student_name) for row in rows]
 
 
 @router.patch("/quizzes/{quiz_id}", response_model=QuizAuthoring)

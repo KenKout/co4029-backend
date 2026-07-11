@@ -26,7 +26,7 @@ from uuid import UUID
 from sqlalchemy import case, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from abridgeai.features.quizzes.models import QuizAttempt
+from abridgeai.features.quizzes.models import Quiz, QuizAttempt
 
 _TOP_MISSED_SQL = text(
     resources.files("abridgeai.features.quizzes.queries.sql")
@@ -77,6 +77,41 @@ async def quiz_completion_rate(db: AsyncSession, quiz_id: UUID) -> dict[str, Any
     }
 
 
+async def list_attempts_for_course(db: AsyncSession, course_id: UUID) -> list[Any]:
+    """Every quiz attempt (any student, any quiz) in a course, newest first.
+
+    Powers the teacher's course-wide "Assessments" tab. Returns SQLAlchemy
+    ``Row`` objects with ``.QuizAttempt`` and ``.title`` (the quiz title,
+    aliased so the router doesn't need a second round-trip). Callers
+    resolve student display names separately via a batched lookup —
+    mirrors the pattern in ``interviews.routers.authoring.list_config_sessions``.
+    """
+    stmt = (
+        select(QuizAttempt, Quiz.title)
+        .join(Quiz, Quiz.id == QuizAttempt.quiz_id)
+        .where(Quiz.course_id == course_id)
+        .order_by(QuizAttempt.started_at.desc())
+    )
+    return list((await db.execute(stmt)).all())
+
+
+async def list_attempts_for_student_in_course(
+    db: AsyncSession, course_id: UUID, student_id: UUID
+) -> list[Any]:
+    """Every quiz attempt by one student across a course's quizzes, newest first.
+
+    Powers the teacher's per-student profile quiz-attempts section. Same
+    row shape as :func:`list_attempts_for_course`.
+    """
+    stmt = (
+        select(QuizAttempt, Quiz.title)
+        .join(Quiz, Quiz.id == QuizAttempt.quiz_id)
+        .where(Quiz.course_id == course_id, QuizAttempt.student_id == student_id)
+        .order_by(QuizAttempt.started_at.desc())
+    )
+    return list((await db.execute(stmt)).all())
+
+
 async def top_missed_questions(
     db: AsyncSession,
     course_id: UUID,
@@ -107,6 +142,8 @@ async def top_missed_questions(
 
 
 __all__ = [
+    "list_attempts_for_course",
+    "list_attempts_for_student_in_course",
     "quiz_completion_rate",
     "top_missed_questions",
 ]

@@ -252,6 +252,8 @@ def test_authoring_router_metadata() -> None:
     assert "/teacher/quizzes/{quiz_id}/questions" in paths
     assert "/teacher/quizzes/{quiz_id}/questions/{question_id}" in paths
     assert "/teacher/quizzes/{quiz_id}/questions/{question_id}/regenerate" in paths
+    assert "/teacher/courses/{course_id}/quiz-attempts" in paths
+    assert "/teacher/courses/{course_id}/students/{student_id}/quiz-attempts" in paths
 
 
 def test_learner_router_metadata() -> None:
@@ -263,6 +265,68 @@ def test_learner_router_metadata() -> None:
     assert "/attempts/{attempt_id}/submit" in paths
     assert "/attempts/{attempt_id}" in paths
     assert "/me/quizzes/{quiz_id}/attempts" in paths
+
+
+async def test_teacher_quiz_attempts_endpoints(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    engine: AsyncEngine,
+    scenario: dict[str, uuid.UUID],
+    seeded_users: SeededUsers,
+) -> None:
+    """Regression coverage for the new course-wide + per-student
+    quiz-attempts endpoints (student-dashboard brainstorm, 2026-07-11).
+
+    Neither endpoint existed before — there was no teacher-facing way to
+    list quiz attempts at all, only aggregate stats.
+    """
+    create_resp = await client.post(
+        f"/api/v1/teacher/courses/{scenario['course_id']}/quizzes",
+        json={
+            "module_id": str(scenario["module_id"]),
+            "title": "Attempts Quiz",
+        },
+        headers=_auth(admin_bearer),
+    )
+    assert create_resp.status_code == 201, create_resp.text
+    quiz_id = create_resp.json()["id"]
+
+    attempt_id = uuid.uuid4()
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO quiz_attempts "
+                "(id, quiz_id, student_id, attempt_number, status, score_percent, passed) "
+                "VALUES (:id, :quiz, :student, 1, 'graded', 88.50, TRUE)"
+            ),
+            {"id": attempt_id, "quiz": quiz_id, "student": seeded_users.student_id},
+        )
+
+    course_resp = await client.get(
+        f"/api/v1/teacher/courses/{scenario['course_id']}/quiz-attempts",
+        headers=_auth(admin_bearer),
+    )
+    assert course_resp.status_code == 200, course_resp.text
+    course_rows = course_resp.json()
+    assert len(course_rows) == 1
+    row = course_rows[0]
+    assert row["id"] == str(attempt_id)
+    assert row["quiz_id"] == quiz_id
+    assert row["quiz_title"] == "Attempts Quiz"
+    assert row["student_id"] == str(seeded_users.student_id)
+    assert row["student_name"] is not None
+    assert float(row["score_percent"]) == 88.50
+    assert row["passed"] is True
+
+    student_resp = await client.get(
+        f"/api/v1/teacher/courses/{scenario['course_id']}/students/"
+        f"{seeded_users.student_id}/quiz-attempts",
+        headers=_auth(admin_bearer),
+    )
+    assert student_resp.status_code == 200, student_resp.text
+    student_rows = student_resp.json()
+    assert len(student_rows) == 1
+    assert student_rows[0]["id"] == str(attempt_id)
 
 
 # ---------------------------------------------------------------------------

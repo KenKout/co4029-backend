@@ -154,6 +154,31 @@ class QuizAttemptReviewRead(BaseModel):
     questions: list[QuizAttemptReviewQuestion]
 
 
+class QuizAttemptTeacherRead(BaseModel):
+    """One row in a teacher's cross-quiz / cross-student attempts list.
+
+    Teacher-only: joins in ``quiz_id`` -> title and student identity so a
+    single row is self-describing without extra client-side lookups.
+    Backs the course-wide "Assessments" tab and the per-student profile's
+    quiz-attempts section (student-dashboard brainstorm, 2026-07-11).
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    quiz_id: UUID
+    quiz_title: str
+    student_id: UUID
+    student_name: str | None = None
+    attempt_number: int
+    status: QuizAttemptStatusLiteral
+    started_at: datetime
+    submitted_at: datetime | None = None
+    time_taken_seconds: int | None = None
+    score_percent: Decimal | None = None
+    passed: bool | None = None
+
+
 __all__ = [
     "QuizAttemptRead",
     "QuizAttemptReviewOption",
@@ -163,4 +188,5 @@ __all__ = [
     "QuizAttemptStatusLiteral",
     "QuizAttemptSubmit",
     "QuizAttemptSubmitAnswer",
+    "QuizAttemptTeacherRead",
 ]

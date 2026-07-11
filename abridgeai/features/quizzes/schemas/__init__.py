@@ -25,6 +25,7 @@ from abridgeai.features.quizzes.schemas.attempt import (
     QuizAttemptStatusLiteral,
     QuizAttemptSubmit,
     QuizAttemptSubmitAnswer,
+    QuizAttemptTeacherRead,
 )
 from abridgeai.features.quizzes.schemas.authoring import (
     QuizAuthoring,
@@ -72,6 +73,7 @@ __all__ = [
     "QuizAttemptStatusLiteral",
     "QuizAttemptSubmit",
     "QuizAttemptSubmitAnswer",
+    "QuizAttemptTeacherRead",
     "QuizAuthoring",
     "QuizForAuthoringPublic",
     "QuizForTakingPublic",
