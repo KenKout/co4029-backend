@@ -63,6 +63,7 @@ from abridgeai.features.interviews.schemas import (
     InterviewOutcomeCreate,
     InterviewQuestionAuthoring,
     InterviewQuestionCreate,
+    InterviewSessionPublic,
     InterviewSessionSummary,
     InterviewTranscriptRead,
     InterviewTranscriptTurn,
@@ -483,6 +484,43 @@ async def list_config_sessions(
         )
         for s in sessions
     ]
+
+
+@router.get(
+    "/interview-sessions/{session_id}",
+    response_model=InterviewSessionPublic,
+)
+async def get_session_authoring(
+    session_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_SESSION_AUTHORING)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> InterviewSessionPublic:
+    """Teacher-scoped session detail (course-owner access via
+    ``require_session_authoring_access``).
+
+    Mirrors the learner-side ``GET /interview-sessions/{id}`` (student-
+    owner-only), which teachers cannot call. The frontend gap-report page
+    was hitting that student endpoint and getting a 403 on every load.
+    """
+    del current_user
+    from abridgeai.features.interviews.queries import sessions as _sessions_q  # noqa: PLC0415
+
+    session = await _sessions_q.get_session(db, session_id)
+    if session is None:
+        raise _not_found("interview_session", session_id)
+    return InterviewSessionPublic(
+        session_id=session.id,
+        interview_config_id=session.interview_config_id,
+        status=session.status,
+        input_mode=session.input_mode,
+        attempt_number=session.attempt_number,
+        started_at=session.started_at,
+        ended_at=session.ended_at,
+        resume_deadline_at=session.resume_deadline_at,
+        current_question_index=None,
+        time_remaining_seconds=None,
+        pass_verdict=session.pass_verdict,
+    )
 
 
 @router.get(

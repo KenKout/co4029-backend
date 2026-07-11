@@ -275,6 +275,7 @@ def test_authoring_endpoints_registered() -> None:
         "/teacher/interview-configs/{config_id}/questions/{question_id}/regenerate",
         "/teacher/interview-configs/{config_id}/outcomes",
         "/teacher/interview-configs/{config_id}/outcomes/{outcome_id}",
+        "/teacher/interview-sessions/{session_id}",
         "/teacher/interview-sessions/{session_id}/gap-report",
     }
     assert expected.issubset(paths), expected - paths
@@ -1493,6 +1494,59 @@ async def test_teacher_transcript_returns_turns_and_blocks_student(
             headers=_auth(student_token),
         )
         assert denied.status_code in (403, 404), denied.text
+    finally:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("DELETE FROM auth_sessions WHERE id = :id"),
+                {"id": student_sid},
+            )
+
+
+async def test_teacher_session_detail_endpoint_returns_200(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    engine: AsyncEngine,
+    scenario: dict[str, uuid.UUID],
+    seeded_users: SeededUsers,
+) -> None:
+    """GET /teacher/interview-sessions/{id} — course-scoped teacher access.
+
+    The frontend gap-report page was calling the student-owner-only
+    GET /interview-sessions/{id} (403 for a teacher) by mistake; this is
+    the teacher-scoped sibling it should have been calling all along.
+    """
+    config_id = await _seed_published_config(
+        engine,
+        course_id=scenario["course_id"],
+        module_id=scenario["module_id"],
+        actor_id=seeded_users.admin_id,
+    )
+    student_sid = await _seed_session(engine, seeded_users.student_id)
+    student_token = create_access_token(user_id=seeded_users.student_id, session_id=student_sid)
+    try:
+        start_resp = await client.post(
+            f"/api/v1/interview-configs/{config_id}/sessions",
+            json={"input_mode": "text"},
+            headers=_auth(student_token),
+        )
+        assert start_resp.status_code == 201, start_resp.text
+        session_id = start_resp.json()["session_id"]
+
+        teacher_resp = await client.get(
+            f"/api/v1/teacher/interview-sessions/{session_id}",
+            headers=_auth(admin_bearer),
+        )
+        assert teacher_resp.status_code == 200, teacher_resp.text
+        body = teacher_resp.json()
+        assert body["session_id"] == session_id
+        assert body["interview_config_id"] == str(config_id)
+
+        # The student-owner-only endpoint remains off-limits to the teacher.
+        denied = await client.get(
+            f"/api/v1/interview-sessions/{session_id}",
+            headers=_auth(admin_bearer),
+        )
+        assert denied.status_code == 403, denied.text
     finally:
         async with engine.begin() as conn:
             await conn.execute(
