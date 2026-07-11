@@ -26,6 +26,7 @@ ensures concurrent active sessions don't leak by:
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy import func, select
@@ -109,6 +110,39 @@ async def list_sessions_for_config(db: AsyncSession, config_id: UUID) -> list[In
         .order_by(InterviewSession.started_at.desc())
     )
     return list((await db.execute(stmt)).scalars().all())
+
+
+async def list_sessions_for_course(db: AsyncSession, course_id: UUID) -> list[Any]:
+    """Every interview session (any student, any config) in a course, newest first.
+
+    Powers the teacher's course-wide "Assessments" tab. Returns
+    SQLAlchemy ``Row`` objects with ``.InterviewSession`` and ``.title``
+    (the interview config title) so the router avoids a second round-trip.
+    """
+    stmt = (
+        select(InterviewSession, InterviewConfig.title)
+        .join(InterviewConfig, InterviewConfig.id == InterviewSession.interview_config_id)
+        .where(InterviewConfig.course_id == course_id)
+        .order_by(InterviewSession.started_at.desc())
+    )
+    return list((await db.execute(stmt)).all())
+
+
+async def list_sessions_for_student_in_course(
+    db: AsyncSession, course_id: UUID, student_id: UUID
+) -> list[Any]:
+    """Every interview session by one student across a course's configs, newest first.
+
+    Powers the teacher's per-student profile page. Same row shape as
+    :func:`list_sessions_for_course`.
+    """
+    stmt = (
+        select(InterviewSession, InterviewConfig.title)
+        .join(InterviewConfig, InterviewConfig.id == InterviewSession.interview_config_id)
+        .where(InterviewConfig.course_id == course_id, InterviewSession.student_id == student_id)
+        .order_by(InterviewSession.started_at.desc())
+    )
+    return list((await db.execute(stmt)).all())
 
 
 async def get_active_session(

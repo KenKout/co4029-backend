@@ -25,6 +25,8 @@ from abridgeai.features.interviews.queries.sessions import (
     get_user_interview_sessions,
     list_session_messages,
     list_sessions_for_config,
+    list_sessions_for_course,
+    list_sessions_for_student_in_course,
 )
 
 __all__ = [
@@ -48,6 +50,8 @@ __all__ = [
     "list_questions_for_config",
     "list_session_messages",
     "list_sessions_for_config",
+    "list_sessions_for_course",
+    "list_sessions_for_student_in_course",
     "next_outcome_position",
     "next_question_position",
 ]

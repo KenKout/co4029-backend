@@ -65,6 +65,7 @@ from abridgeai.features.interviews.schemas import (
     InterviewQuestionCreate,
     InterviewSessionPublic,
     InterviewSessionSummary,
+    InterviewSessionTeacherRead,
     InterviewTranscriptRead,
     InterviewTranscriptTurn,
 )
@@ -126,6 +127,111 @@ async def create_interview_config(
         raise _bad_request(str(exc)) from exc
     await db.commit()
     return InterviewConfigAuthoring.model_validate(config)
+
+
+def _session_teacher_view(
+    session: Any,  # noqa: ANN401  -- ORM row
+    config_title: str,
+    student_name: str | None,
+) -> InterviewSessionTeacherRead:
+    return InterviewSessionTeacherRead(
+        session_id=session.id,
+        interview_config_id=session.interview_config_id,
+        interview_config_title=config_title,
+        student_id=session.student_id,
+        student_name=student_name,
+        attempt_number=session.attempt_number,
+        status=session.status,
+        input_mode=session.input_mode,
+        pass_verdict=session.pass_verdict,
+        started_at=session.started_at,
+        ended_at=session.ended_at,
+    )
+
+
+@router.get(
+    "/courses/{course_id}/interview-sessions",
+    response_model=list[InterviewSessionTeacherRead],
+)
+async def list_course_interview_sessions(
+    course_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_COURSE_UPDATE)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> list[InterviewSessionTeacherRead]:
+    """Every interview session (any student, any config) in this course.
+
+    Powers the teacher's course-wide "Assessments" tab.
+    """
+    del current_user
+    from sqlalchemy import text as _text  # noqa: PLC0415
+
+    from abridgeai.features.interviews.queries import sessions as _sessions_q  # noqa: PLC0415
+
+    rows = await _sessions_q.list_sessions_for_course(db, course_id)
+    student_ids = {row.InterviewSession.student_id for row in rows}
+    names: dict[UUID, str] = {}
+    if student_ids:
+        name_rows = (
+            (
+                await db.execute(
+                    _text(
+                        "SELECT u.id, COALESCE(p.display_name, u.primary_email) AS name "
+                        "FROM users u "
+                        "LEFT JOIN user_profiles p ON p.user_id = u.id "
+                        "WHERE u.id = ANY(:ids)"
+                    ),
+                    {"ids": list(student_ids)},
+                )
+            )
+            .mappings()
+            .all()
+        )
+        names = {row["id"]: row["name"] for row in name_rows}
+    return [
+        _session_teacher_view(
+            row.InterviewSession, row.title, names.get(row.InterviewSession.student_id)
+        )
+        for row in rows
+    ]
+
+
+@router.get(
+    "/courses/{course_id}/students/{student_id}/interview-sessions",
+    response_model=list[InterviewSessionTeacherRead],
+)
+async def list_student_interview_sessions(
+    course_id: UUID,
+    student_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_COURSE_UPDATE)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> list[InterviewSessionTeacherRead]:
+    """Every interview session by one student across this course's configs.
+
+    Powers the teacher's per-student profile page.
+    """
+    del current_user
+    from sqlalchemy import text as _text  # noqa: PLC0415
+
+    from abridgeai.features.interviews.queries import sessions as _sessions_q  # noqa: PLC0415
+
+    rows = await _sessions_q.list_sessions_for_student_in_course(db, course_id, student_id)
+    name_row = (
+        (
+            await db.execute(
+                _text(
+                    "SELECT COALESCE(p.display_name, u.primary_email) AS name "
+                    "FROM users u "
+                    "LEFT JOIN user_profiles p ON p.user_id = u.id "
+                    "WHERE u.id = :id"
+                ),
+                {"id": student_id},
+            )
+        )
+        .mappings()
+        .first()
+    )
+    student_name = name_row["name"] if name_row else None
+    return [_session_teacher_view(row.InterviewSession, row.title, student_name) for row in rows]
 
 
 @router.get("/interview-configs/{config_id}", response_model=InterviewForAuthoringPublic)

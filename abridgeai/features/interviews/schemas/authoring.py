@@ -340,6 +340,31 @@ class InterviewSessionSummary(BaseModel):
     ended_at: datetime | None = None
 
 
+class InterviewSessionTeacherRead(BaseModel):
+    """One row in a teacher's cross-config / cross-student sessions list.
+
+    Widens :class:`InterviewSessionSummary` with the parent config's id +
+    title so a single row is self-describing across multiple interview
+    configs in the same course. Backs the course-wide "Assessments" tab
+    and the per-student profile's interview-attempts section
+    (student-dashboard brainstorm, 2026-07-11).
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    session_id: UUID
+    interview_config_id: UUID
+    interview_config_title: str
+    student_id: UUID
+    student_name: str | None = None
+    attempt_number: int
+    status: SessionStatusLiteral
+    input_mode: InputModeLiteral
+    pass_verdict: bool | None = None
+    started_at: datetime
+    ended_at: datetime | None = None
+
+
 class InterviewTranscriptTurn(BaseModel):
     """One question/answer turn in a teacher-facing transcript view."""
 

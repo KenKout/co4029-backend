@@ -277,6 +277,8 @@ def test_authoring_endpoints_registered() -> None:
         "/teacher/interview-configs/{config_id}/outcomes/{outcome_id}",
         "/teacher/interview-sessions/{session_id}",
         "/teacher/interview-sessions/{session_id}/gap-report",
+        "/teacher/courses/{course_id}/interview-sessions",
+        "/teacher/courses/{course_id}/students/{student_id}/interview-sessions",
     }
     assert expected.issubset(paths), expected - paths
 
@@ -1640,6 +1642,64 @@ async def test_teacher_gap_report_endpoint_returns_200(
             await conn.execute(
                 text("DELETE FROM interview_sessions WHERE id = :id"), {"id": session_id}
             )
+
+
+async def test_teacher_course_and_student_session_list_endpoints(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    engine: AsyncEngine,
+    scenario: dict[str, uuid.UUID],
+    seeded_users: SeededUsers,
+) -> None:
+    """Regression coverage for the new course-wide + per-student
+    interview-sessions endpoints (student-dashboard brainstorm, 2026-07-11).
+
+    Neither endpoint existed before — teachers could only list sessions
+    scoped to a single interview config, never across a whole course.
+    """
+    config_id = await _seed_published_config(
+        engine,
+        course_id=scenario["course_id"],
+        module_id=scenario["module_id"],
+        actor_id=seeded_users.admin_id,
+    )
+    student_sid = await _seed_session(engine, seeded_users.student_id)
+    student_token = create_access_token(user_id=seeded_users.student_id, session_id=student_sid)
+    try:
+        start_resp = await client.post(
+            f"/api/v1/interview-configs/{config_id}/sessions",
+            json={"input_mode": "text"},
+            headers=_auth(student_token),
+        )
+        assert start_resp.status_code == 201, start_resp.text
+        session_id = start_resp.json()["session_id"]
+
+        course_resp = await client.get(
+            f"/api/v1/teacher/courses/{scenario['course_id']}/interview-sessions",
+            headers=_auth(admin_bearer),
+        )
+        assert course_resp.status_code == 200, course_resp.text
+        course_rows = course_resp.json()
+        assert len(course_rows) == 1
+        row = course_rows[0]
+        assert row["session_id"] == session_id
+        assert row["interview_config_id"] == str(config_id)
+        assert row["interview_config_title"]
+        assert row["student_id"] == str(seeded_users.student_id)
+        assert row["student_name"] is not None
+
+        student_resp = await client.get(
+            f"/api/v1/teacher/courses/{scenario['course_id']}/students/"
+            f"{seeded_users.student_id}/interview-sessions",
+            headers=_auth(admin_bearer),
+        )
+        assert student_resp.status_code == 200, student_resp.text
+        student_rows = student_resp.json()
+        assert len(student_rows) == 1
+        assert student_rows[0]["session_id"] == session_id
+    finally:
+        async with engine.begin() as conn:
             await conn.execute(
-                text("DELETE FROM auth_sessions WHERE id = :id"), {"id": student_sid}
+                text("DELETE FROM auth_sessions WHERE id = :id"),
+                {"id": student_sid},
             )
