@@ -7,6 +7,7 @@ from sqlalchemy import and_, select, text
 
 from abridgeai.features.courses.api import public as courses_api
 from abridgeai.features.enrollments.models import Enrollment, InvitationCode
+from abridgeai.features.identity.models import User, UserProfile
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -19,6 +20,44 @@ async def list_enrollments_for_course(db: AsyncSession, course_id: UUID) -> list
         .order_by(Enrollment.enrolled_at.desc())
     )
     return list(result.scalars().all())
+
+
+async def list_enrollments_for_course_with_identity(
+    db: AsyncSession, course_id: UUID
+) -> list[dict[str, Any]]:
+    """Same rows as :func:`list_enrollments_for_course`, plus the
+    enrolled user's ``primary_email`` / ``display_name``.
+
+    The Manager enrollments-roster tab was rendering a raw
+    ``student_id`` UUID with no name because the plain ORM read never
+    joined identity. This mirrors the join
+    ``courses.queries.authoring.list_course_roster`` already does for
+    the sibling teacher-roster endpoint.
+    """
+    result = await db.execute(
+        select(
+            Enrollment.id,
+            Enrollment.course_id,
+            Enrollment.student_id,
+            Enrollment.status,
+            Enrollment.source,
+            Enrollment.invitation_code_id,
+            Enrollment.enrolled_at,
+            Enrollment.completed_at,
+            Enrollment.dropped_at,
+            Enrollment.created_at,
+            Enrollment.updated_at,
+            Enrollment.created_by,
+            Enrollment.updated_by,
+            User.primary_email,
+            UserProfile.display_name,
+        )
+        .join(User, User.id == Enrollment.student_id)
+        .outerjoin(UserProfile, UserProfile.user_id == User.id)
+        .where(Enrollment.course_id == course_id)
+        .order_by(Enrollment.enrolled_at.desc())
+    )
+    return [dict(row) for row in result.mappings().all()]
 
 
 async def list_enrollments_for_user(db: AsyncSession, user_id: UUID) -> list[Enrollment]:

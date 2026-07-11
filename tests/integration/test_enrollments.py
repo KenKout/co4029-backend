@@ -299,6 +299,41 @@ async def test_manager_bulk_enroll(
     assert all(r.source == "manager_bulk" for r in rows)
 
 
+async def test_dept_course_enrollments_includes_student_identity(
+    client: httpx.AsyncClient,
+    manager_bearer: str,
+    scenario: dict[str, object],
+) -> None:
+    """``GET /dept/courses/{id}/enrollments`` must surface the enrolled
+    student's name/email, not just their raw UUID.
+
+    Regression: the roster tab on the Manager enrollments page used to
+    render a bare ``student_id`` because ``EnrollmentAuthoring`` had no
+    identity fields and the query never joined ``users``/``user_profiles``.
+    """
+    course_id = scenario["course_id"]
+    student_ids = scenario["student_ids"]  # type: ignore[assignment]
+    student_emails = scenario["student_emails"]  # type: ignore[assignment]
+    await client.post(
+        f"/api/v1/management/courses/{course_id}/enrollments/bulk",
+        json={"user_ids": [str(sid) for sid in student_ids]},
+        headers={"Authorization": f"Bearer {manager_bearer}"},
+    )
+
+    response = await client.get(
+        f"/api/v1/dept/courses/{course_id}/enrollments",
+        headers={"Authorization": f"Bearer {manager_bearer}"},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert len(body) == 5
+    by_student = {row["student_id"]: row for row in body}
+    for sid_, email in zip(student_ids, student_emails, strict=True):
+        row = by_student[str(sid_)]
+        assert row["primary_email"] == email
+        assert row["display_name"] == f"Enr Student {sid_.hex[:6]}"
+
+
 async def test_already_enrolled_rejected(
     client: httpx.AsyncClient,
     manager_bearer: str,

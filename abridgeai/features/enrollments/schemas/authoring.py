@@ -20,6 +20,12 @@ class EnrollmentAuthoring(BaseModel):
     updated_at: datetime
     created_by: UUID | None = None
     updated_by: UUID | None = None
+    # Additive (optional so existing callers that don't join user identity
+    # -- bulk-enroll / CSV-import responses -- keep working unchanged).
+    # Populated by list_enrollments_for_course for the Manager roster tab,
+    # which was previously rendering raw student_id UUIDs with no name.
+    primary_email: str | None = None
+    display_name: str | None = None
 
     model_config = ConfigDict(from_attributes=True)
 

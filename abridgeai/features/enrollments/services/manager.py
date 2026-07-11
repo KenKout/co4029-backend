@@ -60,6 +60,11 @@ def _to_authoring(enrollment: Enrollment) -> EnrollmentAuthoring:
     )
 
 
+def _row_to_authoring(row: dict[str, Any]) -> EnrollmentAuthoring:
+    """Same shape as :func:`_to_authoring` plus the joined identity fields."""
+    return EnrollmentAuthoring.model_validate(row)
+
+
 def _to_code_authoring(code: InvitationCode) -> InvitationCodeAuthoring:
     return InvitationCodeAuthoring.model_validate(
         {
@@ -84,8 +89,13 @@ def _to_code_authoring(code: InvitationCode) -> InvitationCodeAuthoring:
 async def list_enrollments_for_course(
     db: AsyncSession, course_id: UUID
 ) -> list[EnrollmentAuthoring]:
-    rows = await authoring_queries.list_enrollments_for_course(db, course_id)
-    return [_to_authoring(row) for row in rows]
+    """Manager/HOD roster tab -- includes ``primary_email``/``display_name``.
+
+    Was reading the plain ``Enrollment`` ORM rows with no identity join,
+    so the roster tab rendered a raw ``student_id`` UUID with no name.
+    """
+    rows = await authoring_queries.list_enrollments_for_course_with_identity(db, course_id)
+    return [_row_to_authoring(row) for row in rows]
 
 
 async def _resolve_user_ids(
