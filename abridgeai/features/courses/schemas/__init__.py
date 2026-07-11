@@ -24,7 +24,9 @@ from abridgeai.features.courses.schemas.administration import (
 )
 from abridgeai.features.courses.schemas.assignment import (
     AssignTeacherRequest,
+    CourseRosterRead,
     RosterEntry,
+    RosterStudentRead,
     TeacherAssignmentCreated,
     TeacherAssignmentRead,
 )
@@ -81,6 +83,7 @@ __all__ = [
     "CourseContentAuthoring",
     "CourseContentPublic",
     "CourseCreate",
+    "CourseRosterRead",
     "CourseLearningOutcomeAuthoring",
     "CourseLearningOutcomePublic",
     "CoursePage",
@@ -115,6 +118,7 @@ __all__ = [
     "ProcessingJobRow",
     "ResourceDownloadUrlResponse",
     "RosterEntry",
+    "RosterStudentRead",
     "SlugAvailability",
     "StreamUrlResponse",
     "TagAuthoring",

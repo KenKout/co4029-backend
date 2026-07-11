@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+from importlib import resources
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import delete, func, select, true
+from sqlalchemy import delete, func, select, text, true
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import InstrumentedAttribute, selectinload
 from sqlalchemy.sql.elements import ColumnElement
@@ -19,6 +20,12 @@ from abridgeai.features.courses.models import (
 )
 from abridgeai.features.enrollments.models import Enrollment
 from abridgeai.features.identity.models import StorageObject, User, UserProfile
+
+_ROSTER_WITH_PROGRESS_SQL = text(
+    resources.files("abridgeai.features.courses.queries.sql")
+    .joinpath("roster_with_progress.sql")
+    .read_text(encoding="utf-8")
+)
 
 
 def _archived_filter(
@@ -273,6 +280,23 @@ async def list_course_roster(db: AsyncSession, course_id: UUID) -> list[dict[str
     return [dict(row) for row in rows]
 
 
+async def list_course_roster_with_progress(
+    db: AsyncSession, course_id: UUID
+) -> list[dict[str, Any]]:
+    """Enrolled students for the teacher roster view, with progress + risk.
+
+    Composes ``sql/roster_with_progress.sql`` — a richer projection than
+    :func:`list_course_roster` (used by the ``/dept`` HOD-scope roster,
+    which stays on the thin shape). Adds ``progress_percent``,
+    ``last_activity_at`` and a derived ``at_risk_level``, matching the
+    frontend's ``RosterStudent`` DTO 1:1. The same lesson-progress
+    aggregation as ``progress/queries/sql/roster_progress.sql`` so the
+    Students and Progress pages never disagree on a student's percent.
+    """
+    rows = (await db.execute(_ROSTER_WITH_PROGRESS_SQL, {"course_id": course_id})).mappings().all()
+    return [dict(row) for row in rows]
+
+
 __all__ = [
     "get_authoring_resource_storage_target",
     "get_course_for_authoring",
@@ -283,6 +307,7 @@ __all__ = [
     "get_module_item",
     "list_all_lesson_resources",
     "list_course_roster",
+    "list_course_roster_with_progress",
     "list_courses_assigned_to_teacher",
     "list_courses_for_owner",
     "list_courses_in_org_unit",

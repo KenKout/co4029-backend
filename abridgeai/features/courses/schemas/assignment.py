@@ -71,9 +71,46 @@ class RosterEntry(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class RosterStudentRead(BaseModel):
+    """One student row for the teacher "Students" page.
+
+    Wider than :class:`RosterEntry` — adds ``progress_percent`` /
+    ``at_risk_level`` / ``last_activity_at`` computed from
+    ``lesson_progress`` (same aggregation the Progress page uses, see
+    ``queries/sql/roster_with_progress.sql``), and renames ``status`` to
+    ``enrollment_status`` to match the SPA's ``RosterStudent`` type.
+    """
+
+    enrollment_id: UUID
+    student_id: UUID
+    display_name: str | None = None
+    primary_email: str
+    enrollment_status: str
+    enrolled_at: datetime
+    completed_at: datetime | None = None
+    dropped_at: datetime | None = None
+    progress_percent: float
+    at_risk_level: str
+    last_activity_at: datetime | None = None
+    final_grade: str | None = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class CourseRosterRead(BaseModel):
+    """Envelope for the teacher "Students" page roster response."""
+
+    course_id: UUID
+    students: list[RosterStudentRead]
+
+    model_config = ConfigDict(from_attributes=True)
+
+
 __all__ = [
     "AssignTeacherRequest",
+    "CourseRosterRead",
     "RosterEntry",
+    "RosterStudentRead",
     "TeacherAssignmentCreated",
     "TeacherAssignmentRead",
 ]

@@ -1058,29 +1058,57 @@ async def test_get_authoring_course_content(
 async def test_get_authoring_course_roster(
     client: httpx.AsyncClient,
     admin_bearer: str,
+    engine: AsyncEngine,
     scenario: dict[str, uuid.UUID | str],
+    seeded_users: SeededUsers,
 ) -> None:
-    """``GET /teacher/courses/{id}/roster`` returns the same shape as
-    ``/dept/courses/{id}/roster`` so the SPA's existing
-    useTeacherCourseRoster hook works without code changes.
+    """``GET /teacher/courses/{id}/roster`` returns the ``{course_id,
+    students: [...]}`` envelope the SPA's ``useTeacherCourseRoster`` hook
+    actually expects (progress/risk fields included), not the flat
+    ``RosterEntry`` list the ``/dept`` HOD-scope roster uses.
+
+    Regression: the endpoint used to return ``list[RosterEntry]`` (no
+    envelope, no progress/risk) while the frontend read
+    ``roster?.students``, which is ``undefined`` on a bare array — the
+    Students page silently rendered "no students enrolled" for every
+    course that actually had students.
     """
-    response = await client.get(
-        f"/api/v1/teacher/courses/{scenario['course_a']}/roster",
-        headers={"Authorization": f"Bearer {admin_bearer}"},
-    )
-    assert response.status_code == 200, response.text
-    body = response.json()
-    assert isinstance(body, list)
-    if body:
-        sample = body[0]
-        for key in (
-            "enrollment_id",
-            "student_id",
-            "primary_email",
-            "status",
-            "enrolled_at",
-        ):
-            assert key in sample
+    enrollment_id = uuid.uuid4()
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO course_enrollments (id, course_id, student_id, status, source) "
+                "VALUES (:id, :course, :student, 'active', 'manual')"
+            ),
+            {
+                "id": enrollment_id,
+                "course": scenario["course_a"],
+                "student": seeded_users.student_id,
+            },
+        )
+    try:
+        response = await client.get(
+            f"/api/v1/teacher/courses/{scenario['course_a']}/roster",
+            headers={"Authorization": f"Bearer {admin_bearer}"},
+        )
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["course_id"] == str(scenario["course_a"])
+        assert isinstance(body["students"], list)
+        assert len(body["students"]) == 1
+        row = body["students"][0]
+        assert row["enrollment_id"] == str(enrollment_id)
+        assert row["student_id"] == str(seeded_users.student_id)
+        assert row["enrollment_status"] == "active"
+        assert "primary_email" in row
+        assert "progress_percent" in row
+        assert row["at_risk_level"] in ("none", "low", "medium", "high")
+    finally:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("DELETE FROM course_enrollments WHERE id = :id"),
+                {"id": enrollment_id},
+            )
 
 
 async def test_get_authoring_lesson(

@@ -171,9 +171,7 @@ async def create_course(
 
     # Auto-assign the creator as teacher so the course shows up in their
     # authoring list and in the dept teachers tab immediately.
-    existing = await find_active_teacher_assignment(
-        db, course_id=course.id, user_id=owner.user_id
-    )
+    existing = await find_active_teacher_assignment(db, course_id=course.id, user_id=owner.user_id)
     if existing is None:
         role_id = await get_teacher_role_id(db)
         await insert_teacher_assignment(
@@ -609,9 +607,7 @@ async def get_authoring_lesson(db: AsyncSession, lesson_id: UUID) -> LessonAutho
     return LessonAuthoring.model_validate(lesson)
 
 
-async def list_authoring_lessons(
-    db: AsyncSession, module_id: UUID
-) -> list[LessonAuthoring]:
+async def list_authoring_lessons(db: AsyncSession, module_id: UUID) -> list[LessonAuthoring]:
     """All non-soft-deleted lessons under ``module_id`` (drafts included).
 
     Authoring sibling of :func:`catalog.list_published_lessons_for_module`:
@@ -659,6 +655,13 @@ async def list_course_roster(db: AsyncSession, course_id: UUID) -> list[dict[str
     return await authoring_queries.list_course_roster(db, course_id)
 
 
+async def list_course_roster_with_progress(
+    db: AsyncSession, course_id: UUID
+) -> list[dict[str, Any]]:
+    """Enrolled students for the teacher "Students" page, with progress + risk."""
+    return await authoring_queries.list_course_roster_with_progress(db, course_id)
+
+
 __all__ = [
     "add_lesson",
     "add_lesson_resource",
@@ -675,6 +678,7 @@ __all__ = [
     "list_authoring_courses_for_user",
     "list_authoring_lesson_resources",
     "list_course_roster",
+    "list_course_roster_with_progress",
     "publish_course",
     "reorder_module_items",
     "set_module_prerequisites",

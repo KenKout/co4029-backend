@@ -61,6 +61,7 @@ from abridgeai.features.courses.schemas import (
     CourseAuthoring,
     CourseContentAuthoring,
     CourseCreate,
+    CourseRosterRead,
     CourseUpdate,
     LessonAuthoring,
     LessonCreate,
@@ -76,7 +77,7 @@ from abridgeai.features.courses.schemas import (
     ModulePrerequisiteSet,
     ModuleUpdate,
     OutlineSection,
-    RosterEntry,
+    RosterStudentRead,
     SlugAvailability,
     StreamUrlResponse,
 )
@@ -86,9 +87,7 @@ from abridgeai.features.quizzes.ai.outline import build_lesson_outline
 # Whitelist of ``content_role`` values surfaced by ``OutlineSection``.
 # Anything else returned by the chunk metadata is coerced to "body" so
 # the response stays inside the literal type defined by the schema.
-_ALLOWED_OUTLINE_ROLES: frozenset[str] = frozenset(
-    {"body", "summary", "review", "front_matter"}
-)
+_ALLOWED_OUTLINE_ROLES: frozenset[str] = frozenset({"body", "summary", "review", "front_matter"})
 
 router = APIRouter(prefix="/teacher", tags=["courses-authoring"])
 
@@ -227,22 +226,28 @@ async def get_authoring_course_content(
 
 @router.get(
     "/courses/{course_id}/roster",
-    response_model=list[RosterEntry],
+    response_model=CourseRosterRead,
 )
 async def get_authoring_course_roster(
     course_id: UUID,
     current_user: Annotated[CurrentUser, Depends(_REQUIRE_COURSE_UPDATE)],
     db: Annotated[AsyncSession, Depends(get_db)],
-) -> list[RosterEntry]:
-    """Roster of enrolled students for the teacher's course view.
+) -> CourseRosterRead:
+    """Roster of enrolled students for the teacher's "Students" page.
 
-    Same response shape as ``GET /dept/courses/{id}/roster`` (HOD-scope)
-    but gated on ``course.update`` so the course owner / assigned teacher
-    can read their own roster without HOD privileges.
+    Unlike ``GET /dept/courses/{id}/roster`` (HOD-scope, thin
+    ``RosterEntry`` shape), this endpoint returns the envelope +
+    progress/risk fields the SPA's ``RosterStudent`` type actually
+    expects (the SPA was previously calling this same path and silently
+    rendering an empty roster because the shapes didn't match — see
+    ``queries/sql/roster_with_progress.sql``).
     """
     del current_user
-    rows = await authoring_service.list_course_roster(db, course_id)
-    return [RosterEntry.model_validate(row) for row in rows]
+    rows = await authoring_service.list_course_roster_with_progress(db, course_id)
+    return CourseRosterRead(
+        course_id=course_id,
+        students=[RosterStudentRead.model_validate(row) for row in rows],
+    )
 
 
 @router.patch("/courses/{course_id}", response_model=CourseAuthoring)
@@ -519,9 +524,7 @@ async def get_lesson_outline(
     )
     if outlines and outlines[0].sections:
         outline = outlines[0]
-        body_sections = sum(
-            1 for s in outline.sections if s.content_role == "body"
-        )
+        body_sections = sum(1 for s in outline.sections if s.content_role == "body")
         # Cap suggestion to the legacy 1..50 band — the schema enforces
         # the same on ``QuizGenerationRequest.question_count``, so the
         # SPA can pre-fill the field without an extra clamp on the
@@ -543,9 +546,7 @@ async def get_lesson_outline(
                     page_range=s.page_range,
                     content_role=cast(
                         Literal["body", "summary", "review", "front_matter"],
-                        s.content_role
-                        if s.content_role in _ALLOWED_OUTLINE_ROLES
-                        else "body",
+                        s.content_role if s.content_role in _ALLOWED_OUTLINE_ROLES else "body",
                     ),
                     preview=s.preview,
                 )
