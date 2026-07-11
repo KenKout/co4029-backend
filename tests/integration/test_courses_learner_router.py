@@ -421,6 +421,32 @@ async def test_content_tree_excludes_draft_items_pointing_to_draft_targets(
     assert str(scenario["draft_module"]) not in item_ids
 
 
+async def test_course_modules_returns_200_excludes_draft(
+    client: httpx.AsyncClient, student_bearer: str, scenario: dict
+) -> None:
+    """Regression: GET /courses/{id}/modules 500'd in prod.
+
+    ``list_published_modules_for_course`` called
+    ``ModulePublic.model_validate(m)`` directly on the raw ORM ``Module``
+    row. ``ModulePublic.items`` defaults to ``[]`` but pydantic still
+    probes the ORM attribute, triggering a lazy load of the ``items``
+    relationship outside its async session context (MissingGreenlet).
+    Every call 500'd — this endpoint had no test coverage before.
+    """
+    response = await client.get(
+        f"/api/v1/courses/{scenario['pub_course']}/modules",
+        headers={"Authorization": f"Bearer {student_bearer}"},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    module_ids = {m["id"] for m in body}
+    assert str(scenario["pub_module"]) in module_ids
+    assert str(scenario["draft_module"]) not in module_ids
+    # items is always [] here — the module tree's items come from the
+    # dedicated /modules/{id}/items endpoint, not this list.
+    assert all(m["items"] == [] for m in body)
+
+
 async def test_module_404_when_draft(
     client: httpx.AsyncClient, student_bearer: str, scenario: dict
 ) -> None:

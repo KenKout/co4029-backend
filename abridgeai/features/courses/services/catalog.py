@@ -243,12 +243,33 @@ async def get_published_course_content_for_learner(
 async def list_published_modules_for_course(
     db: AsyncSession, course_id: UUID
 ) -> list[ModulePublic] | None:
-    """Modules under a published course; ``None`` if the course is not visible."""
+    """Modules under a published course; ``None`` if the course is not visible.
+
+    Validates from plain dicts, NOT the raw ORM ``Module`` rows: passing an
+    ORM instance straight to ``ModulePublic.model_validate`` triggers a
+    lazy load of ``Module.items`` outside its async session context
+    (MissingGreenlet), because ``ModulePublic.items`` defaults to ``[]``
+    but pydantic still probes the attribute. This endpoint only returns
+    the module list (id/title/position) — items are fetched separately via
+    ``/modules/{id}/items`` — so ``items`` is always ``[]`` here, same
+    mitigation as :func:`get_published_course_content_for_learner`.
+    """
     course = await get_published_course_by_id(db, course_id)
     if course is None:
         return None
     modules = await list_published_modules(db, course_id)
-    return [ModulePublic.model_validate(m) for m in modules]
+    return [
+        ModulePublic.model_validate(
+            {
+                "id": m.id,
+                "course_id": m.course_id,
+                "title": m.title,
+                "position": m.position,
+                "items": [],
+            }
+        )
+        for m in modules
+    ]
 
 
 async def list_published_course_tags_for_learner(
