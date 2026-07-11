@@ -580,16 +580,47 @@ async def get_session_gap_report_authoring(
         ]
     }
 
+    # ``GapReport`` (the ORM row) has neither ``generated_at`` (it's
+    # ``created_at`` via TimestampMixin) nor ``study_plan``/
+    # ``per_criterion_breakdown`` (those live inside ``report_json``
+    # JSONB) — model_validate(report) directly would 500 on the
+    # required ``generated_at`` field and silently default study_plan
+    # to []. Build the DTO explicitly instead, mirroring the student
+    # projection (_gap_report_view) plus the teacher-only fields.
+    report_json = report.report_json or {}
+    raw_plan = report_json.get("study_plan") if isinstance(report_json, dict) else None
+    study_plan: list[dict[str, Any]] = []
+    if isinstance(raw_plan, list):
+        for entry in raw_plan:
+            if not isinstance(entry, dict):
+                continue
+            study_plan.append(
+                {
+                    "topic": entry.get("topic", ""),
+                    "lesson_id": entry.get("suggested_lesson_id"),
+                    "suggested_resources": [
+                        str(rid) for rid in entry.get("suggested_resource_ids", []) or []
+                    ],
+                }
+            )
     # FR-5.7: per-criterion mean rubric scores are teacher-only. They live
     # in ``report_json["rubric_aggregated"]`` and are surfaced here (never on
     # the student-facing GapReportRead).
-    report_json = report.report_json or {}
     per_criterion = report_json.get("rubric_aggregated") if isinstance(report_json, dict) else None
-    base = GapReportAuthoringRead.model_validate(report)
-    return base.model_copy(
-        update={
-            "raw_evaluation_json": raw_evaluation_json,
+    return GapReportAuthoringRead.model_validate(
+        {
+            "id": report.id,
+            "student_id": report.student_id,
+            "course_id": report.course_id,
+            "module_id": report.module_id,
+            "discrepancy_summary": report.student_summary or None,
+            "study_plan": study_plan,
+            "generated_at": report.created_at,
             "per_criterion_breakdown": (per_criterion if isinstance(per_criterion, dict) else {}),
+            "raw_evaluation_json": raw_evaluation_json,
+            "teacher_summary": report.teacher_summary,
+            "source_quiz_attempt_id": report.source_quiz_attempt_id,
+            "source_interview_session_id": report.source_interview_session_id,
         }
     )
 

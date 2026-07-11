@@ -1499,3 +1499,93 @@ async def test_teacher_transcript_returns_turns_and_blocks_student(
                 text("DELETE FROM auth_sessions WHERE id = :id"),
                 {"id": student_sid},
             )
+
+
+async def test_teacher_gap_report_endpoint_returns_200(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    engine: AsyncEngine,
+    scenario: dict[str, uuid.UUID],
+    seeded_users: SeededUsers,
+) -> None:
+    """Regression: GET /teacher/interview-sessions/{id}/gap-report 500'd in
+    prod because ``GapReportAuthoringRead.model_validate(report)`` was called
+    directly on the ORM row, which has no ``generated_at`` attribute (it's
+    ``created_at`` via TimestampMixin) — a required field on the schema.
+    """
+    config_id = await _seed_published_config(
+        engine,
+        course_id=scenario["course_id"],
+        module_id=scenario["module_id"],
+        actor_id=seeded_users.admin_id,
+    )
+    student_sid = await _seed_session(engine, seeded_users.student_id)
+    student_token = create_access_token(user_id=seeded_users.student_id, session_id=student_sid)
+    start_resp = await client.post(
+        f"/api/v1/interview-configs/{config_id}/sessions",
+        json={"input_mode": "text"},
+        headers=_auth(student_token),
+    )
+    assert start_resp.status_code == 201, start_resp.text
+    session_id = start_resp.json()["session_id"]
+    gap_report_id = uuid.uuid4()
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text(
+                    "INSERT INTO gap_reports ("
+                    "id, student_id, course_id, module_id, "
+                    "source_interview_session_id, student_summary, teacher_summary, "
+                    "report_json"
+                    ") VALUES ("
+                    ":id, :student_id, :course_id, :module_id, "
+                    ":session_id, :student_summary, :teacher_summary, "
+                    "CAST(:report_json AS jsonb)"
+                    ")"
+                ),
+                {
+                    "id": gap_report_id,
+                    "student_id": seeded_users.student_id,
+                    "course_id": scenario["course_id"],
+                    "module_id": scenario["module_id"],
+                    "session_id": session_id,
+                    "student_summary": "Strong on theory, weak on application.",
+                    "teacher_summary": "Push more hands-on practice.",
+                    "report_json": json.dumps(
+                        {
+                            "study_plan": [
+                                {
+                                    "topic": "Recursion",
+                                    "suggested_lesson_id": None,
+                                    "suggested_resource_ids": [],
+                                }
+                            ],
+                            "rubric_aggregated": {"technical_accuracy": 3.2},
+                        }
+                    ),
+                },
+            )
+
+        resp = await client.get(
+            f"/api/v1/teacher/interview-sessions/{session_id}/gap-report",
+            headers=_auth(admin_bearer),
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["id"] == str(gap_report_id)
+        assert body["discrepancy_summary"] == "Strong on theory, weak on application."
+        assert body["study_plan"][0]["topic"] == "Recursion"
+        assert body["per_criterion_breakdown"] == {"technical_accuracy": 3.2}
+        assert body["teacher_summary"] == "Push more hands-on practice."
+        assert "generated_at" in body
+    finally:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("DELETE FROM gap_reports WHERE id = :id"), {"id": gap_report_id}
+            )
+            await conn.execute(
+                text("DELETE FROM interview_sessions WHERE id = :id"), {"id": session_id}
+            )
+            await conn.execute(
+                text("DELETE FROM auth_sessions WHERE id = :id"), {"id": student_sid}
+            )
