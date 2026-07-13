@@ -46,6 +46,9 @@ from abridgeai.features.admin.routers import (
     ai_costs_router as admin_ai_costs_router,
 )
 from abridgeai.features.admin.routers import (
+    ai_pricing_router as admin_ai_pricing_router,
+)
+from abridgeai.features.admin.routers import (
     audit_router as admin_audit_router,
 )
 from abridgeai.features.admin.routers import (
@@ -258,6 +261,9 @@ def create_app() -> FastAPI:
 
     # T0.27 -- AI cost dashboard (admin observability)
     app.include_router(admin_ai_costs_router, prefix=API_V1_PREFIX)
+
+    # Admin-configurable AI model pricing (replaces hardcoded PRICE_TABLE)
+    app.include_router(admin_ai_pricing_router, prefix=API_V1_PREFIX)
 
     # T0.28 -- security headers (HSTS, CSP, X-Frame-Options, ...). Added
     # BEFORE the audit-log middleware in source order so it sits INSIDE the

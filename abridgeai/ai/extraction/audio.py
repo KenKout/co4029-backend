@@ -205,7 +205,7 @@ class AudioExtractor:
         if not text and isinstance(payload.get("text"), str):
             text = payload["text"].strip()
 
-        cost = compute_cost(whisper_model, None, None)
+        cost = await compute_cost(self._db, whisper_model, None, None)
         await write_ai_model_call(
             self._db,
             role=LLMRole.STT,

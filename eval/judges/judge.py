@@ -26,7 +26,7 @@ from typing import Any, Final, Literal
 from jinja2 import Environment, FileSystemLoader, StrictUndefined, Template
 
 from abridgeai.ai.llm.client import OpenAICompatibleClient
-from abridgeai.ai.llm.pricing import compute_cost
+from abridgeai.ai.llm.pricing import compute_cost_static
 from abridgeai.ai.llm.roles import LLMRole, ModelBinding
 from abridgeai.core.config import Settings, get_settings
 
@@ -185,7 +185,7 @@ async def _call_judge_llm(
     usage = response_body.get("usage") or {}
     input_tokens = usage.get("prompt_tokens")
     output_tokens = usage.get("completion_tokens")
-    cost_decimal = compute_cost(judge_model, input_tokens, output_tokens)
+    cost_decimal = compute_cost_static(judge_model, input_tokens, output_tokens)
     cost_usd = float(cost_decimal) if cost_decimal is not None else 0.0
     return str(content_str), cost_usd
 

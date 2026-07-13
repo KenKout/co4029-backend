@@ -182,7 +182,7 @@ class LLMGateway:
         cached_input_tokens: int | None = (usage.get("prompt_tokens_details") or {}).get(
             "cached_tokens"
         )
-        cost = compute_cost(binding.model, input_tokens, output_tokens)
+        cost = await compute_cost(db, binding.model, input_tokens, output_tokens)
 
         try:
             content_str = response_body["choices"][0]["message"]["content"]

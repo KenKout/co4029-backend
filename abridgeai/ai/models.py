@@ -138,6 +138,33 @@ class ProcessingJob(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     retry_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
 
 
+class AIModelPricing(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    """Admin-configurable USD-per-1k-token pricing for one model.
+
+    Replaces the hand-maintained ``abridgeai.ai.llm.pricing.PRICE_TABLE``
+    dict: cost computation now reads this table (cached in-process with a
+    short TTL) instead of a code constant, so operators can update prices
+    without a release. ``model_name`` is the primary lookup key and must be
+    unique; a model absent from this table still yields ``NULL`` cost
+    (honest is better than wrong — matches prior behaviour).
+    """
+
+    __tablename__ = "ai_model_pricing"
+    __table_args__ = (
+        CheckConstraint("input_usd_per_1k >= 0", name="ck_ai_model_pricing_input_nonneg"),
+        CheckConstraint("output_usd_per_1k >= 0", name="ck_ai_model_pricing_output_nonneg"),
+    )
+
+    model_name: Mapped[str] = mapped_column(String(100), nullable=False, unique=True, index=True)
+    input_usd_per_1k: Mapped[Decimal] = mapped_column(Numeric(12, 6), nullable=False)
+    output_usd_per_1k: Mapped[Decimal] = mapped_column(Numeric(12, 6), nullable=False)
+    notes: Mapped[str | None] = mapped_column(String(255))
+    updated_by: Mapped[uuid.UUID | None] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+    )
+
+
 class GenerationRun(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     """Parent record for AI generation pipeline runs.
 
@@ -191,4 +218,4 @@ class GenerationRun(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
-__all__ = ["AIModelCall", "GenerationRun", "ProcessingJob"]
+__all__ = ["AIModelCall", "AIModelPricing", "GenerationRun", "ProcessingJob"]
