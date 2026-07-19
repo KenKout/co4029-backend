@@ -19,11 +19,12 @@ from __future__ import annotations
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from abridgeai.core.db import get_db
 from abridgeai.core.exceptions import AppError, NotFoundError
+from abridgeai.core.pagination import PageResponse
 from abridgeai.core.security import CurrentUser
 from abridgeai.features.access_control.policies import require_any_permission
 from abridgeai.features.access_control.schemas.admin import (
@@ -98,6 +99,41 @@ async def list_organizations_endpoint(
     return OrganizationListPage(
         items=[OrganizationRead.model_validate(r) for r in page.items],
         next_cursor=page.next_cursor,
+    )
+
+
+@router.get(
+    "/admin/organizations/search",
+    response_model=PageResponse[OrganizationRead],
+)
+async def search_organizations_endpoint(
+    _user: Annotated[CurrentUser, Depends(_REQUIRE_ORG_MANAGE)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    search: Annotated[str | None, Query(max_length=200)] = None,
+    org_status: Annotated[str | None, Query(alias="status")] = None,
+    sort: Annotated[str | None, Query()] = None,
+    sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
+    page: Annotated[int, Query(ge=0)] = 0,
+    page_size: Annotated[int, Query(ge=1, le=200)] = 25,
+) -> PageResponse[OrganizationRead]:
+    """Page-numbered admin org list with server-side search (name/slug) +
+    whitelisted sort (``name`` / ``status`` / ``created_at``). Additive to
+    the cursor endpoint above — this one backs the DataTable."""
+    result = await org_service.search_organizations(
+        db,
+        status=org_status,
+        search=search,
+        sort=sort,
+        sort_dir=sort_dir,
+        page=page,
+        page_size=page_size,
+    )
+    return PageResponse[OrganizationRead](
+        items=[OrganizationRead.model_validate(o) for o in result.items],
+        total=result.total,
+        page=result.page,
+        page_size=result.page_size,
+        total_pages=result.total_pages,
     )
 
 

@@ -47,6 +47,8 @@ class MyCareerEnrollmentRead(BaseModel):
     status: Literal["active", "completed", "dropped"]
     started_at: datetime
     completed_at: datetime | None = None
+    overall_percent: float = 0.0
+    is_prepared: bool = False
 
     model_config = ConfigDict(from_attributes=True)
 

@@ -140,6 +140,45 @@ async def _create_enrollment(
     return enrollment
 
 
+async def ensure_enrollment(
+    db: AsyncSession,
+    *,
+    course_id: UUID,
+    student_id: UUID,
+    actor_id: UUID,
+    source: str = "manager_bulk",
+) -> Enrollment:
+    """Idempotently guarantee an active enrollment for ``(course, student)``.
+
+    A "make it so" primitive used by cross-feature callers (career-path
+    auto-enroll, via :func:`enrollments.api.public.ensure_course_enrollment`).
+    No-op when a non-dropped row already exists; reactivates a ``dropped``
+    row; otherwise creates one. Unlike :func:`bulk_enroll_students` it never
+    raises ``already_enrolled`` — re-running is safe.
+
+    ``source`` defaults to ``"manager_bulk"`` (career enrollment is a
+    manager action; the ``course_enrollments.source`` CHECK has no
+    dedicated ``career_path`` value and we avoid a migration per plan).
+    Caller owns the transaction — no commit here.
+    """
+    existing = await authoring_queries.find_enrollment(db, course_id, student_id)
+    if existing is not None and existing.status != "dropped":
+        return existing
+    if existing is not None and existing.status == "dropped":
+        existing.status = "active"
+        existing.dropped_at = None
+        existing.updated_by = actor_id
+        await flush_or_conflict(db)
+        return existing
+    return await _create_enrollment(
+        db,
+        course_id=course_id,
+        student_id=student_id,
+        actor_id=actor_id,
+        source=source,
+    )
+
+
 async def bulk_enroll_students(
     db: AsyncSession,
     course_id: UUID,

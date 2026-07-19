@@ -23,6 +23,7 @@ from abridgeai.features.career_paths.schemas import (
     StudentPathProgressAuthoring,
 )
 from abridgeai.features.career_paths.schemas.public import CareerPathCoursePublic
+from abridgeai.features.enrollments.api import public as enrollments_api
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -74,6 +75,25 @@ def _to_authoring_enrollment(
     )
 
 
+async def _autoenroll_required_courses(
+    db: AsyncSession, *, career_path_id: UUID, student_id: UUID, actor: CurrentUser
+) -> None:
+    """Grant course access: idempotently enroll the student in the path's
+    REQUIRED courses (additive + non-destructive — see W3 plan). Progress
+    stays derived, so a course later removed from the path simply stops
+    counting; the course_enrollment created here is left untouched.
+    """
+    links = await authoring_queries.list_path_course_links(db, career_path_id)
+    for link in links:
+        if link.is_required:
+            await enrollments_api.ensure_course_enrollment(
+                db,
+                student_id=student_id,
+                course_id=link.course_id,
+                actor_id=actor.user_id,
+            )
+
+
 async def enroll_student_in_path(
     db: AsyncSession,
     *,
@@ -96,6 +116,9 @@ async def enroll_student_in_path(
         existing.started_at = datetime.now(tz=UTC)
         existing.updated_by = actor.user_id
         await flush_or_conflict(db)
+        await _autoenroll_required_courses(
+            db, career_path_id=career_path_id, student_id=student_id, actor=actor
+        )
         return _to_authoring_enrollment(existing)
 
     enrollment = StudentCareerEnrollment(
@@ -107,6 +130,9 @@ async def enroll_student_in_path(
     )
     db.add(enrollment)
     await flush_or_conflict(db)
+    await _autoenroll_required_courses(
+        db, career_path_id=career_path_id, student_id=student_id, actor=actor
+    )
     return _to_authoring_enrollment(enrollment)
 
 
@@ -128,11 +154,65 @@ async def unenroll_student(
     return _to_authoring_enrollment(enrollment)
 
 
+async def sync_enrollment_completion(
+    db: AsyncSession,
+    *,
+    career_path_id: UUID,
+    student_id: UUID,
+    overall_percent: float,
+) -> bool:
+    """Flip an ``active`` enrollment to ``completed`` once the path is 100%
+    done — the "prepared" milestone. Idempotent; returns ``True`` iff it
+    flipped on this call (so the caller knows whether to commit). Caller
+    owns the transaction.
+    """
+    if overall_percent < 100:
+        return False
+    enrollment = await student_queries.get_my_career_enrollment(
+        db, student_id=student_id, career_path_id=career_path_id
+    )
+    if enrollment is None or enrollment.status != "active":
+        return False
+    enrollment.status = "completed"
+    enrollment.completed_at = datetime.now(tz=UTC)
+    enrollment.updated_by = student_id
+    await flush_or_conflict(db)
+    return True
+
+
 async def list_my_career_enrollments(
     db: AsyncSession, student_id: UUID
 ) -> list[MyCareerEnrollmentRead]:
+    """Enrollments enriched with derived pathway completion + the "prepared"
+    flag. Also lazily flips completed enrollments (see
+    :func:`sync_enrollment_completion`) — the router commits.
+    """
     rows = await student_queries.list_my_career_enrollments(db, student_id)
-    return [MyCareerEnrollmentRead.model_validate(row) for row in rows]
+    result: list[MyCareerEnrollmentRead] = []
+    for row in rows:
+        career_path_id = row["career_path_id"]
+        progress = await get_my_path_progress(
+            db, career_path_id=career_path_id, student_id=student_id
+        )
+        overall = progress.overall_percent
+        flipped = await sync_enrollment_completion(
+            db,
+            career_path_id=career_path_id,
+            student_id=student_id,
+            overall_percent=overall,
+        )
+        result.append(
+            MyCareerEnrollmentRead.model_validate(
+                {
+                    **row,
+                    "status": "completed" if flipped else row["status"],
+                    "completed_at": datetime.now(tz=UTC) if flipped else row["completed_at"],
+                    "overall_percent": overall,
+                    "is_prepared": overall >= 100,
+                }
+            )
+        )
+    return result
 
 
 async def get_my_path_progress(
@@ -274,5 +354,6 @@ __all__ = [
     "list_my_career_enrollments",
     "list_published_paths",
     "list_published_paths_for_user",
+    "sync_enrollment_completion",
     "unenroll_student",
 ]

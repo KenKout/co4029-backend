@@ -18,6 +18,7 @@ from uuid import UUID
 from abridgeai.core.exceptions import AppError, NotFoundError
 from abridgeai.core.pagination import (
     CursorPage,
+    Page,
     decode_composite_cursor,
     encode_composite_cursor,
 )
@@ -84,6 +85,31 @@ async def list_organizations(
         else None
     )
     return CursorPage(items=rows, next_cursor=next_cursor)
+
+
+async def search_organizations(
+    db: AsyncSession,
+    *,
+    include_deleted: bool = False,
+    status: str | None = None,
+    search: str | None = None,
+    sort: str | None = None,
+    sort_dir: str = "asc",
+    page: int = 0,
+    page_size: int = 25,
+) -> Page[Organization]:
+    """Offset page of organisations (server-side search + sort). Thin
+    delegate to the query layer, which owns the SQLAlchemy statement."""
+    return await org_queries.search_organizations(
+        db,
+        include_deleted=include_deleted,
+        status=status,
+        search=search,
+        sort=sort,
+        sort_dir=sort_dir,
+        page=page,
+        page_size=page_size,
+    )
 
 
 async def count_organizations(
