@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import (
 
 import abridgeai.features.courses.models  # noqa: F401  -- register courses / modules FK targets
 import abridgeai.features.identity.models  # noqa: F401  -- register users FK target
+import abridgeai.features.interviews.models  # noqa: F401  -- ModuleItem -> InterviewConfig relationship target
 import abridgeai.features.quizzes.models  # noqa: F401  -- register quiz_* FK targets
 from abridgeai.core.config import get_settings
 from abridgeai.core.db.recursive_delete import soft_delete_cascade
@@ -194,3 +195,64 @@ async def test_soft_delete_cascade_walks_questions_and_revisions(
             await session.execute(select(Quiz).where(Quiz.id == quiz_id))
         ).scalar_one_or_none()
         assert active_quiz is None
+
+
+async def test_delete_question_repacks_sibling_positions(
+    session_factory: async_sessionmaker[AsyncSession], org_course
+) -> None:
+    """Deleting a middle question repacks survivors to a dense 1..N order.
+
+    Regression: the repack UPDATE previously collided with the
+    non-deferrable ``uq_quiz_questions_position`` (quiz_id, position)
+    unique constraint mid-flush (e.g. shifting 3->2 while a live row still
+    held 2), raising a 500. The two-phase offset swap must avoid that.
+    """
+    from abridgeai.core.security import CurrentUser
+    from abridgeai.features.quizzes.services import authoring as authoring_service
+
+    _org_id, owner_id, course_id, module_id = org_course
+
+    async with session_factory() as session:
+        quiz = Quiz(course_id=course_id, module_id=module_id, title="Repack Quiz")
+        session.add(quiz)
+        await session.flush()
+
+        questions = [
+            QuizQuestion(
+                quiz_id=quiz.id,
+                position=i,
+                question_type="multiple_choice",
+                prompt_text=f"Question {i}",
+            )
+            for i in range(1, 5)  # positions 1,2,3,4
+        ]
+        for question in questions:
+            session.add(question)
+        await session.flush()
+
+        quiz_id = quiz.id
+        second_id = questions[1].id  # position 2
+        await session.commit()
+
+    actor = CurrentUser(user_id=owner_id, session_id=uuid.uuid4())
+
+    # Delete the middle question — this forces 3->2, 4->3 renumbering.
+    async with session_factory() as session:
+        await authoring_service.delete_question(session, second_id, actor)
+        await session.commit()
+
+    # Survivors must be densely repacked 1..3 with no gaps or collisions.
+    async with session_factory() as session:
+        survivors = (
+            (
+                await session.execute(
+                    select(QuizQuestion)
+                    .where(QuizQuestion.quiz_id == quiz_id)
+                    .order_by(QuizQuestion.position)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert [q.position for q in survivors] == [1, 2, 3]
+        assert second_id not in {q.id for q in survivors}

@@ -59,9 +59,7 @@ async def get_user_by_id(db: AsyncSession, user_id: UUID) -> UserDTO | None:
     return _user_to_dto(user, display_name)
 
 
-async def get_users_by_ids(
-    db: AsyncSession, user_ids: Sequence[UUID]
-) -> dict[UUID, UserDTO]:
+async def get_users_by_ids(db: AsyncSession, user_ids: Sequence[UUID]) -> dict[UUID, UserDTO]:
     """Fetch many users in one round-trip; missing ids are absent from the dict.
 
     Empty input short-circuits to an empty dict so callers can pass an
@@ -86,6 +84,22 @@ async def get_user_profile(db: AsyncSession, user_id: UUID) -> UserProfileDTO | 
     return UserProfileDTO.model_validate(profile) if profile else None
 
 
+async def get_user_locale(db: AsyncSession, user_id: UUID) -> str:
+    """Return the user's normalized preferred locale ('en' | 'vi').
+
+    Reads ``user_profiles.locale``. Missing profile, NULL, or any
+    unrecognized value falls back to ``'en'`` -- matching the frontend
+    i18next ``fallbackLng``. Sibling features (notifications dispatch,
+    spaced-repetition workers) call this to render notification copy in
+    the recipient's language at creation time.
+    """
+    stmt = select(UserProfile.locale).where(UserProfile.user_id == user_id)
+    value = (await db.execute(stmt)).scalar_one_or_none()
+    if value == "vi":
+        return "vi"
+    return "en"
+
+
 async def get_active_session_count(db: AsyncSession, user_id: UUID) -> int:
     """Count non-revoked sessions for a user (admin dashboard signal).
 
@@ -106,6 +120,7 @@ __all__ = [
     "UserProfileDTO",
     "get_active_session_count",
     "get_user_by_id",
+    "get_user_locale",
     "get_user_profile",
     "get_users_by_ids",
 ]

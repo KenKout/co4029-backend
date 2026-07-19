@@ -48,6 +48,11 @@ class InterviewQuestionDraft:
     rationale
         Internal explanation of why this question was generated.
         Never shown to the learner.
+    model_answer
+        Teacher-facing reference/model answer for this question. Authoring
+        aid only — never shown to the learner and never used to auto-grade
+        (live sessions are scored against :class:`InterviewOutcome` rubric
+        criteria, not string/semantic matching against this field).
     """
 
     question_type: InterviewQuestionType
@@ -57,6 +62,7 @@ class InterviewQuestionDraft:
     linked_outcome_id: UUID | None
     source_refs: list[UUID] = field(default_factory=list)
     rationale: str = ""
+    model_answer: str = ""
 
 
 def parse_generation_response(
@@ -118,6 +124,10 @@ def _prepare_question(entry: Any) -> InterviewQuestionDraft | None:  # noqa: ANN
     if not isinstance(rationale, str):
         rationale = ""
 
+    model_answer = entry.get("model_answer")
+    if not isinstance(model_answer, str):
+        model_answer = ""
+
     return InterviewQuestionDraft(
         question_type=cast("InterviewQuestionType", raw_type),
         prompt_text=raw_text.strip(),
@@ -126,6 +136,7 @@ def _prepare_question(entry: Any) -> InterviewQuestionDraft | None:  # noqa: ANN
         linked_outcome_id=linked_outcome_id,
         source_refs=source_refs,
         rationale=rationale.strip(),
+        model_answer=model_answer.strip(),
     )
 
 

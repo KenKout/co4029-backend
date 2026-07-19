@@ -213,6 +213,33 @@ async def get_attempt_for_review(
     return (await db.execute(stmt)).scalar_one_or_none()
 
 
+async def get_in_progress_attempt(
+    db: AsyncSession,
+    *,
+    attempt_id: UUID,
+    user_id: UUID,
+) -> QuizAttempt | None:
+    """Load an in-progress attempt + its saved answers for resume.
+
+    Returns ``None`` (router → 404) when the attempt doesn't exist,
+    belongs to a different student, or is no longer in flight (a
+    submitted/graded/abandoned attempt has nothing to resume). Eagerly
+    loads ``answers`` so the service can project the resume payload
+    without extra round-trips. The projection layer is responsible for
+    dropping correctness fields (no-leak: the attempt is still open).
+    """
+    stmt = (
+        select(QuizAttempt)
+        .where(
+            QuizAttempt.id == attempt_id,
+            QuizAttempt.student_id == user_id,
+            QuizAttempt.status == "in_progress",
+        )
+        .options(selectinload(QuizAttempt.answers))
+    )
+    return (await db.execute(stmt)).scalar_one_or_none()
+
+
 async def list_quiz_questions_with_options(
     db: AsyncSession, quiz_id: UUID
 ) -> list[tuple[QuizQuestion, list[QuizQuestionOption]]]:

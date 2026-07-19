@@ -83,3 +83,7 @@ openapi-snapshot.json
 # Local backups and plans
 .backup-*
 .hermes/*
+.hermes/
+
+# Voice smoke-test harness captured audio (scratch WAVs, never committed)
+voice-harness-out*/

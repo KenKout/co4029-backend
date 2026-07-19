@@ -29,6 +29,16 @@ from abridgeai.features.interviews.schemas.real_time import RealtimeTokenRespons
 # the Phase 3 worker parses the exact same shape (single source of truth).
 META_SESSION_ID = "session_id"
 META_STUDENT_ID = "student_id"
+# Phase 18: language the adaptive interviewer should speak in (voice parity with
+# the REST path, which reads Accept-Language). Normalized to "vi" or "en".
+META_LANGUAGE = "language"
+
+
+def normalize_language(value: str | None) -> str:
+    """Normalize an Accept-Language-ish value to 'vi' or 'en' (default 'en')."""
+    if value and value.strip().lower().startswith("vi"):
+        return "vi"
+    return "en"
 
 
 def build_room_name(session_id: UUID) -> str:
@@ -42,12 +52,13 @@ def build_room_name(session_id: UUID) -> str:
     return f"interview-{session_id}"
 
 
-def build_agent_metadata(session_id: UUID, student_id: UUID) -> str:
+def build_agent_metadata(session_id: UUID, student_id: UUID, *, language: str = "en") -> str:
     """JSON payload attached to the agent dispatch (parsed by the worker)."""
     return json.dumps(
         {
             META_SESSION_ID: str(session_id),
             META_STUDENT_ID: str(student_id),
+            META_LANGUAGE: normalize_language(language),
         }
     )
 
@@ -58,6 +69,7 @@ def mint_participant_token(
     student_id: UUID,
     room_name: str,
     settings: Settings,
+    language: str = "en",
 ) -> RealtimeTokenResponse:
     """Mint a room-scoped participant JWT that dispatches the interview agent.
 
@@ -92,7 +104,7 @@ def mint_participant_token(
                 agents=[
                     api.RoomAgentDispatch(
                         agent_name=settings.livekit_agent_name,
-                        metadata=build_agent_metadata(session_id, student_id),
+                        metadata=build_agent_metadata(session_id, student_id, language=language),
                     )
                 ],
             )
@@ -108,9 +120,11 @@ def mint_participant_token(
 
 
 __all__ = [
+    "META_LANGUAGE",
     "META_SESSION_ID",
     "META_STUDENT_ID",
     "build_agent_metadata",
     "build_room_name",
     "mint_participant_token",
+    "normalize_language",
 ]

@@ -29,7 +29,8 @@ from datetime import UTC, datetime
 from typing import Annotated, Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Response, status
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from abridgeai.core.config import get_settings
@@ -52,6 +53,7 @@ from abridgeai.features.interviews.schemas import (
     RealtimeTokenResponse,
 )
 from abridgeai.features.interviews.schemas.integrity import IntegrityEventBatchRequest
+from abridgeai.features.interviews.services import narration as narration_service
 from abridgeai.features.interviews.services import real_time as realtime_service
 from abridgeai.features.interviews.services import taking as taking_service
 
@@ -223,6 +225,7 @@ async def realtime_token(
     session_id: UUID,
     current_user: Annotated[CurrentUser, Depends(_REQUIRE_SESSION_OWNER)],
     db: Annotated[AsyncSession, Depends(get_db)],
+    accept_language: Annotated[str | None, Header()] = None,
 ) -> RealtimeTokenResponse:
     """Mint a LiveKit join token (+ agent dispatch) for a voice session.
 
@@ -257,9 +260,70 @@ async def realtime_token(
             student_id=current_user.user_id,
             room_name=room_name,
             settings=settings,
+            language=realtime_service.normalize_language(accept_language),
         )
     except ValueError as exc:  # credentials missing despite the flag
         raise _voice_unavailable() from exc
+
+
+class NarrationRequest(BaseModel):
+    """Body for ``POST /interview-sessions/{session_id}/narration``.
+
+    The client sends the exact AI utterance (question or follow-up) it is
+    rendering so the server can synthesize matching speech. Persona is derived
+    server-side from the session's config — the client never chooses the voice.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    text: str = Field(min_length=1, max_length=1200)
+
+
+@router.post("/interview-sessions/{session_id}/narration")
+async def narrate_session_text(
+    session_id: UUID,
+    payload: NarrationRequest,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_SESSION_OWNER)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> Response:
+    """Synthesize an AI utterance to MP3 using the agent-quality gateway TTS.
+
+    Gives text/hybrid sessions the same *voice* as the LiveKit agent without
+    mounting a realtime room (which would race the REST loop for control of
+    the session). Persona → voice mapping is resolved from the session's
+    config. On any TTS failure returns 503 so the browser falls back to its
+    local speech synthesizer.
+    """
+    from abridgeai.features.interviews.models import (  # noqa: PLC0415
+        InterviewConfig,
+        InterviewSession,
+    )
+
+    session = await db.get(InterviewSession, session_id)
+    if session is None:  # pragma: no cover - dep already 404s; defensive
+        raise _not_found("interview_session", session_id)
+
+    persona: str | None = None
+    config = await db.get(InterviewConfig, session.interview_config_id)
+    if config is not None:
+        persona = config.persona
+
+    settings = get_settings()
+    try:
+        audio = await narration_service.synthesize_speech(
+            payload.text, persona=persona, settings=settings
+        )
+    except narration_service.NarrationUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"error": "narration_unavailable", "message": str(exc)},
+        ) from exc
+
+    return Response(
+        content=audio,
+        media_type="audio/mpeg",
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @router.post(
@@ -329,6 +393,18 @@ async def get_session(
     )
 
 
+def _resolve_language(accept_language: str | None) -> str:
+    """Map an Accept-Language header to the interview utterance language.
+
+    Returns 'vi' when Vietnamese is the leading preference, else 'en'. Kept
+    deliberately simple — the frontend also drives narration language client
+    side; this only shapes the server-generated interviewer utterance.
+    """
+    if accept_language and accept_language.strip().lower().startswith("vi"):
+        return "vi"
+    return "en"
+
+
 @router.post(
     "/interview-sessions/{session_id}/respond",
     response_model=InterviewSubmitAnswerResponse,
@@ -338,6 +414,7 @@ async def respond_to_session(
     payload: InterviewSubmitAnswerRequest,
     current_user: Annotated[CurrentUser, Depends(_REQUIRE_SESSION_OWNER)],
     db: Annotated[AsyncSession, Depends(get_db)],
+    accept_language: Annotated[str | None, Header()] = None,
 ) -> InterviewSubmitAnswerResponse:
     if payload.session_id != session_id:
         raise _bad_request("session_id mismatch")
@@ -351,6 +428,8 @@ async def respond_to_session(
             answer_text,
             current_user,
             audio_object_id=payload.audio_object_id,
+            turn_key=payload.turn_key,
+            language=_resolve_language(accept_language),
         )
     except NotFoundError as exc:
         raise _not_found("interview_session", session_id) from exc
@@ -389,6 +468,7 @@ async def respond_to_session(
         ) from exc
     next_question = result.get("next_question")
     return InterviewSubmitAnswerResponse(
+        # ── legacy fields (always present; unchanged for existing clients) ───
         next_question=(
             InterviewQuestionPublic.model_validate(next_question)
             if next_question is not None
@@ -397,6 +477,19 @@ async def respond_to_session(
         is_finished=bool(result.get("is_finished")),
         ai_followup_text=result.get("followup_text"),
         time_remaining_seconds=None,
+        # ── adaptive structured fields (None on the legacy/sequential path) ──
+        phase=result.get("phase"),
+        action=result.get("action"),
+        reason_code=result.get("reason_code"),
+        ai_turn_id=result.get("ai_turn_id"),
+        ai_turn_text=result.get("ai_turn_text"),
+        language=result.get("language"),
+        should_narrate=result.get("should_narrate"),
+        current_question_id=result.get("current_question_id"),
+        target_outcome_id=result.get("target_outcome_id"),
+        should_await_response=result.get("should_await_response"),
+        should_finish=result.get("should_finish"),
+        state_version=result.get("state_version"),
     )
 
 

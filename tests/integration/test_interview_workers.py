@@ -16,11 +16,13 @@ from __future__ import annotations
 import inspect
 import uuid
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import ANY, AsyncMock
 from uuid import UUID
 
 import pytest
+from arq import Retry
 
+from abridgeai.ai.llm.errors import ProviderError
 from abridgeai.core.audit import current_actor_var
 from abridgeai.features.interviews.workers import (
     JOBS,
@@ -166,7 +168,7 @@ async def test_evaluate_interview_session_task_sets_actor_context(
     actor_id = uuid.uuid4()
     seen: dict[str, UUID | None] = {"actor": None}
 
-    async def _capture(_db: Any, _session_id: UUID) -> None:
+    async def _capture(_db: Any, _session_id: UUID, **_kwargs: Any) -> None:
         seen["actor"] = current_actor_var.get()
 
     monkeypatch.setattr(
@@ -181,18 +183,126 @@ async def test_evaluate_interview_session_task_sets_actor_context(
 
 
 @pytest.mark.asyncio
-async def test_evaluate_interview_session_task_propagates_failure(
+async def test_evaluate_interview_session_task_final_attempt_detection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    service_mock = AsyncMock(side_effect=RuntimeError("evaluation blew up"))
+    """job_try >= max_tries in ctx must flow through as is_final_attempt=True.
+
+    Without this, a session stuck after the last ARQ retry never gets its
+    terminal 'failed' status stamped and the student-facing poll in
+    course-interview.tsx waits forever for a pass_verdict that never arrives.
+    """
+    service_mock = AsyncMock()
     monkeypatch.setattr(
         eval_worker_mod.evaluation_service, "evaluate_and_generate_report", service_mock
     )
     monkeypatch.setattr(eval_worker_mod, "get_sessionmaker", lambda: _FakeSessionmaker())
 
-    with pytest.raises(RuntimeError, match="evaluation blew up"):
+    session_id = uuid.uuid4()
+    await evaluate_interview_session_task(
+        ctx={"job_try": 3, "max_tries": 3}, actor_id=uuid.uuid4(), session_id=session_id
+    )
+
+    service_mock.assert_awaited_once_with(ANY, session_id, is_final_attempt=True)
+
+
+@pytest.mark.asyncio
+async def test_evaluate_interview_session_task_non_final_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """job_try < max_tries must flow through as is_final_attempt=False."""
+    service_mock = AsyncMock()
+    monkeypatch.setattr(
+        eval_worker_mod.evaluation_service, "evaluate_and_generate_report", service_mock
+    )
+    monkeypatch.setattr(eval_worker_mod, "get_sessionmaker", lambda: _FakeSessionmaker())
+
+    session_id = uuid.uuid4()
+    await evaluate_interview_session_task(
+        ctx={"job_try": 1, "max_tries": 3}, actor_id=uuid.uuid4(), session_id=session_id
+    )
+
+    service_mock.assert_awaited_once_with(ANY, session_id, is_final_attempt=False)
+
+
+@pytest.mark.asyncio
+async def test_evaluate_interview_session_task_retries_on_transient_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A NON-final attempt that fails must raise arq's ``Retry`` (not the raw
+    exception) so the job is re-enqueued and the AI judge gets another try.
+
+    arq 0.28 only re-queues on ``Retry``/``CancelledError``/``RetryJob`` — a
+    bare re-raise here would burn the whole 'max_tries' budget on attempt 1
+    without ever retrying. The service still ran with is_final_attempt=False.
+    """
+    service_mock = AsyncMock(side_effect=ProviderError("judge 503"))
+    monkeypatch.setattr(
+        eval_worker_mod.evaluation_service, "evaluate_and_generate_report", service_mock
+    )
+    monkeypatch.setattr(eval_worker_mod, "get_sessionmaker", lambda: _FakeSessionmaker())
+
+    session_id = uuid.uuid4()
+    with pytest.raises(Retry):
         await evaluate_interview_session_task(
-            ctx={}, actor_id=uuid.uuid4(), session_id=uuid.uuid4()
+            ctx={"job_try": 1, "max_tries": 3}, actor_id=uuid.uuid4(), session_id=session_id
         )
 
+    # Service was invoked as a non-final attempt (so it did NOT stamp
+    # terminal status='failed' — a later retry can still succeed).
+    service_mock.assert_awaited_once_with(ANY, session_id, is_final_attempt=False)
+    assert current_actor_var.get() is None
+
+
+@pytest.mark.asyncio
+async def test_evaluate_interview_session_task_retry_defer_grows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The Retry defer must grow with job_try (exponential backoff)."""
+    monkeypatch.setattr(
+        eval_worker_mod.evaluation_service,
+        "evaluate_and_generate_report",
+        AsyncMock(side_effect=ProviderError("judge 503")),
+    )
+    monkeypatch.setattr(eval_worker_mod, "get_sessionmaker", lambda: _FakeSessionmaker())
+
+    defers: dict[int, float | None] = {}
+    for job_try in (1, 2):
+        try:
+            await evaluate_interview_session_task(
+                ctx={"job_try": job_try, "max_tries": 3},
+                actor_id=uuid.uuid4(),
+                session_id=uuid.uuid4(),
+            )
+        except Retry as retry:
+            # Retry.defer_score is in milliseconds.
+            defers[job_try] = retry.defer_score
+
+    assert defers[1] is not None and defers[2] is not None
+    assert defers[2] > defers[1]  # backoff grows
+
+
+@pytest.mark.asyncio
+async def test_evaluate_interview_session_task_final_attempt_propagates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """On the FINAL attempt (job_try >= max_tries) the original exception must
+    propagate (NOT Retry) so arq records a terminal job failure.
+
+    The service was called with is_final_attempt=True, so it already stamped
+    the session status='failed' — the student-facing poll stops waiting.
+    """
+    service_mock = AsyncMock(side_effect=ProviderError("judge 503"))
+    monkeypatch.setattr(
+        eval_worker_mod.evaluation_service, "evaluate_and_generate_report", service_mock
+    )
+    monkeypatch.setattr(eval_worker_mod, "get_sessionmaker", lambda: _FakeSessionmaker())
+
+    session_id = uuid.uuid4()
+    with pytest.raises(ProviderError, match="judge 503"):
+        await evaluate_interview_session_task(
+            ctx={"job_try": 3, "max_tries": 3}, actor_id=uuid.uuid4(), session_id=session_id
+        )
+
+    service_mock.assert_awaited_once_with(ANY, session_id, is_final_attempt=True)
     assert current_actor_var.get() is None

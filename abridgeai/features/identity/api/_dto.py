@@ -43,6 +43,7 @@ class UserProfileDTO(_DTOBase):
     family_name: str | None
     avatar_object_id: UUID | None
     bio: str | None
+    locale: str | None
 
 
 __all__ = [

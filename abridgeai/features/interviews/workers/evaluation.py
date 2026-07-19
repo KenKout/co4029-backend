@@ -17,14 +17,46 @@ Mirrors the discipline of
 :mod:`abridgeai.features.materials.workers.ingest`. The wrapper is
 deliberately thin — evaluation error handling (rollback, stamp
 ``internal_summary_json['evaluation_failure']``, commit) lives inside
-:func:`abridgeai.features.interviews.services.evaluation.evaluate_and_generate_report`
-which the worker re-raises so ARQ records the failure for retry.
+:func:`abridgeai.features.interviews.services.evaluation.evaluate_and_generate_report`.
+
+Retry mechanism (why this wrapper is NOT a bare re-raise)
+---------------------------------------------------------
+The AI judge (``evaluate_outcomes`` / ``evaluate_session`` /
+``generate_gap_report``) makes external LLM HTTP calls. Those can fail
+transiently — provider 5xx, connection reset, a malformed JSON body,
+a 429 that outlived the client's inline backoff. When they do, the
+student's interview would otherwise be stamped ``failed`` on the FIRST
+error and never judged again.
+
+``WorkerSettings.max_tries=3`` alone does NOT fix this: arq 0.28's
+worker only re-queues a job when the task raises :class:`arq.worker.Retry`
+(or ``CancelledError`` / ``RetryJob``). Any *other* exception —
+including our ``ProviderError`` — takes arq's terminal ``else`` branch,
+so ``job_try`` never advances past 1 and the "3 tries" budget is never
+spent. To actually retry we must translate the failure into an explicit
+``Retry`` while budget remains.
+
+Behaviour:
+
+* Attempts ``1 .. max_tries-1`` — on ANY evaluation exception we raise
+  :class:`arq.worker.Retry` with exponential backoff so arq re-enqueues
+  the job (``job_try`` increments on the next pickup). The service has
+  already rolled back and stamped a non-terminal ``evaluation_failure``
+  note; a later successful attempt overwrites it.
+* Final attempt (``job_try >= max_tries``) — we let the original
+  exception propagate. ``is_final_attempt=True`` was passed to the
+  service so it stamped the terminal ``status='failed'``; re-raising
+  lets arq record the job-level failure. Without the terminal status
+  the student-facing poll in ``course-interview.tsx`` would wait
+  forever for a ``pass_verdict`` that never arrives.
 """
 
 from __future__ import annotations
 
 from typing import Any
 from uuid import UUID
+
+from arq import Retry
 
 from abridgeai.core.audit import current_actor_var
 from abridgeai.core.db import get_sessionmaker
@@ -38,6 +70,19 @@ from abridgeai.workers.actor import set_worker_actor
 
 _logger = get_logger(__name__)
 
+# Exponential backoff between evaluation retries. ``job_try`` is 1-indexed,
+# so the defer before attempt N+1 is ``base * 2**(job_try-1)`` seconds:
+# ~5s before attempt 2, ~10s before attempt 3. Capped so a degraded provider
+# is never hammered and the job never sits deferred for minutes.
+_RETRY_BASE_DELAY_S = 5.0
+_RETRY_MAX_DELAY_S = 60.0
+
+
+def _retry_defer_seconds(job_try: int) -> float:
+    """Seconds to wait before the next evaluation attempt (exponential, capped)."""
+    exponent = max(0, job_try - 1)
+    return min(_RETRY_MAX_DELAY_S, _RETRY_BASE_DELAY_S * (2**exponent))
+
 
 async def evaluate_interview_session_task(
     ctx: dict[str, Any],
@@ -49,7 +94,14 @@ async def evaluate_interview_session_task(
     Parameters
     ----------
     ctx
-        ARQ task context (unused here; reserved for ARQ internals).
+        ARQ task context. Carries ``job_try`` (1-indexed current attempt)
+        and ``max_tries`` (``WorkerSettings.max_tries``, currently 3).
+        Used both to detect the FINAL attempt (so the service stamps a
+        terminal ``status='failed'`` instead of leaving the session stuck
+        at ``'completed'`` with ``pass_verdict`` forever ``null``) and to
+        decide whether a transient AI-call failure should raise
+        :class:`arq.worker.Retry` (budget remaining) or propagate (budget
+        exhausted).
     actor_id
         UUID of the user (or system actor) that submitted the session;
         propagated to audit columns via ``set_worker_actor``. The
@@ -60,7 +112,14 @@ async def evaluate_interview_session_task(
         ``internal_summary_json``, and the ``GapReport`` row in a
         single transaction.
     """
-    _ = ctx
+    job_try_raw = ctx.get("job_try")
+    max_tries_raw = ctx.get("max_tries")
+    job_try = job_try_raw if isinstance(job_try_raw, int) else 1
+    is_final_attempt = bool(
+        isinstance(job_try_raw, int)
+        and isinstance(max_tries_raw, int)
+        and job_try_raw >= max_tries_raw
+    )
     set_worker_actor(actor_id)
     bind_request_context(
         session_id=str(session_id),
@@ -70,15 +129,41 @@ async def evaluate_interview_session_task(
     try:
         async with sessionmaker() as db:
             try:
-                await evaluation_service.evaluate_and_generate_report(db, session_id)
+                await evaluation_service.evaluate_and_generate_report(
+                    db, session_id, is_final_attempt=is_final_attempt
+                )
             except (KeyboardInterrupt, SystemExit):
                 raise
-            except Exception:
+            except Retry:
+                # Already a retry signal (shouldn't originate in the service,
+                # but never swallow it) — let arq handle re-queueing.
+                raise
+            except Exception as exc:
                 _logger.exception(
                     "interview_evaluation_task_failed",
                     session_id=str(session_id),
+                    job_try=job_try,
+                    max_tries=max_tries_raw,
+                    is_final_attempt=is_final_attempt,
                 )
-                raise
+                if is_final_attempt:
+                    # Budget exhausted: the service already stamped
+                    # status='failed'. Propagate so arq records the terminal
+                    # job failure — no further retry.
+                    raise
+                # Budget remaining: translate into arq's Retry so the job is
+                # re-enqueued (bare re-raise would NOT retry — see module
+                # docstring). Backoff grows with each attempt.
+                defer = _retry_defer_seconds(job_try)
+                _logger.warning(
+                    "interview_evaluation_task_retry",
+                    session_id=str(session_id),
+                    job_try=job_try,
+                    max_tries=max_tries_raw,
+                    defer_seconds=defer,
+                    error=str(exc),
+                )
+                raise Retry(defer=defer) from exc
     finally:
         current_actor_var.set(None)
         clear_request_context()

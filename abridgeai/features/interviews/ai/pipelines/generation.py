@@ -2,7 +2,7 @@
 
 Composes the four T6.4-T6.6 stages and persists accepted drafts:
 
-    retrieval -> generation -> validation -> persistence
+    retrieval -> generation (with backfill) -> validation -> persistence
 
 The pipeline does NOT make its own LLM calls; every stage emits its own
 ``ai_model_calls`` row via :class:`LLMGateway`. ``run.id`` is threaded
@@ -19,6 +19,10 @@ in ``tests/lint/test_no_audit_bypass.py`` do not apply).
 Stages T6.7 (followup), T6.8 (evaluation), T6.9 (gap report) are NOT
 in this pipeline — followup runs at session runtime; evaluation +
 gap-report run after submit. Both are wired by T6.11 services.
+
+The generate+validate backfill loop (compensating for validation
+dropping drafts short of the requested count) lives in :mod:`.backfill`
+to keep this orchestrator focused on run-state bookkeeping.
 """
 
 from __future__ import annotations
@@ -26,22 +30,19 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from sqlalchemy import text
 
 from abridgeai.core.exceptions import NotFoundError
 from abridgeai.core.security import utcnow
-from abridgeai.features.interviews.ai.stages.generation import (
-    generate_interview_questions,
+from abridgeai.features.interviews.ai.pipelines.backfill import (
+    generate_with_backfill,
+    validation_summary,
 )
-from abridgeai.features.interviews.ai.stages.retrieval import (
-    retrieve_interview_context,
-)
-from abridgeai.features.interviews.ai.stages.validation import (
-    validate_interview_questions,
-)
+from abridgeai.features.interviews.ai.stages.generation import resolve_question_count
+from abridgeai.features.interviews.ai.stages.retrieval import retrieve_interview_context
 from abridgeai.features.interviews.models import InterviewConfig, InterviewQuestion
 from abridgeai.features.interviews.queries.authoring import (
     list_outcomes_for_config,
@@ -58,7 +59,6 @@ if TYPE_CHECKING:
     from abridgeai.features.interviews.ai.stages.retrieval.logic import (
         InterviewRetrievalContext,
     )
-    from abridgeai.features.interviews.ai.stages.validation.verdicts import Verdict
 
 
 @dataclass
@@ -72,24 +72,17 @@ async def run_interview_generation(
     db: AsyncSession,
     generation_run_id: UUID,
 ) -> None:
-    """Drive retrieval → generation → validation → persistence.
-
-    Reads ``GenerationRun.config_json['interview_config_id']`` to resolve
-    the target config. Threads ``run.id`` through every LLM-emitting
-    stage so ``ai_model_calls`` rows for this run share one
-    ``pipeline_run_id``.
+    """Drive retrieval → generation (with backfill) → validation → persistence.
 
     On success: marks ``run.status='completed'``, populates
     ``run.config_json`` with stage-level summaries, and inserts one
-    :class:`InterviewQuestion` row per accepted draft (with monotonically
-    increasing ``position`` and ``review_status='pending'``).
+    :class:`InterviewQuestion` row per accepted draft (monotonically
+    increasing ``position``, ``review_status='pending'``).
 
-    On any pipeline-stage failure: rolls the session back, re-fetches
-    the run, stamps ``status='failed'`` + the failure message on
-    ``config_json``, commits, and re-raises so the ARQ retry budget
-    engages.
+    On any pipeline-stage failure: rolls back, re-fetches the run, stamps
+    ``status='failed'`` + the failure message, commits, and re-raises so
+    the ARQ retry budget engages.
     """
-
     run_dto = await quizzes_public.get_generation_run(db, generation_run_id)
     if run_dto is None:
         raise NotFoundError("Generation run not found")
@@ -123,23 +116,32 @@ async def run_interview_generation(
         await db.commit()
 
         outcomes = await list_outcomes_for_config(db, config.id)
-        drafts = await generate_interview_questions(
+        target_count = resolve_question_count(
+            run_config_json=state.config_json,
+            supplementary=config.supplementary_instructions,
+        )
+
+        # Seed 0/N so the UI shows progress the moment the run goes running.
+        await _write_progress(db, state, phase="generating", accepted=0, target=target_count)
+
+        async def _on_progress(accepted_so_far: int, target: int) -> None:
+            await _write_progress(
+                db, state, phase="generating", accepted=accepted_so_far, target=target
+            )
+
+        all_drafts, all_verdicts, accepted, backfill_rounds = await generate_with_backfill(
             db,
-            run=state,
+            state=state,
             config=config,
-            context=cast("Any", context),
+            context=context,
             outcomes=outcomes,
+            target_count=target_count,
+            on_progress=_on_progress,
         )
 
-        verdicts = await validate_interview_questions(
-            db,
-            run=state,
-            config=config,
-            drafts=cast("Any", drafts),
-            context=cast("Any", context),
+        await _write_progress(
+            db, state, phase="saving", accepted=len(accepted), target=target_count
         )
-        accepted = _accepted_drafts(drafts, verdicts)
-
         await _persist_questions(db, config=config, accepted=accepted)
 
         state.config_json = state.config_json | {
@@ -147,11 +149,14 @@ async def run_interview_generation(
                 "stage": "completed",
                 "pipeline_run_id": str(state.id),
                 "generation": {
-                    "drafts_total": len(drafts),
+                    "question_count_requested": target_count,
+                    "questions_persisted": len(accepted),
+                    "drafts_total": len(all_drafts),
                     "drafts_accepted": len(accepted),
-                    "drafts_rejected": len(drafts) - len(accepted),
+                    "drafts_rejected": len(all_drafts) - len(accepted),
+                    "backfill_rounds": backfill_rounds,
                 },
-                "validation": _validation_summary(verdicts),
+                "validation": validation_summary(all_verdicts),
             }
         }
         await _update_run(
@@ -225,35 +230,32 @@ def _config_uuid(config_json: dict[str, Any] | None, key: str) -> UUID | None:
         return None
 
 
+async def _write_progress(
+    db: AsyncSession,
+    state: _RunState,
+    *,
+    phase: str,
+    accepted: int,
+    target: int,
+) -> None:
+    """Persist + commit live generation progress into ``config_json``.
+
+    The teacher SPA polls ``generation_runs.config_json`` every 2.5s while
+    the run is ``running`` and renders ``progress.accepted / progress.target``
+    as a count + percentage bar.
+    """
+    state.config_json = state.config_json | {
+        "progress": {"phase": phase, "accepted": accepted, "target": target}
+    }
+    await _update_run(db, state.id, config_json=state.config_json)
+    await db.commit()
+
+
 def _retrieval_summary(context: InterviewRetrievalContext) -> dict[str, Any]:
     return {
         "count": len(context.chunks),
         "kg_concept_count": len(context.kg_concepts),
         "weak_topic_count": len(context.weak_topic_chunks),
-    }
-
-
-def _accepted_drafts(
-    drafts: list[InterviewQuestionDraft],
-    verdicts: list[Verdict],
-) -> list[InterviewQuestionDraft]:
-    accepted: list[InterviewQuestionDraft] = []
-    for index, draft in enumerate(drafts):
-        if index < len(verdicts) and verdicts[index].accepted:
-            accepted.append(draft)
-    return accepted
-
-
-def _validation_summary(verdicts: list[Verdict]) -> dict[str, Any]:
-    rejected = [v for v in verdicts if not v.accepted]
-    failure_codes: dict[str, int] = {}
-    for verdict in rejected:
-        for criterion in verdict.failed_criteria:
-            failure_codes[criterion.value] = failure_codes.get(criterion.value, 0) + 1
-    return {
-        "accepted": sum(1 for v in verdicts if v.accepted),
-        "rejected": len(rejected),
-        "failures": failure_codes,
     }
 
 
@@ -286,6 +288,7 @@ async def _persist_questions(
                 question_type=draft.question_type,
                 prompt_text=draft.prompt_text,
                 difficulty=_persist_difficulty(draft.difficulty),
+                model_answer=draft.model_answer.strip() or None,
                 review_status="pending",
                 ai_generated=True,
                 source_refs_json=[str(c) for c in draft.source_refs],

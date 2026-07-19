@@ -91,6 +91,7 @@ from abridgeai.features.courses.routers import (
 from abridgeai.features.courses.routers import (
     me_courses_router,
 )
+from abridgeai.features.interviews.ai.pipelines import backfill as interview_backfill
 from abridgeai.features.interviews.ai.pipelines import generation as interview_pipeline
 from abridgeai.features.interviews.ai.stages.evaluation.outcome_verdicts import (
     OutcomeVerdict,
@@ -617,8 +618,10 @@ def llm_mocks(scenario: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> dict
         context: Any,
         outcomes: list[Any],
         gateway: Any = None,
+        override_question_count: int | None = None,
+        avoid_prompts: list[str] | None = None,
     ) -> list[Any]:
-        del config, context, gateway
+        del config, context, gateway, override_question_count, avoid_prompts
         captured_run_id["id"] = run.id
         captured["stages"].append({"stage": "generation"})
         await _emit_audit(
@@ -652,8 +655,8 @@ def llm_mocks(scenario: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> dict
         return _accept_verdicts(len(drafts))
 
     monkeypatch.setattr(interview_pipeline, "retrieve_interview_context", _fake_retrieve)
-    monkeypatch.setattr(interview_pipeline, "generate_interview_questions", _fake_generate)
-    monkeypatch.setattr(interview_pipeline, "validate_interview_questions", _fake_validate)
+    monkeypatch.setattr(interview_backfill, "generate_interview_questions", _fake_generate)
+    monkeypatch.setattr(interview_backfill, "validate_interview_questions", _fake_validate)
 
     # Followup stage — at session runtime, NOT in the pipeline.
     async def _fake_followup(*args: Any, **kwargs: Any) -> str | None:

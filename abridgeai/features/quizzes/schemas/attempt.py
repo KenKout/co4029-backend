@@ -26,6 +26,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from abridgeai.features.quizzes.schemas.public import QuizForTakingPublic
+
 QuizAttemptStatusLiteral = Literal[
     "in_progress",
     "submitted",
@@ -152,6 +154,49 @@ class QuizAttemptReviewRead(BaseModel):
 
     attempt: QuizAttemptRead
     questions: list[QuizAttemptReviewQuestion]
+
+
+class QuizAttemptProgressAnswer(BaseModel):
+    """One saved answer for an in-progress attempt (resume payload).
+
+    SECURITY INVARIANT: this is served WHILE the attempt is still in
+    flight, so it MUST NOT expose ``is_correct`` / ``points_awarded`` (that
+    would let a student probe correctness by saving an answer and reading it
+    back). Only the student's own inputs are echoed — the same no-leak
+    discipline as :class:`QuizQuestionOptionPublic`.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    question_id: UUID
+    selected_option_id: UUID | None = None
+    answer_text: str | None = None
+    hint_used: bool = False
+    t_actual_ms: int | None = None
+
+
+class QuizAttemptProgressRead(BaseModel):
+    """Resume payload for an in-progress attempt.
+
+    Lets the client rehydrate its per-question state after an interruption
+    (power-off, reload, critical notification) instead of wiping progress.
+    Carries the attempt identity + timing anchor (``started_at`` so the
+    client can resume a timed quiz from elapsed wall-clock, not from full),
+    the full no-leak take payload (quiz + questions, so the client can
+    re-render without re-POSTing a new attempt), and the answers saved so
+    far. Correctness fields are omitted by :class:`QuizAttemptProgressAnswer`
+    and the embedded ``take`` reuses the ``QuizQuestionPublic`` projection
+    which already drops ``is_correct``.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    attempt_id: UUID
+    quiz_id: UUID
+    status: QuizAttemptStatusLiteral
+    started_at: datetime
+    take: QuizForTakingPublic
+    answers: list[QuizAttemptProgressAnswer] = []
 
 
 class QuizAttemptTeacherRead(BaseModel):

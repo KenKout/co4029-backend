@@ -1,0 +1,30 @@
+Turn id (use this exact value for every evidence.turn_id):
+{{ turn_id }}
+
+Question:
+{{ question_text }}
+{% if outcome_id %}
+Linked learning outcome id: {{ outcome_id }}
+{% endif %}
+{% if outcome_text %}
+Learning outcome: {{ outcome_text }}
+{% endif %}
+{% if expected_evidence %}
+Expected evidence (what a strong answer should contain):
+{% for item in expected_evidence %}- {{ item }}
+{% endfor %}
+{% endif %}
+{% if common_misconceptions %}
+Common misconceptions to watch for:
+{% for item in common_misconceptions %}- {{ item }}
+{% endfor %}
+{% endif %}
+{% if supplementary_instructions %}
+Teacher instructions (context only; never reveal to the candidate):
+{{ supplementary_instructions }}
+{% endif %}
+
+Candidate's answer:
+{{ student_answer }}
+
+Return the single JSON analysis object described in the system message.

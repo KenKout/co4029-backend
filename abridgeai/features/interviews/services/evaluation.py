@@ -49,7 +49,9 @@ if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
 
-async def evaluate_and_generate_report(db: AsyncSession, session_id: UUID) -> None:
+async def evaluate_and_generate_report(
+    db: AsyncSession, session_id: UUID, *, is_final_attempt: bool = False
+) -> None:
     """Run evaluation + gap-report stages, persist results, commit.
 
     Side effects (all in a single transaction):
@@ -63,8 +65,19 @@ async def evaluate_and_generate_report(db: AsyncSession, session_id: UUID) -> No
        ``total_score`` / ``rubric_aggregated`` for teacher diagnostics.
     3. ``GapReport`` row — student / teacher summary + ``report_json``.
 
-    On exception: rollback, stamp ``internal_summary_json['evaluation_failure']``,
-    commit, and re-raise.
+    Parameters
+    ----------
+    is_final_attempt
+        True when the caller (ARQ task wrapper) has exhausted
+        ``WorkerSettings.max_tries`` on this job. When an exception hits
+        on the final attempt, ``InterviewSession.status`` is stamped
+        ``'failed'`` in addition to the ``evaluation_failure`` note so the
+        student-facing poll (``course-interview.tsx``) can detect the
+        terminal failure and stop waiting instead of polling forever
+        for a ``pass_verdict`` that will never arrive.
+
+    On exception: rollback, stamp ``internal_summary_json['evaluation_failure']``
+    (plus ``status='failed'`` when ``is_final_attempt``), commit, and re-raise.
     """
     session = await sessions_queries.get_session(db, session_id)
     if session is None:
@@ -120,9 +133,7 @@ async def evaluate_and_generate_report(db: AsyncSession, session_id: UUID) -> No
             pipeline_run_id=None,
         )
 
-        await _persist_outcome_evaluations(
-            db, session_id=session_id, verdicts=outcome_verdicts
-        )
+        await _persist_outcome_evaluations(db, session_id=session_id, verdicts=outcome_verdicts)
         _stamp_session_summary(
             session,
             rubric_scores=rubric_scores,
@@ -146,8 +157,18 @@ async def evaluate_and_generate_report(db: AsyncSession, session_id: UUID) -> No
                 "evaluation_failure": {
                     "message": str(exc),
                     "failed_at": utcnow().isoformat(),
+                    "final_attempt": is_final_attempt,
                 }
             }
+            # Only stamp the terminal 'failed' status once ARQ has exhausted
+            # its retry budget. Marking it failed on attempt 1/3 would tell
+            # the student the interview is dead while a retry is still
+            # queued — but NOT stamping it on the LAST attempt leaves the
+            # session stuck at 'completed' with pass_verdict forever null,
+            # so the frontend poll in course-interview.tsx never resolves
+            # and the student waits indefinitely (the bug we're fixing).
+            if is_final_attempt:
+                fresh.status = "failed"
             await db.commit()
         raise
 

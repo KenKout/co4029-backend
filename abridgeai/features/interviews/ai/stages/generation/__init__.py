@@ -10,6 +10,7 @@ from __future__ import annotations
 from abridgeai.features.interviews.ai.stages.generation.logic import (
     InterviewRetrievalContext,
     generate_interview_questions,
+    resolve_question_count,
 )
 from abridgeai.features.interviews.ai.stages.generation.parsers import (
     InterviewDifficulty,
@@ -25,4 +26,5 @@ __all__ = [
     "InterviewRetrievalContext",
     "generate_interview_questions",
     "parse_generation_response",
+    "resolve_question_count",
 ]

@@ -41,6 +41,8 @@ class LLMRole(str, Enum):  # noqa: UP042 - StrEnum changes value coercion; prese
     INTERVIEW_FOLLOWUP = "interview_followup"
     INTERVIEW_EVALUATION = "interview_evaluation"
     GAP_REPORT_GENERATION = "gap_report_generation"
+    INTERVIEW_INTENT = "interview_intent"
+    INTERVIEW_ANALYSIS = "interview_analysis"
 
 
 # Default role -> tier mapping. Embedding intentionally excluded — it has its
@@ -63,6 +65,11 @@ ROLE_TO_TIER: dict[LLMRole, Literal["small", "standard", "large"]] = {
     LLMRole.INTERVIEW_FOLLOWUP: "small",
     LLMRole.INTERVIEW_EVALUATION: "large",
     LLMRole.GAP_REPORT_GENERATION: "large",
+    # Intent is a fast, latency-sensitive classification (student is waiting) —
+    # small tier. Answer analysis needs more reasoning (rubric/evidence) but is
+    # still a runtime call, so standard tier balances quality vs latency.
+    LLMRole.INTERVIEW_INTENT: "small",
+    LLMRole.INTERVIEW_ANALYSIS: "standard",
 }
 
 

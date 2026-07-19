@@ -350,6 +350,7 @@ def _compose_payload(
     *,
     missed_concepts: list[str],
     resources: list[_ResolvedResource],
+    locale: str | None,
 ) -> tuple[str, str]:
     """Render notification ``title`` + ``body`` from concepts + resources.
 
@@ -358,26 +359,28 @@ def _compose_payload(
     embedded in the body text together with up to two follow-up links.
     The frontend learner inbox renders the body as Markdown, so plain
     paths suffice as link targets.
-    """
-    if missed_concepts:
-        head = ", ".join(missed_concepts[:2])
-        if len(missed_concepts) > 2:
-            head += f" (+{len(missed_concepts) - 2} more)"
-        title = f"Review needed: {head}"
-    else:
-        primary = resources[0].material_title if resources else "this card"
-        title = f"Review needed: {primary}"
-    title = title[:255]
 
-    lines = [
-        "You missed this question. Review the linked resources before retry "
-        "to lock the concept in.",
-        "",
+    Copy is localized to the recipient's ``locale`` ('en' | 'vi') via the
+    notifications ``messages`` module (cross-feature import authorised in
+    pyproject). Resource labels stay verbatim (material/lesson titles);
+    only the surrounding sentences translate.
+    """
+    from abridgeai.features.notifications import messages
+
+    primary_resource = resources[0].material_title if resources else None
+    resource_links = [
+        (
+            resource.material_title or resource.lesson_title or "Resource",
+            resource.deep_link,
+        )
+        for resource in resources
     ]
-    for resource in resources:
-        label = resource.material_title or resource.lesson_title or "Resource"
-        lines.append(f"- [{label}]({resource.deep_link})")
-    body = "\n".join(lines)
+    title = messages.remediation_title(
+        missed_concepts=missed_concepts,
+        primary_resource=primary_resource,
+        locale=locale,
+    )
+    body = messages.remediation_body(resource_links=resource_links, locale=locale)
     return title, body
 
 
@@ -465,7 +468,15 @@ async def dispatch_remediation_for_card_failure(
         )
         return
 
-    title, body = _compose_payload(missed_concepts=seed_concepts, resources=resources)
+    # Cross-feature read: recipient's preferred locale ('en' | 'vi') so the
+    # notification copy is rendered in their language at creation time. The
+    # identity public API is authorised by the api.public wildcard carve-out.
+    from abridgeai.features.identity.api.public import get_user_locale
+
+    locale = await get_user_locale(db, student_id)
+    title, body = _compose_payload(
+        missed_concepts=seed_concepts, resources=resources, locale=locale
+    )
 
     await send_notification(
         db,
