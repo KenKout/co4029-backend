@@ -82,4 +82,4 @@ openapi-snapshot.json
 
 # Local backups and plans
 .backup-*
-.hermes/
+.hermes/*
