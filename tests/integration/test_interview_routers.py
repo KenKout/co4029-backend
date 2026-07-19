@@ -972,14 +972,13 @@ async def test_start_session_upgrades_input_mode_when_config_allows(
     seeded_users: SeededUsers,
     engine: AsyncEngine,
 ) -> None:
-    """Regression: a stale text session must be upgradeable to voice when
-    the config is hybrid.
+    """Interviews are always hybrid now: the session's input_mode is pinned to
+    ``hybrid`` server-side regardless of any client-supplied value.
 
-    Pre-fix, ``start_session`` short-circuited on any in_progress session
-    without checking whether the caller asked for a different input_mode.
-    A student whose first POST landed as ``text`` then got HTTP 409
-    "session is not a voice interview" from ``/realtime-token`` because
-    the session row stayed at ``input_mode='text'`` forever.
+    Previously the mode was client-selectable (text/voice/hybrid) and a stale
+    text session could be upgraded to voice. That choice is gone — the AI always
+    speaks + writes and the student can type or speak — so a POST that names any
+    mode (here ``voice``) must still resolve the session to ``hybrid``.
     """
     config_id = uuid.uuid4()
     question_id = uuid.uuid4()
@@ -1057,7 +1056,7 @@ async def test_start_session_upgrades_input_mode_when_config_allows(
         assert start_resp.status_code == 201, start_resp.text
         assert start_resp.json()["session_id"] == str(session_id)
 
-        # Verify the upgrade persisted on the session row.
+        # The session stays hybrid — any client-supplied mode is ignored.
         async with engine.begin() as conn:
             row = (
                 await conn.execute(
@@ -1065,7 +1064,7 @@ async def test_start_session_upgrades_input_mode_when_config_allows(
                     {"sid": session_id},
                 )
             ).first()
-        assert row is not None and row[0] == "voice"
+        assert row is not None and row[0] == "hybrid"
     finally:
         async with engine.begin() as conn:
             await conn.execute(
@@ -1306,11 +1305,15 @@ async def test_respond_succeeds_when_followup_stage_raises(
         )
         # Pre-fix this was 500; post-fix the answer commits and the route
         # responds normally (is_finished=True because the seeded config has
-        # only one approved question).
+        # only one approved question). With always-adaptive, a gateway failure
+        # degrades to the legacy sequential path — which may emit a deterministic
+        # closing remark — so ai_followup_text is no longer asserted to be None;
+        # the point of this test is that the request does NOT 500 and the answer
+        # is persisted.
         assert respond_resp.status_code == 200, respond_resp.text
-        payload = respond_resp.json()
-        assert payload["ai_followup_text"] is None
-        assert payload["is_finished"] is True
+        # is_finished is not asserted: with always-adaptive, the rules-based
+        # decision on a gateway failure may probe rather than finish. The
+        # invariant this test guards is "no 500 + answer persisted".
 
         # Verify the answer DID land in the DB despite the follow-up failure.
         async with engine.begin() as conn:

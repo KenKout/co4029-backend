@@ -108,6 +108,10 @@ class UserProfile(TimestampMixin, AuditedByMixin, SoftDeleteMixin, Base):
         nullable=True,
     )
     bio: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Preferred UI + notification language ('en' | 'vi'). NULL = not set;
+    # notification dispatch normalizes NULL to 'en' (matches the frontend
+    # i18next ``fallbackLng``). CHECK constraint added in migration 0024.
+    locale: Mapped[str | None] = mapped_column(String(5), nullable=True)
 
 
 class UserProfileLink(

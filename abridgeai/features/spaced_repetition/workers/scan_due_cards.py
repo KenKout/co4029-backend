@@ -128,16 +128,18 @@ async def _dispatch_for_student(
 ) -> None:
     # Cross-feature: import inside function so the static import graph
     # stays within the ``Features-are-independent`` contract; the runtime
-    # edge is authorised via an ``ignore_imports`` entry in pyproject.
+    # edge is authorised via ``ignore_imports`` entries in pyproject.
+    from abridgeai.features.identity.api.public import get_user_locale
+    from abridgeai.features.notifications import messages
     from abridgeai.features.notifications.services.dispatch import send_notification
 
-    plural = "s" if due_count != 1 else ""
+    locale = await get_user_locale(db, student_id)
     await send_notification(
         db,
         recipient_user_id=student_id,
         notification_type="spaced_repetition",
-        title=f"You have {due_count} card{plural} due",
-        body="Review them now to keep your knowledge fresh.",
+        title=messages.due_cards_title(due_count=due_count, locale=locale),
+        body=messages.due_cards_body(locale=locale),
     )
 
 

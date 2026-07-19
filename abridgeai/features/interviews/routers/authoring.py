@@ -330,6 +330,22 @@ async def unarchive_interview_config(
     return InterviewConfigAuthoring.model_validate(config)
 
 
+@router.post("/interview-configs/{config_id}/unpublish", response_model=InterviewConfigAuthoring)
+async def unpublish_interview_config(
+    config_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_CONFIG)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> InterviewConfigAuthoring:
+    try:
+        config = await authoring_service.unpublish_interview_config(db, config_id, current_user)
+    except NotFoundError as exc:
+        raise _not_found("interview_config", config_id) from exc
+    except AppError as exc:
+        raise _bad_request(str(exc)) from exc
+    await db.commit()
+    return InterviewConfigAuthoring.model_validate(config)
+
+
 @router.delete(
     "/interview-configs/{config_id}",
     status_code=status.HTTP_204_NO_CONTENT,

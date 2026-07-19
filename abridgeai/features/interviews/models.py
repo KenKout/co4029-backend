@@ -325,6 +325,10 @@ class InterviewQuestion(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, Sof
     question_type: Mapped[str] = mapped_column(String(30), nullable=False)
     prompt_text: Mapped[str] = mapped_column(Text, nullable=False)
     difficulty: Mapped[str | None] = mapped_column(String(20))
+    model_answer: Mapped[str | None] = mapped_column(Text)
+    """Teacher-facing reference answer. Authoring aid only — never exposed
+    to learners and never used to auto-grade (scoring stays rubric-based
+    against :class:`InterviewOutcome` criteria)."""
     review_status: Mapped[str] = mapped_column(
         String(20), nullable=False, server_default=text("'pending'")
     )
@@ -593,6 +597,52 @@ class AssessmentIntegrityEvent(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
     )
 
 
+class InterviewRuntimeState(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    """Persistent adaptive-interviewer runtime state (Phase 1).
+
+    One row per :class:`InterviewSession` (1:1, UNIQUE ``session_id``). Holds
+    the stateful orchestrator's view of the interview: phase, per-outcome
+    coverage, asked/skipped/completed ledgers, follow-up counters, the last
+    classified intent + answer analysis, and candidate signals. The entire
+    structured payload lives in ``state_json`` (JSONB) so the shape can evolve
+    without a migration per field; only the hot invariants that need DB-level
+    guarantees get real columns:
+
+    * ``phase`` — surfaced for querying/observability without unpacking JSON.
+    * ``state_version`` — monotonic optimistic-lock counter. Every committed
+      advancement bumps it; a stale update (client/LiveKit retry carrying an
+      older version) is rejected so the interview never advances twice.
+    * ``last_turn_idempotency_key`` — the idempotency key of the most recently
+      processed student turn. A duplicate REST/LiveKit callback carrying the
+      same key is a no-op replay, not a second advancement.
+
+    Compatibility: this table is ADDITIVE and lazily initialised. Sessions that
+    predate it (or run with ``adaptive_interviewer_enabled=false``) simply have
+    no row; the sequential path never reads it. Nothing breaks if it is absent.
+    """
+
+    __tablename__ = "interview_runtime_states"
+    __table_args__ = (
+        UniqueConstraint("session_id", name="uq_interview_runtime_states_session"),
+        CheckConstraint(
+            "phase IN ('opening', 'warmup', 'core', 'deep_probe', 'closing', 'completed')",
+            name="ck_interview_runtime_states_phase",
+        ),
+    )
+
+    session_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("interview_sessions.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    phase: Mapped[str] = mapped_column(String(20), nullable=False, server_default=text("'opening'"))
+    state_version: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    last_turn_idempotency_key: Mapped[str | None] = mapped_column(String(255))
+    state_json: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+
+
 __all__ = [
     "AssessmentIntegrityEvent",
     "GapReport",
@@ -600,6 +650,7 @@ __all__ = [
     "InterviewOutcome",
     "InterviewOutcomeEvaluation",
     "InterviewQuestion",
+    "InterviewRuntimeState",
     "InterviewSession",
     "InterviewSessionMessage",
     "InterviewSessionQuestion",

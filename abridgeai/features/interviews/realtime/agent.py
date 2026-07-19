@@ -21,12 +21,17 @@ from livekit import rtc
 from livekit.agents import JobContext, WorkerOptions, cli
 
 from abridgeai.core.config import get_settings
+from abridgeai.features.interviews.realtime import observability as obs
 from abridgeai.features.interviews.realtime import orchestration_bridge as bridge
 from abridgeai.features.interviews.realtime.session_runtime import (
     InterviewAgent,
     build_agent_session,
 )
-from abridgeai.features.interviews.services.real_time import META_SESSION_ID, META_STUDENT_ID
+from abridgeai.features.interviews.services.real_time import (
+    META_LANGUAGE,
+    META_SESSION_ID,
+    META_STUDENT_ID,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -42,15 +47,38 @@ async def entrypoint(ctx: JobContext) -> None:
     meta = json.loads(raw_metadata)
     interview_session_id = UUID(meta[META_SESSION_ID])
     student_id = UUID(meta[META_STUDENT_ID])
+    # Phase 18: language for adaptive utterances (default 'en' for older tokens
+    # minted before this field existed — backward compatible).
+    language = meta.get(META_LANGUAGE, "en")
     logger.info("interview agent starting (session=%s)", interview_session_id)
+    obs.emit(
+        obs.EV_AGENT_DISPATCH,
+        session_id=interview_session_id,
+        language=language,
+    )
 
-    await ctx.connect()
+    try:
+        await ctx.connect()
+    except Exception as exc:
+        obs.emit(
+            obs.EV_ROOM_JOIN,
+            session_id=interview_session_id,
+            ok=False,
+            error_class=type(exc).__name__,
+        )
+        raise
+    obs.emit(obs.EV_ROOM_JOIN, session_id=interview_session_id, ok=True)
 
     # Record student disconnects for post-session review. Non-terminal: the
     # session stays in_progress so the student can rejoin; the time-limit
     # sweep (Phase 4) is the backstop for sessions that never resume.
     def _on_participant_disconnected(participant: rtc.RemoteParticipant) -> None:
         if participant.identity == f"student-{student_id}":
+            obs.emit(
+                obs.EV_DISCONNECT,
+                session_id=interview_session_id,
+                reason="participant_disconnected",
+            )
             asyncio.create_task(  # noqa: RUF006 - fire-and-forget best-effort
                 bridge.record_integrity_event(
                     interview_session_id, student_id, "disconnect", severity="warning"
@@ -64,6 +92,7 @@ async def entrypoint(ctx: JobContext) -> None:
         interview_session_id=interview_session_id,
         student_id=student_id,
         first_question_text=first_question_text,
+        language=language,
     )
     session = build_agent_session(settings)
     await session.start(agent, room=ctx.room)

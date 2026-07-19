@@ -1,0 +1,811 @@
+"""Integration tests for the adaptive interviewer wired into take_session_step.
+
+Covers the Slice 4 safeguard #14 matrix against a real database:
+
+* flag off  → exact legacy behaviour (no structured fields, no runtime row);
+* voice session with flag ON → still legacy (hard gate, safeguard #9);
+* flag on + text → adaptive path (structured fields present, one AI turn,
+  one state-version bump, answer recorded once);
+* repeat request → repeats, no scoring, no advance;
+* cannot-answer → professional transition, advances;
+* duplicate turn_key → same response, no second answer row, no version bump;
+* utterance/LLM failure → deterministic fallback still yields a valid turn;
+* perception failure → sequential fallback (answer still recorded, legacy dict).
+
+The LLM gateway is always stubbed (no real network). Real-gateway EN/VI runs
+are performed separately (see the manual verification script).
+"""
+
+from __future__ import annotations
+
+import uuid
+from collections.abc import AsyncIterator
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
+from unittest.mock import AsyncMock
+
+import pytest
+import pytest_asyncio
+from alembic import command
+from alembic.config import Config
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
+
+import abridgeai.ai.models  # noqa: F401
+import abridgeai.features.access_control.models  # noqa: F401
+import abridgeai.features.courses.models  # noqa: F401
+import abridgeai.features.identity.models  # noqa: F401
+import abridgeai.features.interviews.models  # noqa: F401
+import abridgeai.features.materials.models  # noqa: F401
+import abridgeai.features.quizzes.models  # noqa: F401
+from abridgeai.core.config import Settings, get_settings
+from abridgeai.core.security import CurrentUser
+from abridgeai.features.interviews.services import taking as taking_service
+
+
+def _async_url(database_url: str) -> str:
+    if "+psycopg_async" in database_url:
+        return database_url
+    if database_url.startswith("postgresql+psycopg://"):
+        return database_url.replace("postgresql+psycopg://", "postgresql+psycopg_async://", 1)
+    if database_url.startswith("postgresql://"):
+        return database_url.replace("postgresql://", "postgresql+psycopg_async://", 1)
+    return database_url
+
+
+def _ensure_head() -> None:
+    cfg_path = Path(__file__).resolve().parents[2] / "alembic.ini"
+    cfg = Config(str(cfg_path))
+    cfg.set_main_option(
+        "script_location",
+        str(Path(__file__).resolve().parents[2] / "migrations"),
+    )
+    command.upgrade(cfg, "head")
+
+
+@pytest_asyncio.fixture
+async def engine() -> AsyncIterator[AsyncEngine]:
+    _ensure_head()
+    eng = create_async_engine(_async_url(get_settings().database_url), pool_pre_ping=True)
+    yield eng
+    await eng.dispose()
+
+
+@pytest_asyncio.fixture
+async def session_factory(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
+    return async_sessionmaker(engine, expire_on_commit=False, autoflush=False)
+
+
+def _actor(user_id: uuid.UUID) -> CurrentUser:
+    return CurrentUser(user_id=user_id, session_id=uuid.uuid4())
+
+
+@pytest_asyncio.fixture
+async def scenario(engine: AsyncEngine) -> AsyncIterator[dict[str, Any]]:
+    """Minimal FK chain + config + 3 approved questions + 2 outcomes + a session."""
+    org_id = uuid.uuid4()
+    teacher_id = uuid.uuid4()
+    student_id = uuid.uuid4()
+    course_id = uuid.uuid4()
+    module_id = uuid.uuid4()
+    config_id = uuid.uuid4()
+    outcome_ids = [uuid.uuid4(), uuid.uuid4()]
+    question_ids = [uuid.uuid4(), uuid.uuid4(), uuid.uuid4()]
+    suffix = org_id.hex[:8]
+
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("INSERT INTO organizations (id, slug, name) VALUES (:id, :slug, :name)"),
+            {"id": org_id, "slug": f"ad-{suffix}", "name": "Adaptive Org"},
+        )
+        for uid, label in ((teacher_id, "teacher"), (student_id, "student")):
+            await conn.execute(
+                text("INSERT INTO users (id, primary_email) VALUES (:id, :email)"),
+                {"id": uid, "email": f"ad-{label}-{suffix}@test.local"},
+            )
+        await conn.execute(
+            text(
+                "INSERT INTO courses (id, organization_id, owner_user_id, slug, title, status) "
+                "VALUES (:id, :org, :owner, :slug, 'AD Course', 'published')"
+            ),
+            {"id": course_id, "org": org_id, "owner": teacher_id, "slug": f"ad-course-{suffix}"},
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO modules (id, course_id, title, position, status) "
+                "VALUES (:id, :course, 'Module', 1, 'published')"
+            ),
+            {"id": module_id, "course": course_id},
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO interview_configs "
+                "(id, course_id, module_id, title, status, supported_modes, persona, created_by) "
+                "VALUES (:id, :course, :module, 'AD Interview', 'published', 'hybrid', "
+                "'neutral', :teacher)"
+            ),
+            {
+                "id": config_id,
+                "course": course_id,
+                "module": module_id,
+                "teacher": teacher_id,
+            },
+        )
+        for i, oid in enumerate(outcome_ids):
+            await conn.execute(
+                text(
+                    "INSERT INTO interview_outcomes "
+                    "(id, interview_config_id, position, outcome_text, outcome_type, "
+                    "importance_weight) VALUES (:id, :cfg, :pos, :txt, 'knowledge', :w)"
+                ),
+                {
+                    "id": oid,
+                    "cfg": config_id,
+                    "pos": i + 1,
+                    "txt": f"Outcome {i + 1}",
+                    "w": 3 + i,
+                },
+            )
+        for i, qid in enumerate(question_ids):
+            await conn.execute(
+                text(
+                    "INSERT INTO interview_questions "
+                    "(id, interview_config_id, linked_outcome_id, position, question_type, "
+                    "prompt_text, difficulty, review_status, ai_generated) "
+                    "VALUES (:id, :cfg, :oid, :pos, 'conceptual', :prompt, :diff, "
+                    "'approved', TRUE)"
+                ),
+                {
+                    "id": qid,
+                    "cfg": config_id,
+                    "oid": outcome_ids[i % len(outcome_ids)],
+                    "pos": i + 1,
+                    "prompt": f"Question {i + 1}: explain concept {i + 1}?",
+                    "diff": ["junior", "mid_level", "senior"][i],
+                },
+            )
+
+    yield {
+        "config_id": config_id,
+        "student_id": student_id,
+        "outcome_ids": outcome_ids,
+        "question_ids": question_ids,
+    }
+
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "DELETE FROM interview_runtime_states WHERE session_id IN "
+                "(SELECT id FROM interview_sessions WHERE interview_config_id = :c)"
+            ),
+            {"c": config_id},
+        )
+        await conn.execute(
+            text(
+                "DELETE FROM interview_session_messages WHERE session_id IN "
+                "(SELECT id FROM interview_sessions WHERE interview_config_id = :c)"
+            ),
+            {"c": config_id},
+        )
+        await conn.execute(
+            text(
+                "DELETE FROM interview_session_questions WHERE session_id IN "
+                "(SELECT id FROM interview_sessions WHERE interview_config_id = :c)"
+            ),
+            {"c": config_id},
+        )
+        await conn.execute(
+            text("DELETE FROM interview_sessions WHERE interview_config_id = :c"),
+            {"c": config_id},
+        )
+        await conn.execute(
+            text("DELETE FROM interview_questions WHERE interview_config_id = :c"),
+            {"c": config_id},
+        )
+        await conn.execute(
+            text("DELETE FROM interview_outcomes WHERE interview_config_id = :c"),
+            {"c": config_id},
+        )
+        await conn.execute(text("DELETE FROM interview_configs WHERE id = :c"), {"c": config_id})
+        await conn.execute(text("DELETE FROM modules WHERE id = :m"), {"m": module_id})
+        await conn.execute(text("DELETE FROM courses WHERE id = :c"), {"c": course_id})
+        await conn.execute(
+            text("DELETE FROM users WHERE id IN (:s, :t)"), {"s": student_id, "t": teacher_id}
+        )
+        await conn.execute(text("DELETE FROM organizations WHERE id = :o"), {"o": org_id})
+
+
+async def _make_session(
+    engine: AsyncEngine, config_id: uuid.UUID, student_id: uuid.UUID, input_mode: str
+) -> tuple[uuid.UUID, uuid.UUID]:
+    """Create an in_progress session with its first question attached."""
+    session_id = uuid.uuid4()
+    sq_id = uuid.uuid4()
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO interview_sessions "
+                "(id, interview_config_id, student_id, attempt_number, status, input_mode) "
+                "VALUES (:id, :cfg, :student, 1, 'in_progress', :mode)"
+            ),
+            {"id": session_id, "cfg": config_id, "student": student_id, "mode": input_mode},
+        )
+        first_q = (
+            await conn.execute(
+                text(
+                    "SELECT id FROM interview_questions WHERE interview_config_id = :c "
+                    "ORDER BY position LIMIT 1"
+                ),
+                {"c": config_id},
+            )
+        ).scalar_one()
+        await conn.execute(
+            text(
+                "INSERT INTO interview_session_questions "
+                "(id, session_id, interview_question_id, sequence_no) "
+                "VALUES (:id, :sid, :qid, 1)"
+            ),
+            {"id": sq_id, "sid": session_id, "qid": first_q},
+        )
+    return session_id, sq_id
+
+
+def _settings(*, adaptive: bool) -> Settings:
+    base = get_settings()
+    # Enable the master switch AND every per-mode flag together: these tests
+    # assert the adaptive path runs for text/hybrid/voice alike, so voice (which
+    # defaults OFF in production) must be explicitly turned on here.
+    return base.model_copy(
+        update={
+            "adaptive_interviewer_enabled": adaptive,
+            "adaptive_interviewer_text_enabled": True,
+            "adaptive_interviewer_hybrid_enabled": True,
+            "adaptive_interviewer_voice_enabled": adaptive,
+        }
+    )
+
+
+@pytest.fixture
+def adaptive_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    # monkeypatch auto-undoes on teardown, so no manual restore is needed.
+    monkeypatch.setattr(taking_service, "get_settings", lambda: _settings(adaptive=True))
+
+
+@pytest.fixture
+def adaptive_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(taking_service, "get_settings", lambda: _settings(adaptive=False))
+
+
+def _gateway(payloads: list[dict[str, Any]]) -> SimpleNamespace:
+    results = [SimpleNamespace(content_json=p) for p in payloads]
+    return SimpleNamespace(generate_json=AsyncMock(side_effect=results))
+
+
+async def _count_user_messages(engine: AsyncEngine, session_id: uuid.UUID) -> int:
+    async with engine.begin() as conn:
+        return int(
+            (
+                await conn.execute(
+                    text(
+                        "SELECT count(*) FROM interview_session_messages "
+                        "WHERE session_id = :s AND role = 'user'"
+                    ),
+                    {"s": session_id},
+                )
+            ).scalar_one()
+        )
+
+
+async def _count_ai_messages(engine: AsyncEngine, session_id: uuid.UUID) -> int:
+    async with engine.begin() as conn:
+        return int(
+            (
+                await conn.execute(
+                    text(
+                        "SELECT count(*) FROM interview_session_messages "
+                        "WHERE session_id = :s AND role = 'ai'"
+                    ),
+                    {"s": session_id},
+                )
+            ).scalar_one()
+        )
+
+
+# ── flag off → legacy ────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_flag_off_uses_legacy_path(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict[str, Any],
+    adaptive_off: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _no_followup(*a: Any, **k: Any) -> str | None:
+        return None
+
+    monkeypatch.setattr(taking_service, "maybe_generate_followup", _no_followup)
+
+    session_id, sq_id = await _make_session(
+        engine, scenario["config_id"], scenario["student_id"], "text"
+    )
+    async with session_factory() as db:
+        result = await taking_service.take_session_step(
+            db, session_id, "my answer", _actor(scenario["student_id"])
+        )
+        await db.commit()
+
+    # Legacy dict only — no structured adaptive keys.
+    assert "action" not in result
+    assert "state_version" not in result
+    assert result["is_finished"] in (True, False)
+    # No runtime-state row was created.
+    async with engine.begin() as conn:
+        rt = (
+            await conn.execute(
+                text("SELECT count(*) FROM interview_runtime_states WHERE session_id = :s"),
+                {"s": session_id},
+            )
+        ).scalar_one()
+    assert int(rt) == 0
+
+
+# ── voice hard gate (safeguard #9) ───────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_voice_session_now_uses_adaptive_path(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict[str, Any],
+    adaptive_on: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Phase 18: voice is no longer hard-gated. With the flag ON a voice session
+    runs the SAME adaptive brain as text/hybrid — the bridge consumes the
+    canonical result (ai_turn_text / should_finish), so voice reaches parity.
+    """
+    # Deterministic rules classify a repeat request; only the utterance phrasing
+    # call hits the gateway, which we stub so no live gateway is needed.
+    gw = _gateway(
+        [
+            {"intent": "ask_to_repeat", "confidence": 0.9},
+            {
+                "acknowledgement": "",
+                "transition": "Of course. Here is the question again:",
+                "ai_turn_text": "Of course. Here is the question again: "
+                "What is a fact table in a data warehouse?",
+            },
+        ]
+    )
+    monkeypatch.setattr(
+        "abridgeai.features.interviews.orchestrator.intent_logic.LLMGateway", lambda: gw
+    )
+    monkeypatch.setattr(
+        "abridgeai.features.interviews.orchestrator.utterance_logic.LLMGateway", lambda: gw
+    )
+
+    session_id, _ = await _make_session(
+        engine, scenario["config_id"], scenario["student_id"], "voice"
+    )
+    async with session_factory() as db:
+        result = await taking_service.take_session_step(
+            db,
+            session_id,
+            "could you repeat the question please",
+            _actor(scenario["student_id"]),
+        )
+        await db.commit()
+
+    # Voice → ADAPTIVE path now: structured fields are present and a runtime
+    # state row was created.
+    assert result.get("action") is not None
+    assert result.get("ai_turn_text")
+    async with engine.begin() as conn:
+        rt = (
+            await conn.execute(
+                text("SELECT count(*) FROM interview_runtime_states WHERE session_id = :s"),
+                {"s": session_id},
+            )
+        ).scalar_one()
+    assert int(rt) == 1
+
+
+# ── flag on + text → adaptive ─────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_adaptive_probe_records_one_turn_and_bumps_version(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict[str, Any],
+    adaptive_on: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # intent=answer, analysis recommends ask_for_example (a probe, no advance).
+    gw = _gateway(
+        [
+            {"intent": "answer", "confidence": 0.9, "rationale": "content"},
+            {
+                "relevance": "relevant",
+                "completeness": "partial",
+                "correctness": "mixed",
+                "specificity": "vague",
+                "has_concrete_example": False,
+                "recommended_probe_type": "ask_for_example",
+                "confidence": 0.7,
+                "evidence": [],
+            },
+            # utterance phrasing call
+            {
+                "acknowledgement": "Thank you.",
+                "transition": "",
+                "ai_turn_text": "Thank you. Could you give a concrete example?",
+            },
+        ]
+    )
+    monkeypatch.setattr(
+        "abridgeai.features.interviews.orchestrator.intent_logic.LLMGateway", lambda: gw
+    )
+    monkeypatch.setattr(
+        "abridgeai.features.interviews.orchestrator.analysis_logic.LLMGateway", lambda: gw
+    )
+    monkeypatch.setattr(
+        "abridgeai.features.interviews.orchestrator.utterance_logic.LLMGateway", lambda: gw
+    )
+
+    session_id, sq_id = await _make_session(
+        engine, scenario["config_id"], scenario["student_id"], "text"
+    )
+    async with session_factory() as db:
+        result = await taking_service.take_session_step(
+            db,
+            session_id,
+            "It stores data.",
+            _actor(scenario["student_id"]),
+            turn_key="turn-A",
+            language="en",
+        )
+        await db.commit()
+
+    assert result["action"] == "ask_for_example"
+    assert result["state_version"] == 1
+    assert result["is_finished"] is False
+    assert result["next_question"] is None  # probe does not advance
+    assert result["ai_turn_text"]
+    assert result["should_await_response"] is True
+    # exactly one user answer + one AI turn.
+    assert await _count_user_messages(engine, session_id) == 1
+    assert await _count_ai_messages(engine, session_id) == 1
+
+
+@pytest.mark.asyncio
+async def test_repeat_request_repeats_without_scoring(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict[str, Any],
+    adaptive_on: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # "can you repeat the question?" — deterministic rule catches it (no LLM).
+    session_id, _ = await _make_session(
+        engine, scenario["config_id"], scenario["student_id"], "text"
+    )
+    async with session_factory() as db:
+        result = await taking_service.take_session_step(
+            db,
+            session_id,
+            "Could you repeat the question?",
+            _actor(scenario["student_id"]),
+            turn_key="turn-repeat",
+            language="en",
+        )
+        await db.commit()
+
+    assert result["action"] == "repeat_question"
+    assert result["is_finished"] is False
+    assert result["next_question"] is None
+    # repeat must NOT record academic evidence.
+    async with engine.begin() as conn:
+        cov = (
+            await conn.execute(
+                text("SELECT state_json FROM interview_runtime_states WHERE session_id = :s"),
+                {"s": session_id},
+            )
+        ).scalar_one()
+    assert cov["outcome_coverage"] == {}
+
+
+@pytest.mark.asyncio
+async def test_duplicate_turn_key_replays_without_second_answer(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict[str, Any],
+    adaptive_on: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    call_count = {"n": 0}
+
+    def _counting_gateway() -> SimpleNamespace:
+        call_count["n"] += 1
+        return _gateway(
+            [
+                {"intent": "answer", "confidence": 0.9, "rationale": "x"},
+                {
+                    "relevance": "relevant",
+                    "completeness": "partial",
+                    "correctness": "mixed",
+                    "specificity": "general",
+                    "recommended_probe_type": "none",
+                    "confidence": 0.6,
+                    "evidence": [],
+                },
+                {
+                    "acknowledgement": "Thanks.",
+                    "transition": "Let's move on.",
+                    "ai_turn_text": "Thanks. Let's move on.",
+                },
+            ]
+        )
+
+    for mod in ("intent_logic", "analysis_logic", "utterance_logic"):
+        monkeypatch.setattr(
+            f"abridgeai.features.interviews.orchestrator.{mod}.LLMGateway",
+            _counting_gateway,
+        )
+
+    session_id, _ = await _make_session(
+        engine, scenario["config_id"], scenario["student_id"], "text"
+    )
+    actor = _actor(scenario["student_id"])
+
+    async with session_factory() as db:
+        first = await taking_service.take_session_step(
+            db, session_id, "answer one", actor, turn_key="dup-key", language="en"
+        )
+        await db.commit()
+
+    async with session_factory() as db:
+        second = await taking_service.take_session_step(
+            db, session_id, "answer one", actor, turn_key="dup-key", language="en"
+        )
+        await db.commit()
+
+    # Same action + same state version — replay, not a second advancement.
+    assert first["action"] == second["action"]
+    assert first["state_version"] == second["state_version"]
+    # Only ONE user answer row despite two calls.
+    assert await _count_user_messages(engine, session_id) == 1
+
+
+@pytest.mark.asyncio
+async def test_perception_failure_falls_back_to_legacy(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict[str, Any],
+    adaptive_on: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Force the adaptive pipeline to raise; the legacy path must still work and
+    # the answer must be recorded exactly once.
+    async def _boom(*a: Any, **k: Any) -> Any:
+        raise RuntimeError("perception exploded")
+
+    monkeypatch.setattr(
+        "abridgeai.features.interviews.orchestrator.adaptive.run_adaptive_turn", _boom
+    )
+
+    async def _no_followup(*a: Any, **k: Any) -> str | None:
+        return None
+
+    monkeypatch.setattr(taking_service, "maybe_generate_followup", _no_followup)
+
+    session_id, _ = await _make_session(
+        engine, scenario["config_id"], scenario["student_id"], "text"
+    )
+    async with session_factory() as db:
+        result = await taking_service.take_session_step(
+            db,
+            session_id,
+            "an answer",
+            _actor(scenario["student_id"]),
+            turn_key="tk-fallback",
+            language="en",
+        )
+        await db.commit()
+
+    # Fell back to legacy → no structured fields, but answer recorded once and
+    # the session advanced (next_question present or finished).
+    assert "action" not in result
+    assert await _count_user_messages(engine, session_id) == 1
+
+
+# ── Phase 18: voice bridge language parity (EN/VI) ────────────────────────────
+
+
+def _reject_utterance_gateway() -> SimpleNamespace:
+    """A gateway whose phrasing output is always rejected → deterministic
+    (language-aware) fallback is used. Lets us assert the fallback language
+    without depending on a live model."""
+    return SimpleNamespace(generate_json=AsyncMock(return_value=SimpleNamespace(content_json={})))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("language", "marker"),
+    [
+        ("en", "Of course. Here is the question again:"),
+        ("vi", "Câu hỏi được nhắc lại:"),
+    ],
+)
+async def test_voice_bridge_honors_language(
+    engine: AsyncEngine,
+    scenario: dict[str, Any],
+    adaptive_on: None,
+    monkeypatch: pytest.MonkeyPatch,
+    language: str,
+    marker: str,
+) -> None:
+    """Phase 18: the LiveKit bridge threads `language` all the way into the
+    adaptive utterance, so a voice session speaks EN or VI accordingly.
+
+    Goes through `bridge.handle_student_turn` (the real voice entry point),
+    which opens its own DB session against the same database. A repeat request
+    is classified deterministically (no intent LLM call); the utterance gateway
+    is stubbed to be rejected so the language-aware deterministic fallback is
+    what gets spoken.
+    """
+    from abridgeai.features.interviews.realtime import orchestration_bridge as bridge
+
+    monkeypatch.setattr(
+        "abridgeai.features.interviews.orchestrator.utterance_logic.LLMGateway",
+        _reject_utterance_gateway,
+    )
+
+    session_id, _ = await _make_session(
+        engine, scenario["config_id"], scenario["student_id"], "voice"
+    )
+
+    result = await bridge.handle_student_turn(
+        session_id,
+        scenario["student_id"],
+        "could you repeat the question please",
+        language=language,
+    )
+
+    assert result.is_finished is False
+    assert result.speak_text is not None
+    assert marker in result.speak_text
+
+
+# ── Shadow mode (Phase 10) ────────────────────────────────────────────────────
+
+
+def _settings_shadow() -> Settings:
+    """Shadow ON, master switch OFF → voice is NOT live, so it gets shadowed:
+    the adaptive decision is computed for comparison but the student still gets
+    the legacy path."""
+    return get_settings().model_copy(
+        update={
+            "adaptive_interviewer_enabled": False,
+            "adaptive_interviewer_voice_enabled": False,
+            "adaptive_interviewer_shadow_enabled": True,
+        }
+    )
+
+
+@pytest.fixture
+def adaptive_shadow(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(taking_service, "get_settings", _settings_shadow)
+
+
+@pytest.mark.asyncio
+async def test_shadow_mode_serves_legacy_and_never_persists_adaptive(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict[str, Any],
+    adaptive_shadow: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Shadow mode computes the adaptive decision purely for comparison. The
+    student MUST get the legacy result, and the shadow computation MUST NOT
+    persist an AI turn or a runtime-state row (its savepoint always rolls back).
+    """
+
+    async def _no_followup(*a: Any, **k: Any) -> str | None:
+        return None
+
+    monkeypatch.setattr(taking_service, "maybe_generate_followup", _no_followup)
+
+    # Stub the adaptive gateways so the shadow pipeline can run end-to-end
+    # without a live gateway (a repeat request needs no intent LLM call, but the
+    # utterance phrasing does).
+    gw = _gateway(
+        [
+            {"intent": "ask_to_repeat", "confidence": 0.9},
+            {
+                "acknowledgement": "",
+                "transition": "Of course. Here is the question again:",
+                "ai_turn_text": "Of course. Here is the question again: Question 1?",
+            },
+        ]
+    )
+    monkeypatch.setattr(
+        "abridgeai.features.interviews.orchestrator.intent_logic.LLMGateway", lambda: gw
+    )
+    monkeypatch.setattr(
+        "abridgeai.features.interviews.orchestrator.utterance_logic.LLMGateway", lambda: gw
+    )
+
+    session_id, _ = await _make_session(
+        engine, scenario["config_id"], scenario["student_id"], "voice"
+    )
+    async with session_factory() as db:
+        result = await taking_service.take_session_step(
+            db,
+            session_id,
+            "could you repeat the question please",
+            _actor(scenario["student_id"]),
+        )
+        await db.commit()
+
+    # Student got the LEGACY dict — no structured adaptive fields.
+    assert "action" not in result
+    assert "state_version" not in result
+    # The student answer WAS recorded (once).
+    assert await _count_user_messages(engine, session_id) == 1
+    # Shadow must NOT have persisted an AI turn or a runtime-state row.
+    assert await _count_ai_messages(engine, session_id) == 0
+    async with engine.begin() as conn:
+        rt = (
+            await conn.execute(
+                text("SELECT count(*) FROM interview_runtime_states WHERE session_id = :s"),
+                {"s": session_id},
+            )
+        ).scalar_one()
+    assert int(rt) == 0
+
+
+@pytest.mark.asyncio
+async def test_shadow_mode_disabled_by_default_no_computation(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict[str, Any],
+    adaptive_off: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With shadow OFF (the adaptive_off fixture leaves it default-false), a
+    turn runs pure legacy and no adaptive artifacts appear — a regression guard
+    that shadow doesn't fire unless explicitly enabled."""
+
+    async def _no_followup(*a: Any, **k: Any) -> str | None:
+        return None
+
+    monkeypatch.setattr(taking_service, "maybe_generate_followup", _no_followup)
+
+    session_id, _ = await _make_session(
+        engine, scenario["config_id"], scenario["student_id"], "voice"
+    )
+    async with session_factory() as db:
+        result = await taking_service.take_session_step(
+            db, session_id, "my answer", _actor(scenario["student_id"])
+        )
+        await db.commit()
+
+    assert "action" not in result
+    assert await _count_ai_messages(engine, session_id) == 0
+    async with engine.begin() as conn:
+        rt = (
+            await conn.execute(
+                text("SELECT count(*) FROM interview_runtime_states WHERE session_id = :s"),
+                {"s": session_id},
+            )
+        ).scalar_one()
+    assert int(rt) == 0

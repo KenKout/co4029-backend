@@ -17,6 +17,8 @@ Four concerns split across sibling files:
 from __future__ import annotations
 
 from abridgeai.features.quizzes.schemas.attempt import (
+    QuizAttemptProgressAnswer,
+    QuizAttemptProgressRead,
     QuizAttemptRead,
     QuizAttemptReviewOption,
     QuizAttemptReviewQuestion,
@@ -65,6 +67,8 @@ __all__ = [
     "QuestionRegenerationRequest",
     "QuestionType",
     "QuestionTypeLiteral",
+    "QuizAttemptProgressAnswer",
+    "QuizAttemptProgressRead",
     "QuizAttemptRead",
     "QuizAttemptReviewOption",
     "QuizAttemptReviewQuestion",

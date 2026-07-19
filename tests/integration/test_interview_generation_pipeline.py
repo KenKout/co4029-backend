@@ -39,6 +39,7 @@ from abridgeai.ai.llm import LLMRole
 from abridgeai.ai.llm.audit import write_ai_model_call
 from abridgeai.ai.models import GenerationRun
 from abridgeai.core.config import get_settings
+from abridgeai.features.interviews.ai.pipelines import backfill as generation_backfill
 from abridgeai.features.interviews.ai.pipelines import generation as generation_pipeline
 from abridgeai.features.interviews.ai.pipelines import run_interview_generation
 from abridgeai.features.interviews.ai.stages.generation.parsers import (
@@ -160,7 +161,11 @@ async def fixture_data(engine: AsyncEngine) -> AsyncIterator[dict[str, UUID]]:
                 "id": run_id,
                 "c": course,
                 "m": module_id,
-                "cfg_json": f'{{"interview_config_id": "{cfg_id}"}}',
+                # question_count=2 matches _install_stage_mocks' default
+                # 2-draft fixture so composition/threading tests don't
+                # trigger the backfill loop; tests exercising backfill
+                # override this via _set_question_count.
+                "cfg_json": f'{{"interview_config_id": "{cfg_id}", "question_count": 2}}',
             },
         )
 
@@ -228,6 +233,24 @@ def _retrieval_context() -> InterviewRetrievalContext:
     )
 
 
+async def _set_question_count(engine: AsyncEngine, run_id: UUID, count: int) -> None:
+    """Override the fixture's default question_count=2 for a specific test.
+
+    Keeps mocked draft/verdict counts aligned with the pipeline's target
+    count so tests that aren't exercising the backfill loop don't
+    accidentally trigger extra generate+validate rounds.
+    """
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "UPDATE generation_runs SET config_json = "
+                "jsonb_set(config_json, '{question_count}', CAST(:count AS JSONB)) "
+                "WHERE id = :id"
+            ),
+            {"id": run_id, "count": str(count)},
+        )
+
+
 def _install_stage_mocks(
     monkeypatch: pytest.MonkeyPatch,
     *,
@@ -254,8 +277,8 @@ def _install_stage_mocks(
     next_pos = AsyncMock(side_effect=_fake_next_pos)
 
     monkeypatch.setattr(generation_pipeline, "retrieve_interview_context", retrieve)
-    monkeypatch.setattr(generation_pipeline, "generate_interview_questions", generate)
-    monkeypatch.setattr(generation_pipeline, "validate_interview_questions", validate)
+    monkeypatch.setattr(generation_backfill, "generate_interview_questions", generate)
+    monkeypatch.setattr(generation_backfill, "validate_interview_questions", validate)
     monkeypatch.setattr(generation_pipeline, "list_outcomes_for_config", list_outcomes)
     monkeypatch.setattr(generation_pipeline, "next_question_position", next_pos)
 
@@ -266,6 +289,77 @@ def _install_stage_mocks(
         "list_outcomes": list_outcomes,
         "next_pos": next_pos,
     }
+
+
+@pytest.mark.asyncio
+async def test_backfill_tops_up_shortfall_from_validation_rejections(
+    session_factory: async_sessionmaker[AsyncSession],
+    fixture_data: dict[str, UUID],
+    engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Round 1 falls short of question_count; round 2 backfills the gap.
+
+    Regression test for the bug where validation rejecting drafts left the
+    persisted question count below what the teacher asked for, with no
+    retry to compensate.
+    """
+    await _set_question_count(engine, fixture_data["run_id"], 5)
+
+    # Round 1: 5 requested, only 3 accepted (2 rejected) -> shortfall of 2.
+    round1_drafts = [_draft(i) for i in range(1, 6)]
+    round1_verdicts = [
+        _verdict(0, accepted=True),
+        _verdict(1, accepted=True),
+        _verdict(2, accepted=False),
+        _verdict(3, accepted=True),
+        _verdict(4, accepted=False),
+    ]
+    # Round 2 (backfill): pipeline asks for the 2 missing; both accepted.
+    round2_drafts = [_draft(10), _draft(11)]
+    round2_verdicts = [_verdict(0, accepted=True), _verdict(1, accepted=True)]
+
+    generate = AsyncMock(side_effect=[round1_drafts, round2_drafts])
+    validate = AsyncMock(side_effect=[round1_verdicts, round2_verdicts])
+    retrieve = AsyncMock(return_value=_retrieval_context())
+    list_outcomes = AsyncMock(return_value=[])
+    next_pos_calls: list[int] = []
+
+    async def _fake_next_pos(_db: Any, _cfg_id: Any) -> int:
+        next_pos_calls.append(1)
+        return len(next_pos_calls)
+
+    monkeypatch.setattr(generation_pipeline, "retrieve_interview_context", retrieve)
+    monkeypatch.setattr(generation_backfill, "generate_interview_questions", generate)
+    monkeypatch.setattr(generation_backfill, "validate_interview_questions", validate)
+    monkeypatch.setattr(generation_pipeline, "list_outcomes_for_config", list_outcomes)
+    monkeypatch.setattr(
+        generation_pipeline, "next_question_position", AsyncMock(side_effect=_fake_next_pos)
+    )
+
+    async with session_factory() as session:
+        await run_interview_generation(session, fixture_data["run_id"])
+
+    # Two generate+validate rounds ran.
+    assert generate.await_count == 2
+    assert validate.await_count == 2
+    # Round 2 asked for the shortfall (2) plus the backfill buffer (+1 =
+    # 3), not the full original count (5).
+    assert generate.await_args_list[1].kwargs["override_question_count"] == 3
+    # Round 2 was told to avoid the 3 already-accepted prompts.
+    assert len(generate.await_args_list[1].kwargs["avoid_prompts"]) == 3
+
+    async with session_factory() as session:
+        rows = (
+            await session.execute(
+                text("SELECT prompt_text FROM interview_questions WHERE interview_config_id = :c"),
+                {"c": fixture_data["cfg_id"]},
+            )
+        ).all()
+
+    # 3 accepted in round 1 + 2 accepted in round 2 backfill == the
+    # originally requested question_count of 5.
+    assert len(rows) == 5
 
 
 @pytest.mark.asyncio
@@ -289,6 +383,7 @@ async def test_pipeline_composes_all_four_stages(
 async def test_persisted_questions_only_accepted_drafts(
     session_factory: async_sessionmaker[AsyncSession],
     fixture_data: dict[str, UUID],
+    engine: AsyncEngine,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     drafts = [_draft(i) for i in range(1, 6)]
@@ -300,6 +395,10 @@ async def test_persisted_questions_only_accepted_drafts(
         _verdict(4, accepted=False),
     ]
     _install_stage_mocks(monkeypatch, drafts=drafts, verdicts=verdicts)
+    # 3 of the 5 mocked drafts are accepted; align question_count so the
+    # backfill loop is satisfied after this single round (not exercised
+    # by this test — see test_backfill_* below).
+    await _set_question_count(engine, fixture_data["run_id"], 3)
 
     async with session_factory() as session:
         await run_interview_generation(session, fixture_data["run_id"])
@@ -354,7 +453,7 @@ async def test_pipeline_run_status_failed_on_exception(
 ) -> None:
     _install_stage_mocks(monkeypatch)
     monkeypatch.setattr(
-        generation_pipeline,
+        generation_backfill,
         "generate_interview_questions",
         AsyncMock(side_effect=RuntimeError("upstream LLM exploded")),
     )
@@ -447,8 +546,8 @@ async def test_audit_rows_share_pipeline_run_id(
         return 1
 
     monkeypatch.setattr(generation_pipeline, "retrieve_interview_context", _fake_retrieve)
-    monkeypatch.setattr(generation_pipeline, "generate_interview_questions", _fake_generate)
-    monkeypatch.setattr(generation_pipeline, "validate_interview_questions", _fake_validate)
+    monkeypatch.setattr(generation_backfill, "generate_interview_questions", _fake_generate)
+    monkeypatch.setattr(generation_backfill, "validate_interview_questions", _fake_validate)
     monkeypatch.setattr(generation_pipeline, "list_outcomes_for_config", _fake_outcomes)
     monkeypatch.setattr(generation_pipeline, "next_question_position", _fake_pos)
 
@@ -476,6 +575,7 @@ async def test_audit_rows_share_pipeline_run_id(
 async def test_pipeline_persists_question_with_correct_fields(
     session_factory: async_sessionmaker[AsyncSession],
     fixture_data: dict[str, UUID],
+    engine: AsyncEngine,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     outcome_id = fixture_data["outcome_id"]
@@ -494,6 +594,9 @@ async def test_pipeline_persists_question_with_correct_fields(
         drafts=[draft],
         verdicts=[_verdict(0, accepted=True)],
     )
+    # Single mocked draft — align question_count so the backfill loop
+    # doesn't request a second (empty) round.
+    await _set_question_count(engine, fixture_data["run_id"], 1)
 
     async with session_factory() as session:
         await run_interview_generation(session, fixture_data["run_id"])
@@ -572,14 +675,18 @@ async def test_pipeline_raises_when_run_missing_interview_config_id(
 
 
 def test_stage_args_use_keyword_only() -> None:
-    """Pipeline must call stages with kwargs only — guards against positional drift."""
-    body = (
-        Path(__file__).resolve().parents[2]
-        / "abridgeai/features/interviews/ai/pipelines/generation.py"
-    ).read_text(encoding="utf-8")
-    for stage_call in (
-        "retrieve_interview_context(",
-        "generate_interview_questions(",
-        "validate_interview_questions(",
-    ):
-        assert stage_call in body, f"pipeline must call {stage_call!r}"
+    """Pipeline must call stages with kwargs only — guards against positional drift.
+
+    ``retrieve_interview_context`` is called directly from ``generation.py``;
+    ``generate_interview_questions``/``validate_interview_questions`` live in
+    the backfill loop (``backfill.py``) since T6.10's backfill refactor.
+    """
+    pipelines_dir = (
+        Path(__file__).resolve().parents[2] / "abridgeai/features/interviews/ai/pipelines"
+    )
+    orchestrator_body = (pipelines_dir / "generation.py").read_text(encoding="utf-8")
+    backfill_body = (pipelines_dir / "backfill.py").read_text(encoding="utf-8")
+
+    assert "retrieve_interview_context(" in orchestrator_body
+    for stage_call in ("generate_interview_questions(", "validate_interview_questions("):
+        assert stage_call in backfill_body, f"backfill loop must call {stage_call!r}"

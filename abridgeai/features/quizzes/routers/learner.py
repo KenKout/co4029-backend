@@ -30,6 +30,7 @@ from abridgeai.core.exceptions import NotFoundError
 from abridgeai.core.observability import get_logger
 from abridgeai.core.security import CurrentUser, get_current_user, utcnow
 from abridgeai.features.quizzes.schemas import (
+    QuizAttemptProgressRead,
     QuizAttemptRead,
     QuizAttemptReviewRead,
     QuizAttemptStart,
@@ -249,6 +250,34 @@ async def get_attempt(
     if attempt is None or attempt.student_id != current_user.user_id:
         raise _not_found("quiz_attempt", attempt_id)
     return QuizAttemptRead.model_validate(attempt)
+
+
+@router.get(
+    "/attempts/{attempt_id}/progress",
+    response_model=QuizAttemptProgressRead,
+)
+async def get_attempt_progress(
+    attempt_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> QuizAttemptProgressRead:
+    """Resume payload for an in-progress attempt.
+
+    Lets the client rehydrate per-question state after an interruption
+    (power-off, reload, critical notification) instead of wiping progress.
+    Returns 404 when the attempt is missing, belongs to a different
+    student, or is no longer in flight (submitted / graded / abandoned).
+
+    No-leak: unlike ``/review`` this fires WHILE the attempt is open, so
+    the payload carries only the student's own saved inputs — never
+    ``is_correct`` / ``points_awarded`` (see ``QuizAttemptProgressAnswer``).
+    """
+    progress = await taking_service.get_attempt_progress(
+        db, attempt_id=attempt_id, actor=current_user
+    )
+    if progress is None:
+        raise _not_found("quiz_attempt", attempt_id)
+    return progress
 
 
 @router.get(

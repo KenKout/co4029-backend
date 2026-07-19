@@ -1,27 +1,25 @@
 """Unit tests for LiveKit realtime token minting (Phase 2, no DB).
 
 Tests voice-interview token generation, room naming, agent metadata.
-No database required — uses mocked credentials or real Settings with
-dummy DB URLs set at module top via os.environ.
+No database required — the one test that builds a real ``Settings`` passes
+dummy DB/JWT values as explicit constructor kwargs.
+
+NOTE: we deliberately do NOT mutate ``os.environ`` at import time. Doing so
+leaked dummy DB URLs into the whole pytest process (``os.environ`` outranks the
+``.env`` file in pydantic-settings), which broke every other test that resolves
+``get_settings().database_url`` when this module was imported first.
 """
 
 from __future__ import annotations
 
 import json
-import os
-from datetime import timedelta
 from uuid import uuid4
 
 import jwt
 import pytest
 
-# CRITICAL: Set dummy DB URLs BEFORE importing Settings (which validates at construction).
-# These are never connected — only used to satisfy Settings validators.
-os.environ.setdefault("JWT_SECRET_KEY", "x" * 40)
-os.environ.setdefault("DATABASE_URL", "postgresql+psycopg://u:p@localhost:5432/db")
-os.environ.setdefault("TEST_DATABASE_URL", "postgresql+psycopg://u:p@localhost:5432/db_test")
-
 from abridgeai.core.config import Settings
+from abridgeai.features.interviews.schemas.real_time import RealtimeTokenResponse
 from abridgeai.features.interviews.services.real_time import (
     META_SESSION_ID,
     META_STUDENT_ID,
@@ -29,7 +27,6 @@ from abridgeai.features.interviews.services.real_time import (
     build_room_name,
     mint_participant_token,
 )
-from abridgeai.features.interviews.schemas.real_time import RealtimeTokenResponse
 
 
 class MockSettings:
@@ -263,8 +260,13 @@ class TestMintParticipantToken:
         student_id = uuid4()
         room_name = build_room_name(session_id)
 
-        # Build a real Settings object with required env vars already set
+        # Build a real Settings object. DB/JWT values are passed explicitly as
+        # dummy kwargs (never connected) instead of polluting os.environ, so this
+        # test can't corrupt get_settings() for the rest of the suite.
         settings = Settings(
+            jwt_secret_key="x" * 40,
+            database_url="postgresql+psycopg://u:p@localhost:5432/db",
+            test_database_url="postgresql+psycopg://u:p@localhost:5432/db_test",
             livekit_api_key=SecretStr("test-key"),
             livekit_api_secret=SecretStr("test-secret"),
             livekit_ws_url="wss://real.livekit.cloud",

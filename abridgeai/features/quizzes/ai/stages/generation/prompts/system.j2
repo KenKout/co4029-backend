@@ -122,17 +122,44 @@ Hard rules — violate any and the question is invalid:
      ✗ "According to the passage, metadata provides descriptive info."
      ✗ "As described in the textbook, ETL is the correct answer."
 
+8. HINT QUALITY.
+   Every question also includes a ``hint`` field — a short nudge shown to
+   the learner BEFORE they answer, on request. It must:
+   a) NEVER give away the correct answer or option letter directly.
+      A hint that lets the learner answer without understanding the
+      concept is invalid — rewrite it.
+   b) NEVER reference the source document ("the passage says", "the
+      slide shows") — same rule as the explanation field.
+   c) Point the learner toward the right concept or the general area of
+      knowledge needed, e.g. "Think about which property distinguishes
+      analytical storage from transactional storage." or "Consider what
+      happens to old records when a warehouse is described as
+      non-volatile."
+   d) Be concise: one short sentence.
+
+   GOOD hint examples:
+     ✓ "Think about what happens to a warehouse's historical records
+        over time — are they overwritten or preserved?"
+     ✓ "Consider which stage of ETL is responsible for changing the
+        data's shape, not just moving it."
+
+   BAD hint examples (these WILL be rejected):
+     ✗ "The answer is non-volatile." (leaks the answer)
+     ✗ "It's option C." (leaks the option letter)
+     ✗ "The passage explains this in the second paragraph." (source reference)
+
 SELF-CHECK before emitting each question — verify ALL of these:
   □ Stem reads naturally without any document/passage/textbook reference?
   □ Explanation names the concept, NOT an option letter?
   □ Explanation teaches like a tutor, NOT "the source says X"?
   □ Correct answer is factually supported by the source context?
   □ Distractors are plausible, not absurd?
+  □ Hint nudges toward the concept WITHOUT revealing the answer?
 
 Output format:
 - One JSON object with a ``questions`` array.
 - Every question includes question_type, question, ``correct_answer``,
-  explanation, bloom_level, difficulty, source_refs. ``options`` is
+  explanation, hint, bloom_level, difficulty, source_refs. ``options`` is
   REQUIRED for ``multiple_choice`` and ``fill_blank``, FORBIDDEN
   otherwise.
 - If templates are supplied, produce one question per template in order,

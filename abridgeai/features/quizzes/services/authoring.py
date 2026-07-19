@@ -58,6 +58,12 @@ if TYPE_CHECKING:
 
 _DEFAULT_PASSING_SCORE = Decimal("70.00")
 
+# Two-phase position-repack offset (mirrors courses.reorder_module_items):
+# bump surviving rows into a disjoint high range before assigning final
+# 1..N so the non-deferrable (quiz_id, position) unique constraint never
+# collides mid-flush. A quiz never has 100k questions.
+_POSITION_REPACK_OFFSET = 100_000
+
 
 register_conflict_mappings(
     {
@@ -214,9 +220,7 @@ async def _quiz_has_in_flight_run(db: AsyncSession, quiz_id: UUID) -> bool:
     return (await db.execute(stmt)).first() is not None
 
 
-async def get_latest_generation_run(
-    db: AsyncSession, quiz_id: UUID
-) -> GenerationRun | None:
+async def get_latest_generation_run(db: AsyncSession, quiz_id: UUID) -> GenerationRun | None:
     """Return the most recent ``GenerationRun`` for ``quiz_id`` (any status).
 
     Powers the SPA's quiz-generation panel reattach-on-mount: instead
@@ -474,16 +478,43 @@ async def delete_question(db: AsyncSession, question_id: UUID, actor: CurrentUse
     question = await _require_question(db, question_id)
     quiz_id = question.quiz_id
     await soft_delete_cascade(db, question, actor_id=actor.user_id)
+    await db.flush()
 
     from sqlalchemy import select  # noqa: PLC0415
 
+    # Repack surviving siblings to a dense 1..N ordering. Two caveats:
+    #
+    # 1. Exclude the just-tombstoned row (``deleted_at IS NULL``) — the
+    #    partial unique index ignores soft-deleted rows, but if we pull the
+    #    dead row into the renumber we'd assign a live position to it.
+    # 2. ``uq_quiz_questions_position`` (quiz_id, position) is a
+    #    non-deferrable unique constraint checked per-row, and the ORM flush
+    #    order is not guaranteed to be collision-free (e.g. shifting 2->1
+    #    while another row still holds 1 mid-batch). Use the same two-phase
+    #    offset swap as ``courses.reorder_module_items``: bump everyone into
+    #    a disjoint high range first, flush, then assign final 1..N.
     siblings_result = await db.execute(
-        select(QuizQuestion).where(QuizQuestion.quiz_id == quiz_id).order_by(QuizQuestion.position)
+        select(QuizQuestion)
+        .where(
+            QuizQuestion.quiz_id == quiz_id,
+            QuizQuestion.deleted_at.is_(None),
+        )
+        .order_by(QuizQuestion.position)
     )
     siblings = list(siblings_result.scalars().all())
+
+    needs_repack = any(
+        sibling.position != new_position for new_position, sibling in enumerate(siblings, start=1)
+    )
+    if not needs_repack:
+        return
+
+    for idx, sibling in enumerate(siblings):
+        sibling.position = _POSITION_REPACK_OFFSET + idx
+    await db.flush()
+
     for new_position, sibling in enumerate(siblings, start=1):
-        if sibling.position != new_position:
-            sibling.position = new_position
+        sibling.position = new_position
     await flush_or_conflict(db)
 
 
@@ -530,9 +561,7 @@ async def start_generation_run(
 
     base_config = dict(payload.config_json)
     coverage_dump: dict[str, Any] | None = (
-        payload.coverage_options.model_dump()
-        if payload.coverage_options is not None
-        else None
+        payload.coverage_options.model_dump() if payload.coverage_options is not None else None
     )
     # Structured FR-5 fields shadow ``config_json`` on conflict — the
     # schema layer documents this contract, so the merge order matters.
@@ -565,9 +594,7 @@ async def start_generation_run(
 
     if quiz is None:
         if not payload.title:
-            raise AppError(
-                "title is required when creating a new quiz"
-            )
+            raise AppError("title is required when creating a new quiz")
         quiz = Quiz(
             course_id=course_id,
             module_id=module_id,

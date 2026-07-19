@@ -20,15 +20,20 @@ HTTP path (latency + retry budget concerns).
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
+from sqlalchemy.exc import IntegrityError
+
+from abridgeai.core.config import get_settings
 from abridgeai.core.db.conflict_mapper import flush_or_conflict
 from abridgeai.core.exceptions import AppError, ForbiddenError, NotFoundError
 from abridgeai.core.security import CurrentUser, utcnow
 from abridgeai.features.interviews.ai.stages.followup import maybe_generate_followup
 from abridgeai.features.interviews.models import (
+    InterviewConfig,
     InterviewQuestion,
     InterviewSession,
     InterviewSessionMessage,
@@ -40,6 +45,8 @@ from abridgeai.features.interviews.queries import sessions as sessions_queries
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
+
+logger = logging.getLogger(__name__)
 
 _EVALUATE_INTERVIEW_SESSION_TASK = "evaluate_interview_session_task"
 
@@ -193,8 +200,10 @@ async def start_session(
     escalate to ``voice``/``hybrid`` — the realtime-token endpoint then
     rejects them with HTTP 409 "session is not a voice interview".
     """
-    data = payload.model_dump(exclude_unset=True) if payload is not None else {}
-    requested_input_mode = data.get("input_mode") or "text"
+    # Interviews are always hybrid now (AI speaks + writes; student types or
+    # speaks). Ignore any client-supplied input_mode and pin to hybrid so a
+    # stale/legacy client can't downgrade the session to text/voice-only.
+    requested_input_mode = "hybrid"
 
     # Thesis §4.3: the pass/fail verdict is judged per learning outcome. Starting
     # an interview whose config has no outcomes guarantees an automatic fail with
@@ -317,16 +326,24 @@ async def take_session_step(
     actor: CurrentUser,
     *,
     audio_object_id: UUID | None = None,
+    turn_key: str | None = None,
+    language: str = "en",
 ) -> dict[str, Any]:
     """Record the student's answer + advance the session.
 
-    Returns ``{next_question, is_finished, followup_text}``. When the
-    follow-up stage decides the answer is shallow, the session does
-    NOT advance (single follow-up per question, enforced by
-    :func:`maybe_generate_followup`). Otherwise the next approved
-    question is appended to ``interview_session_questions`` and
-    returned; ``is_finished=True`` signals the question budget is
-    exhausted (router prompts the client to ``/finish``).
+    Returns a superset dict. The legacy keys ``{next_question, is_finished,
+    followup_text}`` are ALWAYS present (existing callers unaffected). When the
+    adaptive interviewer runs (``adaptive_interviewer_enabled`` AND the session
+    is text/hybrid AND the pipeline succeeds), extra structured keys (``action``,
+    ``reason_code``, ``ai_turn_text``, ``state_version``, …) are added and the
+    canonical mapper guarantees the legacy + structured views never contradict.
+
+    Adaptive is HARD-GATED to text/hybrid using the authoritative backend
+    ``session.input_mode`` — voice sessions always run the exact legacy path
+    until Phase 18 updates the LiveKit bridge. On ANY adaptive failure the
+    savepoint rolls back (no orphan AI turn / partial state) and the legacy
+    sequential path runs; the student's answer, recorded once in the outer
+    transaction, always survives.
     """
     session = await _require_session(db, session_id)
     _assert_owns_session(session, actor)
@@ -337,24 +354,326 @@ async def take_session_step(
     if current_session_question is None:
         raise AppError("Session has no current question to answer")
 
-    db.add(
-        InterviewSessionMessage(
-            session_id=session_id,
-            session_question_id=current_session_question.id,
-            role="user",
-            content_text=answer_text,
-            audio_object_id=audio_object_id,
-            metadata_json={"kind": "answer"},
-        )
-    )
-    await flush_or_conflict(db)
-
     current_question: InterviewQuestion | None = None
     if current_session_question.interview_question_id is not None:
         current_question = await db.get(
             InterviewQuestion, current_session_question.interview_question_id
         )
 
+    # ── Security guard (prompt-injection defense, Phase S1) ───────────────────
+    # Runs BEFORE the academic pipeline (and the intent rules). One choke point
+    # for text/hybrid/voice + adaptive/legacy; internally no-ops when the guard
+    # mode is "off" and only blocks in "enforce" — see security_handler.
+    settings = get_settings()
+    blocked = await maybe_security_block(
+        db,
+        session=session,
+        current_session_question=current_session_question,
+        answer_text=answer_text,
+        audio_object_id=audio_object_id,
+        language=language,
+    )
+    if blocked is not None:
+        return blocked
+
+    # ── Adaptive is ALWAYS ON for interviews (2026-07 product decision) ───────
+    # Interviews are a single hybrid, always-adaptive experience. The master
+    # flag ``adaptive_interviewer_enabled`` is now an emergency KILL SWITCH:
+    # only an explicit ``=false`` forces the legacy sequential path. On ANY
+    # adaptive failure the savepoint rolls back and legacy runs; the student's
+    # answer, recorded once, always survives.
+    adaptive_on = settings.adaptive_interviewer_enabled is not False
+
+    if adaptive_on:
+        adaptive_result = await _try_adaptive_step(
+            db,
+            session=session,
+            current_session_question=current_session_question,
+            current_question=current_question,
+            answer_text=answer_text,
+            audio_object_id=audio_object_id,
+            client_turn_key=turn_key,
+            language=language,
+        )
+        if adaptive_result is not None:
+            return adaptive_result
+        # adaptive declined/failed → answer already recorded; run legacy advance
+        # WITHOUT re-inserting the answer (safeguard #2).
+        return await _legacy_advance(
+            db,
+            session=session,
+            current_session_question=current_session_question,
+            current_question=current_question,
+            answer_text=answer_text,
+        )
+
+    # ── Pure legacy path (flag off, voice session, or gated out by rollout) ───
+    _add_student_answer(db, session_id, current_session_question.id, answer_text, audio_object_id)
+    await flush_or_conflict(db)
+
+    # ── Shadow mode (Phase 10) ────────────────────────────────────────────────
+    # When shadowing this mode, COMPUTE the adaptive decision for comparison but
+    # NEVER let it drive the student: the legacy result below is what the student
+    # gets. The shadow computation runs in a savepoint that ALWAYS rolls back, so
+    # it can never persist an AI turn or bump state — identical isolation to the
+    # proven adaptive-fallback path. Best-effort: any failure is swallowed.
+    if settings.shadow_enabled_for_mode(session.input_mode):
+        await _run_shadow_step(
+            db,
+            session=session,
+            current_session_question=current_session_question,
+            current_question=current_question,
+            answer_text=answer_text,
+            language=language,
+        )
+
+    return await _legacy_advance(
+        db,
+        session=session,
+        current_session_question=current_session_question,
+        current_question=current_question,
+        answer_text=answer_text,
+    )
+
+
+def _add_student_answer(
+    db: AsyncSession,
+    session_id: UUID,
+    session_question_id: UUID,
+    answer_text: str,
+    audio_object_id: UUID | None,
+    *,
+    turn_key: str | None = None,
+) -> None:
+    """Add the student-answer message row (does not flush)."""
+    metadata: dict[str, Any] = {"kind": "answer"}
+    if turn_key is not None:
+        metadata["turn_key"] = turn_key
+    db.add(
+        InterviewSessionMessage(
+            session_id=session_id,
+            session_question_id=session_question_id,
+            role="user",
+            content_text=answer_text,
+            audio_object_id=audio_object_id,
+            metadata_json=metadata,
+        )
+    )
+
+
+def _derive_turn_key(session_question_id: UUID, state_version: int, answer_text: str) -> str:
+    """Stable idempotency key when the client did not supply one (safeguard #1).
+
+    Folds the runtime ``state_version`` in so a *legitimate* second turn (which
+    runs at a bumped version) never collides with the first even when the answer
+    text repeats (e.g. two \"I don't know\"s), while a genuine retry (same
+    version + same answer) resolves to the same key and is deduplicated.
+    """
+    import hashlib  # noqa: PLC0415
+
+    digest = hashlib.sha256(answer_text.encode("utf-8")).hexdigest()[:16]
+    return f"{session_question_id}:{state_version}:{digest}"
+
+
+async def _try_adaptive_step(
+    db: AsyncSession,
+    *,
+    session: InterviewSession,
+    current_session_question: InterviewSessionQuestion,
+    current_question: InterviewQuestion | None,
+    answer_text: str,
+    audio_object_id: UUID | None,
+    client_turn_key: str | None,
+    language: str = "en",
+) -> dict[str, Any] | None:
+    """Attempt one adaptive turn. Returns the canonical result, or None to fall back.
+
+    Order (safeguards #1, #2, #3):
+      1. idempotency PRE-CHECK (before any answer insert);
+      2. insert the student answer ONCE in the outer transaction;
+      3. run the adaptive pipeline inside a SAVEPOINT — any failure rolls the
+         savepoint back (no orphan AI turn) and returns None so the caller runs
+         the legacy advance without re-inserting the answer.
+    """
+    from abridgeai.features.interviews.orchestrator import repository as state_repo
+    from abridgeai.features.interviews.orchestrator.adaptive import run_adaptive_turn
+
+    session_id = session.id
+
+    # Config is required for persona / timing / supplementary instructions.
+    config = await db.get(InterviewConfig, session.interview_config_id)
+    if config is None:
+        return None  # cannot run adaptive without config → legacy
+
+    # 1. Idempotency pre-check (before inserting the answer).
+    try:
+        loaded = await state_repo.load_or_init(db, session_id)
+    except Exception:  # noqa: BLE001 — runtime state unavailable → legacy path
+        logger.exception("adaptive: runtime state load failed (session=%s)", session_id)
+        return None
+
+    effective_turn_key = client_turn_key or _derive_turn_key(
+        current_session_question.id, loaded.version, answer_text
+    )
+
+    if state_repo.is_duplicate_turn(loaded, effective_turn_key):
+        replay = _replay_from_state(loaded)
+        if replay is not None:
+            return await _rehydrate_step_result(db, replay)
+        # No stored replay → safest is to not double-process; fall back.
+        return None
+
+    # 2. Insert the student answer ONCE (outer transaction). A concurrent
+    #    duplicate trips the partial-unique index; treat that as a replay.
+    try:
+        async with db.begin_nested():
+            _add_student_answer(
+                db,
+                session_id,
+                current_session_question.id,
+                answer_text,
+                audio_object_id,
+                turn_key=effective_turn_key,
+            )
+            await db.flush()
+    except IntegrityError:
+        logger.info("adaptive: duplicate answer insert (session=%s) — replaying", session_id)
+        loaded = await state_repo.load_or_init(db, session_id)
+        replay = _replay_from_state(loaded)
+        return await _rehydrate_step_result(db, replay) if replay is not None else None
+
+    # 3. Adaptive pipeline inside a savepoint.
+    try:
+        async with db.begin_nested():
+            outcome = await run_adaptive_turn(
+                db,
+                session=session,
+                config=config,
+                current_session_question=current_session_question,
+                current_question=current_question,
+                answer_text=answer_text,
+                turn_key=effective_turn_key,
+                language=language,
+            )
+        if outcome.result is not None:
+            return _project_adaptive_result(outcome.result)
+    except Exception:  # noqa: BLE001 — adaptive is best-effort; savepoint rolled back
+        logger.exception("adaptive: pipeline failed (session=%s) — legacy fallback", session_id)
+    return None
+
+
+def _project_adaptive_result(canonical: dict[str, Any]) -> dict[str, Any]:
+    """Drop internal (underscore-prefixed) keys before returning to the router."""
+    return {k: v for k, v in canonical.items() if not k.startswith("_")}
+
+
+async def _run_shadow_step(
+    db: AsyncSession,
+    *,
+    session: InterviewSession,
+    current_session_question: InterviewSessionQuestion,
+    current_question: InterviewQuestion | None,
+    answer_text: str,
+    language: str = "en",
+) -> None:
+    """Compute the adaptive decision for comparison WITHOUT driving the student.
+
+    Shadow mode (Phase 10): the student has already been served the legacy path;
+    here we run the adaptive pipeline purely to log WHAT it *would* have decided,
+    so we can compare adaptive vs legacy on real traffic with zero student-facing
+    risk. The pipeline runs inside a savepoint that ALWAYS rolls back — it can
+    never persist an AI turn, bump state, or otherwise leak into the live
+    session (identical isolation to the adaptive-fallback path). The student
+    answer is NOT re-inserted here (the caller already recorded it).
+
+    Best-effort and silent: any failure is swallowed so shadow computation can
+    never affect the interview the student is actually taking.
+    """
+    from abridgeai.features.interviews.orchestrator.adaptive import run_adaptive_turn
+    from abridgeai.features.interviews.realtime import observability as obs
+
+    session_id = session.id
+    config = await db.get(InterviewConfig, session.interview_config_id)
+    if config is None:
+        return
+
+    shadow_turn_key = f"shadow:{current_session_question.id}:{uuid4().hex}"
+    try:
+        # begin_nested() opens a savepoint; we roll it back unconditionally in
+        # the finally block so nothing the pipeline wrote ever commits.
+        savepoint = await db.begin_nested()
+        try:
+            outcome = await run_adaptive_turn(
+                db,
+                session=session,
+                config=config,
+                current_session_question=current_session_question,
+                current_question=current_question,
+                answer_text=answer_text,
+                turn_key=shadow_turn_key,
+                language=language,
+            )
+            canonical = outcome.result or {}
+            # Emit the shadow decision (no transcript content — same privacy
+            # contract as the live decision event), tagged shadow=True so the
+            # aggregator can separate it from real decisions.
+            next_q = canonical.get("next_question")
+            obs.emit(
+                obs.EV_DECISION,
+                session_id=session_id,
+                shadow=True,
+                adaptive=canonical.get("action") is not None,
+                action=canonical.get("action"),
+                reason_code=canonical.get("reason_code"),
+                selected_question_id=canonical.get("current_question_id"),
+                selected_question_type=getattr(next_q, "question_type", None),
+                selected_question_difficulty=getattr(next_q, "difficulty", None),
+                target_outcome_id=canonical.get("target_outcome_id"),
+                state_version=canonical.get("state_version"),
+                utterance_status=canonical.get("_utterance_status"),
+                answer_chars=len(answer_text),
+                finished=bool(canonical.get("should_finish")),
+            )
+        finally:
+            # ALWAYS roll back — shadow must never persist anything.
+            await savepoint.rollback()
+    except Exception:  # noqa: BLE001 — shadow is best-effort; never affect the live turn
+        logger.exception("shadow: adaptive computation failed (session=%s)", session_id)
+
+
+def _replay_from_state(loaded: Any) -> dict[str, Any] | None:  # noqa: ANN401
+    """Extract a stored canonical replay dict from runtime state, if present."""
+    prior = getattr(loaded.data, "last_answer_analysis", None)
+    if isinstance(prior, dict):
+        replay = prior.get("_canonical_result")
+        if isinstance(replay, dict):
+            return replay
+    return None
+
+
+async def _rehydrate_step_result(db: AsyncSession, replay: dict[str, Any]) -> dict[str, Any]:
+    """Turn a stored replay into a live result dict (re-fetch next_question ORM)."""
+    result = dict(replay)
+    nq = result.get("next_question")
+    if isinstance(nq, str):
+        result["next_question"] = await db.get(InterviewQuestion, UUID(nq))
+    return result
+
+
+async def _legacy_advance(
+    db: AsyncSession,
+    *,
+    session: InterviewSession,
+    current_session_question: InterviewSessionQuestion,
+    current_question: InterviewQuestion | None,
+    answer_text: str,
+) -> dict[str, Any]:
+    """The exact legacy sequential progression (unchanged behaviour).
+
+    Assumes the student answer has ALREADY been recorded by the caller. Runs the
+    single-follow-up stage, then advances to the next approved question or
+    signals ``is_finished``.
+    """
     followup_text: str | None = None
     if current_question is not None:
         followup_text = await maybe_generate_followup(
@@ -367,7 +686,7 @@ async def take_session_step(
     if followup_text:
         db.add(
             InterviewSessionMessage(
-                session_id=session_id,
+                session_id=session.id,
                 session_question_id=current_session_question.id,
                 role="ai",
                 content_text=followup_text,
@@ -381,7 +700,7 @@ async def take_session_step(
             "followup_text": followup_text,
         }
 
-    asked_ids = await _asked_question_ids(db, session_id)
+    asked_ids = await _asked_question_ids(db, session.id)
     next_question = await _next_published_question_after(db, session.interview_config_id, asked_ids)
     if next_question is None:
         return {
@@ -390,10 +709,10 @@ async def take_session_step(
             "followup_text": None,
         }
 
-    sequence_no = await _next_session_sequence(db, session_id)
+    sequence_no = await _next_session_sequence(db, session.id)
     db.add(
         InterviewSessionQuestion(
-            session_id=session_id,
+            session_id=session.id,
             interview_question_id=next_question.id,
             sequence_no=sequence_no,
         )

@@ -224,6 +224,7 @@ class InterviewQuestionCreate(BaseModel):
     prompt_text: str
     question_type: QuestionTypeLiteral
     difficulty: DifficultyLiteral | None = None
+    model_answer: str | None = None
     linked_outcome_id: UUID | None = None
     position: int | None = Field(default=None, ge=1)
 
@@ -239,6 +240,7 @@ class InterviewQuestionAuthoring(InterviewQuestionPublic):
     linked_outcome_id: UUID | None = None
     position: int | None = None
     difficulty: DifficultyLiteral | None = None
+    model_answer: str | None = None
     review_status: ReviewStatusLiteral
     ai_generated: bool
     source_refs_json: list[Any] = []

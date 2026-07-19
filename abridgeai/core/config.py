@@ -181,6 +181,151 @@ class Settings(BaseSettings):
     # keeping the lock indicators visible in dashboards.
     lesson_gating_enforced: bool = True
 
+    # Adaptive Interview Orchestrator. Product decision (2026-07): interviews are
+    # ALWAYS adaptive, so this now defaults ON and acts as the emergency KILL
+    # SWITCH — set ADAPTIVE_INTERVIEWER_ENABLED=false to force every session back
+    # to the legacy sequential take_session_step flow (e.g. if the gateway is
+    # degraded). When ON (default), sessions run through the stateful
+    # orchestrator (intent classification → answer analysis → decision →
+    # adaptive selection); the orchestrator always falls back to the sequential
+    # selector on any internal failure so a session is never lost.
+    adaptive_interviewer_enabled: bool = True
+
+    # Mode-specific rollout controls (staged rollout, Phase 18+). The global
+    # ``adaptive_interviewer_enabled`` above remains the MASTER switch / kill
+    # switch: when it is OFF, every mode runs the legacy sequential path no
+    # matter what the per-mode flags say. When the master switch is ON, each
+    # input mode is additionally gated by its own flag so text/hybrid can be
+    # rolled out independently of voice.
+    #
+    # Effective rule per mode:  ``adaptive_interviewer_enabled AND <mode>_flag``.
+    #
+    # Backward compatibility: text and hybrid default ON, so an existing
+    # deployment that only set the master switch keeps its current behaviour
+    # for those two modes. Voice defaults OFF and must be explicitly enabled
+    # once human sign-off (§5A–5C of the smoke-test doc) is complete — flipping
+    # the master switch alone must NOT silently turn on adaptive voice.
+    adaptive_interviewer_text_enabled: bool = True
+    adaptive_interviewer_hybrid_enabled: bool = True
+    adaptive_interviewer_voice_enabled: bool = False
+
+    # Shadow mode (Phase 10 — pre-rollout validation). When ON, the adaptive
+    # pipeline is COMPUTED for a turn but its result NEVER drives the student
+    # experience: the student always gets the legacy sequential path, while the
+    # adaptive decision is logged (voice.decision with shadow=true) for offline
+    # comparison. This lets us collect adaptive-vs-legacy signal on real
+    # sessions with ZERO student-facing risk before flipping a mode live.
+    #
+    # Precedence: shadow mode is only meaningful for a mode that is NOT already
+    # live. If ``adaptive_enabled_for_mode(mode)`` is True (the mode runs
+    # adaptive for real), shadow is a no-op for that mode — you can't shadow
+    # what's already driving. Defaults OFF; independent of the master switch so
+    # you can shadow voice while the master switch is off for everything else.
+    adaptive_interviewer_shadow_enabled: bool = False
+
+    # Percentage rollout (Phase 11 — controlled rollout). When a mode resolves
+    # to adaptive-enabled, this gates the FRACTION of students who actually get
+    # it, by a stable hash of (student_id, config_id) so a given student's
+    # experience is consistent across their turns/attempts. 100 (default) =
+    # everyone enabled = current behaviour preserved. 0 = nobody (equivalent to
+    # the mode being off, but without touching the mode flag). The gate is
+    # applied ON TOP of ``adaptive_enabled_for_mode``: master AND mode-flag must
+    # already be on for the percentage to matter.
+    adaptive_interviewer_rollout_percent: int = Field(default=100, ge=0, le=100)
+
+    # Prompt-injection security guard (Phase S — defense-in-depth). Operations-
+    # only mode switch (teachers must NOT control it). Three modes:
+    #   "off"     — emergency only; the guard does not run, no assessment, no
+    #               blocking. Use to fully disable if the guard ever misbehaves.
+    #   "shadow"  — assess + observe every turn, but current behaviour stays
+    #               student-facing: nothing is blocked. This is the DEFAULT so
+    #               shipping the guard changes NOTHING students see until it is
+    #               explicitly promoted to enforce after false-positive review.
+    #   "enforce" — assess AND act: blocked requests get a deterministic safe
+    #               refusal/redirect; academic analysis/evidence are skipped for
+    #               the blocked turn.
+    # Applies uniformly to text, hybrid, and voice (all converge at
+    # take_session_step) and to both the adaptive and legacy paths, so the
+    # legacy fallback cannot bypass the guard.
+    interview_security_guard_mode: Literal["off", "shadow", "enforce"] = "shadow"
+
+    def security_guard_enforcing(self) -> bool:
+        """True only when the guard should BLOCK (enforce mode)."""
+        return self.interview_security_guard_mode == "enforce"
+
+    def security_guard_active(self) -> bool:
+        """True when the guard should at least ASSESS (shadow or enforce)."""
+        return self.interview_security_guard_mode in ("shadow", "enforce")
+
+    def adaptive_enabled_for_mode(self, input_mode: str) -> bool:
+        """Resolve whether the adaptive interviewer runs for an input mode.
+
+        The master switch gates everything; the per-mode flag then gates the
+        specific mode. An unknown mode is treated conservatively as disabled.
+
+        NOTE: this is the STATIC gate (master AND mode-flag). The percentage
+        rollout gate (:meth:`adaptive_enabled_for_student`) layers on top of
+        this for per-student fractional rollout; callers that need the full
+        decision should use that method.
+        """
+        if not self.adaptive_interviewer_enabled:
+            return False
+        mode_flag = {
+            "text": self.adaptive_interviewer_text_enabled,
+            "hybrid": self.adaptive_interviewer_hybrid_enabled,
+            "voice": self.adaptive_interviewer_voice_enabled,
+        }.get(input_mode)
+        return bool(mode_flag)
+
+    @staticmethod
+    def _rollout_bucket(student_id: str, config_id: str) -> int:
+        """Deterministic bucket in [0, 99] for a (student, config) pair.
+
+        Stable across turns/attempts so a student's experience never flips
+        mid-interview. Uses a hash independent of Python's per-process
+        ``hash()`` salt (which is randomised between runs) so the same pair
+        always lands in the same bucket everywhere.
+        """
+        import hashlib  # noqa: PLC0415
+
+        digest = hashlib.sha256(f"{student_id}:{config_id}".encode()).hexdigest()
+        # First 8 hex digits → int, modulo 100 → an even-ish bucket.
+        return int(digest[:8], 16) % 100
+
+    def adaptive_enabled_for_student(
+        self, input_mode: str, *, student_id: str, config_id: str
+    ) -> bool:
+        """Full adaptive gate: static mode gate AND the percentage rollout gate.
+
+        Returns True only when the mode is statically enabled (master AND
+        mode-flag) AND the (student, config) pair falls inside the rollout
+        percentage. ``rollout_percent=100`` (default) preserves the exact prior
+        behaviour — everyone who passes the static gate is enabled. ``0`` gates
+        everyone out without touching the mode flag.
+        """
+        if not self.adaptive_enabled_for_mode(input_mode):
+            return False
+        percent = self.adaptive_interviewer_rollout_percent
+        if percent >= 100:
+            return True
+        if percent <= 0:
+            return False
+        return self._rollout_bucket(student_id, config_id) < percent
+
+    def shadow_enabled_for_mode(self, input_mode: str) -> bool:
+        """Whether to run the adaptive pipeline in SHADOW for this mode.
+
+        Shadow is meaningful only when the mode is NOT already live: you can't
+        shadow-compare a path that's already driving the student. So this is
+        True iff the shadow flag is on AND the mode is a recognised mode AND the
+        mode is not statically adaptive-enabled.
+        """
+        if not self.adaptive_interviewer_shadow_enabled:
+            return False
+        if input_mode not in ("text", "hybrid", "voice"):
+            return False
+        return not self.adaptive_enabled_for_mode(input_mode)
+
     @model_validator(mode="after")
     def _require_livekit_creds_when_voice_enabled(self) -> Settings:
         """When voice interviews are enabled, all three LiveKit credentials

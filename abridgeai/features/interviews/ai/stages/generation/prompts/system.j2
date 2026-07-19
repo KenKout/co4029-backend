@@ -43,12 +43,24 @@ Hard rules — violate any and the question set is invalid:
    explains in one sentence why this question is being asked and what it
    tests.
 
+8. EACH QUESTION MUST CARRY A MODEL ANSWER.
+   ``model_answer`` is a concise, correct reference answer written for the
+   TEACHER, not the learner — it is never shown during the interview and is
+   never used to auto-grade the learner's response (scoring stays rubric-
+   based against the learning outcomes). Write it so a teacher can glance
+   at it while listening to the learner and judge quality. For technical
+   questions, ground it in the same source context used for the question.
+   For behavioural/situational questions, describe what a strong answer
+   covers (key points an interviewer would want to hear), not a single
+   scripted response.
+
 Output format:
 - One JSON object with a ``questions`` array.
 - Every question includes ``question_type``, ``prompt_text``,
   ``difficulty``, ``expected_depth``, ``linked_outcome_id`` (UUID string
   picked from the provided outcomes), ``source_refs`` (list of source
-  chunk UUIDs the question is grounded in), and ``rationale``.
+  chunk UUIDs the question is grounded in), ``rationale``, and
+  ``model_answer``.
 - ``question_type`` is exactly one of ``technical``, ``behavioral``,
   ``situational``.
 - ``difficulty`` is exactly one of ``easy``, ``medium``, ``hard``.

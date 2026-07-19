@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -17,6 +18,7 @@ class UserProfileRead(_ORMModel):
     display_name: str
     avatar_object_id: UUID | None = None
     bio: str | None = None
+    locale: str | None = None
 
 
 class UserRead(_ORMModel):
@@ -34,6 +36,10 @@ class UserProfileUpdate(BaseModel):
     family_name: str | None = Field(default=None, max_length=100)
     display_name: str | None = Field(default=None, max_length=200)
     bio: str | None = None
+    # Preferred UI + notification language. Constrained to the frontend
+    # SUPPORTED_LOCALES; the DB CHECK constraint (migration 0024) is the
+    # backstop. ``None`` on PATCH means "leave unchanged" (exclude_unset).
+    locale: Literal["en", "vi"] | None = None
 
 
 class UserProfileLinkIn(BaseModel):

@@ -120,6 +120,7 @@ def test_user_profile_dto_has_only_public_fields() -> None:
         "family_name",
         "avatar_object_id",
         "bio",
+        "locale",
     }
 
 

@@ -109,6 +109,17 @@ def _actor(user_id: uuid.UUID) -> CurrentUser:
     return CurrentUser(user_id=user_id, session_id=uuid.uuid4())
 
 
+def _force_legacy(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin the adaptive kill switch OFF so a test exercises the legacy path.
+
+    Interviews now default to always-adaptive; tests that assert the legacy
+    sequential mechanics (followup stage, plain question advance) must flip the
+    emergency kill switch (``adaptive_interviewer_enabled=false``) to reach it.
+    """
+    legacy = get_settings().model_copy(update={"adaptive_interviewer_enabled": False})
+    monkeypatch.setattr(taking_service, "get_settings", lambda: legacy)
+
+
 class _CreatePayload:
     def __init__(self, **fields: Any) -> None:
         self._fields = fields
@@ -578,6 +589,9 @@ async def test_take_step_persists_answer_and_advances(
         "abridgeai.features.interviews.services.taking.maybe_generate_followup",
         AsyncMock(return_value=None),
     )
+    # Interviews now default to always-adaptive; this test exercises the LEGACY
+    # sequential mechanics, which run only when the emergency kill switch is off.
+    _force_legacy(monkeypatch)
     payload = _CreatePayload(input_mode="text")
     async with session_factory() as session, session.begin():
         started = await taking_service.start_session(
@@ -634,6 +648,8 @@ async def test_take_step_returns_followup_when_shallow(
         "abridgeai.features.interviews.services.taking.maybe_generate_followup",
         AsyncMock(return_value="Can you elaborate?"),
     )
+    # Legacy sequential followup mechanics — reachable only via the kill switch.
+    _force_legacy(monkeypatch)
     payload = _CreatePayload(input_mode="text")
     async with session_factory() as session, session.begin():
         started = await taking_service.start_session(

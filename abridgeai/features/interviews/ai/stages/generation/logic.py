@@ -2,8 +2,10 @@
 
 Ports ``backend/app/ai/haystack/pipelines/interview_generation.py`` to
 the feature-first layout. Composes the T2.1 :class:`LLMGateway`
-(``LLMRole.INTERVIEW_GENERATION``, ``stage_name="interview_generation"``),
+(``LLMRole.INTERVIEW_GENERATION``, ``stage_name=\"interview_generation\"``),
 the T0.10 Jinja2 prompt loader, and the sibling :mod:`parsers` module.
+Config-resolution helpers (type mix, question count) live in
+:mod:`.resolve` to keep this module under the LOC budget.
 
 Stages do not implement HTTP / audit logic themselves: the gateway writes
 one ``ai_model_calls`` row per call and rolls audit up to the parent
@@ -29,7 +31,6 @@ position-based bands (1-3 / 4-7 / 8+). The LLM produces the labels;
 
 from __future__ import annotations
 
-import json
 from typing import TYPE_CHECKING, Any, Protocol
 from uuid import UUID
 
@@ -38,6 +39,10 @@ from abridgeai.ai.prompts import render_prompt
 from abridgeai.features.interviews.ai.stages.generation.parsers import (
     InterviewQuestionDraft,
     parse_generation_response,
+)
+from abridgeai.features.interviews.ai.stages.generation.resolve import (
+    resolve_question_count,
+    resolve_type_mix,
 )
 
 if TYPE_CHECKING:
@@ -59,10 +64,6 @@ class GenerationRunRef(Protocol):
 
 
 _STAGE_NAME = "interview_generation"
-_DEFAULT_QUESTION_COUNT = 8
-_MIN_QUESTION_COUNT = 1
-_MAX_QUESTION_COUNT = 50
-_DEFAULT_TYPE_MIX: dict[str, int] = {"technical": 60, "behavioral": 30, "situational": 10}
 
 
 class InterviewRetrievalContext:
@@ -83,6 +84,8 @@ async def generate_interview_questions(
     context: InterviewRetrievalContext,
     outcomes: list[InterviewOutcome],
     gateway: LLMGateway | None = None,
+    override_question_count: int | None = None,
+    avoid_prompts: list[str] | None = None,
 ) -> list[InterviewQuestionDraft]:
     """Run one INTERVIEW_GENERATION LLM call and return parsed drafts.
 
@@ -92,10 +95,16 @@ async def generate_interview_questions(
     ``run.config_json`` supplies the teacher's ``question_count``. ``outcomes``
     may be empty (prompt emits ``null`` ``linked_outcome_id`` then). Bad LLM
     rows are dropped; an empty list means every question failed parsing.
+
+    ``override_question_count`` lets the pipeline's backfill loop (T6.10)
+    ask for exactly the number of questions still missing after validation
+    dropped some drafts, instead of re-requesting the full original count.
+    ``avoid_prompts`` (already-accepted prompt texts) is surfaced to the LLM
+    on backfill calls so it does not repeat a question that already passed.
     """
 
-    type_mix = _resolve_type_mix(config.supplementary_instructions)
-    question_count = _resolve_question_count(
+    type_mix = resolve_type_mix(config.supplementary_instructions)
+    question_count = override_question_count or resolve_question_count(
         run_config_json=getattr(run, "config_json", None),
         supplementary=config.supplementary_instructions,
     )
@@ -112,6 +121,7 @@ async def generate_interview_questions(
         supplementary_instructions=(config.supplementary_instructions or "").strip(),
         outcomes=_outcomes_for_prompt(outcomes),
         chunks_block=_render_chunks(context),
+        avoid_prompts=list(avoid_prompts or []),
     )
     system_prompt = render_prompt("prompts/system.j2")
 
@@ -127,83 +137,6 @@ async def generate_interview_questions(
     )
     drafts = parse_generation_response(result.content_json, max_questions=question_count)
     return _link_outcomes_round_robin(drafts, outcomes)
-
-
-def _resolve_type_mix(supplementary: str | None) -> dict[str, int]:
-    """Return weights summing to 100 — fall back to the 60/30/10 default."""
-    parsed = _try_parse_rubric(supplementary)
-    if parsed is None:
-        return dict(_DEFAULT_TYPE_MIX)
-    raw_weights = parsed.get("rubric_weights")
-    if not isinstance(raw_weights, dict):
-        return dict(_DEFAULT_TYPE_MIX)
-    cleaned: dict[str, int] = {key: 0 for key in _DEFAULT_TYPE_MIX}
-    for key, value in raw_weights.items():
-        if not isinstance(key, str):
-            continue
-        normalised_key = key.strip().lower()
-        if normalised_key == "behavioural":  # accept BrEng spelling
-            normalised_key = "behavioral"
-        if normalised_key not in cleaned:
-            continue
-        try:
-            cleaned[normalised_key] = max(0, int(value))
-        except (TypeError, ValueError):
-            continue
-    total = sum(cleaned.values())
-    if total <= 0:
-        return dict(_DEFAULT_TYPE_MIX)
-    return {key: round(value * 100 / total) for key, value in cleaned.items()}
-
-
-def _resolve_question_count(
-    *,
-    run_config_json: dict[str, Any] | None,
-    supplementary: str | None,
-) -> int:
-    """Resolve question count, clamped to [1, 50].
-
-    Precedence: form value (``run_config_json["question_count"]``) →
-    ``supplementary_instructions`` JSON override → default.
-    """
-    from_form = _coerce_question_count(
-        run_config_json.get("question_count") if isinstance(run_config_json, dict) else None
-    )
-    if from_form is not None:
-        return from_form
-
-    parsed = _try_parse_rubric(supplementary)
-    if parsed is not None:
-        from_supplementary = _coerce_question_count(parsed.get("question_count"))
-        if from_supplementary is not None:
-            return from_supplementary
-
-    return _DEFAULT_QUESTION_COUNT
-
-
-def _coerce_question_count(raw: object) -> int | None:
-    """Parse + clamp a raw count to [1, 50]; None if unusable."""
-    if raw is None or isinstance(raw, bool):
-        return None
-    try:
-        count = int(raw)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
-        return None
-    return max(_MIN_QUESTION_COUNT, min(_MAX_QUESTION_COUNT, count))
-
-
-def _try_parse_rubric(supplementary: str | None) -> dict[str, Any] | None:
-    """Best-effort JSON parse of the supplementary-instructions field."""
-    if not supplementary:
-        return None
-    stripped = supplementary.strip()
-    if not stripped or not stripped.startswith("{"):
-        return None
-    try:
-        parsed = json.loads(stripped)
-    except (TypeError, ValueError):
-        return None
-    return parsed if isinstance(parsed, dict) else None
 
 
 def _outcomes_for_prompt(outcomes: list[InterviewOutcome]) -> list[dict[str, Any]]:
@@ -244,4 +177,9 @@ def _link_outcomes_round_robin(
     return drafts
 
 
-__all__ = ["GenerationRunRef", "InterviewRetrievalContext", "generate_interview_questions"]
+__all__ = [
+    "GenerationRunRef",
+    "InterviewRetrievalContext",
+    "generate_interview_questions",
+    "resolve_question_count",
+]

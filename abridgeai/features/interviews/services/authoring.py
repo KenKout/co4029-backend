@@ -141,7 +141,10 @@ async def create_interview_config(
         module_id=module_id,
         title=data["title"],
         persona=data.get("persona"),
-        supported_modes=data.get("supported_modes", "hybrid"),
+        # Interviews are always hybrid now (AI speaks + writes; student types or
+        # speaks) — ignore any client-supplied value and pin to hybrid. The
+        # column is retained (not dropped) so the change is reversible.
+        supported_modes="hybrid",
         time_limit_minutes=data.get("time_limit_minutes"),
         max_attempts=data.get("max_attempts"),
         cooldown_hours=data.get("cooldown_hours"),
@@ -171,6 +174,9 @@ async def update_interview_config(
     del actor
     config = await _require_config(db, config_id)
     _apply_patch(config, payload)
+    # Interviews are always hybrid now — never let a PATCH downgrade the mode,
+    # even if a stale client sends supported_modes=text/voice.
+    config.supported_modes = "hybrid"
     await flush_or_conflict(db)
     await db.refresh(config)
     return config
@@ -231,6 +237,22 @@ async def unarchive_interview_config(
     return config
 
 
+async def unpublish_interview_config(
+    db: AsyncSession, config_id: UUID, actor: CurrentUser
+) -> InterviewConfig:
+    del actor
+    config = await _require_config(db, config_id)
+    if config.status != "published":
+        raise AppError(
+            f"Cannot unpublish interview config {config_id} — status is '{config.status}', expected 'published'"
+        )
+    config.status = "draft"
+    config.published_at = None
+    await flush_or_conflict(db)
+    await db.refresh(config)
+    return config
+
+
 async def delete_interview_config(db: AsyncSession, config_id: UUID, actor: CurrentUser) -> None:
     """Soft-delete the config + cascade to outcomes / questions."""
     config = await _require_config(db, config_id)
@@ -255,6 +277,7 @@ async def add_question(
         question_type=data["question_type"],
         prompt_text=data["prompt_text"].strip(),
         difficulty=data.get("difficulty"),
+        model_answer=(data.get("model_answer") or "").strip() or None,
         review_status="approved",
         ai_generated=False,
         source_refs_json=data.get("source_refs_json", []) or [],

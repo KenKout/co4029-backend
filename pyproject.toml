@@ -66,13 +66,14 @@ audio-local = [
 asyncio_mode = "auto"
 testpaths = ["tests"]
 pythonpath = ["."]
-addopts = "--cov=abridgeai --cov-report=term-missing --cov-report=xml --cov-fail-under=75 -m 'not destructive'"
+addopts = "--cov=abridgeai --cov-report=term-missing --cov-report=xml --cov-fail-under=75 -m 'not destructive and not voice_live'"
 markers = [
     "s3_live: integration test against a real Garage container (skipped by default; run with -m s3_live)",
     "kg_live: integration test against a real Neo4j container (skipped by default; run with -m kg_live)",
     "audio_live: integration test that calls the real Whisper / faster-whisper backend (skipped by default; run with -m audio_live)",
     "video_live: integration test that exercises the real ffmpeg binary (skipped by default; run with -m video_live)",
     "destructive: test that mutates global DB state (alembic round-trip etc.); skipped by default to keep the suite isolated; run with -m destructive",
+    "voice_live: live LiveKit voice-interview smoke test (real LiveKit + LLM/STT/TTS; costs money). Excluded from the normal suite and CI; runs only with RUN_LIVEKIT_VOICE_TESTS=1 and -m voice_live.",
 ]
 
 [tool.coverage.run]
@@ -123,6 +124,10 @@ max-complexity = 12
 # CLI legitimately writes to stdout/stderr (T20); tests use assert (S101).
 "eval/run.py" = ["T20"]
 "eval/tests/**/*.py" = ["ANN", "S101", "PT011", "T20", "E501"]
+# Voice smoke-test harness — a manual-trigger CLI, not part of the production
+# app. Legitimately writes to stdout (T20), uses a timeout kwarg on its own
+# async helpers (ASYNC109), and does sync pathlib in async setup (ASYNC240).
+"scripts/voice_harness/**/*.py" = ["T20", "E501", "ASYNC109", "ASYNC240", "C901"]
 
 [tool.mypy]
 python_version = "3.12"
@@ -298,6 +303,11 @@ ignore_imports = [
     # remediation services as a side-effect channel; no public API exists.
     "abridgeai.features.spaced_repetition.workers.scan_due_cards -> abridgeai.features.notifications.services.dispatch",
     "abridgeai.features.spaced_repetition.services.remediation -> abridgeai.features.notifications.services.dispatch",
+    # Localized notification copy (EN/VI) is rendered at creation time via
+    # the notifications ``messages`` module. Same side-effect-channel
+    # rationale as the dispatch carve-outs above; no public API exists.
+    "abridgeai.features.spaced_repetition.workers.scan_due_cards -> abridgeai.features.notifications.messages",
+    "abridgeai.features.spaced_repetition.services.remediation -> abridgeai.features.notifications.messages",
     # Courses queries JOIN cross-feature models for ORM-hydrated reads.
     # These are read-only JOINs (no writes to foreign tables); the ORM
     # approach replaces raw SQL that previously bypassed the linter.

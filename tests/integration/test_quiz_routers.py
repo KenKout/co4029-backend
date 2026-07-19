@@ -482,6 +482,256 @@ async def test_learner_quiz_response_omits_is_correct(
 # ---------------------------------------------------------------------------
 
 
+async def _seed_published_quiz_with_question(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    engine: AsyncEngine,
+    scenario: dict[str, uuid.UUID],
+    *,
+    title: str,
+) -> tuple[uuid.UUID, uuid.UUID, dict[str, uuid.UUID]]:
+    """Create + publish a quiz with one MCQ question (4 options).
+
+    Returns ``(quiz_id, question_id, option_ids_by_key)``. Options carry a
+    real ``expected_response_time_ms`` so the SM-2 review path doesn't skip.
+    """
+    create_resp = await client.post(
+        f"/api/v1/teacher/courses/{scenario['course_id']}/quizzes",
+        json={"module_id": str(scenario["module_id"]), "title": title},
+        headers=_auth(admin_bearer),
+    )
+    assert create_resp.status_code == 201, create_resp.text
+    quiz_id = uuid.UUID(create_resp.json()["id"])
+
+    pub_resp = await client.post(
+        f"/api/v1/teacher/quizzes/{quiz_id}/publish",
+        headers=_auth(admin_bearer),
+    )
+    assert pub_resp.status_code == 200, pub_resp.text
+
+    question_id = uuid.uuid4()
+    option_ids: dict[str, uuid.UUID] = {}
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO quiz_questions "
+                "(id, quiz_id, position, question_type, prompt_text, "
+                " review_status, expected_response_time_ms) "
+                "VALUES (:id, :qz, 1, 'multiple_choice', 'What is 2+2?', "
+                " 'approved', 30000)"
+            ),
+            {"id": question_id, "qz": quiz_id},
+        )
+        for option_key, option_text, is_correct, position in (
+            ("A", "3", False, 1),
+            ("B", "4", True, 2),
+            ("C", "5", False, 3),
+            ("D", "6", False, 4),
+        ):
+            oid = uuid.uuid4()
+            option_ids[option_key] = oid
+            await conn.execute(
+                text(
+                    "INSERT INTO quiz_question_options "
+                    "(id, question_id, option_key, option_text, is_correct, position) "
+                    "VALUES (:id, :q, :k, :t, :c, :p)"
+                ),
+                {
+                    "id": oid,
+                    "q": question_id,
+                    "k": option_key,
+                    "t": option_text,
+                    "c": is_correct,
+                    "p": position,
+                },
+            )
+    return quiz_id, question_id, option_ids
+
+
+async def test_answer_upsert_allows_editing_without_conflict(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    scenario: dict[str, uuid.UUID],
+    engine: AsyncEngine,
+    seeded_users: SeededUsers,
+) -> None:
+    """Re-saving a question after changing the answer must NOT 409.
+
+    Regression: the write path used to blindly INSERT, so a second save
+    for the same (attempt, question) violated
+    uq_quiz_attempt_answers_question. The upsert edits in place instead.
+    """
+    quiz_id, question_id, option_ids = await _seed_published_quiz_with_question(
+        client, admin_bearer, engine, scenario, title="Upsert Quiz"
+    )
+    student_sid = await _seed_session(engine, seeded_users.student_id)
+    student_token = create_access_token(
+        user_id=seeded_users.student_id, session_id=student_sid
+    )
+
+    attempt_resp = await client.post(
+        f"/api/v1/quizzes/{quiz_id}/attempts",
+        json={"quiz_id": str(quiz_id)},
+        headers=_auth(student_token),
+    )
+    assert attempt_resp.status_code == 201, attempt_resp.text
+    attempt_id = attempt_resp.json()["attempt_id"] if "attempt_id" in attempt_resp.json() else None
+
+    # The take payload doesn't carry the attempt id; fetch it from the list.
+    attempts_resp = await client.get(
+        f"/api/v1/me/quizzes/{quiz_id}/attempts",
+        headers=_auth(student_token),
+    )
+    assert attempts_resp.status_code == 200, attempts_resp.text
+    attempt_id = attempts_resp.json()[0]["id"]
+
+    # First save — wrong answer (C).
+    first = await client.post(
+        f"/api/v1/attempts/{attempt_id}/answers",
+        json={
+            "question_id": str(question_id),
+            "selected_option_id": str(option_ids["C"]),
+            "t_actual_ms": 5000,
+        },
+        headers=_auth(student_token),
+    )
+    assert first.status_code == 201, first.text
+
+    # Second save — changed to correct answer (B). Must succeed (upsert),
+    # not 409.
+    second = await client.post(
+        f"/api/v1/attempts/{attempt_id}/answers",
+        json={
+            "question_id": str(question_id),
+            "selected_option_id": str(option_ids["B"]),
+            "t_actual_ms": 8000,
+        },
+        headers=_auth(student_token),
+    )
+    assert second.status_code == 201, second.text
+
+    # DB holds exactly ONE answer row, reflecting the latest edit.
+    async with engine.begin() as conn:
+        rows = (
+            await conn.execute(
+                text(
+                    "SELECT selected_option_id, t_actual_ms, is_correct "
+                    "FROM quiz_attempt_answers WHERE attempt_id = :a"
+                ),
+                {"a": attempt_id},
+            )
+        ).all()
+    assert len(rows) == 1
+    assert rows[0][0] == option_ids["B"]
+    assert rows[0][1] == 8000
+    assert rows[0][2] is True
+
+    async with engine.begin() as conn:
+        await conn.execute(text("DELETE FROM auth_sessions WHERE id = :id"), {"id": student_sid})
+
+
+async def test_attempt_progress_returns_saved_answers_no_leak(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    scenario: dict[str, uuid.UUID],
+    engine: AsyncEngine,
+    seeded_users: SeededUsers,
+) -> None:
+    """GET /attempts/{id}/progress rehydrates saved answers, no correctness leak."""
+    quiz_id, question_id, option_ids = await _seed_published_quiz_with_question(
+        client, admin_bearer, engine, scenario, title="Progress Quiz"
+    )
+    student_sid = await _seed_session(engine, seeded_users.student_id)
+    student_token = create_access_token(
+        user_id=seeded_users.student_id, session_id=student_sid
+    )
+
+    attempt_resp = await client.post(
+        f"/api/v1/quizzes/{quiz_id}/attempts",
+        json={"quiz_id": str(quiz_id)},
+        headers=_auth(student_token),
+    )
+    assert attempt_resp.status_code == 201, attempt_resp.text
+    attempts_resp = await client.get(
+        f"/api/v1/me/quizzes/{quiz_id}/attempts",
+        headers=_auth(student_token),
+    )
+    attempt_id = attempts_resp.json()[0]["id"]
+
+    await client.post(
+        f"/api/v1/attempts/{attempt_id}/answers",
+        json={
+            "question_id": str(question_id),
+            "selected_option_id": str(option_ids["B"]),
+            "t_actual_ms": 4200,
+            "hint_used": True,
+        },
+        headers=_auth(student_token),
+    )
+
+    progress_resp = await client.get(
+        f"/api/v1/attempts/{attempt_id}/progress",
+        headers=_auth(student_token),
+    )
+    assert progress_resp.status_code == 200, progress_resp.text
+    body = progress_resp.json()
+    assert body["attempt_id"] == attempt_id
+    assert body["quiz_id"] == str(quiz_id)
+    assert body["status"] == "in_progress"
+    assert "started_at" in body
+    assert len(body["answers"]) == 1
+    ans = body["answers"][0]
+    assert ans["question_id"] == str(question_id)
+    assert ans["selected_option_id"] == str(option_ids["B"])
+    assert ans["t_actual_ms"] == 4200
+    assert ans["hint_used"] is True
+    # No-leak: correctness / points must not appear anywhere in the payload.
+    serialized = json.dumps(body)
+    assert "is_correct" not in serialized
+    assert "points_awarded" not in serialized
+
+    async with engine.begin() as conn:
+        await conn.execute(text("DELETE FROM auth_sessions WHERE id = :id"), {"id": student_sid})
+
+
+async def test_attempt_progress_404_for_other_student(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    scenario: dict[str, uuid.UUID],
+    engine: AsyncEngine,
+    seeded_users: SeededUsers,
+) -> None:
+    """A student cannot read another student's in-progress attempt."""
+    quiz_id, _question_id, _opts = await _seed_published_quiz_with_question(
+        client, admin_bearer, engine, scenario, title="Progress Owner Quiz"
+    )
+    student_sid = await _seed_session(engine, seeded_users.student_id)
+    student_token = create_access_token(
+        user_id=seeded_users.student_id, session_id=student_sid
+    )
+    attempt_resp = await client.post(
+        f"/api/v1/quizzes/{quiz_id}/attempts",
+        json={"quiz_id": str(quiz_id)},
+        headers=_auth(student_token),
+    )
+    assert attempt_resp.status_code == 201
+    attempts_resp = await client.get(
+        f"/api/v1/me/quizzes/{quiz_id}/attempts",
+        headers=_auth(student_token),
+    )
+    attempt_id = attempts_resp.json()[0]["id"]
+
+    # Admin (a different user) tries to read the student's attempt → 404.
+    other_resp = await client.get(
+        f"/api/v1/attempts/{attempt_id}/progress",
+        headers=_auth(admin_bearer),
+    )
+    assert other_resp.status_code == 404, other_resp.text
+
+    async with engine.begin() as conn:
+        await conn.execute(text("DELETE FROM auth_sessions WHERE id = :id"), {"id": student_sid})
+
+
 def test_no_bare_get_current_user_on_quiz_authoring_endpoints() -> None:
     src = (
         Path(__file__).resolve().parent.parent.parent

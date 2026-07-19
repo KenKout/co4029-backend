@@ -7,9 +7,10 @@ No real DB required.
 
 from __future__ import annotations
 
-import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
+
+import pytest
 
 from abridgeai.features.interviews.realtime.orchestration_bridge import (
     TurnResult,
@@ -149,13 +150,16 @@ async def test_handle_student_turn_session_finished(session_id, student_id):
             mock_sessionmaker = MagicMock()
             mock_sessionmaker.return_value = mock_session_ctx
 
-            with patch(
-                "abridgeai.features.interviews.realtime.orchestration_bridge.get_sessionmaker",
-                return_value=mock_sessionmaker,
-            ), patch(
-                "abridgeai.features.interviews.realtime.orchestration_bridge._get_arq_pool",
-                new_callable=AsyncMock,
-                return_value=mock_arq_pool,
+            with (
+                patch(
+                    "abridgeai.features.interviews.realtime.orchestration_bridge.get_sessionmaker",
+                    return_value=mock_sessionmaker,
+                ),
+                patch(
+                    "abridgeai.features.interviews.realtime.orchestration_bridge._get_arq_pool",
+                    new_callable=AsyncMock,
+                    return_value=mock_arq_pool,
+                ),
             ):
                 result = await handle_student_turn(
                     session_id=session_id,
@@ -273,4 +277,104 @@ def test_turn_result_none_speak_text():
     """TurnResult allows None for speak_text (e.g., on finish)."""
     result = TurnResult(speak_text=None, is_finished=True)
     assert result.speak_text is None
+
+
+def test_turn_result_defaults_suppress_closing_false():
+    """Phase 18: suppress_default_closing defaults False (legacy behaviour)."""
+    result = TurnResult(speak_text="hi", is_finished=False)
+    assert result.suppress_default_closing is False
+
+
+@pytest.mark.asyncio
+async def test_adaptive_advance_speaks_combined_ai_turn_text(session_id, student_id):
+    """Phase 18: on an adaptive advance the bridge speaks the COMBINED
+    ai_turn_text (ack + transition + question), NOT just the ack/transition and
+    NOT the bare next_question — so voice never drops or doubles the question.
+    """
+    mock_question = MagicMock()
+    mock_question.prompt_text = "What is a fact table?"
+
+    with patch(
+        "abridgeai.features.interviews.realtime.orchestration_bridge.take_session_step",
+        new_callable=AsyncMock,
+        return_value={
+            # canonical adaptive result on an advance:
+            "followup_text": "Thank you. Let's move on.",  # ack+transition only
+            "next_question": mock_question,
+            "is_finished": False,
+            "should_finish": False,
+            "ai_turn_text": "Thank you. Let's move on. What is a fact table?",
+            "action": "transition_topic",
+        },
+    ):
+        mock_db = AsyncMock()
+        mock_session_ctx = AsyncMock()
+        mock_session_ctx.__aenter__ = AsyncMock(return_value=mock_db)
+        mock_session_ctx.__aexit__ = AsyncMock(return_value=None)
+        mock_sessionmaker = MagicMock()
+        mock_sessionmaker.return_value = mock_session_ctx
+
+        with patch(
+            "abridgeai.features.interviews.realtime.orchestration_bridge.get_sessionmaker",
+            return_value=mock_sessionmaker,
+        ):
+            result = await handle_student_turn(
+                session_id=session_id, student_id=student_id, transcript="it stores data"
+            )
+
+    assert result.is_finished is False
+    # Speaks the combined utterance (contains BOTH the transition and the question).
+    assert result.speak_text == "Thank you. Let's move on. What is a fact table?"
+
+
+@pytest.mark.asyncio
+async def test_adaptive_closing_suppresses_canned_remark(session_id, student_id):
+    """Phase 18: when the adaptive path emits a closing utterance, the bridge
+    speaks it AND flags suppress_default_closing so the runtime skips its canned
+    remark (no double closing). submit_session is still enqueued.
+    """
+    with (
+        patch(
+            "abridgeai.features.interviews.realtime.orchestration_bridge.take_session_step",
+            new_callable=AsyncMock,
+            return_value={
+                "followup_text": None,
+                "next_question": None,
+                "is_finished": True,
+                "should_finish": True,
+                "ai_turn_text": "That concludes the interview. Thank you for your time.",
+                "action": "begin_closing",
+            },
+        ),
+        patch(
+            "abridgeai.features.interviews.realtime.orchestration_bridge.submit_session",
+            new_callable=AsyncMock,
+        ) as mock_submit,
+    ):
+        mock_arq_pool = AsyncMock()
+        mock_db = AsyncMock()
+        mock_session_ctx = AsyncMock()
+        mock_session_ctx.__aenter__ = AsyncMock(return_value=mock_db)
+        mock_session_ctx.__aexit__ = AsyncMock(return_value=None)
+        mock_sessionmaker = MagicMock()
+        mock_sessionmaker.return_value = mock_session_ctx
+
+        with (
+            patch(
+                "abridgeai.features.interviews.realtime.orchestration_bridge.get_sessionmaker",
+                return_value=mock_sessionmaker,
+            ),
+            patch(
+                "abridgeai.features.interviews.realtime.orchestration_bridge._get_arq_pool",
+                new_callable=AsyncMock,
+                return_value=mock_arq_pool,
+            ),
+        ):
+            result = await handle_student_turn(
+                session_id=session_id, student_id=student_id, transcript="bye"
+            )
+
     assert result.is_finished is True
+    assert result.speak_text == "That concludes the interview. Thank you for your time."
+    assert result.suppress_default_closing is True
+    mock_submit.assert_called_once()

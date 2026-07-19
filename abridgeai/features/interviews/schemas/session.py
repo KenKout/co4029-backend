@@ -132,6 +132,14 @@ class InterviewSubmitAnswerRequest(BaseModel):
     answer_text: str | None = None
     audio_object_id: UUID | None = None
     latency_ms: int | None = Field(default=None, ge=0)
+    # Optional client-provided idempotency key for THIS turn (safeguard #1).
+    # A retry carrying the same key returns the previously-persisted step
+    # response without inserting another answer, re-running the pipeline, or
+    # bumping the runtime-state version. Opaque; the adaptive path enforces the
+    # guarantee (DB-level partial-unique index + pre-insert check). When absent,
+    # the server derives a stable key from (session_question_id + answer digest)
+    # so legacy clients still get single-flight protection.
+    turn_key: str | None = Field(default=None, max_length=200)
 
 
 class InterviewSubmitAnswerResponse(BaseModel):
@@ -153,6 +161,26 @@ class InterviewSubmitAnswerResponse(BaseModel):
     is_finished: bool
     ai_followup_text: str | None = None
     time_remaining_seconds: int | None = None
+
+    # ── Adaptive interviewer structured fields (Slice 4, Phase 17) ───────────
+    # ALL optional with None defaults so the contract stays additive: existing
+    # clients that read only the four legacy fields above are unaffected. These
+    # are populated ONLY when the adaptive path ran (flag on + text/hybrid +
+    # orchestrator succeeded); on the legacy/sequential path they remain None.
+    # Every field here is derived from the SAME canonical decision that produced
+    # the legacy fields (single source of truth — never built independently).
+    phase: str | None = None
+    action: str | None = None
+    reason_code: str | None = None
+    ai_turn_id: UUID | None = None
+    ai_turn_text: str | None = None
+    language: str | None = None
+    should_narrate: bool | None = None
+    current_question_id: UUID | None = None
+    target_outcome_id: UUID | None = None
+    should_await_response: bool | None = None
+    should_finish: bool | None = None
+    state_version: int | None = None
 
 
 class InterviewRubricScore(BaseModel):

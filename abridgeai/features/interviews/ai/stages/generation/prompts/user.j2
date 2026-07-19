@@ -32,6 +32,15 @@ outcome ID):
 (no outcomes provided — link_outcome_id MUST be null in the output)
 {%- endif %}
 
+{%- if avoid_prompts %}
+
+Questions already accepted for this interview — do NOT repeat these or
+produce close paraphrases of them:
+{%- for prompt in avoid_prompts %}
+- {{ prompt }}
+{%- endfor %}
+{%- endif %}
+
 Source context (chunks the interview should be grounded in):
 {{ chunks_block }}
 
@@ -46,7 +55,8 @@ Return JSON in this shape:
       "expected_depth": 2,
       "linked_outcome_id": "<one of the outcome ids above, or null>",
       "source_refs": ["<chunk uuid>"],
-      "rationale": "..."
+      "rationale": "...",
+      "model_answer": "..."
     }
   ]
 }
