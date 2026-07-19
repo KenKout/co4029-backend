@@ -73,6 +73,11 @@ GenerationRunStatusLiteral = Literal[
     "failed",
     "cancelled",
 ]
+SecurityResponsePolicyLiteral = Literal[
+    "continue_and_log",
+    "warn_and_continue",
+    "end_and_flag",
+]
 
 
 # --------------------------------------------------------------------------- #
@@ -95,6 +100,11 @@ class InterviewConfigCreate(BaseModel):
     cooldown_hours: int | None = Field(default=None, ge=1)
     lock_quiz_ef_until_pass: bool = False
     supplementary_instructions: str | None = None
+    security_response_policy: SecurityResponsePolicyLiteral = "warn_and_continue"
+    security_max_consecutive_attempts: int = Field(default=3, ge=2, le=20)
+    security_custom_refusal_en: str | None = Field(default=None, max_length=500)
+    security_custom_refusal_vi: str | None = Field(default=None, max_length=500)
+    security_incident_summary_enabled: bool = True
 
 
 class InterviewConfigUpdate(BaseModel):
@@ -117,6 +127,11 @@ class InterviewConfigUpdate(BaseModel):
     min_outcomes_to_pass: int | None = Field(default=None, ge=1)
     lock_quiz_ef_until_pass: bool | None = None
     supplementary_instructions: str | None = None
+    security_response_policy: SecurityResponsePolicyLiteral | None = None
+    security_max_consecutive_attempts: int | None = Field(default=None, ge=2, le=20)
+    security_custom_refusal_en: str | None = Field(default=None, max_length=500)
+    security_custom_refusal_vi: str | None = Field(default=None, max_length=500)
+    security_incident_summary_enabled: bool | None = None
 
 
 class InterviewConfigAuthoring(InterviewConfigPublic):
@@ -132,6 +147,11 @@ class InterviewConfigAuthoring(InterviewConfigPublic):
     status: ConfigStatusLiteral  # type: ignore[assignment]
     supplementary_instructions: str | None = None
     min_outcomes_to_pass: int | None = None
+    security_response_policy: SecurityResponsePolicyLiteral = "warn_and_continue"
+    security_max_consecutive_attempts: int = 3
+    security_custom_refusal_en: str | None = None
+    security_custom_refusal_vi: str | None = None
+    security_incident_summary_enabled: bool = True
     generation_run_id: UUID | None = None
     draft_question_count: int | None = None
     total_importance_weight: int | None = None
@@ -144,7 +164,7 @@ class InterviewConfigAuthoring(InterviewConfigPublic):
 
     @model_validator(mode="before")
     @classmethod
-    def _populate_aggregates(cls, data: Any) -> Any:
+    def _populate_aggregates(cls, data: Any) -> Any:  # noqa: ANN401 -- ORM/Pydantic boundary
         """Sum importance_weight + count active questions when the caller
         passes the raw ORM model with the ``questions`` relationship already
         loaded. Skipped when data is a Pydantic model (nested in
@@ -162,7 +182,7 @@ class InterviewConfigAuthoring(InterviewConfigPublic):
             insp = sa_inspect(data)
         except Exception:  # noqa: BLE001 — defensive: only treat real ORM instances
             return data
-        unloaded = getattr(insp, "unloaded", set()) if insp is not None else set()
+        unloaded: set[str] = getattr(insp, "unloaded", set()) if insp is not None else set()
         if "questions" in unloaded:
             return data
         questions = getattr(data, "questions", None)
@@ -322,6 +342,18 @@ class InterviewForAuthoringPublic(BaseModel):
     questions: list[InterviewQuestionAuthoring] = []
 
 
+class SecuritySessionSummary(BaseModel):
+    """Teacher-only redacted security metrics; no student response content."""
+
+    assessment_count: int = 0
+    blocked_attempt_count: int = 0
+    repeated_attempt_count: int = 0
+    output_leakage_prevented: int = 0
+    security_fallback_rate: float = 0.0
+    average_classification_latency_ms: float | None = None
+    session_flagged: bool = False
+
+
 class InterviewSessionSummary(BaseModel):
     """One row in the teacher's per-config attempts list.
 
@@ -340,6 +372,7 @@ class InterviewSessionSummary(BaseModel):
     pass_verdict: bool | None = None
     started_at: datetime
     ended_at: datetime | None = None
+    security_summary: SecuritySessionSummary | None = None
 
 
 class InterviewSessionTeacherRead(BaseModel):
@@ -365,6 +398,7 @@ class InterviewSessionTeacherRead(BaseModel):
     pass_verdict: bool | None = None
     started_at: datetime
     ended_at: datetime | None = None
+    security_summary: SecuritySessionSummary | None = None
 
 
 class InterviewTranscriptTurn(BaseModel):
@@ -407,7 +441,10 @@ __all__ = [
     "InterviewQuestionAuthoring",
     "InterviewQuestionCreate",
     "InterviewSessionSummary",
+    "InterviewSessionTeacherRead",
     "InterviewTranscriptRead",
     "InterviewTranscriptTurn",
     "ReviewStatusLiteral",
+    "SecurityResponsePolicyLiteral",
+    "SecuritySessionSummary",
 ]

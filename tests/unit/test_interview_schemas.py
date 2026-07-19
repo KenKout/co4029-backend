@@ -160,6 +160,7 @@ def test_for_taking_public_has_first_question_only() -> None:
     fields = InterviewForTakingPublic.model_fields
     assert "first_question" in fields
     assert "questions" not in fields
+    assert "outcomes" not in fields
 
 
 def test_config_public_status_narrows_to_published() -> None:
@@ -456,21 +457,15 @@ def test_for_taking_compose() -> None:
         supported_modes="hybrid",
         lock_quiz_ef_until_pass=False,
     )
-    outcome = InterviewOutcomePublic(
-        id=uuid4(),
-        position=1,
-        outcome_text="x",
-        outcome_type="knowledge",
-    )
     first_q = InterviewQuestionPublic(
         id=uuid4(),
         prompt_text="x",
         question_type="conceptual",
     )
-    take = InterviewForTakingPublic(config=config, outcomes=[outcome], first_question=first_q)
+    take = InterviewForTakingPublic(config=config, first_question=first_q)
     assert take.first_question is not None
     assert take.first_question.question_type == "conceptual"
-    assert "importance_weight" not in take.outcomes[0].model_dump()
+    assert "outcomes" not in take.model_dump()
 
 
 def test_gap_report_authoring_inherits_student_view() -> None:

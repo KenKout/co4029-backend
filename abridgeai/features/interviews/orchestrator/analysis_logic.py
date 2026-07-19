@@ -15,6 +15,7 @@ conventions:
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import TYPE_CHECKING
 
@@ -63,16 +64,17 @@ async def analyze_answer(
 
     try:
         system_prompt = render_prompt("prompts/analysis_system.j2")
-        user_prompt = render_prompt(
-            "prompts/analysis_user.j2",
-            question_text=question_text,
-            student_answer=answer,
-            turn_id=turn_id,
-            outcome_id=outcome_id or "",
-            outcome_text=outcome_text or "",
-            expected_evidence=list(expected_evidence or []),
-            common_misconceptions=list(common_misconceptions or []),
-            supplementary_instructions=supplementary_instructions or "",
+        user_prompt = json.dumps(
+            {
+                "current_question": question_text,
+                "student_answer": answer,
+                "turn_id": turn_id,
+                "outcome": {"id": outcome_id or "", "text": outcome_text or ""},
+                "expected_evidence": list(expected_evidence or []),
+                "common_misconceptions": list(common_misconceptions or []),
+                "supplementary_instructions": supplementary_instructions or "",
+            },
+            ensure_ascii=False,
         )
         gateway = gateway or LLMGateway()
 

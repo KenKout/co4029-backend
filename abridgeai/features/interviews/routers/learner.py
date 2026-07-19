@@ -42,7 +42,6 @@ from abridgeai.features.interviews.schemas import (
     GapReportRead,
     InterviewConfigPublic,
     InterviewForTakingPublic,
-    InterviewOutcomePublic,
     InterviewQuestionPublic,
     InterviewSessionFinishResponse,
     InterviewSessionPublic,
@@ -106,7 +105,6 @@ async def get_interview_for_taking(
 
     from abridgeai.features.interviews.models import (  # noqa: PLC0415
         InterviewConfig,
-        InterviewOutcome,
         InterviewQuestion,
         InterviewSession,
     )
@@ -126,35 +124,20 @@ async def get_interview_for_taking(
         if used >= config.max_attempts:
             raise _not_found("interview_config", config_id)
 
-    outcomes = list(
-        (
-            await db.execute(
-                select(InterviewOutcome)
-                .where(InterviewOutcome.interview_config_id == config_id)
-                .order_by(InterviewOutcome.position)
+    # Just-in-time reveal: this learner request never materializes the full bank.
+    first_question = (
+        await db.execute(
+            select(InterviewQuestion)
+            .where(
+                InterviewQuestion.interview_config_id == config_id,
+                InterviewQuestion.review_status == "approved",
             )
+            .order_by(InterviewQuestion.position)
+            .limit(1)
         )
-        .scalars()
-        .all()
-    )
-    questions = list(
-        (
-            await db.execute(
-                select(InterviewQuestion)
-                .where(
-                    InterviewQuestion.interview_config_id == config_id,
-                    InterviewQuestion.review_status == "approved",
-                )
-                .order_by(InterviewQuestion.position)
-            )
-        )
-        .scalars()
-        .all()
-    )
-    first_question = questions[0] if questions else None
+    ).scalar_one_or_none()
     return InterviewForTakingPublic(
         config=InterviewConfigPublic.model_validate(config),
-        outcomes=[InterviewOutcomePublic.model_validate(o) for o in outcomes],
         first_question=(
             InterviewQuestionPublic.model_validate(first_question)
             if first_question is not None
@@ -285,6 +268,7 @@ async def narrate_session_text(
     payload: NarrationRequest,
     current_user: Annotated[CurrentUser, Depends(_REQUIRE_SESSION_OWNER)],
     db: Annotated[AsyncSession, Depends(get_db)],
+    accept_language: Annotated[str | None, Header(alias="Accept-Language")] = None,
 ) -> Response:
     """Synthesize an AI utterance to MP3 using the agent-quality gateway TTS.
 
@@ -303,6 +287,85 @@ async def narrate_session_text(
     if session is None:  # pragma: no cover - dep already 404s; defensive
         raise _not_found("interview_session", session_id)
 
+    # Narration is an output boundary, not an arbitrary text-to-speech proxy.
+    # Accept only a question already attached to this session or an AI message
+    # that was persisted after the shared output guard.
+    import hashlib  # noqa: PLC0415
+
+    from sqlalchemy import select  # noqa: PLC0415
+
+    from abridgeai.features.interviews.models import (  # noqa: PLC0415
+        InterviewQuestion,
+        InterviewSessionMessage,
+        InterviewSessionQuestion,
+    )
+    from abridgeai.features.interviews.orchestrator.security import (  # noqa: PLC0415
+        SecurityAction,
+        SecurityAssessment,
+        SecurityCategory,
+    )
+    from abridgeai.features.interviews.services import security as security_service  # noqa: PLC0415
+
+    asked_ids = list(
+        (
+            await db.execute(
+                select(InterviewSessionQuestion.interview_question_id).where(
+                    InterviewSessionQuestion.session_id == session_id,
+                    InterviewSessionQuestion.interview_question_id.is_not(None),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    ai_text_exists = await db.scalar(
+        select(InterviewSessionMessage.id).where(
+            InterviewSessionMessage.session_id == session_id,
+            InterviewSessionMessage.role == "ai",
+            InterviewSessionMessage.content_text == payload.text.strip(),
+        )
+    )
+    question_text_exists = None
+    if asked_ids:
+        question_text_exists = await db.scalar(
+            select(InterviewQuestion.id).where(
+                InterviewQuestion.id.in_(asked_ids),
+                InterviewQuestion.prompt_text == payload.text.strip(),
+            )
+        )
+    if ai_text_exists is None and question_text_exists is None:
+        raise _bad_request("narration text is not an approved interview utterance")
+
+    narration_assessment = SecurityAssessment(
+        category=SecurityCategory.BENIGN,
+        detected=False,
+        confidence=1.0,
+        should_block=False,
+        should_record_academic_evidence=False,
+        response_key=None,
+        normalized_fingerprint=None,
+        source="narration_boundary",
+    )
+    narration_key = "narration:" + hashlib.sha256(payload.text.encode()).hexdigest()[:32]
+    narration_language = realtime_service.normalize_language(accept_language)
+    guarded_narration = await security_service.guard_student_output(
+        db,
+        session_id=session_id,
+        config_id=session.interview_config_id,
+        turn_key=narration_key,
+        proposed_text=payload.text.strip(),
+        fallback_text=(
+            "Tôi có thể nhắc lại hoặc giải thích câu hỏi hiện tại."
+            if narration_language == "vi"
+            else "I can repeat or clarify the current question."
+        ),
+        allowed_question_ids=[qid for qid in asked_ids if qid is not None],
+        assessment=narration_assessment,
+        action=SecurityAction.ALLOW,
+        attempt_count=0,
+    )
+    await db.commit()
+
     persona: str | None = None
     config = await db.get(InterviewConfig, session.interview_config_id)
     if config is not None:
@@ -311,7 +374,7 @@ async def narrate_session_text(
     settings = get_settings()
     try:
         audio = await narration_service.synthesize_speech(
-            payload.text, persona=persona, settings=settings
+            guarded_narration.text, persona=persona, settings=settings
         )
     except narration_service.NarrationUnavailable as exc:
         raise HTTPException(
@@ -442,29 +505,21 @@ async def respond_to_session(
         raise _bad_request(str(exc)) from exc
     except HTTPException:
         raise
-    except Exception as exc:  # noqa: BLE001 — surface the real error to logs + client
+    except Exception as exc:  # noqa: BLE001 -- log internally; return an allowlisted error
         await db.rollback()
         logger.exception("respond_to_session: unhandled error (session=%s)", session_id)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail={
-                "error": "internal_error",
-                "error_class": type(exc).__name__,
-                "message": str(exc) or "unhandled error in respond_to_session",
-            },
+            detail={"error": "internal_error", "message": "Unable to process this turn"},
         ) from exc
     try:
         await db.commit()
-    except Exception as exc:  # noqa: BLE001 — commit-time IntegrityError etc.
+    except Exception as exc:  # noqa: BLE001 -- log internally; return an allowlisted error
         await db.rollback()
         logger.exception("respond_to_session: commit failed (session=%s)", session_id)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail={
-                "error": "internal_error",
-                "error_class": type(exc).__name__,
-                "message": str(exc) or "commit failed in respond_to_session",
-            },
+            detail={"error": "internal_error", "message": "Unable to save this turn"},
         ) from exc
     next_question = result.get("next_question")
     return InterviewSubmitAnswerResponse(
@@ -478,18 +533,11 @@ async def respond_to_session(
         ai_followup_text=result.get("followup_text"),
         time_remaining_seconds=None,
         # ── adaptive structured fields (None on the legacy/sequential path) ──
-        phase=result.get("phase"),
-        action=result.get("action"),
-        reason_code=result.get("reason_code"),
-        ai_turn_id=result.get("ai_turn_id"),
         ai_turn_text=result.get("ai_turn_text"),
         language=result.get("language"),
         should_narrate=result.get("should_narrate"),
-        current_question_id=result.get("current_question_id"),
-        target_outcome_id=result.get("target_outcome_id"),
         should_await_response=result.get("should_await_response"),
         should_finish=result.get("should_finish"),
-        state_version=result.get("state_version"),
     )
 
 
@@ -518,16 +566,12 @@ async def finish_session(
         raise _bad_request(str(exc)) from exc
     except HTTPException:
         raise
-    except Exception as exc:  # noqa: BLE001 — surface real error to logs + client
+    except Exception as exc:  # noqa: BLE001 -- log internally; return an allowlisted error
         await db.rollback()
         logger.exception("finish_session: unhandled error (session=%s)", session_id)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail={
-                "error": "internal_error",
-                "error_class": type(exc).__name__,
-                "message": str(exc) or "unhandled error in finish_session",
-            },
+            detail={"error": "internal_error", "message": "Unable to finish this session"},
         ) from exc
     # Thesis §4.3: the student-facing result is binary pass/fail ONLY — no
     # score, no per-outcome breakdown. The rubric total + per-outcome verdicts

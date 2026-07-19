@@ -169,18 +169,11 @@ class InterviewSubmitAnswerResponse(BaseModel):
     # orchestrator succeeded); on the legacy/sequential path they remain None.
     # Every field here is derived from the SAME canonical decision that produced
     # the legacy fields (single source of truth — never built independently).
-    phase: str | None = None
-    action: str | None = None
-    reason_code: str | None = None
-    ai_turn_id: UUID | None = None
     ai_turn_text: str | None = None
     language: str | None = None
     should_narrate: bool | None = None
-    current_question_id: UUID | None = None
-    target_outcome_id: UUID | None = None
     should_await_response: bool | None = None
     should_finish: bool | None = None
-    state_version: int | None = None
 
 
 class InterviewRubricScore(BaseModel):

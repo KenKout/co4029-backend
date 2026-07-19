@@ -56,6 +56,11 @@ from abridgeai.features.interviews.orchestrator.intent import (
 )
 from abridgeai.features.interviews.orchestrator.intent_logic import classify_intent
 from abridgeai.features.interviews.orchestrator.mapping import canonical_step_result
+from abridgeai.features.interviews.orchestrator.security import (
+    SecurityAction,
+    SecurityAssessment,
+    SecurityCategory,
+)
 from abridgeai.features.interviews.orchestrator.selection import (
     CandidateQuestion,
     SelectionContext,
@@ -65,8 +70,13 @@ from abridgeai.features.interviews.orchestrator.state import (
     InterviewPhase,
     OutcomeCoverageState,
 )
-from abridgeai.features.interviews.orchestrator.utterance import persona_from
+from abridgeai.features.interviews.orchestrator.utterance import (
+    Utterance,
+    build_fallback_utterance,
+    persona_from,
+)
 from abridgeai.features.interviews.orchestrator.utterance_logic import generate_utterance
+from abridgeai.features.interviews.services import security as security_service
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -176,6 +186,9 @@ async def run_adaptive_turn(
     turn_key: str,
     language: str,
     use_llm: bool = True,
+    security_assessment: SecurityAssessment | None = None,
+    security_action: SecurityAction = SecurityAction.ALLOW,
+    security_attempt_count: int = 0,
 ) -> AdaptiveOutcome:
     """Run one adaptive turn. MUST be called inside a caller-owned savepoint.
 
@@ -227,7 +240,10 @@ async def run_adaptive_turn(
             turn_id=turn_id_placeholder,
             outcome_id=outcome_id,
             outcome_text=outcome_text,
-            supplementary_instructions=config.supplementary_instructions,
+            # The author-wide blob may contain full rubric weights or unrelated
+            # hidden criteria. Runtime analysis gets only this question and its
+            # linked outcome.
+            supplementary_instructions=None,
         )
 
     # 3. Load candidate pool + compute selection context.
@@ -289,6 +305,51 @@ async def run_adaptive_turn(
         question_text=probe_or_question_text,
         use_llm=use_llm,
     )
+    fallback_utterance = build_fallback_utterance(
+        decision,
+        persona=persona,
+        language=language,
+        question_text=probe_or_question_text,
+    )
+    assessment = security_assessment or SecurityAssessment(
+        category=SecurityCategory.BENIGN,
+        detected=False,
+        confidence=1.0,
+        should_block=False,
+        should_record_academic_evidence=True,
+        response_key=None,
+        normalized_fingerprint=None,
+        source="adaptive",
+    )
+    allowed_question_ids: list[UUID] = []
+    if current_question is not None:
+        allowed_question_ids.append(current_question.id)
+    if selected_orm is not None:
+        allowed_question_ids.append(selected_orm.id)
+    guarded = await security_service.guard_student_output(
+        db,
+        session_id=session_id,
+        config_id=session.interview_config_id,
+        turn_key=turn_key,
+        proposed_text=utterance.ai_turn_text,
+        fallback_text=fallback_utterance.ai_turn_text,
+        allowed_question_ids=allowed_question_ids,
+        assessment=assessment,
+        action=security_action,
+        attempt_count=security_attempt_count,
+    )
+    if guarded.output_fallback_used:
+        if guarded.text == fallback_utterance.ai_turn_text:
+            utterance = fallback_utterance
+        else:
+            # Even the deterministic selected-question utterance overlapped a
+            # protected answer/rubric. Do not attach or serialize that question.
+            selected_orm = None
+            decision.target_question_id = None
+            decision.target_outcome_id = None
+            utterance = Utterance("", "", "", guarded.text)
+        utt_status = "fallback"
+        data.output_leakage_prevented_count += 1
 
     # 7. Persist ONE AI turn (compact audit in metadata_json — safeguard #8/#11).
     ai_msg = InterviewSessionMessage(
@@ -303,6 +364,9 @@ async def run_adaptive_turn(
             "utterance_status": utt_status,
             "turn_key": turn_key,
             "top_candidates": _compact_scores(scored),
+            "output_leakage_blocked": guarded.output_leakage_blocked,
+            "output_fallback_used": guarded.output_fallback_used,
+            "protected_content_category": guarded.protected_content_category,
         },
     )
     db.add(ai_msg)

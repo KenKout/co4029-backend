@@ -21,6 +21,8 @@ HTTP path (latency + retry budget concerns).
 from __future__ import annotations
 
 import logging
+import time
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
@@ -39,11 +41,31 @@ from abridgeai.features.interviews.models import (
     InterviewSessionMessage,
     InterviewSessionQuestion,
 )
+from abridgeai.features.interviews.orchestrator.security import (
+    SecurityAction,
+    SecurityAssessment,
+    SecurityCategory,
+    SecurityResponsePolicy,
+)
+from abridgeai.features.interviews.orchestrator.security_logic import (
+    assess_security,
+    choose_security_action,
+    extract_separable_academic_text,
+    is_explicit_end_request,
+    requested_current_question_action,
+    safe_closing,
+    safe_security_response,
+    should_flag_session,
+)
 from abridgeai.features.interviews.queries import authoring as authoring_queries
 from abridgeai.features.interviews.queries import sessions as sessions_queries
+from abridgeai.features.interviews.realtime import observability as security_obs
+from abridgeai.features.interviews.services import security as security_service
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
+
+    from abridgeai.features.interviews.orchestrator.state import InterviewRuntimeStateData
 
 
 logger = logging.getLogger(__name__)
@@ -200,10 +222,8 @@ async def start_session(
     escalate to ``voice``/``hybrid`` — the realtime-token endpoint then
     rejects them with HTTP 409 "session is not a voice interview".
     """
-    # Interviews are always hybrid now (AI speaks + writes; student types or
-    # speaks). Ignore any client-supplied input_mode and pin to hybrid so a
-    # stale/legacy client can't downgrade the session to text/voice-only.
-    requested_input_mode = "hybrid"
+    data = payload.model_dump(exclude_unset=True) if payload is not None else {}
+    requested_input_mode = data.get("input_mode") or "text"
 
     # Thesis §4.3: the pass/fail verdict is judged per learning outcome. Starting
     # an interview whose config has no outcomes guarantees an automatic fail with
@@ -360,29 +380,50 @@ async def take_session_step(
             InterviewQuestion, current_session_question.interview_question_id
         )
 
-    # ── Security guard (prompt-injection defense, Phase S1) ───────────────────
-    # Runs BEFORE the academic pipeline (and the intent rules). One choke point
-    # for text/hybrid/voice + adaptive/legacy; internally no-ops when the guard
-    # mode is "off" and only blocks in "enforce" — see security_handler.
     settings = get_settings()
-    blocked = await maybe_security_block(
-        db,
-        session=session,
-        current_session_question=current_session_question,
-        answer_text=answer_text,
-        audio_object_id=audio_object_id,
-        language=language,
-    )
-    if blocked is not None:
-        return blocked
+    try:
+        security_stage = await _run_security_stage(
+            db,
+            session=session,
+            current_session_question=current_session_question,
+            current_question=current_question,
+            answer_text=answer_text,
+            audio_object_id=audio_object_id,
+            client_turn_key=turn_key,
+            language=language,
+        )
+    except Exception:  # noqa: BLE001 -- enforcement must fail closed, never bypass
+        logger.exception("interview security stage failed (session=%s)", session_id)
+        if settings.interview_security_guard_mode == "enforce":
+            return _security_emergency_result(language, current_question)
+        security_stage = _SecurityStageResult(
+            turn_key=turn_key,
+            assessment=_benign_assessment(source="stage_fallback", classifier_failed=True),
+            action=SecurityAction.ALLOW,
+            academic_text=answer_text,
+            handled_result=None,
+            attempt_count=0,
+        )
 
-    # ── Adaptive is ALWAYS ON for interviews (2026-07 product decision) ───────
-    # Interviews are a single hybrid, always-adaptive experience. The master
-    # flag ``adaptive_interviewer_enabled`` is now an emergency KILL SWITCH:
-    # only an explicit ``=false`` forces the legacy sequential path. On ANY
-    # adaptive failure the savepoint rolls back and legacy runs; the student's
-    # answer, recorded once, always survives.
-    adaptive_on = settings.adaptive_interviewer_enabled is not False
+    if security_stage.handled_result is not None:
+        return security_stage.handled_result
+
+    # ── Adaptive gate ────────────────────────────────────────────────────────
+    # Resolved via the master switch AND the per-mode flag
+    # (``adaptive_enabled_for_mode``). Text/hybrid default ON under the master
+    # switch; voice defaults OFF until human sign-off flips
+    # ADAPTIVE_INTERVIEWER_VOICE_ENABLED. When adaptive runs, the LiveKit bridge
+    # consumes the canonical result (ai_turn_text / should_finish) exactly like
+    # the REST path, so all enabled modes share the adaptive brain. Any adaptive
+    # failure degrades to the legacy sequential path via the same fallback ladder.
+    # Full gate = static mode gate AND the per-student percentage rollout
+    # (Phase 11). rollout_percent=100 (default) makes this identical to the old
+    # ``adaptive_enabled_for_mode`` check, so existing deployments are unaffected.
+    adaptive_on = settings.adaptive_enabled_for_student(
+        session.input_mode,
+        student_id=str(session.student_id),
+        config_id=str(session.interview_config_id),
+    )
 
     if adaptive_on:
         adaptive_result = await _try_adaptive_step(
@@ -392,8 +433,11 @@ async def take_session_step(
             current_question=current_question,
             answer_text=answer_text,
             audio_object_id=audio_object_id,
-            client_turn_key=turn_key,
+            client_turn_key=security_stage.turn_key,
             language=language,
+            security_assessment=security_stage.assessment,
+            security_action=security_stage.action,
+            security_attempt_count=security_stage.attempt_count,
         )
         if adaptive_result is not None:
             return adaptive_result
@@ -405,10 +449,37 @@ async def take_session_step(
             current_session_question=current_session_question,
             current_question=current_question,
             answer_text=answer_text,
+            language=language,
+            turn_key=security_stage.turn_key,
+            security_assessment=security_stage.assessment,
+            security_action=security_stage.action,
+            security_attempt_count=security_stage.attempt_count,
         )
 
     # ── Pure legacy path (flag off, voice session, or gated out by rollout) ───
-    _add_student_answer(db, session_id, current_session_question.id, answer_text, audio_object_id)
+    # Adaptive turns replay from canonical runtime state. Rebuild legacy retries
+    # from allowlisted persisted records so REST retries and LiveKit reconnects
+    # cannot insert a second answer or security event.
+    if security_stage.assessment.source == "replay" and security_stage.turn_key:
+        legacy_replay = await _replay_legacy_step(
+            db,
+            session_id=session.id,
+            current_session_question=current_session_question,
+            current_question=current_question,
+            turn_key=security_stage.turn_key,
+        )
+        if legacy_replay is not None:
+            return legacy_replay
+
+    _add_student_answer(
+        db,
+        session_id,
+        current_session_question.id,
+        answer_text,
+        audio_object_id,
+        turn_key=security_stage.turn_key,
+        metadata_extra={"security_assessed": True},
+    )
     await flush_or_conflict(db)
 
     # ── Shadow mode (Phase 10) ────────────────────────────────────────────────
@@ -425,6 +496,10 @@ async def take_session_step(
             current_question=current_question,
             answer_text=answer_text,
             language=language,
+            turn_key=security_stage.turn_key,
+            security_assessment=security_stage.assessment,
+            security_action=security_stage.action,
+            security_attempt_count=security_stage.attempt_count,
         )
 
     return await _legacy_advance(
@@ -433,6 +508,11 @@ async def take_session_step(
         current_session_question=current_session_question,
         current_question=current_question,
         answer_text=answer_text,
+        language=language,
+        turn_key=security_stage.turn_key,
+        security_assessment=security_stage.assessment,
+        security_action=security_stage.action,
+        security_attempt_count=security_stage.attempt_count,
     )
 
 
@@ -444,11 +524,14 @@ def _add_student_answer(
     audio_object_id: UUID | None,
     *,
     turn_key: str | None = None,
+    metadata_extra: dict[str, Any] | None = None,
 ) -> None:
     """Add the student-answer message row (does not flush)."""
     metadata: dict[str, Any] = {"kind": "answer"}
     if turn_key is not None:
         metadata["turn_key"] = turn_key
+    if metadata_extra:
+        metadata.update(metadata_extra)
     db.add(
         InterviewSessionMessage(
             session_id=session_id,
@@ -475,6 +558,527 @@ def _derive_turn_key(session_question_id: UUID, state_version: int, answer_text:
     return f"{session_question_id}:{state_version}:{digest}"
 
 
+@dataclass(frozen=True)
+class _SecurityStageResult:
+    turn_key: str | None
+    assessment: SecurityAssessment
+    action: SecurityAction
+    academic_text: str
+    handled_result: dict[str, Any] | None
+    attempt_count: int
+
+
+def _benign_assessment(
+    *, source: str = "rules", classifier_failed: bool = False
+) -> SecurityAssessment:
+    return SecurityAssessment(
+        category=SecurityCategory.BENIGN,
+        detected=False,
+        confidence=1.0,
+        should_block=False,
+        should_record_academic_evidence=True,
+        response_key=None,
+        normalized_fingerprint=None,
+        source=source,
+        classifier_failed=classifier_failed,
+    )
+
+
+async def _run_security_stage(  # noqa: C901 -- precedence is kept explicit and auditable
+    db: AsyncSession,
+    *,
+    session: InterviewSession,
+    current_session_question: InterviewSessionQuestion,
+    current_question: InterviewQuestion | None,
+    answer_text: str,
+    audio_object_id: UUID | None,
+    client_turn_key: str | None,
+    language: str,
+) -> _SecurityStageResult:
+    """Shared pre-academic gate for adaptive, legacy, and LiveKit turns."""
+    from abridgeai.features.interviews.orchestrator import repository as state_repo
+
+    settings = get_settings()
+    if settings.interview_security_guard_mode == "off":
+        return _SecurityStageResult(
+            turn_key=client_turn_key,
+            assessment=_benign_assessment(source="off"),
+            action=SecurityAction.ALLOW,
+            academic_text=answer_text,
+            handled_result=None,
+            attempt_count=0,
+        )
+
+    loaded = await state_repo.load_or_init(db, session.id)
+    turn_key = client_turn_key or _derive_turn_key(
+        current_session_question.id, loaded.version, answer_text
+    )
+    data = loaded.data
+
+    # Security replay short-circuit happens before classifier/event/message
+    # writes. The safe action can be rebuilt from bounded state.
+    if data.last_security_turn_key == turn_key:
+        if data.last_security_action == "normal_end":
+            replay_assessment = _benign_assessment(source="replay")
+            return _SecurityStageResult(
+                turn_key=turn_key,
+                assessment=replay_assessment,
+                action=SecurityAction.ALLOW,
+                academic_text="",
+                handled_result=_controlled_result_dict(
+                    safe_closing(language), language=language, is_finished=True
+                ),
+                attempt_count=data.security_attempt_count,
+            )
+        try:
+            prior_action = SecurityAction(data.last_security_action or "allow")
+        except ValueError:
+            prior_action = SecurityAction.ALLOW
+        try:
+            replay_category = SecurityCategory(data.last_security_category or "benign")
+        except ValueError:
+            replay_category = SecurityCategory.BENIGN
+        replay_assessment = SecurityAssessment(
+            category=replay_category,
+            detected=replay_category is not SecurityCategory.BENIGN,
+            confidence=1.0,
+            should_block=prior_action is not SecurityAction.ALLOW,
+            should_record_academic_evidence=False,
+            response_key=(
+                f"security.{replay_category.value}"
+                if replay_category is not SecurityCategory.BENIGN
+                else None
+            ),
+            normalized_fingerprint=data.last_security_fingerprint,
+            source="replay",
+        )
+        handled = None
+        if prior_action is not SecurityAction.ALLOW:
+            config = await db.get(InterviewConfig, session.interview_config_id)
+            handled = await _security_action_result(
+                db,
+                session=session,
+                current_session_question=current_session_question,
+                current_question=current_question,
+                config=config,
+                answer_text=answer_text,
+                audio_object_id=audio_object_id,
+                turn_key=turn_key,
+                language=language,
+                assessment=replay_assessment,
+                action=prior_action,
+                attempt_count=data.security_attempt_count,
+                persist_messages=False,
+            )
+        return _SecurityStageResult(
+            turn_key=turn_key,
+            assessment=replay_assessment,
+            action=prior_action,
+            academic_text=answer_text,
+            handled_result=handled,
+            attempt_count=data.security_attempt_count,
+        )
+
+    prior_category: SecurityCategory | None = None
+    if data.last_security_category:
+        try:
+            prior_category = SecurityCategory(data.last_security_category)
+        except ValueError:
+            prior_category = None
+
+    started = time.monotonic()
+    explicit_end = is_explicit_end_request(answer_text)
+    control_action = requested_current_question_action(answer_text)
+    if explicit_end or control_action is not None:
+        assessment = _benign_assessment(source="control_rules")
+        action = control_action or SecurityAction.ALLOW
+    else:
+        assessment = await assess_security(
+            db,
+            student_utterance=answer_text,
+            last_category=prior_category,
+        )
+        config = await db.get(InterviewConfig, session.interview_config_id)
+        try:
+            response_policy = SecurityResponsePolicy(
+                getattr(config, "security_response_policy", "warn_and_continue")
+            )
+        except ValueError:
+            response_policy = SecurityResponsePolicy.WARN_AND_CONTINUE
+        max_attempts = int(getattr(config, "security_max_consecutive_attempts", 3) or 3)
+        action = choose_security_action(
+            assessment,
+            consecutive_attempts=data.consecutive_security_attempts,
+            max_consecutive_attempts=max_attempts,
+            response_policy=response_policy,
+            guard_mode=settings.interview_security_guard_mode,
+        )
+        if (
+            action is SecurityAction.END_AND_FLAG
+            and not settings.interview_security_allow_session_termination
+        ):
+            action = SecurityAction.WARN_AND_REDIRECT
+    latency_ms = round((time.monotonic() - started) * 1000.0, 2)
+
+    config = await db.get(InterviewConfig, session.interview_config_id)
+    max_attempts = int(getattr(config, "security_max_consecutive_attempts", 3) or 3)
+    data.security_assessment_count += 1
+    was_flagged = data.session_security_flagged
+    if assessment.detected:
+        data.security_attempt_count += 1
+        data.consecutive_security_attempts += 1
+        if data.consecutive_security_attempts >= 2:
+            data.repeated_security_attempt_count += 1
+        data.last_security_category = assessment.category.value
+        data.last_security_fingerprint = assessment.normalized_fingerprint
+        if action in (SecurityAction.WARN_AND_REDIRECT, SecurityAction.END_AND_FLAG):
+            data.security_warning_issued = True
+        if should_flag_session(
+            attempt_count=data.consecutive_security_attempts,
+            max_consecutive_attempts=max_attempts,
+        ):
+            data.session_security_flagged = True
+            session.session_security_flagged = True
+    else:
+        data.consecutive_security_attempts = 0
+    if assessment.classifier_failed:
+        data.security_fallback_count += 1
+    data.last_security_action = "normal_end" if explicit_end else action.value
+    data.last_security_turn_key = turn_key
+
+    academic_text = answer_text
+    if assessment.detected and action is not SecurityAction.ALLOW:
+        separable = extract_separable_academic_text(answer_text)
+        if separable:
+            academic_text = separable
+            assessment = replace(assessment, should_record_academic_evidence=True)
+            await _record_separable_evidence(
+                db,
+                data=data,
+                current_question=current_question,
+                academic_text=separable,
+                turn_id=str(current_session_question.id),
+            )
+        else:
+            academic_text = ""
+
+    security_handled = explicit_end or action is not SecurityAction.ALLOW
+    await state_repo.save(
+        db,
+        session.id,
+        data,
+        expected_version=loaded.version,
+        turn_idempotency_key=turn_key if security_handled else None,
+    )
+
+    await security_service.record_security_event(
+        db,
+        session_id=session.id,
+        turn_key=turn_key,
+        event_type=security_obs.EV_SECURITY_ASSESSED,
+        assessment=assessment,
+        action=action,
+        attempt_count=data.security_attempt_count,
+        latency_ms=latency_ms,
+        fallback_status=assessment.classifier_failed,
+    )
+    if assessment.detected and action is not SecurityAction.ALLOW:
+        await security_service.record_security_event(
+            db,
+            session_id=session.id,
+            turn_key=turn_key,
+            event_type=security_obs.EV_SECURITY_BLOCKED,
+            assessment=assessment,
+            action=action,
+            attempt_count=data.security_attempt_count,
+        )
+    if assessment.detected and data.consecutive_security_attempts >= 2:
+        await security_service.record_security_event(
+            db,
+            session_id=session.id,
+            turn_key=turn_key,
+            event_type=security_obs.EV_SECURITY_REPEATED_ATTEMPT,
+            assessment=assessment,
+            action=action,
+            attempt_count=data.security_attempt_count,
+        )
+    if data.session_security_flagged and not was_flagged:
+        await security_service.record_security_event(
+            db,
+            session_id=session.id,
+            turn_key=turn_key,
+            event_type=security_obs.EV_SECURITY_SESSION_FLAGGED,
+            assessment=assessment,
+            action=action,
+            attempt_count=data.security_attempt_count,
+        )
+
+    handled_result: dict[str, Any] | None = None
+    if explicit_end:
+        handled_result = await _normal_end_result(
+            db,
+            session=session,
+            current_session_question=current_session_question,
+            current_question=current_question,
+            answer_text=answer_text,
+            audio_object_id=audio_object_id,
+            turn_key=turn_key,
+            language=language,
+            assessment=assessment,
+            attempt_count=data.security_attempt_count,
+        )
+    elif action is not SecurityAction.ALLOW:
+        handled_result = await _security_action_result(
+            db,
+            session=session,
+            current_session_question=current_session_question,
+            current_question=current_question,
+            config=config,
+            answer_text=answer_text,
+            audio_object_id=audio_object_id,
+            turn_key=turn_key,
+            language=language,
+            assessment=assessment,
+            action=action,
+            attempt_count=data.security_attempt_count,
+            academic_text=academic_text or None,
+        )
+
+    return _SecurityStageResult(
+        turn_key=turn_key,
+        assessment=assessment,
+        action=action,
+        academic_text=academic_text,
+        handled_result=handled_result,
+        attempt_count=data.security_attempt_count,
+    )
+
+
+async def _record_separable_evidence(
+    db: AsyncSession,
+    *,
+    data: InterviewRuntimeStateData,
+    current_question: InterviewQuestion | None,
+    academic_text: str,
+    turn_id: str,
+) -> None:
+    if current_question is None or current_question.linked_outcome_id is None:
+        return
+    from abridgeai.features.interviews.models import InterviewOutcome  # noqa: PLC0415
+    from abridgeai.features.interviews.orchestrator.analysis_logic import (  # noqa: PLC0415
+        analyze_answer,
+    )
+    from abridgeai.features.interviews.orchestrator.state import (  # noqa: PLC0415
+        OutcomeCoverageState,
+    )
+
+    outcome = await db.get(InterviewOutcome, current_question.linked_outcome_id)
+    analysis = await analyze_answer(
+        db,
+        question_text=current_question.prompt_text,
+        student_answer=academic_text,
+        turn_id=turn_id,
+        outcome_id=str(current_question.linked_outcome_id),
+        outcome_text=outcome.outcome_text if outcome is not None else None,
+        # Never place the complete authoring/rubric blob in a runtime model
+        # context. The current question and linked outcome are sufficient.
+        supplementary_instructions=None,
+    )
+    if analysis.confidence <= 0.0:
+        return
+    for evidence in analysis.evidence:
+        coverage = data.outcome_coverage.get(evidence.outcome_id)
+        if coverage is None:
+            coverage = OutcomeCoverageState(outcome_id=evidence.outcome_id)
+            data.outcome_coverage[evidence.outcome_id] = coverage
+        coverage.evidence_count += 1
+        if evidence.turn_id not in coverage.supporting_turn_ids:
+            coverage.supporting_turn_ids.append(evidence.turn_id)
+
+
+async def _normal_end_result(
+    db: AsyncSession,
+    *,
+    session: InterviewSession,
+    current_session_question: InterviewSessionQuestion,
+    current_question: InterviewQuestion | None,
+    answer_text: str,
+    audio_object_id: UUID | None,
+    turn_key: str,
+    language: str,
+    assessment: SecurityAssessment,
+    attempt_count: int,
+) -> dict[str, Any]:
+    closing = safe_closing(language)
+    return await _persist_controlled_result(
+        db,
+        session=session,
+        current_session_question=current_session_question,
+        current_question=current_question,
+        answer_text=answer_text,
+        audio_object_id=audio_object_id,
+        turn_key=turn_key,
+        language=language,
+        assessment=assessment,
+        action=SecurityAction.ALLOW,
+        attempt_count=attempt_count,
+        response_text=closing,
+        is_finished=True,
+        message_kind="end_request",
+    )
+
+
+async def _security_action_result(
+    db: AsyncSession,
+    *,
+    session: InterviewSession,
+    current_session_question: InterviewSessionQuestion,
+    current_question: InterviewQuestion | None,
+    config: InterviewConfig | None,
+    answer_text: str,
+    audio_object_id: UUID | None,
+    turn_key: str,
+    language: str,
+    assessment: SecurityAssessment,
+    action: SecurityAction,
+    attempt_count: int,
+    academic_text: str | None = None,
+    persist_messages: bool = True,
+) -> dict[str, Any]:
+    custom = None
+    if config is not None:
+        custom = (
+            config.security_custom_refusal_vi
+            if (language or "en").lower().startswith("vi")
+            else config.security_custom_refusal_en
+        )
+    response = safe_security_response(
+        action,
+        language=language,
+        current_question=(current_question.prompt_text if current_question else None),
+        custom_refusal=custom,
+    )
+    if not persist_messages:
+        return _controlled_result_dict(
+            response,
+            language=language,
+            is_finished=action is SecurityAction.END_AND_FLAG,
+        )
+    return await _persist_controlled_result(
+        db,
+        session=session,
+        current_session_question=current_session_question,
+        current_question=current_question,
+        answer_text=answer_text,
+        audio_object_id=audio_object_id,
+        turn_key=turn_key,
+        language=language,
+        assessment=assessment,
+        action=action,
+        attempt_count=attempt_count,
+        response_text=response,
+        is_finished=action is SecurityAction.END_AND_FLAG,
+        message_kind=("security" if assessment.detected else "turn_control"),
+        academic_text=academic_text,
+    )
+
+
+async def _persist_controlled_result(
+    db: AsyncSession,
+    *,
+    session: InterviewSession,
+    current_session_question: InterviewSessionQuestion,
+    current_question: InterviewQuestion | None,
+    answer_text: str,
+    audio_object_id: UUID | None,
+    turn_key: str,
+    language: str,
+    assessment: SecurityAssessment,
+    action: SecurityAction,
+    attempt_count: int,
+    response_text: str,
+    is_finished: bool,
+    message_kind: str,
+    academic_text: str | None = None,
+) -> dict[str, Any]:
+    allowed_ids = [current_question.id] if current_question is not None else []
+    deterministic_fallback = safe_security_response(
+        action,
+        language=language,
+        current_question=(current_question.prompt_text if current_question else None),
+    )
+    guarded = await security_service.guard_student_output(
+        db,
+        session_id=session.id,
+        config_id=session.interview_config_id,
+        turn_key=turn_key,
+        proposed_text=response_text,
+        fallback_text=deterministic_fallback,
+        allowed_question_ids=allowed_ids,
+        assessment=assessment,
+        action=action,
+        attempt_count=attempt_count,
+    )
+    _add_student_answer(
+        db,
+        session.id,
+        current_session_question.id,
+        answer_text,
+        audio_object_id,
+        turn_key=turn_key,
+        metadata_extra={
+            "kind": message_kind,
+            "security_category": assessment.category.value,
+            "academic_evidence_allowed": bool(academic_text),
+            **({"safe_academic_text": academic_text} if academic_text else {}),
+        },
+    )
+    db.add(
+        InterviewSessionMessage(
+            session_id=session.id,
+            session_question_id=current_session_question.id,
+            role="ai",
+            content_text=guarded.text,
+            metadata_json={
+                "kind": message_kind,
+                "security_action": action.value,
+                "turn_key": turn_key,
+                "output_leakage_blocked": guarded.output_leakage_blocked,
+                "output_fallback_used": guarded.output_fallback_used,
+                "protected_content_category": guarded.protected_content_category,
+            },
+        )
+    )
+    await flush_or_conflict(db)
+    return _controlled_result_dict(guarded.text, language=language, is_finished=is_finished)
+
+
+def _controlled_result_dict(text: str, *, language: str, is_finished: bool) -> dict[str, Any]:
+    return {
+        "next_question": None,
+        "is_finished": is_finished,
+        "followup_text": text,
+        "ai_turn_text": text,
+        "language": language,
+        "should_narrate": True,
+        "should_await_response": not is_finished,
+        "should_finish": is_finished,
+    }
+
+
+def _security_emergency_result(
+    language: str, current_question: InterviewQuestion | None
+) -> dict[str, Any]:
+    text = safe_security_response(
+        SecurityAction.REFUSE_AND_REDIRECT,
+        language=language,
+        current_question=(current_question.prompt_text if current_question else None),
+    )
+    result = _controlled_result_dict(text, language=language, is_finished=False)
+    result["_security_fallback"] = True
+    return result
+
+
 async def _try_adaptive_step(
     db: AsyncSession,
     *,
@@ -485,6 +1089,9 @@ async def _try_adaptive_step(
     audio_object_id: UUID | None,
     client_turn_key: str | None,
     language: str = "en",
+    security_assessment: SecurityAssessment | None = None,
+    security_action: SecurityAction = SecurityAction.ALLOW,
+    security_attempt_count: int = 0,
 ) -> dict[str, Any] | None:
     """Attempt one adaptive turn. Returns the canonical result, or None to fall back.
 
@@ -554,6 +1161,9 @@ async def _try_adaptive_step(
                 answer_text=answer_text,
                 turn_key=effective_turn_key,
                 language=language,
+                security_assessment=security_assessment,
+                security_action=security_action,
+                security_attempt_count=security_attempt_count,
             )
         if outcome.result is not None:
             return _project_adaptive_result(outcome.result)
@@ -575,6 +1185,10 @@ async def _run_shadow_step(
     current_question: InterviewQuestion | None,
     answer_text: str,
     language: str = "en",
+    turn_key: str | None = None,
+    security_assessment: SecurityAssessment | None = None,
+    security_action: SecurityAction = SecurityAction.ALLOW,
+    security_attempt_count: int = 0,
 ) -> None:
     """Compute the adaptive decision for comparison WITHOUT driving the student.
 
@@ -597,7 +1211,7 @@ async def _run_shadow_step(
     if config is None:
         return
 
-    shadow_turn_key = f"shadow:{current_session_question.id}:{uuid4().hex}"
+    shadow_turn_key = f"shadow:{turn_key or current_session_question.id}:{uuid4().hex}"
     try:
         # begin_nested() opens a savepoint; we roll it back unconditionally in
         # the finally block so nothing the pipeline wrote ever commits.
@@ -612,6 +1226,9 @@ async def _run_shadow_step(
                 answer_text=answer_text,
                 turn_key=shadow_turn_key,
                 language=language,
+                security_assessment=security_assessment,
+                security_action=security_action,
+                security_attempt_count=security_attempt_count,
             )
             canonical = outcome.result or {}
             # Emit the shadow decision (no transcript content — same privacy
@@ -660,6 +1277,60 @@ async def _rehydrate_step_result(db: AsyncSession, replay: dict[str, Any]) -> di
     return result
 
 
+async def _replay_legacy_step(
+    db: AsyncSession,
+    *,
+    session_id: UUID,
+    current_session_question: InterviewSessionQuestion,
+    current_question: InterviewQuestion | None,
+    turn_key: str,
+) -> dict[str, Any] | None:
+    """Reconstruct a safe legacy response without re-running a turn."""
+    messages = await sessions_queries.list_session_messages(db, session_id)
+    matching_user = next(
+        (
+            message
+            for message in messages
+            if message.role == "user"
+            and isinstance(message.metadata_json, dict)
+            and message.metadata_json.get("turn_key") == turn_key
+        ),
+        None,
+    )
+    if matching_user is None:
+        return None
+
+    matching_ai = next(
+        (
+            message
+            for message in messages
+            if message.role == "ai"
+            and isinstance(message.metadata_json, dict)
+            and message.metadata_json.get("turn_key") == turn_key
+        ),
+        None,
+    )
+    if matching_ai is not None:
+        return {
+            "next_question": None,
+            "is_finished": False,
+            "followup_text": matching_ai.content_text,
+            "ai_turn_text": matching_ai.content_text,
+        }
+
+    if matching_user.session_question_id != current_session_question.id:
+        return {
+            "next_question": current_question,
+            "is_finished": False,
+            "followup_text": None,
+        }
+    return {
+        "next_question": None,
+        "is_finished": True,
+        "followup_text": None,
+    }
+
+
 async def _legacy_advance(
     db: AsyncSession,
     *,
@@ -667,6 +1338,11 @@ async def _legacy_advance(
     current_session_question: InterviewSessionQuestion,
     current_question: InterviewQuestion | None,
     answer_text: str,
+    language: str = "en",
+    turn_key: str | None = None,
+    security_assessment: SecurityAssessment | None = None,
+    security_action: SecurityAction = SecurityAction.ALLOW,
+    security_attempt_count: int = 0,
 ) -> dict[str, Any]:
     """The exact legacy sequential progression (unchanged behaviour).
 
@@ -674,6 +1350,8 @@ async def _legacy_advance(
     single-follow-up stage, then advances to the next approved question or
     signals ``is_finished``.
     """
+    assessment = security_assessment or _benign_assessment(source="legacy")
+    effective_turn_key = turn_key or f"legacy:{current_session_question.id}:{uuid4().hex}"
     followup_text: str | None = None
     if current_question is not None:
         followup_text = await maybe_generate_followup(
@@ -684,13 +1362,37 @@ async def _legacy_advance(
         )
 
     if followup_text:
+        fallback_followup = (
+            "Bạn có thể làm rõ câu trả lời của mình cho câu hỏi hiện tại không?"
+            if (language or "en").lower().startswith("vi")
+            else "Could you clarify your answer to the current question?"
+        )
+        guarded = await security_service.guard_student_output(
+            db,
+            session_id=session.id,
+            config_id=session.interview_config_id,
+            turn_key=effective_turn_key,
+            proposed_text=followup_text,
+            fallback_text=fallback_followup,
+            allowed_question_ids=([current_question.id] if current_question else []),
+            assessment=assessment,
+            action=security_action,
+            attempt_count=security_attempt_count,
+        )
+        followup_text = guarded.text
         db.add(
             InterviewSessionMessage(
                 session_id=session.id,
                 session_question_id=current_session_question.id,
                 role="ai",
                 content_text=followup_text,
-                metadata_json={"kind": "followup"},
+                metadata_json={
+                    "kind": "followup",
+                    "turn_key": effective_turn_key,
+                    "output_leakage_blocked": guarded.output_leakage_blocked,
+                    "output_fallback_used": guarded.output_fallback_used,
+                    "protected_content_category": guarded.protected_content_category,
+                },
             )
         )
         await flush_or_conflict(db)
@@ -707,6 +1409,49 @@ async def _legacy_advance(
             "next_question": None,
             "is_finished": True,
             "followup_text": None,
+        }
+
+    allowed_ids = [next_question.id]
+    if current_question is not None:
+        allowed_ids.append(current_question.id)
+    next_guard = await security_service.guard_student_output(
+        db,
+        session_id=session.id,
+        config_id=session.interview_config_id,
+        turn_key=effective_turn_key,
+        proposed_text=next_question.prompt_text,
+        fallback_text=(
+            "Tôi có thể nhắc lại hoặc giải thích câu hỏi hiện tại."
+            if (language or "en").lower().startswith("vi")
+            else "I can repeat or clarify the current question."
+        ),
+        allowed_question_ids=allowed_ids,
+        assessment=assessment,
+        action=security_action,
+        attempt_count=security_attempt_count,
+    )
+    if next_guard.output_leakage_blocked:
+        db.add(
+            InterviewSessionMessage(
+                session_id=session.id,
+                session_question_id=current_session_question.id,
+                role="ai",
+                content_text=next_guard.text,
+                metadata_json={
+                    "kind": "output_guard_fallback",
+                    "turn_key": effective_turn_key,
+                    "output_leakage_blocked": True,
+                    "output_fallback_used": True,
+                    "protected_content_category": next_guard.protected_content_category,
+                },
+            )
+        )
+        await flush_or_conflict(db)
+        return {
+            "next_question": None,
+            "is_finished": False,
+            "followup_text": next_guard.text,
+            "ai_turn_text": next_guard.text,
         }
 
     sequence_no = await _next_session_sequence(db, session.id)

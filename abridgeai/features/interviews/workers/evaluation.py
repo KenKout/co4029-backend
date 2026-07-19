@@ -81,7 +81,7 @@ _RETRY_MAX_DELAY_S = 60.0
 def _retry_defer_seconds(job_try: int) -> float:
     """Seconds to wait before the next evaluation attempt (exponential, capped)."""
     exponent = max(0, job_try - 1)
-    return min(_RETRY_MAX_DELAY_S, _RETRY_BASE_DELAY_S * (2**exponent))
+    return float(min(_RETRY_MAX_DELAY_S, _RETRY_BASE_DELAY_S * (2**exponent)))
 
 
 async def evaluate_interview_session_task(

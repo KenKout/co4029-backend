@@ -26,7 +26,7 @@ from typing import Any
 
 # Current schema version of the serialized state payload. Bump on incompatible
 # shape changes so ``from_dict`` can migrate old payloads if ever needed.
-STATE_SCHEMA_VERSION = 1
+STATE_SCHEMA_VERSION = 2
 
 
 class InterviewPhase(str, Enum):  # noqa: UP042 -- StrEnum changes value coercion; match codebase convention
@@ -133,18 +133,22 @@ class InterviewRuntimeStateData:
     consecutive_weak_answers: int = 0
     consecutive_strong_answers: int = 0
 
-    # ── Prompt-injection security counters (Phase S1) ────────────────────────
-    # Bounded, non-reversible security bookkeeping. NO raw malicious content is
-    # ever stored here (spec §8) — only counts, the last category label, and
-    # boolean flags. These live in the JSONB payload, so adding them needs NO DB
-    # migration (``from_dict`` tolerates their absence on older rows).
+    candidate_signals: CandidateSignals = field(default_factory=CandidateSignals)
+
+    # Bounded prompt-injection security state. Raw student content is never
+    # stored here; only counters, enums, a short fingerprint, and a turn key.
+    security_assessment_count: int = 0
     security_attempt_count: int = 0
     consecutive_security_attempts: int = 0
+    repeated_security_attempt_count: int = 0
+    output_leakage_prevented_count: int = 0
+    security_fallback_count: int = 0
     last_security_category: str | None = None
+    last_security_action: str | None = None
+    last_security_fingerprint: str | None = None
+    last_security_turn_key: str | None = None
     security_warning_issued: bool = False
     session_security_flagged: bool = False
-
-    candidate_signals: CandidateSignals = field(default_factory=CandidateSignals)
 
     # Schema version of this payload (NOT the DB optimistic-lock counter).
     version: int = STATE_SCHEMA_VERSION
@@ -166,12 +170,19 @@ class InterviewRuntimeStateData:
             "last_answer_analysis": self.last_answer_analysis,
             "consecutive_weak_answers": self.consecutive_weak_answers,
             "consecutive_strong_answers": self.consecutive_strong_answers,
+            "candidate_signals": self.candidate_signals.to_dict(),
+            "security_assessment_count": self.security_assessment_count,
             "security_attempt_count": self.security_attempt_count,
             "consecutive_security_attempts": self.consecutive_security_attempts,
+            "repeated_security_attempt_count": self.repeated_security_attempt_count,
+            "output_leakage_prevented_count": self.output_leakage_prevented_count,
+            "security_fallback_count": self.security_fallback_count,
             "last_security_category": self.last_security_category,
+            "last_security_action": self.last_security_action,
+            "last_security_fingerprint": self.last_security_fingerprint,
+            "last_security_turn_key": self.last_security_turn_key,
             "security_warning_issued": self.security_warning_issued,
             "session_security_flagged": self.session_security_flagged,
-            "candidate_signals": self.candidate_signals.to_dict(),
             "version": self.version,
         }
 
@@ -205,12 +216,27 @@ class InterviewRuntimeStateData:
             last_answer_analysis=data.get("last_answer_analysis"),
             consecutive_weak_answers=int(data.get("consecutive_weak_answers", 0)),
             consecutive_strong_answers=int(data.get("consecutive_strong_answers", 0)),
-            security_attempt_count=int(data.get("security_attempt_count", 0)),
-            consecutive_security_attempts=int(data.get("consecutive_security_attempts", 0)),
-            last_security_category=data.get("last_security_category"),
+            candidate_signals=CandidateSignals.from_dict(data.get("candidate_signals")),
+            security_assessment_count=max(0, int(data.get("security_assessment_count", 0))),
+            security_attempt_count=max(0, int(data.get("security_attempt_count", 0))),
+            consecutive_security_attempts=max(
+                0, int(data.get("consecutive_security_attempts", 0))
+            ),
+            repeated_security_attempt_count=max(
+                0, int(data.get("repeated_security_attempt_count", 0))
+            ),
+            output_leakage_prevented_count=max(
+                0, int(data.get("output_leakage_prevented_count", 0))
+            ),
+            security_fallback_count=max(0, int(data.get("security_fallback_count", 0))),
+            last_security_category=_optional_short_string(data.get("last_security_category")),
+            last_security_action=_optional_short_string(data.get("last_security_action")),
+            last_security_fingerprint=_optional_short_string(
+                data.get("last_security_fingerprint")
+            ),
+            last_security_turn_key=_optional_short_string(data.get("last_security_turn_key")),
             security_warning_issued=bool(data.get("security_warning_issued", False)),
             session_security_flagged=bool(data.get("session_security_flagged", False)),
-            candidate_signals=CandidateSignals.from_dict(data.get("candidate_signals")),
             version=int(data.get("version", STATE_SCHEMA_VERSION)),
         )
 
@@ -227,6 +253,12 @@ def _coverage_status(value: object) -> CoverageStatus:
         return CoverageStatus(value)
     except (ValueError, TypeError):
         return CoverageStatus.NOT_STARTED
+
+
+def _optional_short_string(value: object) -> str | None:
+    if isinstance(value, str) and value:
+        return value[:255]
+    return None
 
 
 __all__ = [

@@ -8,7 +8,7 @@ trivially unit-testable in isolation from the gateway.
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, cast
 
 _DEFAULT_TYPE_MIX: dict[str, int] = {"technical": 60, "behavioral": 30, "situational": 10}
 _DEFAULT_QUESTION_COUNT = 8
@@ -76,8 +76,10 @@ def _coerce_question_count(raw: object) -> int | None:
     """Parse + clamp a raw count to [1, 50]; None if unusable."""
     if raw is None or isinstance(raw, bool):
         return None
+    if not isinstance(raw, (str, bytes, bytearray, int, float)):
+        return None
     try:
-        count = int(raw)  # type: ignore[arg-type]
+        count = int(raw)
     except (TypeError, ValueError):
         return None
     return max(_MIN_QUESTION_COUNT, min(_MAX_QUESTION_COUNT, count))
@@ -94,7 +96,7 @@ def _try_parse_rubric(supplementary: str | None) -> dict[str, Any] | None:
         parsed = json.loads(stripped)
     except (TypeError, ValueError):
         return None
-    return parsed if isinstance(parsed, dict) else None
+    return cast(dict[str, Any], parsed) if isinstance(parsed, dict) else None
 
 
 __all__ = ["resolve_question_count", "resolve_type_mix"]

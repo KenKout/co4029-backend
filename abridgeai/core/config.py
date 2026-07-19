@@ -181,15 +181,13 @@ class Settings(BaseSettings):
     # keeping the lock indicators visible in dashboards.
     lesson_gating_enforced: bool = True
 
-    # Adaptive Interview Orchestrator. Product decision (2026-07): interviews are
-    # ALWAYS adaptive, so this now defaults ON and acts as the emergency KILL
-    # SWITCH — set ADAPTIVE_INTERVIEWER_ENABLED=false to force every session back
-    # to the legacy sequential take_session_step flow (e.g. if the gateway is
-    # degraded). When ON (default), sessions run through the stateful
-    # orchestrator (intent classification → answer analysis → decision →
-    # adaptive selection); the orchestrator always falls back to the sequential
-    # selector on any internal failure so a session is never lost.
-    adaptive_interviewer_enabled: bool = True
+    # Adaptive Interview Orchestrator (staged rollout). When OFF (default) the
+    # interview runtime uses the existing sequential take_session_step flow
+    # verbatim — zero behaviour change. When ON, sessions run through the
+    # stateful orchestrator (intent classification → answer analysis → decision
+    # → adaptive selection). The orchestrator always falls back to the
+    # sequential selector on any internal failure so a session is never lost.
+    adaptive_interviewer_enabled: bool = False
 
     # Mode-specific rollout controls (staged rollout, Phase 18+). The global
     # ``adaptive_interviewer_enabled`` above remains the MASTER switch / kill
@@ -233,29 +231,13 @@ class Settings(BaseSettings):
     # already be on for the percentage to matter.
     adaptive_interviewer_rollout_percent: int = Field(default=100, ge=0, le=100)
 
-    # Prompt-injection security guard (Phase S — defense-in-depth). Operations-
-    # only mode switch (teachers must NOT control it). Three modes:
-    #   "off"     — emergency only; the guard does not run, no assessment, no
-    #               blocking. Use to fully disable if the guard ever misbehaves.
-    #   "shadow"  — assess + observe every turn, but current behaviour stays
-    #               student-facing: nothing is blocked. This is the DEFAULT so
-    #               shipping the guard changes NOTHING students see until it is
-    #               explicitly promoted to enforce after false-positive review.
-    #   "enforce" — assess AND act: blocked requests get a deterministic safe
-    #               refusal/redirect; academic analysis/evidence are skipped for
-    #               the blocked turn.
-    # Applies uniformly to text, hybrid, and voice (all converge at
-    # take_session_step) and to both the adaptive and legacy paths, so the
-    # legacy fallback cannot bypass the guard.
+    # Prompt-injection guard is operations-only. ``shadow`` is the safe rollout
+    # default: assess and report without changing the learner experience.
+    # Production enforcement must be enabled explicitly by operators.
     interview_security_guard_mode: Literal["off", "shadow", "enforce"] = "shadow"
-
-    def security_guard_enforcing(self) -> bool:
-        """True only when the guard should BLOCK (enforce mode)."""
-        return self.interview_security_guard_mode == "enforce"
-
-    def security_guard_active(self) -> bool:
-        """True when the guard should at least ASSESS (shadow or enforce)."""
-        return self.interview_security_guard_mode in ("shadow", "enforce")
+    # Platform-level backstop for teacher policies that request termination.
+    # False means repeated attempts are flagged/warned but the session continues.
+    interview_security_allow_session_termination: bool = False
 
     def adaptive_enabled_for_mode(self, input_mode: str) -> bool:
         """Resolve whether the adaptive interviewer runs for an input mode.

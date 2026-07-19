@@ -60,10 +60,9 @@ EV_CLOSING_PLAYOUT = "voice.closing_playout"
 EV_SESSION_SUBMITTED = "voice.session_submitted"
 EV_EVALUATION_ENQUEUED = "voice.evaluation_enqueued"
 EV_TURN_ERROR = "voice.turn_error"
-# Prompt-injection security guard (Phase S1). Transport-agnostic (text/hybrid/
-# voice all route through take_session_step), so these are named "interview.*"
-# rather than "voice.*". Privacy contract: these events carry only category /
-# confidence band / action / counts / fingerprint — never raw student content.
+
+# Shared prompt-injection/output-integrity events. These use the same compact,
+# transcript-free emitter for REST, hybrid, and voice paths.
 EV_SECURITY_ASSESSED = "interview.security.assessed"
 EV_SECURITY_BLOCKED = "interview.security.blocked"
 EV_SECURITY_OUTPUT_LEAKAGE_BLOCKED = "interview.security.output_leakage_blocked"

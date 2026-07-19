@@ -14,6 +14,7 @@ stage's proven conventions:
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import TYPE_CHECKING
 
@@ -58,10 +59,12 @@ async def classify_intent(
     # 2) LLM classification (best-effort).
     try:
         system_prompt = render_prompt("prompts/intent_system.j2")
-        user_prompt = render_prompt(
-            "prompts/intent_user.j2",
-            question_text=question_text,
-            student_utterance=student_utterance,
+        user_prompt = json.dumps(
+            {
+                "current_question": question_text,
+                "student_utterance": student_utterance,
+            },
+            ensure_ascii=False,
         )
         gateway = gateway or LLMGateway()
         async with db.begin_nested():

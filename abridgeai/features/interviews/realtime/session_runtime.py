@@ -142,8 +142,10 @@ class InterviewAgent(Agent):
             # On a finished turn ``speak_text`` IS the (adaptive) closing —
             # force it non-interruptible so it can't be cut short. On a normal
             # turn keep the session default (NOT_GIVEN) — unchanged behaviour.
-            say_kwargs = {"allow_interruptions": False} if result.is_finished else {}
-            last_handle = self.session.say(result.speak_text, **say_kwargs)
+            if result.is_finished:
+                last_handle = self.session.say(result.speak_text, allow_interruptions=False)
+            else:
+                last_handle = self.session.say(result.speak_text)
             await last_handle
             obs.emit(
                 obs.EV_TTS_COMPLETED,

@@ -23,6 +23,7 @@ Audit fields
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
@@ -98,10 +99,9 @@ async def evaluate_outcomes(
 
     gateway = gateway or LLMGateway()
     system_prompt = render_prompt("prompts/outcome_system.j2")
-    user_prompt = render_prompt(
-        "prompts/outcome_user.j2",
-        transcript=transcript,
-        outcomes=outcome_views,
+    user_prompt = json.dumps(
+        {"transcript": transcript, "outcomes": outcome_views},
+        ensure_ascii=False,
     )
 
     llm_result = await gateway.generate_json(
@@ -134,7 +134,7 @@ def _build_transcript(
     for answer in answers:
         if not _is_candidate_answer(answer):
             continue
-        response_text = (getattr(answer, "content_text", None) or "").strip()
+        response_text = _candidate_response_text(answer)
         if not response_text:
             continue
         question_id = getattr(answer, "session_question_id", None)
@@ -225,16 +225,18 @@ async def evaluate_session(
         question_prompt = (
             prompts_by_question.get(question_id, "") if isinstance(question_id, UUID) else ""
         )
-        response_text = (getattr(answer, "content_text", None) or "").strip()
+        response_text = _candidate_response_text(answer)
         if not response_text:
             continue
 
-        user_prompt = render_prompt(
-            "prompts/user.j2",
-            question_prompt=question_prompt,
-            outcomes=outcome_views,
-            response_text=response_text,
-            criteria=list(expected_criteria),
+        user_prompt = json.dumps(
+            {
+                "question": question_prompt,
+                "outcomes": outcome_views,
+                "candidate_response": response_text,
+                "rubric_criteria": list(expected_criteria),
+            },
+            ensure_ascii=False,
         )
 
         llm_result = await gateway.generate_json(
@@ -281,6 +283,19 @@ def _is_candidate_answer(message: InterviewSessionMessage) -> bool:
     """Filter for student utterances; AI / system messages are not scored."""
 
     return getattr(message, "role", None) == "user"
+
+
+def _candidate_response_text(message: InterviewSessionMessage) -> str:
+    """Return only evidence-eligible text for post-session grading."""
+    metadata = getattr(message, "metadata_json", None) or {}
+    if isinstance(metadata, dict) and metadata.get("kind") in {
+        "security",
+        "turn_control",
+        "end_request",
+    }:
+        safe = metadata.get("safe_academic_text")
+        return safe.strip() if isinstance(safe, str) else ""
+    return (getattr(message, "content_text", None) or "").strip()
 
 
 def _resolve_session_question_id(

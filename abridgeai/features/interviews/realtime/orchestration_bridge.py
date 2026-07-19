@@ -67,7 +67,7 @@ async def _get_arq_pool() -> ArqRedis:
     return _arq_pool
 
 
-async def get_current_question_text(session_id: UUID) -> str | None:
+async def get_current_question_text(session_id: UUID, *, language: str = "en") -> str | None:
     """Prompt text of the session's current (highest-sequence) question.
 
     Used to speak the first question on join — and, on a mid-session rejoin,
@@ -77,8 +77,15 @@ async def get_current_question_text(session_id: UUID) -> str | None:
 
     from abridgeai.features.interviews.models import (  # noqa: PLC0415
         InterviewQuestion,
+        InterviewSession,
         InterviewSessionQuestion,
     )
+    from abridgeai.features.interviews.orchestrator.security import (  # noqa: PLC0415
+        SecurityAction,
+        SecurityAssessment,
+        SecurityCategory,
+    )
+    from abridgeai.features.interviews.services import security as security_service  # noqa: PLC0415
 
     async with get_sessionmaker()() as db:
         sq = (
@@ -92,7 +99,38 @@ async def get_current_question_text(session_id: UUID) -> str | None:
         if sq is None or sq.interview_question_id is None:
             return None
         question = await db.get(InterviewQuestion, sq.interview_question_id)
-        return question.prompt_text if question is not None else None
+        session = await db.get(InterviewSession, session_id)
+        if question is None or session is None:
+            return None
+        assessment = SecurityAssessment(
+            category=SecurityCategory.BENIGN,
+            detected=False,
+            confidence=1.0,
+            should_block=False,
+            should_record_academic_evidence=False,
+            response_key=None,
+            normalized_fingerprint=None,
+            source="livekit_output_boundary",
+        )
+        fallback = (
+            "Tôi có thể nhắc lại hoặc giải thích câu hỏi hiện tại."
+            if language.lower().startswith("vi")
+            else "I can repeat or clarify the current question."
+        )
+        guarded = await security_service.guard_student_output(
+            db,
+            session_id=session_id,
+            config_id=session.interview_config_id,
+            turn_key=f"livekit-current:{sq.id}",
+            proposed_text=question.prompt_text,
+            fallback_text=fallback,
+            allowed_question_ids=[question.id],
+            assessment=assessment,
+            action=SecurityAction.ALLOW,
+            attempt_count=0,
+        )
+        await db.commit()
+        return guarded.text
 
 
 async def handle_student_turn(
@@ -118,7 +156,14 @@ async def handle_student_turn(
     """
     actor = _build_actor(student_id)
     async with get_sessionmaker()() as db:
-        result = await take_session_step(db, session_id, transcript, actor, language=language)
+        result = await take_session_step(
+            db,
+            session_id,
+            transcript,
+            actor,
+            language=language,
+            turn_key=turn_id,
+        )
 
         # ``ai_turn_text`` is the adaptive combined utterance (ack + transition +
         # question/probe). It is present ONLY on the adaptive path; on the legacy
