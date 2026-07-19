@@ -16,6 +16,7 @@ Guardrails enforced here (requirement #8):
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import TYPE_CHECKING
 
@@ -69,14 +70,18 @@ async def generate_utterance(
 
     try:
         system_prompt = render_prompt("prompts/utterance_system.j2", language=(language or "en"))
-        user_prompt = render_prompt(
-            "prompts/utterance_user.j2",
-            persona=persona.value,
-            language=(language or "en"),
-            action=decision.action.value,
-            acknowledgement=fallback.acknowledgement,
-            transition=fallback.transition,
-            question_or_probe=fallback.question_or_probe,
+        user_prompt = json.dumps(
+            {
+                "persona": persona.value,
+                "language": language or "en",
+                "action": decision.action.value,
+                "approved_parts": {
+                    "acknowledgement": fallback.acknowledgement,
+                    "transition": fallback.transition,
+                    "question_or_probe": fallback.question_or_probe,
+                },
+            },
+            ensure_ascii=False,
         )
         gateway = gateway or LLMGateway()
         async with db.begin_nested():

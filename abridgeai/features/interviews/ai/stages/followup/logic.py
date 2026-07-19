@@ -25,6 +25,7 @@ Design constraints (plan §6414-6453):
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
@@ -95,11 +96,13 @@ async def maybe_generate_followup(
 
     try:
         system_prompt = render_prompt("prompts/system.j2")
-        user_prompt = render_prompt(
-            "prompts/user.j2",
-            question_text=current_question.prompt_text,
-            student_answer=answer,
-            related_chunks=chunk_views,
+        user_prompt = json.dumps(
+            {
+                "current_question": current_question.prompt_text,
+                "student_answer": answer,
+                "related_chunks": chunk_views,
+            },
+            ensure_ascii=False,
         )
 
         gateway = gateway or LLMGateway()

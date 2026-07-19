@@ -41,9 +41,16 @@ from abridgeai.features.interviews.models import (
     InterviewOutcomeEvaluation,
     InterviewSession,
     InterviewSessionMessage,
+    InterviewSessionQuestion,
+)
+from abridgeai.features.interviews.orchestrator.security import (
+    SecurityAction,
+    SecurityAssessment,
+    SecurityCategory,
 )
 from abridgeai.features.interviews.queries import authoring as authoring_queries
 from abridgeai.features.interviews.queries import sessions as sessions_queries
+from abridgeai.features.interviews.services import security as security_service
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -286,6 +293,58 @@ async def _persist_gap_report(
     module_id: UUID | None,
     draft: GapReportDraft,
 ) -> None:
+    # Gap-report prose is also learner-facing AI output. Guard the complete
+    # learner projection (summary + generated study-plan text) before it can be
+    # serialized by REST. Numeric rubric details remain teacher-only.
+    from sqlalchemy import select  # noqa: PLC0415
+
+    asked_question_ids = list(
+        (
+            await db.execute(
+                select(InterviewSessionQuestion.interview_question_id).where(
+                    InterviewSessionQuestion.session_id == session.id,
+                    InterviewSessionQuestion.interview_question_id.is_not(None),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    learner_parts = [draft.student_summary]
+    for item in draft.study_plan:
+        learner_parts.extend((item.topic, item.weakness_summary))
+    assessment = SecurityAssessment(
+        category=SecurityCategory.BENIGN,
+        detected=False,
+        confidence=1.0,
+        should_block=False,
+        should_record_academic_evidence=False,
+        response_key=None,
+        normalized_fingerprint=None,
+        source="gap_report_boundary",
+    )
+    guarded = await security_service.guard_student_output(
+        db,
+        session_id=session.id,
+        config_id=session.interview_config_id,
+        turn_key=f"gap-report:{session.id}",
+        proposed_text="\n".join(part for part in learner_parts if part),
+        fallback_text=(
+            "Your interview feedback could not be displayed safely. "
+            "Please ask your instructor for learning guidance."
+        ),
+        allowed_question_ids=[qid for qid in asked_question_ids if qid is not None],
+        assessment=assessment,
+        action=SecurityAction.ALLOW,
+        attempt_count=0,
+    )
+    report_json = dict(draft.report_json)
+    student_summary = draft.student_summary
+    if guarded.output_fallback_used:
+        student_summary = guarded.text
+        report_json["study_plan"] = []
+        report_json["strengths"] = []
+        report_json["weaknesses"] = []
     db.add(
         GapReport(
             student_id=session.student_id,
@@ -293,9 +352,9 @@ async def _persist_gap_report(
             module_id=module_id,
             source_quiz_attempt_id=None,
             source_interview_session_id=session.id,
-            student_summary=draft.student_summary,
+            student_summary=student_summary,
             teacher_summary=draft.teacher_summary,
-            report_json=dict(draft.report_json),
+            report_json=report_json,
         )
     )
     await flush_or_conflict(db)

@@ -87,7 +87,9 @@ async def entrypoint(ctx: JobContext) -> None:
 
     ctx.room.on("participant_disconnected", _on_participant_disconnected)
 
-    first_question_text = await bridge.get_current_question_text(interview_session_id)
+    first_question_text = await bridge.get_current_question_text(
+        interview_session_id, language=language
+    )
     agent = InterviewAgent(
         interview_session_id=interview_session_id,
         student_id=student_id,

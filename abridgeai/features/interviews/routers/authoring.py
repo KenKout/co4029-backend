@@ -68,6 +68,7 @@ from abridgeai.features.interviews.schemas import (
     InterviewSessionTeacherRead,
     InterviewTranscriptRead,
     InterviewTranscriptTurn,
+    SecuritySessionSummary,
 )
 from abridgeai.features.interviews.services import authoring as authoring_service
 
@@ -133,6 +134,7 @@ def _session_teacher_view(
     session: Any,  # noqa: ANN401  -- ORM row
     config_title: str,
     student_name: str | None,
+    security_summary: SecuritySessionSummary | None = None,
 ) -> InterviewSessionTeacherRead:
     return InterviewSessionTeacherRead(
         session_id=session.id,
@@ -146,6 +148,29 @@ def _session_teacher_view(
         pass_verdict=session.pass_verdict,
         started_at=session.started_at,
         ended_at=session.ended_at,
+        security_summary=security_summary,
+    )
+
+
+async def _security_summary_view(
+    db: AsyncSession,
+    session: Any,  # noqa: ANN401 -- ORM row
+    *,
+    enabled: bool,
+) -> SecuritySessionSummary | None:
+    if not enabled:
+        return None
+    from abridgeai.features.interviews.services import security as _security  # noqa: PLC0415
+
+    metrics = await _security.get_security_session_metrics(db, session.id)
+    return SecuritySessionSummary(
+        assessment_count=metrics.assessment_count,
+        blocked_attempt_count=metrics.blocked_attempt_count,
+        repeated_attempt_count=metrics.repeated_attempt_count,
+        output_leakage_prevented=metrics.output_leakage_prevented,
+        security_fallback_rate=metrics.security_fallback_rate,
+        average_classification_latency_ms=metrics.average_classification_latency_ms,
+        session_flagged=bool(session.session_security_flagged),
     )
 
 
@@ -187,12 +212,22 @@ async def list_course_interview_sessions(
             .all()
         )
         names = {row["id"]: row["name"] for row in name_rows}
-    return [
-        _session_teacher_view(
-            row.InterviewSession, row.title, names.get(row.InterviewSession.student_id)
+    result: list[InterviewSessionTeacherRead] = []
+    for row in rows:
+        summary = await _security_summary_view(
+            db,
+            row.InterviewSession,
+            enabled=bool(row.security_incident_summary_enabled),
         )
-        for row in rows
-    ]
+        result.append(
+            _session_teacher_view(
+                row.InterviewSession,
+                row.title,
+                names.get(row.InterviewSession.student_id),
+                summary,
+            )
+        )
+    return result
 
 
 @router.get(
@@ -231,7 +266,15 @@ async def list_student_interview_sessions(
         .first()
     )
     student_name = name_row["name"] if name_row else None
-    return [_session_teacher_view(row.InterviewSession, row.title, student_name) for row in rows]
+    result: list[InterviewSessionTeacherRead] = []
+    for row in rows:
+        summary = await _security_summary_view(
+            db,
+            row.InterviewSession,
+            enabled=bool(row.security_incident_summary_enabled),
+        )
+        result.append(_session_teacher_view(row.InterviewSession, row.title, student_name, summary))
+    return result
 
 
 @router.get("/interview-configs/{config_id}", response_model=InterviewForAuthoringPublic)
@@ -570,9 +613,19 @@ async def list_config_sessions(
     del current_user
     from sqlalchemy import text as _text  # noqa: PLC0415
 
+    from abridgeai.features.interviews.models import InterviewConfig  # noqa: PLC0415
     from abridgeai.features.interviews.queries import sessions as _sessions_q  # noqa: PLC0415
 
     sessions = await _sessions_q.list_sessions_for_config(db, config_id)
+    config = await db.get(InterviewConfig, config_id)
+    summaries = {
+        s.id: await _security_summary_view(
+            db,
+            s,
+            enabled=bool(config and config.security_incident_summary_enabled),
+        )
+        for s in sessions
+    }
     student_ids = {s.student_id for s in sessions}
     names: dict[UUID, str] = {}
     if student_ids:
@@ -603,6 +656,7 @@ async def list_config_sessions(
             pass_verdict=s.pass_verdict,
             started_at=s.started_at,
             ended_at=s.ended_at,
+            security_summary=summaries[s.id],
         )
         for s in sessions
     ]

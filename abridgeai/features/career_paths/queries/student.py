@@ -43,6 +43,18 @@ async def get_my_career_enrollment(
     return (await db.execute(stmt)).scalar_one_or_none()
 
 
+async def list_active_enrollee_student_ids(
+    db: AsyncSession, career_path_id: UUID
+) -> list[UUID]:
+    """Student ids of every ``active`` enrollee of the path (backfill target)."""
+    stmt = select(StudentCareerEnrollment.student_id).where(
+        StudentCareerEnrollment.career_path_id == career_path_id,
+        StudentCareerEnrollment.status == "active",
+        StudentCareerEnrollment.deleted_at.is_(None),
+    )
+    return list((await db.execute(stmt)).scalars().all())
+
+
 _PATH_COURSE_PROGRESS_SQL = text(
     """
     WITH path_courses AS (

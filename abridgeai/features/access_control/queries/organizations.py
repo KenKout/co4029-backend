@@ -22,6 +22,7 @@ from uuid import UUID, uuid4
 from sqlalchemy import insert, select, tuple_, update
 
 from abridgeai.core.db.recursive_delete import soft_delete_cascade
+from abridgeai.core.pagination import Page, paginate
 from abridgeai.features.access_control.models import (
     Organization,
     OrganizationDomain,
@@ -59,6 +60,42 @@ async def list_organizations(
     stmt = stmt.order_by(Organization.name, Organization.id).limit(limit)
     result = await db.execute(stmt)
     return list(result.scalars().all())
+
+
+async def search_organizations(
+    db: AsyncSession,
+    *,
+    include_deleted: bool = False,
+    status: str | None = None,
+    search: str | None = None,
+    sort: str | None = None,
+    sort_dir: str = "asc",
+    page: int = 0,
+    page_size: int = 25,
+) -> Page[Organization]:
+    """Offset page of organisations with server-side search (name/slug) +
+    whitelisted sort. Backs the page-numbered admin table."""
+    stmt = select(Organization)
+    if not include_deleted:
+        stmt = stmt.where(Organization.deleted_at.is_(None))
+    if status is not None:
+        stmt = stmt.where(Organization.status == status)
+    return await paginate(
+        db,
+        stmt,
+        page=page,
+        page_size=page_size,
+        search=search,
+        search_columns=[Organization.name, Organization.slug],
+        sort=sort,
+        sort_dir=sort_dir,
+        sortable={
+            "name": Organization.name,
+            "status": Organization.status,
+            "created_at": Organization.created_at,
+        },
+        default_order=[Organization.id],
+    )
 
 
 async def count_organizations(

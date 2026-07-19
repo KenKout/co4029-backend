@@ -11,6 +11,7 @@ from abridgeai.core.db.recursive_delete import soft_delete_cascade
 from abridgeai.core.exceptions import AppError, NotFoundError
 from abridgeai.features.career_paths.models import CareerPath, CareerPathCourse
 from abridgeai.features.career_paths.queries import authoring as authoring_queries
+from abridgeai.features.career_paths.queries import student as student_queries
 from abridgeai.features.career_paths.queries.published import (
     get_user_primary_organization_id,
 )
@@ -20,6 +21,7 @@ from abridgeai.features.career_paths.schemas import (
     CareerPathCreate,
     CareerPathUpdate,
 )
+from abridgeai.features.enrollments.api import public as enrollments_api
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -161,7 +163,17 @@ async def add_course_to_path(
     )
     db.add(link)
     await flush_or_conflict(db)
-    del actor
+
+    # Backfill course access for students already on the path when the newly
+    # attached course is required (additive + non-destructive — W3 plan).
+    if is_required:
+        for student_id in await student_queries.list_active_enrollee_student_ids(
+            db, career_path_id
+        ):
+            await enrollments_api.ensure_course_enrollment(
+                db, student_id=student_id, course_id=course_id, actor_id=actor.user_id
+            )
+
     rows = await authoring_queries.list_authoring_career_path_courses(db, career_path_id)
     target = next(row for row in rows if row["course_id"] == course_id)
     return CareerPathCourseAuthoring.model_validate(target)

@@ -30,6 +30,7 @@ Audit fields
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
@@ -138,14 +139,16 @@ async def generate_gap_report(
     evidence_excerpts = _evidence_excerpts(rubric_scores.response_evaluations)
 
     system_prompt = render_prompt("prompts/system.j2")
-    user_prompt = render_prompt(
-        "prompts/user.j2",
-        theory_score_avg=theory_score_avg,
-        practice_score=practice_score,
-        discrepancy_score=discrepancy_score,
-        rubric_aggregated=rubric_scores.aggregated,
-        evidence_excerpts=evidence_excerpts,
-        lesson_library=library,
+    user_prompt = json.dumps(
+        {
+            "theory_score_avg": theory_score_avg,
+            "practice_score": practice_score,
+            "discrepancy_score": discrepancy_score,
+            "rubric_aggregated": rubric_scores.aggregated,
+            "evidence_excerpts": evidence_excerpts,
+            "lesson_library": library,
+        },
+        ensure_ascii=False,
     )
 
     gateway = gateway or LLMGateway()

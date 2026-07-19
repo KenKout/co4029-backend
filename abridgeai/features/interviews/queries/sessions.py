@@ -120,7 +120,11 @@ async def list_sessions_for_course(db: AsyncSession, course_id: UUID) -> list[An
     (the interview config title) so the router avoids a second round-trip.
     """
     stmt = (
-        select(InterviewSession, InterviewConfig.title)
+        select(
+            InterviewSession,
+            InterviewConfig.title,
+            InterviewConfig.security_incident_summary_enabled,
+        )
         .join(InterviewConfig, InterviewConfig.id == InterviewSession.interview_config_id)
         .where(InterviewConfig.course_id == course_id)
         .order_by(InterviewSession.started_at.desc())
@@ -137,7 +141,11 @@ async def list_sessions_for_student_in_course(
     :func:`list_sessions_for_course`.
     """
     stmt = (
-        select(InterviewSession, InterviewConfig.title)
+        select(
+            InterviewSession,
+            InterviewConfig.title,
+            InterviewConfig.security_incident_summary_enabled,
+        )
         .join(InterviewConfig, InterviewConfig.id == InterviewSession.interview_config_id)
         .where(InterviewConfig.course_id == course_id, InterviewSession.student_id == student_id)
         .order_by(InterviewSession.started_at.desc())

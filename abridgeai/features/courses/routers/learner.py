@@ -88,9 +88,9 @@ async def _ensure_lesson_unlocked(
     if not get_settings().lesson_gating_enforced:
         return
 
-    from abridgeai.features.spaced_repetition.api import public as sr_public  # noqa: PLC0415
+    from abridgeai.features.spaced_repetition.sm2 import check_lesson_unlock  # noqa: PLC0415
 
-    unlock = await sr_public.check_lesson_unlock(
+    unlock = await check_lesson_unlock(
         db, student_id=current_user.user_id, lesson_id=lesson_id
     )
     if unlock.eligible:

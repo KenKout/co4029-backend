@@ -77,9 +77,9 @@ class InterviewOutcomePublic(_ORMModel):
     """Student-facing projection of one ``InterviewOutcome`` row.
 
     SECURITY INVARIANT: ``importance_weight`` MUST NOT appear here.
-    The student is told *what* outcomes are being evaluated (so the
-    interview feels transparent) but never *how heavily* each one
-    counts toward the verdict.
+    Retained for backwards schema compatibility. The learner taking endpoint
+    returns no outcomes because the complete outcome set is protected rubric
+    and coverage metadata.
     """
 
     id: UUID
@@ -123,8 +123,7 @@ class InterviewConfigPublic(_ORMModel):
     * ``supplementary_instructions`` — author-only notes.
     * ``generation_run_id`` — pipeline linkage.
     * ``min_outcomes_to_pass`` — exposing the pass threshold lets a
-      student stop trying once they've cleared it; reveal it post-hoc
-      via the session-finish payload instead.
+      student stop trying once they've cleared it; it remains teacher-only.
     * Audit + soft-delete columns.
     """
 
@@ -145,9 +144,9 @@ class InterviewConfigPublic(_ORMModel):
 class InterviewForTakingPublic(_ORMModel):
     """Composed take-interview start payload.
 
-    Carries the published config, the rubric outcomes (so the student
-    knows what they're being evaluated on — without weights), and the
-    **first** question only. Subsequent questions are revealed via
+    Carries the published config and the **first** question only. Outcome and
+    coverage metadata are deliberately absent from the learner contract.
+    Subsequent questions are revealed via
     ``POST /interviews/sessions/{id}/respond`` per T6.12 session flow.
 
     Plan §6.2 explicit MUST NOT: do not bake all questions into the
@@ -156,7 +155,6 @@ class InterviewForTakingPublic(_ORMModel):
     """
 
     config: InterviewConfigPublic
-    outcomes: list[InterviewOutcomePublic] = []
     first_question: InterviewQuestionPublic | None = None
 
 

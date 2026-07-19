@@ -49,13 +49,24 @@ async def compute_readiness_score(
 async def snapshot_enrollment(
     db: AsyncSession, *, career_path_id: UUID, student_id: UUID
 ) -> Decimal:
-    """Compute + persist one snapshot; returns the stored score."""
+    """Compute + persist one snapshot; returns the stored score.
+
+    Also flips the enrollment to ``completed`` ("prepared") once the score
+    reaches 100 — the authoritative backstop to the lazy flip on the
+    learner read path.
+    """
     score = await compute_readiness_score(db, career_path_id=career_path_id, student_id=student_id)
     await readiness_queries.insert_snapshot(
         db,
         student_id=student_id,
         career_path_id=career_path_id,
         readiness_score=score,
+    )
+    await enrollment_service.sync_enrollment_completion(
+        db,
+        career_path_id=career_path_id,
+        student_id=student_id,
+        overall_percent=float(score),
     )
     return score
 

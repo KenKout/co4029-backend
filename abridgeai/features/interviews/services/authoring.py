@@ -141,16 +141,20 @@ async def create_interview_config(
         module_id=module_id,
         title=data["title"],
         persona=data.get("persona"),
-        # Interviews are always hybrid now (AI speaks + writes; student types or
-        # speaks) — ignore any client-supplied value and pin to hybrid. The
-        # column is retained (not dropped) so the change is reversible.
-        supported_modes="hybrid",
+        supported_modes=data.get("supported_modes", "hybrid"),
         time_limit_minutes=data.get("time_limit_minutes"),
         max_attempts=data.get("max_attempts"),
         cooldown_hours=data.get("cooldown_hours"),
         min_outcomes_to_pass=data.get("min_outcomes_to_pass"),
         lock_quiz_ef_until_pass=bool(data.get("lock_quiz_ef_until_pass", False)),
         supplementary_instructions=data.get("supplementary_instructions"),
+        security_response_policy=data.get("security_response_policy", "warn_and_continue"),
+        security_max_consecutive_attempts=data.get("security_max_consecutive_attempts", 3),
+        security_custom_refusal_en=data.get("security_custom_refusal_en"),
+        security_custom_refusal_vi=data.get("security_custom_refusal_vi"),
+        security_incident_summary_enabled=bool(
+            data.get("security_incident_summary_enabled", True)
+        ),
         created_by=actor.user_id,
     )
     db.add(config)
@@ -174,9 +178,6 @@ async def update_interview_config(
     del actor
     config = await _require_config(db, config_id)
     _apply_patch(config, payload)
-    # Interviews are always hybrid now — never let a PATCH downgrade the mode,
-    # even if a stale client sends supported_modes=text/voice.
-    config.supported_modes = "hybrid"
     await flush_or_conflict(db)
     await db.refresh(config)
     return config
@@ -229,7 +230,8 @@ async def unarchive_interview_config(
     config = await _require_config(db, config_id)
     if config.status != "archived":
         raise AppError(
-            f"Cannot unarchive interview config {config_id} — status is '{config.status}', expected 'archived'"
+            f"Cannot unarchive interview config {config_id} — "
+            f"status is '{config.status}', expected 'archived'"
         )
     config.status = "draft"
     await flush_or_conflict(db)
@@ -244,7 +246,8 @@ async def unpublish_interview_config(
     config = await _require_config(db, config_id)
     if config.status != "published":
         raise AppError(
-            f"Cannot unpublish interview config {config_id} — status is '{config.status}', expected 'published'"
+            f"Cannot unpublish interview config {config_id} — "
+            f"status is '{config.status}', expected 'published'"
         )
     config.status = "draft"
     config.published_at = None

@@ -177,6 +177,7 @@ from sqlalchemy import (
     Boolean,
     CheckConstraint,
     DateTime,
+    Float,
     ForeignKey,
     Integer,
     String,
@@ -213,6 +214,15 @@ class InterviewConfig(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftD
             "supported_modes IN ('voice', 'text', 'hybrid')",
             name="ck_interview_configs_supported_modes",
         ),
+        CheckConstraint(
+            "security_response_policy IN "
+            "('continue_and_log', 'warn_and_continue', 'end_and_flag')",
+            name="ck_interview_configs_security_response_policy",
+        ),
+        CheckConstraint(
+            "security_max_consecutive_attempts BETWEEN 2 AND 20",
+            name="ck_interview_configs_security_max_attempts",
+        ),
     )
 
     course_id: Mapped[uuid.UUID] = mapped_column(
@@ -243,6 +253,17 @@ class InterviewConfig(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftD
         String(20), nullable=False, server_default=text("'hybrid'")
     )
     supplementary_instructions: Mapped[str | None] = mapped_column(Text)
+    security_response_policy: Mapped[str] = mapped_column(
+        String(30), nullable=False, server_default=text("'warn_and_continue'")
+    )
+    security_max_consecutive_attempts: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("3")
+    )
+    security_custom_refusal_en: Mapped[str | None] = mapped_column(Text)
+    security_custom_refusal_vi: Mapped[str | None] = mapped_column(Text)
+    security_incident_summary_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("TRUE")
+    )
     generation_run_id: Mapped[uuid.UUID | None] = mapped_column(
         PGUUID(as_uuid=True),
         ForeignKey("generation_runs.id", ondelete="SET NULL"),
@@ -399,6 +420,21 @@ class InterviewSession(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     internal_summary_json: Mapped[dict[str, Any]] = mapped_column(
         JSONB, nullable=False, server_default=text("'{}'::jsonb")
     )
+    security_policy_version: Mapped[str] = mapped_column(
+        String(32), nullable=False, server_default=text("'2026-07-19'")
+    )
+    security_rules_version: Mapped[str] = mapped_column(
+        String(32), nullable=False, server_default=text("'1.0.0'")
+    )
+    security_prompt_version: Mapped[str] = mapped_column(
+        String(32), nullable=False, server_default=text("'1.0.0'")
+    )
+    output_guard_version: Mapped[str] = mapped_column(
+        String(32), nullable=False, server_default=text("'1.0.0'")
+    )
+    session_security_flagged: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("FALSE")
+    )
 
     questions: Mapped[list[InterviewSessionQuestion]] = relationship(
         back_populates="session",
@@ -418,6 +454,10 @@ class InterviewSession(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         back_populates="session",
         cascade="save-update, merge, refresh-expire, expunge",
         foreign_keys="[AssessmentIntegrityEvent.interview_session_id]",
+    )
+    security_events: Mapped[list[InterviewSecurityEvent]] = relationship(
+        back_populates="session",
+        cascade="save-update, merge, refresh-expire, expunge",
     )
 
 
@@ -597,6 +637,54 @@ class AssessmentIntegrityEvent(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
     )
 
 
+class InterviewSecurityEvent(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
+    """Redacted, idempotent prompt-injection/output-guard audit event."""
+
+    __tablename__ = "interview_security_events"
+    __table_args__ = (
+        UniqueConstraint(
+            "session_id", "turn_id", "event_type", name="uq_interview_security_event"
+        ),
+        CheckConstraint(
+            "event_type IN ('interview.security.assessed', "
+            "'interview.security.blocked', "
+            "'interview.security.output_leakage_blocked', "
+            "'interview.security.repeated_attempt', "
+            "'interview.security.session_flagged')",
+            name="ck_interview_security_events_type",
+        ),
+        CheckConstraint(
+            "confidence_band IN ('low', 'medium', 'high')",
+            name="ck_interview_security_events_confidence_band",
+        ),
+    )
+
+    session_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("interview_sessions.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    turn_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    event_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    category: Mapped[str] = mapped_column(String(64), nullable=False)
+    confidence_band: Mapped[str] = mapped_column(String(10), nullable=False)
+    action: Mapped[str] = mapped_column(String(40), nullable=False)
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    fallback_status: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("FALSE")
+    )
+    normalized_fingerprint: Mapped[str | None] = mapped_column(String(64))
+    protected_content_category: Mapped[str | None] = mapped_column(String(64))
+    policy_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    rules_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    prompt_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    output_guard_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    latency_ms: Mapped[float | None] = mapped_column(Float)
+
+    session: Mapped[InterviewSession] = relationship(back_populates="security_events")
+
+
 class InterviewRuntimeState(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     """Persistent adaptive-interviewer runtime state (Phase 1).
 
@@ -651,6 +739,7 @@ __all__ = [
     "InterviewOutcomeEvaluation",
     "InterviewQuestion",
     "InterviewRuntimeState",
+    "InterviewSecurityEvent",
     "InterviewSession",
     "InterviewSessionMessage",
     "InterviewSessionQuestion",

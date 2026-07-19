@@ -41,6 +41,8 @@ from abridgeai.features.interviews.schemas.authoring import (
     InterviewTranscriptRead,
     InterviewTranscriptTurn,
     ReviewStatusLiteral,
+    SecurityResponsePolicyLiteral,
+    SecuritySessionSummary,
 )
 from abridgeai.features.interviews.schemas.integrity import (
     IntegrityEventBatchRequest,
@@ -116,6 +118,8 @@ __all__ = [
     "QuestionTypeLiteral",
     "RealtimeTokenResponse",
     "ReviewStatusLiteral",
+    "SecurityResponsePolicyLiteral",
+    "SecuritySessionSummary",
     "SessionStatusLiteral",
     "StudyPlanItem",
     "SupportedModesLiteral",

@@ -71,7 +71,9 @@ async def list_my_career_enrollments(
     current_user: Annotated[CurrentUser, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> list[MyCareerEnrollmentRead]:
-    return await enrollment_service.list_my_career_enrollments(db, current_user.user_id)
+    result = await enrollment_service.list_my_career_enrollments(db, current_user.user_id)
+    await db.commit()
+    return result
 
 
 @me_router.get(
@@ -83,11 +85,21 @@ async def get_my_career_path_progress(
     current_user: Annotated[CurrentUser, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> CareerPathProgressRead:
-    return await enrollment_service.get_my_path_progress(
+    progress = await enrollment_service.get_my_path_progress(
         db,
         career_path_id=career_path_id,
         student_id=current_user.user_id,
     )
+    # "Prepared" milestone: mark the enrollment completed once fully done.
+    flipped = await enrollment_service.sync_enrollment_completion(
+        db,
+        career_path_id=career_path_id,
+        student_id=current_user.user_id,
+        overall_percent=progress.overall_percent,
+    )
+    if flipped:
+        await db.commit()
+    return progress
 
 
 @me_router.get(
