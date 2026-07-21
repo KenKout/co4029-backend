@@ -15,10 +15,12 @@ from abridgeai.core.security import CurrentUser, utcnow
 from abridgeai.features.interviews.models import InterviewSession, InterviewSessionMessage
 from abridgeai.features.interviews.services.ceremony import (
     CeremonyKind,
+    ask_preferred_name_text,
     ensure_ceremony_message,
     normalize_language,
     onboarding_ceremony_kind,
     onboarding_retry_text,
+    preferred_name_ack_text,
 )
 
 if TYPE_CHECKING:
@@ -49,9 +51,19 @@ def _language_choice(text: str | None) -> str | None:
 def _natural_decision(text: str | None, stage: str | None = None) -> str:
     value = f" {_normalized_words(text)} "
     negative = (
-        " not ready ", " not yet ", " cannot hear ", " cant hear ", " can t hear ",
-        " no audio ", " need a moment ", " wrong name ", " isnt my name ",
-        " chua san sang ", " khong nghe ", " can mot chut ", " sai ten ",
+        " not ready ",
+        " not yet ",
+        " cannot hear ",
+        " cant hear ",
+        " can t hear ",
+        " no audio ",
+        " need a moment ",
+        " wrong name ",
+        " isnt my name ",
+        " chua san sang ",
+        " khong nghe ",
+        " can mot chut ",
+        " sai ten ",
         " khong phai ten ",
     )
     if any(token in value for token in negative):
@@ -59,10 +71,26 @@ def _natural_decision(text: str | None, stage: str | None = None) -> str:
     if stage == "language_check" and _language_choice(text) is not None:
         return "advance"
     positive = (
-        " yes ", " ready ", " audio is clear ", " hear you ", " thats me ",
-        " my name is ", " i am ", " all good ", " okay ", " ok ",
-        " continue ", " no adjustment ", " san sang ", " nghe ro ",
-        " dung roi ", " toi la ", " tiep tuc ", " vang ", " duoc ", " tot ",
+        " yes ",
+        " ready ",
+        " audio is clear ",
+        " hear you ",
+        " thats me ",
+        " my name is ",
+        " i am ",
+        " all good ",
+        " okay ",
+        " ok ",
+        " continue ",
+        " no adjustment ",
+        " san sang ",
+        " nghe ro ",
+        " dung roi ",
+        " toi la ",
+        " tiep tuc ",
+        " vang ",
+        " duoc ",
+        " tot ",
     )
     return "advance" if any(token in value for token in positive) else "unclear"
 
@@ -96,17 +124,13 @@ def _guided_text(action: str | None, language: str) -> str:
         "confirm_identity": "Đúng là tôi." if vi else "Yes, that’s me.",
         "audio_clear": "Tôi nghe rõ." if vi else "The audio is clear.",
         "confirm_language": (
-            "Tôi muốn tiếp tục bằng tiếng Việt."
-            if vi
-            else "I’d like to continue in English."
+            "Tôi muốn tiếp tục bằng tiếng Việt." if vi else "I’d like to continue in English."
         ),
         "continue_setup": "Tôi muốn tiếp tục." if vi else "I’m ready to continue.",
         # Keep the previous combined action readable for older clients.
         "confirm_setup": "Đúng, âm thanh rõ ràng." if vi else "Yes, that’s me. The audio is clear.",
         "needs_adjustment": (
-            "Tôi cần thêm một chút thời gian."
-            if vi
-            else "I need a moment to adjust my audio."
+            "Tôi cần thêm một chút thời gian." if vi else "I need a moment to adjust my audio."
         ),
         "ready": "Tôi đã sẵn sàng bắt đầu." if vi else "I’m ready to begin.",
         "not_ready": "Tôi chưa sẵn sàng." if vi else "I’m not ready yet.",
@@ -140,7 +164,12 @@ async def respond(  # noqa: C901 - explicit persisted state machine
     if stage != session.onboarding_stage:
         raise AppError(f"Expected onboarding stage {session.onboarding_stage}")
     allowed_actions = {
-        "identity_check": {"confirm_identity", "confirm_setup"},
+        "identity_check": {
+            "confirm_identity",
+            "confirm_setup",
+            "reject_identity",
+            "set_name",
+        },
         "audio_check": {"audio_clear", "needs_adjustment"},
         "language_check": {"confirm_language"},
         "preparation": {"continue_setup", "needs_adjustment"},
@@ -171,8 +200,10 @@ async def respond(  # noqa: C901 - explicit persisted state machine
         "ready",
     }:
         decision = "advance"
-    elif action in {"needs_adjustment", "not_ready"}:
+    elif action in {"needs_adjustment", "not_ready", "reject_identity"}:
         decision = "hold"
+    elif action == "set_name":
+        decision = "advance"
 
     db.add(
         InterviewSessionMessage(
@@ -181,8 +212,11 @@ async def respond(  # noqa: C901 - explicit persisted state machine
             role="user",
             content_text=text,
             metadata_json={
-                "kind": "onboarding", "onboarding_stage": stage,
-                "action": action, "decision": decision, "language": lang,
+                "kind": "onboarding",
+                "onboarding_stage": stage,
+                "action": action,
+                "decision": decision,
+                "language": lang,
                 "turn_key": turn_key,
             },
         )
@@ -197,19 +231,34 @@ async def respond(  # noqa: C901 - explicit persisted state machine
         return OnboardingResult(session=session, ai_text=await _current_ai_text(db, session))
 
     if decision != "advance":
-        retry = onboarding_retry_text(stage=stage, language=lang)
+        if action == "reject_identity":
+            retry = ask_preferred_name_text(language=lang)
+        else:
+            retry = onboarding_retry_text(stage=stage, language=lang)
         db.add(
             InterviewSessionMessage(
-                session_id=session.id, session_question_id=None, role="ai",
+                session_id=session.id,
+                session_question_id=None,
+                role="ai",
                 content_text=retry,
                 metadata_json={
-                    "kind": "onboarding", "onboarding_stage": stage,
-                    "response_kind": decision, "language": lang,
+                    "kind": "onboarding",
+                    "onboarding_stage": stage,
+                    "response_kind": decision,
+                    "language": lang,
+                    **({"awaiting": "preferred_name"} if action == "reject_identity" else {}),
                 },
             )
         )
         await db.flush()
         return OnboardingResult(session=session, ai_text=retry)
+
+    # The candidate provided their preferred name: persist it (session-scoped,
+    # never written to their profile) and acknowledge before advancing.
+    ack_text: str | None = None
+    if action == "set_name":
+        session.preferred_name = text[:60]
+        ack_text = preferred_name_ack_text(name=session.preferred_name, language=lang)
 
     next_stage = {
         "identity_check": "audio_check",
@@ -225,7 +274,11 @@ async def respond(  # noqa: C901 - explicit persisted state machine
             kind=onboarding_ceremony_kind(next_stage),
             language=lang,
         )
-        return OnboardingResult(session=session, ai_text=message.content_text)
+        # When the candidate just set their name, the acknowledgement already
+        # carries the audio-check question, so surface it instead of the
+        # generic audio-check ceremony text (the ceremony row still persists in
+        # the transcript for a consistent canonical record).
+        return OnboardingResult(session=session, ai_text=ack_text or message.content_text)
 
     session.onboarding_stage = "completed"
     if session.assessment_started_at is None:

@@ -215,8 +215,7 @@ class InterviewConfig(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftD
             name="ck_interview_configs_supported_modes",
         ),
         CheckConstraint(
-            "security_response_policy IN "
-            "('continue_and_log', 'warn_and_continue', 'end_and_flag')",
+            "security_response_policy IN ('continue_and_log', 'warn_and_continue', 'end_and_flag')",
             name="ck_interview_configs_security_response_policy",
         ),
         CheckConstraint(
@@ -422,6 +421,11 @@ class InterviewSession(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     interview_language: Mapped[str] = mapped_column(
         String(5), nullable=False, server_default=text("'en'")
     )
+    # Session-scoped conversational name. Set when the candidate corrects the
+    # profile-derived name during identity_check ("that isn't my name"). Never
+    # written back to the user's profile — it only affects how the interviewer
+    # addresses them within this session.
+    preferred_name: Mapped[str | None] = mapped_column(String(60))
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     resume_deadline_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     transcript_object_id: Mapped[uuid.UUID | None] = mapped_column(
@@ -658,9 +662,7 @@ class InterviewSecurityEvent(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
 
     __tablename__ = "interview_security_events"
     __table_args__ = (
-        UniqueConstraint(
-            "session_id", "turn_id", "event_type", name="uq_interview_security_event"
-        ),
+        UniqueConstraint("session_id", "turn_id", "event_type", name="uq_interview_security_event"),
         CheckConstraint(
             "event_type IN ('interview.security.assessed', "
             "'interview.security.blocked', "

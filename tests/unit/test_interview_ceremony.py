@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from abridgeai.features.interviews.services.ceremony import (
+    ask_preferred_name_text,
     audio_check_text,
     briefing_text,
     candidate_first_name,
@@ -12,7 +13,9 @@ from abridgeai.features.interviews.services.ceremony import (
     language_check_text,
     normalize_language,
     opening_text,
+    preferred_name_ack_text,
     preparation_text,
+    session_address_name,
 )
 
 
@@ -80,15 +83,11 @@ def test_closing_is_a_final_statement_for_every_reason(reason: str) -> None:
 
 def test_candidate_name_prefers_given_name_then_display_name() -> None:
     assert (
-        candidate_first_name(
-            SimpleNamespace(given_name="  Ada  ", display_name="Ada Lovelace")
-        )
+        candidate_first_name(SimpleNamespace(given_name="  Ada  ", display_name="Ada Lovelace"))
         == "Ada"
     )
     assert (
-        candidate_first_name(
-            SimpleNamespace(given_name=None, display_name="Grace Hopper")
-        )
+        candidate_first_name(SimpleNamespace(given_name=None, display_name="Grace Hopper"))
         == "Grace"
     )
     assert candidate_first_name(None) is None
@@ -98,3 +97,40 @@ def test_language_normalization_defaults_to_english() -> None:
     assert normalize_language("vi-VN") == "vi"
     assert normalize_language("en-GB") == "en"
     assert normalize_language(None) == "en"
+
+
+def test_ask_preferred_name_is_a_single_open_question() -> None:
+    en = ask_preferred_name_text(language="en")
+    vi = ask_preferred_name_text(language="vi")
+    assert en == "No problem. What should I call you?"
+    assert "gọi bạn là gì" in vi
+
+
+def test_preferred_name_ack_uses_the_new_name_and_advances_to_audio() -> None:
+    en = preferred_name_ack_text(name="  Robin ", language="en")
+    assert "Robin" in en
+    # Acknowledgement flows straight into the audio check question.
+    assert "hear me clearly" in en
+    vi = preferred_name_ack_text(name="Robin", language="vi")
+    assert "Robin" in vi
+    assert "nghe rõ" in vi
+
+
+def test_session_address_name_prefers_session_scoped_preferred_name() -> None:
+    profile = SimpleNamespace(given_name="Alexander", display_name="Alexander Doe")
+    # No preferred name → profile first name.
+    assert session_address_name(SimpleNamespace(preferred_name=None), profile) == "Alexander"
+    # Preferred name set → it wins over the profile.
+    assert session_address_name(SimpleNamespace(preferred_name="Xander"), profile) == "Xander"
+    # Blank preferred name is ignored (falls back to profile).
+    assert session_address_name(SimpleNamespace(preferred_name="   "), profile) == "Alexander"
+
+
+def test_opening_uses_preferred_name_when_set() -> None:
+    result = opening_text(
+        title="Backend Engineering",
+        name="Xander",
+        persona="neutral",
+        language="en",
+    )
+    assert result.endswith("speaking with Xander?")
