@@ -156,6 +156,7 @@ def _fallback_parts(  # noqa: C901 -- flat per-action dispatch; readability > sp
         InterviewerActionType.EXPLORE_TRADEOFF,
         InterviewerActionType.RESOLVE_CONTRADICTION,
         InterviewerActionType.CLARIFY_WITHOUT_REVEALING_ANSWER,
+        InterviewerActionType.PROVIDE_NEUTRAL_HINT,
         InterviewerActionType.REFRAME_QUESTION,
     ):
         # Probe text is supplied by the caller (from analysis / a reframing);
@@ -196,14 +197,8 @@ def _fallback_parts(  # noqa: C901 -- flat per-action dispatch; readability > sp
 
     if action in (InterviewerActionType.BEGIN_CLOSING, InterviewerActionType.CLOSE_INTERVIEW):
         closing = {
-            "en": (
-                "That concludes the interview. Before we finish, is there anything "
-                "you would like to clarify or add?"
-            ),
-            "vi": (
-                "Buổi phỏng vấn đến đây là kết thúc. Trước khi dừng lại, bạn có muốn "
-                "làm rõ hay bổ sung điều gì không?"
-            ),
+            "en": "Thank you. That concludes the interview.",
+            "vi": "Cảm ơn bạn. Buổi phỏng vấn kết thúc tại đây.",
         }[lang]
         return ack, "", closing
 
@@ -242,6 +237,14 @@ def _generic_probe(action: InterviewerActionType, persona: Persona, lang: str) -
         ),
         (InterviewerActionType.CLARIFY_WITHOUT_REVEALING_ANSWER, "vi"): (
             "Bạn muốn tôi diễn đạt lại phần nào của câu hỏi?"
+        ),
+        (InterviewerActionType.PROVIDE_NEUTRAL_HINT, "en"): (
+            "A small hint: organize your answer around the main concepts in the question "
+            "and how they relate."
+        ),
+        (InterviewerActionType.PROVIDE_NEUTRAL_HINT, "vi"): (
+            "Gợi ý nhỏ: hãy sắp xếp câu trả lời theo các khái niệm chính trong câu hỏi "
+            "và mối quan hệ giữa chúng."
         ),
         (InterviewerActionType.REFRAME_QUESTION, "en"): "Let me put the question another way.",
         (InterviewerActionType.REFRAME_QUESTION, "vi"): "Để tôi diễn đạt câu hỏi theo cách khác.",

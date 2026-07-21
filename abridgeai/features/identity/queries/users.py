@@ -13,6 +13,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from abridgeai.core.pagination import Page, paginate
 from abridgeai.features.identity.models import AuthIdentity, User, UserProfile
 
 
@@ -64,6 +65,44 @@ async def list_users(
         stmt = stmt.where(User.id > after)
     result = await db.execute(stmt)
     return list(result.scalars().all())
+
+
+async def search_users(
+    db: AsyncSession,
+    *,
+    status: str | None = None,
+    search: str | None = None,
+    sort: str | None = None,
+    sort_dir: str = "asc",
+    page: int = 0,
+    page_size: int = 25,
+) -> Page[User]:
+    """Offset page of users with server-side search (email / display name) +
+    whitelisted sort. Backs the page-numbered admin table.
+
+    ``display_name`` lives on ``user_profiles``, so we ``outerjoin`` it for the
+    search predicate; the SELECT still yields ``User`` rows only (the profile
+    is loaded separately by the service, matching :func:`list_users`).
+    """
+    stmt = select(User).outerjoin(UserProfile, UserProfile.user_id == User.id)
+    if status is not None:
+        stmt = stmt.where(User.status == status)
+    return await paginate(
+        db,
+        stmt,
+        page=page,
+        page_size=page_size,
+        search=search,
+        search_columns=[User.primary_email, UserProfile.display_name],
+        sort=sort,
+        sort_dir=sort_dir,
+        sortable={
+            "email": User.primary_email,
+            "status": User.status,
+            "created_at": User.created_at,
+        },
+        default_order=[User.id],
+    )
 
 
 async def list_profiles(db: AsyncSession, user_ids: Sequence[UUID]) -> list[UserProfile]:

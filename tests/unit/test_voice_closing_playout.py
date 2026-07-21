@@ -152,6 +152,28 @@ class _FakeMessage:
         self.text_content = text
 
 
+@pytest.mark.asyncio
+async def test_opening_plays_out_before_first_question(monkeypatch: Any) -> None:
+    agent = sr.InterviewAgent(
+        interview_session_id=uuid4(),
+        student_id=uuid4(),
+        opening_text="Welcome to the interview.",
+        first_question_text="Tell me about dependency injection.",
+        language="en",
+    )
+    session = _FakeSession()
+    monkeypatch.setattr(type(agent), "session", property(lambda self: session))
+
+    await agent.on_enter()
+
+    assert [text for text, _kwargs in session.says] == [
+        "Welcome to the interview.",
+        "Tell me about dependency injection.",
+    ]
+    assert session.says[0][1]["allow_interruptions"] is False
+    assert session.says[1][1]["allow_interruptions"] is False
+
+
 def bridge_result(*, speak_text: str, is_finished: bool, suppress_default_closing: bool) -> Any:
     from abridgeai.features.interviews.realtime.orchestration_bridge import TurnResult
 

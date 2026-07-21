@@ -164,3 +164,38 @@ async def test_result_reports_strict_fields(stub_live: dict[str, Any], tmp_path:
     assert payload["adaptive_required"] is True
     assert payload["state_version"] == 2
     assert payload["decision_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_security_block_requirement_passes_from_persisted_events(
+    stub_live: dict[str, Any], tmp_path: Path
+) -> None:
+    stub_live.update(
+        security_assessment_count=3,
+        security_blocked_count=3,
+        security_categories=["answer_key_request", "system_prompt_request"],
+        security_actions=["refuse_and_redirect", "warn_and_redirect"],
+    )
+    result = await run_harness.run_scenario(
+        out_dir=str(tmp_path / "o"),
+        require_security_blocks=3,
+    )
+    assert result.required_security_blocks == 3
+    assert result.security_requirement_met is True
+    assert result.security_blocked_count == 3
+    assert result.ok is True
+
+
+@pytest.mark.asyncio
+async def test_security_block_requirement_fails_when_stt_turn_was_not_blocked(
+    stub_live: dict[str, Any], tmp_path: Path
+) -> None:
+    stub_live.update(security_assessment_count=3, security_blocked_count=2)
+    result = await run_harness.run_scenario(
+        out_dir=str(tmp_path / "o"),
+        require_security_blocks=3,
+    )
+    assert result.security_requirement_met is False
+    assert result.ok is False
+    assert result.error is not None
+    assert "blocked=2" in result.error

@@ -14,6 +14,7 @@ persist. Tests cover:
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -105,6 +106,80 @@ async def test_evaluates_each_response() -> None:
     assert len(result.response_evaluations) == 2
     assert gateway.generate_json.await_count == 2
     assert {ev.session_question_id for ev in result.response_evaluations} == {q1, q2}
+
+
+@pytest.mark.asyncio
+async def test_unanswered_questions_receive_zero_and_reduce_total_score() -> None:
+    session = _make_session()
+    answered_id, unanswered_id = uuid4(), uuid4()
+    questions = [
+        _make_question(answered_id, "Answered?"),
+        _make_question(unanswered_id, "Skipped?"),
+    ]
+    gateway = _gateway_returning([_llm_payload(dict.fromkeys(DEFAULT_CRITERIA, 4))])
+
+    result = await evaluate_session(
+        AsyncMock(),
+        session=session,
+        outcomes=[],
+        questions=questions,
+        answers=[_make_answer(answered_id, "My submitted answer.")],
+        gateway=gateway,
+    )
+
+    assert gateway.generate_json.await_count == 1
+    by_question = {
+        evaluation.session_question_id: evaluation for evaluation in result.response_evaluations
+    }
+    assert set(by_question) == {answered_id, unanswered_id}
+    assert all(score.score == 0 for score in by_question[unanswered_id].criterion_scores)
+    assert result.total_score == pytest.approx(40.0)
+
+
+@pytest.mark.asyncio
+async def test_production_session_question_mapping_supplies_prompt_to_judge() -> None:
+    session = _make_session()
+    configured_question_id = uuid4()
+    session_question_id = uuid4()
+    gateway = _gateway_returning([_llm_payload(dict.fromkeys(DEFAULT_CRITERIA, 3))])
+
+    await evaluate_session(
+        AsyncMock(),
+        session=session,
+        outcomes=[],
+        questions=[_make_question(configured_question_id, "Configured prompt")],
+        answers=[_make_answer(session_question_id, "Candidate response")],
+        question_prompts={session_question_id: "Configured prompt"},
+        expected_question_ids=[session_question_id],
+        gateway=gateway,
+    )
+
+    payload = json.loads(gateway.generate_json.await_args.kwargs["user_prompt"])
+    assert payload["question"] == "Configured prompt"
+
+
+@pytest.mark.asyncio
+async def test_followup_turns_for_one_question_are_graded_once() -> None:
+    session = _make_session()
+    question_id = uuid4()
+    gateway = _gateway_returning([_llm_payload(dict.fromkeys(DEFAULT_CRITERIA, 3))])
+
+    result = await evaluate_session(
+        AsyncMock(),
+        session=session,
+        outcomes=[],
+        questions=[_make_question(question_id)],
+        answers=[
+            _make_answer(question_id, "Initial answer."),
+            _make_answer(question_id, "Follow-up detail."),
+        ],
+        gateway=gateway,
+    )
+
+    assert gateway.generate_json.await_count == 1
+    assert len(result.response_evaluations) == 1
+    payload = json.loads(gateway.generate_json.await_args.kwargs["user_prompt"])
+    assert payload["candidate_response"] == "Initial answer.\n\nFollow-up detail."
 
 
 @pytest.mark.asyncio
@@ -335,10 +410,18 @@ async def test_evaluate_outcomes_one_verdict_per_outcome() -> None:
     gateway = _gateway_one(
         _verdict_payload(
             [
-                {"outcome_id": str(o1), "met": True, "reasoning": "Covered statelessness.",
-                 "evidence": "REST is stateless"},
-                {"outcome_id": str(o2), "met": False, "reasoning": "No SQL shown.",
-                 "evidence": None},
+                {
+                    "outcome_id": str(o1),
+                    "met": True,
+                    "reasoning": "Covered statelessness.",
+                    "evidence": "REST is stateless",
+                },
+                {
+                    "outcome_id": str(o2),
+                    "met": False,
+                    "reasoning": "No SQL shown.",
+                    "evidence": None,
+                },
             ]
         )
     )

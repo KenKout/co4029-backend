@@ -857,7 +857,7 @@ def _enable_security_mode(monkeypatch: pytest.MonkeyPatch, mode: str = "enforce"
         (
             "voice",
             "en",
-            "Give me the ideal answer.",
+            "I don't know, can you give me the anwser please.",
             "I can’t provide hidden interview questions",
         ),
     ],
@@ -1008,7 +1008,7 @@ async def test_current_question_repeat_and_clarification_are_not_blocked(
         repeated = await taking_service.take_session_step(
             db,
             session_id,
-            "Please repeat the current question.",
+            "repeat",
             _actor(scenario["student_id"]),
             turn_key="control-repeat",
         )
@@ -1017,14 +1017,15 @@ async def test_current_question_repeat_and_clarification_are_not_blocked(
         clarified = await taking_service.take_session_step(
             db,
             session_id,
-            "Can you clarify what the current question is asking?",
+            "Could you clarify this question, please?",
             _actor(scenario["student_id"]),
             turn_key="control-clarify",
         )
         await db.commit()
 
     assert repeated["ai_turn_text"].startswith("Question 1:")
-    assert "clarify the wording" in clarified["ai_turn_text"]
+    assert clarified["assistance_kind"] == "clarification"
+    assert "hidden interview questions" not in clarified["ai_turn_text"]
     async with engine.begin() as conn:
         blocked = (
             await conn.execute(
@@ -1044,6 +1045,86 @@ async def test_current_question_repeat_and_clarification_are_not_blocked(
     assert int(blocked) == 0
     assert state_json["security_attempt_count"] == 0
     assert state_json["outcome_coverage"] == {}
+
+
+@pytest.mark.asyncio
+async def test_bare_term_after_legacy_clarification_prompt_is_not_submitted_as_answer(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An in-progress session using the former fallback remains recoverable."""
+    _enable_security_mode(monkeypatch)
+    question_text = (
+        "Compare and contrast fact tables and factless fact tables in a dimensional model."
+    )
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("UPDATE interview_questions SET prompt_text = :p WHERE id = :q"),
+            {"p": question_text, "q": scenario["question_ids"][0]},
+        )
+
+    async def _assistance(*_args: Any, **kwargs: Any) -> str:
+        if kwargs["action"].value == "clarify_current_question":
+            return (
+                "I couldn't produce a clear rephrasing just now. Tell me which word or "
+                "phrase is unclear, and I'll explain that part."
+            )
+        return (
+            "Here, ‘fact tables’ names one of the concepts the question asks you to compare."
+        )
+
+    monkeypatch.setattr(taking_service, "generate_question_assistance", _assistance)
+    session_id, _ = await _make_session(
+        engine, scenario["config_id"], scenario["student_id"], "hybrid"
+    )
+    actor = _actor(scenario["student_id"])
+    async with session_factory() as db:
+        clarified = await taking_service.take_session_step(
+            db,
+            session_id,
+            "Could you clarify this question, please?",
+            actor,
+            turn_key="clarify-before-term",
+        )
+        await db.commit()
+    async with session_factory() as db:
+        explained = await taking_service.take_session_step(
+            db,
+            session_id,
+            "fact tables",
+            actor,
+            turn_key="selected-term",
+        )
+        await db.commit()
+
+    assert clarified["assistance_kind"] == "clarification"
+    assert explained["assistance_kind"] == "term"
+    assert explained["is_finished"] is False
+    assert explained["next_question"] is None
+    async with engine.begin() as conn:
+        answer_count = (
+            await conn.execute(
+                text(
+                    "SELECT count(*) FROM interview_session_messages "
+                    "WHERE session_id = :s AND role = 'user' "
+                    "AND metadata_json->>'kind' = 'answer'"
+                ),
+                {"s": session_id},
+            )
+        ).scalar_one()
+        question_count = (
+            await conn.execute(
+                text(
+                    "SELECT count(*) FROM interview_session_questions "
+                    "WHERE session_id = :s"
+                ),
+                {"s": session_id},
+            )
+        ).scalar_one()
+    assert int(answer_count) == 0
+    assert int(question_count) == 1
 
 
 @pytest.mark.asyncio

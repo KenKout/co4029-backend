@@ -33,8 +33,14 @@ async def sweep_interview_sessions_task(ctx: dict[str, Any]) -> int:
             count = await lifecycle_service.sweep_stale_voice_sessions(
                 db, arq_pool=arq_pool, idle_timeout_minutes=idle_timeout_minutes
             )
+            recovered = await lifecycle_service.recover_stalled_evaluations(
+                db,
+                arq_pool=arq_pool,
+            )
         if count:
             _logger.info("swept_stale_voice_sessions", finalised=count)
+        if recovered:
+            _logger.info("recovered_stalled_interview_evaluations", enqueued=recovered)
         return count
     finally:
         clear_request_context()

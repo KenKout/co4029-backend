@@ -34,7 +34,6 @@ from abridgeai.features.quizzes.schemas import (
     QuizAttemptRead,
     QuizAttemptReviewRead,
     QuizAttemptStart,
-    QuizForTakingPublic,
     QuizPublic,
 )
 from abridgeai.features.quizzes.services import taking as taking_service
@@ -105,7 +104,7 @@ async def get_published_quiz(
 
 @router.post(
     "/quizzes/{quiz_id}/attempts",
-    response_model=QuizForTakingPublic,
+    response_model=QuizAttemptProgressRead,
     status_code=status.HTTP_201_CREATED,
 )
 async def start_attempt(
@@ -113,8 +112,13 @@ async def start_attempt(
     payload: QuizAttemptStart,
     current_user: Annotated[CurrentUser, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
-) -> QuizForTakingPublic:
+) -> QuizAttemptProgressRead:
     """Create a :class:`QuizAttempt` and return the no-leak take payload.
+
+    Response shares the :class:`QuizAttemptProgressRead` shape with
+    ``GET /attempts/{id}/progress`` (``answers=[]`` here since nothing is
+    saved yet) so the client gets ``attempt_id`` back immediately and can
+    reuse one hydration path for both "start" and "resume".
 
     Maps :class:`AllCardsInCooldownError` (raised when every question in
     the quiz is still in SR cooldown — thesis UC-LEARN-01 Alt 1a) to

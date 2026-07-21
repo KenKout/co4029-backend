@@ -18,6 +18,7 @@ import base64
 from typing import TYPE_CHECKING
 from uuid import UUID
 
+from abridgeai.core.pagination import Page
 from abridgeai.features.identity.queries import users as user_queries
 from abridgeai.features.identity.schemas import UserListPage, UserRead
 from abridgeai.features.identity.services.profile import serialize_user
@@ -79,4 +80,40 @@ async def list_users(
     return UserListPage(items=items, next_cursor=next_cursor)
 
 
-__all__ = ["get_user_with_profile", "list_users"]
+async def search_users(
+    db: AsyncSession,
+    *,
+    status: str | None = None,
+    search: str | None = None,
+    sort: str | None = None,
+    sort_dir: str = "asc",
+    page: int = 0,
+    page_size: int = 25,
+) -> Page[UserRead]:
+    """Offset page of users (server-side search + whitelisted sort) as
+    ``UserRead``. Delegates the SQLAlchemy statement to the query layer, then
+    batch-loads profiles for the page (same shape as :func:`list_users`)."""
+    result = await user_queries.search_users(
+        db,
+        status=status,
+        search=search,
+        sort=sort,
+        sort_dir=sort_dir,
+        page=page,
+        page_size=page_size,
+    )
+    profiles = {
+        p.user_id: p
+        for p in await user_queries.list_profiles(db, [u.id for u in result.items])
+    }
+    items = [serialize_user(u, profiles.get(u.id)) for u in result.items]
+    return Page(
+        items=items,
+        total=result.total,
+        page=result.page,
+        page_size=result.page_size,
+        total_pages=result.total_pages,
+    )
+
+
+__all__ = ["get_user_with_profile", "list_users", "search_users"]

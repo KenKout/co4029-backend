@@ -119,6 +119,7 @@ async def enroll_student_in_path(
         await _autoenroll_required_courses(
             db, career_path_id=career_path_id, student_id=student_id, actor=actor
         )
+        await db.refresh(existing)
         return _to_authoring_enrollment(existing)
 
     enrollment = StudentCareerEnrollment(
@@ -151,6 +152,7 @@ async def unenroll_student(
     enrollment.status = "dropped"
     enrollment.updated_by = actor.user_id
     await flush_or_conflict(db)
+    await db.refresh(enrollment)
     return _to_authoring_enrollment(enrollment)
 
 

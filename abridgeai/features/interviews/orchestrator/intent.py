@@ -30,6 +30,7 @@ class StudentIntent(str, Enum):  # noqa: UP042 -- StrEnum changes value coercion
     PARTIAL_ANSWER = "partial_answer"
     ASK_TO_REPEAT = "ask_to_repeat"
     ASK_FOR_CLARIFICATION = "ask_for_clarification"
+    ASK_FOR_HINT = "ask_for_hint"
     ASK_FOR_MORE_TIME = "ask_for_more_time"
     SKIP_QUESTION = "skip_question"
     CANNOT_ANSWER = "cannot_answer"
@@ -43,6 +44,7 @@ NON_ACADEMIC_INTENTS: frozenset[StudentIntent] = frozenset(
     {
         StudentIntent.ASK_TO_REPEAT,
         StudentIntent.ASK_FOR_CLARIFICATION,
+        StudentIntent.ASK_FOR_HINT,
         StudentIntent.ASK_FOR_MORE_TIME,
         StudentIntent.SKIP_QUESTION,
         StudentIntent.TECHNICAL_ISSUE,
@@ -84,13 +86,26 @@ _RULES: tuple[tuple[StudentIntent, tuple[str, ...]], ...] = (
     (
         StudentIntent.ASK_TO_REPEAT,
         (
+            r"^(please )?repeat([\s,]+please)?[.!?]*$",
+            r"^(again|one more time)[.!?]*$",
             r"\b(can|could) you (please )?repeat\b",
             r"\brepeat the question\b",
             r"\bsay (that|it) again\b",
             r"\bcome again\b",
+            r"^(vui lòng |xin )?(nhắc lại|lặp lại)( (đi|giúp (tôi|mình|em)))?[.!?]*$",
             r"\bnhắc lại câu hỏi\b",
             r"\b(bạn )?(có thể )?nhắc lại\b",
             r"\blặp lại (câu hỏi)?\b",
+        ),
+    ),
+    (
+        StudentIntent.ASK_FOR_HINT,
+        (
+            r"\b(can|could|would) you (please )?(give|provide) me (a )?"
+            r"(small |brief |little )?hint\b",
+            r"\b(can|could) i (please )?(get|have) (a )?(small |brief |little )?hint\b",
+            r"\b(give|provide) me (a )?(small |brief |little )?hint\b",
+            r"\b(gợi ý|cho (tôi|mình|em) một gợi ý)\b",
         ),
     ),
     (

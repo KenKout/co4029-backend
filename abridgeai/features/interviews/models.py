@@ -383,6 +383,15 @@ class InterviewSession(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             "input_mode IN ('voice', 'text', 'hybrid')",
             name="ck_interview_sessions_input_mode",
         ),
+        CheckConstraint(
+            "onboarding_stage IN ('identity_check', 'audio_check', "
+            "'language_check', 'preparation', 'readiness', 'completed')",
+            name="ck_interview_sessions_onboarding_stage",
+        ),
+        CheckConstraint(
+            "interview_language IN ('en', 'vi')",
+            name="ck_interview_sessions_language",
+        ),
     )
 
     interview_config_id: Mapped[uuid.UUID] = mapped_column(
@@ -405,6 +414,13 @@ class InterviewSession(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     livekit_session_ref: Mapped[str | None] = mapped_column(String(255))
     started_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("NOW()")
+    )
+    assessment_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    onboarding_stage: Mapped[str] = mapped_column(
+        String(20), nullable=False, server_default=text("'identity_check'")
+    )
+    interview_language: Mapped[str] = mapped_column(
+        String(5), nullable=False, server_default=text("'en'")
     )
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     resume_deadline_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

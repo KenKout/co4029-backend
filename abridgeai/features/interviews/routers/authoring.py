@@ -147,6 +147,9 @@ def _session_teacher_view(
         input_mode=session.input_mode,
         pass_verdict=session.pass_verdict,
         started_at=session.started_at,
+        assessment_started_at=session.assessment_started_at,
+        onboarding_stage=session.onboarding_stage,
+        interview_language=session.interview_language,
         ended_at=session.ended_at,
         security_summary=security_summary,
     )

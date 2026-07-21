@@ -42,6 +42,7 @@ class InterviewerActionType(str, Enum):  # noqa: UP042 -- match codebase convent
     REPEAT_QUESTION = "repeat_question"
     REFRAME_QUESTION = "reframe_question"
     CLARIFY_WITHOUT_REVEALING_ANSWER = "clarify_without_revealing_answer"
+    PROVIDE_NEUTRAL_HINT = "provide_neutral_hint"
     ASK_MAIN_QUESTION = "ask_main_question"
     PROBE_DEEPER = "probe_deeper"
     ASK_FOR_EXAMPLE = "ask_for_example"
@@ -68,6 +69,7 @@ class ReasonCode(str, Enum):  # noqa: UP042 -- match codebase convention
     OPENING_REQUIRED = "opening_required"
     STUDENT_REQUESTED_REPEAT = "student_requested_repeat"
     STUDENT_REQUESTED_CLARIFICATION = "student_requested_clarification"
+    STUDENT_REQUESTED_HINT = "student_requested_hint"
     ANSWER_TOO_VAGUE = "answer_too_vague"
     MISSING_EXAMPLE = "missing_example"
     PARTIAL_OUTCOME_COVERAGE = "partial_outcome_coverage"
@@ -230,6 +232,11 @@ _SIMPLE_INTENT_ACTIONS: dict[StudentIntent, tuple[InterviewerActionType, ReasonC
         InterviewerActionType.CLARIFY_WITHOUT_REVEALING_ANSWER,
         ReasonCode.STUDENT_REQUESTED_CLARIFICATION,
         "Student asked for clarification; do not leak answer.",
+    ),
+    StudentIntent.ASK_FOR_HINT: (
+        InterviewerActionType.PROVIDE_NEUTRAL_HINT,
+        ReasonCode.STUDENT_REQUESTED_HINT,
+        "Student asked for a neutral scaffold; do not leak answer content.",
     ),
     StudentIntent.ASK_FOR_MORE_TIME: (
         InterviewerActionType.OFFER_BRIEF_PAUSE,

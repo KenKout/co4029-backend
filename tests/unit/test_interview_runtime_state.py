@@ -11,6 +11,15 @@ guarantees that make lazy initialisation of pre-existing sessions safe:
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+from uuid import uuid4
+
+from abridgeai.features.interviews.orchestrator.adaptive import _sync_question_history
+from abridgeai.features.interviews.orchestrator.selection import (
+    CandidateQuestion,
+    SelectionContext,
+    select_next_question,
+)
 from abridgeai.features.interviews.orchestrator.state import (
     STATE_SCHEMA_VERSION,
     CandidateSignals,
@@ -19,6 +28,38 @@ from abridgeai.features.interviews.orchestrator.state import (
     InterviewRuntimeStateData,
     OutcomeCoverageState,
 )
+
+
+def test_persisted_first_question_is_merged_before_adaptive_selection() -> None:
+    first_id, second_id, outcome_id = uuid4(), uuid4(), uuid4()
+    data = InterviewRuntimeStateData()
+    current = SimpleNamespace(id=first_id, linked_outcome_id=outcome_id)
+
+    _sync_question_history(
+        data,
+        [first_id, first_id],
+        current_question=current,
+    )
+
+    assert data.asked_question_ids == [str(first_id)]
+    assert data.current_question_id == str(first_id)
+    assert data.current_outcome_id == str(outcome_id)
+
+    candidates = [
+        CandidateQuestion(str(first_id), str(outcome_id), "technical", None, 1),
+        CandidateQuestion(str(second_id), None, "technical", None, 2),
+    ]
+    selected = select_next_question(
+        candidates,
+        SelectionContext(
+            asked_question_ids=frozenset(data.asked_question_ids),
+            skipped_question_ids=frozenset(),
+            outcome_evidence_counts={},
+            uncovered_required_outcome_ids=frozenset(),
+        ),
+    )
+    assert selected is not None
+    assert selected.candidate.question_id == str(second_id)
 
 
 def test_empty_dict_yields_valid_default_state() -> None:

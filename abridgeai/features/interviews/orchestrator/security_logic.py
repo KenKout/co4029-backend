@@ -91,6 +91,52 @@ _ANSWER_KEY = (
     r"perfect\s+response|(?:đáp\s*án|câu\s*trả\s*lời)\s*(?:mẫu|hoàn\s*hảo|lý\s*tưởng|đúng)|"
     r"đáp\s*án"
 )
+# A narrow imperative/question shape for generic answer solicitation. Keeping
+# this separate from ``_ANSWER_KEY`` avoids blocking academic prose such as
+# "The answer is that factless facts have no numeric measure."
+_DIRECT_ANSWER_REQUEST = (
+    r"\b(?:(?:please\s+)?|(?:(?:can|could|would|will)\s+you\s+))"
+    r"(?:give|tell|show|provide)\s+me\s+(?:the\s+|an?\s+)?(?:correct\s+)?answers?\b|"
+    r"^what(?:'|’)s\s+(?:the\s+)?(?:correct\s+)?answer\b|"
+    r"^what\s+is\s+(?:the\s+)?(?:correct\s+)?answer\b|"
+    r"^(?:please\s+)?answer\s+(?:this|the|the\s+current|current)\s+question\s+for\s+me\b|"
+    r"^(?:(?:hãy|vui\s+lòng|xin)\s+)?(?:cho|nói|cung\s+cấp)\s+"
+    r"(?:tôi|mình|em)\s+(?:đáp\s*án|câu\s*trả\s*lời)\b|"
+    r"^(?:(?:hãy|vui\s+lòng|xin)\s+)?trả\s+lời\s+"
+    r"(?:câu\s+hỏi\s+)?(?:này|hiện\s+tại)\s+cho\s+(?:tôi|mình|em)\b"
+)
+_ANSWER_REFERENCE_REQUEST = (
+    r"\b(?:repeat|restate|recite|say)\s+(?:the\s+)?(?:correct\s+)?answer\b|"
+    r"\b(?:nhắc\s+lại|lặp\s+lại|nói)\s+(?:câu\s+trả\s+lời|đáp\s*án)\b"
+)
+# These are concept-level routing signals, not final classifications. A broad
+# request must contain both a request/delegation cue and an academic-work cue;
+# the dedicated security model then decides the category semantically.
+_ANSWER_REQUEST_CUE = (
+    r"^(?:(?:please|kindly|just)\s+)?"
+    r"(?:tell|show|give|provide|write|draft|compose|solve|answer|respond|complete|"
+    r"do|help|teach|walk|take\s+over)\b|"
+    r"\b(?:please|kindly|just)\s+"
+    r"(?:tell|show|give|provide|write|draft|compose|solve|answer|respond|complete|"
+    r"do|help|teach|walk|take\s+over)\b|"
+    r"\b(?:can|could|would|will)\s+you\b|"
+    r"\b(?:what|how)\s+(?:should|would|could)\s+"
+    r"(?:i|you|my|the|a\s+candidate)\b|"
+    r"\b(?:for\s+me|on\s+my\s+behalf|as\s+if\s+you\s+were\s+me)\b|"
+    r"\bi(?:'|’)m\s+stuck\b.{0,40}\btake\s+over\b|"
+    r"^(?:(?:hãy|xin|vui\s+lòng)\s+)?"
+    r"(?:cho|nói|viết|soạn|giải|làm|trả\s+lời|giúp)\b|"
+    r"\b(?:bạn\s+)?có\s+thể\b|"
+    r"\b(?:tôi|mình|em)\s+nên\b|"
+    r"\b(?:hộ|giúp|cho)\s+(?:tôi|mình|em)\b"
+)
+_ANSWER_WORK_CUE = (
+    r"\b(?:answer|response|solution|question|solve|respond|work\s+out|"
+    r"say|write|draft|compose|submit|submission|sample|example|exemplar|"
+    r"candidate|take\s+over|do\s+(?:it|this|the\s+question))\b|"
+    r"\b(?:đáp\s*án|câu\s+trả\s+lời|câu\s+hỏi|giải|làm|trả\s+lời|"
+    r"nói|viết|soạn|nộp|bài\s+làm|ví\s+dụ|bài\s+mẫu)\b"
+)
 _RUBRIC = (
     r"rubric|grading\s+(?:criteria|logic|weights?)|scoring\s+(?:criteria|logic|weights?)|"
     r"passing\s+threshold|outcome\s+coverage|expected\s+evidence|common\s+misconceptions|"
@@ -198,6 +244,52 @@ def _compact(value: str) -> str:
     return "".join(ch for ch in normalize_input(value) if ch.isalnum())
 
 
+def _within_one_typo(value: str, target: str) -> bool:
+    """One insertion/deletion/substitution or adjacent transposition."""
+    if value == target:
+        return True
+    if abs(len(value) - len(target)) > 1:
+        return False
+    if len(value) == len(target):
+        differences = [
+            index
+            for index, pair in enumerate(zip(value, target, strict=True))
+            if pair[0] != pair[1]
+        ]
+        if len(differences) == 1:
+            return True
+        return (
+            len(differences) == 2
+            and differences[1] == differences[0] + 1
+            and value[differences[0]] == target[differences[1]]
+            and value[differences[1]] == target[differences[0]]
+        )
+    shorter, longer = (value, target) if len(value) < len(target) else (target, value)
+    short_index = long_index = edits = 0
+    while short_index < len(shorter) and long_index < len(longer):
+        if shorter[short_index] == longer[long_index]:
+            short_index += 1
+            long_index += 1
+            continue
+        edits += 1
+        long_index += 1
+        if edits > 1:
+            return False
+    return True
+
+
+def _canonicalize_answer_typos(value: str) -> str:
+    """Canonicalize only a tightly bounded protected concept for assessment."""
+
+    def _replace(match: re.Match[str]) -> str:
+        token = match.group(0)
+        if 5 <= len(token) <= 7 and _within_one_typo(token, "answer"):
+            return "answer"
+        return token
+
+    return _TOKEN_RE.sub(_replace, value)
+
+
 def _contains_request_for(text: str, target: str) -> bool:
     return bool(
         re.search(rf"{_REQUEST}.{{0,80}}(?:{target})", text, re.IGNORECASE)
@@ -211,6 +303,7 @@ def _rule_category(  # noqa: C901 -- ordered security rules are intentionally ex
     last_category: SecurityCategory | None = None,
 ) -> SecurityCategory:
     text = normalize_input(value)
+    answer_routing_text = _canonicalize_answer_typos(text)
     compact = _compact(text)
     if not text:
         return SecurityCategory.BENIGN
@@ -230,8 +323,13 @@ def _rule_category(  # noqa: C901 -- ordered security rules are intentionally ex
         )
     ):
         return SecurityCategory.FUTURE_QUESTION_REQUEST
-    if _contains_request_for(text, _ANSWER_KEY) or any(
+    if (
+        re.search(_DIRECT_ANSWER_REQUEST, answer_routing_text, re.IGNORECASE)
+        or re.search(_ANSWER_REFERENCE_REQUEST, answer_routing_text, re.IGNORECASE)
+        or _contains_request_for(answer_routing_text, _ANSWER_KEY)
+        or any(
         marker in compact for marker in ("givemetheidealanswer", "showanswerkey", "chotoidapan")
+        )
     ):
         return SecurityCategory.ANSWER_KEY_REQUEST
     if _contains_request_for(text, _RUBRIC) or any(
@@ -302,6 +400,11 @@ def is_ambiguous_security_text(value: str) -> bool:
     text = normalize_input(value)
     if len(text) < 8:
         return False
+    answer_routing_text = _canonicalize_answer_typos(text)
+    if re.search(_ANSWER_REQUEST_CUE, text, re.IGNORECASE) and re.search(
+        _ANSWER_WORK_CUE, answer_routing_text, re.IGNORECASE
+    ):
+        return True
     suspicious = re.search(
         r"hidden|secret|instruction|prompt|rubric|answer\s*key|question\s*bank|"
         r"administrator|teacher\s+mode|debug|bypass|translate|decode|internal|"
@@ -441,28 +544,80 @@ def is_explicit_end_request(value: str) -> bool:
 
 
 def requested_current_question_action(value: str) -> SecurityAction | None:
-    """Recognize narrow repeat/clarification requests before academic analysis."""
+    """Recognize answer-safe controls for the current question."""
     text = normalize_input(value)
-    if re.search(_FUTURE + "|" + _SYSTEM + "|" + _RUBRIC + "|" + _ANSWER_KEY, text):
+    answer_routing_text = _canonicalize_answer_typos(text)
+    if re.search(
+        _FUTURE
+        + "|"
+        + _SYSTEM
+        + "|"
+        + _RUBRIC
+        + "|"
+        + _ANSWER_KEY
+        + "|"
+        + _DIRECT_ANSWER_REQUEST,
+        answer_routing_text,
+    ) or re.search(
+        _ANSWER_REFERENCE_REQUEST,
+        answer_routing_text,
+    ):
         return None
-    repeat = re.search(
-        r"(?:please\s+)?repeat\s+(?:the\s+)?current\s+question|"
-        r"(?:can|could)\s+you\s+(?:please\s+)?repeat\s+(?:that|it|the\s+question)|"
+    control_text = text.strip(" \t\r\n.!?")
+    repeat = re.fullmatch(
+        r"(?:please\s+)?repeat(?:\s*,?\s*please)?|"
+        r"(?:please\s+)?repeat\s+again(?:\s+please)?|"
+        r"(?:again|one\s+more\s+time)|"
+        r"(?:please\s+)?repeat\s+"
+        r"(?:(?:the\s+)?current\s+question|the\s+question|that|it)(?:\s+please)?|"
+        r"(?:can|could)\s+you\s+(?:please\s+)?repeat"
+        r"(?:\s+(?:that|it|the\s+question|the\s+current\s+question))?|"
         r"say\s+(?:that|the\s+question)\s+again|"
-        r"(?:vui\s+lòng\s+)?nhắc\s+lại\s+câu\s+hỏi\s+(?:hiện\s+tại|này)|"
-        r"(?:bạn\s+)?có\s+thể\s+nhắc\s+lại\s+(?:câu\s+hỏi|được\s+không)",
-        text,
+        r"(?:vui\s+lòng\s+|xin\s+)?(?:nhắc\s+lại|lặp\s+lại)"
+        r"(?:\s+(?:đi|giúp\s+(?:tôi|mình|em)))?|"
+        r"(?:vui\s+lòng\s+)?nhắc\s+lại\s+câu\s+hỏi"
+        r"(?:\s+(?:hiện\s+tại|này))?|"
+        r"(?:bạn\s+)?có\s+thể\s+nhắc\s+lại\s+"
+        r"(?:câu\s+hỏi|được\s+không)",
+        control_text,
     )
     if repeat:
         return SecurityAction.REPEAT_CURRENT_QUESTION
-    clarify = re.search(
-        r"(?:can|could)\s+you\s+clarify\s+(?:the\s+)?current\s+question|"
-        r"what\s+does\s+.{1,60}\s+mean\s+in\s+(?:this|the)\s+question|"
+    explain_term = re.fullmatch(
+        r"what\s+does\s+.{1,100}\s+mean(?:\s+in\s+(?:this|the)\s+question)?|"
+        r"(?:can|could)\s+you\s+(?:please\s+)?(?:explain|define)\s+"
+        r"(?:the\s+)?(?:term\s+)?.{1,100}|"
+        r"(?:please\s+)?(?:explain|define)\s+(?:the\s+)?(?:term\s+)?.{1,100}",
+        control_text,
+    )
+    if explain_term:
+        return SecurityAction.EXPLAIN_CURRENT_TERM
+    hint = re.fullmatch(
+        r"(?:can|could|would)\s+you\s+(?:please\s+)?(?:give|provide)\s+me\s+"
+        r"(?:a\s+)?(?:small|brief|little|neutral)?\s*hint|"
+        r"(?:please\s+)?(?:give|provide)\s+me\s+(?:a\s+)?"
+        r"(?:small|brief|little|neutral)?\s*hint|"
+        r"(?:can|could)\s+i\s+(?:please\s+)?(?:get|have)\s+(?:a\s+)?"
+        r"(?:small|brief|little|neutral)?\s*hint",
+        control_text,
+    )
+    if hint:
+        return SecurityAction.HINT_CURRENT_QUESTION
+    clarify = re.fullmatch(
+        r"(?:can|could)\s+you\s+(?:please\s+)?clarify\s+"
+        r"(?:(?:the\s+)?current\s+question|(?:the\s+)?question|this\s+question)"
+        r"(?:\s*,?\s*please)?|"
+        r"(?:can|could)\s+you\s+clarify\s+what\s+(?:the\s+)?"
+        r"current\s+question\s+is\s+asking|"
+        r"(?:can|could)\s+you\s+(?:please\s+)?rephrase\s+"
+        r"(?:(?:the\s+)?current\s+question|(?:the\s+)?question|this\s+question)|"
+        r"(?:please\s+)?(?:rephrase|simplify)\s+"
+        r"(?:(?:the\s+)?current\s+question|(?:the\s+)?question|this\s+question)|"
         r"i\s+don(?:'|’)t\s+understand\s+(?:the\s+)?(?:wording|question)|"
         r"clarify\s+what\s+(?:the\s+)?current\s+question\s+is\s+asking|"
         r"(?:giải\s+thích|làm\s+rõ)\s+(?:câu\s+hỏi\s+)?(?:hiện\s+tại|này)|"
         r"(?:tôi|mình|em)\s+không\s+hiểu\s+(?:cách\s+diễn\s+đạt|câu\s+hỏi)",
-        text,
+        control_text,
     )
     if clarify:
         return SecurityAction.CLARIFY_CURRENT_QUESTION
@@ -500,12 +655,27 @@ def safe_security_response(
             else "There is no current question to repeat."
         )
     if action is SecurityAction.CLARIFY_CURRENT_QUESTION:
-        prefix = (
-            "Tôi có thể làm rõ cách diễn đạt của câu hỏi hiện tại:"
+        return (
+            "Nói cách khác, hãy xác định các khái niệm chính trong câu hỏi, giải thích "
+            "mối quan hệ giữa chúng và trả lời rõ từng phần được yêu cầu."
             if vi
-            else "I can clarify the wording of the current question:"
+            else "Put another way, identify the main concepts in the question and "
+            "address each part of what it is asking in a clear, structured response."
         )
-        return f"{prefix} {question}".strip()
+    if action is SecurityAction.EXPLAIN_CURRENT_TERM:
+        return (
+            "Hãy chọn một từ hoặc cụm từ xuất hiện trong câu hỏi hiện tại."
+            if vi
+            else "Please choose a word or phrase that appears in the current question."
+        )
+    if action is SecurityAction.HINT_CURRENT_QUESTION:
+        return (
+            "Gợi ý nhỏ: hãy sắp xếp câu trả lời theo các khái niệm chính trong câu hỏi "
+            "và mối quan hệ giữa chúng."
+            if vi
+            else "A small hint: organize your answer around the main concepts in the "
+            "question and how they relate."
+        )
     if action is SecurityAction.END_AND_FLAG:
         return (
             "Buổi phỏng vấn đã kết thúc theo chính sách bảo mật của nền tảng."

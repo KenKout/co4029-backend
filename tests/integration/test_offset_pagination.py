@@ -24,9 +24,13 @@ from sqlalchemy.ext.asyncio import (
 )
 
 import abridgeai.features.access_control.models  # noqa: F401  -- FK targets
+import abridgeai.features.courses.models  # noqa: F401
+import abridgeai.features.identity.models  # noqa: F401
+import abridgeai.features.interviews.models  # noqa: F401  -- courses relationship target
 from abridgeai.core.config import get_settings
 from abridgeai.core.pagination import paginate
 from abridgeai.features.access_control.models import Organization
+from abridgeai.features.courses.queries import administration as course_admin_queries
 
 
 def _async_url(database_url: str) -> str:
@@ -147,3 +151,71 @@ async def test_sort_direction_and_whitelist(session_factory, orgs) -> None:
     assert names_asc == sorted(names_asc)
     assert [o.name for o in desc.items] == list(reversed(names_asc))
     assert unknown.total == 26  # ignored bad sort, still returns rows
+
+
+@pytest_asyncio.fixture
+async def courses(engine: AsyncEngine) -> AsyncIterator[str]:
+    """Org + owner + 3 published courses (one soft-deleted) under a prefix."""
+    tag = uuid.uuid4().hex[:8]
+    org, owner = uuid.uuid4(), uuid.uuid4()
+    deleted_id = uuid.uuid4()
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("INSERT INTO organizations (id, slug, name) VALUES (:id, :slug, :name)"),
+            {"id": org, "slug": f"{tag}-org", "name": f"{tag} Org"},
+        )
+        await conn.execute(
+            text("INSERT INTO users (id, primary_email) VALUES (:id, :email)"),
+            {"id": owner, "email": f"owner-{tag}@t.local"},
+        )
+        for i in range(3):
+            cid = deleted_id if i == 2 else uuid.uuid4()
+            await conn.execute(
+                text(
+                    "INSERT INTO courses "
+                    "(id, organization_id, owner_user_id, slug, title, status) "
+                    "VALUES (:id, :org, :owner, :slug, :title, 'published')"
+                ),
+                {
+                    "id": cid,
+                    "org": org,
+                    "owner": owner,
+                    "slug": f"{tag}-course-{i:02d}",
+                    "title": f"{tag} Course {i:02d}",
+                },
+            )
+        # Soft-delete the third course (a tombstone) via UPDATE.
+        await conn.execute(
+            text("UPDATE courses SET deleted_at = NOW() WHERE id = :id"),
+            {"id": deleted_id},
+        )
+    yield tag
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("DELETE FROM courses WHERE slug LIKE :p"), {"p": f"{tag}-%"}
+        )
+        await conn.execute(text("DELETE FROM users WHERE id = :id"), {"id": owner})
+        await conn.execute(text("DELETE FROM organizations WHERE id = :id"), {"id": org})
+
+
+@pytest.mark.asyncio
+async def test_courses_include_deleted_keeps_total_and_items_consistent(
+    session_factory, courses
+) -> None:
+    """The paginate count query must honour ``execution_options(include_deleted)``
+    so ``total`` matches the rows returned (else the soft-delete loader filter
+    counts only live rows while the item query returns tombstoned ones too)."""
+    async with session_factory() as db:
+        live = await course_admin_queries.search_all_courses_admin(
+            db, include_deleted=False, search=f"{courses} Course", page=0, page_size=50
+        )
+        allc = await course_admin_queries.search_all_courses_admin(
+            db, include_deleted=True, search=f"{courses} Course", page=0, page_size=50
+        )
+    # include_deleted=False → the tombstoned course is excluded from BOTH.
+    assert live.total == 2
+    assert len(live.items) == 2
+    assert all(c.deleted_at is None for c in live.items)
+    # include_deleted=True → all three, and total matches item count (no drift).
+    assert allc.total == 3
+    assert len(allc.items) == 3

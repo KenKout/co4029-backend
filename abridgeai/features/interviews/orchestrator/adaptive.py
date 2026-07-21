@@ -49,6 +49,7 @@ from abridgeai.features.interviews.orchestrator.analysis_logic import analyze_an
 from abridgeai.features.interviews.orchestrator.decision import (
     DecisionInputs,
     InterviewerActionType,
+    ReasonCode,
     decide_next_action,
 )
 from abridgeai.features.interviews.orchestrator.intent import (
@@ -68,6 +69,7 @@ from abridgeai.features.interviews.orchestrator.selection import (
 )
 from abridgeai.features.interviews.orchestrator.state import (
     InterviewPhase,
+    InterviewRuntimeStateData,
     OutcomeCoverageState,
 )
 from abridgeai.features.interviews.orchestrator.utterance import (
@@ -123,7 +125,9 @@ def _time_fraction_remaining(session: InterviewSession, config: InterviewConfig)
     limit_min = config.time_limit_minutes
     if not limit_min or limit_min <= 0:
         return None
-    started = session.started_at
+    started = session.assessment_started_at
+    if started is None:
+        return 1.0
     if started.tzinfo is None:
         started = started.replace(tzinfo=UTC)
     elapsed = (datetime.now(UTC) - started).total_seconds()
@@ -175,6 +179,54 @@ async def authoring_list_outcomes(db: AsyncSession, config_id: UUID) -> list[Int
     return await authoring_queries.list_outcomes_for_config(db, config_id)
 
 
+async def _persisted_question_ids(db: AsyncSession, session_id: UUID) -> list[UUID]:
+    """Return every actual interview question already displayed this session."""
+    from sqlalchemy import select  # noqa: PLC0415
+
+    stmt = (
+        select(InterviewSessionQuestion.interview_question_id)
+        .where(
+            InterviewSessionQuestion.session_id == session_id,
+            InterviewSessionQuestion.interview_question_id.is_not(None),
+        )
+        .order_by(InterviewSessionQuestion.sequence_no)
+    )
+    question_ids = (await db.execute(stmt)).scalars().all()
+    return [question_id for question_id in question_ids if question_id is not None]
+
+
+def _sync_question_history(
+    data: InterviewRuntimeStateData,
+    persisted_question_ids: list[UUID],
+    *,
+    current_question: InterviewQuestion | None,
+) -> None:
+    """Merge the database transcript into lazily-created adaptive state.
+
+    The first session question is attached before runtime state exists. Legacy
+    fallbacks can also append questions without updating adaptive state. Unless
+    those persisted IDs are merged here, selection treats an already displayed
+    question as new and can ask it again immediately after a valid answer.
+    """
+    known_ids = set(data.asked_question_ids)
+    for question_id in persisted_question_ids:
+        value = str(question_id)
+        if value not in known_ids:
+            data.asked_question_ids.append(value)
+            known_ids.add(value)
+
+    if current_question is not None:
+        current_id = str(current_question.id)
+        if current_id not in known_ids:
+            data.asked_question_ids.append(current_id)
+        data.current_question_id = current_id
+        data.current_outcome_id = (
+            str(current_question.linked_outcome_id)
+            if current_question.linked_outcome_id is not None
+            else None
+        )
+
+
 async def run_adaptive_turn(
     db: AsyncSession,
     *,
@@ -210,6 +262,11 @@ async def run_adaptive_turn(
         # No stored canonical result (shouldn't happen) → treat as fresh.
 
     data = loaded.data
+    _sync_question_history(
+        data,
+        await _persisted_question_ids(db, session_id),
+        current_question=current_question,
+    )
     question_text = current_question.prompt_text if current_question is not None else ""
     outcome_id = (
         str(current_question.linked_outcome_id)
@@ -419,7 +476,7 @@ async def run_adaptive_turn(
     return AdaptiveOutcome(result=canonical, fallback_reason=None)
 
 
-def _apply_state_updates(
+def _apply_state_updates(  # noqa: C901 -- explicit action branches are auditable
     data: Any,  # noqa: ANN401 -- InterviewRuntimeStateData; loose to avoid import churn
     *,
     intent: Any,  # noqa: ANN401
@@ -473,6 +530,14 @@ def _apply_state_updates(
         InterviewerActionType.CLOSE_INTERVIEW,
     ):
         data.phase = InterviewPhase.CLOSING
+    elif decision.reason_code in {
+        ReasonCode.STUDENT_REQUESTED_REPEAT,
+        ReasonCode.STUDENT_REQUESTED_CLARIFICATION,
+        ReasonCode.STUDENT_REQUESTED_HINT,
+    }:
+        # Candidate controls and assistance do not consume the academic probe
+        # budget used to prevent assessment loops.
+        pass
     else:
         # A probe / clarify / repeat keeps the same question → count the follow-up.
         data.current_question_follow_up_count += 1

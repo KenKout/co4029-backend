@@ -90,10 +90,14 @@ async def entrypoint(ctx: JobContext) -> None:
     first_question_text = await bridge.get_current_question_text(
         interview_session_id, language=language
     )
+    opening_text = await bridge.get_opening_text(
+        interview_session_id, language=language
+    )
     agent = InterviewAgent(
         interview_session_id=interview_session_id,
         student_id=student_id,
         first_question_text=first_question_text,
+        opening_text=opening_text,
         language=language,
     )
     session = build_agent_session(settings)

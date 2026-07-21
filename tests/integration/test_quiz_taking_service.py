@@ -229,8 +229,9 @@ async def test_start_attempt_does_not_leak_is_correct(
 
     assert attempt.attempt_number == 1
     serialized = payload.model_dump()
-    assert serialized["questions"], "expected at least one question"
-    for question in serialized["questions"]:
+    questions = serialized["take"]["questions"]
+    assert questions, "expected at least one question"
+    for question in questions:
         assert "is_correct" not in question
         assert "correct_option_id" not in question
         for option in question["options"]:

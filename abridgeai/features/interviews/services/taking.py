@@ -41,6 +41,10 @@ from abridgeai.features.interviews.models import (
     InterviewSessionMessage,
     InterviewSessionQuestion,
 )
+from abridgeai.features.interviews.orchestrator.assistance_logic import (
+    generate_question_assistance,
+    is_term_selection_reply,
+)
 from abridgeai.features.interviews.orchestrator.security import (
     SecurityAction,
     SecurityAssessment,
@@ -48,6 +52,7 @@ from abridgeai.features.interviews.orchestrator.security import (
     SecurityResponsePolicy,
 )
 from abridgeai.features.interviews.orchestrator.security_logic import (
+    assess_by_rules,
     assess_security,
     choose_security_action,
     extract_separable_academic_text,
@@ -61,6 +66,12 @@ from abridgeai.features.interviews.queries import authoring as authoring_queries
 from abridgeai.features.interviews.queries import sessions as sessions_queries
 from abridgeai.features.interviews.realtime import observability as security_obs
 from abridgeai.features.interviews.services import security as security_service
+from abridgeai.features.interviews.services.ceremony import (
+    FinishReason,
+    ensure_ceremony_message,
+    normalize_language,
+    onboarding_ceremony_kind,
+)
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -203,6 +214,8 @@ async def start_session(
     config_id: UUID,
     payload: Any,  # noqa: ANN401  -- InterviewSessionStartRequest at router edge.
     actor: CurrentUser,
+    *,
+    language: str = "en",
 ) -> InterviewSession:
     """Create (or return the existing live) :class:`InterviewSession`.
 
@@ -236,6 +249,12 @@ async def start_session(
     if existing is not None:
         await _ensure_first_question_attached(db, existing.id, config_id)
         await _maybe_upgrade_input_mode(db, existing, config_id, requested_input_mode)
+        await ensure_ceremony_message(
+            db,
+            session=existing,
+            kind=onboarding_ceremony_kind(existing.onboarding_stage),
+            language=existing.interview_language,
+        )
         return existing
 
     # FR-5.3 retake policy — gate a *new* attempt on the config's
@@ -251,6 +270,8 @@ async def start_session(
         attempt_number=attempt_number,
         status="in_progress",
         input_mode=requested_input_mode,
+        onboarding_stage="identity_check",
+        interview_language=normalize_language(language),
     )
     db.add(session)
     await flush_or_conflict(db)
@@ -267,6 +288,12 @@ async def start_session(
         await flush_or_conflict(db)
 
     await db.refresh(session)
+    await ensure_ceremony_message(
+        db,
+        session=session,
+        kind="candidate_confirmation",
+        language=session.interview_language,
+    )
     return session
 
 
@@ -339,7 +366,7 @@ async def _ensure_first_question_attached(
     await flush_or_conflict(db)
 
 
-async def take_session_step(
+async def take_session_step(  # noqa: C901 - shared legacy/adaptive turn coordinator
     db: AsyncSession,
     session_id: UUID,
     answer_text: str,
@@ -348,6 +375,7 @@ async def take_session_step(
     audio_object_id: UUID | None = None,
     turn_key: str | None = None,
     language: str = "en",
+    turn_action: str = "answer",
 ) -> dict[str, Any]:
     """Record the student's answer + advance the session.
 
@@ -367,6 +395,9 @@ async def take_session_step(
     """
     session = await _require_session(db, session_id)
     _assert_owns_session(session, actor)
+    language = getattr(session, "interview_language", language)
+    if getattr(session, "onboarding_stage", "completed") != "completed":
+        raise AppError("Complete interview onboarding before answering questions")
     if session.status != "in_progress":
         raise AppError(f"Cannot record answer on session with status={session.status}")
 
@@ -391,6 +422,7 @@ async def take_session_step(
             audio_object_id=audio_object_id,
             client_turn_key=turn_key,
             language=language,
+            turn_action=turn_action,
         )
     except Exception:  # noqa: BLE001 -- enforcement must fail closed, never bypass
         logger.exception("interview security stage failed (session=%s)", session_id)
@@ -594,12 +626,44 @@ async def _run_security_stage(  # noqa: C901 -- precedence is kept explicit and 
     audio_object_id: UUID | None,
     client_turn_key: str | None,
     language: str,
+    turn_action: str = "answer",
 ) -> _SecurityStageResult:
     """Shared pre-academic gate for adaptive, legacy, and LiveKit turns."""
     from abridgeai.features.interviews.orchestrator import repository as state_repo
 
     settings = get_settings()
-    if settings.interview_security_guard_mode == "off":
+    explicit_actions = {
+        "repeat": SecurityAction.REPEAT_CURRENT_QUESTION,
+        "clarify": SecurityAction.CLARIFY_CURRENT_QUESTION,
+        "explain_term": SecurityAction.EXPLAIN_CURRENT_TERM,
+        "hint": SecurityAction.HINT_CURRENT_QUESTION,
+    }
+    structured_action = explicit_actions.get(turn_action)
+    if structured_action is not None and assess_by_rules(answer_text).detected:
+        # A client-supplied control cannot override a mixed request for hidden
+        # answers, rubrics, future questions, or internal instructions.
+        structured_action = None
+    explicit_end = is_explicit_end_request(answer_text) if turn_action == "answer" else False
+    control_action = structured_action or (
+        requested_current_question_action(answer_text) if turn_action == "answer" else None
+    )
+    if (
+        control_action is None
+        and turn_action == "answer"
+        and current_question is not None
+        and await _is_pending_term_selection(
+            db,
+            session_question_id=current_session_question.id,
+            answer_text=answer_text,
+            question_text=current_question.prompt_text,
+        )
+    ):
+        control_action = SecurityAction.EXPLAIN_CURRENT_TERM
+    if (
+        settings.interview_security_guard_mode == "off"
+        and not explicit_end
+        and control_action is None
+    ):
         return _SecurityStageResult(
             turn_key=client_turn_key,
             assessment=_benign_assessment(source="off"),
@@ -687,8 +751,6 @@ async def _run_security_stage(  # noqa: C901 -- precedence is kept explicit and 
             prior_category = None
 
     started = time.monotonic()
-    explicit_end = is_explicit_end_request(answer_text)
-    control_action = requested_current_question_action(answer_text)
     if explicit_end or control_action is not None:
         assessment = _benign_assessment(source="control_rules")
         action = control_action or SecurityAction.ALLOW
@@ -747,6 +809,8 @@ async def _run_security_stage(  # noqa: C901 -- precedence is kept explicit and 
     data.last_security_turn_key = turn_key
 
     academic_text = answer_text
+    if control_action is not None:
+        academic_text = ""
     if assessment.detected and action is not SecurityAction.ALLOW:
         separable = extract_separable_academic_text(answer_text)
         if separable:
@@ -945,6 +1009,12 @@ async def _security_action_result(
     academic_text: str | None = None,
     persist_messages: bool = True,
 ) -> dict[str, Any]:
+    assistance_kind = {
+        SecurityAction.REPEAT_CURRENT_QUESTION: "repeat",
+        SecurityAction.CLARIFY_CURRENT_QUESTION: "clarification",
+        SecurityAction.EXPLAIN_CURRENT_TERM: "term",
+        SecurityAction.HINT_CURRENT_QUESTION: "hint",
+    }.get(action)
     custom = None
     if config is not None:
         custom = (
@@ -958,11 +1028,42 @@ async def _security_action_result(
         current_question=(current_question.prompt_text if current_question else None),
         custom_refusal=custom,
     )
+    if (
+        current_question is not None
+        and action
+        in {
+            SecurityAction.CLARIFY_CURRENT_QUESTION,
+            SecurityAction.EXPLAIN_CURRENT_TERM,
+            SecurityAction.HINT_CURRENT_QUESTION,
+        }
+    ):
+        persisted = await _existing_assistance_text(
+            db,
+            session_question_id=current_session_question.id,
+            kind=assistance_kind or "clarification",
+        )
+        # Generate a clarification once and allow only one neutral hint per
+        # question. Reusing persisted text also makes repeated controls stable.
+        if persisted is not None and action in {
+            SecurityAction.CLARIFY_CURRENT_QUESTION,
+            SecurityAction.HINT_CURRENT_QUESTION,
+        }:
+            response = persisted
+        else:
+            response = await generate_question_assistance(
+                db,
+                action=action,
+                question_text=current_question.prompt_text,
+                request_text=answer_text,
+                language=language,
+                persona=getattr(config, "persona", None),
+            )
     if not persist_messages:
         return _controlled_result_dict(
             response,
             language=language,
             is_finished=action is SecurityAction.END_AND_FLAG,
+            assistance_kind=assistance_kind,
         )
     return await _persist_controlled_result(
         db,
@@ -978,8 +1079,82 @@ async def _security_action_result(
         attempt_count=attempt_count,
         response_text=response,
         is_finished=action is SecurityAction.END_AND_FLAG,
-        message_kind=("security" if assessment.detected else "turn_control"),
+        message_kind=(
+            "security"
+            if assessment.detected
+            else {
+                "repeat": "turn_control",
+                "clarification": "clarification",
+                "term": "term_explanation",
+                "hint": "hint",
+            }.get(assistance_kind or "", "turn_control")
+        ),
         academic_text=academic_text,
+        assistance_kind=assistance_kind,
+    )
+
+
+async def _existing_assistance_text(
+    db: AsyncSession,
+    *,
+    session_question_id: UUID,
+    kind: str,
+) -> str | None:
+    """Return the latest persisted assistance of this kind for one question."""
+    from sqlalchemy import select  # noqa: PLC0415
+
+    rows = (
+        await db.execute(
+            select(InterviewSessionMessage)
+            .where(
+                InterviewSessionMessage.session_question_id == session_question_id,
+                InterviewSessionMessage.role == "ai",
+            )
+            .order_by(InterviewSessionMessage.created_at.desc())
+        )
+    ).scalars()
+    metadata_kind = {
+        "clarification": "clarification",
+        "term": "term_explanation",
+        "hint": "hint",
+    }.get(kind, kind)
+    for message in rows:
+        metadata = message.metadata_json if isinstance(message.metadata_json, dict) else {}
+        content = (message.content_text or "").strip()
+        if metadata.get("kind") == metadata_kind and content:
+            return content
+    return None
+
+
+async def _is_pending_term_selection(
+    db: AsyncSession,
+    *,
+    session_question_id: UUID,
+    answer_text: str,
+    question_text: str,
+) -> bool:
+    """Treat a bare term as assistance only after an explicit term prompt."""
+    from sqlalchemy import select  # noqa: PLC0415
+
+    message = (
+        await db.execute(
+            select(InterviewSessionMessage)
+            .where(
+                InterviewSessionMessage.session_question_id == session_question_id,
+                InterviewSessionMessage.role == "ai",
+            )
+            .order_by(InterviewSessionMessage.created_at.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if message is None:
+        return False
+    metadata = message.metadata_json if isinstance(message.metadata_json, dict) else {}
+    return is_term_selection_reply(
+        answer_text,
+        question_text,
+        prior_assistance_text=message.content_text or "",
+        prior_assistance_kind=metadata.get("kind"),
     )
 
 
@@ -1000,6 +1175,7 @@ async def _persist_controlled_result(
     is_finished: bool,
     message_kind: str,
     academic_text: str | None = None,
+    assistance_kind: str | None = None,
 ) -> dict[str, Any]:
     allowed_ids = [current_question.id] if current_question is not None else []
     deterministic_fallback = safe_security_response(
@@ -1050,11 +1226,22 @@ async def _persist_controlled_result(
         )
     )
     await flush_or_conflict(db)
-    return _controlled_result_dict(guarded.text, language=language, is_finished=is_finished)
+    return _controlled_result_dict(
+        guarded.text,
+        language=language,
+        is_finished=is_finished,
+        assistance_kind=assistance_kind,
+    )
 
 
-def _controlled_result_dict(text: str, *, language: str, is_finished: bool) -> dict[str, Any]:
-    return {
+def _controlled_result_dict(
+    text: str,
+    *,
+    language: str,
+    is_finished: bool,
+    assistance_kind: str | None = None,
+) -> dict[str, Any]:
+    result = {
         "next_question": None,
         "is_finished": is_finished,
         "followup_text": text,
@@ -1064,6 +1251,9 @@ def _controlled_result_dict(text: str, *, language: str, is_finished: bool) -> d
         "should_await_response": not is_finished,
         "should_finish": is_finished,
     }
+    if assistance_kind is not None:
+        result["assistance_kind"] = assistance_kind
+    return result
 
 
 def _security_emergency_result(
@@ -1476,28 +1666,89 @@ async def submit_session(
     actor: CurrentUser,
     *,
     arq_pool: object | None = None,
+    reason: FinishReason = "natural",
+    language: str = "en",
 ) -> InterviewSession:
-    """Mark session ``completed`` + enqueue evaluation.
+    """Persist the final ceremony, terminalize the session, and enqueue evaluation.
 
-    Commits inline so the ARQ worker sees the terminal status before
-    the evaluation job dequeues. Tolerates ``arq_pool=None`` (test
-    mode); production routers inject the real pool via Depends.
+    Natural and explicit early completion are always ``completed`` and graded;
+    unanswered questions receive zero in the evaluation stage. A deadline
+    completion is ``timed_out`` when answers exist, or ``abandoned`` when there
+    is no gradeable transcript. Commits inline so the worker sees terminal
+    state before dequeueing.
     """
     session = await _require_session(db, session_id)
     _assert_owns_session(session, actor)
+    language = getattr(session, "interview_language", language)
     if session.status != "in_progress":
         return session
 
-    session.status = "completed"
-    session.ended_at = utcnow()
+    config = await db.get(InterviewConfig, session.interview_config_id)
+    ended_at = utcnow()
+    if reason == "timed_out":
+        if config is None or not config.time_limit_minutes:
+            raise AppError("Cannot time out an interview without a time limit")
+        started_at = session.assessment_started_at or session.started_at
+        if started_at.tzinfo is None:
+            started_at = started_at.replace(tzinfo=UTC)
+        deadline = started_at + timedelta(minutes=config.time_limit_minutes)
+        # Allow a small client/server scheduling tolerance at the boundary.
+        if ended_at + timedelta(seconds=2) < deadline:
+            raise AppError("Interview time limit has not elapsed")
+
+    from sqlalchemy import func, select  # noqa: PLC0415
+
+    user_message_count = int(
+        (
+            await db.execute(
+                select(func.count(InterviewSessionMessage.id)).where(
+                    InterviewSessionMessage.session_id == session.id,
+                    InterviewSessionMessage.role == "user",
+                    InterviewSessionMessage.session_question_id.is_not(None),
+                )
+            )
+        ).scalar_one()
+    )
+    await ensure_ceremony_message(
+        db,
+        session=session,
+        kind="closing",
+        language=language,
+        reason=reason,
+    )
+    session.status = (
+        "abandoned"
+        if user_message_count == 0 and reason == "timed_out"
+        else "timed_out"
+        if reason == "timed_out"
+        else "completed"
+    )
+    session.ended_at = ended_at
     await db.commit()
     await db.refresh(session)
 
-    if arq_pool is not None:
+    if arq_pool is not None and (user_message_count > 0 or reason != "timed_out"):
         await arq_pool.enqueue_job(  # type: ignore[attr-defined]
-            _EVALUATE_INTERVIEW_SESSION_TASK, actor.user_id, session.id
+            _EVALUATE_INTERVIEW_SESSION_TASK,
+            actor.user_id,
+            session.id,
+            _job_id=f"interview-evaluation:{session.id}",
         )
     return session
+
+
+async def session_time_remaining_seconds(db: AsyncSession, session: InterviewSession) -> int | None:
+    """Return the authoritative whole-second countdown for a live session."""
+    config = await db.get(InterviewConfig, session.interview_config_id)
+    if config is None or not config.time_limit_minutes:
+        return None
+    started_at = session.assessment_started_at
+    if started_at is None:
+        return int(config.time_limit_minutes * 60)
+    if started_at.tzinfo is None:
+        started_at = started_at.replace(tzinfo=UTC)
+    deadline = started_at + timedelta(minutes=config.time_limit_minutes)
+    return max(0, int((deadline - datetime.now(UTC)).total_seconds()))
 
 
 async def get_session_for_user(
@@ -1546,6 +1797,7 @@ __all__ = [
     "get_session_for_user",
     "get_user_sessions",
     "start_session",
+    "session_time_remaining_seconds",
     "submit_session",
     "take_session_step",
 ]

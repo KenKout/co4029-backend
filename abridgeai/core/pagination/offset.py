@@ -94,10 +94,11 @@ async def paginate(
         like = f"%{term}%"
         stmt = stmt.where(or_(*(col.ilike(like) for col in search_columns)))
 
-    # Count the filtered rows; strip any ordering the caller baked in.
-    total = (
-        await db.execute(select(func.count()).select_from(stmt.order_by(None).subquery()))
-    ).scalar_one()
+    count_stmt = select(func.count()).select_from(stmt.order_by(None).subquery())
+    exec_opts = stmt.get_execution_options()
+    if exec_opts:
+        count_stmt = count_stmt.execution_options(**exec_opts)
+    total = (await db.execute(count_stmt)).scalar_one()
 
     order_by: list[ColumnElement[Any]] = []
     sort_col = sortable.get(sort) if sort else None

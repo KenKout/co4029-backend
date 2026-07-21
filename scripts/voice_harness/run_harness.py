@@ -184,6 +184,17 @@ class ScenarioResult:
     fallback_count: int = 0
     state_version: int | None = None
     decision_count: int = 0
+    # Security verification is sourced from persisted redacted audit events,
+    # never inferred from refusal wording or audio transcription text.
+    required_security_blocks: int = 0
+    security_requirement_met: bool = True
+    security_assessment_count: int = 0
+    security_blocked_count: int = 0
+    security_repeated_attempt_count: int = 0
+    output_leakage_blocked_count: int = 0
+    session_security_flagged: bool = False
+    security_categories: list[str] = field(default_factory=list)
+    security_actions: list[str] = field(default_factory=list)
     # Flag state as seen by THIS process at scenario start vs. after any
     # agent-flag management was restored. Disambiguates the old, misleading
     # single "adaptive flag: False" line.
@@ -315,7 +326,8 @@ async def _cleanup_throwaway(db, config_id: uuid.UUID) -> None:  # noqa: ANN001
     row = (
         await db.execute(
             text(
-                "SELECT c.id AS course_id, c.organization_id AS org_id, cf.module_id "
+                "SELECT c.id AS course_id, c.organization_id AS org_id, "
+                "c.owner_user_id AS teacher_id, cf.module_id "
                 "FROM interview_configs cf JOIN courses c ON c.id = cf.course_id "
                 "WHERE cf.id = :cfg"
             ),
@@ -324,7 +336,25 @@ async def _cleanup_throwaway(db, config_id: uuid.UUID) -> None:  # noqa: ANN001
     ).first()
     if row is None:
         return
-    course_id, org_id, module_id = row.course_id, row.org_id, row.module_id
+    course_id, org_id, teacher_id, module_id = (
+        row.course_id,
+        row.org_id,
+        row.teacher_id,
+        row.module_id,
+    )
+    # Capture harness-created students before their sessions are deleted.
+    student_ids = [
+        r.student_id
+        for r in (
+            await db.execute(
+                text(
+                    "SELECT DISTINCT student_id FROM interview_sessions "
+                    "WHERE interview_config_id = :c"
+                ),
+                {"c": config_id},
+            )
+        ).all()
+    ]
     # Interview subtree (sessions → messages/questions/runtime state, then bank).
     await db.execute(
         text(
@@ -356,14 +386,11 @@ async def _cleanup_throwaway(db, config_id: uuid.UUID) -> None:  # noqa: ANN001
     await db.execute(text("DELETE FROM interview_configs WHERE id = :c"), {"c": config_id})
     await db.execute(text("DELETE FROM modules WHERE id = :m"), {"m": module_id})
     await db.execute(text("DELETE FROM courses WHERE id = :c"), {"c": course_id})
-    # Users tied to this org (harness created exactly a teacher + student).
-    await db.execute(
-        text(
-            "DELETE FROM users WHERE id IN "
-            "(SELECT owner_user_id FROM courses WHERE organization_id = :o) "
-        ),
-        {"o": org_id},
-    )
+    # Users are resolved before deleting courses/sessions. Delete only those
+    # exact harness-created ids; never infer a broad organization-wide target.
+    user_ids = [teacher_id, *student_ids]
+    for user_id in user_ids:
+        await db.execute(text("DELETE FROM users WHERE id = :u"), {"u": user_id})
     await db.execute(
         text("DELETE FROM organizations WHERE id = :o AND slug LIKE 'vh-%'"), {"o": org_id}
     )
@@ -412,6 +439,8 @@ async def _collect_db_signals(session_id: uuid.UUID) -> dict[str, Any]:
                     "SELECT role, "
                     "metadata_json->>'kind' AS kind, "
                     "metadata_json->>'action' AS action, "
+                    "metadata_json->>'security_action' AS security_action, "
+                    "metadata_json->>'security_category' AS security_category, "
                     "metadata_json->>'utterance_status' AS utterance_status, "
                     "left(content_text, 200) AS txt, "
                     "created_at "
@@ -446,8 +475,45 @@ async def _collect_db_signals(session_id: uuid.UUID) -> dict[str, Any]:
                 {"s": session_id},
             )
         ).all()
+        security_row = (
+            await db.execute(
+                text(
+                    "SELECT "
+                    "count(*) FILTER (WHERE event_type = 'interview.security.assessed') "
+                    "AS assessed, "
+                    "count(*) FILTER (WHERE event_type = 'interview.security.blocked') "
+                    "AS blocked, "
+                    "count(*) FILTER (WHERE event_type = 'interview.security.repeated_attempt') "
+                    "AS repeated_attempt, "
+                    "count(*) FILTER (WHERE event_type = "
+                    "'interview.security.output_leakage_blocked') AS output_leakage, "
+                    "array_remove(array_agg(DISTINCT category), NULL) AS categories, "
+                    "array_remove(array_agg(DISTINCT action), NULL) AS actions "
+                    "FROM interview_security_events WHERE session_id = :s"
+                ),
+                {"s": session_id},
+            )
+        ).one()
+        session_flagged = bool(
+            (
+                await db.execute(
+                    text(
+                        "SELECT session_security_flagged FROM interview_sessions "
+                        "WHERE id = :s"
+                    ),
+                    {"s": session_id},
+                )
+            ).scalar_one()
+        )
     transcript = [
-        {"role": r.role, "action": r.action or "", "text": r.txt or ""} for r in msg_rows
+        {
+            "role": r.role,
+            "action": r.action or "",
+            "security_action": r.security_action or "",
+            "security_category": r.security_category or "",
+            "text": r.txt or "",
+        }
+        for r in msg_rows
     ]
     actions = [r["action"] for r in transcript if r["action"]]
     # Decisions + fallbacks come from the persisted AI-turn metadata (the source
@@ -472,6 +538,13 @@ async def _collect_db_signals(session_id: uuid.UUID) -> dict[str, Any]:
         "fallback_count": fallback_count,
         "selected_question_ids": [str(r.interview_question_id) for r in sq_rows],
         "ai_turn_committed_at": ai_turn_committed_at,
+        "security_assessment_count": int(security_row.assessed or 0),
+        "security_blocked_count": int(security_row.blocked or 0),
+        "security_repeated_attempt_count": int(security_row.repeated_attempt or 0),
+        "output_leakage_blocked_count": int(security_row.output_leakage or 0),
+        "session_security_flagged": session_flagged,
+        "security_categories": sorted(str(v) for v in (security_row.categories or [])),
+        "security_actions": sorted(str(v) for v in (security_row.actions or [])),
     }
 
 
@@ -646,6 +719,26 @@ def _strict_failure_reason(result: ScenarioResult) -> str:
     )
 
 
+def _security_requirement_ok(result: ScenarioResult) -> bool:
+    """Check the persisted minimum block count requested by the caller."""
+    if result.required_security_blocks <= 0:
+        return True
+    return (
+        result.security_assessment_count >= result.required_security_blocks
+        and result.security_blocked_count >= result.required_security_blocks
+    )
+
+
+def _security_failure_reason(result: ScenarioResult) -> str:
+    return (
+        "security verification FAILED: required at least "
+        f"{result.required_security_blocks} assessed+blocked voice turn(s), but persisted "
+        f"assessed={result.security_assessment_count}, blocked={result.security_blocked_count}. "
+        "Confirm INTERVIEW_SECURITY_GUARD_MODE=enforce in both backend and "
+        "abridgeai-interview-agent, then inspect STT transcripts for recognition errors."
+    )
+
+
 async def _drive_scenario(
     *,
     settings: Any,  # noqa: ANN401
@@ -741,6 +834,7 @@ async def run_scenario(
     delete_audio_on_success: bool = False,
     scenario_timeout_s: float = DEFAULT_SCENARIO_TIMEOUT_S,
     require_adaptive: bool = False,
+    require_security_blocks: int = 0,
 ) -> ScenarioResult:
     """Run one live voice scenario end-to-end and return a machine-readable result.
 
@@ -756,6 +850,7 @@ async def run_scenario(
         ok=False,
         language=language,
         adaptive_required=require_adaptive,
+        required_security_blocks=max(0, require_security_blocks),
         adaptive_flag_during_run=adaptive_during,
         adaptive_flag_after_restoration=adaptive_during,
         audio_dir=str(Path(out_dir).resolve()),
@@ -827,6 +922,17 @@ async def run_scenario(
         result.decision_count = signals.get("decision_count", 0)
         result.fallback_count = signals.get("fallback_count", 0)
         result.selected_question_ids = signals.get("selected_question_ids", [])
+        result.security_assessment_count = signals.get("security_assessment_count", 0)
+        result.security_blocked_count = signals.get("security_blocked_count", 0)
+        result.security_repeated_attempt_count = signals.get(
+            "security_repeated_attempt_count", 0
+        )
+        result.output_leakage_blocked_count = signals.get(
+            "output_leakage_blocked_count", 0
+        )
+        result.session_security_flagged = signals.get("session_security_flagged", False)
+        result.security_categories = signals.get("security_categories", [])
+        result.security_actions = signals.get("security_actions", [])
 
         # Baseline verdict: audio produced in both directions AND turns persisted.
         result.ok = (
@@ -843,6 +949,11 @@ async def run_scenario(
                 result.ok = False
                 if result.error is None:
                     result.error = _strict_failure_reason(result)
+        result.security_requirement_met = _security_requirement_ok(result)
+        if not result.security_requirement_met:
+            result.ok = False
+            if result.error is None:
+                result.error = _security_failure_reason(result)
     except TimeoutError:
         result.error = f"scenario exceeded hard timeout of {scenario_timeout_s}s"
         logger.error(result.error)
@@ -908,6 +1019,15 @@ def _print_summary(result: ScenarioResult) -> None:
     print(f"fallback count                 : {result.fallback_count}")
     print(f"adaptive REQUIRED (strict)     : {result.adaptive_required}")
     print(f"adaptive requirement met       : {result.adaptive_requirement_met}")
+    print(f"security blocks REQUIRED       : {result.required_security_blocks}")
+    print(f"security requirement met       : {result.security_requirement_met}")
+    print(f"security assessed              : {result.security_assessment_count}")
+    print(f"security blocked               : {result.security_blocked_count}")
+    print(f"security repeated attempts     : {result.security_repeated_attempt_count}")
+    print(f"output leakage blocked         : {result.output_leakage_blocked_count}")
+    print(f"session security flagged       : {result.session_security_flagged}")
+    print(f"security categories            : {result.security_categories}")
+    print(f"security actions               : {result.security_actions}")
     print(f"agent utterances               : {result.agent_utterance_count}")
     print(f"captured audio (s)             : {result.captured_audio_seconds}")
     print(f"peak amplitude                 : {result.peak_amplitude}")
@@ -943,6 +1063,7 @@ async def run(args: argparse.Namespace) -> int:
         delete_audio_on_success=args.delete_audio_on_success,
         scenario_timeout_s=args.scenario_timeout,
         require_adaptive=args.require_adaptive,
+        require_security_blocks=args.require_security_blocks,
     )
     _print_summary(result)
     if args.json:
@@ -997,6 +1118,13 @@ def main() -> None:
         help="Strict mode: FAIL the run unless the adaptive brain genuinely ran "
         "(runtime-state row + persisted decision/action + non-null version + not "
         "all-fallback). Defaults on when REQUIRE_ADAPTIVE_VOICE=1.",
+    )
+    p.add_argument(
+        "--require-security-blocks",
+        type=int,
+        default=0,
+        help="FAIL unless at least this many redacted security assessed+blocked "
+        "events were persisted (use with spoken injection fixtures in enforce mode)",
     )
     args = p.parse_args()
     raise SystemExit(asyncio.run(run(args)))

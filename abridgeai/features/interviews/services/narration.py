@@ -48,7 +48,7 @@ _MAX_CHARS = 1200
 _TIMEOUT = httpx.Timeout(30.0, connect=10.0)
 
 
-class NarrationUnavailable(RuntimeError):
+class NarrationUnavailable(RuntimeError):  # noqa: N818 - public API name
     """Raised when TTS cannot be produced (no credentials, gateway error)."""
 
 

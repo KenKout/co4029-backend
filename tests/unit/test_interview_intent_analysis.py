@@ -31,6 +31,7 @@ from abridgeai.features.interviews.orchestrator.intent import (
 @pytest.mark.parametrize(
     ("utterance", "expected"),
     [
+        ("repeat", StudentIntent.ASK_TO_REPEAT),
         ("Could you repeat the question?", StudentIntent.ASK_TO_REPEAT),
         ("Can you say that again", StudentIntent.ASK_TO_REPEAT),
         ("What do you mean by granularity?", StudentIntent.ASK_FOR_CLARIFICATION),
