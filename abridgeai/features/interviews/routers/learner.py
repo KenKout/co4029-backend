@@ -642,6 +642,9 @@ async def respond_to_session(
         should_await_response=result.get("should_await_response"),
         should_finish=result.get("should_finish"),
         assistance_kind=result.get("assistance_kind"),
+        # ── End-confirmation gate (Slice 4; None on legacy/sequential path) ──
+        pending_confirmation=result.get("pending_confirmation"),
+        interaction_state=result.get("interaction_state"),
         # ── Natural Interview Transitions (additive; None when no transition) ─
         transition_id=result.get("transition_id"),
         transition_text=result.get("transition_text"),

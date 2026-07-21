@@ -237,6 +237,22 @@ def _fallback_parts(  # noqa: C901 -- flat per-action dispatch; readability > sp
         }[lang]
         return "", tech, ""
 
+    if action is InterviewerActionType.REQUEST_END_CONFIRMATION:
+        # End-confirmation gate (Slice 4): ask the candidate to confirm ending
+        # rather than closing immediately. Keeps the current question in play.
+        confirm = {
+            "en": "Just to confirm — would you like to end and submit for grading, or continue the interview?",  # noqa: E501
+            "vi": "Xin xác nhận — bạn muốn kết thúc và nộp bài để chấm điểm, hay tiếp tục buổi phỏng vấn?",  # noqa: E501
+        }[lang]
+        return "", confirm, ""
+
+    if action is InterviewerActionType.CANCEL_END:
+        resume = {
+            "en": "No problem — let's continue.",
+            "vi": "Không sao — chúng ta tiếp tục nhé.",
+        }[lang]
+        return "", resume, q
+
     if action is InterviewerActionType.OPENING:
         return "", "", q
 

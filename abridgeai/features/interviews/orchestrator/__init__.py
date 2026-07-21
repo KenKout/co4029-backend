@@ -53,6 +53,7 @@ from abridgeai.features.interviews.orchestrator.intent import (
     NON_ACADEMIC_INTENTS,
     IntentClassification,
     StudentIntent,
+    classify_confirmation_reply,
 )
 from abridgeai.features.interviews.orchestrator.mapping import canonical_step_result
 from abridgeai.features.interviews.orchestrator.pipeline import (
@@ -71,6 +72,7 @@ from abridgeai.features.interviews.orchestrator.selection import (
 from abridgeai.features.interviews.orchestrator.state import (
     CandidateSignals,
     CoverageStatus,
+    InteractionState,
     InterviewPhase,
     InterviewRuntimeStateData,
     OutcomeCoverageState,
@@ -111,6 +113,7 @@ __all__ = [
     "DecisionInputs",
     "EvidenceType",
     "IntentClassification",
+    "InteractionState",
     "InterviewPhase",
     "InterviewRuntimeStateData",
     "InterviewerActionType",
@@ -126,6 +129,7 @@ __all__ = [
     "Specificity",
     "StudentIntent",
     "decide_next_action",
+    "classify_confirmation_reply",
     "perceive_turn",
     "score_candidate",
     "select_next_question",

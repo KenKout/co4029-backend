@@ -61,7 +61,9 @@ from abridgeai.features.interviews.orchestrator.difficulty import (
     update_streaks,
 )
 from abridgeai.features.interviews.orchestrator.intent import (
+    IntentClassification,
     StudentIntent,
+    classify_confirmation_reply,
 )
 from abridgeai.features.interviews.orchestrator.intent_logic import classify_intent
 from abridgeai.features.interviews.orchestrator.mapping import canonical_step_result
@@ -76,6 +78,7 @@ from abridgeai.features.interviews.orchestrator.selection import (
     select_next_question,
 )
 from abridgeai.features.interviews.orchestrator.state import (
+    InteractionState,
     InterviewPhase,
     InterviewRuntimeStateData,
     OutcomeCoverageState,
@@ -234,6 +237,24 @@ def _sync_question_history(
         )
 
 
+def _confirmation_override(
+    intent: IntentClassification, answer_text: str, *, pending: bool
+) -> IntentClassification:
+    """End-confirmation gate (Slice 4).
+
+    While a confirmation is pending, an unambiguous yes/no is reinterpreted as
+    CONFIRM_END / CANCEL_END, overriding the general classifier (a bare
+    "yes"/"no" here is a confirmation reply, not an answer). Non-matches fall
+    through unchanged; the decision policy treats anything that isn't a confirm
+    as a cancel while pending, so this stays safe. When no confirmation is
+    pending the intent is returned as-is.
+    """
+    if not pending:
+        return intent
+    reply = classify_confirmation_reply(answer_text)
+    return reply if reply is not None else intent
+
+
 async def run_adaptive_turn(
     db: AsyncSession,
     *,
@@ -288,6 +309,9 @@ async def run_adaptive_turn(
         student_utterance=answer_text,
         gateway=None if use_llm else _no_gateway(),
     )
+
+    # 1b. End-confirmation gate (Slice 4) — see _confirmation_override.
+    intent = _confirmation_override(intent, answer_text, pending=data.pending_confirmation)
 
     # 2. Analysis — only for genuine academic answers.
     analysis: AnswerAnalysis | None = None
@@ -368,6 +392,7 @@ async def run_adaptive_turn(
             time_fraction_remaining=ctx.time_fraction_remaining,
             has_next_question=has_next,
             all_required_outcomes_covered=all_required_covered,
+            pending_confirmation=data.pending_confirmation,
         )
     )
 
@@ -490,6 +515,8 @@ async def run_adaptive_turn(
         state_version=loaded.version + 1,
         ai_turn_id=str(ai_msg.id) if ai_msg.id is not None else None,
         utterance_status=utt_status,
+        pending_confirmation=data.pending_confirmation,
+        interaction_state=data.interaction_state.value,
     )
 
     # Stash a replay-safe copy of the canonical result (ids as strings) so a
@@ -538,6 +565,22 @@ def _apply_state_updates(  # noqa: C901 -- explicit action branches are auditabl
                 data.outcome_coverage[ev.outcome_id] = cov
             apply_evidence_to_coverage(cov, ev, now=now)
 
+    # End-confirmation state (Slice 4). These actions keep the SAME question and
+    # never consume the academic probe budget; they only flip the confirmation
+    # flag + interaction state, so they are handled before the follow-up logic.
+    if decision.action is InterviewerActionType.REQUEST_END_CONFIRMATION:
+        data.pending_confirmation = True
+        data.interaction_state = InteractionState.CONFIRMING_END
+        return
+    if decision.action is InterviewerActionType.CANCEL_END:
+        data.pending_confirmation = False
+        data.interaction_state = InteractionState.AWAITING_ANSWER
+        return
+
+    # Any other resolved action clears a pending confirmation (a confirmed end
+    # flows into the closing branch below; nothing else should stay pending).
+    data.pending_confirmation = False
+
     # Follow-up counters + phase.
     if decision.action in ADVANCE_ACTIONS:
         data.current_question_follow_up_count = 0
@@ -553,11 +596,13 @@ def _apply_state_updates(  # noqa: C901 -- explicit action branches are auditabl
             data.skipped_question_ids.append(data.current_question_id)
         if data.phase is InterviewPhase.OPENING:
             data.phase = InterviewPhase.CORE
+        data.interaction_state = InteractionState.AWAITING_ANSWER
     elif decision.action in (
         InterviewerActionType.BEGIN_CLOSING,
         InterviewerActionType.CLOSE_INTERVIEW,
     ):
         data.phase = InterviewPhase.CLOSING
+        data.interaction_state = InteractionState.CLOSING
     elif decision.reason_code in {
         ReasonCode.STUDENT_REQUESTED_REPEAT,
         ReasonCode.STUDENT_REQUESTED_CLARIFICATION,

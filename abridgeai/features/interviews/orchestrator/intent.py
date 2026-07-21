@@ -37,6 +37,11 @@ class StudentIntent(str, Enum):  # noqa: UP042 -- StrEnum changes value coercion
     TECHNICAL_ISSUE = "technical_issue"
     OFF_TOPIC = "off_topic"
     END_INTERVIEW = "end_interview"
+    # End-confirmation replies (Slice 4). Only meaningful while the runtime has
+    # a pending end-confirmation; otherwise they fall through to answer-handling
+    # (a bare "yes"/"no" mid-question is not an end signal).
+    CONFIRM_END = "confirm_end"
+    CANCEL_END = "cancel_end"
 
 
 # Intents that must NEVER be recorded as an academic answer / scored.
@@ -49,6 +54,8 @@ NON_ACADEMIC_INTENTS: frozenset[StudentIntent] = frozenset(
         StudentIntent.SKIP_QUESTION,
         StudentIntent.TECHNICAL_ISSUE,
         StudentIntent.END_INTERVIEW,
+        StudentIntent.CONFIRM_END,
+        StudentIntent.CANCEL_END,
     }
 )
 
@@ -209,6 +216,62 @@ def classify_by_rules(utterance: str) -> IntentClassification | None:
     return None
 
 
+# Confirm / cancel replies (Slice 4). These are CONTEXT-SCOPED: a bare "yes" or
+# "no" is only an end-confirm/cancel signal while an end-confirmation is pending,
+# so they are NOT in the general _RULES (that would hijack a legitimate "yes,
+# because…" answer mid-question). ``classify_confirmation_reply`` is called by
+# the runtime ONLY when ``pending_confirmation`` is set.
+_CONFIRM_END_PATTERNS: tuple[str, ...] = (
+    r"^(yes|yeah|yep|yup|confirm|confirmed|end it|do it|sure)[.!?]*$",
+    # While a confirmation is pending, an explicit end-the-interview phrase is a
+    # confirm (the comma/leading "yes," variants are common, so match anywhere).
+    r"\bend (and submit|the interview|this interview|the session|this session)\b",
+    r"\b(yes|please)\b.{0,10}\bend\b",
+    r"\bi'?m sure\b",
+    r"^(có|đúng|vâng|ừ|ok|okay|đồng ý)[.!?]*$",
+    r"\b(kết thúc|dừng)\b.{0,12}\b(đi|luôn|nhé|phỏng vấn)\b",
+)
+_CANCEL_END_PATTERNS: tuple[str, ...] = (
+    r"^(no|nope|nah|cancel|continue|keep going|not yet|wait)[.!?]*$",
+    r"\b(continue|keep going|carry on) (the |with )?(interview|session)?\b",
+    r"\bdon'?t end\b",
+    r"\bnever ?mind\b",
+    r"^(không|khoan|tiếp tục|chưa)[.!?]*$",
+    r"\btiếp tục (đi|nhé)?\b",
+    r"\bđừng (dừng|kết thúc)\b",
+)
+
+
+def classify_confirmation_reply(utterance: str) -> IntentClassification | None:
+    """Classify a reply while an end-confirmation is pending.
+
+    Returns a CONFIRM_END / CANCEL_END verdict on an unambiguous yes/no, or None
+    to let the normal classifier + decision policy decide (the decision layer
+    treats "anything that isn't a confirm" as a cancel while pending, so a
+    None here still resolves safely — this only short-circuits the clear cases).
+    """
+    text = (utterance or "").strip().lower()
+    if not text:
+        return None
+    for pattern in _CANCEL_END_PATTERNS:
+        if re.search(pattern, text):
+            return IntentClassification(
+                intent=StudentIntent.CANCEL_END,
+                confidence=0.9,
+                rationale="Confirmation-scoped cancel reply.",
+                source="rules",
+            )
+    for pattern in _CONFIRM_END_PATTERNS:
+        if re.search(pattern, text):
+            return IntentClassification(
+                intent=StudentIntent.CONFIRM_END,
+                confidence=0.9,
+                rationale="Confirmation-scoped confirm reply.",
+                source="rules",
+            )
+    return None
+
+
 def parse_intent_response(payload: Mapping[str, Any] | None) -> IntentClassification | None:
     """Coerce the gateway JSON into an :class:`IntentClassification`.
 
@@ -259,5 +322,6 @@ __all__ = [
     "IntentClassification",
     "StudentIntent",
     "classify_by_rules",
+    "classify_confirmation_reply",
     "parse_intent_response",
 ]

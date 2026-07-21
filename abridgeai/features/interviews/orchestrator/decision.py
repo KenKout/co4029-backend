@@ -54,6 +54,11 @@ class InterviewerActionType(str, Enum):  # noqa: UP042 -- match codebase convent
     SKIP_QUESTION = "skip_question"
     OFFER_BRIEF_PAUSE = "offer_brief_pause"
     HANDLE_TECHNICAL_ISSUE = "handle_technical_issue"
+    # End-confirmation gate (Slice 4): a natural-language end request no longer
+    # closes immediately — it asks the candidate to confirm. The next turn
+    # resolves to CONFIRM_END (→ closing) or CANCEL_END (→ back to the question).
+    REQUEST_END_CONFIRMATION = "request_end_confirmation"
+    CANCEL_END = "cancel_end"
     BEGIN_CLOSING = "begin_closing"
     CLOSE_INTERVIEW = "close_interview"
 
@@ -84,6 +89,10 @@ class ReasonCode(str, Enum):  # noqa: UP042 -- match codebase convention
     CLOSING_REQUIRED = "closing_required"
     OFF_TOPIC_REDIRECT = "off_topic_redirect"
     CANNOT_ANSWER_TRANSITION = "cannot_answer_transition"
+    # End-confirmation gate (Slice 4).
+    END_CONFIRMATION_REQUESTED = "end_confirmation_requested"
+    END_CONFIRMED = "end_confirmed"
+    END_CANCELLED = "end_cancelled"
 
 
 # Follow-up / loop-protection limits (Phase 11). Conservative defaults; Phase 6
@@ -163,6 +172,10 @@ class DecisionInputs:
     max_follow_ups_per_question: int = DEFAULT_MAX_FOLLOWUPS_PER_QUESTION
     max_total_follow_ups: int = DEFAULT_MAX_TOTAL_FOLLOWUPS
     closing_time_fraction: float = 0.1
+    # End-confirmation gate (Slice 4): True while a prior turn asked the
+    # candidate to confirm ending. It changes how CONFIRM_END / CANCEL_END and a
+    # bare answer are interpreted this turn (see _decide_from_intent_request).
+    pending_confirmation: bool = False
 
 
 # Below this fraction of time remaining, stop probing and head for closing.
@@ -218,11 +231,6 @@ _SIMPLE_INTENT_ACTIONS: dict[StudentIntent, tuple[InterviewerActionType, ReasonC
         ReasonCode.TECHNICAL_ISSUE,
         "Student reported a technical issue; not scored.",
     ),
-    StudentIntent.END_INTERVIEW: (
-        InterviewerActionType.BEGIN_CLOSING,
-        ReasonCode.STUDENT_REQUESTED_END,
-        "Student asked to end the interview.",
-    ),
     StudentIntent.ASK_TO_REPEAT: (
         InterviewerActionType.REPEAT_QUESTION,
         ReasonCode.STUDENT_REQUESTED_REPEAT,
@@ -253,6 +261,44 @@ def _decide_from_intent_request(inputs: DecisionInputs) -> InterviewerDecision |
     analysis-driven probing / advancement logic.
     """
     intent = inputs.intent.intent
+
+    # End-confirmation gate (Slice 4).
+    if inputs.pending_confirmation:
+        # A confirmation is outstanding. An explicit end-confirm — or a repeated
+        # natural end request — closes; anything else cancels and resumes the
+        # SAME question (never scored, never advanced).
+        if intent in (StudentIntent.CONFIRM_END, StudentIntent.END_INTERVIEW):
+            return InterviewerDecision(
+                action=InterviewerActionType.BEGIN_CLOSING,
+                reason_code=ReasonCode.END_CONFIRMED,
+                should_record_academic_evidence=False,
+                internal_rationale="Candidate confirmed ending; closing.",
+                tags=["end_confirmed"],
+            )
+        return InterviewerDecision(
+            action=InterviewerActionType.CANCEL_END,
+            reason_code=ReasonCode.END_CANCELLED,
+            should_record_academic_evidence=False,
+            should_advance_question=False,
+            internal_rationale="End cancelled; resume the current question.",
+            tags=["end_cancelled"],
+        )
+
+    # A fresh end request does NOT close immediately — it asks to confirm.
+    if intent is StudentIntent.END_INTERVIEW:
+        return InterviewerDecision(
+            action=InterviewerActionType.REQUEST_END_CONFIRMATION,
+            reason_code=ReasonCode.END_CONFIRMATION_REQUESTED,
+            should_record_academic_evidence=False,
+            should_advance_question=False,
+            internal_rationale="Candidate asked to end; request confirmation.",
+            tags=["confirm_end_requested"],
+        )
+
+    # A confirm/cancel reply with NO pending confirmation is not an end signal —
+    # treat it as an ordinary answer (fall through to analysis-driven handling).
+    if intent in (StudentIntent.CONFIRM_END, StudentIntent.CANCEL_END):
+        return None
 
     simple = _SIMPLE_INTENT_ACTIONS.get(intent)
     if simple is not None:

@@ -103,10 +103,19 @@ def test_cannot_answer_records_insufficient_and_advances() -> None:
     assert "insufficient_evidence" in d.tags
 
 
-def test_end_request_begins_closing() -> None:
-    d = decide_next_action(_inputs(intent=_intent(StudentIntent.END_INTERVIEW)))
-    assert d.action is InterviewerActionType.BEGIN_CLOSING
-    assert d.reason_code is ReasonCode.STUDENT_REQUESTED_END
+def test_end_request_asks_for_confirmation_then_closes_on_confirm() -> None:
+    # End-confirmation gate (Slice 4): a fresh end request no longer closes
+    # immediately — it asks the candidate to confirm.
+    fresh = decide_next_action(_inputs(intent=_intent(StudentIntent.END_INTERVIEW)))
+    assert fresh.action is InterviewerActionType.REQUEST_END_CONFIRMATION
+    assert fresh.reason_code is ReasonCode.END_CONFIRMATION_REQUESTED
+    assert fresh.should_advance_question is False
+    # With a confirmation pending, the end request (or an explicit confirm) closes.
+    confirmed = decide_next_action(
+        _inputs(intent=_intent(StudentIntent.END_INTERVIEW), pending_confirmation=True)
+    )
+    assert confirmed.action is InterviewerActionType.BEGIN_CLOSING
+    assert confirmed.reason_code is ReasonCode.END_CONFIRMED
 
 
 def test_off_topic_redirects_once_then_advances() -> None:

@@ -273,6 +273,15 @@ class InterviewSubmitAnswerResponse(BaseModel):
     should_finish: bool | None = None
     assistance_kind: InterviewAssistanceKindLiteral | None = None
 
+    # ── End-confirmation gate (Slice 4) ──────────────────────────────────────
+    # pending_confirmation is True while the interviewer has asked the candidate
+    # to confirm ending (action=request_end_confirmation) and is awaiting a
+    # yes/no. interaction_state exposes the per-turn lifecycle axis (separate
+    # from interview progress/phase) so the client can render the confirm UI.
+    # Additive/optional; legacy + non-adaptive paths leave both None.
+    pending_confirmation: bool | None = None
+    interaction_state: str | None = None
+
     # ── Natural Interview Transitions ────────────────────────────────────────
     # A standardized between-turn transition, persisted as its own AI turn and
     # surfaced here so the client can show + narrate it BEFORE revealing the

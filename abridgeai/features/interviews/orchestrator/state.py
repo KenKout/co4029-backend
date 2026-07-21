@@ -26,7 +26,7 @@ from typing import Any
 
 # Current schema version of the serialized state payload. Bump on incompatible
 # shape changes so ``from_dict`` can migrate old payloads if ever needed.
-STATE_SCHEMA_VERSION = 2
+STATE_SCHEMA_VERSION = 3
 
 
 class InterviewPhase(str, Enum):  # noqa: UP042 -- StrEnum changes value coercion; match codebase convention
@@ -43,6 +43,29 @@ class CoverageStatus(str, Enum):  # noqa: UP042 -- StrEnum changes value coercio
     PARTIAL = "partial"
     SUFFICIENT = "sufficient"
     INSUFFICIENT = "insufficient"
+
+
+class InteractionState(str, Enum):  # noqa: UP042 -- match codebase convention
+    """Per-turn interaction lifecycle (Slice 4).
+
+    This is a SEPARATE axis from ``InterviewPhase``. ``InterviewPhase`` tracks
+    *progress* through the interview (opening → core → closing → completed);
+    ``InteractionState`` tracks what the current *turn* is waiting on. Keeping
+    them distinct avoids overloading ``phase`` — e.g. an end-confirmation can be
+    pending (``CONFIRMING_END``) while the phase is still ``CORE``.
+
+    Most turns sit in ``AWAITING_ANSWER``. ``CONFIRMING_END`` is the only state
+    that currently changes control flow (it gates the confirm/cancel handling);
+    the others are reserved for richer client rendering and future slices, and
+    default deserialization is tolerant so older rows load as ``AWAITING_ANSWER``.
+    """
+
+    ASKING = "asking"
+    AWAITING_ANSWER = "awaiting_answer"
+    ANALYZING = "analyzing"
+    CONFIRMING_END = "confirming_end"
+    CLOSING = "closing"
+    COMPLETED = "completed"
 
 
 @dataclass
@@ -146,6 +169,13 @@ class InterviewRuntimeStateData:
     consecutive_weak_answers: int = 0
     consecutive_strong_answers: int = 0
 
+    # Per-turn interaction lifecycle (Slice 4) — a SEPARATE axis from ``phase``.
+    # ``pending_confirmation`` is True only while an end-confirmation is awaiting
+    # the candidate's yes/no; it gates the confirm/cancel branch and is cleared
+    # on either resolution.
+    interaction_state: InteractionState = InteractionState.AWAITING_ANSWER
+    pending_confirmation: bool = False
+
     candidate_signals: CandidateSignals = field(default_factory=CandidateSignals)
 
     # Bounded prompt-injection security state. Raw student content is never
@@ -183,6 +213,8 @@ class InterviewRuntimeStateData:
             "last_answer_analysis": self.last_answer_analysis,
             "consecutive_weak_answers": self.consecutive_weak_answers,
             "consecutive_strong_answers": self.consecutive_strong_answers,
+            "interaction_state": self.interaction_state.value,
+            "pending_confirmation": self.pending_confirmation,
             "candidate_signals": self.candidate_signals.to_dict(),
             "security_assessment_count": self.security_assessment_count,
             "security_attempt_count": self.security_attempt_count,
@@ -229,6 +261,8 @@ class InterviewRuntimeStateData:
             last_answer_analysis=data.get("last_answer_analysis"),
             consecutive_weak_answers=int(data.get("consecutive_weak_answers", 0)),
             consecutive_strong_answers=int(data.get("consecutive_strong_answers", 0)),
+            interaction_state=_interaction_state(data.get("interaction_state")),
+            pending_confirmation=bool(data.get("pending_confirmation", False)),
             candidate_signals=CandidateSignals.from_dict(data.get("candidate_signals")),
             security_assessment_count=max(0, int(data.get("security_assessment_count", 0))),
             security_attempt_count=max(0, int(data.get("security_attempt_count", 0))),
@@ -257,6 +291,13 @@ def _phase(value: object) -> InterviewPhase:
         return InterviewPhase.OPENING
 
 
+def _interaction_state(value: object) -> InteractionState:
+    try:
+        return InteractionState(value)
+    except (ValueError, TypeError):
+        return InteractionState.AWAITING_ANSWER
+
+
 def _coverage_status(value: object) -> CoverageStatus:
     try:
         return CoverageStatus(value)
@@ -274,6 +315,7 @@ __all__ = [
     "STATE_SCHEMA_VERSION",
     "CandidateSignals",
     "CoverageStatus",
+    "InteractionState",
     "InterviewPhase",
     "InterviewRuntimeStateData",
     "OutcomeCoverageState",
