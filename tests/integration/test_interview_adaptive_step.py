@@ -530,18 +530,25 @@ async def test_repeat_request_repeats_without_scoring(
         )
         await db.commit()
 
-    assert result["action"] == "repeat_question"
+    # A repeat request is handled by the shared pre-academic control gate
+    # (before adaptive/legacy), so it returns a controlled-result dict — NOT the
+    # structured adaptive shape. It never advances, never finishes, and the
+    # repeated question text is spoken back.
+    assert "action" not in result
     assert result["is_finished"] is False
     assert result["next_question"] is None
-    # repeat must NOT record academic evidence.
+    assert result["ai_turn_text"]
+    assert "explain concept 1" in result["ai_turn_text"]
+    # repeat must NOT record academic evidence: no runtime-state coverage row.
     async with engine.begin() as conn:
-        cov = (
+        cov_row = (
             await conn.execute(
                 text("SELECT state_json FROM interview_runtime_states WHERE session_id = :s"),
                 {"s": session_id},
             )
-        ).scalar_one()
-    assert cov["outcome_coverage"] == {}
+        ).first()
+    if cov_row is not None:
+        assert cov_row[0].get("outcome_coverage", {}) == {}
 
 
 @pytest.mark.asyncio
@@ -662,8 +669,8 @@ def _reject_utterance_gateway() -> SimpleNamespace:
 @pytest.mark.parametrize(
     ("language", "marker"),
     [
-        ("en", "Of course. Here is the question again:"),
-        ("vi", "Câu hỏi được nhắc lại:"),
+        ("en", "I'll repeat the question."),
+        ("vi", "Tôi sẽ nhắc lại câu hỏi."),
     ],
 )
 async def test_voice_bridge_honors_language(
@@ -691,7 +698,7 @@ async def test_voice_bridge_honors_language(
     )
 
     session_id, _ = await _make_session(
-        engine, scenario["config_id"], scenario["student_id"], "voice"
+        engine, scenario["config_id"], scenario["student_id"], "voice", language=language
     )
 
     result = await bridge.handle_student_turn(
@@ -718,6 +725,11 @@ def _settings_shadow() -> Settings:
             "adaptive_interviewer_enabled": False,
             "adaptive_interviewer_voice_enabled": False,
             "adaptive_interviewer_shadow_enabled": True,
+            # Pin the guard OFF so the security stage (which runs load_or_init,
+            # creating a runtime-state row) doesn't fire and leak a state row
+            # from the live .env's INTERVIEW_SECURITY_GUARD_MODE. The shadow
+            # invariant under test is rt==0, so the guard must stay out of it.
+            "interview_security_guard_mode": "off",
         }
     )
 
@@ -753,8 +765,8 @@ async def test_shadow_mode_serves_legacy_and_never_persists_adaptive(
             {"intent": "ask_to_repeat", "confidence": 0.9},
             {
                 "acknowledgement": "",
-                "transition": "Of course. Here is the question again:",
-                "ai_turn_text": "Of course. Here is the question again: Question 1?",
+                "transition": "Of course. I'll repeat the question.",
+                "ai_turn_text": "Of course. I'll repeat the question. Question 1?",
             },
         ]
     )
@@ -782,8 +794,10 @@ async def test_shadow_mode_serves_legacy_and_never_persists_adaptive(
     assert "state_version" not in result
     # The student answer WAS recorded (once).
     assert await _count_user_messages(engine, session_id) == 1
-    # Shadow must NOT have persisted an AI turn or a runtime-state row.
-    assert await _count_ai_messages(engine, session_id) == 0
+    # The legacy path persists exactly one AI turn (that is NOT a shadow
+    # artifact — the flag-off legacy test persists one too). The real shadow
+    # guard is that its savepoint rolled back, i.e. NO runtime-state row below.
+    assert await _count_ai_messages(engine, session_id) == 1
     async with engine.begin() as conn:
         rt = (
             await conn.execute(
@@ -821,7 +835,10 @@ async def test_shadow_mode_disabled_by_default_no_computation(
         await db.commit()
 
     assert "action" not in result
-    assert await _count_ai_messages(engine, session_id) == 0
+    # Legacy persists exactly one AI turn (same as the flag-off legacy test);
+    # the regression guard for "shadow didn't fire" is the absence of a
+    # runtime-state row below, not the AI-message count.
+    assert await _count_ai_messages(engine, session_id) == 1
     async with engine.begin() as conn:
         rt = (
             await conn.execute(
