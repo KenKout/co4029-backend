@@ -69,12 +69,13 @@ def voice_for_persona(persona: str | None) -> str:
 
 
 def _deepgram_model_for_persona(persona: str | None, *, settings: Settings) -> str:
-    """Map an interview persona to a Deepgram Aura-2 voice model (English)."""
-    if persona == "strict":
-        return settings.deepgram_tts_model_strict
-    if persona == "supportive":
-        return settings.deepgram_tts_model_supportive
-    return settings.deepgram_tts_model_neutral
+    """Return the English Deepgram Aura voice model for narration.
+
+    Deepgram exposes one voice per model, so persona tone is not varied here
+    (unlike the OpenAI voices); a single ``deepgram_tts_model_en`` applies.
+    """
+    del persona  # single English voice; kept for signature symmetry
+    return settings.deepgram_tts_model_en
 
 
 def _is_english(language: str | None) -> bool:
@@ -110,7 +111,7 @@ async def _synthesize_deepgram(
     # is a JSON body ``{"text": ...}``. encoding=mp3 returns an MP3 stream that
     # the browser plays through the exact same <audio> path as the gateway.
     url = f"{base_url}/speak"
-    params = {"model": model, "encoding": "mp3"}
+    params = {"model": model, "encoding": settings.deepgram_tts_encoding}
     payload = {"text": text}
     headers = {
         "Authorization": f"Token {api_key.get_secret_value()}",

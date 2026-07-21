@@ -23,9 +23,8 @@ class _NarrationSettings:
     llm_api_key = "test-key"
     deepgram_api_key: SecretStr | None = None
     deepgram_tts_base_url = "https://api.deepgram.com/v1"
-    deepgram_tts_model_strict = "aura-2-orion-en"
-    deepgram_tts_model_neutral = "aura-2-thalia-en"
-    deepgram_tts_model_supportive = "aura-2-luna-en"
+    deepgram_tts_model_en = "aura-2-ophelia-en"
+    deepgram_tts_encoding = "mp3"
     deepgram_tts_timeout_seconds = 30.0
 
 
@@ -64,7 +63,7 @@ async def test_english_narration_uses_deepgram_when_key_present() -> None:
         )
 
     request = route.calls[0].request
-    assert request.url.params["model"] == "aura-2-orion-en"
+    assert request.url.params["model"] == "aura-2-ophelia-en"
     assert request.url.params["encoding"] == "mp3"
     assert request.headers["authorization"] == "Token dg-test-key"
     payload = json.loads(request.content)
