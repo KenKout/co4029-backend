@@ -932,6 +932,9 @@ async def _record_separable_evidence(
     from abridgeai.features.interviews.orchestrator.analysis_logic import (  # noqa: PLC0415
         analyze_answer,
     )
+    from abridgeai.features.interviews.orchestrator.coverage import (  # noqa: PLC0415
+        apply_evidence_to_coverage,
+    )
     from abridgeai.features.interviews.orchestrator.state import (  # noqa: PLC0415
         OutcomeCoverageState,
     )
@@ -955,9 +958,7 @@ async def _record_separable_evidence(
         if coverage is None:
             coverage = OutcomeCoverageState(outcome_id=evidence.outcome_id)
             data.outcome_coverage[evidence.outcome_id] = coverage
-        coverage.evidence_count += 1
-        if evidence.turn_id not in coverage.supporting_turn_ids:
-            coverage.supporting_turn_ids.append(evidence.turn_id)
+        apply_evidence_to_coverage(coverage, evidence)
 
 
 async def _normal_end_result(

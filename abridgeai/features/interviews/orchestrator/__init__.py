@@ -26,6 +26,15 @@ from abridgeai.features.interviews.orchestrator.analysis import (
     Relevance,
     Specificity,
 )
+from abridgeai.features.interviews.orchestrator.coverage import (
+    COVERAGE_SUFFICIENT_POINTS,
+    STRONG_CONFIDENCE_MIN,
+    apply_evidence_to_coverage,
+    evidence_points,
+    is_provisionally_sufficient,
+    is_strong_answer,
+    is_weak_answer,
+)
 from abridgeai.features.interviews.orchestrator.decision import (
     AcknowledgementStyle,
     DecisionInputs,
@@ -75,6 +84,13 @@ __all__ = [
     "persona_from",
     "ACADEMIC_INTENTS",
     "NON_ACADEMIC_INTENTS",
+    "COVERAGE_SUFFICIENT_POINTS",
+    "STRONG_CONFIDENCE_MIN",
+    "apply_evidence_to_coverage",
+    "evidence_points",
+    "is_provisionally_sufficient",
+    "is_strong_answer",
+    "is_weak_answer",
     "AcknowledgementStyle",
     "AnswerAnalysis",
     "CandidateQuestion",

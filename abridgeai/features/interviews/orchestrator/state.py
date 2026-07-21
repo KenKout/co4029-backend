@@ -54,7 +54,13 @@ class OutcomeCoverageState:
     """
 
     outcome_id: str
+    # Raw count of evidence items attributed to this outcome (audit / traceability).
     evidence_count: int = 0
+    # Weighted provisional coverage (Slice 2): confident supporting evidence adds
+    # 2, confident partial support adds 1, contradiction/insufficient/low-confidence
+    # add 0. An outcome is provisionally sufficient at COVERAGE_SUFFICIENT_POINTS.
+    # This — not the raw evidence_count — drives runtime selection sufficiency.
+    coverage_points: int = 0
     provisional_score: float | None = None
     confidence: float = 0.0
     status: CoverageStatus = CoverageStatus.NOT_STARTED
@@ -69,9 +75,16 @@ class OutcomeCoverageState:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> OutcomeCoverageState:
+        evidence_count = int(data.get("evidence_count", 0))
+        # Backfill for sessions persisted before weighted coverage existed: when
+        # coverage_points is absent, seed it from the raw count so a resumed
+        # in-flight session keeps its already-earned coverage instead of
+        # resetting every outcome to "uncovered".
+        coverage_points = int(data.get("coverage_points", evidence_count) or 0)
         return cls(
             outcome_id=str(data.get("outcome_id", "")),
-            evidence_count=int(data.get("evidence_count", 0)),
+            evidence_count=evidence_count,
+            coverage_points=coverage_points,
             provisional_score=data.get("provisional_score"),
             confidence=float(data.get("confidence", 0.0)),
             status=_coverage_status(data.get("status")),
@@ -219,9 +232,7 @@ class InterviewRuntimeStateData:
             candidate_signals=CandidateSignals.from_dict(data.get("candidate_signals")),
             security_assessment_count=max(0, int(data.get("security_assessment_count", 0))),
             security_attempt_count=max(0, int(data.get("security_attempt_count", 0))),
-            consecutive_security_attempts=max(
-                0, int(data.get("consecutive_security_attempts", 0))
-            ),
+            consecutive_security_attempts=max(0, int(data.get("consecutive_security_attempts", 0))),
             repeated_security_attempt_count=max(
                 0, int(data.get("repeated_security_attempt_count", 0))
             ),
@@ -231,9 +242,7 @@ class InterviewRuntimeStateData:
             security_fallback_count=max(0, int(data.get("security_fallback_count", 0))),
             last_security_category=_optional_short_string(data.get("last_security_category")),
             last_security_action=_optional_short_string(data.get("last_security_action")),
-            last_security_fingerprint=_optional_short_string(
-                data.get("last_security_fingerprint")
-            ),
+            last_security_fingerprint=_optional_short_string(data.get("last_security_fingerprint")),
             last_security_turn_key=_optional_short_string(data.get("last_security_turn_key")),
             security_warning_issued=bool(data.get("security_warning_issued", False)),
             session_security_flagged=bool(data.get("session_security_flagged", False)),

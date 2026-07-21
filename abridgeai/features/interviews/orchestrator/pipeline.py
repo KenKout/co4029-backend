@@ -149,19 +149,19 @@ async def perceive_turn(
     if analysis is not None:
         data.current_outcome_id = outcome_id or data.current_outcome_id
         if analysis.confidence > 0.0:
+            from abridgeai.features.interviews.orchestrator.coverage import (
+                apply_evidence_to_coverage,
+            )
+            from abridgeai.features.interviews.orchestrator.state import (
+                OutcomeCoverageState,
+            )
+
             for ev in analysis.evidence:
                 cov = data.outcome_coverage.get(ev.outcome_id)
                 if cov is None:
-                    from abridgeai.features.interviews.orchestrator.state import (
-                        OutcomeCoverageState,
-                    )
-
                     cov = OutcomeCoverageState(outcome_id=ev.outcome_id)
                     data.outcome_coverage[ev.outcome_id] = cov
-                cov.evidence_count += 1
-                cov.last_updated_at = now
-                if ev.turn_id not in cov.supporting_turn_ids:
-                    cov.supporting_turn_ids.append(ev.turn_id)
+                apply_evidence_to_coverage(cov, ev, now=now)
 
     new_version = await state_repo.save(
         db,

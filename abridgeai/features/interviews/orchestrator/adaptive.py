@@ -46,6 +46,10 @@ from abridgeai.features.interviews.models import (
 from abridgeai.features.interviews.orchestrator import repository as state_repo
 from abridgeai.features.interviews.orchestrator.analysis import AnswerAnalysis
 from abridgeai.features.interviews.orchestrator.analysis_logic import analyze_answer
+from abridgeai.features.interviews.orchestrator.coverage import (
+    apply_evidence_to_coverage,
+    is_provisionally_sufficient,
+)
 from abridgeai.features.interviews.orchestrator.decision import (
     DecisionInputs,
     InterviewerActionType,
@@ -87,9 +91,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Provisional coverage is "sufficient" at this many pieces of evidence — used to
-# decide which outcomes still need covering (guides selection, not scoring).
-_SUFFICIENT_EVIDENCE = 2
+# Sufficiency is decided by weighted coverage points — see coverage.py
+# (COVERAGE_SUFFICIENT_POINTS / is_provisionally_sufficient), not a raw count.
 
 ADVANCE_ACTIONS = frozenset(
     {
@@ -307,19 +310,25 @@ async def run_adaptive_turn(
     candidates, orm_by_id = await _load_candidates(db, session.interview_config_id)
     asked = frozenset(data.asked_question_ids)
     skipped = frozenset(data.skipped_question_ids)
-    evidence_counts = {oid: cov.evidence_count for oid, cov in data.outcome_coverage.items()}
+    # Weighted coverage points (Slice 2) — not the raw evidence count — drive
+    # both the "uncovered" signal for scoring and the sufficiency gate below, so
+    # a single low-value (partial/contradictory) turn cannot mark an outcome
+    # covered the way a flat count once did.
+    coverage_points = {oid: cov.coverage_points for oid, cov in data.outcome_coverage.items()}
 
     # Required outcomes not yet sufficiently covered (guides selection priority).
     outcomes = await authoring_list_outcomes(db, session.interview_config_id)
     uncovered_required = frozenset(
-        str(o.id) for o in outcomes if evidence_counts.get(str(o.id), 0) < _SUFFICIENT_EVIDENCE
+        str(o.id)
+        for o in outcomes
+        if not is_provisionally_sufficient(coverage_points.get(str(o.id), 0))
     )
     all_required_covered = len(uncovered_required) == 0 and len(outcomes) > 0
 
     ctx = SelectionContext(
         asked_question_ids=asked,
         skipped_question_ids=skipped,
-        outcome_evidence_counts=evidence_counts,
+        outcome_evidence_counts=coverage_points,
         uncovered_required_outcome_ids=uncovered_required,
         time_fraction_remaining=_time_fraction_remaining(session, config),
         last_targeted_outcome_id=data.current_outcome_id,
@@ -498,17 +507,14 @@ def _apply_state_updates(  # noqa: C901 -- explicit action branches are auditabl
     sig.appeared_uncertain = intent.intent is StudentIntent.CANNOT_ANSWER
     sig.appeared_off_topic = intent.intent is StudentIntent.OFF_TOPIC
 
-    # Evidence / coverage from analysis.
+    # Evidence / coverage from analysis (weighted — see coverage.py).
     if analysis is not None and analysis.confidence > 0.0:
         for ev in analysis.evidence:
             cov = data.outcome_coverage.get(ev.outcome_id)
             if cov is None:
                 cov = OutcomeCoverageState(outcome_id=ev.outcome_id)
                 data.outcome_coverage[ev.outcome_id] = cov
-            cov.evidence_count += 1
-            cov.last_updated_at = now
-            if ev.turn_id not in cov.supporting_turn_ids:
-                cov.supporting_turn_ids.append(ev.turn_id)
+            apply_evidence_to_coverage(cov, ev, now=now)
 
     # Follow-up counters + phase.
     if decision.action in ADVANCE_ACTIONS:
