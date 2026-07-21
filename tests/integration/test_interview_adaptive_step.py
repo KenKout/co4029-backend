@@ -232,8 +232,9 @@ async def _make_session(
         await conn.execute(
             text(
                 "INSERT INTO interview_sessions "
-                "(id, interview_config_id, student_id, attempt_number, status, input_mode) "
-                "VALUES (:id, :cfg, :student, 1, 'in_progress', :mode)"
+                "(id, interview_config_id, student_id, attempt_number, status, "
+                "input_mode, onboarding_stage) "
+                "VALUES (:id, :cfg, :student, 1, 'in_progress', :mode, 'completed')"
             ),
             {"id": session_id, "cfg": config_id, "student": student_id, "mode": input_mode},
         )
@@ -904,28 +905,19 @@ async def test_security_blocks_consistently_and_duplicate_turn_is_idempotent(
     async with engine.begin() as conn:
         event_count = (
             await conn.execute(
-                text(
-                    "SELECT count(*) FROM interview_security_events "
-                    "WHERE session_id = :s"
-                ),
+                text("SELECT count(*) FROM interview_security_events WHERE session_id = :s"),
                 {"s": session_id},
             )
         ).scalar_one()
         question_count = (
             await conn.execute(
-                text(
-                    "SELECT count(*) FROM interview_session_questions "
-                    "WHERE session_id = :s"
-                ),
+                text("SELECT count(*) FROM interview_session_questions WHERE session_id = :s"),
                 {"s": session_id},
             )
         ).scalar_one()
         state_json = (
             await conn.execute(
-                text(
-                    "SELECT state_json FROM interview_runtime_states "
-                    "WHERE session_id = :s"
-                ),
+                text("SELECT state_json FROM interview_runtime_states WHERE session_id = :s"),
                 {"s": session_id},
             )
         ).scalar_one()
@@ -1071,9 +1063,7 @@ async def test_bare_term_after_legacy_clarification_prompt_is_not_submitted_as_a
                 "I couldn't produce a clear rephrasing just now. Tell me which word or "
                 "phrase is unclear, and I'll explain that part."
             )
-        return (
-            "Here, ‘fact tables’ names one of the concepts the question asks you to compare."
-        )
+        return "Here, ‘fact tables’ names one of the concepts the question asks you to compare."
 
     monkeypatch.setattr(taking_service, "generate_question_assistance", _assistance)
     session_id, _ = await _make_session(
@@ -1116,10 +1106,7 @@ async def test_bare_term_after_legacy_clarification_prompt_is_not_submitted_as_a
         ).scalar_one()
         question_count = (
             await conn.execute(
-                text(
-                    "SELECT count(*) FROM interview_session_questions "
-                    "WHERE session_id = :s"
-                ),
+                text("SELECT count(*) FROM interview_session_questions WHERE session_id = :s"),
                 {"s": session_id},
             )
         ).scalar_one()

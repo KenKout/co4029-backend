@@ -43,6 +43,12 @@ from abridgeai.features.interviews.orchestrator.decision import (
     ReasonCode,
     decide_next_action,
 )
+from abridgeai.features.interviews.orchestrator.difficulty import (
+    STREAK_ADJUST_THRESHOLD,
+    difficulty_rank,
+    target_difficulty_level,
+    update_streaks,
+)
 from abridgeai.features.interviews.orchestrator.intent import (
     NON_ACADEMIC_INTENTS,
     IntentClassification,
@@ -91,6 +97,10 @@ __all__ = [
     "is_provisionally_sufficient",
     "is_strong_answer",
     "is_weak_answer",
+    "STREAK_ADJUST_THRESHOLD",
+    "difficulty_rank",
+    "target_difficulty_level",
+    "update_streaks",
     "AcknowledgementStyle",
     "AnswerAnalysis",
     "CandidateQuestion",

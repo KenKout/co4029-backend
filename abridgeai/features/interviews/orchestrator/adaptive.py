@@ -56,6 +56,10 @@ from abridgeai.features.interviews.orchestrator.decision import (
     ReasonCode,
     decide_next_action,
 )
+from abridgeai.features.interviews.orchestrator.difficulty import (
+    target_difficulty_level,
+    update_streaks,
+)
 from abridgeai.features.interviews.orchestrator.intent import (
     StudentIntent,
 )
@@ -306,6 +310,23 @@ async def run_adaptive_turn(
             supplementary_instructions=None,
         )
 
+    # 2b. Difficulty streaks (Slice 3). Fold THIS answer's quality into the
+    # strong/weak streaks BEFORE selection so it shapes the next question's
+    # difficulty. Neutral / low-confidence answers leave both streaks untouched.
+    # These fields were persisted but never written until now; _apply_state_updates
+    # deliberately does not touch them, so this is their single write site.
+    data.consecutive_strong_answers, data.consecutive_weak_answers = update_streaks(
+        consecutive_strong=data.consecutive_strong_answers,
+        consecutive_weak=data.consecutive_weak_answers,
+        analysis=analysis,
+    )
+    current_difficulty = current_question.difficulty if current_question is not None else None
+    student_level = target_difficulty_level(
+        current_difficulty=current_difficulty,
+        consecutive_strong=data.consecutive_strong_answers,
+        consecutive_weak=data.consecutive_weak_answers,
+    )
+
     # 3. Load candidate pool + compute selection context.
     candidates, orm_by_id = await _load_candidates(db, session.interview_config_id)
     asked = frozenset(data.asked_question_ids)
@@ -330,6 +351,7 @@ async def run_adaptive_turn(
         skipped_question_ids=skipped,
         outcome_evidence_counts=coverage_points,
         uncovered_required_outcome_ids=uncovered_required,
+        student_difficulty_level=student_level,
         time_fraction_remaining=_time_fraction_remaining(session, config),
         last_targeted_outcome_id=data.current_outcome_id,
     )
