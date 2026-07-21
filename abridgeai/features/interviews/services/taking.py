@@ -474,7 +474,15 @@ async def take_session_step(  # noqa: C901 - shared legacy/adaptive turn coordin
         if adaptive_result is not None:
             return adaptive_result
         # adaptive declined/failed → answer already recorded; run legacy advance
-        # WITHOUT re-inserting the answer (safeguard #2).
+        # WITHOUT re-inserting the answer (safeguard #2). Emit a live fallback
+        # event (Slice 6) so the aggregator can track the adaptive→legacy
+        # fallback rate that gates the staged rollout.
+        security_obs.emit(
+            security_obs.EV_FALLBACK,
+            session_id=session.id,
+            shadow=False,
+            input_mode=session.input_mode,
+        )
         return await _legacy_advance(
             db,
             session=session,
@@ -1353,10 +1361,40 @@ async def _try_adaptive_step(
                 security_attempt_count=security_attempt_count,
             )
         if outcome.result is not None:
+            _emit_live_decision(session_id, outcome.result)
             return _project_adaptive_result(outcome.result)
     except Exception:  # noqa: BLE001 — adaptive is best-effort; savepoint rolled back
         logger.exception("adaptive: pipeline failed (session=%s) — legacy fallback", session_id)
     return None
+
+
+def _emit_live_decision(session_id: Any, canonical: dict[str, Any]) -> None:  # noqa: ANN401 - session_id is UUID|str
+    """Emit the LIVE adaptive decision event (Slice 6).
+
+    Mirrors the shadow-path emit but with ``shadow=False`` so the aggregator
+    counts it toward the live adaptive-success / fallback rates that gate the
+    staged rollout. Transcript-free (same privacy contract). Never raises.
+    """
+    from abridgeai.features.interviews.realtime import observability as obs  # noqa: PLC0415
+
+    next_q = canonical.get("next_question")
+    obs.emit(
+        obs.EV_DECISION,
+        session_id=session_id,
+        shadow=False,
+        adaptive=canonical.get("action") is not None,
+        action=canonical.get("action"),
+        reason_code=canonical.get("reason_code"),
+        selected_question_id=canonical.get("current_question_id"),
+        selected_question_type=getattr(next_q, "question_type", None),
+        selected_question_difficulty=getattr(next_q, "difficulty", None),
+        target_outcome_id=canonical.get("target_outcome_id"),
+        state_version=canonical.get("state_version"),
+        utterance_status=canonical.get("_utterance_status"),
+        interaction_state=canonical.get("interaction_state"),
+        pending_confirmation=bool(canonical.get("pending_confirmation")),
+        finished=bool(canonical.get("should_finish")),
+    )
 
 
 def _project_adaptive_result(canonical: dict[str, Any]) -> dict[str, Any]:
