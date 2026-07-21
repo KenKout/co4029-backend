@@ -42,7 +42,12 @@ def _settings(**overrides: bool) -> Settings:
         "test_database_url": "postgresql+psycopg://u:p@localhost:5432/db_test",
     }
     base.update(overrides)  # type: ignore[arg-type]
-    return Settings(**base)  # type: ignore[arg-type]
+    # _env_file=None disables .env file loading so these tests assert against
+    # the declared code defaults, not an ambient host .env (the deployed .env
+    # exports ADAPTIVE_INTERVIEWER_VOICE_ENABLED=true to run the live agent,
+    # which would otherwise override the default this suite verifies). The
+    # autouse fixture clears the process env; this closes the file-load hole.
+    return Settings(_env_file=None, **base)  # type: ignore[arg-type,call-arg]
 
 
 def test_master_off_disables_every_mode() -> None:
