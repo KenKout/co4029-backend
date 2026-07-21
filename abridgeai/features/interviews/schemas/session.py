@@ -83,6 +83,10 @@ InterviewOnboardingActionLiteral = Literal[
     "needs_adjustment",
     "ready",
     "not_ready",
+    # Identity correction during identity_check: the candidate rejects the
+    # profile-derived name, then supplies the name the interviewer should use.
+    "reject_identity",
+    "set_name",
 ]
 
 

@@ -64,6 +64,7 @@ async def send_notification(
     body: str,
     entity_type: str | None = None,
     entity_id: UUID | None = None,
+    action_url: str | None = None,
     arq_pool: object | None = None,
 ) -> Notification:
     """Create the in-app row, then conditionally enqueue an email.
@@ -108,6 +109,7 @@ async def send_notification(
         body=body,
         entity_type=entity_type,
         entity_id=entity_id,
+        action_url=action_url,
         delivery_status="pending",
     )
 

@@ -439,6 +439,7 @@ async def submit_attempt(
     question_count = int(question_count_row.scalar_one()) or len(answers) or 1
     score_points = sum((answer.points_awarded for answer in answers), Decimal("0"))
     score_percent = (score_points / Decimal(question_count)) * Decimal("100")
+    correct_count = sum(1 for answer in answers if answer.is_correct)
 
     attempt.status = "submitted"
     attempt.submitted_at = utcnow()
@@ -448,6 +449,13 @@ async def submit_attempt(
     attempt.passed = score_percent >= quiz.passing_score_percent
     await flush_or_conflict(db)
     await db.refresh(attempt)
+    # correct_count / total_questions are response-only fields (not ORM
+    # columns) that QuizAttemptRead surfaces so the results page can show
+    # "N/total correct". Attach them as transient attributes after refresh so
+    # pydantic's from_attributes picks them up; without this they default to
+    # None and the UI renders "0/N correct" despite a correct score_percent.
+    attempt.correct_count = correct_count
+    attempt.total_questions = question_count
     return attempt
 
 
@@ -494,9 +502,7 @@ async def get_attempt_review(
     if attempt is None:
         return None
 
-    answers_by_question: dict[UUID, QuizAttemptAnswer] = {
-        a.question_id: a for a in attempt.answers
-    }
+    answers_by_question: dict[UUID, QuizAttemptAnswer] = {a.question_id: a for a in attempt.answers}
 
     questions_with_options = await published_queries.list_quiz_questions_with_options(
         db, attempt.quiz_id
@@ -513,9 +519,7 @@ async def get_attempt_review(
                 prompt_text=question.prompt_text,
                 explanation=question.explanation,
                 hint_text=question.hint_text,
-                options=[
-                    QuizAttemptReviewOption.model_validate(opt) for opt in options
-                ],
+                options=[QuizAttemptReviewOption.model_validate(opt) for opt in options],
                 selected_option_id=ans.selected_option_id if ans else None,
                 answer_text=ans.answer_text if ans else None,
                 is_correct=ans.is_correct if ans else False,

@@ -229,9 +229,7 @@ async def start_session(
             if onboarding_complete and first_question is not None
             else None
         ),
-        time_remaining_seconds=await taking_service.session_time_remaining_seconds(
-            db, session
-        ),
+        time_remaining_seconds=await taking_service.session_time_remaining_seconds(db, session),
         question_count_remaining=None,
         onboarding_stage=session.onboarding_stage,
         interview_language=session.interview_language,
@@ -472,7 +470,10 @@ async def narrate_session_text(
     settings = get_settings()
     try:
         audio = await narration_service.synthesize_speech(
-            guarded_narration.text, persona=persona, settings=settings
+            guarded_narration.text,
+            persona=persona,
+            settings=settings,
+            language=narration_language,
         )
     except narration_service.NarrationUnavailable as exc:
         raise HTTPException(

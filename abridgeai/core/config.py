@@ -159,6 +159,22 @@ class Settings(BaseSettings):
     whisper_model: str = "whisper-1"
     video_frame_sample_fps: float = Field(default=1.0, gt=0, le=30)
 
+    # Deepgram TTS for browser-played interview narration (REST path only).
+    # When a key is present, ENGLISH narration is synthesized with Deepgram's
+    # Aura voices; Vietnamese always falls back to the OpenAI-compatible TTS
+    # (Deepgram TTS is English-only). When the key is unset the whole narration
+    # path uses the OpenAI-compatible gateway exactly as before — this is an
+    # additive, default-off change. The key is SecretStr (never logged).
+    deepgram_api_key: SecretStr | None = None
+    deepgram_tts_base_url: str = "https://api.deepgram.com/v1"
+    # Single English Aura voice model for narration. See
+    # https://developers.deepgram.com/docs/tts-models for the catalog.
+    deepgram_tts_model_en: str = "aura-2-thalia-en"
+    # Audio container returned by /v1/speak (mp3 keeps the browser <audio> path
+    # identical to the OpenAI-compatible gateway).
+    deepgram_tts_encoding: str = "mp3"
+    deepgram_tts_timeout_seconds: float = 30.0
+
     # LiveKit voice-interview (Phase 1+). Target is LiveKit Cloud for dev +
     # initial prod; ``livekit_ws_url`` is the project WS endpoint
     # (wss://<project>.livekit.cloud). Voice mode is gated OFF by default so

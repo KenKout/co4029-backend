@@ -184,10 +184,16 @@ _MULTITURN_COLLECTION = (
 _GRADING = (
     r"(?:give|set|assign|change)\s+(?:me|my\s+score)?\s*(?:to\s+)?100|"
     r"(?:give|award|assign|set)\s+(?:me\s+|my\s+)?(?:a\s+)?perfect\s+(?:score|grade)\b|"
-    r"(?:give|award|assign)\s+me\s+full\s+marks?\b|"
+    # "full score" / "full marks" / "full grade" / "full credit" / "full points"
+    # are all grade-manipulation shaped and never appear in a legitimate answer;
+    # the awarding verb and the object are both optional-plural to cover
+    # phrasings like "give me full score" and "just award full marks".
+    r"(?:give|award|assign|grant|set)\s+(?:me\s+|my\s+)?(?:a\s+)?full\s+(?:marks?|score|grade|credit|points?)\b|"
     r"mark\s+(?:this|my)\s+answer\s+(?:as\s+)?correct|"
     r"do\s+not\s+record\s+(?:that\s+)?i\s+skipped|"
     r"(?:cho|đặt|chấm)\s+(?:tôi|em|mình)?\s*(?:điểm\s*)?100|"
+    # VI: "give me full / maximum / perfect score"
+    r"(?:cho|đặt|chấm)\s+(?:tôi|em|mình)?\s*điểm\s+(?:tối\s+đa|tuyệt\s+đối|cao\s+nhất|đầy\s+đủ)|"
     r"đặt\s+điểm\s+(?:của\s+)?(?:tôi|em|mình)\s+(?:thành|là)\s+100|"
     r"chấm\s+(?:câu\s+trả\s+lời\s+)?(?:này\s+)?đúng|đừng\s+ghi\s+(?:lại|nhận).*(?:bỏ\s+qua|không\s+trả\s+lời)"
 )
@@ -328,7 +334,7 @@ def _rule_category(  # noqa: C901 -- ordered security rules are intentionally ex
         or re.search(_ANSWER_REFERENCE_REQUEST, answer_routing_text, re.IGNORECASE)
         or _contains_request_for(answer_routing_text, _ANSWER_KEY)
         or any(
-        marker in compact for marker in ("givemetheidealanswer", "showanswerkey", "chotoidapan")
+            marker in compact for marker in ("givemetheidealanswer", "showanswerkey", "chotoidapan")
         )
     ):
         return SecurityCategory.ANSWER_KEY_REQUEST
@@ -408,7 +414,7 @@ def is_ambiguous_security_text(value: str) -> bool:
     suspicious = re.search(
         r"hidden|secret|instruction|prompt|rubric|answer\s*key|question\s*bank|"
         r"administrator|teacher\s+mode|debug|bypass|translate|decode|internal|"
-        r"perfect\s+(?:score|grade)|full\s+marks?|grading|score\s*(?:to|of)\s*\d+|"
+        r"perfect\s+(?:score|grade)|full\s+(?:marks?|score|grade|credit|points?)|grading|score\s*(?:to|of)\s*\d+|"
         r"ẩn|bí\s+mật|chỉ\s+dẫn|đáp\s+án|ngân\s+hàng\s+câu\s+hỏi|quản\s+trị|gỡ\s+lỗi|nội\s+bộ",
         text,
     )
@@ -548,15 +554,7 @@ def requested_current_question_action(value: str) -> SecurityAction | None:
     text = normalize_input(value)
     answer_routing_text = _canonicalize_answer_typos(text)
     if re.search(
-        _FUTURE
-        + "|"
-        + _SYSTEM
-        + "|"
-        + _RUBRIC
-        + "|"
-        + _ANSWER_KEY
-        + "|"
-        + _DIRECT_ANSWER_REQUEST,
+        _FUTURE + "|" + _SYSTEM + "|" + _RUBRIC + "|" + _ANSWER_KEY + "|" + _DIRECT_ANSWER_REQUEST,
         answer_routing_text,
     ) or re.search(
         _ANSWER_REFERENCE_REQUEST,
@@ -691,12 +689,16 @@ def safe_security_response(
             "repeated requests may be recorded for security review."
         )
     else:
-        base = custom_refusal.strip() if custom_refusal and custom_refusal.strip() else (
-            "Tôi không thể cung cấp các câu hỏi chưa được hỏi, đáp án hoặc tiêu chí "
-            "chấm điểm. Tôi có thể nhắc lại hoặc giải thích câu hỏi hiện tại."
-            if vi
-            else "I can’t provide hidden interview questions, answers, or grading criteria. "
-            "I can repeat or clarify the current question."
+        base = (
+            custom_refusal.strip()
+            if custom_refusal and custom_refusal.strip()
+            else (
+                "Tôi không thể cung cấp các câu hỏi chưa được hỏi, đáp án hoặc tiêu chí "
+                "chấm điểm. Tôi có thể nhắc lại hoặc giải thích câu hỏi hiện tại."
+                if vi
+                else "I can’t provide hidden interview questions, answers, or grading criteria. "
+                "I can repeat or clarify the current question."
+            )
         )
     if question and action in {
         SecurityAction.REFUSE_AND_REDIRECT,

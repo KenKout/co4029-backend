@@ -36,6 +36,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from abridgeai.api.healthz import router as healthz_router
 from abridgeai.core.config import get_settings
+from abridgeai.core.observability import get_logger
 from abridgeai.core.observability.audit_log import AuditLogMiddleware
 from abridgeai.core.security.headers import SecurityHeadersMiddleware
 from abridgeai.features.access_control.routers import admin_router as access_control_admin_router
@@ -161,6 +162,44 @@ from abridgeai.features.spaced_repetition.routers import (
 API_V1_PREFIX = "/api/v1"
 
 
+async def _probe_embedding_health() -> None:
+    """Non-fatal startup probe of the embedding provider.
+
+    Quiz generation and material ingestion both depend on the embedding
+    endpoint, but a misconfigured provider (invalid token, or a token that
+    lacks access to the configured embedding model) currently only surfaces
+    when a teacher clicks Generate and the background job fails minutes later
+    with an opaque upstream error. This probe fires one tiny embedding call on
+    boot and logs a LOUD operator warning if it fails, so a misprovisioned
+    proxy is visible immediately in the startup log.
+
+    It deliberately NEVER raises: an embedding outage must not take down login,
+    courses, or the rest of the API. Best-effort visibility only.
+    """
+    from abridgeai.ai.llm.client import OpenAICompatibleClient
+    from abridgeai.ai.llm.roles import LLMRole, binding_for
+
+    log = get_logger(__name__)
+    settings = get_settings()
+    try:
+        binding = binding_for(LLMRole.EMBEDDING, settings)
+        client = OpenAICompatibleClient(binding)
+        await client.embeddings(["healthcheck"], dimensions=settings.embedding_dimensions)
+        log.info("embedding_health_ok", model=binding.model, base_url=binding.base_url)
+    except Exception as exc:  # noqa: BLE001 -- must never crash startup
+        log.error(
+            "embedding_health_failed",
+            error=str(exc),
+            model=settings.embedding_model,
+            base_url=settings.embedding_base_url,
+            hint=(
+                "Quiz generation and material ingestion will fail. Check the "
+                "embedding provider token has access to the configured model "
+                "on the LLM proxy."
+            ),
+        )
+
+
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
@@ -174,6 +213,9 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.dependency_overrides[interviews_learner_get_arq_pool] = _provide_arq_pool
     app.dependency_overrides[materials_get_arq_pool] = _provide_arq_pool
     app.dependency_overrides[quizzes_get_arq_pool] = _provide_arq_pool
+
+    # Best-effort embedding provider probe (non-fatal — logs, never raises).
+    await _probe_embedding_health()
 
     yield
 

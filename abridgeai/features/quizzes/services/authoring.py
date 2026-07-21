@@ -40,6 +40,7 @@ from abridgeai.core.security import CurrentUser, utcnow
 from abridgeai.features.courses.api import public as courses_api
 from abridgeai.features.quizzes.models import (
     Quiz,
+    QuizAttemptAnswer,
     QuizQuestion,
     QuizQuestionOption,
     QuizQuestionRevision,
@@ -230,11 +231,29 @@ async def get_latest_generation_run(db: AsyncSession, quiz_id: UUID) -> Generati
     second teacher viewing the same quiz see the in-flight run too.
     Returns ``None`` when the quiz has never been generated.
     """
-    from sqlalchemy import select  # noqa: PLC0415
+    from datetime import timedelta  # noqa: PLC0415
 
+    from sqlalchemy import and_, not_, select  # noqa: PLC0415
+
+    # Ignore *stale failed* runs: a run that failed more than 6 hours ago is
+    # not something the SPA should reattach to on mount — otherwise the panel
+    # greets the teacher with a long-dead error (e.g. a transient upstream
+    # blip from days ago) as if it just happened. Pending/running/completed
+    # runs of any age still reattach, and recent (<6h) failures still surface
+    # so a just-failed generation is visible.
+    stale_failed_cutoff = utcnow() - timedelta(hours=6)
     stmt = (
         select(GenerationRun)
-        .where(GenerationRun.config_json["quiz_id"].astext == str(quiz_id))
+        .where(
+            GenerationRun.config_json["quiz_id"].astext == str(quiz_id),
+            not_(
+                and_(
+                    GenerationRun.status == "failed",
+                    GenerationRun.finished_at.is_not(None),
+                    GenerationRun.finished_at < stale_failed_cutoff,
+                )
+            ),
+        )
         .order_by(GenerationRun.created_at.desc())
         .limit(1)
     )
@@ -518,6 +537,40 @@ async def delete_question(db: AsyncSession, question_id: UUID, actor: CurrentUse
     await flush_or_conflict(db)
 
 
+async def _require_embedded_chunks(db: AsyncSession, lesson_ids: list[UUID]) -> None:
+    """Reject coverage generation when the source lessons have no chunks.
+
+    Coverage mode groups pre-existing ``document_chunks`` into an outline;
+    it cannot generate anything if the lesson's materials were never
+    embedded (never processed, or embedding failed upstream — e.g. the
+    provider token lacking embedding-model access). Raises ``AppError`` so
+    the router maps it to a 400 with an actionable message instead of the
+    worker dying later with the opaque "no document chunks found".
+
+    Raw SQL against ``document_chunks.lesson_id`` keeps the quizzes feature
+    from importing ``features.materials`` (import-linter contract).
+    """
+    from sqlalchemy import text as sa_text  # noqa: PLC0415
+
+    if not lesson_ids:
+        raise AppError("Select at least one source lesson to generate from.")
+    row = (
+        await db.execute(
+            sa_text(
+                "SELECT count(*) FROM document_chunks "
+                "WHERE lesson_id = ANY(CAST(:lesson_ids AS uuid[]))"
+            ),
+            {"lesson_ids": [str(x) for x in lesson_ids]},
+        )
+    ).scalar()
+    if not row:
+        raise AppError(
+            "The selected lesson has no processed content yet. Reprocess the "
+            "lesson's materials (or switch generation to topic mode) before "
+            "generating a quiz in coverage mode."
+        )
+
+
 async def start_generation_run(
     db: AsyncSession,
     module_id: UUID,
@@ -553,9 +606,58 @@ async def start_generation_run(
             raise AppError("Quiz must belong to this module")
         if await _quiz_has_in_flight_run(db, quiz.id):
             raise ConflictError("quiz_generation_in_progress")
+        # Preflight (coverage mode only): coverage generation needs the source
+        # lessons' materials to already be embedded into document_chunks. If a
+        # lesson was never processed (or embedding failed upstream), the worker
+        # dies deep in the pipeline with a cryptic "no document chunks found"
+        # and — worse, pre-fix — only AFTER wiping the quiz's existing
+        # questions. Reject early with a clear, actionable message and BEFORE
+        # the wipe, so the teacher keeps their current questions and knows to
+        # reprocess the lesson (or switch to topic mode).
+        if str(payload.generation_mode or "topic").strip().lower() == "coverage":
+            await _require_embedded_chunks(db, payload.source_lesson_ids)
         if not payload.append:
             from sqlalchemy import delete as sa_delete  # noqa: PLC0415
+            from sqlalchemy import select as sa_select  # noqa: PLC0415
+            from sqlalchemy import text as sa_text  # noqa: PLC0415
 
+            # Regenerating with append=false wipes the quiz's existing
+            # questions. A bare DELETE on quiz_questions bypasses the ORM
+            # relationships (no delete cascade) and trips the child tables'
+            # foreign keys, which are ondelete=NO ACTION (options, revisions,
+            # attempt_answers, student_quiz_card_state). The raw IntegrityError
+            # is not UNIQUE, so flush_or_conflict re-raises it and the router
+            # turns it into a 500. This bit any teacher regenerating a quiz
+            # that already had questions (and, once students had answered,
+            # would trip on the attempt/card-state rows too). Delete children
+            # first, in FK order, then the questions.
+            question_id_subq = sa_select(QuizQuestion.id).where(QuizQuestion.quiz_id == quiz.id)
+            await db.execute(
+                sa_delete(QuizQuestionOption).where(
+                    QuizQuestionOption.question_id.in_(question_id_subq)
+                )
+            )
+            await db.execute(
+                sa_delete(QuizQuestionRevision).where(
+                    QuizQuestionRevision.question_id.in_(question_id_subq)
+                )
+            )
+            await db.execute(
+                sa_delete(QuizAttemptAnswer).where(
+                    QuizAttemptAnswer.question_id.in_(question_id_subq)
+                )
+            )
+            # student_quiz_card_state has no ORM model in this feature (ported
+            # separately with the SR scheduler) and its question_id FK is
+            # NO ACTION on the live schema, so clear it via raw SQL.
+            await db.execute(
+                sa_text(
+                    "DELETE FROM student_quiz_card_state "
+                    "WHERE question_id IN (SELECT id FROM quiz_questions "
+                    "WHERE quiz_id = :quiz_id)"
+                ),
+                {"quiz_id": str(quiz.id)},
+            )
             await db.execute(sa_delete(QuizQuestion).where(QuizQuestion.quiz_id == quiz.id))
             await flush_or_conflict(db)
 
