@@ -82,7 +82,8 @@ def test_repeat_question_has_no_acknowledgement_and_carries_question() -> None:
     )
     assert u.acknowledgement == ""
     assert "Original Q?" in u.question_or_probe
-    assert "again" in u.ai_turn_text.lower()
+    # Standardized repeat signpost (Natural Interview Transitions spec).
+    assert "repeat the question" in u.ai_turn_text.lower()
 
 
 def test_ask_for_example_uses_generic_probe_when_no_text() -> None:
