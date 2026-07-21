@@ -51,6 +51,7 @@ from abridgeai.features.interviews.routers._deps import (
     require_session_authoring_access,
 )
 from abridgeai.features.interviews.schemas import (
+    AdaptiveReadinessRead,
     GapReportAuthoringRead,
     GenerationRunStatusLiteral,
     InterviewConfigAuthoring,
@@ -305,6 +306,29 @@ async def get_interview_config(
         outcomes=[InterviewOutcomeAuthoring.model_validate(o) for o in outcomes],
         questions=[InterviewQuestionAuthoring.model_validate(q) for q in questions],
     )
+
+
+@router.get(
+    "/interview-configs/{config_id}/adaptive-readiness",
+    response_model=AdaptiveReadinessRead,
+)
+async def get_adaptive_readiness(
+    config_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_CONFIG)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> AdaptiveReadinessRead:
+    """Advisory adaptive-readiness report for the authoring workspace (Slice 5).
+
+    Read-only; never blocks publishing. Warnings guide the teacher on whether
+    the adaptive interviewer has enough structured material (outcome links,
+    difficulty labels, coverage) to adapt well.
+    """
+    del current_user
+    try:
+        report = await authoring_service.adaptive_readiness(db, config_id)
+    except NotFoundError as exc:
+        raise _not_found("interview_config", config_id) from exc
+    return AdaptiveReadinessRead.model_validate(report)
 
 
 @router.patch("/interview-configs/{config_id}", response_model=InterviewConfigAuthoring)

@@ -934,10 +934,7 @@ async def test_start_session_self_heals_stale_empty_session(
     # Teacher approves the question now.
     async with engine.begin() as conn:
         await conn.execute(
-            text(
-                "UPDATE interview_questions SET review_status='approved' "
-                "WHERE id = :qid"
-            ),
+            text("UPDATE interview_questions SET review_status='approved' WHERE id = :qid"),
             {"qid": question_id},
         )
 
@@ -1064,7 +1061,8 @@ async def test_start_session_upgrades_input_mode_when_config_allows(
                     {"sid": session_id},
                 )
             ).first()
-        assert row is not None and row[0] == "hybrid"
+        assert row is not None
+        assert row[0] == "hybrid"
     finally:
         async with engine.begin() as conn:
             await conn.execute(
@@ -1167,7 +1165,8 @@ async def test_start_session_does_not_upgrade_when_config_text_only(
                     {"sid": session_id},
                 )
             ).first()
-        assert row is not None and row[0] == "text"
+        assert row is not None
+        assert row[0] == "text"
     finally:
         async with engine.begin() as conn:
             await conn.execute(
@@ -1190,7 +1189,7 @@ async def test_respond_surfaces_unhandled_error_with_class_and_message(
     """
     from abridgeai.features.interviews.services import taking as taking_service  # noqa: PLC0415
 
-    async def _explode(*_args: object, **_kwargs: object) -> dict[str, Any]:
+    async def _explode(*_args: object, **_kwargs: object) -> dict[str, object]:
         raise RuntimeError("boom: simulated unhandled error")
 
     monkeypatch.setattr(  # type: ignore[attr-defined]
@@ -1205,9 +1204,7 @@ async def test_respond_surfaces_unhandled_error_with_class_and_message(
     )
     student_sid = await _seed_session(engine, seeded_users.student_id)
     try:
-        student_token = create_access_token(
-            user_id=seeded_users.student_id, session_id=student_sid
-        )
+        student_token = create_access_token(user_id=seeded_users.student_id, session_id=student_sid)
         start_resp = await client.post(
             f"/api/v1/interview-configs/{config_id}/sessions",
             json={"input_mode": "text"},
@@ -1279,9 +1276,7 @@ async def test_respond_succeeds_when_followup_stage_raises(
     )
     student_sid = await _seed_session(engine, seeded_users.student_id)
     try:
-        student_token = create_access_token(
-            user_id=seeded_users.student_id, session_id=student_sid
-        )
+        student_token = create_access_token(user_id=seeded_users.student_id, session_id=student_sid)
 
         start_resp = await client.post(
             f"/api/v1/interview-configs/{config_id}/sessions",
@@ -1368,9 +1363,7 @@ async def test_my_sessions_carries_title_and_no_leakage(
         )
         assert start_resp.status_code == 201, start_resp.text
 
-        resp = await client.get(
-            "/api/v1/me/interview-sessions", headers=_auth(student_token)
-        )
+        resp = await client.get("/api/v1/me/interview-sessions", headers=_auth(student_token))
         assert resp.status_code == 200, resp.text
         rows = resp.json()
         assert len(rows) >= 1
@@ -1706,3 +1699,72 @@ async def test_teacher_course_and_student_session_list_endpoints(
                 text("DELETE FROM auth_sessions WHERE id = :id"),
                 {"id": student_sid},
             )
+
+
+async def test_adaptive_readiness_reports_advisory_warnings_and_never_blocks(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    scenario: dict[str, uuid.UUID],
+    seeded_users: SeededUsers,
+    engine: AsyncEngine,
+) -> None:
+    """Slice 5: the readiness endpoint returns advisory warnings + rollout status.
+
+    A config with an approved question that has no linked outcome AND an outcome
+    with no approved question must surface both warnings, but blocks_publish
+    stays False (advisory only — the hard gates live on /publish).
+    """
+    create_resp = await client.post(
+        f"/api/v1/teacher/courses/{scenario['course_id']}/interview-configs",
+        json={
+            "title": "Readiness Check",
+            "course_id": str(scenario["course_id"]),
+            "module_id": str(scenario["module_id"]),
+            "supported_modes": "text",
+        },
+        headers=_auth(admin_bearer),
+    )
+    assert create_resp.status_code == 201, create_resp.text
+    config_id = create_resp.json()["id"]
+
+    async with engine.begin() as conn:
+        # Approved question WITHOUT a linked outcome (orphaned evidence) and no
+        # difficulty label.
+        await conn.execute(
+            text(
+                "INSERT INTO interview_questions ("
+                "  id, interview_config_id, prompt_text, question_type,"
+                "  review_status, ai_generated, position, created_by"
+                ") VALUES ("
+                "  :id, :cid, 'Explain recursion', 'conceptual',"
+                "  'approved', false, 1, :uid"
+                ")"
+            ),
+            {"id": uuid.uuid4(), "cid": uuid.UUID(config_id), "uid": seeded_users.admin_id},
+        )
+        # Outcome WITHOUT any approved question covering it.
+        await conn.execute(
+            text(
+                "INSERT INTO interview_outcomes ("
+                "  id, interview_config_id, position, outcome_text, outcome_type,"
+                "  importance_weight, created_by"
+                ") VALUES ("
+                "  :id, :cid, 1, 'Understand recursion', 'knowledge', 3, :uid"
+                ")"
+            ),
+            {"id": uuid.uuid4(), "cid": uuid.UUID(config_id), "uid": seeded_users.admin_id},
+        )
+
+    resp = await client.get(
+        f"/api/v1/teacher/interview-configs/{config_id}/adaptive-readiness",
+        headers=_auth(admin_bearer),
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["blocks_publish"] is False
+    codes = {w["code"] for w in body["warnings"]}
+    assert "questions_without_outcome" in codes
+    assert "outcomes_without_question" in codes
+    assert "questions_missing_difficulty" in codes
+    # Rollout status is present for all three modes.
+    assert set(body["rollout"]) == {"text", "hybrid", "voice"}

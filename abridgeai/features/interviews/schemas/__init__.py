@@ -22,6 +22,8 @@ Four concerns split across sibling files:
 from __future__ import annotations
 
 from abridgeai.features.interviews.schemas.authoring import (
+    AdaptiveModeRolloutStatus,
+    AdaptiveReadinessRead,
     ConfigStatusLiteral,
     DifficultyLiteral,
     GenerationModeLiteral,
@@ -106,6 +108,8 @@ __all__ = [
     "InterviewConfigUpdate",
     "IntegrityEventBatchRequest",
     "IntegrityEventItem",
+    "AdaptiveModeRolloutStatus",
+    "AdaptiveReadinessRead",
     "InterviewForAuthoringPublic",
     "InterviewForTakingPublic",
     "InterviewGenerationRequest",

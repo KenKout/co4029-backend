@@ -420,12 +420,55 @@ class InterviewTranscriptRead(BaseModel):
     turns: list[InterviewTranscriptTurn] = []
 
 
+# --------------------------------------------------------------------------- #
+# Adaptive readiness (Slice 5) — advisory authoring analysis
+# --------------------------------------------------------------------------- #
+
+
+class AdaptiveModeRolloutStatus(BaseModel):
+    """Whether the adaptive interviewer is live for each input mode.
+
+    Reflects the deployment flag matrix (master + per-mode switches), NOT a
+    per-config toggle — teachers see it read-only so they understand which
+    modes will actually run the adaptive brain for their published interview.
+    """
+
+    text: bool
+    hybrid: bool
+    voice: bool
+
+
+class ReadinessWarningRead(BaseModel):
+    """One advisory readiness finding. ``code`` drives the localized UI copy."""
+
+    code: str
+    level: Literal["info", "warning"]
+    affected_ids: list[str] = Field(default_factory=list)
+    count: int = 0
+
+
+class AdaptiveReadinessRead(BaseModel):
+    """Adaptive-readiness report for the authoring workspace.
+
+    ``warnings`` are ADVISORY — they never block publishing (only the existing
+    hard requirements do). ``blocks_publish`` is always False here and is kept
+    explicit so the client never mistakes a warning for a publish gate.
+    """
+
+    config_id: UUID
+    warnings: list[ReadinessWarningRead] = Field(default_factory=list)
+    rollout: AdaptiveModeRolloutStatus
+    blocks_publish: bool = False
+
+
 # Suppress unused-import warning — Decimal is exported in case downstream
 # generation-config payloads carry numeric thresholds. Keep available.
 _DECIMAL_AVAILABLE = Decimal
 
 
 __all__ = [
+    "AdaptiveModeRolloutStatus",
+    "AdaptiveReadinessRead",
     "ConfigStatusLiteral",
     "DifficultyLiteral",
     "GenerationModeLiteral",

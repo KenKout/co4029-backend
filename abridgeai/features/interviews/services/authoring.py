@@ -152,9 +152,7 @@ async def create_interview_config(
         security_max_consecutive_attempts=data.get("security_max_consecutive_attempts", 3),
         security_custom_refusal_en=data.get("security_custom_refusal_en"),
         security_custom_refusal_vi=data.get("security_custom_refusal_vi"),
-        security_incident_summary_enabled=bool(
-            data.get("security_incident_summary_enabled", True)
-        ),
+        security_incident_summary_enabled=bool(data.get("security_incident_summary_enabled", True)),
         created_by=actor.user_id,
     )
     db.add(config)
@@ -260,6 +258,61 @@ async def delete_interview_config(db: AsyncSession, config_id: UUID, actor: Curr
     """Soft-delete the config + cascade to outcomes / questions."""
     config = await _require_config(db, config_id)
     await soft_delete_cascade(db, config, actor_id=actor.user_id)
+
+
+async def adaptive_readiness(db: AsyncSession, config_id: UUID) -> dict[str, Any]:
+    """Assemble the advisory adaptive-readiness report for a config (Slice 5).
+
+    Read-only: analyses the APPROVED question pool + outcomes with the pure
+    :func:`orchestrator.readiness.analyze_readiness`, and reports the deployment
+    rollout status per mode. Never blocks publishing — ``blocks_publish`` is
+    always False (the hard publish gates live in ``publish_interview_config``).
+    """
+    from abridgeai.core.config import get_settings  # noqa: PLC0415
+    from abridgeai.features.interviews.orchestrator.readiness import (  # noqa: PLC0415
+        ReadinessInputs,
+        ReadinessOutcome,
+        ReadinessQuestion,
+        analyze_readiness,
+    )
+
+    config = await _require_config(db, config_id)
+    approved = await authoring_queries.list_questions_for_config(
+        db, config_id, review_status="approved"
+    )
+    outcomes = await authoring_queries.list_outcomes_for_config(db, config_id)
+
+    inputs = ReadinessInputs(
+        questions=[
+            ReadinessQuestion(
+                question_id=str(q.id),
+                linked_outcome_id=str(q.linked_outcome_id) if q.linked_outcome_id else None,
+                difficulty=q.difficulty,
+            )
+            for q in approved
+        ],
+        outcomes=[
+            ReadinessOutcome(
+                outcome_id=str(o.id),
+                importance_weight=o.importance_weight or 1,
+            )
+            for o in outcomes
+        ],
+        time_limit_minutes=config.time_limit_minutes,
+    )
+    warnings = analyze_readiness(inputs)
+
+    settings = get_settings()
+    return {
+        "config_id": config_id,
+        "warnings": [w.to_dict() for w in warnings],
+        "rollout": {
+            "text": settings.adaptive_enabled_for_mode("text"),
+            "hybrid": settings.adaptive_enabled_for_mode("hybrid"),
+            "voice": settings.adaptive_enabled_for_mode("voice"),
+        },
+        "blocks_publish": False,
+    }
 
 
 async def add_question(
