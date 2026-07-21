@@ -113,15 +113,44 @@ def _ack_text(persona: Persona, style: AcknowledgementStyle, lang: str) -> str:
 # or probe text. Where the action carries no question (technical issue, pause),
 # the template is self-contained.
 
-# Transitions used when advancing to a new question.
+# Transitions used when advancing to a new question. Standardized natural
+# wording (Natural Interview Transitions spec): a brief thanks + an explicit
+# "move on to the next question" signpost, persona-shaped in tone only. The
+# question text itself is appended separately (never duplicated here).
 _TRANSITION: dict[tuple[Persona, str], str] = {
-    (Persona.STRICT, "en"): "Next question.",
-    (Persona.STRICT, "vi"): "Câu hỏi tiếp theo.",
-    (Persona.NEUTRAL, "en"): "Let's move on.",
-    (Persona.NEUTRAL, "vi"): "Chúng ta tiếp tục nhé.",
-    (Persona.SUPPORTIVE, "en"): "Let's move on to the next one.",
-    (Persona.SUPPORTIVE, "vi"): "Chúng ta chuyển sang câu tiếp theo nhé.",
+    (Persona.STRICT, "en"): "Thank you. Let's move on to the next question.",
+    (Persona.STRICT, "vi"): "Cảm ơn bạn. Chúng ta sang câu hỏi tiếp theo.",
+    (Persona.NEUTRAL, "en"): "Thank you. Now let's move on to the next question.",
+    (Persona.NEUTRAL, "vi"): "Cảm ơn bạn. Bây giờ chúng ta chuyển sang câu hỏi tiếp theo.",
+    (Persona.SUPPORTIVE, "en"): ("Thank you. Now let's move on to the next question together."),
+    (Persona.SUPPORTIVE, "vi"): (
+        "Cảm ơn bạn. Bây giờ chúng ta cùng chuyển sang câu hỏi tiếp theo nhé."
+    ),
 }
+
+# Final-question transition (spec §ending): a short acknowledgment that the
+# last question has been reached. This is a transition-only turn; the separate
+# goodbye/closing turn follows via the existing finish flow.
+_FINAL_QUESTION_TRANSITION: dict[tuple[Persona, str], str] = {
+    (Persona.STRICT, "en"): "Thank you. That was the final question.",
+    (Persona.STRICT, "vi"): "Cảm ơn bạn. Đó là câu hỏi cuối cùng.",
+    (Persona.NEUTRAL, "en"): "Thank you. That was the final question.",
+    (Persona.NEUTRAL, "vi"): "Cảm ơn bạn. Đó là câu hỏi cuối cùng.",
+    (Persona.SUPPORTIVE, "en"): "Thank you. That was the final question — well done.",
+    (Persona.SUPPORTIVE, "vi"): "Cảm ơn bạn. Đó là câu hỏi cuối cùng — bạn đã làm rất tốt.",
+}
+
+
+def transition_text(persona: Persona, language: str | None, *, final: bool = False) -> str:
+    """Standardized persona-aware EN/VI transition wording.
+
+    ``final=True`` returns the final-question acknowledgment (spec §ending);
+    otherwise the next-question signpost. Reused by both the legacy-mode
+    deterministic path and transcript persistence so wording stays identical.
+    """
+    lang = _lang(language)
+    table = _FINAL_QUESTION_TRANSITION if final else _TRANSITION
+    return table.get((persona, lang), table[(Persona.NEUTRAL, "en")])
 
 
 def _fallback_parts(  # noqa: C901 -- flat per-action dispatch; readability > splitting
@@ -150,24 +179,40 @@ def _fallback_parts(  # noqa: C901 -- flat per-action dispatch; readability > sp
         return ack, transition, q
 
     if action in (
+        InterviewerActionType.CLARIFY_WITHOUT_REVEALING_ANSWER,
+        InterviewerActionType.REFRAME_QUESTION,
+    ):
+        # Spec §wording: clarification/rephrase signpost precedes the safe,
+        # answer-preserving rephrasing. The current question is never advanced
+        # or scored by this control turn.
+        signpost = {
+            "en": "Of course. Let me rephrase the question.",
+            "vi": "Tất nhiên. Để tôi diễn đạt lại câu hỏi.",
+        }[lang]
+        probe = q or _generic_probe(action, persona, lang)
+        return ack, signpost, probe
+
+    if action in (
         InterviewerActionType.PROBE_DEEPER,
         InterviewerActionType.ASK_FOR_EXAMPLE,
         InterviewerActionType.CHALLENGE_REASONING,
         InterviewerActionType.EXPLORE_TRADEOFF,
         InterviewerActionType.RESOLVE_CONTRADICTION,
-        InterviewerActionType.CLARIFY_WITHOUT_REVEALING_ANSWER,
         InterviewerActionType.PROVIDE_NEUTRAL_HINT,
-        InterviewerActionType.REFRAME_QUESTION,
     ):
-        # Probe text is supplied by the caller (from analysis / a reframing);
-        # when absent we ask a generic, answer-safe probe.
+        # Hint/term explanation and follow-up probes get a short natural
+        # signpost before the safe assistance (spec §wording). The signpost
+        # acknowledges without implying the previous answer was correct.
+        signpost = _probe_signpost(action, persona, lang)
         probe = q or _generic_probe(action, persona, lang)
-        return ack, "", probe
+        return ack, signpost, probe
 
     if action is InterviewerActionType.REPEAT_QUESTION:
+        # Spec §wording: repeat signpost is a fixed natural phrase; the current
+        # question follows verbatim and unchanged (never advances or scores).
         prefix = {
-            "en": "Of course. Here is the question again:",
-            "vi": "Tất nhiên. Câu hỏi được nhắc lại:",
+            "en": "Of course. I'll repeat the question.",
+            "vi": "Tất nhiên. Tôi sẽ nhắc lại câu hỏi.",
         }[lang]
         return "", prefix, q
 
@@ -207,6 +252,31 @@ def _fallback_parts(  # noqa: C901 -- flat per-action dispatch; readability > sp
 
     # Unknown / unmapped action → neutral, safe.
     return ack, "", q
+
+
+def _probe_signpost(action: InterviewerActionType, persona: Persona, lang: str) -> str:
+    """Short natural signpost before a follow-up probe or safe assistance.
+
+    Spec §wording: follow-ups acknowledge the answer WITHOUT implying it was
+    correct, then ask the probe; hint/term explanations get a brief lead-in
+    before the answer-safe assistance. Tone is persona-shaped only.
+    """
+    if action is InterviewerActionType.PROVIDE_NEUTRAL_HINT:
+        table = {
+            "en": "Here's a small hint to guide you.",
+            "vi": "Đây là một gợi ý nhỏ để bạn định hướng.",
+        }
+        return table[lang]
+    # Follow-up / deeper probing: neutral lead-in, never affirms correctness.
+    followup = {
+        (Persona.STRICT, "en"): "Let's dig into that.",
+        (Persona.STRICT, "vi"): "Chúng ta hãy đi sâu hơn.",
+        (Persona.NEUTRAL, "en"): "Let me follow up on that.",
+        (Persona.NEUTRAL, "vi"): "Tôi muốn hỏi thêm về điều đó.",
+        (Persona.SUPPORTIVE, "en"): "Thanks — let me follow up on that.",
+        (Persona.SUPPORTIVE, "vi"): "Cảm ơn bạn — tôi muốn hỏi thêm một chút.",
+    }
+    return followup.get((persona, lang), followup[(Persona.NEUTRAL, "en")])
 
 
 def _generic_probe(action: InterviewerActionType, persona: Persona, lang: str) -> str:
@@ -284,4 +354,5 @@ __all__ = [
     "Utterance",
     "build_fallback_utterance",
     "persona_from",
+    "transition_text",
 ]
