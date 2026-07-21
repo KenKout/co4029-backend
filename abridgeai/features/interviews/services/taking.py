@@ -1028,15 +1028,11 @@ async def _security_action_result(
         current_question=(current_question.prompt_text if current_question else None),
         custom_refusal=custom,
     )
-    if (
-        current_question is not None
-        and action
-        in {
-            SecurityAction.CLARIFY_CURRENT_QUESTION,
-            SecurityAction.EXPLAIN_CURRENT_TERM,
-            SecurityAction.HINT_CURRENT_QUESTION,
-        }
-    ):
+    if current_question is not None and action in {
+        SecurityAction.CLARIFY_CURRENT_QUESTION,
+        SecurityAction.EXPLAIN_CURRENT_TERM,
+        SecurityAction.HINT_CURRENT_QUESTION,
+    }:
         persisted = await _existing_assistance_text(
             db,
             session_question_id=current_session_question.id,
@@ -1595,10 +1591,49 @@ async def _legacy_advance(
     asked_ids = await _asked_question_ids(db, session.id)
     next_question = await _next_published_question_after(db, session.interview_config_id, asked_ids)
     if next_question is None:
+        # No further question: persist the short final-question transition as
+        # its OWN AI turn (Natural Interview Transitions spec §ending). The
+        # separate goodbye/closing turn is added later by the finish flow, so
+        # the ending is two short turns. Idempotent via a stable turn key.
+        from abridgeai.features.interviews.orchestrator.utterance import (  # noqa: PLC0415
+            persona_from,
+            transition_text,
+        )
+
+        config = await db.get(InterviewConfig, session.interview_config_id)
+        persona = persona_from(config.persona if config is not None else None)
+        final_turn_key = f"transition-final:{effective_turn_key}"
+        final_text = transition_text(persona, language, final=True)
+        existing_messages = await sessions_queries.list_session_messages(db, session.id)
+        final_exists = any(
+            message.role == "ai"
+            and isinstance(message.metadata_json, dict)
+            and message.metadata_json.get("turn_key") == final_turn_key
+            for message in existing_messages
+        )
+        if not final_exists:
+            db.add(
+                InterviewSessionMessage(
+                    session_id=session.id,
+                    session_question_id=current_session_question.id,
+                    role="ai",
+                    content_text=final_text,
+                    metadata_json={
+                        "kind": "transition",
+                        "turn_key": final_turn_key,
+                        "transition_target": "closing",
+                    },
+                )
+            )
+            await flush_or_conflict(db)
         return {
             "next_question": None,
             "is_finished": True,
-            "followup_text": None,
+            "followup_text": final_text,
+            "ai_turn_text": final_text,
+            "transition_id": final_turn_key,
+            "transition_text": final_text,
+            "transition_target": "closing",
         }
 
     allowed_ids = [next_question.id]
@@ -1644,6 +1679,43 @@ async def _legacy_advance(
             "ai_turn_text": next_guard.text,
         }
 
+    # Persist a standardized, persona-aware transition as its OWN AI turn before
+    # the next question turn (Natural Interview Transitions spec). The question
+    # text is NOT included here — it rides in ``next_question`` — so it is never
+    # duplicated. A stable turn key keyed to the destination question makes
+    # retries idempotent (no duplicate transition on resend).
+    from abridgeai.features.interviews.orchestrator.utterance import (  # noqa: PLC0415
+        persona_from,
+        transition_text,
+    )
+
+    config = await db.get(InterviewConfig, session.interview_config_id)
+    persona = persona_from(config.persona if config is not None else None)
+    transition_turn_key = f"transition:{effective_turn_key}:{next_question.id}"
+    transition_text_value = transition_text(persona, language)
+    existing_messages = await sessions_queries.list_session_messages(db, session.id)
+    transition_exists = any(
+        message.role == "ai"
+        and isinstance(message.metadata_json, dict)
+        and message.metadata_json.get("turn_key") == transition_turn_key
+        for message in existing_messages
+    )
+    if not transition_exists:
+        db.add(
+            InterviewSessionMessage(
+                session_id=session.id,
+                session_question_id=current_session_question.id,
+                role="ai",
+                content_text=transition_text_value,
+                metadata_json={
+                    "kind": "transition",
+                    "turn_key": transition_turn_key,
+                    "transition_target": "next_question",
+                },
+            )
+        )
+        await flush_or_conflict(db)
+
     sequence_no = await _next_session_sequence(db, session.id)
     db.add(
         InterviewSessionQuestion(
@@ -1656,7 +1728,11 @@ async def _legacy_advance(
     return {
         "next_question": next_question,
         "is_finished": False,
-        "followup_text": None,
+        "followup_text": transition_text_value,
+        "ai_turn_text": transition_text_value,
+        "transition_id": transition_turn_key,
+        "transition_text": transition_text_value,
+        "transition_target": "next_question",
     }
 
 

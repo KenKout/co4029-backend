@@ -642,6 +642,10 @@ async def respond_to_session(
         should_await_response=result.get("should_await_response"),
         should_finish=result.get("should_finish"),
         assistance_kind=result.get("assistance_kind"),
+        # ── Natural Interview Transitions (additive; None when no transition) ─
+        transition_id=result.get("transition_id"),
+        transition_text=result.get("transition_text"),
+        transition_target=result.get("transition_target"),
     )
 
 
@@ -797,6 +801,11 @@ def _history_message_kind(message: InterviewSessionMessage) -> str:
         return "clarification"
     if stored_kind == "hint":
         return "hint"
+    # Standardized between-question transition turns (Natural Interview
+    # Transitions spec) map to the existing "transition" history kind so the
+    # transcript renders them as their own chronological AI turn.
+    if stored_kind == "transition":
+        return "transition"
     if message.role == "user":
         return "answer"
     ceremony_key = metadata.get("ceremony_key")

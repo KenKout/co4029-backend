@@ -273,6 +273,16 @@ class InterviewSubmitAnswerResponse(BaseModel):
     should_finish: bool | None = None
     assistance_kind: InterviewAssistanceKindLiteral | None = None
 
+    # ── Natural Interview Transitions ────────────────────────────────────────
+    # A standardized between-turn transition, persisted as its own AI turn and
+    # surfaced here so the client can show + narrate it BEFORE revealing the
+    # next Question Card (or, when target is "closing", before the goodbye).
+    # Additive/optional: legacy clients ignore these; the transition text is
+    # ALSO carried in the legacy ai_followup_text for those clients.
+    transition_id: str | None = None
+    transition_text: str | None = None
+    transition_target: Literal["next_question", "closing"] | None = None
+
 
 class InterviewRubricScore(BaseModel):
     """One outcome's verdict slice on the finish response."""
