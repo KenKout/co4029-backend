@@ -167,11 +167,12 @@ class Settings(BaseSettings):
     # additive, default-off change. The key is SecretStr (never logged).
     deepgram_api_key: SecretStr | None = None
     deepgram_tts_base_url: str = "https://api.deepgram.com/v1"
-    # Aura-2 voice models per persona (English only). See
+    # Single English Aura voice model for narration. See
     # https://developers.deepgram.com/docs/tts-models for the catalog.
-    deepgram_tts_model_strict: str = "aura-2-orion-en"
-    deepgram_tts_model_neutral: str = "aura-2-thalia-en"
-    deepgram_tts_model_supportive: str = "aura-2-luna-en"
+    deepgram_tts_model_en: str = "aura-2-thalia-en"
+    # Audio container returned by /v1/speak (mp3 keeps the browser <audio> path
+    # identical to the OpenAI-compatible gateway).
+    deepgram_tts_encoding: str = "mp3"
     deepgram_tts_timeout_seconds: float = 30.0
 
     # LiveKit voice-interview (Phase 1+). Target is LiveKit Cloud for dev +
