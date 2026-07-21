@@ -53,6 +53,36 @@ def candidate_first_name(profile: UserProfile | None) -> str | None:
     return display.split(" ", 1)[0] if display else None
 
 
+def session_address_name(session: InterviewSession, profile: UserProfile | None) -> str | None:
+    """Resolve how the interviewer should address the candidate this session.
+
+    A session-scoped ``preferred_name`` (set when the candidate corrects the
+    profile-derived name during identity_check) always wins; otherwise fall
+    back to the profile's conversational first name.
+    """
+    preferred = _clean(getattr(session, "preferred_name", None), limit=60)
+    if preferred:
+        return preferred
+    return candidate_first_name(profile)
+
+
+def ask_preferred_name_text(*, language: str | None) -> str:
+    """AI reply after the candidate says the profile name isn't theirs."""
+    return (
+        "Không sao. Vậy tôi nên gọi bạn là gì?"
+        if normalize_language(language) == "vi"
+        else "No problem. What should I call you?"
+    )
+
+
+def preferred_name_ack_text(*, name: str, language: str | None) -> str:
+    """AI acknowledgement once the candidate provides their preferred name."""
+    safe = _clean(name, limit=60)
+    if normalize_language(language) == "vi":
+        return f"Đã rõ, từ giờ tôi sẽ gọi bạn là {safe}. Bạn có nghe rõ tôi không?"
+    return f"Got it — I’ll call you {safe} from now on. Can you hear me clearly?"
+
+
 def _address(name: str | None, language: str) -> str:
     if not name:
         return ""
@@ -103,8 +133,7 @@ def language_check_text(*, language: str | None) -> str:
         "Tốt rồi. Bạn muốn sử dụng ngôn ngữ nào cho buổi phỏng vấn: tiếng Anh hay tiếng Việt?"
         if normalize_language(language) == "vi"
         else (
-            "Great. Which language would you like to use for this interview: "
-            "English or Vietnamese?"
+            "Great. Which language would you like to use for this interview: English or Vietnamese?"
         )
     )
 
@@ -266,11 +295,7 @@ def closing_text(
         middle = f"We’ll end your “{safe_title}” interview here."
     else:
         middle = f"That concludes your “{safe_title}” interview."
-    thanks = (
-        "Thank you for your time and effort"
-        if tone is Persona.SUPPORTIVE
-        else "Thank you"
-    )
+    thanks = "Thank you for your time and effort" if tone is Persona.SUPPORTIVE else "Thank you"
     return (
         f"{thanks}{address}. {middle} Your submitted responses have been recorded "
         "for evaluation. Goodbye."
@@ -313,7 +338,7 @@ async def ensure_ceremony_message(
 
     config = await db.get(InterviewConfig, session.interview_config_id)  # type: ignore[attr-defined]
     profile = await db.get(UserProfile, session.student_id)  # type: ignore[attr-defined]
-    name = candidate_first_name(profile)
+    name = session_address_name(session, profile)
     title = config.title if config is not None else "Interview"
     persona = config.persona if config is not None else None
     if kind in {"opening", "candidate_confirmation"}:
@@ -360,10 +385,13 @@ async def ensure_ceremony_message(
 
 __all__ = [
     "FinishReason",
+    "ask_preferred_name_text",
     "audio_check_text",
     "briefing_text",
     "candidate_first_name",
     "closing_text",
+    "preferred_name_ack_text",
+    "session_address_name",
     "ensure_ceremony_message",
     "language_check_text",
     "normalize_language",
