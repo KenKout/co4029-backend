@@ -223,9 +223,19 @@ async def scenario(engine: AsyncEngine) -> AsyncIterator[dict[str, Any]]:
 
 
 async def _make_session(
-    engine: AsyncEngine, config_id: uuid.UUID, student_id: uuid.UUID, input_mode: str
+    engine: AsyncEngine,
+    config_id: uuid.UUID,
+    student_id: uuid.UUID,
+    input_mode: str,
+    language: str = "en",
 ) -> tuple[uuid.UUID, uuid.UUID]:
-    """Create an in_progress session with its first question attached."""
+    """Create an in_progress session with its first question attached.
+
+    ``language`` seeds ``interview_language`` — take_session_step treats the
+    session's stored language as authoritative (it is fixed at onboarding, not
+    per-turn), so a VI test MUST seed it here; passing language="vi" to the
+    step alone is overridden by the session row.
+    """
     session_id = uuid.uuid4()
     sq_id = uuid.uuid4()
     async with engine.begin() as conn:
@@ -233,10 +243,16 @@ async def _make_session(
             text(
                 "INSERT INTO interview_sessions "
                 "(id, interview_config_id, student_id, attempt_number, status, "
-                "input_mode, onboarding_stage) "
-                "VALUES (:id, :cfg, :student, 1, 'in_progress', :mode, 'completed')"
+                "input_mode, onboarding_stage, interview_language) "
+                "VALUES (:id, :cfg, :student, 1, 'in_progress', :mode, 'completed', :lang)"
             ),
-            {"id": session_id, "cfg": config_id, "student": student_id, "mode": input_mode},
+            {
+                "id": session_id,
+                "cfg": config_id,
+                "student": student_id,
+                "mode": input_mode,
+                "lang": language,
+            },
         )
         first_q = (
             await conn.execute(
@@ -875,7 +891,7 @@ async def test_security_blocks_consistently_and_duplicate_turn_is_idempotent(
 ) -> None:
     _enable_security_mode(monkeypatch)
     session_id, _ = await _make_session(
-        engine, scenario["config_id"], scenario["student_id"], input_mode
+        engine, scenario["config_id"], scenario["student_id"], input_mode, language=language
     )
     async with session_factory() as db:
         first = await taking_service.take_session_step(
