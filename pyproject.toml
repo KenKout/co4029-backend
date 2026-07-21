@@ -175,8 +175,29 @@ module = [
     "pytesseract.*",
     "pgvector",
     "pgvector.*",
+    # livekit ships no type hints / py.typed marker (agents + plugins). Narrow
+    # ignore so the realtime voice modules (agent.py, session_runtime.py) type-
+    # check without livekit's untyped surface producing import-untyped noise.
+    "livekit",
+    "livekit.*",
 ]
 ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# The realtime voice modules subclass / consume livekit's Agent + rtc surface.
+# livekit ships no stubs, so under ignore_missing_imports those names resolve
+# to Any. strict's disallow_subclassing_any would then reject `class
+# InterviewAgent(Agent)`. Scope the relaxation to exactly these two modules so
+# the rest of the tree keeps full strictness. warn_unused_ignores is disabled
+# here too because whether an ignore is "used" depends on whether livekit is
+# installed in the checking env (present in the app venv, absent in the
+# pre-commit hook venv), and we don't want that env split to break the hook.
+module = [
+    "abridgeai.features.interviews.realtime.agent",
+    "abridgeai.features.interviews.realtime.session_runtime",
+]
+disallow_subclassing_any = false
+warn_unused_ignores = false
 
 [tool.setuptools.packages.find]
 include = ["abridgeai*"]

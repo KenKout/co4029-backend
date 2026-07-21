@@ -17,7 +17,9 @@ import json
 import logging
 from uuid import UUID
 
-from livekit import rtc
+from livekit import (
+    rtc,  # type: ignore[attr-defined]  # rtc is a lazy submodule; livekit ships no stubs
+)
 from livekit.agents import JobContext, WorkerOptions, cli
 
 from abridgeai.core.config import get_settings
@@ -90,9 +92,7 @@ async def entrypoint(ctx: JobContext) -> None:
     first_question_text = await bridge.get_current_question_text(
         interview_session_id, language=language
     )
-    opening_text = await bridge.get_opening_text(
-        interview_session_id, language=language
-    )
+    opening_text = await bridge.get_opening_text(interview_session_id, language=language)
     agent = InterviewAgent(
         interview_session_id=interview_session_id,
         student_id=student_id,

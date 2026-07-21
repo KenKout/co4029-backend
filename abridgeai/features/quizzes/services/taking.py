@@ -454,8 +454,9 @@ async def submit_attempt(
     # "N/total correct". Attach them as transient attributes after refresh so
     # pydantic's from_attributes picks them up; without this they default to
     # None and the UI renders "0/N correct" despite a correct score_percent.
-    attempt.correct_count = correct_count
-    attempt.total_questions = question_count
+    # response-only (not ORM columns); dynamic attrs picked up by from_attributes
+    setattr(attempt, "correct_count", correct_count)  # noqa: B010 -- dynamic, not column
+    setattr(attempt, "total_questions", question_count)  # noqa: B010 -- dynamic, not column
     return attempt
 
 

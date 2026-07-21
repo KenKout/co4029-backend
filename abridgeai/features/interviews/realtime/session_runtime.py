@@ -72,9 +72,7 @@ class InterviewAgent(Agent):
     async def on_enter(self) -> None:
         """Speak the greeting completely, then begin with question one."""
         if self._opening_text:
-            opening_handle = self.session.say(
-                self._opening_text, allow_interruptions=False
-            )
+            opening_handle = self.session.say(self._opening_text, allow_interruptions=False)
             await opening_handle
             if hasattr(opening_handle, "wait_for_playout"):
                 try:
