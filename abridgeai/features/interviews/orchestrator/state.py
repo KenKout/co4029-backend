@@ -26,7 +26,7 @@ from typing import Any
 
 # Current schema version of the serialized state payload. Bump on incompatible
 # shape changes so ``from_dict`` can migrate old payloads if ever needed.
-STATE_SCHEMA_VERSION = 4
+STATE_SCHEMA_VERSION = 5
 
 
 class InterviewPhase(str, Enum):  # noqa: UP042 -- StrEnum changes value coercion; match codebase convention
@@ -90,6 +90,11 @@ class OutcomeCoverageState:
     last_updated_at: str | None = None
     supporting_turn_ids: list[str] = field(default_factory=list)
     missing_evidence: list[str] = field(default_factory=list)
+    # Bounded log of the candidate's own prior claims about this outcome (Slice
+    # 9, v2). Fed back into answer analysis so the interviewer can spot a
+    # cross-turn contradiction ("earlier you said X"). Their words only — never
+    # rubric/answer content. Bounded to the last few by the writer.
+    claims: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
@@ -114,6 +119,7 @@ class OutcomeCoverageState:
             last_updated_at=data.get("last_updated_at"),
             supporting_turn_ids=list(data.get("supporting_turn_ids", []) or []),
             missing_evidence=list(data.get("missing_evidence", []) or []),
+            claims=list(data.get("claims", []) or []),
         )
 
 

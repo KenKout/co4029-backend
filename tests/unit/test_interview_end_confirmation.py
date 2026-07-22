@@ -185,9 +185,9 @@ def test_new_fields_round_trip() -> None:
 
 
 def test_schema_version_is_current() -> None:
-    # Bumped to 4 in Slice 7 (turns_in_phase / warmup_turns_target added).
-    assert STATE_SCHEMA_VERSION == 4
-    assert InterviewRuntimeStateData().version == 4
+    # Bumped to 5 in Slice 9 (per-outcome claims log added).
+    assert STATE_SCHEMA_VERSION == 5
+    assert InterviewRuntimeStateData().version == 5
 
 
 def test_v2_payload_without_new_fields_defaults_safely() -> None:

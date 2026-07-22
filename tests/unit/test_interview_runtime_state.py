@@ -163,6 +163,18 @@ def test_to_dict_is_json_serializable() -> None:
     assert "closing" in dumped
 
 
+def test_outcome_claims_default_and_roundtrip() -> None:
+    """Slice 9: per-outcome bounded claims log defaults empty and round-trips."""
+    cov = OutcomeCoverageState(outcome_id="o-1")
+    assert cov.claims == []
+    cov.claims = ["stores facts", "grain is per-transaction"]
+    again = OutcomeCoverageState.from_dict(cov.to_dict())
+    assert again.claims == ["stores facts", "grain is per-transaction"]
+    # Tolerant load of an OLD row without the field → empty list.
+    legacy = OutcomeCoverageState.from_dict({"outcome_id": "o-2"})
+    assert legacy.claims == []
+
+
 def test_turns_in_phase_defaults_and_roundtrips() -> None:
     """Slice 7: phase-dwell tracking defaults safely and survives a round-trip."""
     d = InterviewRuntimeStateData()
