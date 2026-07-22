@@ -65,6 +65,43 @@ def test_unknown_language_falls_back_to_english() -> None:
     assert u.acknowledgement == "Thank you."
 
 
+def _model_answer_leak_guard(text: str) -> None:
+    """Depth probes must never contain answer/rubric content — only ask to expand."""
+    lowered = text.lower()
+    for banned in ("the answer is", "correct answer", "you should say", "rubric"):
+        assert banned not in lowered
+
+
+def test_depth_probe_extend_answer_renders_bilingual_and_answer_safe() -> None:
+    """Slice 8: EXTEND_ANSWER has non-empty, answer-safe EN + VI fallbacks."""
+    d = _decision(
+        InterviewerActionType.EXTEND_ANSWER,
+        ack=AcknowledgementStyle.POSITIVE,
+        reason=ReasonCode.STRONG_ANSWER_DEPTH_PROBE,
+    )
+    en = build_fallback_utterance(d, persona=Persona.NEUTRAL, language="en", question_text=None)
+    vi = build_fallback_utterance(d, persona=Persona.NEUTRAL, language="vi", question_text=None)
+    assert en.question_or_probe.strip()
+    assert vi.question_or_probe.strip()
+    assert en.question_or_probe != vi.question_or_probe  # genuinely localized
+    _model_answer_leak_guard(en.ai_turn_text)
+    _model_answer_leak_guard(vi.ai_turn_text)
+
+
+def test_depth_probe_edge_case_renders_bilingual_and_answer_safe() -> None:
+    d = _decision(
+        InterviewerActionType.PROBE_EDGE_CASE,
+        ack=AcknowledgementStyle.POSITIVE,
+        reason=ReasonCode.STRONG_ANSWER_DEPTH_PROBE,
+    )
+    en = build_fallback_utterance(d, persona=Persona.STRICT, language="en", question_text=None)
+    vi = build_fallback_utterance(d, persona=Persona.STRICT, language="vi", question_text=None)
+    assert en.question_or_probe.strip()
+    assert vi.question_or_probe.strip()
+    _model_answer_leak_guard(en.ai_turn_text)
+    _model_answer_leak_guard(vi.ai_turn_text)
+
+
 def test_strict_persona_is_terse() -> None:
     d = _decision(InterviewerActionType.TRANSITION_TOPIC, ack=AcknowledgementStyle.NEUTRAL)
     strict = build_fallback_utterance(d, persona=Persona.STRICT, language="en", question_text="Q?")

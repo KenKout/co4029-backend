@@ -199,6 +199,8 @@ def _fallback_parts(  # noqa: C901 -- flat per-action dispatch; readability > sp
         InterviewerActionType.EXPLORE_TRADEOFF,
         InterviewerActionType.RESOLVE_CONTRADICTION,
         InterviewerActionType.PROVIDE_NEUTRAL_HINT,
+        InterviewerActionType.EXTEND_ANSWER,
+        InterviewerActionType.PROBE_EDGE_CASE,
     ):
         # Hint/term explanation and follow-up probes get a short natural
         # signpost before the safe assistance (spec §wording). The signpost
@@ -283,6 +285,17 @@ def _probe_signpost(action: InterviewerActionType, persona: Persona, lang: str) 
             "vi": "Đây là một gợi ý nhỏ để bạn định hướng.",
         }
         return table[lang]
+    # Depth probes (Slice 8): follow a STRONG answer, so the lead-in genuinely
+    # affirms before pushing further (unlike the neutral follow-up lead-in).
+    if action in (
+        InterviewerActionType.EXTEND_ANSWER,
+        InterviewerActionType.PROBE_EDGE_CASE,
+    ):
+        table = {
+            "en": "That's a strong answer — let's go further.",
+            "vi": "Đó là một câu trả lời tốt — chúng ta hãy đi xa hơn.",
+        }
+        return table[lang]
     # Follow-up / deeper probing: neutral lead-in, never affirms correctness.
     followup = {
         (Persona.STRICT, "en"): "Let's dig into that.",
@@ -334,6 +347,18 @@ def _generic_probe(action: InterviewerActionType, persona: Persona, lang: str) -
         ),
         (InterviewerActionType.REFRAME_QUESTION, "en"): "Let me put the question another way.",
         (InterviewerActionType.REFRAME_QUESTION, "vi"): "Để tôi diễn đạt câu hỏi theo cách khác.",
+        (InterviewerActionType.EXTEND_ANSWER, "en"): (
+            "That's solid — can you generalize it or extend it to a broader case?"
+        ),
+        (InterviewerActionType.EXTEND_ANSWER, "vi"): (
+            "Rất tốt — bạn có thể khái quát hóa hoặc mở rộng nó cho một trường hợp rộng hơn không?"
+        ),
+        (InterviewerActionType.PROBE_EDGE_CASE, "en"): (
+            "Where might that break down — what edge cases or failure modes should we consider?"
+        ),
+        (InterviewerActionType.PROBE_EDGE_CASE, "vi"): (
+            "Nó có thể thất bại ở đâu — có trường hợp biên hay tình huống lỗi nào cần cân nhắc không?"  # noqa: E501
+        ),
     }
     return table.get((action, lang), table.get((action, "en"), "Could you say more?"))
 
