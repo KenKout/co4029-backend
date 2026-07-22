@@ -26,7 +26,7 @@ from typing import Any
 
 # Current schema version of the serialized state payload. Bump on incompatible
 # shape changes so ``from_dict`` can migrate old payloads if ever needed.
-STATE_SCHEMA_VERSION = 5
+STATE_SCHEMA_VERSION = 6
 
 
 class InterviewPhase(str, Enum):  # noqa: UP042 -- StrEnum changes value coercion; match codebase convention
@@ -131,6 +131,10 @@ class CandidateSignals:
     appeared_off_topic: bool = False
     appeared_uncertain: bool = False
     technical_issue_detected: bool = False
+    # Latest detected candidate affect (Slice 10, v2): terse/rambling/nervous/
+    # confident/neutral. Drives utterance TONE only, never control flow. Stored
+    # as the enum value string; None when affect detection is disabled.
+    last_affect: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -145,6 +149,7 @@ class CandidateSignals:
             appeared_off_topic=bool(data.get("appeared_off_topic", False)),
             appeared_uncertain=bool(data.get("appeared_uncertain", False)),
             technical_issue_detected=bool(data.get("technical_issue_detected", False)),
+            last_affect=data.get("last_affect"),
         )
 
 

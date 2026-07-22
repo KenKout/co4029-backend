@@ -48,6 +48,7 @@ from abridgeai.features.interviews.models import (
 )
 from abridgeai.features.interviews.orchestrator import repository as state_repo
 from abridgeai.features.interviews.orchestrator import turn_perception, turn_state
+from abridgeai.features.interviews.orchestrator.affect import detect_affect
 from abridgeai.features.interviews.orchestrator.analysis import AnswerAnalysis
 from abridgeai.features.interviews.orchestrator.analysis_logic import analyze_answer
 from abridgeai.features.interviews.orchestrator.coverage import is_provisionally_sufficient
@@ -110,6 +111,26 @@ class AdaptiveOutcome:
     fallback_reason: str | None
 
 
+def _resolve_affect(
+    data: Any,  # noqa: ANN401 -- InterviewRuntimeStateData; loose to avoid import churn
+    *,
+    answer_text: str,
+    analysis: AnswerAnalysis | None,
+    enabled: bool,
+) -> Any | None:  # noqa: ANN401 -- Affect | None; loose to avoid import churn
+    """Detect candidate affect + record it on state (Slice 10, v2).
+
+    Returns the detected ``Affect`` (and stores its value on candidate_signals)
+    when the feature is enabled, else None → v1 tone. Kept as a helper so
+    ``run_adaptive_turn`` stays under the complexity cap.
+    """
+    if not enabled:
+        return None
+    affect = detect_affect(answer_text=answer_text, analysis=analysis)
+    data.candidate_signals.last_affect = affect.value
+    return affect
+
+
 async def run_adaptive_turn(
     db: AsyncSession,
     *,
@@ -127,6 +148,7 @@ async def run_adaptive_turn(
     phases_enabled: bool = False,
     depth_probe_enabled: bool = False,
     cross_turn_enabled: bool = False,
+    affect_enabled: bool = False,
 ) -> AdaptiveOutcome:
     """Run one adaptive turn. MUST be called inside a caller-owned savepoint.
 
@@ -291,6 +313,12 @@ async def run_adaptive_turn(
         decision.target_question_id = scored.candidate.question_id
         decision.target_outcome_id = scored.candidate.linked_outcome_id
 
+    # 5b. Candidate affect (Slice 10, v2). Read lightweight affect to warm the
+    # utterance TONE only — never control flow. Gated: off → None → v1 tone.
+    affect = _resolve_affect(
+        data, answer_text=answer_text, analysis=analysis, enabled=affect_enabled
+    )
+
     # 6. Natural utterance (LLM phrasing + deterministic fallback).
     persona = persona_from(config.persona)
     probe_or_question_text = (
@@ -305,12 +333,14 @@ async def run_adaptive_turn(
         language=language,
         question_text=probe_or_question_text,
         use_llm=use_llm,
+        affect=affect,
     )
     fallback_utterance = build_fallback_utterance(
         decision,
         persona=persona,
         language=language,
         question_text=probe_or_question_text,
+        affect=affect,
     )
     assessment = security_assessment or SecurityAssessment(
         category=SecurityCategory.BENIGN,

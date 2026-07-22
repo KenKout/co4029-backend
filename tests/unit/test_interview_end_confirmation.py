@@ -185,9 +185,9 @@ def test_new_fields_round_trip() -> None:
 
 
 def test_schema_version_is_current() -> None:
-    # Bumped to 5 in Slice 9 (per-outcome claims log added).
-    assert STATE_SCHEMA_VERSION == 5
-    assert InterviewRuntimeStateData().version == 5
+    # Bumped to 6 in Slice 10 (candidate affect signal added).
+    assert STATE_SCHEMA_VERSION == 6
+    assert InterviewRuntimeStateData().version == 6
 
 
 def test_v2_payload_without_new_fields_defaults_safely() -> None:

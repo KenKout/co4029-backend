@@ -338,7 +338,9 @@ async def _count_ai_messages(engine: AsyncEngine, session_id: uuid.UUID) -> int:
         )
 
 
-def _settings_v2(*, phases: bool = False, depth_probe: bool = False) -> Settings:
+def _settings_v2(
+    *, phases: bool = False, depth_probe: bool = False, affect: bool = False
+) -> Settings:
     """v1 adaptive fully on PLUS the v2 master + selected sub-flags.
 
     Used by the v2 tests: the v1 gate must be on for v2 to run, and each
@@ -349,6 +351,7 @@ def _settings_v2(*, phases: bool = False, depth_probe: bool = False) -> Settings
             "adaptive_interviewer_v2_enabled": True,
             "adaptive_v2_phases_enabled": phases,
             "adaptive_v2_depth_probe_enabled": depth_probe,
+            "adaptive_v2_affect_enabled": affect,
         }
     )
 
@@ -361,6 +364,11 @@ def adaptive_v2_phases_on(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.fixture
 def adaptive_v2_depth_probe_on(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(taking_service, "get_settings", lambda: _settings_v2(depth_probe=True))
+
+
+@pytest.fixture
+def adaptive_v2_affect_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(taking_service, "get_settings", lambda: _settings_v2(affect=True))
 
 
 async def _runtime_phase(engine: AsyncEngine, session_id: uuid.UUID) -> str | None:
@@ -1379,3 +1387,65 @@ async def test_v2_depth_probe_digs_into_strong_answer(
     assert result["next_question"] is None
     assert result["is_finished"] is False
     assert result["ai_turn_text"]
+
+
+@pytest.mark.asyncio
+async def test_v2_affect_records_nervous_and_warms_tone(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict[str, Any],
+    adaptive_v2_affect_on: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A hedged, nervous answer records last_affect='nervous' in runtime state.
+
+    Affect only warms the utterance tone; it never changes control flow. Here we
+    assert the persisted signal so the phrasing layer has it to work with.
+    """
+    gw = _gateway(
+        [
+            {"intent": "answer", "confidence": 0.9, "rationale": "content"},
+            {
+                "relevance": "partially_relevant",
+                "completeness": "partial",
+                "correctness": "mixed",
+                "specificity": "vague",
+                "recommended_probe_type": "none",
+                "confidence": 0.5,
+                "evidence": [],
+            },
+            {
+                "acknowledgement": "Thanks.",
+                "transition": "",
+                "ai_turn_text": "Thanks. Let's continue.",
+            },
+        ]
+    )
+    for mod in ("intent_logic", "analysis_logic", "utterance_logic"):
+        monkeypatch.setattr(
+            f"abridgeai.features.interviews.orchestrator.{mod}.LLMGateway", lambda: gw
+        )
+
+    session_id, _ = await _make_session(
+        engine, scenario["config_id"], scenario["student_id"], "text"
+    )
+    async with session_factory() as db:
+        result = await taking_service.take_session_step(
+            db,
+            session_id,
+            "Um, I'm not really sure, but maybe it could possibly be that?",
+            _actor(scenario["student_id"]),
+            turn_key="affect-1",
+        )
+        await db.commit()
+
+    assert result["ai_turn_text"]
+    async with engine.begin() as conn:
+        state_json = (
+            await conn.execute(
+                text("SELECT state_json FROM interview_runtime_states WHERE session_id = :s"),
+                {"s": session_id},
+            )
+        ).scalar_one()
+    signals = state_json.get("candidate_signals", {})
+    assert signals.get("last_affect") == "nervous"

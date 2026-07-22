@@ -368,20 +368,52 @@ def _combine(acknowledgement: str, transition: str, question_or_probe: str) -> s
     return " ".join(p for p in (acknowledgement, transition, question_or_probe) if p).strip()
 
 
+# Affect-aware tone lead-ins (Slice 10, v2). Prepended to the acknowledgement to
+# warm the tone for a nervous candidate or gently steer a rambling one. TONE
+# ONLY — the action/reason/question are unchanged, so this never affects control
+# flow or leaks answer content. Keyed by affect value string (avoids importing
+# the Affect enum here and any import cycle); unknown/neutral → no lead-in.
+_AFFECT_LEAD_IN: dict[tuple[str, str], str] = {
+    ("nervous", "en"): "No rush — you're doing fine.",
+    ("nervous", "vi"): "Bạn cứ từ từ — bạn đang làm tốt mà.",
+    ("rambling", "en"): "Let's focus in a little.",
+    ("rambling", "vi"): "Chúng ta hãy tập trung lại một chút.",
+    ("terse", "en"): "Feel free to expand.",
+    ("terse", "vi"): "Bạn cứ trình bày thêm nhé.",
+}
+
+
+def _affect_lead_in(affect_value: str | None, lang: str) -> str:
+    """Optional tone lead-in for the detected affect (empty when none applies)."""
+    if not affect_value:
+        return ""
+    return _AFFECT_LEAD_IN.get((affect_value, lang), "")
+
+
 def build_fallback_utterance(
     decision: InterviewerDecision,
     *,
     persona: Persona,
     language: str | None,
     question_text: str | None = None,
+    affect: object | None = None,
 ) -> Utterance:
     """Deterministic, persona-aware, bilingual utterance for a decision.
 
     This is the guaranteed path — no I/O, never fails. The LLM phrasing layer
     (added in the logic module) wraps this and falls back to it on any error.
+
+    ``affect`` (Slice 10, v2) optionally warms the TONE: a short reassuring /
+    steering lead-in is prepended for a nervous / rambling / terse candidate.
+    It only prepends to the acknowledgement — the question/probe text is
+    untouched, so control flow and the answer-leak guard are unaffected. When
+    None or NEUTRAL, the utterance is byte-for-byte the v1 result.
     """
     lang = _lang(language)
     ack, transition, qp = _fallback_parts(decision, persona, lang, question_text=question_text)
+    affect_value = getattr(affect, "value", affect) if affect is not None else None
+    lead_in = _affect_lead_in(affect_value if isinstance(affect_value, str) else None, lang)
+    ack = _combine(lead_in, "", ack) if lead_in else ack
     return Utterance(
         acknowledgement=ack,
         transition=transition,

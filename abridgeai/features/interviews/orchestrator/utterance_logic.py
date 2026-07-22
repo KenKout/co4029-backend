@@ -52,6 +52,7 @@ async def generate_utterance(
     language: str | None,
     question_text: str | None = None,
     use_llm: bool = True,
+    affect: object | None = None,
     pipeline_run_id: UUID | None = None,
     gateway: LLMGateway | None = None,
 ) -> tuple[Utterance, str]:
@@ -63,7 +64,7 @@ async def generate_utterance(
     never blocked (requirement #9).
     """
     fallback = build_fallback_utterance(
-        decision, persona=persona, language=language, question_text=question_text
+        decision, persona=persona, language=language, question_text=question_text, affect=affect
     )
     if not use_llm:
         return fallback, "fallback"

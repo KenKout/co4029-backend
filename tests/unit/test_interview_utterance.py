@@ -164,3 +164,48 @@ def test_combined_text_has_no_double_spaces() -> None:
     u = build_fallback_utterance(d, persona=Persona.NEUTRAL, language="en", question_text="Q?")
     assert "  " not in u.ai_turn_text
     assert not u.ai_turn_text.startswith(" ")
+
+
+# ── affect-aware tone (Slice 10) ─────────────────────────────────────────────
+
+
+def test_affect_none_leaves_utterance_unchanged() -> None:
+    """v1 parity: affect=None (default) must not alter the utterance at all."""
+    from abridgeai.features.interviews.orchestrator.affect import Affect
+
+    d = _decision(InterviewerActionType.PROBE_DEEPER, ack=AcknowledgementStyle.NEUTRAL)
+    base = build_fallback_utterance(d, persona=Persona.NEUTRAL, language="en", question_text="Q?")
+    neutral = build_fallback_utterance(
+        d, persona=Persona.NEUTRAL, language="en", question_text="Q?", affect=Affect.NEUTRAL
+    )
+    assert base.ai_turn_text == neutral.ai_turn_text
+
+
+def test_nervous_affect_adds_reassuring_lead_in() -> None:
+    from abridgeai.features.interviews.orchestrator.affect import Affect
+
+    d = _decision(InterviewerActionType.PROBE_DEEPER, ack=AcknowledgementStyle.NEUTRAL)
+    base = build_fallback_utterance(d, persona=Persona.NEUTRAL, language="en", question_text="Q?")
+    nervous = build_fallback_utterance(
+        d, persona=Persona.NEUTRAL, language="en", question_text="Q?", affect=Affect.NERVOUS
+    )
+    # A warmer lead-in is prepended; the question/probe is preserved verbatim.
+    assert nervous.ai_turn_text != base.ai_turn_text
+    assert len(nervous.ai_turn_text) > len(base.ai_turn_text)
+    assert nervous.question_or_probe == base.question_or_probe
+
+
+def test_nervous_affect_bilingual() -> None:
+    from abridgeai.features.interviews.orchestrator.affect import Affect
+
+    d = _decision(InterviewerActionType.PROBE_DEEPER, ack=AcknowledgementStyle.NEUTRAL)
+    vi = build_fallback_utterance(
+        d, persona=Persona.NEUTRAL, language="vi", question_text="Q?", affect=Affect.NERVOUS
+    )
+    en = build_fallback_utterance(
+        d, persona=Persona.NEUTRAL, language="en", question_text="Q?", affect=Affect.NERVOUS
+    )
+    # The lead-in is localized (EN and VI differ) and never double-spaces.
+    assert vi.ai_turn_text != en.ai_turn_text
+    assert "  " not in vi.ai_turn_text
+    assert "  " not in en.ai_turn_text
