@@ -215,6 +215,36 @@ def test_report_question_metadata_absent_when_no_advance() -> None:
     assert r.selected_question_difficulty_counts == {}
 
 
+def test_report_counts_v2_actions_and_no_false_loop_rollback() -> None:
+    """Slice 14: new v2 actions (depth probe, closing sub-steps) surface in the
+    action histogram, and consuming the follow-up budget does NOT trip a false
+    question_loop_detected rollback (the histogram is dynamic; loop detection is
+    not action-name based)."""
+    events = [
+        {"event": obs.EV_DECISION, "session_id": "s1", "adaptive": True, "action": "extend_answer"},
+        {
+            "event": obs.EV_DECISION,
+            "session_id": "s1",
+            "adaptive": True,
+            "action": "prompt_self_reflection",
+        },
+        {
+            "event": obs.EV_DECISION,
+            "session_id": "s1",
+            "adaptive": True,
+            "action": "invite_candidate_questions",
+        },
+    ]
+    r = vr.build_report(events)
+    assert r.action_counts.get("extend_answer") == 1
+    assert r.action_counts.get("prompt_self_reflection") == 1
+    assert r.action_counts.get("invite_candidate_questions") == 1
+    # These are normal adaptive decisions → no rollback trigger.
+    signals = vr.evaluate_rollback(r)
+    assert signals.question_loop_detected is False
+    assert signals.should_rollback is False
+
+
 def test_report_latency_percentiles() -> None:
     r = vr.build_report(_events())
     # decision latencies: [1800, 2200, 400] → p50 nearest-rank = 1800, p95 = 2200.
