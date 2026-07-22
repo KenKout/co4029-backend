@@ -127,3 +127,75 @@ subsequent turns to legacy without corrupting persisted runtime state.
 - **Final grading is independent:** the post-session evaluator re-judges the
   transcript and is never bound by provisional adaptive coverage/scores, so a
   bad adaptive window cannot corrupt a verdict.
+
+---
+
+## 5. Adaptive v2 (real-life interview upgrades)
+
+v2 layers seven human-interviewer behaviours on top of the v1 adaptive engine.
+It is a **second staged rollout that only begins once v1 is at 100% on a mode**
+and healthy per §2. All v2 behaviour is additive and flag-gated; with every v2
+flag OFF the adaptive path is byte-for-byte v1.
+
+### 5.1 The v2 flag matrix
+
+All flags are `Settings` fields (`.env`), read by backend + agent. Restart both
+after any change. Every v2 flag requires the v1 master switch
+(`ADAPTIVE_INTERVIEWER_ENABLED`) ON **and** the per-mode gate ON for that mode —
+v2 rides inside the v1 adaptive path, so if v1 is off for a mode, v2 is off too.
+
+| Env var | Default | Behaviour |
+|---|---|---|
+| `ADAPTIVE_INTERVIEWER_V2_ENABLED` | `false` | **v2 master / kill switch.** OFF → every sub-flag below is inert; the engine runs exactly as v1. One-flip v2 rollback. |
+| `ADAPTIVE_V2_PHASES_ENABLED` | `false` | Real phase progression (opening → warmup → core → deep-probe → closing) with per-phase difficulty bias. |
+| `ADAPTIVE_V2_DEPTH_PROBE_ENABLED` | `false` | Probe a strong answer for its ceiling (extend / edge-case) instead of advancing. Consumes the follow-up budget. |
+| `ADAPTIVE_V2_HINT_LADDER_ENABLED` | `false` | Escalating hints + non-repeating rephrasing on the same question (via the adaptive decision path). |
+| `ADAPTIVE_V2_AFFECT_ENABLED` | `false` | Detect candidate affect (nervous/terse/rambling/confident) and warm the utterance TONE only. |
+| `ADAPTIVE_V2_CROSS_TURN_ENABLED` | `false` | Feed the candidate's own prior claims into answer analysis to catch cross-turn contradictions. |
+| `ADAPTIVE_V2_PER_OUTCOME_DIFFICULTY_ENABLED` | `false` | Per-outcome competence (EWMA) calibrates question difficulty per topic instead of one global level. |
+| `ADAPTIVE_V2_RICH_CLOSING_ENABLED` | `false` | Closing sub-sequence: self-reflection prompt → invite candidate questions → graceful sign-off. |
+
+Resolver: `Settings.adaptive_v2_feature_enabled(mode, feature)` — returns True
+only when the v1 gate for `mode` is on AND the v2 master is on AND that
+sub-flag is on. Never re-implement; always call it.
+
+### 5.2 Shadow-first sub-flag order
+
+Bring sub-features up **one at a time, in this order**, each in shadow for a
+window (compute + log, don't drive — reuse `ADAPTIVE_INTERVIEWER_SHADOW_ENABLED`
+on a mode not yet live, or enable on a low `ROLLOUT_PERCENT` canary), then live:
+
+1. `phases` — foundational; the phase drives depth-probe and closing eligibility.
+2. `depth_probe` — verify `test_interview_decision_invariants` loop caps hold.
+3. `hint_ladder`
+4. `affect` — phrasing-only; lowest risk.
+5. `cross_turn`
+6. `per_outcome_difficulty`
+7. `rich_closing` — last; it changes how sessions end.
+
+Evaluate the §2 rollback signal between each. The new v2 actions
+(`extend_answer`, `probe_edge_case`, `prompt_self_reflection`,
+`invite_candidate_questions`, `answer_candidate_question`) surface in the report
+action histogram automatically; because depth probes and hints consume the
+follow-up budget, they cannot trip `question_loop_detected`.
+
+### 5.3 v2 rollback
+
+Fastest first — all env flips + `pm2 restart abridgeai-backend abridgeai-interview-agent`:
+
+1. **All of v2:** set `ADAPTIVE_INTERVIEWER_V2_ENABLED=false` → the engine
+   reverts to v1 (which, via its own master switch, can revert to legacy).
+   In-flight sessions are safe: the per-turn fallback ladder is unchanged.
+2. **One sub-feature:** set that sub-flag OFF (e.g.
+   `ADAPTIVE_V2_RICH_CLOSING_ENABLED=false`).
+
+### 5.4 v2 safety invariants
+
+- **Additive + gated:** every v2 field on the runtime state is optional with a
+  safe default; an old persisted session loads with neutral v2 values.
+- **Deterministic core:** all v2 policy (phase, affect, competence, closing
+  sub-state) is pure and unit-tested; the LLM only ever refines phrasing.
+- **Evaluator independence still holds:** competence estimates, claims, affect
+  and phase are provisional signals and never bind the final verdict.
+- **Loop protection preserved:** depth probes / hints consume the follow-up
+  budget, so the Slice 1 decision invariants continue to cap follow-ups.
