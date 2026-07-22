@@ -18,7 +18,9 @@ import inspect
 import tempfile
 import uuid
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
 from uuid import UUID
@@ -420,6 +422,108 @@ async def test_failure_captures_exception_in_processing_jobs(
     assert row.status == "failed"
     assert row.error_message is not None
     assert "synthetic" in row.error_message
+
+
+@pytest.mark.asyncio
+async def test_kg_client_injected_when_flag_enabled(
+    engine: AsyncEngine,
+    scope: _Scope,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Regression: when KNOWLEDGE_GRAPH_ENABLED is true the worker must open a
+    KnowledgeGraphClient and pass it into run_material_ingest. The pipeline
+    guards Stage 5 with ``kg_client is not None``, so if the worker forgets to
+    inject it (the original bug) the KG stage silently skips even with the
+    flag on.
+    """
+    fake_local = tmp_path / "downloaded.bin"
+    fake_local.write_bytes(b"stub")
+
+    captured: dict[str, Any] = {}
+
+    async def _fake_download(storage_object: Any, dest_dir: Path, **_: Any) -> Path:
+        return fake_local
+
+    async def _capturing_pipeline(
+        db: AsyncSession,
+        material_version_id: UUID,
+        pipeline_run_id: UUID,
+        *,
+        source_path: Path | None = None,
+        kg_client: Any = None,
+        **_: Any,
+    ) -> None:
+        captured["kg_client"] = kg_client
+
+    sentinel_client = object()
+
+    @asynccontextmanager
+    async def _fake_graph_client() -> AsyncIterator[object]:
+        yield sentinel_client
+
+    monkeypatch.setattr(worker_mod, "download_to_temp", _fake_download)
+    monkeypatch.setattr(worker_mod, "run_material_ingest", _capturing_pipeline)
+    monkeypatch.setattr(worker_mod, "graph_client", _fake_graph_client)
+    monkeypatch.setattr(
+        worker_mod, "get_settings", lambda: SimpleNamespace(knowledge_graph_enabled=True)
+    )
+
+    await ingest_material_version_task(
+        ctx={},
+        actor_id=uuid.uuid4(),
+        material_version_id=scope.version_id,
+        pipeline_run_id=uuid.uuid4(),
+    )
+
+    assert captured["kg_client"] is sentinel_client
+
+
+@pytest.mark.asyncio
+async def test_kg_client_none_when_flag_disabled(
+    engine: AsyncEngine,
+    scope: _Scope,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """When the flag is off, no KG client is opened and kg_client stays None."""
+    fake_local = tmp_path / "downloaded.bin"
+    fake_local.write_bytes(b"stub")
+
+    captured: dict[str, Any] = {}
+
+    async def _fake_download(storage_object: Any, dest_dir: Path, **_: Any) -> Path:
+        return fake_local
+
+    async def _capturing_pipeline(
+        db: AsyncSession,
+        material_version_id: UUID,
+        pipeline_run_id: UUID,
+        *,
+        source_path: Path | None = None,
+        kg_client: Any = None,
+        **_: Any,
+    ) -> None:
+        captured["kg_client"] = kg_client
+
+    def _must_not_open() -> Any:
+        raise AssertionError("graph_client must not be opened when flag is off")
+
+    monkeypatch.setattr(worker_mod, "download_to_temp", _fake_download)
+    monkeypatch.setattr(worker_mod, "run_material_ingest", _capturing_pipeline)
+    monkeypatch.setattr(worker_mod, "graph_client", _must_not_open)
+    monkeypatch.setattr(
+        worker_mod, "get_settings", lambda: SimpleNamespace(knowledge_graph_enabled=False)
+    )
+
+    await ingest_material_version_task(
+        ctx={},
+        actor_id=uuid.uuid4(),
+        material_version_id=scope.version_id,
+        pipeline_run_id=uuid.uuid4(),
+    )
+
+    assert captured["kg_client"] is None
 
 
 @pytest.mark.asyncio
