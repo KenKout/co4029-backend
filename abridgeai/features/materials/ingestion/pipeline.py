@@ -468,6 +468,14 @@ async def _run_stages(
         job.progress_percent = 60
         await db.flush()
 
+        # Drop empty / whitespace-only chunks before embedding. The embedding
+        # API rejects an empty input string with HTTP 400 and fails the WHOLE
+        # batch, so a single blank chunk (silent audio segment, blank video
+        # frame, blank PDF page) would otherwise crash an entire ingest. Guard
+        # on the contextual embed input, not just raw content, so a chunk that
+        # is only a "[Topic: …]" prefix with no body is also dropped.
+        raw_chunks = [c for c in raw_chunks if (c.content or "").strip()]
+
         if not raw_chunks:
             ctx.version.extracted_metadata = dict(ctx.version.extracted_metadata or {}) | {
                 **dict(extracted.metadata or {}),

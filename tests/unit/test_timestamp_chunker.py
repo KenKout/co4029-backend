@@ -74,6 +74,38 @@ def test_timestamp_chunker_no_locations_falls_back() -> None:
     assert chunks[0].metadata["timestamp_start_ms"] is None
 
 
+def test_timestamp_chunker_video_frame_ocr_single_newline() -> None:
+    """Regression: video frame-OCR text is '\\n'-joined, not '\\n\\n'.
+
+    VideoExtractor emits one '[Frame OCR @ Nms] ...' line per sampled frame
+    joined by single newlines, with one SourceLocation per frame. The chunker
+    used to only split on '\\n\\n', hit a 1-vs-N length mismatch, and emit
+    EMPTY segments — discarding all OCR text and producing a blank chunk that
+    then crashed the embedding API (HTTP 400 on empty input). It must align on
+    the single-newline split and preserve the text.
+    """
+    text = "\n".join(f"[Frame OCR @ {i * 1000}ms] frame {i}" for i in range(5))
+    locations = [
+        SourceLocation(timestamp_start_ms=i * 1000, timestamp_end_ms=i * 1000 + 500)
+        for i in range(5)
+    ]
+    content = ExtractedContent(
+        text=text,
+        metadata={},
+        source_type="video",
+        source_locations=locations,
+    )
+
+    chunks = TimestampAwareChunker(silence_gap_ms=2_000).chunk(content)
+
+    assert chunks, "video frame-OCR must not collapse to zero chunks"
+    combined = "\n".join(c.content for c in chunks)
+    assert "frame 0" in combined
+    assert "frame 4" in combined
+    for c in chunks:
+        assert c.content.strip(), "no chunk may be empty/whitespace-only"
+
+
 def test_timestamp_chunker_max_chunk_ms() -> None:
     content = _transcript(
         [

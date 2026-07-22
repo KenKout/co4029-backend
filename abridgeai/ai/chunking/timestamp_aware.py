@@ -93,14 +93,23 @@ def _segments_with_timestamps(
     if not locations:
         return []
 
-    text_segments = (content.text or "").split("\n\n")
+    # Align the text body to source_locations one segment per location.
+    # Audio transcripts join utterances with "\n\n"; video frame-OCR joins
+    # per-frame lines with a single "\n". Try the paragraph split first, then
+    # fall back to a single-newline split, so both shapes map cleanly onto
+    # their locations instead of collapsing to empty segments (which would
+    # discard the text entirely and emit a blank chunk).
     aligned: list[tuple[str, SourceLocation]] = []
-    if len(text_segments) == len(locations):
+    for delimiter in ("\n\n", "\n"):
+        text_segments = (content.text or "").split(delimiter)
+        if len(text_segments) != len(locations):
+            continue
+        candidate: list[tuple[str, SourceLocation]] = []
         for seg_text, loc in zip(text_segments, locations, strict=True):
             if loc.timestamp_start_ms is not None or loc.timestamp_end_ms is not None:
-                aligned.append((seg_text.strip(), loc))
-        if aligned:
-            return aligned
+                candidate.append((seg_text.strip(), loc))
+        if candidate:
+            return candidate
 
     for loc in locations:
         if loc.timestamp_start_ms is None and loc.timestamp_end_ms is None:
