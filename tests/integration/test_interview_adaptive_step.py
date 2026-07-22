@@ -1543,3 +1543,105 @@ async def test_v2_per_outcome_difficulty_raises_competence_on_strong_answer(
     coverage = state_json.get("outcome_coverage", {})
     oc = coverage.get(str(scenario["outcome_ids"][0]), {})
     assert oc.get("competence_estimate", 0.5) > 0.5
+
+
+# ── Slice 11 upgrade: unified hint ladder across BOTH hint paths ──────────────
+# A student who TYPES "give me a hint" is handled by the pre-adaptive assistance
+# stage (not the adaptive decision path). Before this upgrade that stage reused a
+# single "one hint per question" and never escalated. With the hint_ladder flag
+# on, both paths now share data.hint_level, so repeated hint requests on the SAME
+# question escalate consistently no matter which path fires.
+
+
+@pytest.fixture
+def hint_ladder_enforced(monkeypatch: pytest.MonkeyPatch) -> None:
+    """v1+v2 hint_ladder on. guard_mode stays 'off' so a typed hint still routes
+    to HINT_CURRENT_QUESTION (control_action != None skips the off early-return),
+    exercising the assistance-stage hint path with the ladder enabled."""
+    settings = _settings_v2(hint_ladder=True)
+    monkeypatch.setattr(taking_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(security_service, "get_settings", lambda: settings)
+
+
+@pytest.mark.asyncio
+async def test_typed_hint_escalates_via_shared_ladder(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict[str, Any],
+    hint_ladder_enforced: None,
+) -> None:
+    """Two typed hint requests on the same question yield DISTINCT, escalating
+    hints (the assistance stage now renders the deterministic laddered hint at
+    data.hint_level and advances it), unified with the adaptive decision path."""
+    session_id, _ = await _make_session(
+        engine, scenario["config_id"], scenario["student_id"], "text"
+    )
+    hints: list[str] = []
+    for i in range(2):
+        async with session_factory() as db:
+            result = await taking_service.take_session_step(
+                db,
+                session_id,
+                "Can I get a hint?",
+                _actor(scenario["student_id"]),
+                turn_key=f"hint-{i}",
+            )
+            await db.commit()
+        assert result["assistance_kind"] == "hint"
+        hints.append(result["ai_turn_text"])
+
+    # Escalation: the second hint differs from the first (shared ladder advanced).
+    assert hints[0] != hints[1]
+    # Answer-safe: never leaks the answer.
+    for h in hints:
+        low = h.lower()
+        for banned in ("the answer is", "correct answer", "you should say"):
+            assert banned not in low
+    # The shared counter advanced on the runtime state.
+    async with engine.begin() as conn:
+        state_json = (
+            await conn.execute(
+                text("SELECT state_json FROM interview_runtime_states WHERE session_id = :s"),
+                {"s": session_id},
+            )
+        ).scalar_one()
+    assert state_json["hint_level"] >= 2
+
+
+@pytest.mark.asyncio
+async def test_typed_hint_no_escalation_when_flag_off(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Parity: with hint_ladder OFF, the assistance stage keeps its one-hint-reuse
+    behaviour — the second typed hint is identical to the first and hint_level
+    never moves."""
+    _enable_security_mode(monkeypatch, mode="off")
+    session_id, _ = await _make_session(
+        engine, scenario["config_id"], scenario["student_id"], "text"
+    )
+    hints: list[str] = []
+    for i in range(2):
+        async with session_factory() as db:
+            result = await taking_service.take_session_step(
+                db,
+                session_id,
+                "Can I get a hint?",
+                _actor(scenario["student_id"]),
+                turn_key=f"hint-off-{i}",
+            )
+            await db.commit()
+        assert result["assistance_kind"] == "hint"
+        hints.append(result["ai_turn_text"])
+
+    assert hints[0] == hints[1]  # reused, not escalated
+    async with engine.begin() as conn:
+        state_json = (
+            await conn.execute(
+                text("SELECT state_json FROM interview_runtime_states WHERE session_id = :s"),
+                {"s": session_id},
+            )
+        ).scalar_one()
+    assert state_json["hint_level"] == 0

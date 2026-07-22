@@ -440,6 +440,18 @@ def _laddered_hint(hint_level: int, lang: str) -> str:
     return rungs[idx]
 
 
+def laddered_hint(hint_level: int, language: str | None) -> str:
+    """Public answer-safe laddered hint (Slice 11 upgrade).
+
+    Shared by BOTH hint paths so escalation is identical no matter which fires:
+    the adaptive decision path (via ``build_fallback_utterance``) and the
+    pre-adaptive assistance stage (student types "give me a hint"). Accepts a
+    raw ``language`` and normalises it, so callers outside this module don't
+    need to know the en/vi keying.
+    """
+    return _laddered_hint(hint_level, _lang(language))
+
+
 # Rephrasing signposts (Slice 11, v2). Vary by reframe_count so a repeated
 # reframe/clarify never repeats verbatim. Index 0 is the original v1 wording.
 _REFRAME_SIGNPOSTS: dict[str, tuple[str, ...]] = {
@@ -538,6 +550,7 @@ __all__ = [
     "Persona",
     "Utterance",
     "build_fallback_utterance",
+    "laddered_hint",
     "persona_from",
     "transition_text",
 ]

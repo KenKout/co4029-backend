@@ -672,6 +672,13 @@ async def _run_security_stage(  # noqa: C901 -- precedence is kept explicit and 
     from abridgeai.features.interviews.orchestrator import repository as state_repo
 
     settings = get_settings()
+    # Slice 11 upgrade: unify the hint ladder across BOTH hint paths. When the
+    # hint_ladder v2 sub-flag is on for this mode, the assistance-stage hint
+    # renders the SAME deterministic laddered hint (keyed on the shared
+    # data.hint_level) that the adaptive decision path uses, and advances the
+    # shared counter — so escalation is consistent no matter which path fires.
+    # Off → the assistance stage keeps its one-hint-per-question reuse (v1).
+    hint_ladder_enabled = settings.adaptive_v2_feature_enabled(session.input_mode, "hint_ladder")
     explicit_actions = {
         "repeat": SecurityAction.REPEAT_CURRENT_QUESTION,
         "clarify": SecurityAction.CLARIFY_CURRENT_QUESTION,
@@ -866,6 +873,15 @@ async def _run_security_stage(  # noqa: C901 -- precedence is kept explicit and 
         else:
             academic_text = ""
 
+    # Slice 11 upgrade: shared hint ladder. When enabled and this turn is a hint
+    # request, render at the CURRENT shared level then advance it (before the
+    # save below), so a repeated hint on the same question escalates — unified
+    # with the adaptive decision path, which reads/resets the same counter.
+    hint_render_level: int | None = None
+    if hint_ladder_enabled and action is SecurityAction.HINT_CURRENT_QUESTION:
+        hint_render_level = data.hint_level
+        data.hint_level += 1
+
     security_handled = explicit_end or action is not SecurityAction.ALLOW
     await state_repo.save(
         db,
@@ -946,6 +962,7 @@ async def _run_security_stage(  # noqa: C901 -- precedence is kept explicit and 
             action=action,
             attempt_count=data.security_attempt_count,
             academic_text=academic_text or None,
+            hint_render_level=hint_render_level,
         )
 
     return _SecurityStageResult(
@@ -1049,6 +1066,7 @@ async def _security_action_result(
     attempt_count: int,
     academic_text: str | None = None,
     persist_messages: bool = True,
+    hint_render_level: int | None = None,
 ) -> dict[str, Any]:
     assistance_kind = {
         SecurityAction.REPEAT_CURRENT_QUESTION: "repeat",
@@ -1069,7 +1087,22 @@ async def _security_action_result(
         current_question=(current_question.prompt_text if current_question else None),
         custom_refusal=custom,
     )
-    if current_question is not None and action in {
+    if (
+        hint_render_level is not None
+        and action is SecurityAction.HINT_CURRENT_QUESTION
+        and current_question is not None
+    ):
+        # Slice 11 upgrade: render the SHARED deterministic laddered hint at the
+        # level the caller captured from data.hint_level. This is the exact same
+        # escalating template the adaptive decision path uses, so a typed hint
+        # and a decision-emitted hint escalate identically. Answer-safe by
+        # construction (no question/rubric content), so no LLM call is needed.
+        from abridgeai.features.interviews.orchestrator.utterance import (  # noqa: PLC0415
+            laddered_hint,
+        )
+
+        response = laddered_hint(hint_render_level, language)
+    elif current_question is not None and action in {
         SecurityAction.CLARIFY_CURRENT_QUESTION,
         SecurityAction.EXPLAIN_CURRENT_TERM,
         SecurityAction.HINT_CURRENT_QUESTION,
