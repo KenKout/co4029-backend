@@ -15,6 +15,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
+from abridgeai.features.quizzes.ai.pipelines._progress import FULL_STAGES, record_stage
 from abridgeai.features.quizzes.ai.pipelines._synthetic_outline import resolve_outline_inputs
 from abridgeai.features.quizzes.ai.pipelines._telemetry import log_validator_aborted_run
 from abridgeai.features.quizzes.ai.stages.dedup import discard_duplicates
@@ -67,6 +68,7 @@ async def run_full_pipeline(
         int(round(requested_count * _IDEATION_OVERSAMPLE)),
     )
 
+    await record_stage(run.id, stages=FULL_STAGES, current_stage="retrieval")
     if not chunks:
         chunks, primary_embedding, anchors = await retrieve_chunks(
             db,
@@ -90,6 +92,12 @@ async def run_full_pipeline(
         outlines, budget, chunks, template_target
     )
 
+    await record_stage(
+        run.id,
+        stages=FULL_STAGES,
+        current_stage="ideation",
+        detail=f"{len(chunks)} chunks retrieved",
+    )
     templates = await ideate_for_outline(
         db,
         run,
@@ -101,6 +109,12 @@ async def run_full_pipeline(
     )
     template_dicts: list[dict[str, Any]] = [t.model_dump() for t in templates[:requested_count]]
 
+    await record_stage(
+        run.id,
+        stages=FULL_STAGES,
+        current_stage="generation",
+        detail=f"{len(template_dicts)} templates",
+    )
     candidates = await generate_questions(
         title=quiz.title,
         config=config,
@@ -122,6 +136,12 @@ async def run_full_pipeline(
     # groundedness instead of rejecting on "empty correct answer".
     review_dicts = [question_for_review(c) for c in candidates]
 
+    await record_stage(
+        run.id,
+        stages=FULL_STAGES,
+        current_stage="validation",
+        detail=f"{len(candidate_dicts)} candidates",
+    )
     _, verdicts = await validate_questions(
         title=quiz.title,
         chunks=chunks,
@@ -133,6 +153,12 @@ async def run_full_pipeline(
     )
     accepted, rejected, _ = apply_verdicts(candidate_dicts, verdicts)
 
+    await record_stage(
+        run.id,
+        stages=FULL_STAGES,
+        current_stage="dedup",
+        detail=f"{len(accepted)} accepted",
+    )
     kept, drops = await discard_duplicates(db, quiz, accepted)
     if not kept:
         log_validator_aborted_run(
@@ -149,6 +175,12 @@ async def run_full_pipeline(
             f"dropped_by_dedup={len(drops)})"
         )
 
+    await record_stage(
+        run.id,
+        stages=FULL_STAGES,
+        current_stage="persistence",
+        detail=f"{len(kept)} questions",
+    )
     persisted = await persist_questions(db, run, quiz, chunks, kept)
 
     run.config_json = run.config_json | {

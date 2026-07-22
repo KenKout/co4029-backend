@@ -36,7 +36,7 @@ from typing import Annotated, Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from abridgeai.ai.models import GenerationRun
@@ -56,6 +56,7 @@ from abridgeai.features.quizzes.schemas import (
     QuizAttemptTeacherRead,
     QuizAuthoring,
     QuizForAuthoringPublic,
+    QuizGenerationProgress,
     QuizGenerationRequest,
     QuizGenerationRunRead,
     QuizOptionDistribution,
@@ -821,6 +822,16 @@ def _generation_run_view(run: GenerationRun, quiz_id: UUID) -> QuizGenerationRun
     error_message = (
         str(failure.get("message")) if isinstance(failure, dict) and "message" in failure else None
     )
+    # Live-progress projection (migration 0035). ``progress_json`` is
+    # written incrementally by the pipeline checkpoint helper; validate it
+    # leniently so a malformed/partial checkpoint never 500s the poll.
+    progress = None
+    raw_progress = getattr(run, "progress_json", None)
+    if isinstance(raw_progress, dict) and raw_progress:
+        try:
+            progress = QuizGenerationProgress.model_validate(raw_progress)
+        except ValidationError:
+            progress = None
     return QuizGenerationRunRead(
         id=run.id,
         quiz_id=quiz_id,
@@ -829,6 +840,7 @@ def _generation_run_view(run: GenerationRun, quiz_id: UUID) -> QuizGenerationRun
         completed_at=run.finished_at,
         error_message=error_message,
         pipeline_run_id=None,
+        progress=progress,
     )
 
 

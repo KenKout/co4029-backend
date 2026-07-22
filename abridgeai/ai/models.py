@@ -216,6 +216,14 @@ class GenerationRun(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     dedup_key: Mapped[str | None] = mapped_column(String(255))
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Live-progress checkpoints (migration 0035). Written ONLY by the
+    # checkpoint helper through a dedicated short-lived session so the
+    # status-poll endpoint can surface real-time stage/step/event data
+    # while the worker runs. Kept separate from ``config_json`` (which the
+    # pipeline overwrites wholesale at stage boundaries) to avoid clobber.
+    progress_json: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
 
 
 __all__ = ["AIModelCall", "AIModelPricing", "GenerationRun", "ProcessingJob"]

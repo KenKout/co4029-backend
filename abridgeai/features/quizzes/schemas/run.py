@@ -279,6 +279,30 @@ class QuizGenerationRequest(BaseModel):
 # ---------------------------------------------------------------------------
 # Run status projection
 # ---------------------------------------------------------------------------
+class QuizGenerationStageEvent(BaseModel):
+    """One append-only progress event recorded as a pipeline stage starts."""
+
+    stage: str
+    at: datetime
+    detail: str | None = None
+
+
+class QuizGenerationProgress(BaseModel):
+    """Live-progress projection sourced from ``GenerationRun.progress_json``.
+
+    Written incrementally by the pipeline's checkpoint helper (migration
+    0035) through a dedicated session, so a status poll can surface the
+    current stage, a stepped percentage (``stage_index / total_stages``),
+    and an append-only event log while the worker is still running.
+    """
+
+    current_stage: str | None = None
+    stage_index: int = 0
+    total_stages: int = 0
+    updated_at: datetime | None = None
+    events: list[QuizGenerationStageEvent] = Field(default_factory=list)
+
+
 class QuizGenerationRunRead(BaseModel):
     """Status-poll projection of a quiz generation run.
 
@@ -295,6 +319,7 @@ class QuizGenerationRunRead(BaseModel):
     completed_at: datetime | None = None
     error_message: str | None = None
     pipeline_run_id: UUID | None = None
+    progress: QuizGenerationProgress | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -315,6 +340,8 @@ __all__ = [
     "GenerationRunStatus",
     "QuestionRegenerationRequest",
     "QuestionType",
+    "QuizGenerationProgress",
     "QuizGenerationRequest",
     "QuizGenerationRunRead",
+    "QuizGenerationStageEvent",
 ]

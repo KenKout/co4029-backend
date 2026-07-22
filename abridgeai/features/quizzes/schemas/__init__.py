@@ -61,8 +61,10 @@ from abridgeai.features.quizzes.schemas.run import (
     GenerationRunStatus,
     QuestionRegenerationRequest,
     QuestionType,
+    QuizGenerationProgress,
     QuizGenerationRequest,
     QuizGenerationRunRead,
+    QuizGenerationStageEvent,
 )
 
 __all__ = [
@@ -89,8 +91,10 @@ __all__ = [
     "QuizAuthoring",
     "QuizForAuthoringPublic",
     "QuizForTakingPublic",
+    "QuizGenerationProgress",
     "QuizGenerationRequest",
     "QuizGenerationRunRead",
+    "QuizGenerationStageEvent",
     "QuizOptionDistribution",
     "QuizPerStudentRow",
     "QuizPublic",
