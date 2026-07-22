@@ -26,7 +26,7 @@ from typing import Any
 
 # Current schema version of the serialized state payload. Bump on incompatible
 # shape changes so ``from_dict`` can migrate old payloads if ever needed.
-STATE_SCHEMA_VERSION = 6
+STATE_SCHEMA_VERSION = 7
 
 
 class InterviewPhase(str, Enum):  # noqa: UP042 -- StrEnum changes value coercion; match codebase convention
@@ -179,6 +179,14 @@ class InterviewRuntimeStateData:
     turns_in_phase: int = 0
     warmup_turns_target: int = 1
 
+    # Assistance laddering (Slice 11, v2). ``hint_level`` escalates each time the
+    # candidate asks for a hint on the SAME question (neutral nudge → structural
+    # → worked-approach, never the answer); ``reframe_count`` tracks how many
+    # times the current question has been reframed so each rephrasing differs.
+    # Both reset to 0 when the interview advances to a new question.
+    hint_level: int = 0
+    reframe_count: int = 0
+
     outcome_coverage: dict[str, OutcomeCoverageState] = field(default_factory=dict)
 
     last_student_intent: dict[str, Any] | None = None
@@ -228,6 +236,8 @@ class InterviewRuntimeStateData:
             "total_follow_up_count": self.total_follow_up_count,
             "turns_in_phase": self.turns_in_phase,
             "warmup_turns_target": self.warmup_turns_target,
+            "hint_level": self.hint_level,
+            "reframe_count": self.reframe_count,
             "outcome_coverage": {k: v.to_dict() for k, v in self.outcome_coverage.items()},
             "last_student_intent": self.last_student_intent,
             "last_answer_analysis": self.last_answer_analysis,
@@ -278,6 +288,8 @@ class InterviewRuntimeStateData:
             total_follow_up_count=int(data.get("total_follow_up_count", 0)),
             turns_in_phase=int(data.get("turns_in_phase", 0)),
             warmup_turns_target=int(data.get("warmup_turns_target", 1)),
+            hint_level=int(data.get("hint_level", 0)),
+            reframe_count=int(data.get("reframe_count", 0)),
             outcome_coverage=coverage,
             last_student_intent=data.get("last_student_intent"),
             last_answer_analysis=data.get("last_answer_analysis"),

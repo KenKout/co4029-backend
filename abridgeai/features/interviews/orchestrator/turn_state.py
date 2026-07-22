@@ -152,6 +152,10 @@ def apply_state_updates(  # noqa: C901 -- explicit action branches are auditable
     # Follow-up counters + phase.
     if decision.action in ADVANCE_ACTIONS:
         data.current_question_follow_up_count = 0
+        # Assistance laddering (Slice 11): a new question resets the hint ladder
+        # and reframe variety so escalation starts fresh per question.
+        data.hint_level = 0
+        data.reframe_count = 0
         if selected_question_id is not None:
             if selected_question_id not in data.asked_question_ids:
                 data.asked_question_ids.append(selected_question_id)
