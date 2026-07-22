@@ -184,9 +184,10 @@ def test_new_fields_round_trip() -> None:
     assert restored.pending_confirmation is True
 
 
-def test_schema_version_is_three() -> None:
-    assert STATE_SCHEMA_VERSION == 3
-    assert InterviewRuntimeStateData().version == 3
+def test_schema_version_is_current() -> None:
+    # Bumped to 4 in Slice 7 (turns_in_phase / warmup_turns_target added).
+    assert STATE_SCHEMA_VERSION == 4
+    assert InterviewRuntimeStateData().version == 4
 
 
 def test_v2_payload_without_new_fields_defaults_safely() -> None:

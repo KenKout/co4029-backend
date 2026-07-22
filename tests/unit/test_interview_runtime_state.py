@@ -161,3 +161,20 @@ def test_to_dict_is_json_serializable() -> None:
     # Must not raise — the payload is stored as JSONB.
     dumped = json.dumps(data.to_dict())
     assert "closing" in dumped
+
+
+def test_turns_in_phase_defaults_and_roundtrips() -> None:
+    """Slice 7: phase-dwell tracking defaults safely and survives a round-trip."""
+    d = InterviewRuntimeStateData()
+    assert d.turns_in_phase == 0
+    assert d.warmup_turns_target == 1
+    # Tolerant load of an OLD row without the field → default 0.
+    loaded = InterviewRuntimeStateData.from_dict({"phase": "core"})
+    assert loaded.turns_in_phase == 0
+    assert loaded.warmup_turns_target == 1
+    # Round-trip preserves an explicit value.
+    d.turns_in_phase = 3
+    d.warmup_turns_target = 2
+    again = InterviewRuntimeStateData.from_dict(d.to_dict())
+    assert again.turns_in_phase == 3
+    assert again.warmup_turns_target == 2

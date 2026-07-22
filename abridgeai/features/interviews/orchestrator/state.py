@@ -26,7 +26,7 @@ from typing import Any
 
 # Current schema version of the serialized state payload. Bump on incompatible
 # shape changes so ``from_dict`` can migrate old payloads if ever needed.
-STATE_SCHEMA_VERSION = 3
+STATE_SCHEMA_VERSION = 4
 
 
 class InterviewPhase(str, Enum):  # noqa: UP042 -- StrEnum changes value coercion; match codebase convention
@@ -161,6 +161,13 @@ class InterviewRuntimeStateData:
     current_question_follow_up_count: int = 0
     total_follow_up_count: int = 0
 
+    # Phase-dwell tracking (Slice 7). ``turns_in_phase`` counts turns spent in
+    # the CURRENT phase (reset to 0 on any phase change); the phase policy uses
+    # it to decide when to advance OPENING → WARMUP → CORE. ``warmup_turns_target``
+    # is how many warmup turns to run before entering CORE (authorable later).
+    turns_in_phase: int = 0
+    warmup_turns_target: int = 1
+
     outcome_coverage: dict[str, OutcomeCoverageState] = field(default_factory=dict)
 
     last_student_intent: dict[str, Any] | None = None
@@ -208,6 +215,8 @@ class InterviewRuntimeStateData:
             "completed_question_ids": list(self.completed_question_ids),
             "current_question_follow_up_count": self.current_question_follow_up_count,
             "total_follow_up_count": self.total_follow_up_count,
+            "turns_in_phase": self.turns_in_phase,
+            "warmup_turns_target": self.warmup_turns_target,
             "outcome_coverage": {k: v.to_dict() for k, v in self.outcome_coverage.items()},
             "last_student_intent": self.last_student_intent,
             "last_answer_analysis": self.last_answer_analysis,
@@ -256,6 +265,8 @@ class InterviewRuntimeStateData:
             completed_question_ids=list(data.get("completed_question_ids", []) or []),
             current_question_follow_up_count=int(data.get("current_question_follow_up_count", 0)),
             total_follow_up_count=int(data.get("total_follow_up_count", 0)),
+            turns_in_phase=int(data.get("turns_in_phase", 0)),
+            warmup_turns_target=int(data.get("warmup_turns_target", 1)),
             outcome_coverage=coverage,
             last_student_intent=data.get("last_student_intent"),
             last_answer_analysis=data.get("last_answer_analysis"),
