@@ -33,6 +33,7 @@ import abridgeai.features.career_paths.models  # noqa: F401
 import abridgeai.features.courses.models  # noqa: F401
 import abridgeai.features.enrollments.models  # noqa: F401
 import abridgeai.features.identity.models  # noqa: F401
+import abridgeai.features.interviews.models  # noqa: F401 
 import abridgeai.features.progress.models  # noqa: F401
 from abridgeai.core.config import get_settings
 from abridgeai.core.security import CurrentUser
@@ -168,18 +169,27 @@ async def seed(engine: AsyncEngine) -> AsyncIterator[dict]:
             text("DELETE FROM career_course_items WHERE career_path_id = :p"), {"p": path_id}
         )
         await conn.execute(text("DELETE FROM career_paths WHERE id = :p"), {"p": path_id})
+        # Scoped by organization_id (not the fixed [req_course, opt_course] ids)
+        # so it also sweeps up any course a test creates mid-run, e.g. the
+        # backfill test's `new_course` -- otherwise that row survives and its
+        # courses.owner_user_id FK blocks the `users` delete below.
         await conn.execute(
-            text("DELETE FROM lessons WHERE module_id IN "
-                 "(SELECT id FROM modules WHERE course_id = ANY(CAST(:ids AS uuid[])))"),
-            {"ids": [str(req_course), str(opt_course)]},
+            text(
+                "DELETE FROM lessons WHERE module_id IN "
+                "(SELECT id FROM modules WHERE course_id IN "
+                "(SELECT id FROM courses WHERE organization_id = :org))"
+            ),
+            {"org": org},
         )
         await conn.execute(
-            text("DELETE FROM modules WHERE course_id = ANY(CAST(:ids AS uuid[]))"),
-            {"ids": [str(req_course), str(opt_course)]},
+            text(
+                "DELETE FROM modules WHERE course_id IN "
+                "(SELECT id FROM courses WHERE organization_id = :org)"
+            ),
+            {"org": org},
         )
         await conn.execute(
-            text("DELETE FROM courses WHERE id = ANY(CAST(:ids AS uuid[]))"),
-            {"ids": [str(req_course), str(opt_course)]},
+            text("DELETE FROM courses WHERE organization_id = :org"), {"org": org},
         )
         await conn.execute(
             text("DELETE FROM users WHERE id = ANY(CAST(:ids AS uuid[]))"),

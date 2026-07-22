@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from abridgeai.core.exceptions import NotFoundError
+from abridgeai.core.pagination import Page
 from abridgeai.core.security import CurrentUser
 from abridgeai.features.courses.queries import (
     CursorPage,
@@ -43,6 +44,39 @@ async def list_all_courses_admin(
     return CursorPage(
         items=[CourseAuthoring.model_validate(course) for course in page.items],
         next_cursor=page.next_cursor,
+    )
+
+
+async def search_all_courses_admin(
+    db: AsyncSession,
+    *,
+    include_deleted: bool = False,
+    status: str | None = None,
+    search: str | None = None,
+    sort: str | None = None,
+    sort_dir: str = "asc",
+    page: int = 0,
+    page_size: int = 25,
+) -> Page[CourseAuthoring]:
+    """Offset page of courses (server-side search + whitelisted sort) as
+    ``CourseAuthoring``. Thin delegate to the query layer, which owns the
+    SQLAlchemy statement and soft-delete handling."""
+    result = await admin_queries.search_all_courses_admin(
+        db,
+        include_deleted=include_deleted,
+        status=status,
+        search=search,
+        sort=sort,
+        sort_dir=sort_dir,
+        page=page,
+        page_size=page_size,
+    )
+    return Page(
+        items=[CourseAuthoring.model_validate(c) for c in result.items],
+        total=result.total,
+        page=result.page,
+        page_size=result.page_size,
+        total_pages=result.total_pages,
     )
 
 

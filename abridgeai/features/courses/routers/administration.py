@@ -32,6 +32,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from abridgeai.core.db import get_db
 from abridgeai.core.exceptions import NotFoundError
+from abridgeai.core.pagination import PageResponse
 from abridgeai.core.security import CurrentUser
 from abridgeai.features.access_control.policies import require_permission
 from abridgeai.features.courses.schemas import (
@@ -82,6 +83,41 @@ async def list_all_courses(
         db, include_deleted=include_deleted, limit=limit, cursor=cursor
     )
     return AdminCoursePage(items=page.items, next_cursor=page.next_cursor)
+
+
+@router.get("/courses/search", response_model=PageResponse[CourseAuthoring])
+async def search_all_courses(
+    _admin: Annotated[CurrentUser, Depends(_REQUIRE_ADMIN)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    search: Annotated[str | None, Query(max_length=200)] = None,
+    course_status: Annotated[str | None, Query(alias="status")] = None,
+    include_deleted: Annotated[bool, Query()] = True,
+    sort: Annotated[str | None, Query()] = None,
+    sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
+    page: Annotated[int, Query(ge=0)] = 0,
+    page_size: Annotated[int, Query(ge=1, le=200)] = 25,
+) -> PageResponse[CourseAuthoring]:
+    """Page-numbered admin course list with server-side search (title /
+    slug) + whitelisted sort (``title`` / ``status`` / ``created_at``).
+    Additive to the cursor ``GET /admin/courses`` above — this one backs
+    the DataTable. ``include_deleted`` defaults to ``True`` (admin view)."""
+    result = await administration_service.search_all_courses_admin(
+        db,
+        include_deleted=include_deleted,
+        status=course_status,
+        search=search,
+        sort=sort,
+        sort_dir=sort_dir,
+        page=page,
+        page_size=page_size,
+    )
+    return PageResponse[CourseAuthoring](
+        items=result.items,
+        total=result.total,
+        page=result.page,
+        page_size=result.page_size,
+        total_pages=result.total_pages,
+    )
 
 
 @router.post("/courses/{course_id}/restore", response_model=CourseAuthoring)

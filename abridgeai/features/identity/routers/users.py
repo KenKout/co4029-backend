@@ -28,6 +28,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from abridgeai.core.db import get_db
+from abridgeai.core.pagination import PageResponse
 from abridgeai.core.security import CurrentUser
 from abridgeai.features.access_control.policies import require_permission
 from abridgeai.features.identity.schemas import UserListPage, UserRead
@@ -63,6 +64,41 @@ async def list_users(
         return await admin_service.list_users(db, cursor=cursor, limit=limit)
     except ValueError as exc:
         raise _bad_cursor() from exc
+
+
+# Declared before ``/{user_id}`` so ``/users/search`` isn't captured by the
+# path-param route (which would 422 on UUID parsing). Additive to the cursor
+# ``GET /users`` above — this one backs the page-numbered DataTable.
+@router.get("/search", response_model=PageResponse[UserRead])
+async def search_users(
+    _user: Annotated[CurrentUser, Depends(_REQUIRE_USER_READ)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    search: Annotated[str | None, Query(max_length=200)] = None,
+    user_status: Annotated[str | None, Query(alias="status")] = None,
+    sort: Annotated[str | None, Query()] = None,
+    sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
+    page: Annotated[int, Query(ge=0)] = 0,
+    page_size: Annotated[int, Query(ge=1, le=200)] = 25,
+) -> PageResponse[UserRead]:
+    """Page-numbered admin user list with server-side search (email /
+    display name) + whitelisted sort (``email`` / ``status`` /
+    ``created_at``)."""
+    result = await admin_service.search_users(
+        db,
+        status=user_status,
+        search=search,
+        sort=sort,
+        sort_dir=sort_dir,
+        page=page,
+        page_size=page_size,
+    )
+    return PageResponse[UserRead](
+        items=result.items,
+        total=result.total,
+        page=result.page,
+        page_size=result.page_size,
+        total_pages=result.total_pages,
+    )
 
 
 @router.get("/{user_id}", response_model=UserRead)

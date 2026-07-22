@@ -264,7 +264,7 @@ async def test_no_cooldown_all_questions_returned(
         await session.flush()
 
     assert attempt.attempt_number == 1
-    assert len(payload.questions) == 5
+    assert len(payload.take.questions) == 5
     assert getattr(attempt, "cards_in_cooldown", []) == []
 
 
@@ -288,7 +288,7 @@ async def test_some_in_cooldown_filtered_out(
         )
         await session.flush()
 
-    returned_ids = {q.id for q in payload.questions}
+    returned_ids = {q.id for q in payload.take.questions}
     assert len(returned_ids) == 3
     assert question_ids[0] not in returned_ids
     assert question_ids[1] not in returned_ids
@@ -343,7 +343,7 @@ async def test_expired_cooldown_card_returns(
         )
         await session.flush()
 
-    returned_ids = {q.id for q in payload.questions}
+    returned_ids = {q.id for q in payload.take.questions}
     assert returned_ids == set(question_ids)
 
 
@@ -366,7 +366,7 @@ async def test_unattempted_cards_no_cooldown(
         )
         await session.flush()
 
-    returned_ids = {q.id for q in payload.questions}
+    returned_ids = {q.id for q in payload.take.questions}
     assert question_ids[0] not in returned_ids
     for unattempted_qid in question_ids[1:]:
         assert unattempted_qid in returned_ids

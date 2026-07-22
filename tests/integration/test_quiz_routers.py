@@ -465,9 +465,11 @@ async def test_learner_quiz_response_omits_is_correct(
         headers=_auth(student_token),
     )
     assert attempt_resp.status_code == 201, attempt_resp.text
-    take_body = attempt_resp.json()
+    progress_body = attempt_resp.json()
+    assert progress_body["attempt_id"]
+    take_body = progress_body["take"]
     assert take_body["questions"]
-    serialized = json.dumps(take_body)
+    serialized = json.dumps(progress_body)
     assert "is_correct" not in serialized
     for question in take_body["questions"]:
         for option in question["options"]:
@@ -575,15 +577,7 @@ async def test_answer_upsert_allows_editing_without_conflict(
         headers=_auth(student_token),
     )
     assert attempt_resp.status_code == 201, attempt_resp.text
-    attempt_id = attempt_resp.json()["attempt_id"] if "attempt_id" in attempt_resp.json() else None
-
-    # The take payload doesn't carry the attempt id; fetch it from the list.
-    attempts_resp = await client.get(
-        f"/api/v1/me/quizzes/{quiz_id}/attempts",
-        headers=_auth(student_token),
-    )
-    assert attempts_resp.status_code == 200, attempts_resp.text
-    attempt_id = attempts_resp.json()[0]["id"]
+    attempt_id = attempt_resp.json()["attempt_id"]
 
     # First save — wrong answer (C).
     first = await client.post(

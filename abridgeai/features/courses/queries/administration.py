@@ -23,6 +23,7 @@ from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from abridgeai.ai.models import AIModelCall, GenerationRun, ProcessingJob
+from abridgeai.core.pagination import Page, paginate
 from abridgeai.core.pagination.cursor import (
     CursorPage,
 )
@@ -80,6 +81,49 @@ async def list_all_courses_admin(
         _encode_admin_cursor(rows[-1].created_at, rows[-1].id) if len(rows) == capped else None
     )
     return CursorPage(items=rows, next_cursor=next_cursor)
+
+
+async def search_all_courses_admin(
+    db: AsyncSession,
+    *,
+    include_deleted: bool = False,
+    status: str | None = None,
+    search: str | None = None,
+    sort: str | None = None,
+    sort_dir: str = "asc",
+    page: int = 0,
+    page_size: int = 25,
+) -> Page[Course]:
+    """Offset page of courses with server-side search (title / slug) +
+    whitelisted sort. Backs the page-numbered admin table.
+
+    Soft-delete: we opt out of the global ``do_orm_execute`` filter via
+    ``execution_options(include_deleted=True)`` and re-add the
+    ``deleted_at IS NULL`` predicate explicitly when ``include_deleted`` is
+    false — baking it into ``stmt`` keeps the count subquery consistent with
+    the returned rows (paginate carries the exec options to the count query).
+    """
+    stmt = select(Course).execution_options(include_deleted=True)
+    if not include_deleted:
+        stmt = stmt.where(Course.deleted_at.is_(None))
+    if status is not None:
+        stmt = stmt.where(Course.status == status)
+    return await paginate(
+        db,
+        stmt,
+        page=page,
+        page_size=page_size,
+        search=search,
+        search_columns=[Course.title, Course.slug],
+        sort=sort,
+        sort_dir=sort_dir,
+        sortable={
+            "title": Course.title,
+            "status": Course.status,
+            "created_at": Course.created_at,
+        },
+        default_order=[Course.id],
+    )
 
 
 async def get_course_including_deleted(db: AsyncSession, course_id: UUID) -> Course | None:

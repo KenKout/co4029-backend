@@ -198,8 +198,14 @@ async def start_attempt(
     actor: CurrentUser,
     *,
     idempotency_key: UUID | None = None,
-) -> tuple[QuizAttempt, QuizForTakingPublic]:
+) -> tuple[QuizAttempt, QuizAttemptProgressRead]:
     """Create a :class:`QuizAttempt` and return the no-leak take payload.
+
+    Returns the same :class:`QuizAttemptProgressRead` shape as
+    :func:`get_attempt_progress` (``answers=[]`` since nothing is saved
+    yet) so the client learns the new ``attempt_id`` immediately instead
+    of having to guess it from the attempts list, and so "start" and
+    "resume" share one hydration code path on the frontend.
 
     The serialized response goes through :class:`QuizQuestionPublic`
     which drops ``is_correct`` (and any other answer-correctness fields)
@@ -270,7 +276,17 @@ async def start_attempt(
         QuizQuestionPublic.model_validate(question) for question in available_questions
     ]
     take_payload = QuizForTakingPublic(quiz=public_quiz, questions=public_questions)
-    return attempt, take_payload
+    progress = QuizAttemptProgressRead.model_validate(
+        {
+            "attempt_id": attempt.id,
+            "quiz_id": attempt.quiz_id,
+            "status": attempt.status,
+            "started_at": attempt.started_at,
+            "take": take_payload,
+            "answers": [],
+        }
+    )
+    return attempt, progress
 
 
 async def answer_attempt(
@@ -549,22 +565,24 @@ async def get_attempt_progress(
         questions=[QuizQuestionPublic.model_validate(q) for q in questions],
     )
 
-    return QuizAttemptProgressRead(
-        attempt_id=attempt.id,
-        quiz_id=attempt.quiz_id,
-        status=attempt.status,
-        started_at=attempt.started_at,
-        take=take_payload,
-        answers=[
-            QuizAttemptProgressAnswer(
-                question_id=ans.question_id,
-                selected_option_id=ans.selected_option_id,
-                answer_text=ans.answer_text,
-                hint_used=ans.hint_used,
-                t_actual_ms=ans.t_actual_ms,
-            )
-            for ans in attempt.answers
-        ],
+    return QuizAttemptProgressRead.model_validate(
+        {
+            "attempt_id": attempt.id,
+            "quiz_id": attempt.quiz_id,
+            "status": attempt.status,
+            "started_at": attempt.started_at,
+            "take": take_payload,
+            "answers": [
+                QuizAttemptProgressAnswer(
+                    question_id=ans.question_id,
+                    selected_option_id=ans.selected_option_id,
+                    answer_text=ans.answer_text,
+                    hint_used=ans.hint_used,
+                    t_actual_ms=ans.t_actual_ms,
+                )
+                for ans in attempt.answers
+            ],
+        }
     )
 
 
