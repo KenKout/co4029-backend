@@ -29,6 +29,7 @@ from abridgeai.ai.extraction.registry import (
 )
 from abridgeai.ai.extraction.text import TextExtractor
 from abridgeai.ai.extraction.video import VideoExtractor
+from abridgeai.ai.extraction.xlsx import XlsxExtractor
 
 __all__ = [
     "CODE_MIMES",
@@ -47,6 +48,7 @@ __all__ = [
     "TextExtractor",
     "UnsupportedMimeError",
     "VideoExtractor",
+    "XlsxExtractor",
     "dispatch_extractor",
     "maybe_local_mock_extractor",
     "register_extractor",

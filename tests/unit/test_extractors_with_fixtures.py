@@ -22,6 +22,7 @@ from abridgeai.ai.extraction import (
     ImageExtractor,
     SourceLocation,
     VideoExtractor,
+    XlsxExtractor,
     dispatch_extractor,
 )
 from abridgeai.core.config import Settings
@@ -35,12 +36,14 @@ WAV_PATH = FIXTURES_DIR / "sample.wav"
 MP4_PATH = FIXTURES_DIR / "sample.mp4"
 PNG_PATH = FIXTURES_DIR / "text-image.png"
 HTML_PATH = FIXTURES_DIR / "sample.html"
+XLSX_PATH = FIXTURES_DIR / "sample.xlsx"
 
 PDF_MIME = "application/pdf"
 DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 PPTX_MIME = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
 HTML_MIME = "text/html"
 PNG_MIME = "image/png"
+XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 
 def _tesseract_available() -> bool:
@@ -99,6 +102,22 @@ async def test_html_extractor_consumes_sample_html() -> None:
     assert "Title" in result.text
     assert "Body" in result.text
     assert result.source_type == "html"
+
+
+@pytest.mark.asyncio
+async def test_xlsx_extractor_consumes_sample_xlsx() -> None:
+    assert XLSX_PATH.exists(), "Run generate_fixtures.py to produce sample.xlsx"
+    extractor = dispatch_extractor(XLSX_MIME)
+    assert isinstance(extractor, XlsxExtractor)
+    with XLSX_PATH.open("rb") as fh:
+        result = await extractor.extract(fh)
+    assert "Hello World" in result.text
+    assert "Second sheet content" in result.text
+    assert "[Sheet: Sheet1]" in result.text
+    assert result.source_type == "xlsx"
+    assert result.metadata["sheet_count"] == 2
+    assert len(result.source_locations) == 2
+    assert result.source_locations[0].page == 1
 
 
 @pytest.mark.asyncio

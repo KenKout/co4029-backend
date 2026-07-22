@@ -85,7 +85,9 @@ logger = logging.getLogger(__name__)
 
 _TIMESTAMP_SOURCES: frozenset[str] = frozenset({"audio", "video"})
 _IMAGE_SOURCES: frozenset[str] = frozenset({"image"})
-_TEXT_SOURCES: frozenset[str] = frozenset({"pdf", "docx", "pptx", "html", "text", "code", "mock"})
+_TEXT_SOURCES: frozenset[str] = frozenset(
+    {"pdf", "docx", "pptx", "xlsx", "html", "text", "code", "mock"}
+)
 _DEFAULT_TEXT_TOKENS = 500
 _IMAGE_CHUNK_TOKENS = 10_000
 _ERROR_FIELD_LIMIT = 5000

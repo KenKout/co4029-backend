@@ -70,6 +70,7 @@ WAV_FILENAME = "sample.wav"
 MP4_FILENAME = "sample.mp4"
 PNG_FILENAME = "text-image.png"
 HTML_FILENAME = "sample.html"
+XLSX_FILENAME = "sample.xlsx"
 
 WAV_SAMPLE_RATE_HZ = 16000
 WAV_DURATION_S = 5
@@ -222,6 +223,26 @@ def _gen_html(out: Path) -> None:
     )
 
 
+def _gen_xlsx(out: Path) -> None:
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    ws1 = wb.active
+    assert ws1 is not None  # noqa: S101  -- fresh Workbook always has an active sheet
+    ws1.title = "Sheet1"
+    ws1.append(["Name", "Score"])
+    ws1.append(["Hello World", 42])
+    ws2 = wb.create_sheet("Sheet2")
+    ws2.append(["Second sheet content"])
+    wb.properties.created = FIXED_TIMESTAMP
+    wb.properties.modified = FIXED_TIMESTAMP
+    wb.properties.creator = "abridgeai"
+    wb.properties.lastModifiedBy = ""
+    wb.properties.title = "Test Fixture"
+    wb.save(str(out))
+    _normalize_zip(out)
+
+
 def main() -> int:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     _gen_pdf(OUT_DIR / PDF_FILENAME)
@@ -231,6 +252,7 @@ def main() -> int:
     mp4_ok = _gen_mp4(OUT_DIR / MP4_FILENAME)
     _gen_png(OUT_DIR / PNG_FILENAME)
     _gen_html(OUT_DIR / HTML_FILENAME)
+    _gen_xlsx(OUT_DIR / XLSX_FILENAME)
 
     sys.stdout.write(f"Generated fixtures in {OUT_DIR}\n")
     for name in (
@@ -241,6 +263,7 @@ def main() -> int:
         MP4_FILENAME,
         PNG_FILENAME,
         HTML_FILENAME,
+        XLSX_FILENAME,
     ):
         path = OUT_DIR / name
         if path.exists():

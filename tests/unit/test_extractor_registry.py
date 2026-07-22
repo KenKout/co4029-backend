@@ -7,6 +7,7 @@ from abridgeai.ai.extraction import (
     PdfExtractor,
     PptxExtractor,
     UnsupportedMimeError,
+    XlsxExtractor,
     dispatch_extractor,
     register_extractor,
 )
@@ -29,6 +30,17 @@ def test_pptx_dispatch() -> None:
     mime = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
     extractor = dispatch_extractor(mime)
     assert isinstance(extractor, PptxExtractor)
+
+
+def test_xlsx_dispatch() -> None:
+    mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    extractor = dispatch_extractor(mime)
+    assert isinstance(extractor, XlsxExtractor)
+
+
+def test_xls_dispatch() -> None:
+    extractor = dispatch_extractor("application/vnd.ms-excel")
+    assert isinstance(extractor, XlsxExtractor)
 
 
 def test_unknown_raises() -> None:
@@ -65,3 +77,6 @@ def test_built_in_mimes_registered() -> None:
     pptx_mime = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
     assert docx_mime in EXTRACTOR_REGISTRY
     assert pptx_mime in EXTRACTOR_REGISTRY
+    xlsx_mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    assert xlsx_mime in EXTRACTOR_REGISTRY
+    assert "application/vnd.ms-excel" in EXTRACTOR_REGISTRY
