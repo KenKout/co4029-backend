@@ -18,7 +18,7 @@ is the only consumer of the authoring projection.
 
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -29,6 +29,10 @@ from abridgeai.core.db import get_db
 from abridgeai.core.exceptions import NotFoundError
 from abridgeai.core.observability import get_logger
 from abridgeai.core.security import CurrentUser, get_current_user, utcnow
+from abridgeai.features.quizzes.queries.published import (
+    QuizClosed,
+    QuizNotYetOpen,
+)
 from abridgeai.features.quizzes.schemas import (
     QuizAttemptProgressRead,
     QuizAttemptRead,
@@ -88,6 +92,33 @@ class QuizAttemptAnswerRead(BaseModel):
     attempt_id: UUID
     question_id: UUID
     selected_option_id: UUID | None = None
+
+
+# ── Integrity (proctoring) ingest ────────────────────────────────────────
+# Mirrors the interview integrity contract but kept quiz-local to honour the
+# cross-feature independence rule. The literals + 50-event cap match the
+# ``assessment_integrity_events`` CHECK constraints (assessment_kind='quiz').
+_QUIZ_INTEGRITY_MAX_BATCH = 50
+
+QuizIntegrityEventType = Literal[
+    "focus_lost",
+    "tab_switch",
+    "fullscreen_exit",
+    "warning_issued",
+    "reconnect",
+    "disconnect",
+]
+QuizIntegritySeverity = Literal["info", "warning", "critical"]
+
+
+class QuizIntegrityEventItem(BaseModel):
+    event_type: QuizIntegrityEventType
+    severity: QuizIntegritySeverity = "info"
+    metadata: dict[str, str | int | float | bool] = Field(default_factory=dict)
+
+
+class QuizIntegrityEventBatchRequest(BaseModel):
+    events: list[QuizIntegrityEventItem] = Field(min_length=1, max_length=_QUIZ_INTEGRITY_MAX_BATCH)
 
 
 @router.get("/quizzes/{quiz_id}", response_model=QuizPublic)
@@ -240,6 +271,50 @@ async def record_answer(
                 attempt_id=str(attempt_id),
             )
     return QuizAttemptAnswerRead.model_validate(answer)
+
+
+@router.post(
+    "/attempts/{attempt_id}/integrity-events",
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def record_quiz_integrity_events(
+    attempt_id: UUID,
+    payload: QuizIntegrityEventBatchRequest,
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> dict[str, int]:
+    """Best-effort ingest of browser integrity signals for a live attempt.
+
+    Ownership is enforced (attempt must belong to the caller). Events are
+    recorded only while the attempt is ``in_progress`` — late events for a
+    submitted/graded/abandoned attempt are silently dropped so this never
+    blocks the take. Append-only; post-attempt / teacher review only, never
+    surfaced to the student.
+    """
+    from abridgeai.features.interviews.models import (  # noqa: PLC0415
+        AssessmentIntegrityEvent,
+    )
+    from abridgeai.features.quizzes.models import QuizAttempt  # noqa: PLC0415
+
+    attempt = await db.get(QuizAttempt, attempt_id)
+    if attempt is None or attempt.student_id != current_user.user_id:
+        raise _not_found("quiz_attempt", attempt_id)
+    if attempt.status != "in_progress":
+        return {"accepted": 0}
+
+    for item in payload.events:
+        db.add(
+            AssessmentIntegrityEvent(
+                assessment_kind="quiz",
+                quiz_attempt_id=attempt_id,
+                student_id=current_user.user_id,
+                event_type=item.event_type,
+                severity=item.severity,
+                metadata_json=dict(item.metadata),
+            )
+        )
+    await db.commit()
+    return {"accepted": len(payload.events)}
 
 
 @router.post("/attempts/{attempt_id}/submit", response_model=QuizAttemptRead)

@@ -264,6 +264,7 @@ def test_learner_router_metadata() -> None:
     assert "/attempts/{attempt_id}/answers" in paths
     assert "/attempts/{attempt_id}/submit" in paths
     assert "/attempts/{attempt_id}" in paths
+    assert "/attempts/{attempt_id}/integrity-events" in paths
     assert "/me/quizzes/{quiz_id}/attempts" in paths
 
 
@@ -732,6 +733,147 @@ def test_no_bare_get_current_user_on_quiz_authoring_endpoints() -> None:
     code_only = re.sub(r'"""[\s\S]*?"""', "", src)
     bare = re.findall(r"Depends\(get_current_user\)", code_only)
     assert bare == [], f"authoring.py uses bare Depends(get_current_user): {bare}"
+
+
+async def test_quiz_integrity_events_recorded_for_in_progress_attempt(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    scenario: dict[str, uuid.UUID],
+    engine: AsyncEngine,
+    seeded_users: SeededUsers,
+) -> None:
+    """Owner can POST integrity events for a live attempt; rows land in DB."""
+    quiz_id, _question_id, _opts = await _seed_published_quiz_with_question(
+        client, admin_bearer, engine, scenario, title="Integrity Quiz"
+    )
+    student_sid = await _seed_session(engine, seeded_users.student_id)
+    student_token = create_access_token(user_id=seeded_users.student_id, session_id=student_sid)
+
+    attempt_resp = await client.post(
+        f"/api/v1/quizzes/{quiz_id}/attempts",
+        json={"quiz_id": str(quiz_id)},
+        headers=_auth(student_token),
+    )
+    assert attempt_resp.status_code == 201, attempt_resp.text
+    attempt_id = attempt_resp.json()["attempt_id"]
+
+    resp = await client.post(
+        f"/api/v1/attempts/{attempt_id}/integrity-events",
+        json={
+            "events": [
+                {"event_type": "tab_switch", "severity": "warning"},
+                {"event_type": "focus_lost", "severity": "info"},
+            ]
+        },
+        headers=_auth(student_token),
+    )
+    assert resp.status_code == 202, resp.text
+    assert resp.json()["accepted"] == 2
+
+    async with engine.begin() as conn:
+        rows = (
+            await conn.execute(
+                text(
+                    "SELECT event_type, severity, assessment_kind, student_id "
+                    "FROM assessment_integrity_events "
+                    "WHERE quiz_attempt_id = :a ORDER BY event_type"
+                ),
+                {"a": attempt_id},
+            )
+        ).all()
+    assert len(rows) == 2
+    assert {r[0] for r in rows} == {"focus_lost", "tab_switch"}
+    assert all(r[2] == "quiz" for r in rows)
+    assert all(str(r[3]) == str(seeded_users.student_id) for r in rows)
+
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("DELETE FROM assessment_integrity_events WHERE quiz_attempt_id = :a"),
+            {"a": attempt_id},
+        )
+        await conn.execute(text("DELETE FROM auth_sessions WHERE id = :id"), {"id": student_sid})
+
+
+async def test_quiz_integrity_events_404_for_other_student(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    scenario: dict[str, uuid.UUID],
+    engine: AsyncEngine,
+    seeded_users: SeededUsers,
+) -> None:
+    """A non-owner cannot post integrity events against someone's attempt."""
+    quiz_id, _question_id, _opts = await _seed_published_quiz_with_question(
+        client, admin_bearer, engine, scenario, title="Integrity Owner Quiz"
+    )
+    student_sid = await _seed_session(engine, seeded_users.student_id)
+    student_token = create_access_token(user_id=seeded_users.student_id, session_id=student_sid)
+    attempt_resp = await client.post(
+        f"/api/v1/quizzes/{quiz_id}/attempts",
+        json={"quiz_id": str(quiz_id)},
+        headers=_auth(student_token),
+    )
+    assert attempt_resp.status_code == 201
+    attempt_id = attempt_resp.json()["attempt_id"]
+
+    # Admin (different user) attempts to post → 404 (no existence leak).
+    other = await client.post(
+        f"/api/v1/attempts/{attempt_id}/integrity-events",
+        json={"events": [{"event_type": "tab_switch", "severity": "warning"}]},
+        headers=_auth(admin_bearer),
+    )
+    assert other.status_code == 404, other.text
+
+    async with engine.begin() as conn:
+        await conn.execute(text("DELETE FROM auth_sessions WHERE id = :id"), {"id": student_sid})
+
+
+async def test_quiz_integrity_events_dropped_when_not_in_progress(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    scenario: dict[str, uuid.UUID],
+    engine: AsyncEngine,
+    seeded_users: SeededUsers,
+) -> None:
+    """Events for a submitted/graded attempt are silently dropped (accepted=0)."""
+    quiz_id, _question_id, _opts = await _seed_published_quiz_with_question(
+        client, admin_bearer, engine, scenario, title="Integrity Closed Quiz"
+    )
+    student_sid = await _seed_session(engine, seeded_users.student_id)
+    student_token = create_access_token(user_id=seeded_users.student_id, session_id=student_sid)
+    attempt_resp = await client.post(
+        f"/api/v1/quizzes/{quiz_id}/attempts",
+        json={"quiz_id": str(quiz_id)},
+        headers=_auth(student_token),
+    )
+    assert attempt_resp.status_code == 201
+    attempt_id = attempt_resp.json()["attempt_id"]
+
+    # Force the attempt out of in_progress.
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("UPDATE quiz_attempts SET status = 'graded' WHERE id = :a"),
+            {"a": attempt_id},
+        )
+
+    resp = await client.post(
+        f"/api/v1/attempts/{attempt_id}/integrity-events",
+        json={"events": [{"event_type": "tab_switch", "severity": "warning"}]},
+        headers=_auth(student_token),
+    )
+    assert resp.status_code == 202, resp.text
+    assert resp.json()["accepted"] == 0
+
+    async with engine.begin() as conn:
+        rows = (
+            await conn.execute(
+                text("SELECT COUNT(*) FROM assessment_integrity_events WHERE quiz_attempt_id = :a"),
+                {"a": attempt_id},
+            )
+        ).scalar_one()
+    assert rows == 0
+
+    async with engine.begin() as conn:
+        await conn.execute(text("DELETE FROM auth_sessions WHERE id = :id"), {"id": student_sid})
 
 
 async def test_start_attempt_blocked_before_available_from(

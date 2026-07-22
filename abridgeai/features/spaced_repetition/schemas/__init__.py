@@ -14,6 +14,7 @@ from abridgeai.features.spaced_repetition.schemas.dashboards import (
     AtRiskStudentRead,
     CardsDueItem,
     CardsDuePage,
+    CardStudentResultRead,
     ClassKRDistributionRead,
     DifficultCardRead,
     LessonOverviewItem,
@@ -26,6 +27,7 @@ from abridgeai.features.spaced_repetition.schemas.dashboards import (
 
 __all__ = [
     "AtRiskStudentRead",
+    "CardStudentResultRead",
     "CardsDueItem",
     "CardsDuePage",
     "ClassKRDistributionRead",

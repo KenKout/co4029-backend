@@ -130,7 +130,12 @@ async def _load_quiz_questions_for_taking(db: AsyncSession, quiz_id: UUID) -> li
         (
             await db.execute(
                 select(QuizQuestion)
-                .where(QuizQuestion.quiz_id == quiz_id)
+                .where(
+                    QuizQuestion.quiz_id == quiz_id,
+                    # Students only ever see approved questions — pending /
+                    # rejected drafts are never served to the taking surface.
+                    QuizQuestion.review_status == "approved",
+                )
                 .order_by(QuizQuestion.position)
             )
         )

@@ -51,6 +51,7 @@ from abridgeai.features.quizzes.queries import authoring as authoring_queries
 from abridgeai.features.quizzes.schemas import QuizGenerationRequest
 from abridgeai.features.quizzes.services.publish_gate import (
     QuizPublishValidationError,
+    assert_all_questions_approved,
     assert_t_exp_set_for_all_questions,
     bulk_set_expected_response_time,
 )
@@ -361,6 +362,7 @@ async def publish_quiz(db: AsyncSession, quiz_id: UUID, actor: CurrentUser) -> Q
     if quiz.status == "archived":
         raise AppError(f"Cannot publish archived quiz {quiz_id}")
     await assert_t_exp_set_for_all_questions(db, quiz_id)
+    await assert_all_questions_approved(db, quiz_id)
     quiz.status = "published"
     quiz.published_at = utcnow()
     await _ensure_module_item(db, module_id=quiz.module_id, quiz_id=quiz.id)
@@ -476,6 +478,38 @@ async def update_question(
     await flush_or_conflict(db)
     await db.refresh(question)
     return question
+
+
+async def bulk_approve_questions(
+    db: AsyncSession,
+    quiz_id: UUID,
+    question_ids: list[UUID],
+    actor: CurrentUser,
+) -> int:
+    """Set ``review_status='approved'`` on each ``question_id`` in ``quiz_id``.
+
+    The teacher's bulk sign-off for AI-generated content. Questions that
+    don't belong to ``quiz_id`` (or are soft-deleted → auto-filtered by
+    db.get's SELECT filter) are skipped. Stamps ``reviewed_by`` /
+    ``reviewed_at`` like the single-question approve path so the audit trail
+    matches.
+    """
+    quiz = await db.get(Quiz, quiz_id)
+    if quiz is None:
+        raise NotFoundError(f"Quiz {quiz_id} not found")
+    if not question_ids:
+        return 0
+    updated = 0
+    for question_id in question_ids:
+        question = await db.get(QuizQuestion, question_id)
+        if question is None or question.quiz_id != quiz_id:
+            continue
+        question.review_status = "approved"
+        question.reviewed_by = actor.user_id
+        question.reviewed_at = utcnow()
+        updated += 1
+    await db.flush()
+    return updated
 
 
 async def _update_question_options(

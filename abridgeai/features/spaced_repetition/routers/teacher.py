@@ -45,6 +45,7 @@ from abridgeai.features.quizzes.api.public import get_quiz_question_id_set_by_le
 from abridgeai.features.spaced_repetition.models import StudentCardState
 from abridgeai.features.spaced_repetition.queries import (
     at_risk_students,
+    card_student_results,
     class_card_difficulty,
     class_kr_distribution,
     knowledge_retention_estimate,
@@ -52,6 +53,7 @@ from abridgeai.features.spaced_repetition.queries import (
 )
 from abridgeai.features.spaced_repetition.schemas.dashboards import (
     AtRiskStudentRead,
+    CardStudentResultRead,
     ClassKRDistributionRead,
     DifficultCardRead,
     HistogramBucket,
@@ -175,10 +177,38 @@ async def get_difficult_cards(
         DifficultCardRead(
             question_id=card.question_id,
             quiz_id=card.quiz_id,
+            prompt_text=card.prompt_text,
             mean_ef=card.mean_ef,
             student_count=card.student_count,
         )
         for card in cards
+    ]
+
+
+@router.get(
+    "/courses/{course_id}/questions/{question_id}/student-results",
+    response_model=list[CardStudentResultRead],
+    dependencies=[Depends(_REQUIRE_COURSE_READ_DRAFT)],
+)
+async def get_card_student_results(
+    course_id: UUID,  # noqa: ARG001 -- bound by require_course_permission
+    question_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> list[CardStudentResultRead]:
+    """Per-student results for one question (weakest EF first)."""
+    results = await card_student_results(db, question_id=question_id)
+    return [
+        CardStudentResultRead(
+            student_id=r.student_id,
+            name=r.name,
+            ef=r.ef,
+            total_reviews=r.total_reviews,
+            last_reviewed_at=r.last_reviewed_at,
+            last_correct=r.last_correct,
+            correct_count=r.correct_count,
+            review_count=r.review_count,
+        )
+        for r in results
     ]
 
 

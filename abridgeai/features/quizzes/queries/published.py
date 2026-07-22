@@ -306,7 +306,14 @@ async def list_quiz_questions_with_options(
     that isn't declared on ``QuizQuestion``.
     """
     stmt = (
-        select(QuizQuestion).where(QuizQuestion.quiz_id == quiz_id).order_by(QuizQuestion.position)
+        select(QuizQuestion)
+        .where(
+            QuizQuestion.quiz_id == quiz_id,
+            # Approved-only: the published/preview view mirrors what a student
+            # sees, so pending/rejected drafts must not surface here either.
+            QuizQuestion.review_status == "approved",
+        )
+        .order_by(QuizQuestion.position)
     )
     questions = list((await db.execute(stmt)).scalars().all())
     if not questions:

@@ -58,6 +58,41 @@ async def assert_t_exp_set_for_all_questions(db: AsyncSession, quiz_id: UUID) ->
         raise QuizPublishValidationError(missing_t_exp_question_ids=missing)
 
 
+class QuizApprovalRequiredError(AppError):
+    """Raised when publish is attempted with un-approved questions.
+
+    Carries the list of question IDs whose ``review_status`` is not
+    ``approved`` so the frontend can highlight them. The router maps this
+    to HTTP 422 with structured detail (code ``pending_review``).
+    """
+
+    def __init__(self, pending_question_ids: list[UUID]) -> None:
+        self.pending_question_ids = pending_question_ids
+        super().__init__(
+            f"Cannot publish quiz: {len(pending_question_ids)} question(s) "
+            f"pending review (not approved)"
+        )
+
+
+async def assert_all_questions_approved(db: AsyncSession, quiz_id: UUID) -> None:
+    """Assert every live question on ``quiz_id`` has ``review_status='approved'``.
+
+    Human-in-the-loop gate for AI-generated content: a teacher must
+    explicitly approve each question before students can see it. Soft-deleted
+    rows are auto-filtered by the SoftDeleteMixin SELECT filter.
+    """
+    from sqlalchemy import select  # noqa: PLC0415
+
+    stmt = select(QuizQuestion.id).where(
+        QuizQuestion.quiz_id == quiz_id,
+        QuizQuestion.review_status != "approved",
+    )
+    result = await db.execute(stmt)
+    pending = list(result.scalars().all())
+    if pending:
+        raise QuizApprovalRequiredError(pending_question_ids=pending)
+
+
 async def bulk_set_expected_response_time(
     db: AsyncSession,
     quiz_id: UUID,
@@ -94,7 +129,9 @@ async def bulk_set_expected_response_time(
 
 
 __all__ = [
+    "QuizApprovalRequiredError",
     "QuizPublishValidationError",
+    "assert_all_questions_approved",
     "assert_t_exp_set_for_all_questions",
     "bulk_set_expected_response_time",
 ]

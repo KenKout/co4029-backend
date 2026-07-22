@@ -1,8 +1,10 @@
 from abridgeai.features.spaced_repetition.queries.analytics import (
     AtRiskStudent,
+    CardStudentResult,
     ClassKRDistribution,
     DifficultCard,
     at_risk_students,
+    card_student_results,
     class_card_difficulty,
     class_kr_distribution,
 )
@@ -25,11 +27,13 @@ from abridgeai.features.spaced_repetition.queries.unlock_sql import (
 __all__ = [
     "DEFAULT_BLOCKING_LIMIT",
     "AtRiskStudent",
+    "CardStudentResult",
     "ClassKRDistribution",
     "DifficultCard",
     "StudentLessonSummary",
     "aggregate_lesson_card_ef",
     "at_risk_students",
+    "card_student_results",
     "class_card_difficulty",
     "class_kr_distribution",
     "fetch_lesson_module_id",
