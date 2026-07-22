@@ -765,3 +765,103 @@ def test_score_breakdown_is_populated() -> None:
     assert scored.breakdown["required_outcome"] > 0
     assert scored.breakdown["importance"] == 40.0  # 8.0 * 5
     assert scored.score > 0
+
+
+# ── outcome backtracking: under-covered reward (Slice 18) ────────────────────
+
+
+def test_undercovered_reward_only_when_backtrack_enabled() -> None:
+    # An outcome with 1 point (touched but < COVERAGE_SUFFICIENT_POINTS=2) is
+    # "under-covered". The reward term is present only when the flag is on.
+    off = SelectionContext(
+        asked_question_ids=frozenset(),
+        skipped_question_ids=frozenset(),
+        outcome_evidence_counts={"o1": 1},
+        uncovered_required_outcome_ids=frozenset(),
+    )
+    on = SelectionContext(
+        asked_question_ids=frozenset(),
+        skipped_question_ids=frozenset(),
+        outcome_evidence_counts={"o1": 1},
+        uncovered_required_outcome_ids=frozenset(),
+        backtrack_undercovered=True,
+    )
+    q = _q("q1", outcome="o1", pos=1)
+    assert score_candidate(q, off).breakdown["undercovered_outcome"] == 0.0
+    assert score_candidate(q, on).breakdown["undercovered_outcome"] > 0.0
+
+
+def test_undercovered_reward_not_given_to_fresh_or_covered_outcomes() -> None:
+    # The reward targets ONLY the 0<points<sufficient band: a fresh (0) outcome
+    # keeps the big uncovered reward instead, and a covered (>=2) outcome gets
+    # neither the under-covered nor uncovered reward.
+    ctx_kwargs = {
+        "asked_question_ids": frozenset(),
+        "skipped_question_ids": frozenset(),
+        "uncovered_required_outcome_ids": frozenset(),
+        "backtrack_undercovered": True,
+    }
+    fresh = SelectionContext(outcome_evidence_counts={"o1": 0}, **ctx_kwargs)
+    covered = SelectionContext(outcome_evidence_counts={"o1": 2}, **ctx_kwargs)
+    q = _q("q1", outcome="o1", pos=1)
+    assert score_candidate(q, fresh).breakdown["undercovered_outcome"] == 0.0
+    assert score_candidate(q, fresh).breakdown["uncovered_outcome"] > 0.0
+    assert score_candidate(q, covered).breakdown["undercovered_outcome"] == 0.0
+    assert score_candidate(q, covered).breakdown["uncovered_outcome"] == 0.0
+
+
+def test_backtrack_prefers_undercovered_over_fully_covered() -> None:
+    # The realism win: an un-asked question on an under-covered outcome (1 pt)
+    # is preferred over one on a fully-covered outcome, even when the covered
+    # outcome has higher importance (which would otherwise win via importance).
+    candidates = [
+        _q("q_covered", outcome="o_covered", pos=1, weight=5),
+        _q("q_partial", outcome="o_partial", pos=2, weight=1),
+    ]
+    ctx = SelectionContext(
+        asked_question_ids=frozenset(),
+        skipped_question_ids=frozenset(),
+        outcome_evidence_counts={"o_covered": 2, "o_partial": 1},
+        uncovered_required_outcome_ids=frozenset(),
+        backtrack_undercovered=True,
+    )
+    picked = select_next_question(candidates, ctx)
+    assert picked is not None
+    assert picked.candidate.question_id == "q_partial"
+
+
+def test_backtrack_still_prefers_fresh_uncovered_over_undercovered() -> None:
+    # Breadth-first preserved: a fresh (0-point) outcome still outranks an
+    # under-covered one, because the uncovered reward (100) > undercovered (40).
+    candidates = [
+        _q("q_fresh", outcome="o_fresh", pos=2, weight=1),
+        _q("q_partial", outcome="o_partial", pos=1, weight=1),
+    ]
+    ctx = SelectionContext(
+        asked_question_ids=frozenset(),
+        skipped_question_ids=frozenset(),
+        outcome_evidence_counts={"o_partial": 1},
+        uncovered_required_outcome_ids=frozenset(),
+        backtrack_undercovered=True,
+    )
+    picked = select_next_question(candidates, ctx)
+    assert picked is not None
+    assert picked.candidate.question_id == "q_fresh"
+
+
+def test_backtrack_off_is_byte_for_byte_v1() -> None:
+    # Parity: with the flag off, the under-covered outcome gets no special
+    # treatment, so importance carries the covered outcome to the win (v1).
+    candidates = [
+        _q("q_covered", outcome="o_covered", pos=1, weight=5),
+        _q("q_partial", outcome="o_partial", pos=2, weight=1),
+    ]
+    ctx = SelectionContext(
+        asked_question_ids=frozenset(),
+        skipped_question_ids=frozenset(),
+        outcome_evidence_counts={"o_covered": 2, "o_partial": 1},
+        uncovered_required_outcome_ids=frozenset(),
+    )
+    picked = select_next_question(candidates, ctx)
+    assert picked is not None
+    assert picked.candidate.question_id == "q_covered"

@@ -486,6 +486,10 @@ async def take_session_step(  # noqa: C901 - shared legacy/adaptive turn coordin
     rambling_redirect_enabled = settings.adaptive_v2_feature_enabled(
         session.input_mode, "rambling_redirect"
     )
+    # v2 outcome backtracking (Slice 18): revisit under-covered outcomes before closing.
+    backtrack_undercovered_enabled = settings.adaptive_v2_feature_enabled(
+        session.input_mode, "backtrack_undercovered"
+    )
 
     if adaptive_on:
         adaptive_result = await _try_adaptive_step(
@@ -510,6 +514,7 @@ async def take_session_step(  # noqa: C901 - shared legacy/adaptive turn coordin
             self_correction_enabled=self_correction_enabled,
             confident_wrong_challenge_enabled=confident_wrong_challenge_enabled,
             rambling_redirect_enabled=rambling_redirect_enabled,
+            backtrack_undercovered_enabled=backtrack_undercovered_enabled,
         )
         if adaptive_result is not None:
             return adaptive_result
@@ -590,6 +595,7 @@ async def take_session_step(  # noqa: C901 - shared legacy/adaptive turn coordin
             self_correction_enabled=self_correction_enabled,
             confident_wrong_challenge_enabled=confident_wrong_challenge_enabled,
             rambling_redirect_enabled=rambling_redirect_enabled,
+            backtrack_undercovered_enabled=backtrack_undercovered_enabled,
         )
 
     return await _legacy_advance(
@@ -1386,6 +1392,7 @@ async def _try_adaptive_step(
     self_correction_enabled: bool = False,
     confident_wrong_challenge_enabled: bool = False,
     rambling_redirect_enabled: bool = False,
+    backtrack_undercovered_enabled: bool = False,
 ) -> dict[str, Any] | None:
     """Attempt one adaptive turn. Returns the canonical result, or None to fall back.
 
@@ -1468,6 +1475,7 @@ async def _try_adaptive_step(
                 self_correction_enabled=self_correction_enabled,
                 confident_wrong_challenge_enabled=confident_wrong_challenge_enabled,
                 rambling_redirect_enabled=rambling_redirect_enabled,
+                backtrack_undercovered_enabled=backtrack_undercovered_enabled,
             )
         if outcome.result is not None:
             _emit_live_decision(session_id, outcome.result)
@@ -1533,6 +1541,7 @@ async def _run_shadow_step(
     self_correction_enabled: bool = False,
     confident_wrong_challenge_enabled: bool = False,
     rambling_redirect_enabled: bool = False,
+    backtrack_undercovered_enabled: bool = False,
 ) -> None:
     """Compute the adaptive decision for comparison WITHOUT driving the student.
 
@@ -1583,6 +1592,7 @@ async def _run_shadow_step(
                 self_correction_enabled=self_correction_enabled,
                 confident_wrong_challenge_enabled=confident_wrong_challenge_enabled,
                 rambling_redirect_enabled=rambling_redirect_enabled,
+                backtrack_undercovered_enabled=backtrack_undercovered_enabled,
             )
             canonical = outcome.result or {}
             # Emit the shadow decision (no transcript content — same privacy

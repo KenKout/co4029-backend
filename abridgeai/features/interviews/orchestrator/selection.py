@@ -25,6 +25,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 
+from abridgeai.features.interviews.orchestrator.coverage import COVERAGE_SUFFICIENT_POINTS
+
 
 class Difficulty(str, Enum):  # noqa: UP042 -- match codebase convention
     JUNIOR = "junior"
@@ -76,6 +78,12 @@ class SelectionContext:
     # competence (push harder on strengths, ease on weak areas) instead of the
     # single global student level. Empty/missing → fall back to the global level.
     outcome_competence: dict[str, float] | None = None
+    # Outcome backtracking (Slice 18, v2): when True, reward un-asked questions
+    # on UNDER-covered outcomes (touched but below the sufficiency threshold) so
+    # the selector circles back to rushed partials before spending turns on
+    # already-covered ones. Below the uncovered reward, so fresh outcomes still
+    # lead (breadth-first preserved). Off → the under-covered band is ignored (v1).
+    backtrack_undercovered: bool = False
 
 
 @dataclass(frozen=True)
@@ -90,6 +98,7 @@ class ScoredCandidate:
 # then outcome importance, then difficulty/time fit, with teacher order as a
 # small nudge and penalties for duplication / single-outcome fixation.
 _W_UNCOVERED_OUTCOME = 100.0  # question targets an uncovered outcome
+_W_UNDERCOVERED_OUTCOME = 40.0  # targets a touched-but-insufficient outcome (Slice 18)
 _W_REQUIRED_OUTCOME = 60.0  # ...and that outcome is required to pass
 _W_IMPORTANCE = 8.0  # × importance_weight (1..5) → up to 40
 _W_TEACHER_ORDER = 5.0  # earlier position preferred (small nudge)
@@ -159,6 +168,16 @@ def score_candidate(candidate: CandidateQuestion, ctx: SelectionContext) -> Scor
     evidence = ctx.outcome_evidence_counts.get(oid, 0) if oid else 0
     is_uncovered = evidence == 0
     breakdown["uncovered_outcome"] = _W_UNCOVERED_OUTCOME if is_uncovered else 0.0
+
+    # Under-covered band (Slice 18, v2): the outcome was touched but has not yet
+    # reached the sufficiency threshold. Rewarded ONLY when backtracking is
+    # enabled, so the selector circles back to rushed partials before spending a
+    # turn on an already-covered outcome. Below the uncovered reward, so a fresh
+    # (0-evidence) outcome still ranks higher (breadth-first preserved).
+    is_undercovered = 0 < evidence < COVERAGE_SUFFICIENT_POINTS
+    breakdown["undercovered_outcome"] = (
+        _W_UNDERCOVERED_OUTCOME if (ctx.backtrack_undercovered and is_undercovered) else 0.0
+    )
 
     is_required_uncovered = oid is not None and oid in ctx.uncovered_required_outcome_ids
     breakdown["required_outcome"] = _W_REQUIRED_OUTCOME if is_required_uncovered else 0.0

@@ -172,6 +172,7 @@ async def run_adaptive_turn(
     self_correction_enabled: bool = False,
     confident_wrong_challenge_enabled: bool = False,
     rambling_redirect_enabled: bool = False,
+    backtrack_undercovered_enabled: bool = False,
 ) -> AdaptiveOutcome:
     """Run one adaptive turn. MUST be called inside a caller-owned savepoint.
 
@@ -319,6 +320,7 @@ async def run_adaptive_turn(
         time_fraction_remaining=time_fraction,
         last_targeted_outcome_id=data.current_outcome_id,
         outcome_competence=outcome_competence,
+        backtrack_undercovered=backtrack_undercovered_enabled,
     )
     scored = select_next_question(candidates, ctx)
     has_next = scored is not None

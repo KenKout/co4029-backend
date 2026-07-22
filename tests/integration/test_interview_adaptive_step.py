@@ -349,6 +349,7 @@ def _settings_v2(
     self_correction: bool = False,
     confident_wrong_challenge: bool = False,
     rambling_redirect: bool = False,
+    backtrack_undercovered: bool = False,
 ) -> Settings:
     """v1 adaptive fully on PLUS the v2 master + selected sub-flags.
 
@@ -367,6 +368,7 @@ def _settings_v2(
             "adaptive_v2_self_correction_enabled": self_correction,
             "adaptive_v2_confident_wrong_challenge_enabled": confident_wrong_challenge,
             "adaptive_v2_rambling_redirect_enabled": rambling_redirect,
+            "adaptive_v2_backtrack_undercovered_enabled": backtrack_undercovered,
         }
     )
 
@@ -1947,3 +1949,64 @@ async def test_rambling_advances_when_flag_off(
         )
         await db.commit()
     assert await _persisted_ai_action(engine, session_id) != "redirect_to_topic"
+
+
+# ── Slice 18: outcome backtracking (selection-only) ──────────────────────────
+# Backtracking is a SELECTION-scoring change (prefer un-asked questions on
+# under-covered outcomes), not a distinct decision action. The scoring is proven
+# deterministically in the unit suite; here we just prove the flag threads
+# cleanly through the whole pipeline and a normal turn still drives adaptive
+# (advances) rather than falling back to legacy.
+
+
+def _plain_answer_gateway() -> SimpleNamespace:
+    return _gateway(
+        [
+            {"intent": "answer", "confidence": 0.9, "rationale": "content"},
+            {
+                "relevance": "relevant",
+                "completeness": "partial",
+                "correctness": "mostly_correct",
+                "specificity": "specific",
+                "recommended_probe_type": "none",
+                "confidence": 0.7,
+            },
+            {
+                "acknowledgement": "Thanks.",
+                "transition": "",
+                "ai_turn_text": "Thanks. Let's continue.",
+            },
+        ]
+    )
+
+
+@pytest.mark.asyncio
+async def test_backtrack_flag_threads_cleanly_and_advances(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        taking_service, "get_settings", lambda: _settings_v2(backtrack_undercovered=True)
+    )
+    gw = _plain_answer_gateway()
+    for mod in ("intent_logic", "analysis_logic", "utterance_logic"):
+        monkeypatch.setattr(
+            f"abridgeai.features.interviews.orchestrator.{mod}.LLMGateway", lambda: gw
+        )
+    session_id, _ = await _make_session(
+        engine, scenario["config_id"], scenario["student_id"], "text"
+    )
+    async with session_factory() as db:
+        result = await taking_service.take_session_step(
+            db,
+            session_id,
+            "A solid, on-topic answer.",
+            _actor(scenario["student_id"]),
+            turn_key="bt-1",
+        )
+        await db.commit()
+    # The adaptive pipeline drove the turn (action present) rather than falling
+    # back to legacy — proving the new flag threaded through all wiring sites.
+    assert result.get("action") is not None
