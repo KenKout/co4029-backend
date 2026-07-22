@@ -339,7 +339,11 @@ async def _count_ai_messages(engine: AsyncEngine, session_id: uuid.UUID) -> int:
 
 
 def _settings_v2(
-    *, phases: bool = False, depth_probe: bool = False, affect: bool = False
+    *,
+    phases: bool = False,
+    depth_probe: bool = False,
+    affect: bool = False,
+    hint_ladder: bool = False,
 ) -> Settings:
     """v1 adaptive fully on PLUS the v2 master + selected sub-flags.
 
@@ -352,6 +356,7 @@ def _settings_v2(
             "adaptive_v2_phases_enabled": phases,
             "adaptive_v2_depth_probe_enabled": depth_probe,
             "adaptive_v2_affect_enabled": affect,
+            "adaptive_v2_hint_ladder_enabled": hint_ladder,
         }
     )
 

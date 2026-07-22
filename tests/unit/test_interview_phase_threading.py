@@ -158,3 +158,56 @@ def test_cross_turn_off_records_no_claims() -> None:
         cross_turn_enabled=False,
     )
     assert data.outcome_coverage["o-1"].claims == []
+
+
+def _hint_decision() -> InterviewerDecision:
+    return InterviewerDecision(
+        action=InterviewerActionType.PROVIDE_NEUTRAL_HINT,
+        reason_code=ReasonCode.STUDENT_REQUESTED_HINT,
+        acknowledgement_style=AcknowledgementStyle.NEUTRAL,
+    )
+
+
+def test_hint_ladder_increments_on_repeated_hint() -> None:
+    """Slice 11: a hint on the same question escalates hint_level when enabled."""
+    data = InterviewRuntimeStateData(phase=InterviewPhase.CORE)
+    for _ in range(2):
+        apply_state_updates(
+            data,
+            intent=_answer_intent(),
+            analysis=None,
+            decision=_hint_decision(),
+            selected_question_id=None,
+            target_outcome_id=None,
+            hint_ladder_enabled=True,
+        )
+    assert data.hint_level == 2
+
+
+def test_hint_ladder_off_leaves_level_zero() -> None:
+    data = InterviewRuntimeStateData(phase=InterviewPhase.CORE)
+    apply_state_updates(
+        data,
+        intent=_answer_intent(),
+        analysis=None,
+        decision=_hint_decision(),
+        selected_question_id=None,
+        target_outcome_id=None,
+        hint_ladder_enabled=False,
+    )
+    assert data.hint_level == 0
+
+
+def test_advance_resets_hint_ladder() -> None:
+    data = InterviewRuntimeStateData(phase=InterviewPhase.CORE, hint_level=3, reframe_count=2)
+    apply_state_updates(
+        data,
+        intent=_answer_intent(),
+        analysis=None,
+        decision=_advance_decision(),
+        selected_question_id="q-2",
+        target_outcome_id="o-1",
+        hint_ladder_enabled=True,
+    )
+    assert data.hint_level == 0
+    assert data.reframe_count == 0

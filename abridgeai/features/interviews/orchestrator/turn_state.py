@@ -87,6 +87,7 @@ def apply_state_updates(  # noqa: C901 -- explicit action branches are auditable
     target_outcome_id: str | None,
     target_phase: InterviewPhase | None = None,
     cross_turn_enabled: bool = False,
+    hint_ladder_enabled: bool = False,
 ) -> None:
     """Mutate the loaded state in memory (NO save here — caller saves once).
 
@@ -200,6 +201,17 @@ def apply_state_updates(  # noqa: C901 -- explicit action branches are auditable
         else:
             data.phase = target_phase
             data.turns_in_phase += 1
+
+    # Assistance laddering (Slice 11, v2). AFTER this turn's utterance rendered
+    # at the current level, advance the ladder so a REPEATED hint/reframe on the
+    # SAME question escalates next time. The advance-reset above (hint_level=0,
+    # reframe_count=0) fires first for advance actions, so escalation is
+    # per-question. Gated: off → counters never move → v1 behaviour.
+    if hint_ladder_enabled and decision.action not in ADVANCE_ACTIONS:
+        if decision.action is InterviewerActionType.PROVIDE_NEUTRAL_HINT:
+            data.hint_level += 1
+        elif decision.action is InterviewerActionType.REFRAME_QUESTION:
+            data.reframe_count += 1
 
     if target_outcome_id:
         data.current_outcome_id = target_outcome_id

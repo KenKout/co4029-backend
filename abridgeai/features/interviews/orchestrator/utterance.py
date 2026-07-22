@@ -153,17 +153,22 @@ def transition_text(persona: Persona, language: str | None, *, final: bool = Fal
     return table.get((persona, lang), table[(Persona.NEUTRAL, "en")])
 
 
-def _fallback_parts(  # noqa: C901 -- flat per-action dispatch; readability > splitting
+def _fallback_parts(  # noqa: C901, PLR0911 -- flat per-action dispatch; readability > splitting
     decision: InterviewerDecision,
     persona: Persona,
     lang: str,
     *,
     question_text: str | None,
+    hint_level: int = 0,
+    reframe_count: int = 0,
 ) -> tuple[str, str, str]:
     """Deterministic (acknowledgement, transition, question_or_probe) per action.
 
     This is the guaranteed fallback (requirement #9): every action type has a
     persona-aware, bilingual template so a failed LLM call never blocks the turn.
+
+    ``hint_level`` / ``reframe_count`` (Slice 11, v2) select an escalating hint
+    or a rephrasing variant; both default to 0 → the original v1 wording.
     """
     action = decision.action
     ack = _ack_text(persona, decision.acknowledgement_style, lang)
@@ -184,12 +189,17 @@ def _fallback_parts(  # noqa: C901 -- flat per-action dispatch; readability > sp
     ):
         # Spec §wording: clarification/rephrase signpost precedes the safe,
         # answer-preserving rephrasing. The current question is never advanced
-        # or scored by this control turn.
-        signpost = {
-            "en": "Of course. Let me rephrase the question.",
-            "vi": "Tất nhiên. Để tôi diễn đạt lại câu hỏi.",
-        }[lang]
+        # or scored by this control turn. Slice 11: vary the signpost by
+        # reframe_count so a repeated reframe never repeats verbatim.
+        signpost = _reframe_signpost(reframe_count, lang)
         probe = q or _generic_probe(action, persona, lang)
+        return ack, signpost, probe
+
+    if action is InterviewerActionType.PROVIDE_NEUTRAL_HINT:
+        # Laddered hint (Slice 11): escalate neutral nudge → structural →
+        # worked-approach by hint_level, NEVER revealing the answer.
+        signpost = _probe_signpost(action, persona, lang)
+        probe = q or _laddered_hint(hint_level, lang)
         return ack, signpost, probe
 
     if action in (
@@ -198,7 +208,6 @@ def _fallback_parts(  # noqa: C901 -- flat per-action dispatch; readability > sp
         InterviewerActionType.CHALLENGE_REASONING,
         InterviewerActionType.EXPLORE_TRADEOFF,
         InterviewerActionType.RESOLVE_CONTRADICTION,
-        InterviewerActionType.PROVIDE_NEUTRAL_HINT,
         InterviewerActionType.EXTEND_ANSWER,
         InterviewerActionType.PROBE_EDGE_CASE,
     ):
@@ -363,6 +372,60 @@ def _generic_probe(action: InterviewerActionType, persona: Persona, lang: str) -
     return table.get((action, lang), table.get((action, "en"), "Could you say more?"))
 
 
+# Laddered hints (Slice 11, v2). Escalate by hint_level, NEVER revealing the
+# answer: level 0 = neutral structural nudge (the original v1 hint), level 1 =
+# stronger structural scaffold, level 2+ = a worked-approach hint (how to think,
+# not what to say). Level clamps to the last rung.
+_HINT_LADDER: dict[str, tuple[str, ...]] = {
+    "en": (
+        "A small hint: organize your answer around the main concepts in the question "
+        "and how they relate.",
+        "A bigger hint: break the question into its parts and address each one in turn — "
+        "start with the definition, then the 'why', then an example.",
+        "Let's approach it together: pick the single most central idea, state it plainly, "
+        "then explain one consequence of it. You don't need the whole answer at once.",
+    ),
+    "vi": (
+        "Gợi ý nhỏ: hãy sắp xếp câu trả lời theo các khái niệm chính trong câu hỏi "
+        "và mối quan hệ giữa chúng.",
+        "Gợi ý rõ hơn: hãy chia câu hỏi thành các phần và trả lời lần lượt — "
+        "bắt đầu từ định nghĩa, rồi đến 'tại sao', rồi một ví dụ.",
+        "Chúng ta cùng tiếp cận nhé: chọn ý trọng tâm nhất, nêu rõ ràng, "
+        "rồi giải thích một hệ quả của nó. Bạn không cần trả lời hết ngay.",
+    ),
+}
+
+
+def _laddered_hint(hint_level: int, lang: str) -> str:
+    """Answer-safe hint escalating by ``hint_level`` (clamped to the last rung)."""
+    rungs = _HINT_LADDER.get(lang, _HINT_LADDER["en"])
+    idx = max(0, min(hint_level, len(rungs) - 1))
+    return rungs[idx]
+
+
+# Rephrasing signposts (Slice 11, v2). Vary by reframe_count so a repeated
+# reframe/clarify never repeats verbatim. Index 0 is the original v1 wording.
+_REFRAME_SIGNPOSTS: dict[str, tuple[str, ...]] = {
+    "en": (
+        "Of course. Let me rephrase the question.",
+        "Let me put it a different way.",
+        "Here's another way to think about what I'm asking.",
+    ),
+    "vi": (
+        "Tất nhiên. Để tôi diễn đạt lại câu hỏi.",
+        "Để tôi nói theo một cách khác.",
+        "Đây là một cách khác để hiểu câu hỏi của tôi.",
+    ),
+}
+
+
+def _reframe_signpost(reframe_count: int, lang: str) -> str:
+    """Rephrasing signpost that differs by ``reframe_count`` (clamped)."""
+    variants = _REFRAME_SIGNPOSTS.get(lang, _REFRAME_SIGNPOSTS["en"])
+    idx = max(0, min(reframe_count, len(variants) - 1))
+    return variants[idx]
+
+
 def _combine(acknowledgement: str, transition: str, question_or_probe: str) -> str:
     """Join the parts into one natural utterance, single-spaced, no doubling."""
     return " ".join(p for p in (acknowledgement, transition, question_or_probe) if p).strip()
@@ -397,6 +460,8 @@ def build_fallback_utterance(
     language: str | None,
     question_text: str | None = None,
     affect: object | None = None,
+    hint_level: int = 0,
+    reframe_count: int = 0,
 ) -> Utterance:
     """Deterministic, persona-aware, bilingual utterance for a decision.
 
@@ -408,9 +473,19 @@ def build_fallback_utterance(
     It only prepends to the acknowledgement — the question/probe text is
     untouched, so control flow and the answer-leak guard are unaffected. When
     None or NEUTRAL, the utterance is byte-for-byte the v1 result.
+
+    ``hint_level`` / ``reframe_count`` (Slice 11, v2) select an escalating
+    answer-safe hint or a rephrasing variant; both default to 0 → v1 wording.
     """
     lang = _lang(language)
-    ack, transition, qp = _fallback_parts(decision, persona, lang, question_text=question_text)
+    ack, transition, qp = _fallback_parts(
+        decision,
+        persona,
+        lang,
+        question_text=question_text,
+        hint_level=hint_level,
+        reframe_count=reframe_count,
+    )
     affect_value = getattr(affect, "value", affect) if affect is not None else None
     lead_in = _affect_lead_in(affect_value if isinstance(affect_value, str) else None, lang)
     ack = _combine(lead_in, "", ack) if lead_in else ack

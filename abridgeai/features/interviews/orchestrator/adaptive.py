@@ -149,6 +149,7 @@ async def run_adaptive_turn(
     depth_probe_enabled: bool = False,
     cross_turn_enabled: bool = False,
     affect_enabled: bool = False,
+    hint_ladder_enabled: bool = False,
 ) -> AdaptiveOutcome:
     """Run one adaptive turn. MUST be called inside a caller-owned savepoint.
 
@@ -326,6 +327,11 @@ async def run_adaptive_turn(
         if selected_orm is not None
         else turn_state.probe_seed_text(decision, current_question)
     )
+    # Assistance laddering (Slice 11, v2): render this turn at the CURRENT ladder
+    # level; apply_state_updates advances the level AFTER, so a repeated hint /
+    # reframe escalates next turn. Gated: off → level 0 → v1 wording.
+    hint_level = data.hint_level if hint_ladder_enabled else 0
+    reframe_count = data.reframe_count if hint_ladder_enabled else 0
     utterance, utt_status = await generate_utterance(
         db,
         decision,
@@ -334,6 +340,8 @@ async def run_adaptive_turn(
         question_text=probe_or_question_text,
         use_llm=use_llm,
         affect=affect,
+        hint_level=hint_level,
+        reframe_count=reframe_count,
     )
     fallback_utterance = build_fallback_utterance(
         decision,
@@ -341,6 +349,8 @@ async def run_adaptive_turn(
         language=language,
         question_text=probe_or_question_text,
         affect=affect,
+        hint_level=hint_level,
+        reframe_count=reframe_count,
     )
     assessment = security_assessment or SecurityAssessment(
         category=SecurityCategory.BENIGN,
@@ -425,6 +435,7 @@ async def run_adaptive_turn(
         target_outcome_id=decision.target_outcome_id,
         target_phase=target_phase if phases_enabled else None,
         cross_turn_enabled=cross_turn_enabled,
+        hint_ladder_enabled=hint_ladder_enabled,
     )
 
     canonical = canonical_step_result(

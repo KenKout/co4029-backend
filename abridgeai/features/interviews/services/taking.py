@@ -466,6 +466,8 @@ async def take_session_step(  # noqa: C901 - shared legacy/adaptive turn coordin
     cross_turn_enabled = settings.adaptive_v2_feature_enabled(session.input_mode, "cross_turn")
     # v2 affect (Slice 10): read candidate affect to warm utterance tone (phrasing only).
     affect_enabled = settings.adaptive_v2_feature_enabled(session.input_mode, "affect")
+    # v2 hint ladder (Slice 11): escalate hints + vary rephrasing on the same question.
+    hint_ladder_enabled = settings.adaptive_v2_feature_enabled(session.input_mode, "hint_ladder")
 
     if adaptive_on:
         adaptive_result = await _try_adaptive_step(
@@ -484,6 +486,7 @@ async def take_session_step(  # noqa: C901 - shared legacy/adaptive turn coordin
             depth_probe_enabled=depth_probe_enabled,
             cross_turn_enabled=cross_turn_enabled,
             affect_enabled=affect_enabled,
+            hint_ladder_enabled=hint_ladder_enabled,
         )
         if adaptive_result is not None:
             return adaptive_result
@@ -558,6 +561,7 @@ async def take_session_step(  # noqa: C901 - shared legacy/adaptive turn coordin
             depth_probe_enabled=depth_probe_enabled,
             cross_turn_enabled=cross_turn_enabled,
             affect_enabled=affect_enabled,
+            hint_ladder_enabled=hint_ladder_enabled,
         )
 
     return await _legacy_advance(
@@ -1309,6 +1313,7 @@ async def _try_adaptive_step(
     depth_probe_enabled: bool = False,
     cross_turn_enabled: bool = False,
     affect_enabled: bool = False,
+    hint_ladder_enabled: bool = False,
 ) -> dict[str, Any] | None:
     """Attempt one adaptive turn. Returns the canonical result, or None to fall back.
 
@@ -1385,6 +1390,7 @@ async def _try_adaptive_step(
                 depth_probe_enabled=depth_probe_enabled,
                 cross_turn_enabled=cross_turn_enabled,
                 affect_enabled=affect_enabled,
+                hint_ladder_enabled=hint_ladder_enabled,
             )
         if outcome.result is not None:
             _emit_live_decision(session_id, outcome.result)
@@ -1444,6 +1450,7 @@ async def _run_shadow_step(
     depth_probe_enabled: bool = False,
     cross_turn_enabled: bool = False,
     affect_enabled: bool = False,
+    hint_ladder_enabled: bool = False,
 ) -> None:
     """Compute the adaptive decision for comparison WITHOUT driving the student.
 
@@ -1488,6 +1495,7 @@ async def _run_shadow_step(
                 depth_probe_enabled=depth_probe_enabled,
                 cross_turn_enabled=cross_turn_enabled,
                 affect_enabled=affect_enabled,
+                hint_ladder_enabled=hint_ladder_enabled,
             )
             canonical = outcome.result or {}
             # Emit the shadow decision (no transcript content — same privacy

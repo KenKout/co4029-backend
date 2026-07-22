@@ -209,3 +209,64 @@ def test_nervous_affect_bilingual() -> None:
     assert vi.ai_turn_text != en.ai_turn_text
     assert "  " not in vi.ai_turn_text
     assert "  " not in en.ai_turn_text
+
+
+# ── laddered hints & rephrasing variants (Slice 11) ──────────────────────────
+
+
+def _hint_leak_guard(text: str) -> None:
+    lowered = text.lower()
+    for banned in ("the answer is", "correct answer", "you should say"):
+        assert banned not in lowered
+
+
+def test_hint_ladder_escalates_and_stays_answer_safe() -> None:
+    """Each hint level yields a DIFFERENT, answer-safe EN hint."""
+    d = _decision(
+        InterviewerActionType.PROVIDE_NEUTRAL_HINT, reason=ReasonCode.STUDENT_REQUESTED_HINT
+    )
+    texts = []
+    for level in (0, 1, 2):
+        u = build_fallback_utterance(
+            d, persona=Persona.NEUTRAL, language="en", question_text=None, hint_level=level
+        )
+        assert u.question_or_probe.strip()
+        _hint_leak_guard(u.ai_turn_text)
+        texts.append(u.question_or_probe)
+    assert len(set(texts)) == 3  # three distinct escalating hints
+
+
+def test_hint_ladder_bilingual() -> None:
+    d = _decision(
+        InterviewerActionType.PROVIDE_NEUTRAL_HINT, reason=ReasonCode.STUDENT_REQUESTED_HINT
+    )
+    vi = build_fallback_utterance(
+        d, persona=Persona.NEUTRAL, language="vi", question_text=None, hint_level=1
+    )
+    assert vi.question_or_probe.strip()
+    _hint_leak_guard(vi.ai_turn_text)
+
+
+def test_hint_level_zero_matches_v1_default() -> None:
+    """Parity: level 0 (default) is the original single flat hint."""
+    d = _decision(
+        InterviewerActionType.PROVIDE_NEUTRAL_HINT, reason=ReasonCode.STUDENT_REQUESTED_HINT
+    )
+    base = build_fallback_utterance(d, persona=Persona.NEUTRAL, language="en", question_text=None)
+    lvl0 = build_fallback_utterance(
+        d, persona=Persona.NEUTRAL, language="en", question_text=None, hint_level=0
+    )
+    assert base.ai_turn_text == lvl0.ai_turn_text
+
+
+def test_reframe_variants_differ_by_count() -> None:
+    d = _decision(
+        InterviewerActionType.REFRAME_QUESTION, reason=ReasonCode.STUDENT_REQUESTED_CLARIFICATION
+    )
+    v0 = build_fallback_utterance(
+        d, persona=Persona.NEUTRAL, language="en", question_text=None, reframe_count=0
+    )
+    v1 = build_fallback_utterance(
+        d, persona=Persona.NEUTRAL, language="en", question_text=None, reframe_count=1
+    )
+    assert v0.ai_turn_text != v1.ai_turn_text
