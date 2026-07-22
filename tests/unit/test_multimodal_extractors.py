@@ -140,11 +140,18 @@ async def test_image_extractor_dispatches_llm_vision() -> None:
     gateway.generate_json = AsyncMock(return_value=fake_result)
     db = MagicMock()
     extractor = ImageExtractor(settings=settings, gateway=gateway, db=db)
-    with patch("abridgeai.ai.extraction.image._image_size", return_value=(800, 600)):
+    with patch(
+        "abridgeai.ai.extraction.image._image_meta",
+        return_value=((800, 600), "image/png"),
+    ):
         result = await extractor.extract(b"fake-png-bytes")
     gateway.generate_json.assert_awaited_once()
     call_kwargs = gateway.generate_json.await_args.kwargs
     assert call_kwargs["role"] is LLMRole.VISION
+    # The image is sent as a proper base64 data URL via image_data_url — not
+    # pasted into the prompt string — so the vision model actually sees it.
+    assert call_kwargs["image_data_url"].startswith("data:image/png;base64,")
+    assert "fake-png-bytes" not in call_kwargs["user_prompt"]
     assert "Hello from vision" in result.text
     assert result.metadata["ocr_provider"] == "llm_vision"
     assert result.source_locations[0].bbox == (0.0, 0.0, 800.0, 600.0)
