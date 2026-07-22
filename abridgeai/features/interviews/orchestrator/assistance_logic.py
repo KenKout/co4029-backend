@@ -62,9 +62,20 @@ def _fallback(
     *,
     question_text: str = "",
     valid_term: bool = True,
+    hint_level: int | None = None,
 ) -> str:
     vi = _is_vi(language)
     if action is SecurityAction.HINT_CURRENT_QUESTION:
+        if hint_level is not None:
+            # Slice 11 upgrade: escalation-aware fallback. Reuse the SHARED
+            # deterministic laddered hint so a typed hint still escalates and is
+            # byte-identical to the adaptive decision path's fallback when the
+            # LLM is unavailable. Imported locally to avoid an import cycle.
+            from abridgeai.features.interviews.orchestrator.utterance import (  # noqa: PLC0415
+                laddered_hint,
+            )
+
+            return laddered_hint(hint_level, language)
         return (
             "Gợi ý nhỏ: hãy sắp xếp câu trả lời theo các khái niệm chính trong câu hỏi, "
             "mối quan hệ giữa chúng và một ví dụ thực tế nếu phù hợp."
@@ -103,8 +114,7 @@ def extract_question_term(request_text: str, question_text: str) -> str | None:
     if len(request) <= 100 and len(request.split()) <= 12:
         candidates.append(request)
     candidates.extend(
-        value.strip()
-        for value in re.findall(r"[\"'“”‘’]([^\"'“”‘’]{1,100})[\"'“”‘’]", request)
+        value.strip() for value in re.findall(r"[\"'“”‘’]([^\"'“”‘’]{1,100})[\"'“”‘’]", request)
     )
     for pattern in (
         r"what\s+does\s+(.{1,100}?)\s+mean(?:\s+in\s+(?:this|the)\s+question)?[?.!]*$",
@@ -194,8 +204,17 @@ async def generate_question_assistance(
     language: str,
     persona: str | None,
     gateway: LLMGateway | None = None,
+    hint_level: int | None = None,
 ) -> str:
-    """Generate one answer-safe clarification, term explanation, or scaffold."""
+    """Generate one answer-safe clarification, term explanation, or scaffold.
+
+    ``hint_level`` (Slice 11 upgrade) escalates a hint: when provided, it is fed
+    to the model so it produces a question-SPECIFIC hint at that escalation rung,
+    and the deterministic shared laddered hint at the same level is the answer-
+    safe fallback if the model is unavailable or returns unusable text. So a
+    typed hint gets question-specific phrasing when the LLM is up and still
+    escalates identically to the adaptive decision path either way.
+    """
     term = (
         extract_question_term(request_text, question_text)
         if action is SecurityAction.EXPLAIN_CURRENT_TERM
@@ -214,16 +233,18 @@ async def generate_question_assistance(
             "prompts/assistance_system.j2",
             language=language or "en",
         )
-        user_prompt = json.dumps(
-            {
-                "action": action.value,
-                "language": language or "en",
-                "persona": persona or "neutral",
-                "current_question": question_text,
-                "requested_term": term,
-            },
-            ensure_ascii=False,
-        )
+        payload: dict[str, object] = {
+            "action": action.value,
+            "language": language or "en",
+            "persona": persona or "neutral",
+            "current_question": question_text,
+            "requested_term": term,
+        }
+        if hint_level is not None and action is SecurityAction.HINT_CURRENT_QUESTION:
+            # Escalation rung for the model: 0 = gentle structural nudge,
+            # 1 = stronger scaffold, 2+ = how-to-approach (never the answer).
+            payload["hint_level"] = hint_level
+        user_prompt = json.dumps(payload, ensure_ascii=False)
         llm = gateway or LLMGateway()
         async with db.begin_nested():
             result = await llm.generate_json(
@@ -238,7 +259,7 @@ async def generate_question_assistance(
             return text
     except Exception:  # noqa: BLE001 -- assistance must never block the interview
         logger.exception("interview assistance generation failed; using safe fallback")
-    return _fallback(action, language, question_text=question_text)
+    return _fallback(action, language, question_text=question_text, hint_level=hint_level)
 
 
 __all__ = [

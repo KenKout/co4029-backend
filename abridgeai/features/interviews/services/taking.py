@@ -1092,16 +1092,22 @@ async def _security_action_result(
         and action is SecurityAction.HINT_CURRENT_QUESTION
         and current_question is not None
     ):
-        # Slice 11 upgrade: render the SHARED deterministic laddered hint at the
-        # level the caller captured from data.hint_level. This is the exact same
-        # escalating template the adaptive decision path uses, so a typed hint
-        # and a decision-emitted hint escalate identically. Answer-safe by
-        # construction (no question/rubric content), so no LLM call is needed.
-        from abridgeai.features.interviews.orchestrator.utterance import (  # noqa: PLC0415
-            laddered_hint,
+        # Slice 11 upgrade: generate a question-SPECIFIC hint at the escalation
+        # level the caller captured from data.hint_level. The model produces
+        # phrasing tied to THIS question at this rung, and the shared
+        # deterministic laddered hint (same one the adaptive decision path uses)
+        # is the answer-safe fallback baked into generate_question_assistance if
+        # the model is unavailable — so escalation holds either way. We do NOT
+        # reuse the persisted one-hint here: each rung is a fresh, harder hint.
+        response = await generate_question_assistance(
+            db,
+            action=action,
+            question_text=current_question.prompt_text,
+            request_text=answer_text,
+            language=language,
+            persona=getattr(config, "persona", None),
+            hint_level=hint_render_level,
         )
-
-        response = laddered_hint(hint_render_level, language)
     elif current_question is not None and action in {
         SecurityAction.CLARIFY_CURRENT_QUESTION,
         SecurityAction.EXPLAIN_CURRENT_TERM,

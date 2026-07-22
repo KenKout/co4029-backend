@@ -154,8 +154,7 @@ async def test_clarification_failure_returns_a_useful_rephrasing() -> None:
         _DB(),  # type: ignore[arg-type]
         action=SecurityAction.CLARIFY_CURRENT_QUESTION,
         question_text=(
-            "Compare and contrast fact tables and factless fact tables in a "
-            "dimensional model."
+            "Compare and contrast fact tables and factless fact tables in a dimensional model."
         ),
         request_text="Could you clarify this question, please?",
         language="en",
@@ -199,6 +198,60 @@ async def test_hint_is_short_neutral_scaffold() -> None:
         gateway=gateway,  # type: ignore[arg-type]
     )
     assert result == "Structure your response around purpose, structure, and usage."
+
+
+@pytest.mark.asyncio
+async def test_hint_prompt_carries_level_for_escalation() -> None:
+    """Slice 11 incorporate: hint_level is passed to the LLM so it can produce a
+    question-specific hint that escalates with the shared counter."""
+    gateway = _Gateway("A question-specific structural nudge.")
+    await generate_question_assistance(
+        _DB(),  # type: ignore[arg-type]
+        action=SecurityAction.HINT_CURRENT_QUESTION,
+        question_text="Compare fact tables and factless fact tables.",
+        request_text="Can I get a hint?",
+        language="en",
+        persona="neutral",
+        gateway=gateway,  # type: ignore[arg-type]
+        hint_level=2,
+    )
+    assert gateway.user_prompt is not None
+    payload = json.loads(gateway.user_prompt)
+    assert payload["hint_level"] == 2
+    # Still no hidden assessment data leaks into the prompt.
+    assert "rubric" not in gateway.user_prompt.casefold()
+    assert "model_answer" not in gateway.user_prompt.casefold()
+
+
+@pytest.mark.asyncio
+async def test_hint_fallback_is_level_aware_and_escalates() -> None:
+    """When the LLM is unavailable, the hint fallback is the SHARED deterministic
+    laddered hint at hint_level — so escalation is preserved (level 0 != level 1)
+    and identical to the adaptive decision path's fallback."""
+    kwargs = dict(
+        action=SecurityAction.HINT_CURRENT_QUESTION,
+        question_text="Compare fact tables and factless fact tables.",
+        request_text="Can I get a hint?",
+        language="en",
+        persona="neutral",
+    )
+    r0 = await generate_question_assistance(
+        _DB(),  # type: ignore[arg-type]
+        gateway=_FailingGateway(),  # type: ignore[arg-type]
+        hint_level=0,
+        **kwargs,  # type: ignore[arg-type]
+    )
+    r1 = await generate_question_assistance(
+        _DB(),  # type: ignore[arg-type]
+        gateway=_FailingGateway(),  # type: ignore[arg-type]
+        hint_level=1,
+        **kwargs,  # type: ignore[arg-type]
+    )
+    assert r0 != r1
+    for r in (r0, r1):
+        low = r.lower()
+        for banned in ("the answer is", "correct answer", "you should say"):
+            assert banned not in low
 
 
 @pytest.mark.asyncio
