@@ -285,10 +285,130 @@ async def top_missed_questions(
     ]
 
 
+_QUESTION_TYPES_WITH_OPTIONS = ("multiple_choice", "true_false")
+
+
+async def quiz_question_breakdown(db: AsyncSession, quiz_id: UUID) -> list[dict[str, Any]]:
+    """Per-question performance breakdown for a single quiz.
+
+    For each non-soft-deleted question in ``quiz_id``, counts how students
+    performed, considering ONLY answers that belong to COMPLETED attempts
+    (``status IN ('submitted','graded')``). Unlike :func:`top_missed_questions`
+    there is NO minimum-attempts gate — every question is returned so a
+    teacher with a small cohort still sees each one.
+
+    Returns a list with ONE dict per question, ordered by ``correctness_rate``
+    ascending (hardest first) with question ``position`` ascending as a stable
+    tiebreaker. Questions nobody answered sort last (NULL rate) and still
+    appear with zeroed counts.
+
+    Each dict carries:
+
+    * ``question_id`` — :class:`~uuid.UUID`.
+    * ``prompt`` — ``quiz_questions.prompt_text``.
+    * ``correct_count`` — answers where ``is_correct`` (completed attempts).
+    * ``answered_count`` — total answers (completed attempts) for the question.
+    * ``correctness_rate`` — ``correct_count / answered_count`` (0..1);
+      ``None`` when ``answered_count == 0``.
+    * ``option_distribution`` — for MCQ (``multiple_choice`` / ``true_false``):
+      one entry per option ``{option_id, option_key, option_text, is_correct,
+      chosen_count}``; ``[]`` for non-MCQ question types.
+
+    ``chosen_count`` counts completed-attempt answers whose
+    ``selected_option_id`` is that option; options nobody picked report ``0``.
+    """
+    # (a) Per-question correct/answered counts over COMPLETED attempts only.
+    # LEFT JOIN so questions with zero answers still return a row.
+    per_question_sql = text(
+        "SELECT q.id AS question_id, q.prompt_text AS prompt, "
+        "       q.question_type AS question_type, q.position AS position, "
+        "       count(ans.id) AS answered_count, "
+        "       count(ans.id) FILTER (WHERE ans.is_correct) AS correct_count "
+        "FROM quiz_questions q "
+        "LEFT JOIN quiz_attempt_answers ans ON ans.question_id = q.id "
+        "LEFT JOIN quiz_attempts att "
+        "  ON att.id = ans.attempt_id AND att.status IN ('submitted', 'graded') "
+        "WHERE q.quiz_id = :quiz_id AND q.deleted_at IS NULL "
+        "  AND (ans.id IS NULL OR att.id IS NOT NULL) "
+        "GROUP BY q.id, q.prompt_text, q.question_type, q.position "
+        "ORDER BY q.position ASC"
+    )
+
+    # (b) Per-option chosen counts over COMPLETED attempts only.
+    # LEFT JOIN so options nobody picked still return chosen_count = 0.
+    per_option_sql = text(
+        "SELECT o.question_id AS question_id, o.id AS option_id, "
+        "       o.option_key AS option_key, o.option_text AS option_text, "
+        "       o.is_correct AS is_correct, o.position AS position, "
+        "       count(ans.id) AS chosen_count "
+        "FROM quiz_question_options o "
+        "JOIN quiz_questions q ON q.id = o.question_id "
+        "LEFT JOIN quiz_attempt_answers ans ON ans.selected_option_id = o.id "
+        "LEFT JOIN quiz_attempts att "
+        "  ON att.id = ans.attempt_id AND att.status IN ('submitted', 'graded') "
+        "WHERE q.quiz_id = :quiz_id AND q.deleted_at IS NULL "
+        "  AND o.deleted_at IS NULL "
+        "  AND (ans.id IS NULL OR att.id IS NOT NULL) "
+        "GROUP BY o.question_id, o.id, o.option_key, o.option_text, "
+        "         o.is_correct, o.position "
+        "ORDER BY o.position ASC"
+    )
+
+    question_rows = (await db.execute(per_question_sql, {"quiz_id": quiz_id})).all()
+    option_rows = (await db.execute(per_option_sql, {"quiz_id": quiz_id})).all()
+
+    # Group options by question_id (already ordered by option position).
+    options_by_question: dict[UUID, list[dict[str, Any]]] = {}
+    for row in option_rows:
+        options_by_question.setdefault(row.question_id, []).append(
+            {
+                "option_id": row.option_id,
+                "option_key": row.option_key,
+                "option_text": row.option_text,
+                "is_correct": bool(row.is_correct),
+                "chosen_count": int(row.chosen_count or 0),
+            }
+        )
+
+    results: list[dict[str, Any]] = []
+    for row in question_rows:
+        answered = int(row.answered_count or 0)
+        correct = int(row.correct_count or 0)
+        rate = (correct / answered) if answered else None
+        has_options = row.question_type in _QUESTION_TYPES_WITH_OPTIONS
+        distribution = options_by_question.get(row.question_id, []) if has_options else []
+        results.append(
+            {
+                "question_id": row.question_id,
+                "prompt": row.prompt,
+                "correct_count": correct,
+                "answered_count": answered,
+                "correctness_rate": rate,
+                "option_distribution": distribution,
+                "_position": row.position,
+            }
+        )
+
+    # Order by correctness_rate ASC (hardest first); NULL (unanswered) sorts
+    # last; position ASC as a stable tiebreaker. Done in Python so the NULL
+    # ordering and rate computation stay together and testable.
+    results.sort(
+        key=lambda r: (
+            r["correctness_rate"] is None,
+            r["correctness_rate"] if r["correctness_rate"] is not None else 0.0,
+            r["_position"],
+        )
+    )
+    for r in results:
+        del r["_position"]
+    return results
+
+
 __all__ = [
     "list_attempts_for_course",
     "list_attempts_for_student_in_course",
     "quiz_completion_rate",
+    "quiz_question_breakdown",
     "quiz_results_summary",
     "top_missed_questions",
 ]
