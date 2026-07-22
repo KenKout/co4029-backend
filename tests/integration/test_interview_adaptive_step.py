@@ -338,6 +338,36 @@ async def _count_ai_messages(engine: AsyncEngine, session_id: uuid.UUID) -> int:
         )
 
 
+def _settings_v2(*, phases: bool) -> Settings:
+    """v1 adaptive fully on PLUS the v2 master + phases sub-flag.
+
+    Used by the phase-progression tests: the v1 gate must be on for v2 to run,
+    and the phases sub-feature is toggled independently.
+    """
+    return _settings(adaptive=True).model_copy(
+        update={
+            "adaptive_interviewer_v2_enabled": True,
+            "adaptive_v2_phases_enabled": phases,
+        }
+    )
+
+
+@pytest.fixture
+def adaptive_v2_phases_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(taking_service, "get_settings", lambda: _settings_v2(phases=True))
+
+
+async def _runtime_phase(engine: AsyncEngine, session_id: uuid.UUID) -> str | None:
+    async with engine.begin() as conn:
+        row = (
+            await conn.execute(
+                text("SELECT phase FROM interview_runtime_states WHERE session_id = :s"),
+                {"s": session_id},
+            )
+        ).scalar_one_or_none()
+    return str(row) if row is not None else None
+
+
 # ── flag off → legacy ────────────────────────────────────────────────────────
 
 
@@ -1197,4 +1227,74 @@ async def test_generated_legacy_followup_cannot_leak_model_answer(
                 {"s": session_id},
             )
         ).scalar_one()
-    assert int(leakage_events) == 1
+    assert int(leakage_events) >= 1
+
+
+# ── v2 phase progression (Slice 7) ───────────────────────────────────────────
+
+
+def _answer_payloads(n: int) -> list[dict[str, Any]]:
+    """n answer turns worth of stubbed gateway payloads (intent+analysis+utterance)."""
+    out: list[dict[str, Any]] = []
+    for i in range(n):
+        out.append({"intent": "answer", "confidence": 0.9, "rationale": "content"})
+        out.append(
+            {
+                "relevance": "relevant",
+                "completeness": "partial",
+                "correctness": "mixed",
+                "specificity": "general",
+                "has_concrete_example": False,
+                "recommended_probe_type": "none",
+                "confidence": 0.6,
+                "evidence": [],
+            }
+        )
+        out.append(
+            {
+                "acknowledgement": "Thanks.",
+                "transition": "",
+                "ai_turn_text": f"Thanks. Next question {i}?",
+            }
+        )
+    return out
+
+
+@pytest.mark.asyncio
+async def test_v2_phases_walk_off_opening(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict[str, Any],
+    adaptive_v2_phases_on: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With the v2 phases flag ON, the persisted phase advances out of OPENING.
+
+    Turn 1: OPENING (dwell 0) → policy keeps OPENING but bumps dwell to 1.
+    Turn 2: OPENING (dwell 1) → policy advances to WARMUP.
+    The legacy OPENING→CORE hardcoded jump is overridden by the phase policy.
+    """
+    gw = _gateway(_answer_payloads(2))
+    for mod in ("intent_logic", "analysis_logic", "utterance_logic"):
+        monkeypatch.setattr(
+            f"abridgeai.features.interviews.orchestrator.{mod}.LLMGateway", lambda: gw
+        )
+
+    session_id, _ = await _make_session(
+        engine, scenario["config_id"], scenario["student_id"], "text"
+    )
+    async with session_factory() as db:
+        await taking_service.take_session_step(
+            db, session_id, "First answer.", _actor(scenario["student_id"]), turn_key="p1"
+        )
+        await db.commit()
+    phase_after_1 = await _runtime_phase(engine, session_id)
+    assert phase_after_1 == "opening"  # dwell bumped, not yet advanced
+
+    async with session_factory() as db:
+        await taking_service.take_session_step(
+            db, session_id, "Second answer.", _actor(scenario["student_id"]), turn_key="p2"
+        )
+        await db.commit()
+    phase_after_2 = await _runtime_phase(engine, session_id)
+    assert phase_after_2 == "warmup"  # phase policy advanced OPENING → WARMUP

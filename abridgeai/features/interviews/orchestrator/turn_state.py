@@ -85,9 +85,18 @@ def apply_state_updates(  # noqa: C901 -- explicit action branches are auditable
     decision: Any,  # noqa: ANN401
     selected_question_id: str | None,
     target_outcome_id: str | None,
+    target_phase: InterviewPhase | None = None,
 ) -> None:
-    """Mutate the loaded state in memory (NO save here — caller saves once)."""
+    """Mutate the loaded state in memory (NO save here — caller saves once).
+
+    ``target_phase`` (Slice 7, v2) is the phase the phase-policy decided the
+    next turn should be in. When provided, it AUTHORITATIVELY sets ``data.phase``
+    and maintains ``turns_in_phase`` (reset to 0 on a phase change, else +1),
+    overriding the v1 hardcoded OPENING→CORE / →CLOSING transitions below. When
+    None (v2 phases disabled), the legacy transitions run unchanged — v1 parity.
+    """
     now = datetime.now(UTC).isoformat()
+    phase_at_entry = data.phase  # captured before v1 transitions mutate data.phase
     data.last_student_intent = intent.to_dict()
 
     # Candidate signals.
@@ -158,6 +167,19 @@ def apply_state_updates(  # noqa: C901 -- explicit action branches are auditable
         # A probe / clarify / repeat keeps the same question → count the follow-up.
         data.current_question_follow_up_count += 1
         data.total_follow_up_count += 1
+
+    # Phase progression (Slice 7, v2). When the phase policy supplied a target
+    # phase it is authoritative: it overrides the v1 hardcoded transitions above
+    # (which already ran, but the explicit set here wins) and maintains the
+    # phase-dwell counter. A phase CHANGE resets turns_in_phase to 0; staying in
+    # the same phase increments it, so the policy can measure dwell next turn.
+    if target_phase is not None:
+        if target_phase is not phase_at_entry:
+            data.phase = target_phase
+            data.turns_in_phase = 0
+        else:
+            data.phase = target_phase
+            data.turns_in_phase += 1
 
     if target_outcome_id:
         data.current_outcome_id = target_outcome_id

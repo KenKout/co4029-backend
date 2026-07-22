@@ -457,6 +457,10 @@ async def take_session_step(  # noqa: C901 - shared legacy/adaptive turn coordin
         config_id=str(session.interview_config_id),
     )
 
+    # v2 phase-progression sub-feature (Slice 7). Resolved once here and threaded
+    # into both the live and shadow adaptive calls. Defaults OFF → v1 behaviour.
+    phases_enabled = settings.adaptive_v2_feature_enabled(session.input_mode, "phases")
+
     if adaptive_on:
         adaptive_result = await _try_adaptive_step(
             db,
@@ -470,6 +474,7 @@ async def take_session_step(  # noqa: C901 - shared legacy/adaptive turn coordin
             security_assessment=security_stage.assessment,
             security_action=security_stage.action,
             security_attempt_count=security_stage.attempt_count,
+            phases_enabled=phases_enabled,
         )
         if adaptive_result is not None:
             return adaptive_result
@@ -540,6 +545,7 @@ async def take_session_step(  # noqa: C901 - shared legacy/adaptive turn coordin
             security_assessment=security_stage.assessment,
             security_action=security_stage.action,
             security_attempt_count=security_stage.attempt_count,
+            phases_enabled=phases_enabled,
         )
 
     return await _legacy_advance(
@@ -1287,6 +1293,7 @@ async def _try_adaptive_step(
     security_assessment: SecurityAssessment | None = None,
     security_action: SecurityAction = SecurityAction.ALLOW,
     security_attempt_count: int = 0,
+    phases_enabled: bool = False,
 ) -> dict[str, Any] | None:
     """Attempt one adaptive turn. Returns the canonical result, or None to fall back.
 
@@ -1359,6 +1366,7 @@ async def _try_adaptive_step(
                 security_assessment=security_assessment,
                 security_action=security_action,
                 security_attempt_count=security_attempt_count,
+                phases_enabled=phases_enabled,
             )
         if outcome.result is not None:
             _emit_live_decision(session_id, outcome.result)
@@ -1414,6 +1422,7 @@ async def _run_shadow_step(
     security_assessment: SecurityAssessment | None = None,
     security_action: SecurityAction = SecurityAction.ALLOW,
     security_attempt_count: int = 0,
+    phases_enabled: bool = False,
 ) -> None:
     """Compute the adaptive decision for comparison WITHOUT driving the student.
 
@@ -1454,6 +1463,7 @@ async def _run_shadow_step(
                 security_assessment=security_assessment,
                 security_action=security_action,
                 security_attempt_count=security_attempt_count,
+                phases_enabled=phases_enabled,
             )
             canonical = outcome.result or {}
             # Emit the shadow decision (no transcript content — same privacy

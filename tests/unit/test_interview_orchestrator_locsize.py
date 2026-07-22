@@ -18,9 +18,13 @@ def test_no_god_file_in_orchestrator() -> None:
     assert target.is_dir()
     hard_cap = 800  # feature-wide "no god files" ceiling
     soft_budget = {
-        # decomposition targets (Slice 7); keep these lean
-        "adaptive.py": 400,
-        "decision.py": 600,
+        # adaptive.py is the orchestration seam: it threads each v2 feature's
+        # flag + small wiring block through run_adaptive_turn, so it grows a
+        # little per slice. Pure logic lives in sibling modules (phases.py,
+        # turn_state.py, difficulty.py, ...), not here. 500 keeps it lean with
+        # headroom, well under the 800 feature-wide hard cap.
+        "adaptive.py": 500,
+        "decision.py": 550,
     }
     offenders = []
     for path in target.rglob("*.py"):

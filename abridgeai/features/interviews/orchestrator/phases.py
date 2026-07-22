@@ -85,4 +85,41 @@ def phase_difficulty_bias(phase: InterviewPhase) -> int:
     return _DIFFICULTY_BIAS.get(phase, 0)
 
 
-__all__ = ["PhaseInputs", "next_phase", "phase_difficulty_bias"]
+def resolve_phase_and_level(
+    *,
+    current_phase: InterviewPhase,
+    turns_in_phase: int,
+    warmup_turns_target: int,
+    all_required_covered: bool,
+    time_fraction_remaining: float | None,
+    total_follow_up_count: int,
+    max_total_follow_ups: int,
+    student_level: int,
+) -> tuple[InterviewPhase, int]:
+    """Compute the next phase and the phase-biased difficulty level.
+
+    Convenience wrapper so ``run_adaptive_turn`` stays lean: builds the
+    ``PhaseInputs``, derives the depth budget from the follow-up counters,
+    applies :func:`phase_difficulty_bias` to ``student_level`` and clamps it to
+    the junior..senior band (1..3). Returns ``(target_phase, biased_level)``.
+    """
+    target_phase = next_phase(
+        PhaseInputs(
+            current_phase=current_phase,
+            turns_in_phase=turns_in_phase,
+            all_required_covered=all_required_covered,
+            time_fraction_remaining=time_fraction_remaining,
+            depth_budget_remaining=total_follow_up_count < max_total_follow_ups,
+            warmup_turns_target=warmup_turns_target,
+        )
+    )
+    biased_level = max(1, min(3, student_level + phase_difficulty_bias(target_phase)))
+    return target_phase, biased_level
+
+
+__all__ = [
+    "PhaseInputs",
+    "next_phase",
+    "phase_difficulty_bias",
+    "resolve_phase_and_level",
+]

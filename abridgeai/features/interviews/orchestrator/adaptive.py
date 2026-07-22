@@ -52,6 +52,7 @@ from abridgeai.features.interviews.orchestrator.analysis import AnswerAnalysis
 from abridgeai.features.interviews.orchestrator.analysis_logic import analyze_answer
 from abridgeai.features.interviews.orchestrator.coverage import is_provisionally_sufficient
 from abridgeai.features.interviews.orchestrator.decision import (
+    DEFAULT_MAX_TOTAL_FOLLOWUPS,
     DecisionInputs,
     decide_next_action,
 )
@@ -62,6 +63,7 @@ from abridgeai.features.interviews.orchestrator.difficulty import (
 from abridgeai.features.interviews.orchestrator.intent import StudentIntent
 from abridgeai.features.interviews.orchestrator.intent_logic import classify_intent
 from abridgeai.features.interviews.orchestrator.mapping import canonical_step_result
+from abridgeai.features.interviews.orchestrator.phases import resolve_phase_and_level
 from abridgeai.features.interviews.orchestrator.security import (
     SecurityAction,
     SecurityAssessment,
@@ -122,6 +124,7 @@ async def run_adaptive_turn(
     security_assessment: SecurityAssessment | None = None,
     security_action: SecurityAction = SecurityAction.ALLOW,
     security_attempt_count: int = 0,
+    phases_enabled: bool = False,
 ) -> AdaptiveOutcome:
     """Run one adaptive turn. MUST be called inside a caller-owned savepoint.
 
@@ -225,13 +228,33 @@ async def run_adaptive_turn(
     )
     all_required_covered = len(uncovered_required) == 0 and len(outcomes) > 0
 
+    time_fraction = turn_perception.time_fraction_remaining(session, config)
+
+    # Phase progression (Slice 7, v2). When the phases feature is enabled we
+    # compute the phase the NEXT turn should be in and bias the difficulty
+    # target accordingly (warmup eases down, deep-probe pushes up). When the
+    # flag is OFF, target_phase stays the current phase and the bias is 0, so
+    # ``student_level`` and every downstream decision are byte-for-byte v1.
+    target_phase = data.phase
+    if phases_enabled:
+        target_phase, student_level = resolve_phase_and_level(
+            current_phase=data.phase,
+            turns_in_phase=data.turns_in_phase,
+            warmup_turns_target=data.warmup_turns_target,
+            all_required_covered=all_required_covered,
+            time_fraction_remaining=time_fraction,
+            total_follow_up_count=data.total_follow_up_count,
+            max_total_follow_ups=DEFAULT_MAX_TOTAL_FOLLOWUPS,
+            student_level=student_level,
+        )
+
     ctx = SelectionContext(
         asked_question_ids=asked,
         skipped_question_ids=skipped,
         outcome_evidence_counts=coverage_points,
         uncovered_required_outcome_ids=uncovered_required,
         student_difficulty_level=student_level,
-        time_fraction_remaining=turn_perception.time_fraction_remaining(session, config),
+        time_fraction_remaining=time_fraction,
         last_targeted_outcome_id=data.current_outcome_id,
     )
     scored = select_next_question(candidates, ctx)
@@ -360,6 +383,7 @@ async def run_adaptive_turn(
         decision=decision,
         selected_question_id=(str(selected_orm.id) if selected_orm is not None else None),
         target_outcome_id=decision.target_outcome_id,
+        target_phase=target_phase if phases_enabled else None,
     )
 
     canonical = canonical_step_result(
