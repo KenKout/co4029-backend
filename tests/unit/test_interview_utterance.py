@@ -211,6 +211,115 @@ def test_nervous_affect_bilingual() -> None:
     assert "  " not in en.ai_turn_text
 
 
+# ── communication polish: time-pressure + recovery lead-ins (Slice 20) ───────
+
+
+def test_time_pressure_lead_in_prepended_when_enabled() -> None:
+    d = _decision(InterviewerActionType.TRANSITION_TOPIC, ack=AcknowledgementStyle.NEUTRAL)
+    base = build_fallback_utterance(d, persona=Persona.NEUTRAL, language="en", question_text="Q?")
+    pressed = build_fallback_utterance(
+        d, persona=Persona.NEUTRAL, language="en", question_text="Q?", time_pressure=True
+    )
+    # A short "we're short on time, let's prioritise" lead-in is prepended; the
+    # question/probe is preserved verbatim.
+    assert pressed.ai_turn_text != base.ai_turn_text
+    assert len(pressed.ai_turn_text) > len(base.ai_turn_text)
+    assert pressed.question_or_probe == base.question_or_probe
+
+
+def test_time_pressure_lead_in_bilingual() -> None:
+    d = _decision(InterviewerActionType.TRANSITION_TOPIC, ack=AcknowledgementStyle.NEUTRAL)
+    en = build_fallback_utterance(
+        d, persona=Persona.NEUTRAL, language="en", question_text="Q?", time_pressure=True
+    )
+    vi = build_fallback_utterance(
+        d, persona=Persona.NEUTRAL, language="vi", question_text="Q?", time_pressure=True
+    )
+    assert en.ai_turn_text != vi.ai_turn_text  # localized
+    assert "  " not in en.ai_turn_text
+    assert "  " not in vi.ai_turn_text
+
+
+def test_recovery_lead_in_prepended_when_enabled() -> None:
+    d = _decision(InterviewerActionType.TRANSITION_TOPIC, ack=AcknowledgementStyle.NEUTRAL)
+    base = build_fallback_utterance(d, persona=Persona.NEUTRAL, language="en", question_text="Q?")
+    recover = build_fallback_utterance(
+        d, persona=Persona.NEUTRAL, language="en", question_text="Q?", recovery=True
+    )
+    assert recover.ai_turn_text != base.ai_turn_text
+    assert len(recover.ai_turn_text) > len(base.ai_turn_text)
+    assert recover.question_or_probe == base.question_or_probe
+
+
+def test_recovery_lead_in_bilingual() -> None:
+    d = _decision(InterviewerActionType.TRANSITION_TOPIC, ack=AcknowledgementStyle.NEUTRAL)
+    en = build_fallback_utterance(
+        d, persona=Persona.NEUTRAL, language="en", question_text="Q?", recovery=True
+    )
+    vi = build_fallback_utterance(
+        d, persona=Persona.NEUTRAL, language="vi", question_text="Q?", recovery=True
+    )
+    assert en.ai_turn_text != vi.ai_turn_text
+    assert "  " not in en.ai_turn_text
+    assert "  " not in vi.ai_turn_text
+
+
+def test_lead_in_precedence_recovery_over_time_pressure_over_affect() -> None:
+    # Only ONE lead-in is ever prepended (no stacking). Precedence is
+    # recovery > time_pressure > affect, so a struggling candidate is rebuilt
+    # rather than also told "we're short on time" or "you're doing fine".
+    from abridgeai.features.interviews.orchestrator.affect import Affect
+
+    d = _decision(InterviewerActionType.TRANSITION_TOPIC, ack=AcknowledgementStyle.NEUTRAL)
+    recovery_only = build_fallback_utterance(
+        d, persona=Persona.NEUTRAL, language="en", question_text="Q?", recovery=True
+    )
+    all_three = build_fallback_utterance(
+        d,
+        persona=Persona.NEUTRAL,
+        language="en",
+        question_text="Q?",
+        recovery=True,
+        time_pressure=True,
+        affect=Affect.NERVOUS,
+    )
+    # Recovery wins outright — identical to recovery-only (no stacked lead-ins).
+    assert all_three.ai_turn_text == recovery_only.ai_turn_text
+
+
+def test_time_pressure_wins_over_affect() -> None:
+    from abridgeai.features.interviews.orchestrator.affect import Affect
+
+    d = _decision(InterviewerActionType.TRANSITION_TOPIC, ack=AcknowledgementStyle.NEUTRAL)
+    tp_only = build_fallback_utterance(
+        d, persona=Persona.NEUTRAL, language="en", question_text="Q?", time_pressure=True
+    )
+    tp_and_affect = build_fallback_utterance(
+        d,
+        persona=Persona.NEUTRAL,
+        language="en",
+        question_text="Q?",
+        time_pressure=True,
+        affect=Affect.NERVOUS,
+    )
+    assert tp_and_affect.ai_turn_text == tp_only.ai_turn_text
+
+
+def test_no_polish_flags_is_byte_for_byte_v1() -> None:
+    # Parity: with neither new signal, the utterance is unchanged from v1.
+    d = _decision(InterviewerActionType.TRANSITION_TOPIC, ack=AcknowledgementStyle.NEUTRAL)
+    base = build_fallback_utterance(d, persona=Persona.NEUTRAL, language="en", question_text="Q?")
+    same = build_fallback_utterance(
+        d,
+        persona=Persona.NEUTRAL,
+        language="en",
+        question_text="Q?",
+        time_pressure=False,
+        recovery=False,
+    )
+    assert base.ai_turn_text == same.ai_turn_text
+
+
 # ── laddered hints & rephrasing variants (Slice 11) ──────────────────────────
 
 

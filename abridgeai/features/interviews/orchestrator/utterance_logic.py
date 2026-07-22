@@ -55,6 +55,8 @@ async def generate_utterance(
     affect: object | None = None,
     hint_level: int = 0,
     reframe_count: int = 0,
+    time_pressure: bool = False,
+    recovery: bool = False,
     pipeline_run_id: UUID | None = None,
     gateway: LLMGateway | None = None,
 ) -> tuple[Utterance, str]:
@@ -73,6 +75,8 @@ async def generate_utterance(
         affect=affect,
         hint_level=hint_level,
         reframe_count=reframe_count,
+        time_pressure=time_pressure,
+        recovery=recovery,
     )
     if not use_llm:
         return fallback, "fallback"

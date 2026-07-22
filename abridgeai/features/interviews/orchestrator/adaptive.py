@@ -148,6 +148,34 @@ def _is_rambling(
     return detect_affect(answer_text=answer_text, analysis=analysis) is Affect.RAMBLING
 
 
+# Communication-polish thresholds (Slice 20, v2).
+_COMMS_TIME_PRESSURE_FRACTION = 0.2  # signal to prioritise below this time fraction
+_COMMS_RECOVERY_WEAK_STREAK = 2  # rebuild after this many consecutive weak answers
+
+
+def _comms_polish_signals(
+    *,
+    time_fraction_remaining: float | None,
+    consecutive_weak_answers: int,
+    enabled: bool,
+) -> tuple[bool, bool]:
+    """Return ``(time_pressure, recovery)`` tone signals (Slice 20, v2).
+
+    ``time_pressure`` fires when little time remains so the interviewer can tell
+    the candidate to prioritise; ``recovery`` fires after a weak streak so a
+    rattled candidate gets an encouraging, scoped lead-in. TONE ONLY — these
+    feed the utterance lead-in, never the decision. Off → (False, False) → v1.
+    """
+    if not enabled:
+        return False, False
+    time_pressure = (
+        time_fraction_remaining is not None
+        and time_fraction_remaining <= _COMMS_TIME_PRESSURE_FRACTION
+    )
+    recovery = consecutive_weak_answers >= _COMMS_RECOVERY_WEAK_STREAK
+    return time_pressure, recovery
+
+
 async def run_adaptive_turn(
     db: AsyncSession,
     *,
@@ -173,6 +201,7 @@ async def run_adaptive_turn(
     confident_wrong_challenge_enabled: bool = False,
     rambling_redirect_enabled: bool = False,
     backtrack_undercovered_enabled: bool = False,
+    comms_polish_enabled: bool = False,
 ) -> AdaptiveOutcome:
     """Run one adaptive turn. MUST be called inside a caller-owned savepoint.
 
@@ -380,6 +409,14 @@ async def run_adaptive_turn(
     # reframe escalates next turn. Gated: off → level 0 → v1 wording.
     hint_level = data.hint_level if hint_ladder_enabled else 0
     reframe_count = data.reframe_count if hint_ladder_enabled else 0
+    # Communication polish (Slice 20, v2): TONE-ONLY lead-ins — signal time
+    # pressure when little time remains, and an encouraging recovery framing
+    # after a weak streak. Gated: off → (False, False) → v1 wording.
+    time_pressure, recovery = _comms_polish_signals(
+        time_fraction_remaining=time_fraction,
+        consecutive_weak_answers=data.consecutive_weak_answers,
+        enabled=comms_polish_enabled,
+    )
     utterance, utt_status = await generate_utterance(
         db,
         decision,
@@ -390,6 +427,8 @@ async def run_adaptive_turn(
         affect=affect,
         hint_level=hint_level,
         reframe_count=reframe_count,
+        time_pressure=time_pressure,
+        recovery=recovery,
     )
     fallback_utterance = build_fallback_utterance(
         decision,
@@ -399,6 +438,8 @@ async def run_adaptive_turn(
         affect=affect,
         hint_level=hint_level,
         reframe_count=reframe_count,
+        time_pressure=time_pressure,
+        recovery=recovery,
     )
     assessment = security_assessment or SecurityAssessment(
         category=SecurityCategory.BENIGN,

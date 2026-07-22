@@ -502,6 +502,38 @@ def _affect_lead_in(affect_value: str | None, lang: str) -> str:
     return _AFFECT_LEAD_IN.get((affect_value, lang), "")
 
 
+# Communication-polish lead-ins (Slice 20, v2). Same TONE-ONLY mechanism as the
+# affect lead-in: prepended to the acknowledgement, never touching the
+# question/probe or control flow. ``time_pressure`` signals the candidate to
+# prioritise when little time remains; ``recovery`` rebuilds a rattled candidate
+# after a weak streak with an encouraging, scoped lead-in.
+_TIME_PRESSURE_LEAD_IN: dict[str, str] = {
+    "en": "We're a little short on time, so let's prioritise.",
+    "vi": "Chúng ta còn hơi ít thời gian, nên hãy tập trung vào điểm chính.",
+}
+_RECOVERY_LEAD_IN: dict[str, str] = {
+    "en": "No problem — let's take a fresh, straightforward one.",
+    "vi": "Không sao — mình thử một câu nhẹ nhàng, rõ ràng hơn nhé.",
+}
+
+
+def _polish_lead_in(
+    *, recovery: bool, time_pressure: bool, affect_value: str | None, lang: str
+) -> str:
+    """Pick the single lead-in to prepend (Slice 20, v2).
+
+    Precedence: recovery > time_pressure > affect. Only ONE lead-in is ever
+    prepended so the tones never stack (a struggling candidate is rebuilt, not
+    also told "we're short on time" and "you're doing fine"). With neither new
+    signal set, this falls through to the existing affect lead-in → v1 wording.
+    """
+    if recovery:
+        return _RECOVERY_LEAD_IN.get(lang, "")
+    if time_pressure:
+        return _TIME_PRESSURE_LEAD_IN.get(lang, "")
+    return _affect_lead_in(affect_value, lang)
+
+
 def build_fallback_utterance(
     decision: InterviewerDecision,
     *,
@@ -511,6 +543,8 @@ def build_fallback_utterance(
     affect: object | None = None,
     hint_level: int = 0,
     reframe_count: int = 0,
+    time_pressure: bool = False,
+    recovery: bool = False,
 ) -> Utterance:
     """Deterministic, persona-aware, bilingual utterance for a decision.
 
@@ -536,7 +570,12 @@ def build_fallback_utterance(
         reframe_count=reframe_count,
     )
     affect_value = getattr(affect, "value", affect) if affect is not None else None
-    lead_in = _affect_lead_in(affect_value if isinstance(affect_value, str) else None, lang)
+    lead_in = _polish_lead_in(
+        recovery=recovery,
+        time_pressure=time_pressure,
+        affect_value=affect_value if isinstance(affect_value, str) else None,
+        lang=lang,
+    )
     ack = _combine(lead_in, "", ack) if lead_in else ack
     return Utterance(
         acknowledgement=ack,

@@ -350,6 +350,7 @@ def _settings_v2(
     confident_wrong_challenge: bool = False,
     rambling_redirect: bool = False,
     backtrack_undercovered: bool = False,
+    comms_polish: bool = False,
 ) -> Settings:
     """v1 adaptive fully on PLUS the v2 master + selected sub-flags.
 
@@ -369,6 +370,7 @@ def _settings_v2(
             "adaptive_v2_confident_wrong_challenge_enabled": confident_wrong_challenge,
             "adaptive_v2_rambling_redirect_enabled": rambling_redirect,
             "adaptive_v2_backtrack_undercovered_enabled": backtrack_undercovered,
+            "adaptive_v2_comms_polish_enabled": comms_polish,
         }
     )
 
@@ -2009,4 +2011,40 @@ async def test_backtrack_flag_threads_cleanly_and_advances(
         await db.commit()
     # The adaptive pipeline drove the turn (action present) rather than falling
     # back to legacy — proving the new flag threaded through all wiring sites.
+    assert result.get("action") is not None
+
+
+# ── Slice 20: communication polish (tone-only lead-ins) ──────────────────────
+# Time-pressure + recovery are TONE-ONLY utterance lead-ins, not decision
+# changes. The lead-in composition + precedence is proven deterministically in
+# the unit suite; here we just prove the flag threads cleanly through the whole
+# pipeline and a normal turn still drives adaptive (advances) rather than
+# falling back to legacy.
+
+
+@pytest.mark.asyncio
+async def test_comms_polish_flag_threads_cleanly_and_advances(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(taking_service, "get_settings", lambda: _settings_v2(comms_polish=True))
+    gw = _plain_answer_gateway()
+    for mod in ("intent_logic", "analysis_logic", "utterance_logic"):
+        monkeypatch.setattr(
+            f"abridgeai.features.interviews.orchestrator.{mod}.LLMGateway", lambda: gw
+        )
+    session_id, _ = await _make_session(
+        engine, scenario["config_id"], scenario["student_id"], "text"
+    )
+    async with session_factory() as db:
+        result = await taking_service.take_session_step(
+            db,
+            session_id,
+            "A solid, on-topic answer.",
+            _actor(scenario["student_id"]),
+            turn_key="cp-1",
+        )
+        await db.commit()
     assert result.get("action") is not None

@@ -23,9 +23,10 @@ def test_no_god_file_in_orchestrator() -> None:
         # little per slice. Pure logic lives in sibling modules (phases.py,
         # turn_state.py, difficulty.py, ...), not here. Each v2 slice adds a
         # flag param + a small wiring block (and the realism cluster added the
-        # _is_rambling seam helper), so it creeps up a little per slice. 540
-        # keeps it lean with headroom, well under the 800 feature-wide hard cap.
-        "adaptive.py": 540,
+        # _is_rambling / _comms_polish_signals seam helpers), so it creeps up a
+        # little per slice. 580 keeps it lean with headroom, well under the 800
+        # feature-wide hard cap.
+        "adaptive.py": 580,
         # decision.py is the deterministic policy core: every v2 slice that adds
         # a decision rule (depth probe, rich-closing sub-state machine, the
         # realism cluster — self-correction / confident-but-wrong / rambling
