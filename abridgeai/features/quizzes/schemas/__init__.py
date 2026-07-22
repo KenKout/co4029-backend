@@ -47,6 +47,14 @@ from abridgeai.features.quizzes.schemas.public import (
     QuizQuestionOptionPublic,
     QuizQuestionPublic,
 )
+from abridgeai.features.quizzes.schemas.results import (
+    QuizOptionDistribution,
+    QuizPerStudentRow,
+    QuizQuestionBreakdown,
+    QuizResultsRead,
+    QuizResultsSummary,
+    QuizScoreBucket,
+)
 from abridgeai.features.quizzes.schemas.run import (
     CoverageOptions,
     GenerationMode,
@@ -83,9 +91,15 @@ __all__ = [
     "QuizForTakingPublic",
     "QuizGenerationRequest",
     "QuizGenerationRunRead",
+    "QuizOptionDistribution",
+    "QuizPerStudentRow",
     "QuizPublic",
     "QuizQuestionAuthoring",
+    "QuizQuestionBreakdown",
     "QuizQuestionOptionAuthoring",
     "QuizQuestionOptionPublic",
     "QuizQuestionPublic",
+    "QuizResultsRead",
+    "QuizResultsSummary",
+    "QuizScoreBucket",
 ]

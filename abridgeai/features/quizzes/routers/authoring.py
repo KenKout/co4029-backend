@@ -58,7 +58,13 @@ from abridgeai.features.quizzes.schemas import (
     QuizForAuthoringPublic,
     QuizGenerationRequest,
     QuizGenerationRunRead,
+    QuizOptionDistribution,
+    QuizPerStudentRow,
     QuizQuestionAuthoring,
+    QuizQuestionBreakdown,
+    QuizResultsRead,
+    QuizResultsSummary,
+    QuizScoreBucket,
 )
 from abridgeai.features.quizzes.services import (
     authoring as authoring_service,
@@ -293,6 +299,80 @@ async def list_student_quiz_attempts(
     names = await _resolve_student_names(db, {student_id})
     student_name = names.get(student_id)
     return [_attempt_teacher_view(row.QuizAttempt, row.title, student_name) for row in rows]
+
+
+@router.get(
+    "/quizzes/{quiz_id}/results",
+    response_model=QuizResultsRead,
+)
+async def get_quiz_results(
+    quiz_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_QUIZ)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> QuizResultsRead:
+    """Assemble the full teacher-facing results analytics payload for a quiz.
+
+    Combines the grading-method-aware summary, a per-student rollup, and the
+    per-question breakdown into one response. A quiz with zero completed
+    attempts returns a zeroed summary + empty ``per_student`` while
+    ``per_question`` still lists every question (zero counts).
+    """
+    del current_user  # permission already enforced by Depends
+    from abridgeai.features.quizzes.queries import analytics as _analytics_q  # noqa: PLC0415
+
+    quiz = await db.get(Quiz, quiz_id)
+    if quiz is None:
+        raise _not_found("quiz", quiz_id)
+
+    summary_dict = await _analytics_q.quiz_results_summary(db, quiz_id, quiz.grading_method)
+    per_question_list = await _analytics_q.quiz_question_breakdown(db, quiz_id)
+    rollup = await _analytics_q.quiz_per_student_rollup(db, quiz_id)
+
+    names = await _resolve_student_names(db, {row["student_id"] for row in rollup})
+
+    summary = QuizResultsSummary(
+        total_attempts=summary_dict["total_attempts"],
+        unique_students=summary_dict["unique_students"],
+        mean_score=summary_dict["mean_score"],
+        median_score=summary_dict["median_score"],
+        p25=summary_dict["p25"],
+        p75=summary_dict["p75"],
+        pass_rate=summary_dict["pass_rate"],
+        mean_time_seconds=summary_dict["mean_time_seconds"],
+        histogram=[QuizScoreBucket(**bucket) for bucket in summary_dict["histogram"]],
+    )
+    per_student = [
+        QuizPerStudentRow(
+            student_id=row["student_id"],
+            student_name=names.get(row["student_id"]),
+            best_score_percent=row["best_score_percent"],
+            latest_score_percent=row["latest_score_percent"],
+            attempts_count=row["attempts_count"],
+            passed=row["passed"],
+            last_attempt_at=row["last_attempt_at"],
+        )
+        for row in rollup
+    ]
+    per_question = [
+        QuizQuestionBreakdown(
+            question_id=q["question_id"],
+            prompt=q["prompt"],
+            correct_count=q["correct_count"],
+            answered_count=q["answered_count"],
+            correctness_rate=q["correctness_rate"],
+            option_distribution=[QuizOptionDistribution(**opt) for opt in q["option_distribution"]],
+        )
+        for q in per_question_list
+    ]
+    return QuizResultsRead(
+        quiz_id=quiz.id,
+        quiz_title=quiz.title,
+        passing_score_percent=quiz.passing_score_percent,
+        grading_method=quiz.grading_method,
+        summary=summary,
+        per_student=per_student,
+        per_question=per_question,
+    )
 
 
 @router.patch("/quizzes/{quiz_id}", response_model=QuizAuthoring)

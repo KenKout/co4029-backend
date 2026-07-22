@@ -256,6 +256,50 @@ async def list_attempts_for_student_in_course(
     return list((await db.execute(stmt)).all())
 
 
+async def quiz_per_student_rollup(db: AsyncSession, quiz_id: UUID) -> list[dict[str, Any]]:
+    """Per-student rollup over COMPLETED attempts for a single quiz.
+
+    For every student with at least one COMPLETED attempt
+    (``status IN ('submitted','graded')``) on ``quiz_id``, returns one dict:
+
+    * ``student_id`` — :class:`~uuid.UUID`.
+    * ``best_score_percent`` — MAX ``score_percent`` (``None`` if all NULL).
+    * ``latest_score_percent`` — ``score_percent`` of the attempt with the
+      highest ``attempt_number`` (most recent).
+    * ``attempts_count`` — count of completed attempts.
+    * ``passed`` — ``bool_or(passed)`` (a student who passed on any counted
+      attempt is treated as a pass; ``None`` if all NULL).
+    * ``last_attempt_at`` — MAX of ``COALESCE(submitted_at, started_at)``.
+
+    Names are resolved by the router (batched) — this stays name-agnostic to
+    mirror :func:`list_attempts_for_course`.
+    """
+    sql = text(
+        "SELECT student_id, "
+        "  max(score_percent) AS best_score_percent, "
+        "  (array_agg(score_percent ORDER BY attempt_number DESC))[1] AS latest_score_percent, "
+        "  count(*) AS attempts_count, "
+        "  bool_or(passed) AS passed, "
+        "  max(COALESCE(submitted_at, started_at)) AS last_attempt_at "
+        "FROM quiz_attempts "
+        "WHERE quiz_id = :quiz_id "
+        "  AND status IN ('submitted', 'graded') "
+        "GROUP BY student_id"
+    )
+    rows = (await db.execute(sql, {"quiz_id": quiz_id})).all()
+    return [
+        {
+            "student_id": row.student_id,
+            "best_score_percent": row.best_score_percent,
+            "latest_score_percent": row.latest_score_percent,
+            "attempts_count": int(row.attempts_count or 0),
+            "passed": row.passed,
+            "last_attempt_at": row.last_attempt_at,
+        }
+        for row in rows
+    ]
+
+
 async def top_missed_questions(
     db: AsyncSession,
     course_id: UUID,
@@ -408,6 +452,7 @@ __all__ = [
     "list_attempts_for_course",
     "list_attempts_for_student_in_course",
     "quiz_completion_rate",
+    "quiz_per_student_rollup",
     "quiz_question_breakdown",
     "quiz_results_summary",
     "top_missed_questions",

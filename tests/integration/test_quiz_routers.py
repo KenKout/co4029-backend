@@ -1018,3 +1018,179 @@ async def test_update_quiz_persists_schedule_window(
     )
     assert clear_resp.status_code == 200, clear_resp.text
     assert clear_resp.json()["available_until"] is None
+
+
+# ---------------------------------------------------------------------------
+# Quiz results analytics endpoint (T1.5 + T1.6)
+# ---------------------------------------------------------------------------
+
+
+def test_authoring_router_exposes_quiz_results_route() -> None:
+    paths = {route.path for route in authoring_router.routes}  # type: ignore[attr-defined]
+    assert "/teacher/quizzes/{quiz_id}/results" in paths
+
+
+async def test_quiz_results_endpoint_assembles_payload(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    scenario: dict[str, uuid.UUID],
+    engine: AsyncEngine,
+    seeded_users: SeededUsers,
+) -> None:
+    """As the course teacher: 200 with summary/per_student/per_question.
+
+    Two students with completed attempts → unique_students==2 and two
+    per-student rows with the correct best/latest score distinction.
+    """
+    create_resp = await client.post(
+        f"/api/v1/teacher/courses/{scenario['course_id']}/quizzes",
+        json={"module_id": str(scenario["module_id"]), "title": "Results Quiz"},
+        headers=_auth(admin_bearer),
+    )
+    assert create_resp.status_code == 201, create_resp.text
+    quiz_id = create_resp.json()["id"]
+
+    # One question so per_question is non-empty even with attempts.
+    question_id = uuid.uuid4()
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO quiz_questions "
+                "(id, quiz_id, position, question_type, prompt_text, review_status) "
+                "VALUES (:id, :qz, 1, 'multiple_choice', 'What is 2+2?', 'approved')"
+            ),
+            {"id": question_id, "qz": quiz_id},
+        )
+
+    now = datetime.now(UTC)
+    student_a = seeded_users.student_id
+    student_b = seeded_users.hod_id
+    # A: #1 60 (fail), #2 90 (pass) → best 90, latest 90
+    # B: #1 100 (pass), #2 50 (fail) → best 100, latest 50
+    attempts = [
+        (student_a, 1, "graded", 60, False),
+        (student_a, 2, "graded", 90, True),
+        (student_b, 1, "graded", 100, True),
+        (student_b, 2, "graded", 50, False),
+    ]
+    async with engine.begin() as conn:
+        for sid, num, stat, score, passed in attempts:
+            await conn.execute(
+                text(
+                    "INSERT INTO quiz_attempts "
+                    "(id, quiz_id, student_id, attempt_number, status, "
+                    " score_percent, passed, time_taken_seconds, started_at, submitted_at) "
+                    "VALUES (:id, :q, :s, :n, :st, :sc, :p, 120, :start, :submit)"
+                ),
+                {
+                    "id": uuid.uuid4(),
+                    "q": quiz_id,
+                    "s": sid,
+                    "n": num,
+                    "st": stat,
+                    "sc": score,
+                    "p": passed,
+                    "start": now - timedelta(hours=2),
+                    "submit": now - timedelta(hours=1),
+                },
+            )
+
+    resp = await client.get(
+        f"/api/v1/teacher/quizzes/{quiz_id}/results",
+        headers=_auth(admin_bearer),
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["quiz_id"] == quiz_id
+    assert body["quiz_title"] == "Results Quiz"
+    assert body["grading_method"] == "highest"
+    assert body["passing_score_percent"] is not None
+    assert "summary" in body
+    assert "per_student" in body
+    assert "per_question" in body
+    assert body["summary"]["unique_students"] == 2
+    assert body["summary"]["total_attempts"] == 4
+
+    rows = {row["student_id"]: row for row in body["per_student"]}
+    assert len(rows) == 2
+    row_a = rows[str(student_a)]
+    assert float(row_a["best_score_percent"]) == 90.0
+    assert float(row_a["latest_score_percent"]) == 90.0
+    assert row_a["attempts_count"] == 2
+    assert row_a["passed"] is True
+    row_b = rows[str(student_b)]
+    assert float(row_b["best_score_percent"]) == 100.0
+    assert float(row_b["latest_score_percent"]) == 50.0
+    assert row_b["attempts_count"] == 2
+
+    # per_question lists the one question.
+    assert len(body["per_question"]) == 1
+    assert body["per_question"][0]["question_id"] == str(question_id)
+
+
+async def test_quiz_results_endpoint_403_for_unrelated_user(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    scenario: dict[str, uuid.UUID],
+    engine: AsyncEngine,
+    seeded_users: SeededUsers,
+) -> None:
+    """A user without course.update on the course is rejected with 403."""
+    create_resp = await client.post(
+        f"/api/v1/teacher/courses/{scenario['course_id']}/quizzes",
+        json={"module_id": str(scenario["module_id"]), "title": "Forbidden Quiz"},
+        headers=_auth(admin_bearer),
+    )
+    assert create_resp.status_code == 201, create_resp.text
+    quiz_id = create_resp.json()["id"]
+
+    student_sid = await _seed_session(engine, seeded_users.student_id)
+    student_token = create_access_token(user_id=seeded_users.student_id, session_id=student_sid)
+    resp = await client.get(
+        f"/api/v1/teacher/quizzes/{quiz_id}/results",
+        headers=_auth(student_token),
+    )
+    assert resp.status_code == 403, resp.text
+
+    async with engine.begin() as conn:
+        await conn.execute(text("DELETE FROM auth_sessions WHERE id = :id"), {"id": student_sid})
+
+
+async def test_quiz_results_endpoint_zero_attempts(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    scenario: dict[str, uuid.UUID],
+    engine: AsyncEngine,
+) -> None:
+    """Zero-attempts quiz → 200, zeroed summary, empty per_student,
+    per_question still lists the questions."""
+    create_resp = await client.post(
+        f"/api/v1/teacher/courses/{scenario['course_id']}/quizzes",
+        json={"module_id": str(scenario["module_id"]), "title": "Empty Results Quiz"},
+        headers=_auth(admin_bearer),
+    )
+    assert create_resp.status_code == 201, create_resp.text
+    quiz_id = create_resp.json()["id"]
+
+    question_id = uuid.uuid4()
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO quiz_questions "
+                "(id, quiz_id, position, question_type, prompt_text, review_status) "
+                "VALUES (:id, :qz, 1, 'short_answer', 'Explain X.', 'approved')"
+            ),
+            {"id": question_id, "qz": quiz_id},
+        )
+
+    resp = await client.get(
+        f"/api/v1/teacher/quizzes/{quiz_id}/results",
+        headers=_auth(admin_bearer),
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["summary"]["total_attempts"] == 0
+    assert body["summary"]["unique_students"] == 0
+    assert body["per_student"] == []
+    assert len(body["per_question"]) == 1
+    assert body["per_question"][0]["question_id"] == str(question_id)
