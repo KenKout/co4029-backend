@@ -50,9 +50,9 @@ def _read_source(source: BinaryIO | bytes | str) -> bytes:
     return source.read()
 
 
-def _tesseract_extract(raw: bytes) -> ExtractedContent:
+def _tesseract_extract(raw: bytes, *, lang: str) -> ExtractedContent:
     image = Image.open(io.BytesIO(raw))
-    data = pytesseract.image_to_data(image, output_type=pytesseract.Output.DICT)
+    data = pytesseract.image_to_data(image, lang=lang, output_type=pytesseract.Output.DICT)
     words = data.get("text") or []
     lefts = data.get("left") or []
     tops = data.get("top") or []
@@ -113,7 +113,9 @@ class ImageExtractor:
         raw = await asyncio.to_thread(_read_source, source)
         provider = self._settings.image_ocr_provider
         if provider == "tesseract":
-            return await asyncio.to_thread(_tesseract_extract, raw)
+            return await asyncio.to_thread(
+                _tesseract_extract, raw, lang=self._settings.image_ocr_lang
+            )
         if provider == "llm_vision":
             return await self._llm_vision_extract(raw)
         raise ValueError(f"Unknown image_ocr_provider: {provider!r}")

@@ -155,6 +155,11 @@ class Settings(BaseSettings):
 
     audio_extraction_local: bool = False
     image_ocr_provider: Literal["tesseract", "llm_vision"] = "tesseract"
+    # Tesseract language(s) for image/frame OCR. '+'-joined traineddata names
+    # (e.g. "eng+vie" for the bilingual EN/VI corpus). Each must be installed
+    # under tessdata (apt: tesseract-ocr-<lang>); pytesseract passes this
+    # verbatim as the ``lang=`` argument. Ignored when provider=llm_vision.
+    image_ocr_lang: str = "eng+vie"
     ffmpeg_path: str = "ffmpeg"
     whisper_model: str = "whisper-1"
     video_frame_sample_fps: float = Field(default=1.0, gt=0, le=30)

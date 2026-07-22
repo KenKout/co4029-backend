@@ -103,7 +103,7 @@ async def test_html_extractor_strips_scripts_and_styles() -> None:
 
 @pytest.mark.asyncio
 async def test_image_extractor_dispatches_tesseract() -> None:
-    settings = Settings(image_ocr_provider="tesseract")
+    settings = Settings(image_ocr_provider="tesseract", image_ocr_lang="eng+vie")
     extractor = ImageExtractor(settings=settings)
     fake_data = {
         "text": ["Hello", "", "World"],
@@ -125,6 +125,9 @@ async def test_image_extractor_dispatches_tesseract() -> None:
     assert result.metadata["ocr_provider"] == "tesseract"
     assert len(result.source_locations) == 2
     assert result.source_locations[0].bbox is not None
+    # The configured OCR language is threaded through to pytesseract verbatim
+    # (bilingual EN/VI corpus needs the 'vie' traineddata to be requested).
+    assert mock_pyt.image_to_data.call_args.kwargs["lang"] == "eng+vie"
 
 
 @pytest.mark.asyncio
