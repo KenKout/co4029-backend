@@ -125,6 +125,7 @@ async def run_adaptive_turn(
     security_action: SecurityAction = SecurityAction.ALLOW,
     security_attempt_count: int = 0,
     phases_enabled: bool = False,
+    depth_probe_enabled: bool = False,
 ) -> AdaptiveOutcome:
     """Run one adaptive turn. MUST be called inside a caller-owned savepoint.
 
@@ -271,6 +272,8 @@ async def run_adaptive_turn(
             has_next_question=has_next,
             all_required_outcomes_covered=all_required_covered,
             pending_confirmation=data.pending_confirmation,
+            depth_probe_enabled=depth_probe_enabled,
+            phase=data.phase,
         )
     )
 

@@ -338,16 +338,17 @@ async def _count_ai_messages(engine: AsyncEngine, session_id: uuid.UUID) -> int:
         )
 
 
-def _settings_v2(*, phases: bool) -> Settings:
-    """v1 adaptive fully on PLUS the v2 master + phases sub-flag.
+def _settings_v2(*, phases: bool = False, depth_probe: bool = False) -> Settings:
+    """v1 adaptive fully on PLUS the v2 master + selected sub-flags.
 
-    Used by the phase-progression tests: the v1 gate must be on for v2 to run,
-    and the phases sub-feature is toggled independently.
+    Used by the v2 tests: the v1 gate must be on for v2 to run, and each
+    sub-feature is toggled independently.
     """
     return _settings(adaptive=True).model_copy(
         update={
             "adaptive_interviewer_v2_enabled": True,
             "adaptive_v2_phases_enabled": phases,
+            "adaptive_v2_depth_probe_enabled": depth_probe,
         }
     )
 
@@ -355,6 +356,11 @@ def _settings_v2(*, phases: bool) -> Settings:
 @pytest.fixture
 def adaptive_v2_phases_on(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(taking_service, "get_settings", lambda: _settings_v2(phases=True))
+
+
+@pytest.fixture
+def adaptive_v2_depth_probe_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(taking_service, "get_settings", lambda: _settings_v2(depth_probe=True))
 
 
 async def _runtime_phase(engine: AsyncEngine, session_id: uuid.UUID) -> str | None:
@@ -1298,3 +1304,63 @@ async def test_v2_phases_walk_off_opening(
         await db.commit()
     phase_after_2 = await _runtime_phase(engine, session_id)
     assert phase_after_2 == "warmup"  # phase policy advanced OPENING → WARMUP
+
+
+@pytest.mark.asyncio
+async def test_v2_depth_probe_digs_into_strong_answer(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict[str, Any],
+    adaptive_v2_depth_probe_on: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A STRONG answer with depth_probe ON is probed for depth, not advanced.
+
+    intent=answer, analysis is strong (relevant/complete/correct, confident) and
+    recommends NO probe of its own — so without depth probing the turn would
+    advance. With the flag ON, rule 11.5 fires and the interviewer extends.
+    """
+    gw = _gateway(
+        [
+            {"intent": "answer", "confidence": 0.95, "rationale": "content"},
+            {
+                "relevance": "relevant",
+                "completeness": "complete",
+                "correctness": "correct",
+                "specificity": "specific",
+                "has_concrete_example": True,
+                "recommended_probe_type": "none",
+                "confidence": 0.9,
+                "evidence": [],
+            },
+            {
+                "acknowledgement": "Excellent.",
+                "transition": "",
+                "ai_turn_text": "Excellent. Can you generalize that to a broader case?",
+            },
+        ]
+    )
+    for mod in ("intent_logic", "analysis_logic", "utterance_logic"):
+        monkeypatch.setattr(
+            f"abridgeai.features.interviews.orchestrator.{mod}.LLMGateway", lambda: gw
+        )
+
+    session_id, _ = await _make_session(
+        engine, scenario["config_id"], scenario["student_id"], "text"
+    )
+    async with session_factory() as db:
+        result = await taking_service.take_session_step(
+            db,
+            session_id,
+            "A thorough, correct, well-exemplified answer.",
+            _actor(scenario["student_id"]),
+            turn_key="depth-1",
+        )
+        await db.commit()
+
+    # Depth probe fired: extend action, evidence recorded, did NOT advance.
+    assert result["action"] == "extend_answer"
+    assert result["reason_code"] == "strong_answer_depth_probe"
+    assert result["next_question"] is None
+    assert result["is_finished"] is False
+    assert result["ai_turn_text"]
