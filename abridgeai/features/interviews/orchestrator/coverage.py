@@ -161,12 +161,37 @@ def is_weak_answer(analysis: AnswerAnalysis | None) -> bool:
     )
 
 
+def is_confidently_wrong(analysis: AnswerAnalysis | None) -> bool:
+    """Relevant + specific + confidently INCORRECT/MIXED — the case to challenge.
+
+    A candidate who committed assertively to a concrete claim that is wrong is
+    exactly whom a real interviewer leans in on (Slice 16): the answer is on
+    topic, specific enough to engage, and the analyzer is confident it is wrong
+    or mixed. This is deliberately narrower than :func:`is_weak_answer`:
+
+    * VAGUE answers are excluded — those are a clarify/probe case, not a
+      challenge case (you can't challenge reasoning that wasn't really given).
+    * OFF_TOPIC / PARTIALLY_RELEVANT answers are excluded — redirected elsewhere.
+    * Low-confidence reads are excluded — we never lean in on a shaky signal.
+
+    A missing analysis is never confidently wrong (returns False).
+    """
+    if analysis is None or analysis.confidence < STRONG_CONFIDENCE_MIN:
+        return False
+    return (
+        analysis.relevance is Relevance.RELEVANT
+        and analysis.correctness in (Correctness.INCORRECT, Correctness.MIXED)
+        and analysis.specificity is not Specificity.VAGUE
+    )
+
+
 __all__ = [
     "COVERAGE_SUFFICIENT_POINTS",
     "EVIDENCE_CONFIDENCE_MIN",
     "STRONG_CONFIDENCE_MIN",
     "apply_evidence_to_coverage",
     "evidence_points",
+    "is_confidently_wrong",
     "is_provisionally_sufficient",
     "is_strong_answer",
     "is_weak_answer",

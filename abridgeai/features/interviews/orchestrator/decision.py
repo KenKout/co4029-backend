@@ -30,7 +30,10 @@ from abridgeai.features.interviews.orchestrator.analysis import (
     ProbeType,
     Relevance,
 )
-from abridgeai.features.interviews.orchestrator.coverage import is_strong_answer
+from abridgeai.features.interviews.orchestrator.coverage import (
+    is_confidently_wrong,
+    is_strong_answer,
+)
 from abridgeai.features.interviews.orchestrator.intent import (
     IntentClassification,
     StudentIntent,
@@ -94,6 +97,8 @@ class ReasonCode(str, Enum):  # noqa: UP042 -- match codebase convention
     OUTCOME_NOT_COVERED = "outcome_not_covered"
     # Depth probe on a strong answer (Slice 8, v2).
     STRONG_ANSWER_DEPTH_PROBE = "strong_answer_depth_probe"
+    # Confident-but-wrong forced challenge (Slice 16, v2).
+    CONFIDENT_BUT_WRONG_CHALLENGE = "confident_but_wrong_challenge"
     TIME_RUNNING_LOW = "time_running_low"
     ALL_REQUIRED_OUTCOMES_COVERED = "all_required_outcomes_covered"
     FOLLOWUP_LIMIT_REACHED = "followup_limit_reached"
@@ -209,6 +214,12 @@ class DecisionInputs:
     # and suppress a RESOLVE_CONTRADICTION probe pointing at what they already
     # resolved. Off → the self_corrected signal is ignored (byte-for-byte v1).
     self_correction_enabled: bool = False
+    # Confident-but-wrong forced challenge (Slice 16, v2): when enabled AND the
+    # answer is confidently wrong (relevant, specific, high-confidence
+    # incorrect/mixed) AND budget + time remain AND the analyzer recommended no
+    # other probe, force a CHALLENGE_REASONING probe instead of advancing. Off →
+    # the confidently-wrong answer advances as in v1.
+    confident_wrong_challenge_enabled: bool = False
 
 
 # Below this fraction of time remaining, stop probing and head for closing.
@@ -342,6 +353,93 @@ def _reward_self_correction(decision: InterviewerDecision, *, self_corrected: bo
     decision.acknowledgement_style = AcknowledgementStyle.POSITIVE
     if "self_correction" not in decision.tags:
         decision.tags.append("self_correction")
+
+
+def _depth_probe(
+    inputs: DecisionInputs, *, followups_exhausted: bool, time_low: bool
+) -> InterviewerDecision | None:
+    """Depth probe on a STRONG answer to find the candidate's ceiling (Slice 8).
+
+    Only when the feature is enabled, the answer is strong, we are in
+    CORE/DEEP_PROBE, and we still have follow-up budget + time. DEEP_PROBE
+    pushes on edge cases; CORE asks them to extend. Consumes the follow-up
+    budget (falls into the else branch of _apply_state_updates), so loop
+    protection is preserved. Returns None when it does not apply.
+    """
+    if not (
+        inputs.depth_probe_enabled
+        and inputs.analysis is not None
+        and is_strong_answer(inputs.analysis)
+        and inputs.phase in (InterviewPhase.CORE, InterviewPhase.DEEP_PROBE)
+        and not followups_exhausted
+        and not time_low
+    ):
+        return None
+    depth = (
+        ProbeType.PROBE_EDGE_CASE
+        if inputs.phase is InterviewPhase.DEEP_PROBE
+        else ProbeType.EXTEND_STRONG
+    )
+    return InterviewerDecision(
+        action=_probe_action(depth),
+        reason_code=ReasonCode.STRONG_ANSWER_DEPTH_PROBE,
+        should_record_academic_evidence=True,
+        should_advance_question=False,
+        acknowledgement_style=AcknowledgementStyle.POSITIVE,
+        internal_rationale="Strong answer; probing for depth/ceiling.",
+        tags=["depth_probe", depth.value],
+    )
+
+
+def _confident_wrong_challenge(
+    inputs: DecisionInputs, *, followups_exhausted: bool, time_low: bool
+) -> InterviewerDecision | None:
+    """Forced challenge on a confident-but-wrong answer (Slice 16, v2).
+
+    The candidate committed confidently to a specific, relevant, but WRONG
+    claim, and no other probe was recommended. Instead of quietly advancing
+    (which feels like the interviewer didn't notice), lean in with a
+    CHALLENGE_REASONING probe so they can defend or revise. Gated on budget +
+    time, so loop protection holds. Returns None when the feature is off, the
+    answer is not confidently wrong, or budget/time are spent → the caller
+    advances as in v1.
+    """
+    if not (
+        inputs.confident_wrong_challenge_enabled
+        and is_confidently_wrong(inputs.analysis)
+        and not followups_exhausted
+        and not time_low
+    ):
+        return None
+    return InterviewerDecision(
+        action=InterviewerActionType.CHALLENGE_REASONING,
+        reason_code=ReasonCode.CONFIDENT_BUT_WRONG_CHALLENGE,
+        should_record_academic_evidence=True,
+        should_advance_question=False,
+        acknowledgement_style=AcknowledgementStyle.CORRECTIVE,
+        internal_rationale="Confident but wrong; challenge the reasoning.",
+        tags=["confident_wrong", "challenge"],
+    )
+
+
+def _advance_reason(inputs: DecisionInputs, *, followups_exhausted: bool) -> ReasonCode:
+    """Pick the reason code for a plain advance (rule 12).
+
+    Precedence: exhausted budget → all-covered → (mostly-)correct answer →
+    partial coverage. Extracted from ``decide_next_action`` to keep that
+    function under the cyclomatic-complexity cap.
+    """
+    if followups_exhausted:
+        return ReasonCode.FOLLOWUP_LIMIT_REACHED
+    if inputs.all_required_outcomes_covered:
+        return ReasonCode.ALL_REQUIRED_OUTCOMES_COVERED
+    analysis = inputs.analysis
+    if analysis is not None and analysis.correctness in (
+        Correctness.CORRECT,
+        Correctness.MOSTLY_CORRECT,
+    ):
+        return ReasonCode.OUTCOME_SUFFICIENTLY_COVERED
+    return ReasonCode.PARTIAL_OUTCOME_COVERAGE
 
 
 def _advance_or_close(inputs: DecisionInputs, reason: ReasonCode) -> InterviewerDecision:
@@ -563,47 +661,20 @@ def decide_next_action(inputs: DecisionInputs) -> InterviewerDecision:
             tags=["probe", probe.value],
         )
 
-    # 11.5 Depth probe (Slice 8, v2): dig into a STRONG answer to find the
-    # candidate's ceiling instead of advancing. Only when the feature is
-    # enabled, the answer is strong, we are in CORE/DEEP_PROBE, and we still
-    # have follow-up budget + time. DEEP_PROBE pushes on edge cases; CORE asks
-    # them to extend. Consumes the follow-up budget (falls into the else branch
-    # of _apply_state_updates), so loop protection is preserved.
-    if (
-        inputs.depth_probe_enabled
-        and analysis is not None
-        and is_strong_answer(analysis)
-        and inputs.phase in (InterviewPhase.CORE, InterviewPhase.DEEP_PROBE)
-        and not followups_exhausted
-        and not time_low
-    ):
-        depth = (
-            ProbeType.PROBE_EDGE_CASE
-            if inputs.phase is InterviewPhase.DEEP_PROBE
-            else ProbeType.EXTEND_STRONG
-        )
-        return InterviewerDecision(
-            action=_probe_action(depth),
-            reason_code=ReasonCode.STRONG_ANSWER_DEPTH_PROBE,
-            should_record_academic_evidence=True,
-            should_advance_question=False,
-            acknowledgement_style=AcknowledgementStyle.POSITIVE,
-            internal_rationale="Strong answer; probing for depth/ceiling.",
-            tags=["depth_probe", depth.value],
-        )
+    # 11.5 Depth probe on a strong answer (Slice 8, v2).
+    depth_probe = _depth_probe(inputs, followups_exhausted=followups_exhausted, time_low=time_low)
+    if depth_probe is not None:
+        return depth_probe
+
+    # 11.6 Confident-but-wrong forced challenge (Slice 16, v2).
+    challenge = _confident_wrong_challenge(
+        inputs, followups_exhausted=followups_exhausted, time_low=time_low
+    )
+    if challenge is not None:
+        return challenge
 
     # 12. Otherwise advance (recording this answer's evidence first).
-    if followups_exhausted:
-        reason = ReasonCode.FOLLOWUP_LIMIT_REACHED
-    elif inputs.all_required_outcomes_covered:
-        reason = ReasonCode.ALL_REQUIRED_OUTCOMES_COVERED
-    elif analysis is not None and analysis.correctness in (
-        Correctness.CORRECT,
-        Correctness.MOSTLY_CORRECT,
-    ):
-        reason = ReasonCode.OUTCOME_SUFFICIENTLY_COVERED
-    else:
-        reason = ReasonCode.PARTIAL_OUTCOME_COVERAGE
+    reason = _advance_reason(inputs, followups_exhausted=followups_exhausted)
 
     if inputs.all_required_outcomes_covered and not time_low:
         # Everything required is covered → begin closing rather than pad.

@@ -161,6 +161,84 @@ def test_self_correction_is_inert_when_flag_off() -> None:
     assert d.action is InterviewerActionType.RESOLVE_CONTRADICTION
 
 
+# ── confident-but-wrong forced challenge (Slice 16) ──────────────────────────
+
+
+def _confidently_wrong_analysis(*, probe: ProbeType = ProbeType.NONE) -> AnswerAnalysis:
+    from abridgeai.features.interviews.orchestrator.analysis import (
+        Completeness,
+        Specificity,
+    )
+
+    return AnswerAnalysis(
+        relevance=Relevance.RELEVANT,
+        completeness=Completeness.COMPLETE,
+        correctness=Correctness.INCORRECT,
+        specificity=Specificity.SPECIFIC,
+        recommended_probe_type=probe,
+        confidence=0.9,
+    )
+
+
+def test_confident_wrong_forces_challenge_when_enabled() -> None:
+    # A specific, relevant, confidently-WRONG answer with budget + time left:
+    # the interviewer leans in with a challenge instead of quietly advancing.
+    d = decide_next_action(
+        _inputs(
+            analysis=_confidently_wrong_analysis(),
+            confident_wrong_challenge_enabled=True,
+        )
+    )
+    assert d.action is InterviewerActionType.CHALLENGE_REASONING
+    assert d.reason_code is ReasonCode.CONFIDENT_BUT_WRONG_CHALLENGE
+    assert d.should_record_academic_evidence is True
+    assert d.should_advance_question is False
+    assert "confident_wrong" in d.tags
+
+
+def test_confident_wrong_inert_when_flag_off() -> None:
+    # Flag off → byte-for-byte v1: no forced challenge; a confidently-wrong
+    # answer with no recommended probe just advances (records evidence first).
+    d = decide_next_action(
+        _inputs(
+            analysis=_confidently_wrong_analysis(),
+            confident_wrong_challenge_enabled=False,
+        )
+    )
+    assert d.action is not InterviewerActionType.CHALLENGE_REASONING
+
+
+def test_confident_wrong_respects_followup_budget() -> None:
+    # Loop protection wins: with the per-question budget exhausted, we must NOT
+    # force another challenge — we advance even though the answer was wrong.
+    from abridgeai.features.interviews.orchestrator.decision import (
+        DEFAULT_MAX_FOLLOWUPS_PER_QUESTION,
+    )
+
+    d = decide_next_action(
+        _inputs(
+            analysis=_confidently_wrong_analysis(),
+            confident_wrong_challenge_enabled=True,
+            current_question_follow_up_count=DEFAULT_MAX_FOLLOWUPS_PER_QUESTION,
+        )
+    )
+    assert d.action is not InterviewerActionType.CHALLENGE_REASONING
+    assert d.should_advance_question is True
+
+
+def test_confident_wrong_defers_to_explicit_recommended_probe() -> None:
+    # If the analyzer already recommends a probe, the normal rule-11 probe path
+    # handles it (higher precedence); the forced-challenge rule only fires when
+    # nothing else would probe. Here an explicit ask_for_example is honored.
+    d = decide_next_action(
+        _inputs(
+            analysis=_confidently_wrong_analysis(probe=ProbeType.ASK_FOR_EXAMPLE),
+            confident_wrong_challenge_enabled=True,
+        )
+    )
+    assert d.action is InterviewerActionType.ASK_FOR_EXAMPLE
+
+
 def test_strong_answer_triggers_depth_probe_when_enabled() -> None:
     from abridgeai.features.interviews.orchestrator.state import InterviewPhase
 

@@ -23,6 +23,7 @@ from abridgeai.features.interviews.orchestrator.coverage import (
     STRONG_CONFIDENCE_MIN,
     apply_evidence_to_coverage,
     evidence_points,
+    is_confidently_wrong,
     is_provisionally_sufficient,
     is_strong_answer,
     is_weak_answer,
@@ -225,6 +226,45 @@ def test_low_confidence_answer_is_neutral_not_weak() -> None:
     noise = _analysis(correctness=Correctness.INCORRECT, confidence=0.2)
     assert is_weak_answer(weak) is True
     assert is_weak_answer(noise) is False
+
+
+def test_confidently_wrong_requires_assertive_incorrect_answer() -> None:
+    # Slice 16: a candidate who commits confidently to a specific, relevant, but
+    # wrong claim is "confidently wrong" — the case a real interviewer challenges.
+    assert is_confidently_wrong(_analysis(correctness=Correctness.INCORRECT)) is True
+    assert is_confidently_wrong(_analysis(correctness=Correctness.MIXED)) is True
+    # A correct answer is never confidently wrong.
+    assert is_confidently_wrong(_analysis(correctness=Correctness.CORRECT)) is False
+    assert is_confidently_wrong(_analysis(correctness=Correctness.MOSTLY_CORRECT)) is False
+
+
+def test_confidently_wrong_needs_high_confidence_and_not_vague() -> None:
+    # Low analyzer confidence → not confidently wrong (could be noise / the
+    # candidate was unsure), so we don't lean in on a shaky read.
+    assert (
+        is_confidently_wrong(
+            _analysis(correctness=Correctness.INCORRECT, confidence=STRONG_CONFIDENCE_MIN - 0.01)
+        )
+        is False
+    )
+    # A vague answer is a clarify/probe case, not a challenge case.
+    assert (
+        is_confidently_wrong(
+            _analysis(correctness=Correctness.INCORRECT, specificity=Specificity.VAGUE)
+        )
+        is False
+    )
+    # Off-topic is redirected elsewhere, never challenged as if it were an attempt.
+    assert (
+        is_confidently_wrong(
+            _analysis(correctness=Correctness.INCORRECT, relevance=Relevance.OFF_TOPIC)
+        )
+        is False
+    )
+
+
+def test_confidently_wrong_is_none_safe() -> None:
+    assert is_confidently_wrong(None) is False
 
 
 def test_strong_and_weak_are_mutually_exclusive() -> None:

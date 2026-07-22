@@ -347,6 +347,7 @@ def _settings_v2(
     per_outcome_difficulty: bool = False,
     rich_closing: bool = False,
     self_correction: bool = False,
+    confident_wrong_challenge: bool = False,
 ) -> Settings:
     """v1 adaptive fully on PLUS the v2 master + selected sub-flags.
 
@@ -363,6 +364,7 @@ def _settings_v2(
             "adaptive_v2_per_outcome_difficulty_enabled": per_outcome_difficulty,
             "adaptive_v2_rich_closing_enabled": rich_closing,
             "adaptive_v2_self_correction_enabled": self_correction,
+            "adaptive_v2_confident_wrong_challenge_enabled": confident_wrong_challenge,
         }
     )
 
@@ -1749,3 +1751,94 @@ async def test_self_correction_probe_still_fires_when_flag_off(
         )
         await db.commit()
     assert await _persisted_ai_action(engine, session_id) == "resolve_contradiction"
+
+
+# ── Slice 16: confident-but-wrong forced challenge ───────────────────────────
+# A candidate who commits confidently to a specific, relevant, but WRONG claim
+# (no other probe recommended) is challenged rather than quietly advanced past.
+# Flag-gated: off → the confidently-wrong answer advances as in v1.
+
+
+def _confidently_wrong_gateway() -> SimpleNamespace:
+    """intent=answer → analysis: relevant, specific, confidently INCORRECT, no
+    recommended probe → utterance."""
+    return _gateway(
+        [
+            {"intent": "answer", "confidence": 0.95, "rationale": "content"},
+            {
+                "relevance": "relevant",
+                "completeness": "complete",
+                "correctness": "incorrect",
+                "specificity": "specific",
+                "recommended_probe_type": "none",
+                "confidence": 0.9,
+            },
+            {
+                "acknowledgement": "I understand your reasoning.",
+                "transition": "",
+                "ai_turn_text": "I understand your reasoning. But consider this.",
+            },
+        ]
+    )
+
+
+@pytest.mark.asyncio
+async def test_confident_wrong_forces_challenge_when_enabled(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        taking_service, "get_settings", lambda: _settings_v2(confident_wrong_challenge=True)
+    )
+    gw = _confidently_wrong_gateway()
+    for mod in ("intent_logic", "analysis_logic", "utterance_logic"):
+        monkeypatch.setattr(
+            f"abridgeai.features.interviews.orchestrator.{mod}.LLMGateway", lambda: gw
+        )
+    session_id, _ = await _make_session(
+        engine, scenario["config_id"], scenario["student_id"], "text"
+    )
+    async with session_factory() as db:
+        await taking_service.take_session_step(
+            db,
+            session_id,
+            "It's definitely a snowflake schema because it denormalizes everything.",
+            _actor(scenario["student_id"]),
+            turn_key="cw-1",
+        )
+        await db.commit()
+    assert await _persisted_ai_action(engine, session_id) == "challenge_reasoning"
+
+
+@pytest.mark.asyncio
+async def test_confident_wrong_advances_when_flag_off(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Parity: flag off → no forced challenge; the confidently-wrong answer
+    # advances (records evidence first), so the persisted action is not a challenge.
+    monkeypatch.setattr(
+        taking_service, "get_settings", lambda: _settings_v2(confident_wrong_challenge=False)
+    )
+    gw = _confidently_wrong_gateway()
+    for mod in ("intent_logic", "analysis_logic", "utterance_logic"):
+        monkeypatch.setattr(
+            f"abridgeai.features.interviews.orchestrator.{mod}.LLMGateway", lambda: gw
+        )
+    session_id, _ = await _make_session(
+        engine, scenario["config_id"], scenario["student_id"], "text"
+    )
+    async with session_factory() as db:
+        await taking_service.take_session_step(
+            db,
+            session_id,
+            "It's definitely a snowflake schema because it denormalizes everything.",
+            _actor(scenario["student_id"]),
+            turn_key="cw-off-1",
+        )
+        await db.commit()
+    assert await _persisted_ai_action(engine, session_id) != "challenge_reasoning"
