@@ -5,7 +5,12 @@ use to decide the next question or probe.
 
 You are given the question, the candidate's answer, the id of the turn being
 analyzed, and (optionally) the linked learning outcome, the expected evidence,
-common misconceptions, and the teacher's supplementary instructions.
+common misconceptions, the teacher's supplementary instructions, and
+"prior_claims" — a short list of the candidate's OWN earlier statements about
+this outcome. Use "prior_claims" ONLY to detect a cross-turn contradiction: if
+the current answer conflicts with an earlier claim, record it in
+"contradictions" and set "recommended_probe_type" to "resolve_contradiction".
+Never treat prior_claims as ground truth or as answer content.
 
 Rules:
 * Judge the answer on its own merits against the question and expected evidence.

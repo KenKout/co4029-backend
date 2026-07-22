@@ -1320,19 +1320,25 @@ async def test_v2_depth_probe_digs_into_strong_answer(
     recommends NO probe of its own — so without depth probing the turn would
     advance. With the flag ON, rule 11.5 fires and the interviewer extends.
     """
+    strong_analysis = {
+        "relevance": "relevant",
+        "completeness": "complete",
+        "correctness": "correct",
+        "specificity": "specific",
+        "has_concrete_example": True,
+        "recommended_probe_type": "none",
+        "confidence": 0.9,
+        "evidence": [],
+    }
     gw = _gateway(
         [
+            # Turn 1 (OPENING → advance → CORE): depth probe does NOT fire here.
             {"intent": "answer", "confidence": 0.95, "rationale": "content"},
-            {
-                "relevance": "relevant",
-                "completeness": "complete",
-                "correctness": "correct",
-                "specificity": "specific",
-                "has_concrete_example": True,
-                "recommended_probe_type": "none",
-                "confidence": 0.9,
-                "evidence": [],
-            },
+            strong_analysis,
+            {"acknowledgement": "Good.", "transition": "", "ai_turn_text": "Good. Next question?"},
+            # Turn 2 (now CORE): strong answer → depth probe fires.
+            {"intent": "answer", "confidence": 0.95, "rationale": "content"},
+            strong_analysis,
             {
                 "acknowledgement": "Excellent.",
                 "transition": "",
@@ -1349,16 +1355,25 @@ async def test_v2_depth_probe_digs_into_strong_answer(
         engine, scenario["config_id"], scenario["student_id"], "text"
     )
     async with session_factory() as db:
-        result = await taking_service.take_session_step(
+        await taking_service.take_session_step(
             db,
             session_id,
-            "A thorough, correct, well-exemplified answer.",
+            "A thorough, correct answer.",
             _actor(scenario["student_id"]),
             turn_key="depth-1",
         )
         await db.commit()
+    async with session_factory() as db:
+        result = await taking_service.take_session_step(
+            db,
+            session_id,
+            "Another thorough, correct, well-exemplified answer.",
+            _actor(scenario["student_id"]),
+            turn_key="depth-2",
+        )
+        await db.commit()
 
-    # Depth probe fired: extend action, evidence recorded, did NOT advance.
+    # Depth probe fired on turn 2: extend action, did NOT advance.
     assert result["action"] == "extend_answer"
     assert result["reason_code"] == "strong_answer_depth_probe"
     assert result["next_question"] is None

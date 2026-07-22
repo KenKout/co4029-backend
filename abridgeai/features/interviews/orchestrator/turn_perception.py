@@ -143,6 +143,19 @@ def no_gateway() -> Any:  # noqa: ANN401
     return None
 
 
+def prior_claims_for(data: Any, outcome_id: str | None, *, enabled: bool) -> list[str]:  # noqa: ANN401
+    """Prior claims the candidate made about ``outcome_id`` (Slice 9, v2).
+
+    Returns the bounded per-outcome claims list so answer analysis can flag a
+    cross-turn contradiction. Empty when the feature is disabled, no outcome is
+    linked, or the outcome has no recorded coverage yet — i.e. v1 behaviour.
+    """
+    if not enabled or outcome_id is None:
+        return []
+    cov = data.outcome_coverage.get(outcome_id)
+    return list(cov.claims) if cov is not None else []
+
+
 __all__ = [
     "confirmation_override",
     "list_outcomes",
@@ -151,5 +164,6 @@ __all__ = [
     "next_sequence",
     "no_gateway",
     "persisted_question_ids",
+    "prior_claims_for",
     "time_fraction_remaining",
 ]

@@ -462,6 +462,8 @@ async def take_session_step(  # noqa: C901 - shared legacy/adaptive turn coordin
     phases_enabled = settings.adaptive_v2_feature_enabled(session.input_mode, "phases")
     # v2 depth-probe sub-feature (Slice 8): dig into strong answers for the ceiling.
     depth_probe_enabled = settings.adaptive_v2_feature_enabled(session.input_mode, "depth_probe")
+    # v2 cross-turn memory (Slice 9): feed prior claims into analysis for contradiction.
+    cross_turn_enabled = settings.adaptive_v2_feature_enabled(session.input_mode, "cross_turn")
 
     if adaptive_on:
         adaptive_result = await _try_adaptive_step(
@@ -478,6 +480,7 @@ async def take_session_step(  # noqa: C901 - shared legacy/adaptive turn coordin
             security_attempt_count=security_stage.attempt_count,
             phases_enabled=phases_enabled,
             depth_probe_enabled=depth_probe_enabled,
+            cross_turn_enabled=cross_turn_enabled,
         )
         if adaptive_result is not None:
             return adaptive_result
@@ -550,6 +553,7 @@ async def take_session_step(  # noqa: C901 - shared legacy/adaptive turn coordin
             security_attempt_count=security_stage.attempt_count,
             phases_enabled=phases_enabled,
             depth_probe_enabled=depth_probe_enabled,
+            cross_turn_enabled=cross_turn_enabled,
         )
 
     return await _legacy_advance(
@@ -1299,6 +1303,7 @@ async def _try_adaptive_step(
     security_attempt_count: int = 0,
     phases_enabled: bool = False,
     depth_probe_enabled: bool = False,
+    cross_turn_enabled: bool = False,
 ) -> dict[str, Any] | None:
     """Attempt one adaptive turn. Returns the canonical result, or None to fall back.
 
@@ -1373,6 +1378,7 @@ async def _try_adaptive_step(
                 security_attempt_count=security_attempt_count,
                 phases_enabled=phases_enabled,
                 depth_probe_enabled=depth_probe_enabled,
+                cross_turn_enabled=cross_turn_enabled,
             )
         if outcome.result is not None:
             _emit_live_decision(session_id, outcome.result)
@@ -1430,6 +1436,7 @@ async def _run_shadow_step(
     security_attempt_count: int = 0,
     phases_enabled: bool = False,
     depth_probe_enabled: bool = False,
+    cross_turn_enabled: bool = False,
 ) -> None:
     """Compute the adaptive decision for comparison WITHOUT driving the student.
 
@@ -1472,6 +1479,7 @@ async def _run_shadow_step(
                 security_attempt_count=security_attempt_count,
                 phases_enabled=phases_enabled,
                 depth_probe_enabled=depth_probe_enabled,
+                cross_turn_enabled=cross_turn_enabled,
             )
             canonical = outcome.result or {}
             # Emit the shadow decision (no transcript content — same privacy

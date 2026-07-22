@@ -86,6 +86,7 @@ def apply_state_updates(  # noqa: C901 -- explicit action branches are auditable
     selected_question_id: str | None,
     target_outcome_id: str | None,
     target_phase: InterviewPhase | None = None,
+    cross_turn_enabled: bool = False,
 ) -> None:
     """Mutate the loaded state in memory (NO save here — caller saves once).
 
@@ -116,6 +117,21 @@ def apply_state_updates(  # noqa: C901 -- explicit action branches are auditable
                 cov = OutcomeCoverageState(outcome_id=ev.outcome_id)
                 data.outcome_coverage[ev.outcome_id] = cov
             apply_evidence_to_coverage(cov, ev, now=now)
+
+        # Cross-turn memory (Slice 9, v2). Record a short claim summary for each
+        # outcome that got evidence this turn, so a LATER turn's analysis can be
+        # fed the candidate's own prior words and spot a contradiction. Bounded
+        # to the last 3 claims per outcome, each capped in length. The candidate's
+        # words only — never rubric/answer content. Gated: off → no claims logged.
+        if cross_turn_enabled:
+            for ev in analysis.evidence:
+                cov = data.outcome_coverage.get(ev.outcome_id)
+                if cov is None:
+                    continue
+                claim = (ev.summary or "").strip()
+                if claim:
+                    cov.claims.append(claim[:200])
+                    del cov.claims[:-3]  # keep only the last 3
 
     # End-confirmation state (Slice 4). These actions keep the SAME question and
     # never consume the academic probe budget; they only flip the confirmation

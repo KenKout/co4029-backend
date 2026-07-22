@@ -126,6 +126,7 @@ async def run_adaptive_turn(
     security_attempt_count: int = 0,
     phases_enabled: bool = False,
     depth_probe_enabled: bool = False,
+    cross_turn_enabled: bool = False,
 ) -> AdaptiveOutcome:
     """Run one adaptive turn. MUST be called inside a caller-owned savepoint.
 
@@ -180,6 +181,11 @@ async def run_adaptive_turn(
         if outcome_id is not None:
             oc = await db.get(InterviewOutcome, current_question.linked_outcome_id)  # type: ignore[union-attr]
             outcome_text = oc.outcome_text if oc is not None else None
+        # Cross-turn memory (Slice 9, v2): the candidate's own prior claims about
+        # THIS outcome, so the analyzer can flag a cross-turn contradiction.
+        prior_claims = turn_perception.prior_claims_for(
+            data, outcome_id, enabled=cross_turn_enabled
+        )
         analysis = await analyze_answer(
             db,
             question_text=question_text,
@@ -191,6 +197,7 @@ async def run_adaptive_turn(
             # hidden criteria. Runtime analysis gets only this question and its
             # linked outcome.
             supplementary_instructions=None,
+            prior_claims=prior_claims,
         )
 
     # 2b. Difficulty streaks (Slice 3). Fold THIS answer's quality into the
@@ -387,6 +394,7 @@ async def run_adaptive_turn(
         selected_question_id=(str(selected_orm.id) if selected_orm is not None else None),
         target_outcome_id=decision.target_outcome_id,
         target_phase=target_phase if phases_enabled else None,
+        cross_turn_enabled=cross_turn_enabled,
     )
 
     canonical = canonical_step_result(

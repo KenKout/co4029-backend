@@ -85,3 +85,76 @@ def test_no_target_phase_preserves_v1_transitions() -> None:
     )
     assert data.phase is InterviewPhase.CORE
     assert data.turns_in_phase == 0
+
+
+def test_cross_turn_records_bounded_claims() -> None:
+    """Slice 9: with cross_turn on, evidence summaries append to outcome claims,
+    bounded to the last 3; with the flag off, no claims are recorded."""
+    from abridgeai.features.interviews.orchestrator.analysis import (
+        AnswerAnalysis,
+        EvidenceType,
+        OutcomeEvidence,
+    )
+    from abridgeai.features.interviews.orchestrator.state import OutcomeCoverageState
+
+    def _analysis_with_claim(summary: str) -> AnswerAnalysis:
+        return AnswerAnalysis(
+            confidence=0.9,
+            evidence=[
+                OutcomeEvidence(
+                    outcome_id="o-1",
+                    turn_id="t-1",
+                    evidence_type=EvidenceType.SUPPORTS,
+                    summary=summary,
+                    confidence=0.9,
+                )
+            ],
+        )
+
+    data = InterviewRuntimeStateData()
+    data.outcome_coverage["o-1"] = OutcomeCoverageState(outcome_id="o-1")
+    # Four claims, bounded to the last 3.
+    for i in range(4):
+        apply_state_updates(
+            data,
+            intent=_answer_intent(),
+            analysis=_analysis_with_claim(f"claim {i}"),
+            decision=_advance_decision(),
+            selected_question_id="q-2",
+            target_outcome_id="o-1",
+            cross_turn_enabled=True,
+        )
+    assert data.outcome_coverage["o-1"].claims == ["claim 1", "claim 2", "claim 3"]
+
+
+def test_cross_turn_off_records_no_claims() -> None:
+    from abridgeai.features.interviews.orchestrator.analysis import (
+        AnswerAnalysis,
+        EvidenceType,
+        OutcomeEvidence,
+    )
+    from abridgeai.features.interviews.orchestrator.state import OutcomeCoverageState
+
+    data = InterviewRuntimeStateData()
+    data.outcome_coverage["o-1"] = OutcomeCoverageState(outcome_id="o-1")
+    apply_state_updates(
+        data,
+        intent=_answer_intent(),
+        analysis=AnswerAnalysis(
+            confidence=0.9,
+            evidence=[
+                OutcomeEvidence(
+                    outcome_id="o-1",
+                    turn_id="t-1",
+                    evidence_type=EvidenceType.SUPPORTS,
+                    summary="a claim",
+                    confidence=0.9,
+                )
+            ],
+        ),
+        decision=_advance_decision(),
+        selected_question_id="q-2",
+        target_outcome_id="o-1",
+        cross_turn_enabled=False,
+    )
+    assert data.outcome_coverage["o-1"].claims == []
