@@ -222,10 +222,15 @@ async def _run_extraction(
     ctx: _IngestContext,
     *,
     source_path: Path,
+    llm_gateway: LLMGateway | None = None,
 ) -> ExtractedContent:
     mime = _resolve_extractor_mime(ctx)
     try:
-        extractor = dispatch_extractor(mime)
+        # Media extractors (audio/image/video) need db + gateway injected to
+        # write STT/vision audit rows and reach the providers; dispatch picks
+        # only the kwargs each constructor accepts, so no-arg extractors
+        # (pdf/docx/…) are unaffected.
+        extractor = dispatch_extractor(mime, db=db, gateway=llm_gateway)
     except UnsupportedMimeError:
         fallback = maybe_local_mock_extractor(mime)
         if fallback is None:
@@ -442,7 +447,7 @@ async def _run_stages(
         job.progress_percent = 10
         await db.flush()
 
-        extracted = await _run_extraction(db, ctx, source_path=source_path)
+        extracted = await _run_extraction(db, ctx, source_path=source_path, llm_gateway=llm_gateway)
 
         stage_label = "chunking"
         ctx.version.processing_status = "chunking"
