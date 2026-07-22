@@ -6,6 +6,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from pydantic import SecretStr
 
 from abridgeai.ai.extraction import (
     CODE_MIMES,
@@ -190,6 +191,8 @@ class _FakeWhisperResponse:
 async def test_audio_extractor_uses_whisper_api() -> None:
     settings = Settings(
         audio_extraction_local=False,
+        audio_stt_provider="whisper_api",
+        deepgram_api_key=None,
         whisper_model="whisper-1",
         llm_api_key="sk-test",
     )
@@ -222,6 +225,109 @@ async def test_audio_extractor_uses_whisper_api() -> None:
 
 
 @pytest.mark.asyncio
+async def test_audio_extractor_uses_deepgram() -> None:
+    settings = Settings(
+        audio_extraction_local=False,
+        audio_stt_provider="deepgram",
+        deepgram_api_key=SecretStr("dg-test"),
+        deepgram_stt_model="nova-2",
+    )
+    db = MagicMock()
+    db.add = MagicMock()
+    db.flush = AsyncMock()
+    extractor = AudioExtractor(settings=settings, db=db)
+
+    dg_payload = {
+        "metadata": {"duration": 6.6},
+        "results": {
+            "channels": [
+                {
+                    "detected_language": "en",
+                    "alternatives": [{"transcript": "hello world", "language": "en"}],
+                }
+            ],
+            "utterances": [
+                {"transcript": "Hello world.", "start": 0.24, "end": 3.1},
+                {"transcript": "Second part.", "start": 3.1, "end": 6.34},
+            ],
+        },
+    }
+    fake_response = MagicMock()
+    fake_response.status_code = 200
+    fake_response.text = "ok"
+    fake_response.json = MagicMock(return_value=dg_payload)
+
+    fake_client = MagicMock()
+    fake_client.__aenter__ = AsyncMock(return_value=fake_client)
+    fake_client.__aexit__ = AsyncMock(return_value=False)
+    fake_client.post = AsyncMock(return_value=fake_response)
+
+    with patch("abridgeai.ai.extraction.audio.httpx.AsyncClient", return_value=fake_client):
+        result = await extractor.extract(b"fake-wav-bytes")
+
+    # The request goes to Deepgram /v1/listen with a Token auth header.
+    fake_client.post.assert_awaited_once()
+    call = fake_client.post.await_args
+    assert call.args[0].endswith("/listen")
+    assert call.kwargs["headers"]["Authorization"] == "Token dg-test"
+    assert call.kwargs["content"] == b"fake-wav-bytes"
+
+    assert "Hello world." in result.text
+    assert "Second part." in result.text
+    assert result.metadata["stt_provider"] == "deepgram"
+    assert result.metadata["model_name"] == "nova-2"
+    assert result.metadata["language"] == "en"
+    assert result.metadata["segment_count"] == 2
+    assert result.source_locations[0].timestamp_start_ms == 240
+    assert result.source_locations[1].timestamp_end_ms == 6340
+    db.add.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_audio_extractor_deepgram_error_writes_failed_audit() -> None:
+    settings = Settings(
+        audio_extraction_local=False,
+        audio_stt_provider="deepgram",
+        deepgram_api_key=SecretStr("dg-test"),
+    )
+    db = MagicMock()
+    db.add = MagicMock()
+    db.flush = AsyncMock()
+    extractor = AudioExtractor(settings=settings, db=db)
+
+    fake_response = MagicMock()
+    fake_response.status_code = 401
+    fake_response.text = "unauthorized"
+
+    fake_client = MagicMock()
+    fake_client.__aenter__ = AsyncMock(return_value=fake_client)
+    fake_client.__aexit__ = AsyncMock(return_value=False)
+    fake_client.post = AsyncMock(return_value=fake_response)
+
+    with (
+        patch("abridgeai.ai.extraction.audio.httpx.AsyncClient", return_value=fake_client),
+        pytest.raises(AppError),
+    ):
+        await extractor.extract(b"x")
+    db.add.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_audio_extractor_deepgram_missing_key_errors() -> None:
+    settings = Settings(
+        audio_extraction_local=False,
+        audio_stt_provider="deepgram",
+        deepgram_api_key=None,
+    )
+    db = MagicMock()
+    db.add = MagicMock()
+    db.flush = AsyncMock()
+    extractor = AudioExtractor(settings=settings, db=db)
+    with pytest.raises(AppError, match="deepgram_api_key"):
+        await extractor.extract(b"x")
+
+
+@pytest.mark.asyncio
 async def test_audio_extractor_local_path_missing_dep_errors() -> None:
     settings = Settings(audio_extraction_local=True, llm_api_key="sk-test")
     extractor = AudioExtractor(settings=settings)
@@ -234,6 +340,8 @@ async def test_audio_extractor_local_path_missing_dep_errors() -> None:
 async def test_audio_extractor_whisper_api_error_writes_failed_audit() -> None:
     settings = Settings(
         audio_extraction_local=False,
+        audio_stt_provider="whisper_api",
+        deepgram_api_key=None,
         whisper_model="whisper-1",
         llm_api_key="sk-test",
     )

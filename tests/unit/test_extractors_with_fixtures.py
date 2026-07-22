@@ -161,6 +161,8 @@ async def test_audio_extractor_consumes_sample_wav() -> None:
 
     settings = Settings(
         audio_extraction_local=False,
+        audio_stt_provider="whisper_api",
+        deepgram_api_key=None,
         whisper_model="whisper-1",
         llm_api_key="sk-test",
     )

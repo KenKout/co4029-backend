@@ -154,6 +154,17 @@ class Settings(BaseSettings):
     s3_bucket_name: str = "abridgeai-materials"
 
     audio_extraction_local: bool = False
+    # STT backend for material-ingestion audio/video transcription (ignored
+    # when audio_extraction_local=True, which forces local faster-whisper).
+    # 'deepgram' calls Deepgram /v1/listen with deepgram_api_key (API-only,
+    # supports EN+VI via language detection). 'whisper_api' calls the
+    # OpenAI-compatible gateway /audio/transcriptions (needs the gateway to
+    # serve an STT model named by whisper_model).
+    audio_stt_provider: Literal["deepgram", "whisper_api"] = "whisper_api"
+    # Deepgram STT model + endpoint (used when audio_stt_provider=deepgram).
+    # nova-2 handles EN and VI; detect_language picks per-file at runtime.
+    deepgram_stt_model: str = "nova-2"
+    deepgram_stt_base_url: str = "https://api.deepgram.com/v1"
     image_ocr_provider: Literal["tesseract", "llm_vision"] = "tesseract"
     # Tesseract language(s) for image/frame OCR. '+'-joined traineddata names
     # (e.g. "eng+vie" for the bilingual EN/VI corpus). Each must be installed
