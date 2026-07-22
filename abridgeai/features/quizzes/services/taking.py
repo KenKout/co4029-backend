@@ -37,6 +37,8 @@ from abridgeai.features.quizzes.queries import published as published_queries
 from abridgeai.features.quizzes.queries.published import (
     CooldownActive,
     MaxAttemptsReached,
+    QuizClosed,  # noqa: F401  -- re-exported for the learner router (see __all__)
+    QuizNotYetOpen,  # noqa: F401  -- re-exported for the learner router (see __all__)
 )
 from abridgeai.features.quizzes.schemas.attempt import (
     QuizAttemptProgressAnswer,
@@ -595,6 +597,8 @@ __all__ = [
     "AllCardsInCooldownError",
     "CooldownActive",
     "MaxAttemptsReached",
+    "QuizClosed",
+    "QuizNotYetOpen",
     "answer_attempt",
     "get_attempt_history",
     "get_attempt_progress",

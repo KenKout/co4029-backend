@@ -567,9 +567,7 @@ async def test_answer_upsert_allows_editing_without_conflict(
         client, admin_bearer, engine, scenario, title="Upsert Quiz"
     )
     student_sid = await _seed_session(engine, seeded_users.student_id)
-    student_token = create_access_token(
-        user_id=seeded_users.student_id, session_id=student_sid
-    )
+    student_token = create_access_token(user_id=seeded_users.student_id, session_id=student_sid)
 
     attempt_resp = await client.post(
         f"/api/v1/quizzes/{quiz_id}/attempts",
@@ -636,9 +634,7 @@ async def test_attempt_progress_returns_saved_answers_no_leak(
         client, admin_bearer, engine, scenario, title="Progress Quiz"
     )
     student_sid = await _seed_session(engine, seeded_users.student_id)
-    student_token = create_access_token(
-        user_id=seeded_users.student_id, session_id=student_sid
-    )
+    student_token = create_access_token(user_id=seeded_users.student_id, session_id=student_sid)
 
     attempt_resp = await client.post(
         f"/api/v1/quizzes/{quiz_id}/attempts",
@@ -700,9 +696,7 @@ async def test_attempt_progress_404_for_other_student(
         client, admin_bearer, engine, scenario, title="Progress Owner Quiz"
     )
     student_sid = await _seed_session(engine, seeded_users.student_id)
-    student_token = create_access_token(
-        user_id=seeded_users.student_id, session_id=student_sid
-    )
+    student_token = create_access_token(user_id=seeded_users.student_id, session_id=student_sid)
     attempt_resp = await client.post(
         f"/api/v1/quizzes/{quiz_id}/attempts",
         json={"quiz_id": str(quiz_id)},
@@ -738,3 +732,147 @@ def test_no_bare_get_current_user_on_quiz_authoring_endpoints() -> None:
     code_only = re.sub(r'"""[\s\S]*?"""', "", src)
     bare = re.findall(r"Depends\(get_current_user\)", code_only)
     assert bare == [], f"authoring.py uses bare Depends(get_current_user): {bare}"
+
+
+async def test_start_attempt_blocked_before_available_from(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    scenario: dict[str, uuid.UUID],
+    engine: AsyncEngine,
+    seeded_users: SeededUsers,
+) -> None:
+    """A quiz with available_from in the future rejects attempt start with 409."""
+    quiz_id, _question_id, _opts = await _seed_published_quiz_with_question(
+        client, admin_bearer, engine, scenario, title="Not Yet Open Quiz"
+    )
+    future = datetime.now(UTC) + timedelta(days=1)
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("UPDATE quizzes SET available_from = :ts WHERE id = :id"),
+            {"ts": future, "id": quiz_id},
+        )
+    student_sid = await _seed_session(engine, seeded_users.student_id)
+    student_token = create_access_token(user_id=seeded_users.student_id, session_id=student_sid)
+
+    resp = await client.post(
+        f"/api/v1/quizzes/{quiz_id}/attempts",
+        json={"quiz_id": str(quiz_id)},
+        headers=_auth(student_token),
+    )
+    assert resp.status_code == 409, resp.text
+    assert resp.json()["detail"]["reason"] == "quiz_not_yet_open"
+
+    async with engine.begin() as conn:
+        await conn.execute(text("DELETE FROM auth_sessions WHERE id = :id"), {"id": student_sid})
+
+
+async def test_start_attempt_blocked_after_available_until(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    scenario: dict[str, uuid.UUID],
+    engine: AsyncEngine,
+    seeded_users: SeededUsers,
+) -> None:
+    """A quiz whose available_until has passed rejects attempt start with 409."""
+    quiz_id, _question_id, _opts = await _seed_published_quiz_with_question(
+        client, admin_bearer, engine, scenario, title="Closed Quiz"
+    )
+    past = datetime.now(UTC) - timedelta(days=1)
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("UPDATE quizzes SET available_until = :ts WHERE id = :id"),
+            {"ts": past, "id": quiz_id},
+        )
+    student_sid = await _seed_session(engine, seeded_users.student_id)
+    student_token = create_access_token(user_id=seeded_users.student_id, session_id=student_sid)
+
+    resp = await client.post(
+        f"/api/v1/quizzes/{quiz_id}/attempts",
+        json={"quiz_id": str(quiz_id)},
+        headers=_auth(student_token),
+    )
+    assert resp.status_code == 409, resp.text
+    assert resp.json()["detail"]["reason"] == "quiz_closed"
+
+    async with engine.begin() as conn:
+        await conn.execute(text("DELETE FROM auth_sessions WHERE id = :id"), {"id": student_sid})
+
+
+async def test_start_attempt_allowed_inside_window(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    scenario: dict[str, uuid.UUID],
+    engine: AsyncEngine,
+    seeded_users: SeededUsers,
+) -> None:
+    """A quiz whose now sits inside [available_from, available_until] starts fine.
+
+    ``due_at`` in the past must NOT block (it's a soft deadline).
+    """
+    quiz_id, _question_id, _opts = await _seed_published_quiz_with_question(
+        client, admin_bearer, engine, scenario, title="Open Window Quiz"
+    )
+    now = datetime.now(UTC)
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "UPDATE quizzes SET available_from = :past, "
+                "available_until = :future, due_at = :due WHERE id = :id"
+            ),
+            {
+                "past": now - timedelta(hours=1),
+                "future": now + timedelta(hours=1),
+                "due": now - timedelta(minutes=5),  # past soft deadline — must not block
+                "id": quiz_id,
+            },
+        )
+    student_sid = await _seed_session(engine, seeded_users.student_id)
+    student_token = create_access_token(user_id=seeded_users.student_id, session_id=student_sid)
+
+    resp = await client.post(
+        f"/api/v1/quizzes/{quiz_id}/attempts",
+        json={"quiz_id": str(quiz_id)},
+        headers=_auth(student_token),
+    )
+    assert resp.status_code == 201, resp.text
+
+    async with engine.begin() as conn:
+        await conn.execute(text("DELETE FROM auth_sessions WHERE id = :id"), {"id": student_sid})
+
+
+async def test_update_quiz_persists_schedule_window(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    scenario: dict[str, uuid.UUID],
+    engine: AsyncEngine,
+) -> None:
+    """PATCH /teacher/quizzes/{id} accepts ISO window strings and echoes them back."""
+    quiz_id, _question_id, _opts = await _seed_published_quiz_with_question(
+        client, admin_bearer, engine, scenario, title="Schedule PATCH Quiz"
+    )
+    open_ts = "2026-08-01T09:00:00+00:00"
+    close_ts = "2026-08-08T09:00:00+00:00"
+    due_ts = "2026-08-07T23:59:00+00:00"
+    resp = await client.patch(
+        f"/api/v1/teacher/quizzes/{quiz_id}",
+        json={
+            "available_from": open_ts,
+            "available_until": close_ts,
+            "due_at": due_ts,
+        },
+        headers=_auth(admin_bearer),
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["available_from"].startswith("2026-08-01T09:00:00")
+    assert body["available_until"].startswith("2026-08-08T09:00:00")
+    assert body["due_at"].startswith("2026-08-07T23:59:00")
+
+    # Clearing a window field with null must persist NULL.
+    clear_resp = await client.patch(
+        f"/api/v1/teacher/quizzes/{quiz_id}",
+        json={"available_until": None},
+        headers=_auth(admin_bearer),
+    )
+    assert clear_resp.status_code == 200, clear_resp.text
+    assert clear_resp.json()["available_until"] is None

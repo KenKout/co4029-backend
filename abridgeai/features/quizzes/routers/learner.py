@@ -41,6 +41,8 @@ from abridgeai.features.quizzes.services.taking import (
     AllCardsInCooldownError,
     CooldownActive,
     MaxAttemptsReached,
+    QuizClosed,
+    QuizNotYetOpen,
 )
 from abridgeai.features.spaced_repetition.api.public import (
     dispatch_remediation_for_card_failure,
@@ -163,6 +165,22 @@ async def start_attempt(
                 "max_attempts": exc.max_attempts,
             },
         ) from exc
+    except QuizNotYetOpen as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "reason": "quiz_not_yet_open",
+                "available_from": exc.available_from.isoformat(),
+            },
+        ) from exc
+    except QuizClosed as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "reason": "quiz_closed",
+                "available_until": exc.available_until.isoformat(),
+            },
+        ) from exc
     except AllCardsInCooldownError as exc:
         retry_after_seconds = max(0, int((exc.retry_available_at - utcnow()).total_seconds()))
         raise HTTPException(
@@ -202,9 +220,7 @@ async def record_answer(
     Remediation failures are logged and never surface to the student.
     """
     try:
-        answer, review = await taking_service.answer_attempt(
-            db, attempt_id, payload, current_user
-        )
+        answer, review = await taking_service.answer_attempt(db, attempt_id, payload, current_user)
     except NotFoundError as exc:
         raise _not_found("quiz_attempt", attempt_id) from exc
     await db.commit()
@@ -299,9 +315,7 @@ async def get_attempt_review(
     or hasn't been submitted yet (review only opens after submission so
     correct-option flags can't leak mid-attempt).
     """
-    review = await taking_service.get_attempt_review(
-        db, attempt_id=attempt_id, actor=current_user
-    )
+    review = await taking_service.get_attempt_review(db, attempt_id=attempt_id, actor=current_user)
     if review is None:
         raise _not_found("quiz_attempt", attempt_id)
     return review
