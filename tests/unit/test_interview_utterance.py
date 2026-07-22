@@ -270,3 +270,25 @@ def test_reframe_variants_differ_by_count() -> None:
         d, persona=Persona.NEUTRAL, language="en", question_text=None, reframe_count=1
     )
     assert v0.ai_turn_text != v1.ai_turn_text
+
+
+# ── rich closing templates (Slice 13) ────────────────────────────────────────
+
+
+def test_closing_substeps_render_bilingual_and_answer_safe() -> None:
+    """Self-reflection / invite-questions / answer-question all render EN + VI."""
+    for action in (
+        InterviewerActionType.PROMPT_SELF_REFLECTION,
+        InterviewerActionType.INVITE_CANDIDATE_QUESTIONS,
+        InterviewerActionType.ANSWER_CANDIDATE_QUESTION,
+    ):
+        d = _decision(action, reason=ReasonCode.CLOSING_REQUIRED)
+        en = build_fallback_utterance(d, persona=Persona.NEUTRAL, language="en", question_text=None)
+        vi = build_fallback_utterance(d, persona=Persona.NEUTRAL, language="vi", question_text=None)
+        assert en.ai_turn_text.strip()
+        assert vi.ai_turn_text.strip()
+        assert en.ai_turn_text != vi.ai_turn_text  # localized
+        # Never leaks rubric/answer content.
+        for text in (en.ai_turn_text.lower(), vi.ai_turn_text.lower()):
+            for banned in ("the answer is", "correct answer", "rubric", "score is"):
+                assert banned not in text

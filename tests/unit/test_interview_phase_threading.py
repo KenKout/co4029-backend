@@ -296,3 +296,60 @@ def test_per_outcome_competence_off_leaves_prior() -> None:
         per_outcome_difficulty_enabled=False,
     )
     assert data.outcome_coverage["o-1"].competence_estimate == 0.5
+
+
+def _closing_decision(action: InterviewerActionType, reason: ReasonCode) -> InterviewerDecision:
+    return InterviewerDecision(
+        action=action,
+        reason_code=reason,
+        should_advance_question=False,
+        acknowledgement_style=AcknowledgementStyle.NEUTRAL,
+    )
+
+
+def test_rich_closing_marker_advances_reflection_to_questions() -> None:
+    """Slice 13: closing sub-actions flip phase to CLOSING and advance the marker."""
+    data = InterviewRuntimeStateData(phase=InterviewPhase.CORE)
+    # self-reflection → marker "reflection"
+    apply_state_updates(
+        data,
+        intent=_answer_intent(),
+        analysis=None,
+        decision=_closing_decision(
+            InterviewerActionType.PROMPT_SELF_REFLECTION, ReasonCode.CLOSING_SELF_REFLECTION
+        ),
+        selected_question_id=None,
+        target_outcome_id=None,
+    )
+    assert data.phase is InterviewPhase.CLOSING
+    assert data.closing_step == "reflection"
+
+    # invite questions → marker "questions"
+    apply_state_updates(
+        data,
+        intent=_answer_intent(),
+        analysis=None,
+        decision=_closing_decision(
+            InterviewerActionType.INVITE_CANDIDATE_QUESTIONS, ReasonCode.CLOSING_INVITE_QUESTIONS
+        ),
+        selected_question_id=None,
+        target_outcome_id=None,
+    )
+    assert data.closing_step == "questions"
+
+
+def test_rich_closing_answer_question_keeps_marker() -> None:
+    data = InterviewRuntimeStateData(phase=InterviewPhase.CLOSING, closing_step="questions")
+    apply_state_updates(
+        data,
+        intent=_answer_intent(),
+        analysis=None,
+        decision=_closing_decision(
+            InterviewerActionType.ANSWER_CANDIDATE_QUESTION, ReasonCode.CLOSING_ANSWERED_QUESTION
+        ),
+        selected_question_id=None,
+        target_outcome_id=None,
+    )
+    # Marker stays "questions" so the NEXT turn signs off.
+    assert data.closing_step == "questions"
+    assert data.phase is InterviewPhase.CLOSING

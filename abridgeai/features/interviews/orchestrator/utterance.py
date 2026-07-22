@@ -274,6 +274,43 @@ def _fallback_parts(  # noqa: C901, PLR0911 -- flat per-action dispatch; readabi
         }[lang]
         return ack, "", closing
 
+    # Rich closing sub-steps (Slice 13, v2). Brief, answer-safe, bilingual. Each
+    # is a self-contained turn (no question metadata needed).
+    if action is InterviewerActionType.PROMPT_SELF_REFLECTION:
+        reflection = {
+            "en": (
+                "Before we wrap up: looking back on the interview, what's one thing "
+                "you feel went well, and one you'd approach differently?"
+            ),
+            "vi": (
+                "Trước khi kết thúc: nhìn lại buổi phỏng vấn, bạn thấy điều gì mình "
+                "đã làm tốt, và điều gì bạn sẽ làm khác đi?"
+            ),
+        }[lang]
+        return ack, "", reflection
+
+    if action is InterviewerActionType.INVITE_CANDIDATE_QUESTIONS:
+        invite = {
+            "en": "Thank you for sharing that. Is there anything you'd like to ask me?",
+            "vi": "Cảm ơn bạn đã chia sẻ. Bạn có muốn hỏi tôi điều gì không?",
+        }[lang]
+        return ack, "", invite
+
+    if action is InterviewerActionType.ANSWER_CANDIDATE_QUESTION:
+        # Answer-safe acknowledgement — never reveals rubric/answers or makes
+        # commitments; defers specifics to the teacher/results.
+        reply = {
+            "en": (
+                "That's a good question. I can't share the evaluation details here, "
+                "but your instructor will follow up with feedback and results."
+            ),
+            "vi": (
+                "Đó là một câu hỏi hay. Tôi không thể chia sẻ chi tiết đánh giá ở đây, "
+                "nhưng giảng viên của bạn sẽ phản hồi kèm kết quả sau."
+            ),
+        }[lang]
+        return ack, "", reply
+
     if action is InterviewerActionType.ACKNOWLEDGE:
         return ack, "", q
 

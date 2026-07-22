@@ -26,7 +26,7 @@ from typing import Any
 
 # Current schema version of the serialized state payload. Bump on incompatible
 # shape changes so ``from_dict`` can migrate old payloads if ever needed.
-STATE_SCHEMA_VERSION = 8
+STATE_SCHEMA_VERSION = 9
 
 
 class InterviewPhase(str, Enum):  # noqa: UP042 -- StrEnum changes value coercion; match codebase convention
@@ -192,6 +192,12 @@ class InterviewRuntimeStateData:
     hint_level: int = 0
     reframe_count: int = 0
 
+    # Rich closing sub-step marker (Slice 13, v2). Sequences the closing phase:
+    # "" (not started) → "reflection" (self-reflection prompted) → "questions"
+    # (candidate questions invited) → "done" (final sign-off emitted). Only
+    # advanced when rich_closing is enabled; otherwise stays "" → v1 one-shot close.
+    closing_step: str = ""
+
     outcome_coverage: dict[str, OutcomeCoverageState] = field(default_factory=dict)
 
     last_student_intent: dict[str, Any] | None = None
@@ -243,6 +249,7 @@ class InterviewRuntimeStateData:
             "warmup_turns_target": self.warmup_turns_target,
             "hint_level": self.hint_level,
             "reframe_count": self.reframe_count,
+            "closing_step": self.closing_step,
             "outcome_coverage": {k: v.to_dict() for k, v in self.outcome_coverage.items()},
             "last_student_intent": self.last_student_intent,
             "last_answer_analysis": self.last_answer_analysis,
@@ -295,6 +302,7 @@ class InterviewRuntimeStateData:
             warmup_turns_target=int(data.get("warmup_turns_target", 1)),
             hint_level=int(data.get("hint_level", 0)),
             reframe_count=int(data.get("reframe_count", 0)),
+            closing_step=str(data.get("closing_step", "") or ""),
             outcome_coverage=coverage,
             last_student_intent=data.get("last_student_intent"),
             last_answer_analysis=data.get("last_answer_analysis"),

@@ -66,6 +66,12 @@ class InterviewerActionType(str, Enum):  # noqa: UP042 -- match codebase convent
     CANCEL_END = "cancel_end"
     BEGIN_CLOSING = "begin_closing"
     CLOSE_INTERVIEW = "close_interview"
+    # Rich closing sub-steps (Slice 13, v2). Deterministic, brief, answer-safe
+    # turns that run during the CLOSING phase before the final sign-off: prompt
+    # the candidate to self-reflect, then invite their questions, then close.
+    PROMPT_SELF_REFLECTION = "prompt_self_reflection"
+    INVITE_CANDIDATE_QUESTIONS = "invite_candidate_questions"
+    ANSWER_CANDIDATE_QUESTION = "answer_candidate_question"
 
 
 class AcknowledgementStyle(str, Enum):  # noqa: UP042 -- match codebase convention
@@ -100,6 +106,10 @@ class ReasonCode(str, Enum):  # noqa: UP042 -- match codebase convention
     END_CONFIRMATION_REQUESTED = "end_confirmation_requested"
     END_CONFIRMED = "end_confirmed"
     END_CANCELLED = "end_cancelled"
+    # Rich closing sub-steps (Slice 13, v2).
+    CLOSING_SELF_REFLECTION = "closing_self_reflection"
+    CLOSING_INVITE_QUESTIONS = "closing_invite_questions"
+    CLOSING_ANSWERED_QUESTION = "closing_answered_question"
 
 
 # Follow-up / loop-protection limits (Phase 11). Conservative defaults; Phase 6
@@ -188,6 +198,12 @@ class DecisionInputs:
     # instead of advancing. Defaults False + CORE → byte-for-byte v1 behaviour.
     depth_probe_enabled: bool = False
     phase: InterviewPhase = InterviewPhase.CORE
+    # Rich closing (Slice 13, v2): when enabled, the CLOSING phase runs a short
+    # deterministic sub-sequence (self-reflection → invite questions → sign-off)
+    # instead of a one-shot close. ``closing_step`` is the current marker from
+    # state (""/"reflection"/"questions"/"done"). Off → v1 one-shot close.
+    rich_closing_enabled: bool = False
+    closing_step: str = ""
 
 
 # Below this fraction of time remaining, stop probing and head for closing.
@@ -220,15 +236,100 @@ def _probe_reason(probe: ProbeType) -> ReasonCode:
     }.get(probe, ReasonCode.PARTIAL_OUTCOME_COVERAGE)
 
 
+def _rich_closing_step(inputs: DecisionInputs) -> InterviewerDecision | None:
+    """Advance the rich-closing sub-sequence (Slice 13, v2).
+
+    Runs a short deterministic sequence once closing is reached, keyed by the
+    ``closing_step`` marker from state:
+
+        ""          → prompt self-reflection      (marker becomes "reflection")
+        "reflection"→ invite candidate questions  (marker becomes "questions")
+        "questions" → answer a candidate question OR final sign-off
+        "done"      → final sign-off (CLOSE_INTERVIEW)
+
+    Every sub-step except the final one is a NON-finishing turn (mapping.py only
+    finishes on BEGIN_CLOSING / CLOSE_INTERVIEW), so the interview keeps
+    collecting one more reply. None means rich closing does not apply (feature
+    off), so the caller falls back to the v1 one-shot close.
+    """
+    if not inputs.rich_closing_enabled:
+        return None
+
+    step = inputs.closing_step
+    if step == "":
+        return InterviewerDecision(
+            action=InterviewerActionType.PROMPT_SELF_REFLECTION,
+            reason_code=ReasonCode.CLOSING_SELF_REFLECTION,
+            should_record_academic_evidence=False,
+            should_advance_question=False,
+            acknowledgement_style=AcknowledgementStyle.POSITIVE,
+            internal_rationale="Closing: prompt candidate self-reflection.",
+            tags=["closing", "self_reflection"],
+        )
+    if step == "reflection":
+        return InterviewerDecision(
+            action=InterviewerActionType.INVITE_CANDIDATE_QUESTIONS,
+            reason_code=ReasonCode.CLOSING_INVITE_QUESTIONS,
+            should_record_academic_evidence=False,
+            should_advance_question=False,
+            acknowledgement_style=AcknowledgementStyle.NEUTRAL,
+            internal_rationale="Closing: invite candidate questions.",
+            tags=["closing", "invite_questions"],
+        )
+    if step == "questions" and inputs.intent.intent is StudentIntent.ASK_INTERVIEWER_QUESTION:
+        # Candidate asked something — acknowledge briefly (answer-safe), then the
+        # NEXT turn (still "questions") will sign off. Non-finishing.
+        return InterviewerDecision(
+            action=InterviewerActionType.ANSWER_CANDIDATE_QUESTION,
+            reason_code=ReasonCode.CLOSING_ANSWERED_QUESTION,
+            should_record_academic_evidence=False,
+            should_advance_question=False,
+            acknowledgement_style=AcknowledgementStyle.NEUTRAL,
+            internal_rationale="Closing: acknowledge candidate question (answer-safe).",
+            tags=["closing", "answer_question"],
+        )
+    # step == "questions" (no question asked) or "done" → final sign-off.
+    return InterviewerDecision(
+        action=InterviewerActionType.CLOSE_INTERVIEW,
+        reason_code=ReasonCode.CLOSING_REQUIRED,
+        should_record_academic_evidence=False,
+        should_advance_question=False,
+        acknowledgement_style=AcknowledgementStyle.POSITIVE,
+        internal_rationale="Closing: final sign-off.",
+        tags=["closing", "sign_off"],
+    )
+
+
+def _begin_closing_decision(
+    inputs: DecisionInputs, reason: ReasonCode, rationale: str
+) -> InterviewerDecision:
+    """The turn that ENTERS closing.
+
+    Rich closing (Slice 13): emit the first sub-step (self-reflection), a
+    NON-finishing turn that also flips the phase to CLOSING in turn_state so
+    subsequent turns route through the sub-sequence. Off → the v1 one-shot
+    BEGIN_CLOSING (finishing).
+    """
+    if inputs.rich_closing_enabled:
+        rich = _rich_closing_step(inputs)
+        if rich is not None:
+            return rich
+    return InterviewerDecision(
+        action=InterviewerActionType.BEGIN_CLOSING,
+        reason_code=reason,
+        should_record_academic_evidence=False,
+        should_advance_question=False,
+        internal_rationale=rationale,
+    )
+
+
 def _advance_or_close(inputs: DecisionInputs, reason: ReasonCode) -> InterviewerDecision:
     """Move to the next question, or begin closing when none remain / time low."""
     if not inputs.has_next_question:
-        return InterviewerDecision(
-            action=InterviewerActionType.BEGIN_CLOSING,
-            reason_code=ReasonCode.CLOSING_REQUIRED,
-            should_record_academic_evidence=False,
-            should_advance_question=False,
-            internal_rationale="No further approved questions available; closing.",
+        return _begin_closing_decision(
+            inputs,
+            ReasonCode.CLOSING_REQUIRED,
+            "No further approved questions available; closing.",
         )
     return InterviewerDecision(
         action=InterviewerActionType.TRANSITION_TOPIC,
@@ -382,6 +483,15 @@ def decide_next_action(inputs: DecisionInputs) -> InterviewerDecision:
     11. Analysis recommends a probe → probe (record evidence).
     12. Otherwise             → advance to next question / close.
     """
+    # Rich closing continuation (Slice 13, v2). Once the phase is CLOSING and the
+    # feature is on, the closing sub-sequence owns every turn (self-reflection →
+    # invite questions → answer/​sign-off), regardless of intent — so an end
+    # request during closing simply signs off. Off → falls through to v1.
+    if inputs.rich_closing_enabled and inputs.phase is InterviewPhase.CLOSING:
+        rich = _rich_closing_step(inputs)
+        if rich is not None:
+            return rich
+
     request_decision = _decide_from_intent_request(inputs)
     if request_decision is not None:
         return request_decision
@@ -466,12 +576,13 @@ def decide_next_action(inputs: DecisionInputs) -> InterviewerDecision:
 
     if inputs.all_required_outcomes_covered and not time_low:
         # Everything required is covered → begin closing rather than pad.
-        return InterviewerDecision(
-            action=InterviewerActionType.BEGIN_CLOSING,
-            reason_code=ReasonCode.ALL_REQUIRED_OUTCOMES_COVERED,
-            should_record_academic_evidence=True,
-            internal_rationale="All required outcomes covered; begin closing.",
+        decision = _begin_closing_decision(
+            inputs,
+            ReasonCode.ALL_REQUIRED_OUTCOMES_COVERED,
+            "All required outcomes covered; begin closing.",
         )
+        decision.should_record_academic_evidence = True
+        return decision
 
     decision = _advance_or_close(inputs, reason)
     decision.should_record_academic_evidence = True

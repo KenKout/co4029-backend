@@ -42,6 +42,11 @@ class StudentIntent(str, Enum):  # noqa: UP042 -- StrEnum changes value coercion
     # (a bare "yes"/"no" mid-question is not an end signal).
     CONFIRM_END = "confirm_end"
     CANCEL_END = "cancel_end"
+    # Rich closing (Slice 13, v2). The candidate asks the interviewer a question
+    # ("do you have feedback?", "can I ask something?"). Benign, NEVER scored —
+    # handled only during the closing phase; mid-interview it falls through to
+    # the normal classifier so a genuine answer is never hijacked.
+    ASK_INTERVIEWER_QUESTION = "ask_interviewer_question"
 
 
 # Intents that must NEVER be recorded as an academic answer / scored.
@@ -56,6 +61,7 @@ NON_ACADEMIC_INTENTS: frozenset[StudentIntent] = frozenset(
         StudentIntent.END_INTERVIEW,
         StudentIntent.CONFIRM_END,
         StudentIntent.CANCEL_END,
+        StudentIntent.ASK_INTERVIEWER_QUESTION,
     }
 )
 
@@ -90,6 +96,20 @@ class IntentClassification:
 # the LLM (or, on LLM failure, defaults to ANSWER so progression never stalls).
 
 _RULES: tuple[tuple[StudentIntent, tuple[str, ...]], ...] = (
+    (
+        # Rich closing (Slice 13): candidate asks the interviewer a question.
+        # HIGH-PRECISION only — these phrasings are unambiguous requests directed
+        # at the interviewer, so they won't hijack a normal mid-interview answer.
+        # (The decision layer only acts on this intent during the closing phase.)
+        StudentIntent.ASK_INTERVIEWER_QUESTION,
+        (
+            r"\b(can|could|may) i ask you (a |one )?(quick )?question\b",
+            r"\bdo you have (any )?(feedback|questions for me)\b",
+            r"\bcan i ask you something\b",
+            r"\b(tôi|mình|em) (có thể )?hỏi (bạn|anh|chị|thầy|cô) (một )?(câu|chút)\b",
+            r"\b(bạn|anh|chị|thầy|cô) có (nhận xét|góp ý|phản hồi) (gì )?(cho (tôi|mình|em))?\b",
+        ),
+    ),
     (
         StudentIntent.ASK_TO_REPEAT,
         (

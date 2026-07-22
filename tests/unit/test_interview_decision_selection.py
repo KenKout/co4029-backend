@@ -205,6 +205,70 @@ def test_no_per_outcome_competence_falls_back_to_global() -> None:
     )
 
 
+# ── rich closing sub-sequence (Slice 13) ─────────────────────────────────────
+
+
+def test_rich_closing_off_is_one_shot_begin_closing() -> None:
+    """Parity: with rich_closing off, an exhausted pool → v1 one-shot BEGIN_CLOSING."""
+    d = decide_next_action(_inputs(has_next_question=False, rich_closing_enabled=False))
+    assert d.action is InterviewerActionType.BEGIN_CLOSING
+
+
+def test_rich_closing_entry_prompts_self_reflection() -> None:
+    """Entering closing with rich_closing on emits self-reflection (non-finishing)."""
+    from abridgeai.features.interviews.orchestrator.state import InterviewPhase
+
+    d = decide_next_action(
+        _inputs(
+            has_next_question=False,
+            rich_closing_enabled=True,
+            closing_step="",
+            phase=InterviewPhase.CORE,
+        )
+    )
+    assert d.action is InterviewerActionType.PROMPT_SELF_REFLECTION
+    assert d.reason_code is ReasonCode.CLOSING_SELF_REFLECTION
+
+
+def test_rich_closing_sequence_reflection_then_invite_then_signoff() -> None:
+    from abridgeai.features.interviews.orchestrator.state import InterviewPhase
+
+    # reflection → invite questions
+    d1 = decide_next_action(
+        _inputs(
+            rich_closing_enabled=True,
+            closing_step="reflection",
+            phase=InterviewPhase.CLOSING,
+        )
+    )
+    assert d1.action is InterviewerActionType.INVITE_CANDIDATE_QUESTIONS
+
+    # questions + no interviewer-question → final sign-off (CLOSE_INTERVIEW)
+    d2 = decide_next_action(
+        _inputs(
+            rich_closing_enabled=True,
+            closing_step="questions",
+            phase=InterviewPhase.CLOSING,
+        )
+    )
+    assert d2.action is InterviewerActionType.CLOSE_INTERVIEW
+
+
+def test_rich_closing_answers_candidate_question_before_signoff() -> None:
+    from abridgeai.features.interviews.orchestrator.state import InterviewPhase
+
+    d = decide_next_action(
+        _inputs(
+            intent=_intent(StudentIntent.ASK_INTERVIEWER_QUESTION),
+            rich_closing_enabled=True,
+            closing_step="questions",
+            phase=InterviewPhase.CLOSING,
+        )
+    )
+    assert d.action is InterviewerActionType.ANSWER_CANDIDATE_QUESTION
+    assert d.reason_code is ReasonCode.CLOSING_ANSWERED_QUESTION
+
+
 # ── decision precedence ──────────────────────────────────────────────────────
 
 

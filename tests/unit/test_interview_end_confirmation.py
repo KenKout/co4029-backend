@@ -185,9 +185,9 @@ def test_new_fields_round_trip() -> None:
 
 
 def test_schema_version_is_current() -> None:
-    # Bumped to 8 in Slice 12 (per-outcome competence estimate added).
-    assert STATE_SCHEMA_VERSION == 8
-    assert InterviewRuntimeStateData().version == 8
+    # Bumped to 9 in Slice 13 (rich closing sub-step marker added).
+    assert STATE_SCHEMA_VERSION == 9
+    assert InterviewRuntimeStateData().version == 9
 
 
 def test_v2_payload_without_new_fields_defaults_safely() -> None:

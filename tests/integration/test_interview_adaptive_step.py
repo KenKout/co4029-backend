@@ -345,6 +345,7 @@ def _settings_v2(
     affect: bool = False,
     hint_ladder: bool = False,
     per_outcome_difficulty: bool = False,
+    rich_closing: bool = False,
 ) -> Settings:
     """v1 adaptive fully on PLUS the v2 master + selected sub-flags.
 
@@ -359,6 +360,7 @@ def _settings_v2(
             "adaptive_v2_affect_enabled": affect,
             "adaptive_v2_hint_ladder_enabled": hint_ladder,
             "adaptive_v2_per_outcome_difficulty_enabled": per_outcome_difficulty,
+            "adaptive_v2_rich_closing_enabled": rich_closing,
         }
     )
 
@@ -383,6 +385,11 @@ def adaptive_v2_per_outcome_difficulty_on(monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setattr(
         taking_service, "get_settings", lambda: _settings_v2(per_outcome_difficulty=True)
     )
+
+
+@pytest.fixture
+def adaptive_v2_rich_closing_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(taking_service, "get_settings", lambda: _settings_v2(rich_closing=True))
 
 
 async def _runtime_phase(engine: AsyncEngine, session_id: uuid.UUID) -> str | None:

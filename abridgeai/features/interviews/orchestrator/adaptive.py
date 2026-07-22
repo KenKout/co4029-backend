@@ -151,6 +151,7 @@ async def run_adaptive_turn(
     affect_enabled: bool = False,
     hint_ladder_enabled: bool = False,
     per_outcome_difficulty_enabled: bool = False,
+    rich_closing_enabled: bool = False,
 ) -> AdaptiveOutcome:
     """Run one adaptive turn. MUST be called inside a caller-owned savepoint.
 
@@ -315,6 +316,8 @@ async def run_adaptive_turn(
             pending_confirmation=data.pending_confirmation,
             depth_probe_enabled=depth_probe_enabled,
             phase=data.phase,
+            rich_closing_enabled=rich_closing_enabled,
+            closing_step=data.closing_step,
         )
     )
 

@@ -192,6 +192,23 @@ def apply_state_updates(  # noqa: C901 -- explicit action branches are auditable
     ):
         data.phase = InterviewPhase.CLOSING
         data.interaction_state = InteractionState.CLOSING
+    elif decision.action in (
+        InterviewerActionType.PROMPT_SELF_REFLECTION,
+        InterviewerActionType.INVITE_CANDIDATE_QUESTIONS,
+        InterviewerActionType.ANSWER_CANDIDATE_QUESTION,
+    ):
+        # Rich closing sub-steps (Slice 13, v2). Non-finishing turns that keep
+        # the session in the CLOSING phase and advance the closing_step marker
+        # so the sub-sequence progresses: "" → reflection → questions. An
+        # ANSWER_CANDIDATE_QUESTION turn keeps the marker at "questions" so the
+        # next turn signs off. These never consume the academic follow-up budget.
+        data.phase = InterviewPhase.CLOSING
+        data.interaction_state = InteractionState.CLOSING
+        if decision.action is InterviewerActionType.PROMPT_SELF_REFLECTION:
+            data.closing_step = "reflection"
+        elif decision.action is InterviewerActionType.INVITE_CANDIDATE_QUESTIONS:
+            data.closing_step = "questions"
+        # ANSWER_CANDIDATE_QUESTION leaves closing_step == "questions".
     elif decision.reason_code in {
         ReasonCode.STUDENT_REQUESTED_REPEAT,
         ReasonCode.STUDENT_REQUESTED_CLARIFICATION,
