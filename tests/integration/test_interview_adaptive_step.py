@@ -344,6 +344,7 @@ def _settings_v2(
     depth_probe: bool = False,
     affect: bool = False,
     hint_ladder: bool = False,
+    per_outcome_difficulty: bool = False,
 ) -> Settings:
     """v1 adaptive fully on PLUS the v2 master + selected sub-flags.
 
@@ -357,6 +358,7 @@ def _settings_v2(
             "adaptive_v2_depth_probe_enabled": depth_probe,
             "adaptive_v2_affect_enabled": affect,
             "adaptive_v2_hint_ladder_enabled": hint_ladder,
+            "adaptive_v2_per_outcome_difficulty_enabled": per_outcome_difficulty,
         }
     )
 
@@ -374,6 +376,13 @@ def adaptive_v2_depth_probe_on(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.fixture
 def adaptive_v2_affect_on(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(taking_service, "get_settings", lambda: _settings_v2(affect=True))
+
+
+@pytest.fixture
+def adaptive_v2_per_outcome_difficulty_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        taking_service, "get_settings", lambda: _settings_v2(per_outcome_difficulty=True)
+    )
 
 
 async def _runtime_phase(engine: AsyncEngine, session_id: uuid.UUID) -> str | None:
@@ -1454,3 +1463,76 @@ async def test_v2_affect_records_nervous_and_warms_tone(
         ).scalar_one()
     signals = state_json.get("candidate_signals", {})
     assert signals.get("last_affect") == "nervous"
+
+
+@pytest.mark.asyncio
+async def test_v2_per_outcome_difficulty_raises_competence_on_strong_answer(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict[str, Any],
+    adaptive_v2_per_outcome_difficulty_on: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A strong answer raises the linked outcome's competence in runtime state.
+
+    The scenario seeds a question linked to an outcome; a strong analysis with
+    evidence on that outcome should EWMA-lift its competence above the 0.5 prior,
+    so a later question on the same outcome is calibrated harder.
+    """
+    gw = _gateway(
+        [
+            {"intent": "answer", "confidence": 0.95, "rationale": "content"},
+            {
+                "relevance": "relevant",
+                "completeness": "complete",
+                "correctness": "correct",
+                "specificity": "specific",
+                "has_concrete_example": True,
+                "recommended_probe_type": "none",
+                "confidence": 0.9,
+                "evidence": [
+                    {
+                        "outcome_id": str(scenario["outcome_ids"][0]),
+                        "turn_id": "t-1",
+                        "evidence_type": "supports",
+                        "summary": "solid",
+                        "provisional_score": 0.9,
+                        "confidence": 0.9,
+                    }
+                ],
+            },
+            {
+                "acknowledgement": "Great.",
+                "transition": "",
+                "ai_turn_text": "Great. Let's continue.",
+            },
+        ]
+    )
+    for mod in ("intent_logic", "analysis_logic", "utterance_logic"):
+        monkeypatch.setattr(
+            f"abridgeai.features.interviews.orchestrator.{mod}.LLMGateway", lambda: gw
+        )
+
+    session_id, _ = await _make_session(
+        engine, scenario["config_id"], scenario["student_id"], "text"
+    )
+    async with session_factory() as db:
+        await taking_service.take_session_step(
+            db,
+            session_id,
+            "A thorough, correct, well-exemplified answer.",
+            _actor(scenario["student_id"]),
+            turn_key="poc-1",
+        )
+        await db.commit()
+
+    async with engine.begin() as conn:
+        state_json = (
+            await conn.execute(
+                text("SELECT state_json FROM interview_runtime_states WHERE session_id = :s"),
+                {"s": session_id},
+            )
+        ).scalar_one()
+    coverage = state_json.get("outcome_coverage", {})
+    oc = coverage.get(str(scenario["outcome_ids"][0]), {})
+    assert oc.get("competence_estimate", 0.5) > 0.5

@@ -19,6 +19,7 @@ from abridgeai.features.interviews.orchestrator.decision import (
     InterviewerActionType,
     ReasonCode,
 )
+from abridgeai.features.interviews.orchestrator.difficulty import update_competence
 from abridgeai.features.interviews.orchestrator.intent import StudentIntent
 from abridgeai.features.interviews.orchestrator.state import (
     InteractionState,
@@ -88,6 +89,7 @@ def apply_state_updates(  # noqa: C901 -- explicit action branches are auditable
     target_phase: InterviewPhase | None = None,
     cross_turn_enabled: bool = False,
     hint_ladder_enabled: bool = False,
+    per_outcome_difficulty_enabled: bool = False,
 ) -> None:
     """Mutate the loaded state in memory (NO save here — caller saves once).
 
@@ -133,6 +135,20 @@ def apply_state_updates(  # noqa: C901 -- explicit action branches are auditable
                 if claim:
                     cov.claims.append(claim[:200])
                     del cov.claims[:-3]  # keep only the last 3
+
+        # Per-outcome difficulty calibration (Slice 12, v2). EWMA-fold this
+        # answer's quality into the competence estimate of each outcome it
+        # touched, so the selector can target question difficulty per topic.
+        # A neutral answer leaves the estimate unchanged (see update_competence).
+        # Gated: off → estimates never move → v1 behaviour.
+        if per_outcome_difficulty_enabled:
+            for ev in analysis.evidence:
+                cov = data.outcome_coverage.get(ev.outcome_id)
+                if cov is None:
+                    continue
+                cov.competence_estimate = update_competence(
+                    prior=cov.competence_estimate, analysis=analysis
+                )
 
     # End-confirmation state (Slice 4). These actions keep the SAME question and
     # never consume the academic probe budget; they only flip the confirmation

@@ -211,3 +211,88 @@ def test_advance_resets_hint_ladder() -> None:
     )
     assert data.hint_level == 0
     assert data.reframe_count == 0
+
+
+def test_per_outcome_competence_updates_on_evidence() -> None:
+    """Slice 12: a strong answer raises the linked outcome's competence estimate."""
+    from abridgeai.features.interviews.orchestrator.analysis import (
+        AnswerAnalysis,
+        Completeness,
+        Correctness,
+        EvidenceType,
+        OutcomeEvidence,
+        Relevance,
+        Specificity,
+    )
+    from abridgeai.features.interviews.orchestrator.state import OutcomeCoverageState
+
+    strong = AnswerAnalysis(
+        relevance=Relevance.RELEVANT,
+        completeness=Completeness.COMPLETE,
+        correctness=Correctness.CORRECT,
+        specificity=Specificity.SPECIFIC,
+        confidence=0.9,
+        evidence=[
+            OutcomeEvidence(
+                outcome_id="o-1",
+                turn_id="t-1",
+                evidence_type=EvidenceType.SUPPORTS,
+                summary="good",
+                confidence=0.9,
+            )
+        ],
+    )
+    data = InterviewRuntimeStateData(phase=InterviewPhase.CORE)
+    data.outcome_coverage["o-1"] = OutcomeCoverageState(outcome_id="o-1")
+    apply_state_updates(
+        data,
+        intent=_answer_intent(),
+        analysis=strong,
+        decision=_advance_decision(),
+        selected_question_id="q-2",
+        target_outcome_id="o-1",
+        per_outcome_difficulty_enabled=True,
+    )
+    assert data.outcome_coverage["o-1"].competence_estimate > 0.5
+
+
+def test_per_outcome_competence_off_leaves_prior() -> None:
+    from abridgeai.features.interviews.orchestrator.analysis import (
+        AnswerAnalysis,
+        Completeness,
+        Correctness,
+        EvidenceType,
+        OutcomeEvidence,
+        Relevance,
+        Specificity,
+    )
+    from abridgeai.features.interviews.orchestrator.state import OutcomeCoverageState
+
+    strong = AnswerAnalysis(
+        relevance=Relevance.RELEVANT,
+        completeness=Completeness.COMPLETE,
+        correctness=Correctness.CORRECT,
+        specificity=Specificity.SPECIFIC,
+        confidence=0.9,
+        evidence=[
+            OutcomeEvidence(
+                outcome_id="o-1",
+                turn_id="t-1",
+                evidence_type=EvidenceType.SUPPORTS,
+                summary="good",
+                confidence=0.9,
+            )
+        ],
+    )
+    data = InterviewRuntimeStateData(phase=InterviewPhase.CORE)
+    data.outcome_coverage["o-1"] = OutcomeCoverageState(outcome_id="o-1")
+    apply_state_updates(
+        data,
+        intent=_answer_intent(),
+        analysis=strong,
+        decision=_advance_decision(),
+        selected_question_id="q-2",
+        target_outcome_id="o-1",
+        per_outcome_difficulty_enabled=False,
+    )
+    assert data.outcome_coverage["o-1"].competence_estimate == 0.5

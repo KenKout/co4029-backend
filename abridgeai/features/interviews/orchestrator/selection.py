@@ -71,6 +71,11 @@ class SelectionContext:
     time_fraction_remaining: float | None = None
     # outcome_id most recently targeted — penalise to avoid hammering one outcome.
     last_targeted_outcome_id: str | None = None
+    # Per-outcome competence estimates (Slice 12, v2): outcome_id -> 0..1. When a
+    # candidate's linked outcome has an entry, difficulty fit targets THAT
+    # competence (push harder on strengths, ease on weak areas) instead of the
+    # single global student level. Empty/missing → fall back to the global level.
+    outcome_competence: dict[str, float] | None = None
 
 
 @dataclass(frozen=True)
@@ -94,16 +99,45 @@ _P_ALREADY_COVERED = 25.0  # penalty: outcome already has ample evidence
 _P_RECENT_OUTCOME = 20.0  # penalty: same outcome as last targeted
 
 
-def _difficulty_fit_score(ctx: SelectionContext, difficulty: str | None) -> float:
+def _competence_to_rank(competence: float) -> int:
+    """Map a 0..1 competence estimate to a target difficulty rank (1..3).
+
+    Low competence → aim junior (1); mid → mid-level (2); high → senior (3).
+    Thresholds mirror the neutral-0.5 prior: below 0.4 eases, above 0.6 pushes.
+    """
+    if competence >= 0.6:
+        return 3
+    if competence <= 0.4:
+        return 1
+    return 2
+
+
+def _difficulty_fit_score(
+    ctx: SelectionContext, difficulty: str | None, *, outcome_id: str | None = None
+) -> float:
     """Reward a difficulty near the student's demonstrated level.
 
-    Unknown difficulty or unknown student level → neutral (half credit), so a
-    question is never excluded merely for missing metadata.
+    Slice 12 (v2): when a per-outcome competence estimate exists for this
+    candidate's linked outcome, target THAT competence's difficulty (calibrate
+    per topic); otherwise fall back to the single global student level. Unknown
+    difficulty or no target level → neutral (half credit), so a question is
+    never excluded merely for missing metadata.
     """
     rank = _DIFFICULTY_RANK.get(difficulty or "", 0)
-    if rank == 0 or ctx.student_difficulty_level is None:
+    if rank == 0:
         return _W_DIFFICULTY_FIT * 0.5
-    distance = abs(rank - ctx.student_difficulty_level)
+
+    target_level: int | None = None
+    if outcome_id is not None and ctx.outcome_competence:
+        competence = ctx.outcome_competence.get(outcome_id)
+        if competence is not None:
+            target_level = _competence_to_rank(competence)
+    if target_level is None:
+        target_level = ctx.student_difficulty_level
+    if target_level is None:
+        return _W_DIFFICULTY_FIT * 0.5
+
+    distance = abs(rank - target_level)
     # distance 0 → full, 1 → half, 2 → zero.
     return _W_DIFFICULTY_FIT * max(0.0, 1.0 - distance / 2.0)
 
@@ -137,7 +171,7 @@ def score_candidate(candidate: CandidateQuestion, ctx: SelectionContext) -> Scor
     else:
         breakdown["teacher_order"] = 0.0
 
-    breakdown["difficulty_fit"] = _difficulty_fit_score(ctx, candidate.difficulty)
+    breakdown["difficulty_fit"] = _difficulty_fit_score(ctx, candidate.difficulty, outcome_id=oid)
     breakdown["time_fit"] = _time_fit_score(ctx, candidate.difficulty)
 
     # Penalty: outcome already amply covered (>= 2 pieces of evidence).

@@ -151,6 +151,60 @@ def test_depth_probe_respects_followup_cap() -> None:
     assert d.action is not InterviewerActionType.EXTEND_ANSWER
 
 
+# ── per-outcome difficulty calibration (Slice 12) ────────────────────────────
+
+
+def test_per_outcome_competence_biases_difficulty_fit() -> None:
+    """A high competence for an outcome favors a HARDER question on it."""
+    from abridgeai.features.interviews.orchestrator.selection import _difficulty_fit_score
+
+    # Global student level unknown; per-outcome competence high (0.9 → target senior).
+    ctx = SelectionContext(
+        asked_question_ids=frozenset(),
+        skipped_question_ids=frozenset(),
+        outcome_evidence_counts={},
+        uncovered_required_outcome_ids=frozenset(),
+        student_difficulty_level=None,
+        outcome_competence={"o-1": 0.9},
+    )
+    senior = _difficulty_fit_score(ctx, "senior", outcome_id="o-1")
+    junior = _difficulty_fit_score(ctx, "junior", outcome_id="o-1")
+    assert senior > junior  # high competence → prefer the harder question
+
+
+def test_per_outcome_low_competence_favors_easier() -> None:
+    from abridgeai.features.interviews.orchestrator.selection import _difficulty_fit_score
+
+    ctx = SelectionContext(
+        asked_question_ids=frozenset(),
+        skipped_question_ids=frozenset(),
+        outcome_evidence_counts={},
+        uncovered_required_outcome_ids=frozenset(),
+        student_difficulty_level=None,
+        outcome_competence={"o-1": 0.1},
+    )
+    junior = _difficulty_fit_score(ctx, "junior", outcome_id="o-1")
+    senior = _difficulty_fit_score(ctx, "senior", outcome_id="o-1")
+    assert junior > senior  # low competence → prefer the easier question
+
+
+def test_no_per_outcome_competence_falls_back_to_global() -> None:
+    """Parity: without outcome_competence, fit uses the global student level."""
+    from abridgeai.features.interviews.orchestrator.selection import _difficulty_fit_score
+
+    ctx = SelectionContext(
+        asked_question_ids=frozenset(),
+        skipped_question_ids=frozenset(),
+        outcome_evidence_counts={},
+        uncovered_required_outcome_ids=frozenset(),
+        student_difficulty_level=3,
+    )
+    # No per-outcome data → global level 3 favors senior.
+    assert _difficulty_fit_score(ctx, "senior", outcome_id="o-1") > _difficulty_fit_score(
+        ctx, "junior", outcome_id="o-1"
+    )
+
+
 # ── decision precedence ──────────────────────────────────────────────────────
 
 

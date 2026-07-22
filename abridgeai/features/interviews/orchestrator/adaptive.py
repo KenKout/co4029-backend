@@ -150,6 +150,7 @@ async def run_adaptive_turn(
     cross_turn_enabled: bool = False,
     affect_enabled: bool = False,
     hint_ladder_enabled: bool = False,
+    per_outcome_difficulty_enabled: bool = False,
 ) -> AdaptiveOutcome:
     """Run one adaptive turn. MUST be called inside a caller-owned savepoint.
 
@@ -279,6 +280,15 @@ async def run_adaptive_turn(
             student_level=student_level,
         )
 
+    # Per-outcome difficulty calibration (Slice 12, v2): expose each outcome's
+    # competence estimate so selection targets question difficulty per topic.
+    # Gated: None → selection falls back to the global student level (v1).
+    outcome_competence = (
+        {oid: cov.competence_estimate for oid, cov in data.outcome_coverage.items()}
+        if per_outcome_difficulty_enabled
+        else None
+    )
+
     ctx = SelectionContext(
         asked_question_ids=asked,
         skipped_question_ids=skipped,
@@ -287,6 +297,7 @@ async def run_adaptive_turn(
         student_difficulty_level=student_level,
         time_fraction_remaining=time_fraction,
         last_targeted_outcome_id=data.current_outcome_id,
+        outcome_competence=outcome_competence,
     )
     scored = select_next_question(candidates, ctx)
     has_next = scored is not None
@@ -436,6 +447,7 @@ async def run_adaptive_turn(
         target_phase=target_phase if phases_enabled else None,
         cross_turn_enabled=cross_turn_enabled,
         hint_ladder_enabled=hint_ladder_enabled,
+        per_outcome_difficulty_enabled=per_outcome_difficulty_enabled,
     )
 
     canonical = canonical_step_result(
