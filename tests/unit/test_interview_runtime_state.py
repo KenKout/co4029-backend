@@ -163,6 +163,18 @@ def test_to_dict_is_json_serializable() -> None:
     assert "closing" in dumped
 
 
+def test_outcome_competence_default_and_roundtrip() -> None:
+    """Slice 12: per-outcome competence estimate defaults to 0.5 and round-trips."""
+    cov = OutcomeCoverageState(outcome_id="o-1")
+    assert cov.competence_estimate == 0.5  # neutral prior
+    cov.competence_estimate = 0.8
+    again = OutcomeCoverageState.from_dict(cov.to_dict())
+    assert again.competence_estimate == 0.8
+    # Tolerant load of an OLD row without the field → neutral prior.
+    legacy = OutcomeCoverageState.from_dict({"outcome_id": "o-2"})
+    assert legacy.competence_estimate == 0.5
+
+
 def test_outcome_claims_default_and_roundtrip() -> None:
     """Slice 9: per-outcome bounded claims log defaults empty and round-trips."""
     cov = OutcomeCoverageState(outcome_id="o-1")

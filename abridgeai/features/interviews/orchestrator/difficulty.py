@@ -106,9 +106,37 @@ def target_difficulty_level(
     return base
 
 
+# EWMA smoothing factor for the per-outcome competence estimate (Slice 12). A
+# single answer moves the estimate by this fraction toward its observed quality,
+# so the calibration is responsive but noise-tolerant (needs a few consistent
+# answers to swing hard).
+_COMPETENCE_ALPHA = 0.4
+
+
+def update_competence(*, prior: float, analysis: AnswerAnalysis | None) -> float:
+    """EWMA-update a per-outcome competence estimate from one answer.
+
+    Quality is 1.0 for a strong answer, 0.0 for a weak one, and neutral
+    otherwise — a neutral / low-confidence / absent analysis leaves the estimate
+    UNCHANGED (mirrors the streak rule: noise never drags calibration around).
+    Returns the new estimate clamped to (0, 1).
+    """
+    if analysis is None:
+        return prior
+    if is_strong_answer(analysis):
+        quality = 1.0
+    elif is_weak_answer(analysis):
+        quality = 0.0
+    else:
+        return prior  # neutral answer → no movement
+    updated = (1.0 - _COMPETENCE_ALPHA) * prior + _COMPETENCE_ALPHA * quality
+    return max(0.0, min(1.0, updated))
+
+
 __all__ = [
     "STREAK_ADJUST_THRESHOLD",
     "difficulty_rank",
     "target_difficulty_level",
+    "update_competence",
     "update_streaks",
 ]

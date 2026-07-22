@@ -36,6 +36,20 @@ def _strong() -> AnswerAnalysis:
     )
 
 
+def test_update_competence_ewma_moves_toward_quality() -> None:
+    """Slice 12: EWMA folds an answer's quality into the per-outcome estimate."""
+    from abridgeai.features.interviews.orchestrator.difficulty import update_competence
+
+    # Strong answer (quality 1.0) pulls a neutral 0.5 prior upward, bounded <1.
+    up = update_competence(prior=0.5, analysis=_strong())
+    assert 0.5 < up < 1.0
+    # Weak answer (quality 0.0) pulls it downward, bounded >0.
+    down = update_competence(prior=0.5, analysis=_weak())
+    assert 0.0 < down < 0.5
+    # Neutral / no analysis leaves the estimate unchanged.
+    assert update_competence(prior=0.7, analysis=None) == 0.7
+
+
 def _weak() -> AnswerAnalysis:
     return AnswerAnalysis(
         relevance=Relevance.RELEVANT,
