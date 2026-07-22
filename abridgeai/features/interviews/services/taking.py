@@ -474,6 +474,10 @@ async def take_session_step(  # noqa: C901 - shared legacy/adaptive turn coordin
     )
     # v2 rich closing (Slice 13): self-reflection + invite-questions closing sub-steps.
     rich_closing_enabled = settings.adaptive_v2_feature_enabled(session.input_mode, "rich_closing")
+    # v2 self-correction (Slice 15): reward a candidate who fixes their own mistake.
+    self_correction_enabled = settings.adaptive_v2_feature_enabled(
+        session.input_mode, "self_correction"
+    )
 
     if adaptive_on:
         adaptive_result = await _try_adaptive_step(
@@ -495,6 +499,7 @@ async def take_session_step(  # noqa: C901 - shared legacy/adaptive turn coordin
             hint_ladder_enabled=hint_ladder_enabled,
             per_outcome_difficulty_enabled=per_outcome_difficulty_enabled,
             rich_closing_enabled=rich_closing_enabled,
+            self_correction_enabled=self_correction_enabled,
         )
         if adaptive_result is not None:
             return adaptive_result
@@ -572,6 +577,7 @@ async def take_session_step(  # noqa: C901 - shared legacy/adaptive turn coordin
             hint_ladder_enabled=hint_ladder_enabled,
             per_outcome_difficulty_enabled=per_outcome_difficulty_enabled,
             rich_closing_enabled=rich_closing_enabled,
+            self_correction_enabled=self_correction_enabled,
         )
 
     return await _legacy_advance(
@@ -1365,6 +1371,7 @@ async def _try_adaptive_step(
     hint_ladder_enabled: bool = False,
     per_outcome_difficulty_enabled: bool = False,
     rich_closing_enabled: bool = False,
+    self_correction_enabled: bool = False,
 ) -> dict[str, Any] | None:
     """Attempt one adaptive turn. Returns the canonical result, or None to fall back.
 
@@ -1444,6 +1451,7 @@ async def _try_adaptive_step(
                 hint_ladder_enabled=hint_ladder_enabled,
                 per_outcome_difficulty_enabled=per_outcome_difficulty_enabled,
                 rich_closing_enabled=rich_closing_enabled,
+                self_correction_enabled=self_correction_enabled,
             )
         if outcome.result is not None:
             _emit_live_decision(session_id, outcome.result)
@@ -1506,6 +1514,7 @@ async def _run_shadow_step(
     hint_ladder_enabled: bool = False,
     per_outcome_difficulty_enabled: bool = False,
     rich_closing_enabled: bool = False,
+    self_correction_enabled: bool = False,
 ) -> None:
     """Compute the adaptive decision for comparison WITHOUT driving the student.
 
@@ -1553,6 +1562,7 @@ async def _run_shadow_step(
                 hint_ladder_enabled=hint_ladder_enabled,
                 per_outcome_difficulty_enabled=per_outcome_difficulty_enabled,
                 rich_closing_enabled=rich_closing_enabled,
+                self_correction_enabled=self_correction_enabled,
             )
             canonical = outcome.result or {}
             # Emit the shadow decision (no transcript content — same privacy

@@ -152,6 +152,7 @@ async def run_adaptive_turn(
     hint_ladder_enabled: bool = False,
     per_outcome_difficulty_enabled: bool = False,
     rich_closing_enabled: bool = False,
+    self_correction_enabled: bool = False,
 ) -> AdaptiveOutcome:
     """Run one adaptive turn. MUST be called inside a caller-owned savepoint.
 
@@ -318,6 +319,7 @@ async def run_adaptive_turn(
             phase=data.phase,
             rich_closing_enabled=rich_closing_enabled,
             closing_step=data.closing_step,
+            self_correction_enabled=self_correction_enabled,
         )
     )
 

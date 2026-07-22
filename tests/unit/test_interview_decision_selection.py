@@ -96,6 +96,71 @@ def _strong_analysis() -> AnswerAnalysis:
     )
 
 
+# ── self-correction recognition (Slice 15) ───────────────────────────────────
+
+
+def _self_corrected_analysis(
+    *,
+    correctness: Correctness = Correctness.MOSTLY_CORRECT,
+    probe: ProbeType = ProbeType.NONE,
+) -> AnswerAnalysis:
+    from abridgeai.features.interviews.orchestrator.analysis import (
+        Completeness,
+        Specificity,
+    )
+
+    return AnswerAnalysis(
+        relevance=Relevance.RELEVANT,
+        completeness=Completeness.COMPLETE,
+        correctness=correctness,
+        specificity=Specificity.SPECIFIC,
+        recommended_probe_type=probe,
+        confidence=0.8,
+        self_corrected=True,
+    )
+
+
+def test_self_correction_earns_positive_ack_when_enabled() -> None:
+    from abridgeai.features.interviews.orchestrator.decision import AcknowledgementStyle
+
+    d = decide_next_action(
+        _inputs(
+            analysis=_self_corrected_analysis(),
+            self_correction_enabled=True,
+        )
+    )
+    # A candidate who fixed their own mistake is advanced (nothing else to probe)
+    # but explicitly rewarded with a POSITIVE acknowledgement.
+    assert d.acknowledgement_style is AcknowledgementStyle.POSITIVE
+    assert "self_correction" in d.tags
+    # Invariant: still records evidence + advances like any complete answer.
+    assert d.should_record_academic_evidence is True
+
+
+def test_self_correction_suppresses_contradiction_probe_when_enabled() -> None:
+    # The candidate already resolved their own contradiction, so we must NOT
+    # issue a RESOLVE_CONTRADICTION probe pointing at what they just fixed.
+    d = decide_next_action(
+        _inputs(
+            analysis=_self_corrected_analysis(probe=ProbeType.RESOLVE_CONTRADICTION),
+            self_correction_enabled=True,
+        )
+    )
+    assert d.action is not InterviewerActionType.RESOLVE_CONTRADICTION
+
+
+def test_self_correction_is_inert_when_flag_off() -> None:
+    # Flag off → byte-for-byte v1: the self_corrected signal is ignored, so a
+    # recommended contradiction probe still fires and the ack is not forced positive.
+    d = decide_next_action(
+        _inputs(
+            analysis=_self_corrected_analysis(probe=ProbeType.RESOLVE_CONTRADICTION),
+            self_correction_enabled=False,
+        )
+    )
+    assert d.action is InterviewerActionType.RESOLVE_CONTRADICTION
+
+
 def test_strong_answer_triggers_depth_probe_when_enabled() -> None:
     from abridgeai.features.interviews.orchestrator.state import InterviewPhase
 

@@ -264,6 +264,7 @@ class Settings(BaseSettings):
     adaptive_v2_hint_ladder_enabled: bool = False
     adaptive_v2_per_outcome_difficulty_enabled: bool = False
     adaptive_v2_rich_closing_enabled: bool = False
+    adaptive_v2_self_correction_enabled: bool = False
 
     # Prompt-injection guard is operations-only. ``shadow`` is the safe rollout
     # default: assess and report without changing the learner experience.
@@ -301,6 +302,7 @@ class Settings(BaseSettings):
         "hint_ladder": "adaptive_v2_hint_ladder_enabled",
         "per_outcome_difficulty": "adaptive_v2_per_outcome_difficulty_enabled",
         "rich_closing": "adaptive_v2_rich_closing_enabled",
+        "self_correction": "adaptive_v2_self_correction_enabled",
     }
 
     def adaptive_v2_feature_enabled(self, input_mode: str, feature: str) -> bool:

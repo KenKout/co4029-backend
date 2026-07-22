@@ -346,6 +346,7 @@ def _settings_v2(
     hint_ladder: bool = False,
     per_outcome_difficulty: bool = False,
     rich_closing: bool = False,
+    self_correction: bool = False,
 ) -> Settings:
     """v1 adaptive fully on PLUS the v2 master + selected sub-flags.
 
@@ -361,6 +362,7 @@ def _settings_v2(
             "adaptive_v2_hint_ladder_enabled": hint_ladder,
             "adaptive_v2_per_outcome_difficulty_enabled": per_outcome_difficulty,
             "adaptive_v2_rich_closing_enabled": rich_closing,
+            "adaptive_v2_self_correction_enabled": self_correction,
         }
     )
 
@@ -1645,3 +1647,105 @@ async def test_typed_hint_no_escalation_when_flag_off(
             )
         ).scalar_one()
     assert state_json["hint_level"] == 0
+
+
+# ── Slice 15: self-correction recognition ────────────────────────────────────
+# A candidate who fixes their OWN mistake ("actually, it's X, not Y") should not
+# be probed with resolve_contradiction pointing at what they already resolved —
+# the interviewer credits the catch and moves on. Flag-gated: off → the analysis
+# self_corrected signal is ignored and the contradiction probe still fires.
+
+
+async def _persisted_ai_action(engine: AsyncEngine, session_id: object) -> str:
+    async with engine.begin() as conn:
+        return (
+            await conn.execute(
+                text(
+                    "SELECT metadata_json->>'action' FROM interview_session_messages "
+                    "WHERE session_id = :s AND role = 'ai' ORDER BY created_at DESC LIMIT 1"
+                ),
+                {"s": session_id},
+            )
+        ).scalar_one()
+
+
+def _self_correction_gateway() -> SimpleNamespace:
+    """intent=answer → analysis flagged self_corrected + recommending a
+    contradiction probe → utterance."""
+    return _gateway(
+        [
+            {"intent": "answer", "confidence": 0.95, "rationale": "content"},
+            {
+                "relevance": "relevant",
+                "completeness": "complete",
+                "correctness": "mostly_correct",
+                "specificity": "specific",
+                "recommended_probe_type": "resolve_contradiction",
+                "self_corrected": True,
+                "confidence": 0.85,
+            },
+            {
+                "acknowledgement": "Good catch.",
+                "transition": "Let's continue.",
+                "ai_turn_text": "Good catch. Let's continue.",
+            },
+        ]
+    )
+
+
+@pytest.mark.asyncio
+async def test_self_correction_skips_contradiction_probe_when_enabled(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(taking_service, "get_settings", lambda: _settings_v2(self_correction=True))
+    gw = _self_correction_gateway()
+    for mod in ("intent_logic", "analysis_logic", "utterance_logic"):
+        monkeypatch.setattr(
+            f"abridgeai.features.interviews.orchestrator.{mod}.LLMGateway", lambda: gw
+        )
+    session_id, _ = await _make_session(
+        engine, scenario["config_id"], scenario["student_id"], "text"
+    )
+    async with session_factory() as db:
+        await taking_service.take_session_step(
+            db,
+            session_id,
+            "Actually, it's a star schema, not a snowflake — I misspoke.",
+            _actor(scenario["student_id"]),
+            turn_key="sc-1",
+        )
+        await db.commit()
+    # The contradiction probe was suppressed → the interviewer advanced instead.
+    assert await _persisted_ai_action(engine, session_id) != "resolve_contradiction"
+
+
+@pytest.mark.asyncio
+async def test_self_correction_probe_still_fires_when_flag_off(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Parity: flag off → self_corrected ignored, contradiction probe fires (v1).
+    monkeypatch.setattr(taking_service, "get_settings", lambda: _settings_v2(self_correction=False))
+    gw = _self_correction_gateway()
+    for mod in ("intent_logic", "analysis_logic", "utterance_logic"):
+        monkeypatch.setattr(
+            f"abridgeai.features.interviews.orchestrator.{mod}.LLMGateway", lambda: gw
+        )
+    session_id, _ = await _make_session(
+        engine, scenario["config_id"], scenario["student_id"], "text"
+    )
+    async with session_factory() as db:
+        await taking_service.take_session_step(
+            db,
+            session_id,
+            "Actually, it's a star schema, not a snowflake — I misspoke.",
+            _actor(scenario["student_id"]),
+            turn_key="sc-off-1",
+        )
+        await db.commit()
+    assert await _persisted_ai_action(engine, session_id) == "resolve_contradiction"

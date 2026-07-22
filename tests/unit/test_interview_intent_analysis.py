@@ -208,3 +208,17 @@ def test_analysis_roundtrips_through_dict() -> None:
     assert restored.correctness is original.correctness
     assert restored.misconceptions == original.misconceptions
     assert restored.evidence[0].outcome_id == "o1"
+
+
+def test_analysis_self_corrected_defaults_false_and_roundtrips() -> None:
+    # Slice 15: self_corrected is a positive signal (candidate fixed their own
+    # mistake). Defaults False, parses from the payload, and survives a round trip.
+    default = parse_analysis_response({}, default_turn_id="t1")
+    assert default is not None
+    assert default.self_corrected is False
+
+    corrected = parse_analysis_response({"self_corrected": True}, default_turn_id="t1")
+    assert corrected is not None
+    assert corrected.self_corrected is True
+    restored = AnswerAnalysis.from_dict(corrected.to_dict(), default_turn_id="t1")
+    assert restored.self_corrected is True

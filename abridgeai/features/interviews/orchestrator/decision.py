@@ -204,6 +204,11 @@ class DecisionInputs:
     # state (""/"reflection"/"questions"/"done"). Off → v1 one-shot close.
     rich_closing_enabled: bool = False
     closing_step: str = ""
+    # Self-correction (Slice 15, v2): when enabled AND the analysis flags the
+    # candidate fixed their own mistake, reward it with a POSITIVE acknowledgement
+    # and suppress a RESOLVE_CONTRADICTION probe pointing at what they already
+    # resolved. Off → the self_corrected signal is ignored (byte-for-byte v1).
+    self_correction_enabled: bool = False
 
 
 # Below this fraction of time remaining, stop probing and head for closing.
@@ -321,6 +326,22 @@ def _begin_closing_decision(
         should_advance_question=False,
         internal_rationale=rationale,
     )
+
+
+def _reward_self_correction(decision: InterviewerDecision, *, self_corrected: bool) -> None:
+    """Reward a self-correction (Slice 15, v2) on an advancing/closing decision.
+
+    When the candidate fixed their own mistake this turn, upgrade the
+    acknowledgement to POSITIVE and tag it — a real interviewer credits the
+    catch. Only ever touches TONE (ack style + tag); the action, advance/close,
+    and evidence flags are untouched, so every decision invariant holds. No-op
+    when the feature is off or the answer was not self-corrected.
+    """
+    if not self_corrected:
+        return
+    decision.acknowledgement_style = AcknowledgementStyle.POSITIVE
+    if "self_correction" not in decision.tags:
+        decision.tags.append("self_correction")
 
 
 def _advance_or_close(inputs: DecisionInputs, reason: ReasonCode) -> InterviewerDecision:
@@ -519,8 +540,18 @@ def decide_next_action(inputs: DecisionInputs) -> InterviewerDecision:
         or inputs.total_follow_up_count >= inputs.max_total_follow_ups
     )
 
+    # Self-correction (Slice 15, v2): the candidate noticed and fixed their own
+    # mistake this turn. When enabled, don't point a RESOLVE_CONTRADICTION probe
+    # at what they already resolved — that would feel like the interviewer wasn't
+    # listening. Off → self_corrected is ignored (byte-for-byte v1).
+    self_corrected = (
+        inputs.self_correction_enabled and analysis is not None and analysis.self_corrected
+    )
+
     # 11. Probe when the analysis recommends it AND we're allowed to.
     probe = analysis.recommended_probe_type if analysis is not None else ProbeType.NONE
+    if self_corrected and probe is ProbeType.RESOLVE_CONTRADICTION:
+        probe = ProbeType.NONE
     if probe is not ProbeType.NONE and not followups_exhausted and not time_low:
         return InterviewerDecision(
             action=_probe_action(probe),
@@ -582,10 +613,12 @@ def decide_next_action(inputs: DecisionInputs) -> InterviewerDecision:
             "All required outcomes covered; begin closing.",
         )
         decision.should_record_academic_evidence = True
+        _reward_self_correction(decision, self_corrected=self_corrected)
         return decision
 
     decision = _advance_or_close(inputs, reason)
     decision.should_record_academic_evidence = True
+    _reward_self_correction(decision, self_corrected=self_corrected)
     return decision
 
 

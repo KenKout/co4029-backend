@@ -46,8 +46,17 @@ Output EXACTLY one JSON object with this shape (no prose, no markdown):
   ],
   "recommended_probe_type": "none | clarification | ask_for_example | probe_reasoning | challenge_assumption | explore_tradeoff | resolve_contradiction",
   "provisional_quality_score": 0.0,
-  "confidence": 0.0
+  "confidence": 0.0,
+  "self_corrected": false
 }
+
+Set "self_corrected" to true ONLY when, within THIS answer, the candidate
+noticed their own error and fixed it (e.g. "actually, it's X, not Y" or "wait,
+I mean ..."). A self-correction is a positive signal of understanding — when it
+is true and the only issue was the mistake they already fixed, prefer
+"recommended_probe_type": "none" rather than "resolve_contradiction". Do not set
+it for an answer that was simply consistent, nor for a cross-turn contradiction
+with a prior claim (that still uses "contradictions" + "resolve_contradiction").
 
 Use "not_assessable" for correctness when the answer cannot be judged (e.g.
 the candidate went off-topic). Recommend a probe type only when a follow-up
