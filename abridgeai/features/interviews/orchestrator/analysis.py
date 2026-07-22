@@ -61,6 +61,11 @@ class ProbeType(str, Enum):  # noqa: UP042 -- match codebase convention
     CHALLENGE_ASSUMPTION = "challenge_assumption"
     EXPLORE_TRADEOFF = "explore_tradeoff"
     RESOLVE_CONTRADICTION = "resolve_contradiction"
+    # Depth probes (Slice 8, v2): dig into a STRONG answer to find the
+    # candidate's ceiling instead of advancing. EXTEND_STRONG asks them to
+    # generalize/extend; PROBE_EDGE_CASE pushes on boundaries/failure modes.
+    EXTEND_STRONG = "extend_strong"
+    PROBE_EDGE_CASE = "probe_edge_case"
 
 
 class EvidenceType(str, Enum):  # noqa: UP042 -- match codebase convention

@@ -65,6 +65,92 @@ def _inputs(**overrides: object) -> DecisionInputs:
     return DecisionInputs(**base)  # type: ignore[arg-type]
 
 
+# ── depth-probe mappings (Slice 8) ───────────────────────────────────────────
+
+
+def test_depth_probe_types_map_to_actions_and_reason() -> None:
+    from abridgeai.features.interviews.orchestrator.decision import (
+        _probe_action,
+        _probe_reason,
+    )
+
+    assert _probe_action(ProbeType.EXTEND_STRONG) is InterviewerActionType.EXTEND_ANSWER
+    assert _probe_action(ProbeType.PROBE_EDGE_CASE) is InterviewerActionType.PROBE_EDGE_CASE
+    assert _probe_reason(ProbeType.EXTEND_STRONG) is ReasonCode.STRONG_ANSWER_DEPTH_PROBE
+    assert _probe_reason(ProbeType.PROBE_EDGE_CASE) is ReasonCode.STRONG_ANSWER_DEPTH_PROBE
+
+
+def _strong_analysis() -> AnswerAnalysis:
+    from abridgeai.features.interviews.orchestrator.analysis import (
+        Completeness,
+        Specificity,
+    )
+
+    return AnswerAnalysis(
+        relevance=Relevance.RELEVANT,
+        completeness=Completeness.COMPLETE,
+        correctness=Correctness.CORRECT,
+        specificity=Specificity.SPECIFIC,
+        recommended_probe_type=ProbeType.NONE,
+        confidence=0.9,
+    )
+
+
+def test_strong_answer_triggers_depth_probe_when_enabled() -> None:
+    from abridgeai.features.interviews.orchestrator.state import InterviewPhase
+
+    d = decide_next_action(
+        _inputs(
+            analysis=_strong_analysis(),
+            depth_probe_enabled=True,
+            phase=InterviewPhase.DEEP_PROBE,
+        )
+    )
+    assert d.action in (
+        InterviewerActionType.EXTEND_ANSWER,
+        InterviewerActionType.PROBE_EDGE_CASE,
+    )
+    assert d.reason_code is ReasonCode.STRONG_ANSWER_DEPTH_PROBE
+    assert d.should_record_academic_evidence is True
+    assert d.should_advance_question is False
+
+
+def test_strong_answer_core_phase_uses_extend() -> None:
+    from abridgeai.features.interviews.orchestrator.state import InterviewPhase
+
+    d = decide_next_action(
+        _inputs(
+            analysis=_strong_analysis(),
+            depth_probe_enabled=True,
+            phase=InterviewPhase.CORE,
+        )
+    )
+    assert d.action is InterviewerActionType.EXTEND_ANSWER
+
+
+def test_strong_answer_advances_when_flag_off() -> None:
+    # v1 parity: with depth_probe_enabled=False a strong answer advances.
+    d = decide_next_action(_inputs(analysis=_strong_analysis(), depth_probe_enabled=False))
+    assert d.should_advance_question is True
+    assert d.action is not InterviewerActionType.EXTEND_ANSWER
+
+
+def test_depth_probe_respects_followup_cap() -> None:
+    # Even a strong answer must not probe once the follow-up budget is exhausted.
+    from abridgeai.features.interviews.orchestrator.state import InterviewPhase
+
+    d = decide_next_action(
+        _inputs(
+            analysis=_strong_analysis(),
+            depth_probe_enabled=True,
+            phase=InterviewPhase.DEEP_PROBE,
+            current_question_follow_up_count=2,
+        )
+    )
+    assert d.should_advance_question is True
+    assert d.action is not InterviewerActionType.EXTEND_ANSWER
+
+
 # ── decision precedence ──────────────────────────────────────────────────────
 
 

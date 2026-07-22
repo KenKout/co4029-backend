@@ -30,10 +30,12 @@ from abridgeai.features.interviews.orchestrator.analysis import (
     ProbeType,
     Relevance,
 )
+from abridgeai.features.interviews.orchestrator.coverage import is_strong_answer
 from abridgeai.features.interviews.orchestrator.intent import (
     IntentClassification,
     StudentIntent,
 )
+from abridgeai.features.interviews.orchestrator.state import InterviewPhase
 
 
 class InterviewerActionType(str, Enum):  # noqa: UP042 -- match codebase convention
@@ -48,6 +50,9 @@ class InterviewerActionType(str, Enum):  # noqa: UP042 -- match codebase convent
     ASK_FOR_EXAMPLE = "ask_for_example"
     CHALLENGE_REASONING = "challenge_reasoning"
     EXPLORE_TRADEOFF = "explore_tradeoff"
+    # Depth probes on a strong answer (Slice 8, v2) — dig for the ceiling.
+    EXTEND_ANSWER = "extend_answer"
+    PROBE_EDGE_CASE = "probe_edge_case"
     RESOLVE_CONTRADICTION = "resolve_contradiction"
     REDIRECT_TO_TOPIC = "redirect_to_topic"
     TRANSITION_TOPIC = "transition_topic"
@@ -81,6 +86,8 @@ class ReasonCode(str, Enum):  # noqa: UP042 -- match codebase convention
     CONTRADICTION_DETECTED = "contradiction_detected"
     OUTCOME_SUFFICIENTLY_COVERED = "outcome_sufficiently_covered"
     OUTCOME_NOT_COVERED = "outcome_not_covered"
+    # Depth probe on a strong answer (Slice 8, v2).
+    STRONG_ANSWER_DEPTH_PROBE = "strong_answer_depth_probe"
     TIME_RUNNING_LOW = "time_running_low"
     ALL_REQUIRED_OUTCOMES_COVERED = "all_required_outcomes_covered"
     FOLLOWUP_LIMIT_REACHED = "followup_limit_reached"
@@ -176,6 +183,11 @@ class DecisionInputs:
     # candidate to confirm ending. It changes how CONFIRM_END / CANCEL_END and a
     # bare answer are interpreted this turn (see _decide_from_intent_request).
     pending_confirmation: bool = False
+    # Depth probing (Slice 8, v2): when enabled AND the answer is strong AND we
+    # are in CORE/DEEP_PROBE with follow-up budget + time, probe for the ceiling
+    # instead of advancing. Defaults False + CORE → byte-for-byte v1 behaviour.
+    depth_probe_enabled: bool = False
+    phase: InterviewPhase = InterviewPhase.CORE
 
 
 # Below this fraction of time remaining, stop probing and head for closing.
@@ -190,6 +202,8 @@ def _probe_action(probe: ProbeType) -> InterviewerActionType:
         ProbeType.CHALLENGE_ASSUMPTION: InterviewerActionType.CHALLENGE_REASONING,
         ProbeType.EXPLORE_TRADEOFF: InterviewerActionType.EXPLORE_TRADEOFF,
         ProbeType.RESOLVE_CONTRADICTION: InterviewerActionType.RESOLVE_CONTRADICTION,
+        ProbeType.EXTEND_STRONG: InterviewerActionType.EXTEND_ANSWER,
+        ProbeType.PROBE_EDGE_CASE: InterviewerActionType.PROBE_EDGE_CASE,
     }.get(probe, InterviewerActionType.PROBE_DEEPER)
 
 
@@ -201,6 +215,8 @@ def _probe_reason(probe: ProbeType) -> ReasonCode:
         ProbeType.CHALLENGE_ASSUMPTION: ReasonCode.PARTIAL_OUTCOME_COVERAGE,
         ProbeType.EXPLORE_TRADEOFF: ReasonCode.PARTIAL_OUTCOME_COVERAGE,
         ProbeType.RESOLVE_CONTRADICTION: ReasonCode.CONTRADICTION_DETECTED,
+        ProbeType.EXTEND_STRONG: ReasonCode.STRONG_ANSWER_DEPTH_PROBE,
+        ProbeType.PROBE_EDGE_CASE: ReasonCode.STRONG_ANSWER_DEPTH_PROBE,
     }.get(probe, ReasonCode.PARTIAL_OUTCOME_COVERAGE)
 
 
@@ -404,6 +420,35 @@ def decide_next_action(inputs: DecisionInputs) -> InterviewerDecision:
             acknowledgement_style=AcknowledgementStyle.NEUTRAL,
             internal_rationale=f"Analysis recommends probe={probe.value}.",
             tags=["probe", probe.value],
+        )
+
+    # 11.5 Depth probe (Slice 8, v2): dig into a STRONG answer to find the
+    # candidate's ceiling instead of advancing. Only when the feature is
+    # enabled, the answer is strong, we are in CORE/DEEP_PROBE, and we still
+    # have follow-up budget + time. DEEP_PROBE pushes on edge cases; CORE asks
+    # them to extend. Consumes the follow-up budget (falls into the else branch
+    # of _apply_state_updates), so loop protection is preserved.
+    if (
+        inputs.depth_probe_enabled
+        and analysis is not None
+        and is_strong_answer(analysis)
+        and inputs.phase in (InterviewPhase.CORE, InterviewPhase.DEEP_PROBE)
+        and not followups_exhausted
+        and not time_low
+    ):
+        depth = (
+            ProbeType.PROBE_EDGE_CASE
+            if inputs.phase is InterviewPhase.DEEP_PROBE
+            else ProbeType.EXTEND_STRONG
+        )
+        return InterviewerDecision(
+            action=_probe_action(depth),
+            reason_code=ReasonCode.STRONG_ANSWER_DEPTH_PROBE,
+            should_record_academic_evidence=True,
+            should_advance_question=False,
+            acknowledgement_style=AcknowledgementStyle.POSITIVE,
+            internal_rationale="Strong answer; probing for depth/ceiling.",
+            tags=["depth_probe", depth.value],
         )
 
     # 12. Otherwise advance (recording this answer's evidence first).
