@@ -109,6 +109,10 @@ def test_submit_response_drops_internal_orchestrator_fields() -> None:
         "transition_id",
         "transition_text",
         "transition_target",
+        # End-confirmation gate (Slice 4) — additive, safe public response fields
+        # that drive the client's confirm-end UX (not internal orchestrator state).
+        "pending_confirmation",
+        "interaction_state",
     }
 
 
