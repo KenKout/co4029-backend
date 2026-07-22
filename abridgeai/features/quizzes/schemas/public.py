@@ -47,6 +47,7 @@ automatically.
 
 from __future__ import annotations
 
+from datetime import datetime
 from decimal import Decimal
 from typing import Literal
 from uuid import UUID
@@ -142,6 +143,10 @@ class QuizPublic(_ORMModel):
     allow_retakes: bool = True
     cooldown_hours: int | None = None
     show_hints: bool = True
+    # Scheduling window (migration 0032). NULL = no restriction.
+    available_from: datetime | None = None
+    available_until: datetime | None = None
+    due_at: datetime | None = None
 
 
 class QuizForTakingPublic(_ORMModel):

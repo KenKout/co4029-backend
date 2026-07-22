@@ -25,6 +25,7 @@ see the row before the job dequeues.
 
 from __future__ import annotations
 
+from datetime import datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
@@ -82,10 +83,39 @@ register_conflict_mappings(
 )
 
 
+# Quiz columns typed DateTime(timezone=True) that a loose dict PATCH body may
+# deliver as an ISO-8601 string. setattr'ing a str onto a DateTime column would
+# persist wrong / raise at flush, so coerce these keys str -> datetime here.
+_DATETIME_PATCH_KEYS = frozenset({"available_from", "available_until", "due_at"})
+
+
+def _coerce_patch_value(key: str, value: object) -> object:
+    """Coerce known datetime-typed PATCH keys from ISO strings to datetime.
+
+    NULL (clear the window) and already-datetime values pass through
+    untouched. A trailing 'Z' is normalised to '+00:00' for
+    ``datetime.fromisoformat`` (Python < 3.11 compatibility, and harmless
+    on newer). An unparseable string raises ``AppError`` → HTTP 400.
+    """
+    if key not in _DATETIME_PATCH_KEYS or value is None:
+        return value
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return None
+        try:
+            return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise AppError(f"{key} must be an ISO-8601 datetime or null") from exc
+    raise AppError(f"{key} must be an ISO-8601 datetime or null")
+
+
 def _apply_patch(model: object, payload: object) -> None:
     data = payload.model_dump(exclude_unset=True)  # type: ignore[attr-defined]
     for key, value in data.items():
-        setattr(model, key, value)
+        setattr(model, key, _coerce_patch_value(key, value))
 
 
 async def _require_quiz(db: AsyncSession, quiz_id: UUID) -> Quiz:
