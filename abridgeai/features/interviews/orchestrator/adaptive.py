@@ -48,7 +48,7 @@ from abridgeai.features.interviews.models import (
 )
 from abridgeai.features.interviews.orchestrator import repository as state_repo
 from abridgeai.features.interviews.orchestrator import turn_perception, turn_state
-from abridgeai.features.interviews.orchestrator.affect import detect_affect
+from abridgeai.features.interviews.orchestrator.affect import Affect, detect_affect
 from abridgeai.features.interviews.orchestrator.analysis import AnswerAnalysis
 from abridgeai.features.interviews.orchestrator.analysis_logic import analyze_answer
 from abridgeai.features.interviews.orchestrator.coverage import is_provisionally_sufficient
@@ -131,6 +131,23 @@ def _resolve_affect(
     return affect
 
 
+def _is_rambling(
+    *,
+    answer_text: str,
+    analysis: AnswerAnalysis | None,
+    enabled: bool,
+) -> bool:
+    """Whether the candidate is rambling (Slice 17, v2), gated on the flag.
+
+    Uses the same deterministic ``detect_affect`` as the tone layer (single
+    source of truth) so the decision-time signal and the tone lead-in never
+    disagree. Off → False → the decision is byte-for-byte v1.
+    """
+    if not enabled:
+        return False
+    return detect_affect(answer_text=answer_text, analysis=analysis) is Affect.RAMBLING
+
+
 async def run_adaptive_turn(
     db: AsyncSession,
     *,
@@ -154,6 +171,7 @@ async def run_adaptive_turn(
     rich_closing_enabled: bool = False,
     self_correction_enabled: bool = False,
     confident_wrong_challenge_enabled: bool = False,
+    rambling_redirect_enabled: bool = False,
 ) -> AdaptiveOutcome:
     """Run one adaptive turn. MUST be called inside a caller-owned savepoint.
 
@@ -305,6 +323,14 @@ async def run_adaptive_turn(
     scored = select_next_question(candidates, ctx)
     has_next = scored is not None
 
+    # Rambling signal (Slice 17, v2). Computed BEFORE the decision so the policy
+    # can steer a long, on-topic, low-substance ramble back to focus. Uses the
+    # same deterministic detect_affect as the tone layer (single source), gated
+    # on the flag. Off → False → the decision is byte-for-byte v1.
+    rambling = _is_rambling(
+        answer_text=answer_text, analysis=analysis, enabled=rambling_redirect_enabled
+    )
+
     # 4. Deterministic decision.
     decision = decide_next_action(
         DecisionInputs(
@@ -322,6 +348,8 @@ async def run_adaptive_turn(
             closing_step=data.closing_step,
             self_correction_enabled=self_correction_enabled,
             confident_wrong_challenge_enabled=confident_wrong_challenge_enabled,
+            rambling=rambling,
+            rambling_redirect_enabled=rambling_redirect_enabled,
         )
     )
 

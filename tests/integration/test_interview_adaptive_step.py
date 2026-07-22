@@ -348,6 +348,7 @@ def _settings_v2(
     rich_closing: bool = False,
     self_correction: bool = False,
     confident_wrong_challenge: bool = False,
+    rambling_redirect: bool = False,
 ) -> Settings:
     """v1 adaptive fully on PLUS the v2 master + selected sub-flags.
 
@@ -365,6 +366,7 @@ def _settings_v2(
             "adaptive_v2_rich_closing_enabled": rich_closing,
             "adaptive_v2_self_correction_enabled": self_correction,
             "adaptive_v2_confident_wrong_challenge_enabled": confident_wrong_challenge,
+            "adaptive_v2_rambling_redirect_enabled": rambling_redirect,
         }
     )
 
@@ -1842,3 +1844,106 @@ async def test_confident_wrong_advances_when_flag_off(
         )
         await db.commit()
     assert await _persisted_ai_action(engine, session_id) != "challenge_reasoning"
+
+
+# ── Slice 17: rambling redirect ──────────────────────────────────────────────
+# A long, on-topic, low-substance ramble is steered back to focus rather than
+# quietly advanced past. Flag-gated: off → the ramble advances as in v1.
+# The affect layer flags RAMBLING from the (long) answer text + non-strong
+# analysis, so the answer text itself must be >= 60 words and low-substance.
+
+_RAMBLING_ANSWER = (
+    "So the thing about this is that there are a lot of aspects to consider and "
+    "honestly it depends on many different factors that all sort of interact with "
+    "each other in ways that are hard to pin down exactly, and I remember reading "
+    "something about this once and there were several points and they all seemed "
+    "relevant in one way or another, so I think the overall idea is that you have to "
+    "look at the big picture and consider everything together before you decide what "
+    "the actual answer really is in the end, more or less."
+)
+
+
+def _rambling_gateway() -> SimpleNamespace:
+    """intent=answer → analysis: relevant but PARTIAL/GENERAL (not strong), no
+    recommended probe → utterance. Combined with the long answer text, the affect
+    layer reads RAMBLING."""
+    return _gateway(
+        [
+            {"intent": "answer", "confidence": 0.9, "rationale": "content"},
+            {
+                "relevance": "relevant",
+                "completeness": "partial",
+                "correctness": "mixed",
+                "specificity": "general",
+                "recommended_probe_type": "none",
+                "confidence": 0.6,
+            },
+            {
+                "acknowledgement": "Thanks.",
+                "transition": "",
+                "ai_turn_text": "Thanks. Let's focus in on the key point.",
+            },
+        ]
+    )
+
+
+@pytest.mark.asyncio
+async def test_rambling_redirect_when_enabled(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        taking_service, "get_settings", lambda: _settings_v2(rambling_redirect=True)
+    )
+    gw = _rambling_gateway()
+    for mod in ("intent_logic", "analysis_logic", "utterance_logic"):
+        monkeypatch.setattr(
+            f"abridgeai.features.interviews.orchestrator.{mod}.LLMGateway", lambda: gw
+        )
+    session_id, _ = await _make_session(
+        engine, scenario["config_id"], scenario["student_id"], "text"
+    )
+    async with session_factory() as db:
+        await taking_service.take_session_step(
+            db,
+            session_id,
+            _RAMBLING_ANSWER,
+            _actor(scenario["student_id"]),
+            turn_key="rr-1",
+        )
+        await db.commit()
+    assert await _persisted_ai_action(engine, session_id) == "redirect_to_topic"
+
+
+@pytest.mark.asyncio
+async def test_rambling_advances_when_flag_off(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Parity: flag off → the rambling signal is ignored, so the answer advances
+    # (records evidence first) rather than being redirected.
+    monkeypatch.setattr(
+        taking_service, "get_settings", lambda: _settings_v2(rambling_redirect=False)
+    )
+    gw = _rambling_gateway()
+    for mod in ("intent_logic", "analysis_logic", "utterance_logic"):
+        monkeypatch.setattr(
+            f"abridgeai.features.interviews.orchestrator.{mod}.LLMGateway", lambda: gw
+        )
+    session_id, _ = await _make_session(
+        engine, scenario["config_id"], scenario["student_id"], "text"
+    )
+    async with session_factory() as db:
+        await taking_service.take_session_step(
+            db,
+            session_id,
+            _RAMBLING_ANSWER,
+            _actor(scenario["student_id"]),
+            turn_key="rr-off-1",
+        )
+        await db.commit()
+    assert await _persisted_ai_action(engine, session_id) != "redirect_to_topic"

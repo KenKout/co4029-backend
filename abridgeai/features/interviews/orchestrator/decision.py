@@ -99,6 +99,8 @@ class ReasonCode(str, Enum):  # noqa: UP042 -- match codebase convention
     STRONG_ANSWER_DEPTH_PROBE = "strong_answer_depth_probe"
     # Confident-but-wrong forced challenge (Slice 16, v2).
     CONFIDENT_BUT_WRONG_CHALLENGE = "confident_but_wrong_challenge"
+    # Rambling redirect (Slice 17, v2): steer a long, on-topic, low-substance ramble.
+    RAMBLING_REDIRECT = "rambling_redirect"
     TIME_RUNNING_LOW = "time_running_low"
     ALL_REQUIRED_OUTCOMES_COVERED = "all_required_outcomes_covered"
     FOLLOWUP_LIMIT_REACHED = "followup_limit_reached"
@@ -220,6 +222,13 @@ class DecisionInputs:
     # other probe, force a CHALLENGE_REASONING probe instead of advancing. Off →
     # the confidently-wrong answer advances as in v1.
     confident_wrong_challenge_enabled: bool = False
+    # Rambling redirect (Slice 17, v2): ``rambling`` is the plain affect signal
+    # (candidate gave a long, on-topic, low-substance answer). When enabled AND
+    # rambling AND the answer is on-topic AND budget + time remain AND no other
+    # probe fired, steer back with REDIRECT_TO_TOPIC instead of advancing. Off →
+    # the rambling signal is ignored (byte-for-byte v1).
+    rambling: bool = False
+    rambling_redirect_enabled: bool = False
 
 
 # Below this fraction of time remaining, stop probing and head for closing.
@@ -419,6 +428,40 @@ def _confident_wrong_challenge(
         acknowledgement_style=AcknowledgementStyle.CORRECTIVE,
         internal_rationale="Confident but wrong; challenge the reasoning.",
         tags=["confident_wrong", "challenge"],
+    )
+
+
+def _rambling_redirect(
+    inputs: DecisionInputs, *, followups_exhausted: bool, time_low: bool
+) -> InterviewerDecision | None:
+    """Steer a long, on-topic, low-substance ramble back to focus (Slice 17, v2).
+
+    The candidate is meandering: the affect layer flagged the answer as rambling
+    and it is on-topic (off-topic is already handled at rule 8). Instead of
+    quietly advancing past the sprawl, interrupt gently and redirect them to the
+    point. Gated on budget + time (REDIRECT_TO_TOPIC consumes the follow-up
+    budget, so loop protection holds). Returns None when the feature is off, the
+    answer is not rambling, it is off-topic, or budget/time are spent → the
+    caller advances as in v1.
+    """
+    analysis = inputs.analysis
+    off_topic = analysis is not None and analysis.relevance is Relevance.OFF_TOPIC
+    if not (
+        inputs.rambling_redirect_enabled
+        and inputs.rambling
+        and not off_topic
+        and not followups_exhausted
+        and not time_low
+    ):
+        return None
+    return InterviewerDecision(
+        action=InterviewerActionType.REDIRECT_TO_TOPIC,
+        reason_code=ReasonCode.RAMBLING_REDIRECT,
+        should_record_academic_evidence=True,
+        should_advance_question=False,
+        acknowledgement_style=AcknowledgementStyle.NEUTRAL,
+        internal_rationale="Rambling; steer back to the focus of the question.",
+        tags=["rambling", "redirect"],
     )
 
 
@@ -672,6 +715,13 @@ def decide_next_action(inputs: DecisionInputs) -> InterviewerDecision:
     )
     if challenge is not None:
         return challenge
+
+    # 11.7 Rambling redirect (Slice 17, v2).
+    redirect = _rambling_redirect(
+        inputs, followups_exhausted=followups_exhausted, time_low=time_low
+    )
+    if redirect is not None:
+        return redirect
 
     # 12. Otherwise advance (recording this answer's evidence first).
     reason = _advance_reason(inputs, followups_exhausted=followups_exhausted)

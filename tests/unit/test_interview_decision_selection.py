@@ -239,6 +239,101 @@ def test_confident_wrong_defers_to_explicit_recommended_probe() -> None:
     assert d.action is InterviewerActionType.ASK_FOR_EXAMPLE
 
 
+# ── rambling redirect (Slice 17) ─────────────────────────────────────────────
+
+
+def _rambling_analysis(*, probe: ProbeType = ProbeType.NONE) -> AnswerAnalysis:
+    # On-topic but meandering: relevant, partial, general (not vague/off-topic),
+    # no probe recommended. The affect layer flags the ramble; the decision uses
+    # the plain `rambling` signal to steer.
+    from abridgeai.features.interviews.orchestrator.analysis import (
+        Completeness,
+        Specificity,
+    )
+
+    return AnswerAnalysis(
+        relevance=Relevance.RELEVANT,
+        completeness=Completeness.PARTIAL,
+        correctness=Correctness.MIXED,
+        specificity=Specificity.GENERAL,
+        recommended_probe_type=probe,
+        confidence=0.7,
+    )
+
+
+def test_rambling_redirect_when_enabled() -> None:
+    # A long, on-topic, low-substance ramble with budget + time and no other
+    # probe → the interviewer steers back to focus instead of advancing.
+    d = decide_next_action(
+        _inputs(
+            analysis=_rambling_analysis(),
+            rambling=True,
+            rambling_redirect_enabled=True,
+        )
+    )
+    assert d.action is InterviewerActionType.REDIRECT_TO_TOPIC
+    assert d.reason_code is ReasonCode.RAMBLING_REDIRECT
+    assert d.should_advance_question is False
+    assert d.should_record_academic_evidence is True
+    assert "rambling" in d.tags
+
+
+def test_rambling_redirect_inert_when_flag_off() -> None:
+    # Flag off → byte-for-byte v1: the rambling signal is ignored, no redirect.
+    d = decide_next_action(
+        _inputs(
+            analysis=_rambling_analysis(),
+            rambling=True,
+            rambling_redirect_enabled=False,
+        )
+    )
+    assert d.action is not InterviewerActionType.REDIRECT_TO_TOPIC
+
+
+def test_rambling_redirect_only_when_actually_rambling() -> None:
+    # Feature on but affect is not rambling → no redirect (v1 advance/probe).
+    d = decide_next_action(
+        _inputs(
+            analysis=_rambling_analysis(),
+            rambling=False,
+            rambling_redirect_enabled=True,
+        )
+    )
+    assert d.action is not InterviewerActionType.REDIRECT_TO_TOPIC
+
+
+def test_rambling_redirect_respects_followup_budget() -> None:
+    # Loop protection: with the per-question budget exhausted, a ramble does not
+    # trigger another redirect — we advance.
+    from abridgeai.features.interviews.orchestrator.decision import (
+        DEFAULT_MAX_FOLLOWUPS_PER_QUESTION,
+    )
+
+    d = decide_next_action(
+        _inputs(
+            analysis=_rambling_analysis(),
+            rambling=True,
+            rambling_redirect_enabled=True,
+            current_question_follow_up_count=DEFAULT_MAX_FOLLOWUPS_PER_QUESTION,
+        )
+    )
+    assert d.action is not InterviewerActionType.REDIRECT_TO_TOPIC
+    assert d.should_advance_question is True
+
+
+def test_rambling_redirect_defers_to_explicit_probe() -> None:
+    # An analyzer-recommended probe (rule 11) wins; the rambling redirect only
+    # fires when nothing else would probe.
+    d = decide_next_action(
+        _inputs(
+            analysis=_rambling_analysis(probe=ProbeType.ASK_FOR_EXAMPLE),
+            rambling=True,
+            rambling_redirect_enabled=True,
+        )
+    )
+    assert d.action is InterviewerActionType.ASK_FOR_EXAMPLE
+
+
 def test_strong_answer_triggers_depth_probe_when_enabled() -> None:
     from abridgeai.features.interviews.orchestrator.state import InterviewPhase
 
