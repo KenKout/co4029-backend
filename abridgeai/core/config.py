@@ -269,6 +269,8 @@ class Settings(BaseSettings):
     adaptive_v2_rambling_redirect_enabled: bool = False
     adaptive_v2_backtrack_undercovered_enabled: bool = False
     adaptive_v2_comms_polish_enabled: bool = False
+    adaptive_v2_frustration_deescalation_enabled: bool = False
+    adaptive_v2_question_deferral_enabled: bool = False
 
     # Prompt-injection guard is operations-only. ``shadow`` is the safe rollout
     # default: assess and report without changing the learner experience.
@@ -311,6 +313,8 @@ class Settings(BaseSettings):
         "rambling_redirect": "adaptive_v2_rambling_redirect_enabled",
         "backtrack_undercovered": "adaptive_v2_backtrack_undercovered_enabled",
         "comms_polish": "adaptive_v2_comms_polish_enabled",
+        "frustration_deescalation": "adaptive_v2_frustration_deescalation_enabled",
+        "question_deferral": "adaptive_v2_question_deferral_enabled",
     }
 
     def adaptive_v2_feature_enabled(self, input_mode: str, feature: str) -> bool:

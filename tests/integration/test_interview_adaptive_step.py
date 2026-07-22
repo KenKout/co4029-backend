@@ -351,6 +351,8 @@ def _settings_v2(
     rambling_redirect: bool = False,
     backtrack_undercovered: bool = False,
     comms_polish: bool = False,
+    frustration_deescalation: bool = False,
+    question_deferral: bool = False,
 ) -> Settings:
     """v1 adaptive fully on PLUS the v2 master + selected sub-flags.
 
@@ -371,6 +373,8 @@ def _settings_v2(
             "adaptive_v2_rambling_redirect_enabled": rambling_redirect,
             "adaptive_v2_backtrack_undercovered_enabled": backtrack_undercovered,
             "adaptive_v2_comms_polish_enabled": comms_polish,
+            "adaptive_v2_frustration_deescalation_enabled": frustration_deescalation,
+            "adaptive_v2_question_deferral_enabled": question_deferral,
         }
     )
 
@@ -2048,3 +2052,104 @@ async def test_comms_polish_flag_threads_cleanly_and_advances(
         )
         await db.commit()
     assert result.get("action") is not None
+
+
+# ── Slice 19A: frustration de-escalation ─────────────────────────────────────
+# A frustrated candidate ("this is pointless") is de-escalated (acknowledged,
+# same question resumed), never scored. The FRUSTRATED intent is matched by the
+# deterministic rules, so no gateway intent stub is needed. Flag-gated.
+
+
+@pytest.mark.asyncio
+async def test_frustration_deescalates_end_to_end(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        taking_service, "get_settings", lambda: _settings_v2(frustration_deescalation=True)
+    )
+    gw = _plain_answer_gateway()
+    for mod in ("intent_logic", "analysis_logic", "utterance_logic"):
+        monkeypatch.setattr(
+            f"abridgeai.features.interviews.orchestrator.{mod}.LLMGateway", lambda: gw
+        )
+    session_id, _ = await _make_session(
+        engine, scenario["config_id"], scenario["student_id"], "text"
+    )
+    async with session_factory() as db:
+        await taking_service.take_session_step(
+            db,
+            session_id,
+            "This is pointless, I give up.",
+            _actor(scenario["student_id"]),
+            turn_key="fr-1",
+        )
+        await db.commit()
+    assert await _persisted_ai_action(engine, session_id) == "deescalate"
+
+
+@pytest.mark.asyncio
+async def test_frustration_inert_when_flag_off_end_to_end(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        taking_service, "get_settings", lambda: _settings_v2(frustration_deescalation=False)
+    )
+    gw = _plain_answer_gateway()
+    for mod in ("intent_logic", "analysis_logic", "utterance_logic"):
+        monkeypatch.setattr(
+            f"abridgeai.features.interviews.orchestrator.{mod}.LLMGateway", lambda: gw
+        )
+    session_id, _ = await _make_session(
+        engine, scenario["config_id"], scenario["student_id"], "text"
+    )
+    async with session_factory() as db:
+        await taking_service.take_session_step(
+            db,
+            session_id,
+            "This is pointless, I give up.",
+            _actor(scenario["student_id"]),
+            turn_key="fr-off-1",
+        )
+        await db.commit()
+    assert await _persisted_ai_action(engine, session_id) != "deescalate"
+
+
+# ── Slice 19B: mid-interview question deferral ───────────────────────────────
+# A candidate question asked mid-interview ("can I ask you a question?") is
+# deferred to the end and the current question resumed. Flag-gated.
+
+
+@pytest.mark.asyncio
+async def test_question_deferral_defers_end_to_end(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        taking_service, "get_settings", lambda: _settings_v2(question_deferral=True)
+    )
+    gw = _plain_answer_gateway()
+    for mod in ("intent_logic", "analysis_logic", "utterance_logic"):
+        monkeypatch.setattr(
+            f"abridgeai.features.interviews.orchestrator.{mod}.LLMGateway", lambda: gw
+        )
+    session_id, _ = await _make_session(
+        engine, scenario["config_id"], scenario["student_id"], "text"
+    )
+    async with session_factory() as db:
+        await taking_service.take_session_step(
+            db,
+            session_id,
+            "Can I ask you a question?",
+            _actor(scenario["student_id"]),
+            turn_key="qd-1",
+        )
+        await db.commit()
+    assert await _persisted_ai_action(engine, session_id) == "defer_candidate_question"

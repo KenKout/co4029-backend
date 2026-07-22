@@ -22,7 +22,6 @@ are meant to cross the API boundary; ``internal_rationale`` stays server-side.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import Enum
 
 from abridgeai.features.interviews.orchestrator.analysis import (
     AnswerAnalysis,
@@ -34,90 +33,21 @@ from abridgeai.features.interviews.orchestrator.coverage import (
     is_confidently_wrong,
     is_strong_answer,
 )
+
+# Action / acknowledgement / reason enums live in a sibling module so this file
+# stays under the feature-wide 800-LOC ceiling as v2 slices add cases. Re-export
+# them here so existing ``from ...decision import ReasonCode`` imports (21 sites)
+# keep working unchanged.
+from abridgeai.features.interviews.orchestrator.decision_types import (  # noqa: E402
+    AcknowledgementStyle,
+    InterviewerActionType,
+    ReasonCode,
+)
 from abridgeai.features.interviews.orchestrator.intent import (
     IntentClassification,
     StudentIntent,
 )
 from abridgeai.features.interviews.orchestrator.state import InterviewPhase
-
-
-class InterviewerActionType(str, Enum):  # noqa: UP042 -- match codebase convention
-    OPENING = "opening"
-    ACKNOWLEDGE = "acknowledge"
-    REPEAT_QUESTION = "repeat_question"
-    REFRAME_QUESTION = "reframe_question"
-    CLARIFY_WITHOUT_REVEALING_ANSWER = "clarify_without_revealing_answer"
-    PROVIDE_NEUTRAL_HINT = "provide_neutral_hint"
-    ASK_MAIN_QUESTION = "ask_main_question"
-    PROBE_DEEPER = "probe_deeper"
-    ASK_FOR_EXAMPLE = "ask_for_example"
-    CHALLENGE_REASONING = "challenge_reasoning"
-    EXPLORE_TRADEOFF = "explore_tradeoff"
-    # Depth probes on a strong answer (Slice 8, v2) — dig for the ceiling.
-    EXTEND_ANSWER = "extend_answer"
-    PROBE_EDGE_CASE = "probe_edge_case"
-    RESOLVE_CONTRADICTION = "resolve_contradiction"
-    REDIRECT_TO_TOPIC = "redirect_to_topic"
-    TRANSITION_TOPIC = "transition_topic"
-    SKIP_QUESTION = "skip_question"
-    OFFER_BRIEF_PAUSE = "offer_brief_pause"
-    HANDLE_TECHNICAL_ISSUE = "handle_technical_issue"
-    # End-confirmation gate (Slice 4): a natural-language end request no longer
-    # closes immediately — it asks the candidate to confirm. The next turn
-    # resolves to CONFIRM_END (→ closing) or CANCEL_END (→ back to the question).
-    REQUEST_END_CONFIRMATION = "request_end_confirmation"
-    CANCEL_END = "cancel_end"
-    BEGIN_CLOSING = "begin_closing"
-    CLOSE_INTERVIEW = "close_interview"
-    # Rich closing sub-steps (Slice 13, v2). Deterministic, brief, answer-safe
-    # turns that run during the CLOSING phase before the final sign-off: prompt
-    # the candidate to self-reflect, then invite their questions, then close.
-    PROMPT_SELF_REFLECTION = "prompt_self_reflection"
-    INVITE_CANDIDATE_QUESTIONS = "invite_candidate_questions"
-    ANSWER_CANDIDATE_QUESTION = "answer_candidate_question"
-
-
-class AcknowledgementStyle(str, Enum):  # noqa: UP042 -- match codebase convention
-    NONE = "none"
-    NEUTRAL = "neutral"
-    POSITIVE = "positive"
-    CORRECTIVE = "corrective"
-
-
-class ReasonCode(str, Enum):  # noqa: UP042 -- match codebase convention
-    OPENING_REQUIRED = "opening_required"
-    STUDENT_REQUESTED_REPEAT = "student_requested_repeat"
-    STUDENT_REQUESTED_CLARIFICATION = "student_requested_clarification"
-    STUDENT_REQUESTED_HINT = "student_requested_hint"
-    ANSWER_TOO_VAGUE = "answer_too_vague"
-    MISSING_EXAMPLE = "missing_example"
-    PARTIAL_OUTCOME_COVERAGE = "partial_outcome_coverage"
-    CONTRADICTION_DETECTED = "contradiction_detected"
-    OUTCOME_SUFFICIENTLY_COVERED = "outcome_sufficiently_covered"
-    OUTCOME_NOT_COVERED = "outcome_not_covered"
-    # Depth probe on a strong answer (Slice 8, v2).
-    STRONG_ANSWER_DEPTH_PROBE = "strong_answer_depth_probe"
-    # Confident-but-wrong forced challenge (Slice 16, v2).
-    CONFIDENT_BUT_WRONG_CHALLENGE = "confident_but_wrong_challenge"
-    # Rambling redirect (Slice 17, v2): steer a long, on-topic, low-substance ramble.
-    RAMBLING_REDIRECT = "rambling_redirect"
-    TIME_RUNNING_LOW = "time_running_low"
-    ALL_REQUIRED_OUTCOMES_COVERED = "all_required_outcomes_covered"
-    FOLLOWUP_LIMIT_REACHED = "followup_limit_reached"
-    STUDENT_REQUESTED_END = "student_requested_end"
-    TECHNICAL_ISSUE = "technical_issue"
-    CLOSING_REQUIRED = "closing_required"
-    OFF_TOPIC_REDIRECT = "off_topic_redirect"
-    CANNOT_ANSWER_TRANSITION = "cannot_answer_transition"
-    # End-confirmation gate (Slice 4).
-    END_CONFIRMATION_REQUESTED = "end_confirmation_requested"
-    END_CONFIRMED = "end_confirmed"
-    END_CANCELLED = "end_cancelled"
-    # Rich closing sub-steps (Slice 13, v2).
-    CLOSING_SELF_REFLECTION = "closing_self_reflection"
-    CLOSING_INVITE_QUESTIONS = "closing_invite_questions"
-    CLOSING_ANSWERED_QUESTION = "closing_answered_question"
-
 
 # Follow-up / loop-protection limits (Phase 11). Conservative defaults; Phase 6
 # will let a question override ``max_follow_ups`` and Phase 16 will expose these
@@ -229,6 +159,15 @@ class DecisionInputs:
     # the rambling signal is ignored (byte-for-byte v1).
     rambling: bool = False
     rambling_redirect_enabled: bool = False
+    # Frustration de-escalation (Slice 19A, v2): when enabled AND the intent is
+    # FRUSTRATED, acknowledge and resume the SAME question (never scored, never
+    # advanced, does not consume the follow-up budget). Off → FRUSTRATED is not
+    # a recognised request and falls through to answer handling (byte-for-byte v1).
+    frustration_deescalation_enabled: bool = False
+    # Mid-interview question deferral (Slice 19B, v2): when enabled AND the intent
+    # is ASK_INTERVIEWER_QUESTION OUTSIDE the closing phase, briefly defer and
+    # resume the current question. Off → the intent falls through to v1 handling.
+    question_deferral_enabled: bool = False
 
 
 # Below this fraction of time remaining, stop probing and head for closing.
@@ -540,6 +479,40 @@ def _decide_from_intent_request(inputs: DecisionInputs) -> InterviewerDecision |
     analysis-driven probing / advancement logic.
     """
     intent = inputs.intent.intent
+
+    # Frustration de-escalation (Slice 19A, v2). Acknowledge the candidate's
+    # frustration and resume the SAME question — never scored, never advanced,
+    # and NOT gated on the follow-up budget (this is candidate support, not an
+    # academic probe). Off → FRUSTRATED falls through to answer handling (v1).
+    if inputs.frustration_deescalation_enabled and intent is StudentIntent.FRUSTRATED:
+        return InterviewerDecision(
+            action=InterviewerActionType.DEESCALATE,
+            reason_code=ReasonCode.CANDIDATE_FRUSTRATED,
+            should_record_academic_evidence=False,
+            should_advance_question=False,
+            acknowledgement_style=AcknowledgementStyle.POSITIVE,
+            internal_rationale="Candidate frustrated; de-escalate and resume.",
+            tags=["frustrated"],
+        )
+
+    # Mid-interview question deferral (Slice 19B, v2). When the candidate asks
+    # the interviewer a question OUTSIDE closing, briefly defer and resume the
+    # current question. During CLOSING the rich-closing sub-sequence (which runs
+    # before this) answers it instead. Off → falls through to v1 handling.
+    if (
+        inputs.question_deferral_enabled
+        and intent is StudentIntent.ASK_INTERVIEWER_QUESTION
+        and inputs.phase is not InterviewPhase.CLOSING
+    ):
+        return InterviewerDecision(
+            action=InterviewerActionType.DEFER_CANDIDATE_QUESTION,
+            reason_code=ReasonCode.CANDIDATE_QUESTION_DEFERRED,
+            should_record_academic_evidence=False,
+            should_advance_question=False,
+            acknowledgement_style=AcknowledgementStyle.NEUTRAL,
+            internal_rationale="Candidate asked a question mid-interview; defer to closing.",
+            tags=["deferred"],
+        )
 
     # End-confirmation gate (Slice 4).
     if inputs.pending_confirmation:

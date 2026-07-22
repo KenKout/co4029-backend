@@ -202,6 +202,8 @@ async def run_adaptive_turn(
     rambling_redirect_enabled: bool = False,
     backtrack_undercovered_enabled: bool = False,
     comms_polish_enabled: bool = False,
+    frustration_deescalation_enabled: bool = False,
+    question_deferral_enabled: bool = False,
 ) -> AdaptiveOutcome:
     """Run one adaptive turn. MUST be called inside a caller-owned savepoint.
 
@@ -381,6 +383,8 @@ async def run_adaptive_turn(
             confident_wrong_challenge_enabled=confident_wrong_challenge_enabled,
             rambling=rambling,
             rambling_redirect_enabled=rambling_redirect_enabled,
+            frustration_deescalation_enabled=frustration_deescalation_enabled,
+            question_deferral_enabled=question_deferral_enabled,
         )
     )
 

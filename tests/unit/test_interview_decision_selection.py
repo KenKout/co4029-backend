@@ -579,6 +579,105 @@ def test_off_topic_redirects_once_then_advances() -> None:
     assert second.should_advance_question is True
 
 
+# ── frustration de-escalation (Slice 19A) ────────────────────────────────────
+
+
+def test_frustration_deescalates_without_scoring_when_enabled() -> None:
+    d = decide_next_action(
+        _inputs(
+            intent=_intent(StudentIntent.FRUSTRATED),
+            frustration_deescalation_enabled=True,
+        )
+    )
+    assert d.action is InterviewerActionType.DEESCALATE
+    assert d.reason_code is ReasonCode.CANDIDATE_FRUSTRATED
+    # De-escalation is candidate support: never scored, never advances (resumes
+    # the SAME question), and never penalises.
+    assert d.should_record_academic_evidence is False
+    assert d.should_advance_question is False
+    assert "frustrated" in d.tags
+
+
+def test_frustration_does_not_consume_followup_budget() -> None:
+    # Even with the per-question budget exhausted, de-escalation still fires —
+    # it is not an academic probe, so loop protection does not suppress it.
+    from abridgeai.features.interviews.orchestrator.decision import (
+        DEFAULT_MAX_FOLLOWUPS_PER_QUESTION,
+    )
+
+    d = decide_next_action(
+        _inputs(
+            intent=_intent(StudentIntent.FRUSTRATED),
+            frustration_deescalation_enabled=True,
+            current_question_follow_up_count=DEFAULT_MAX_FOLLOWUPS_PER_QUESTION,
+        )
+    )
+    assert d.action is InterviewerActionType.DEESCALATE
+    assert d.should_advance_question is False
+
+
+def test_frustration_inert_when_flag_off() -> None:
+    # Flag off → byte-for-byte v1: FRUSTRATED is not a recognised request intent,
+    # so it falls through to analysis-driven answer handling (never DEESCALATE).
+    d = decide_next_action(
+        _inputs(
+            intent=_intent(StudentIntent.FRUSTRATED),
+            frustration_deescalation_enabled=False,
+        )
+    )
+    assert d.action is not InterviewerActionType.DEESCALATE
+
+
+# ── mid-interview question deferral (Slice 19B) ──────────────────────────────
+
+
+def test_question_deferral_defers_and_resumes_when_enabled() -> None:
+    from abridgeai.features.interviews.orchestrator.state import InterviewPhase
+
+    d = decide_next_action(
+        _inputs(
+            intent=_intent(StudentIntent.ASK_INTERVIEWER_QUESTION),
+            question_deferral_enabled=True,
+            phase=InterviewPhase.CORE,
+        )
+    )
+    assert d.action is InterviewerActionType.DEFER_CANDIDATE_QUESTION
+    assert d.reason_code is ReasonCode.CANDIDATE_QUESTION_DEFERRED
+    assert d.should_record_academic_evidence is False
+    assert d.should_advance_question is False
+    assert "deferred" in d.tags
+
+
+def test_question_deferral_inert_when_flag_off() -> None:
+    from abridgeai.features.interviews.orchestrator.state import InterviewPhase
+
+    d = decide_next_action(
+        _inputs(
+            intent=_intent(StudentIntent.ASK_INTERVIEWER_QUESTION),
+            question_deferral_enabled=False,
+            phase=InterviewPhase.CORE,
+        )
+    )
+    assert d.action is not InterviewerActionType.DEFER_CANDIDATE_QUESTION
+
+
+def test_question_deferral_yields_to_closing_answer() -> None:
+    # During CLOSING with rich_closing on, the candidate's question is ANSWERED
+    # (Slice 13), not deferred — closing ownership wins over mid-interview defer.
+    from abridgeai.features.interviews.orchestrator.state import InterviewPhase
+
+    d = decide_next_action(
+        _inputs(
+            intent=_intent(StudentIntent.ASK_INTERVIEWER_QUESTION),
+            question_deferral_enabled=True,
+            rich_closing_enabled=True,
+            closing_step="questions",
+            phase=InterviewPhase.CLOSING,
+        )
+    )
+    assert d.action is InterviewerActionType.ANSWER_CANDIDATE_QUESTION
+
+
 def test_probe_recommended_probes_and_records_evidence() -> None:
     d = decide_next_action(_inputs(analysis=_analysis(probe=ProbeType.ASK_FOR_EXAMPLE)))
     assert d.action is InterviewerActionType.ASK_FOR_EXAMPLE

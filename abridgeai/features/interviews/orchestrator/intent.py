@@ -47,6 +47,12 @@ class StudentIntent(str, Enum):  # noqa: UP042 -- StrEnum changes value coercion
     # handled only during the closing phase; mid-interview it falls through to
     # the normal classifier so a genuine answer is never hijacked.
     ASK_INTERVIEWER_QUESTION = "ask_interviewer_question"
+    # Frustration / disengagement (Slice 19A, v2). The candidate expresses
+    # frustration or intent to give up ("this is pointless", "I give up"). Benign
+    # and NEVER scored — the decision layer de-escalates (acknowledges, resumes
+    # the same question) only when the feature is enabled; otherwise it falls
+    # through to normal answer handling (byte-for-byte v1).
+    FRUSTRATED = "frustrated"
 
 
 # Intents that must NEVER be recorded as an academic answer / scored.
@@ -62,6 +68,7 @@ NON_ACADEMIC_INTENTS: frozenset[StudentIntent] = frozenset(
         StudentIntent.CONFIRM_END,
         StudentIntent.CANCEL_END,
         StudentIntent.ASK_INTERVIEWER_QUESTION,
+        StudentIntent.FRUSTRATED,
     }
 )
 
@@ -203,6 +210,28 @@ _RULES: tuple[tuple[StudentIntent, tuple[str, ...]], ...] = (
             r"\bi'?m done\b",
             r"\b(kết thúc|dừng|thoát) (buổi |cuộc )?phỏng vấn\b",
             r"\b(tôi|mình|em) (muốn )?(dừng|kết thúc)\b",
+        ),
+    ),
+    (
+        # Frustration / disengagement (Slice 19A). HIGH-PRECISION only — these
+        # are unambiguous expressions of frustration or giving up, so they never
+        # hijack a genuine answer that merely mentions difficulty. The decision
+        # layer de-escalates (does not score, resumes the same question) only
+        # when the feature flag is on.
+        StudentIntent.FRUSTRATED,
+        (
+            r"\bthis is (so |really )?(pointless|useless|ridiculous|stupid)\b",
+            r"\bpointless\b",
+            r"\bwaste of (my )?time\b",
+            r"\bi (just )?give up\b",
+            r"\bi'?m giving up\b",
+            r"\bi'?m (so |really |getting )?frustrated\b",
+            r"\bwhat'?s the point\b",
+            r"\bi can'?t do this\b",
+            r"\bchán (quá|thật|ghê)\b",
+            r"\bbỏ cuộc\b",
+            r"\bmất thời gian\b",
+            r"\bvô nghĩa\b",
         ),
     ),
 )

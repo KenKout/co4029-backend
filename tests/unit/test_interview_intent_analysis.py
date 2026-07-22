@@ -87,6 +87,56 @@ def test_non_academic_intents_membership() -> None:
     assert StudentIntent.PARTIAL_ANSWER not in NON_ACADEMIC_INTENTS
 
 
+# ── Intent: frustration (Slice 19A) ──────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "utterance",
+    [
+        "This is pointless.",
+        "I give up.",
+        "This is a waste of time.",
+        "I'm so frustrated with this.",
+        "What's the point of this.",
+        "This is ridiculous.",
+    ],
+)
+def test_frustration_rules_match_english(utterance: str) -> None:
+    verdict = classify_by_rules(utterance)
+    assert verdict is not None
+    assert verdict.intent is StudentIntent.FRUSTRATED
+    assert verdict.source == "rules"
+    assert verdict.confidence >= 0.9
+
+
+@pytest.mark.parametrize(
+    "utterance",
+    [
+        "Chán quá đi.",
+        "Thôi tôi bỏ cuộc.",
+        "Mất thời gian quá.",
+        "Cái này vô nghĩa.",
+    ],
+)
+def test_frustration_rules_match_vietnamese(utterance: str) -> None:
+    verdict = classify_by_rules(utterance)
+    assert verdict is not None
+    assert verdict.intent is StudentIntent.FRUSTRATED
+
+
+def test_frustration_rules_do_not_hijack_genuine_answer() -> None:
+    # A real content answer that happens to mention difficulty must NOT match —
+    # high-precision only.
+    assert (
+        classify_by_rules("This is a hard problem, but a fact table stores measurable events.")
+        is None
+    )
+
+
+def test_frustrated_is_non_academic() -> None:
+    assert StudentIntent.FRUSTRATED in NON_ACADEMIC_INTENTS
+
+
 # ── Intent: parser ───────────────────────────────────────────────────────────
 
 

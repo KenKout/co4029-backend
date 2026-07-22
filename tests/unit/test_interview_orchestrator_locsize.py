@@ -35,9 +35,11 @@ def test_no_god_file_in_orchestrator() -> None:
         # circular import. Rule bodies are also extracted into same-file helpers
         # (_depth_probe / _confident_wrong_challenge / _rambling_redirect /
         # _advance_reason) to keep decide_next_action under the cyclomatic-
-        # complexity cap, which trades a little length for readability. 780 keeps
-        # it honest with headroom, still well under the 800 feature-wide cap.
-        "decision.py": 780,
+        # complexity cap, which trades a little length for readability. When it
+        # hit the 800 ceiling (Slice 19), the three pure enums (action /
+        # acknowledgement / reason) were extracted to decision_types.py and
+        # re-exported, dropping it back to ~730. 760 keeps headroom under 800.
+        "decision.py": 760,
     }
     offenders = []
     for path in target.rglob("*.py"):

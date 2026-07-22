@@ -311,6 +311,37 @@ def _fallback_parts(  # noqa: C901, PLR0911 -- flat per-action dispatch; readabi
         }[lang]
         return ack, "", reply
 
+    # Frustration de-escalation (Slice 19A, v2). Warm, encouraging, answer-safe;
+    # acknowledges the feeling and resumes the SAME question (``q``). Never
+    # reveals answer content.
+    if action is InterviewerActionType.DEESCALATE:
+        reassure = {
+            "en": (
+                "That's completely okay — take a breath. There's no penalty here; "
+                "let's take it one step at a time."
+            ),
+            "vi": (
+                "Không sao đâu — bạn cứ bình tĩnh. Không có điểm trừ gì cả; "
+                "chúng ta cứ đi từng bước một nhé."
+            ),
+        }[lang]
+        return reassure, "", q
+
+    # Mid-interview question deferral (Slice 19B, v2). Briefly acknowledge the
+    # candidate's question, defer it to the end, and resume the current question.
+    if action is InterviewerActionType.DEFER_CANDIDATE_QUESTION:
+        defer = {
+            "en": (
+                "Good question — let's come back to that at the end. For now, "
+                "let's stay with the current one."
+            ),
+            "vi": (
+                "Câu hỏi hay — mình sẽ quay lại cuối buổi nhé. Bây giờ, "
+                "chúng ta tiếp tục với câu hiện tại."
+            ),
+        }[lang]
+        return defer, "", q
+
     if action is InterviewerActionType.ACKNOWLEDGE:
         return ack, "", q
 
