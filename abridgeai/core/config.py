@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import logging
 from functools import lru_cache
-from typing import Literal
+from typing import ClassVar, Literal
 
 from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -247,6 +247,24 @@ class Settings(BaseSettings):
     # already be on for the percentage to matter.
     adaptive_interviewer_rollout_percent: int = Field(default=100, ge=0, le=100)
 
+    # ── Adaptive Interviewer v2 (real-life coverage upgrade) ─────────────────
+    # v2 layers richer interviewer behaviour on top of the v1 adaptive path
+    # (phase progression, depth probing, cross-turn memory, affect, laddered
+    # hints, per-outcome difficulty, rich closing).
+    #
+    # MASTER v2 switch, default OFF: when OFF, run_adaptive_turn produces the
+    # exact v1 result. v2 also requires the v1 master + per-mode gate to already
+    # be on (v2 cannot run where v1 does not). Each sub-feature is independently
+    # gated and defaults OFF so it can shadow/canary one behaviour at a time.
+    adaptive_interviewer_v2_enabled: bool = False
+    adaptive_v2_phases_enabled: bool = False
+    adaptive_v2_depth_probe_enabled: bool = False
+    adaptive_v2_cross_turn_enabled: bool = False
+    adaptive_v2_affect_enabled: bool = False
+    adaptive_v2_hint_ladder_enabled: bool = False
+    adaptive_v2_per_outcome_difficulty_enabled: bool = False
+    adaptive_v2_rich_closing_enabled: bool = False
+
     # Prompt-injection guard is operations-only. ``shadow`` is the safe rollout
     # default: assess and report without changing the learner experience.
     # Production enforcement must be enabled explicitly by operators.
@@ -274,6 +292,31 @@ class Settings(BaseSettings):
             "voice": self.adaptive_interviewer_voice_enabled,
         }.get(input_mode)
         return bool(mode_flag)
+
+    _V2_SUBFLAGS: ClassVar[dict[str, str]] = {
+        "phases": "adaptive_v2_phases_enabled",
+        "depth_probe": "adaptive_v2_depth_probe_enabled",
+        "cross_turn": "adaptive_v2_cross_turn_enabled",
+        "affect": "adaptive_v2_affect_enabled",
+        "hint_ladder": "adaptive_v2_hint_ladder_enabled",
+        "per_outcome_difficulty": "adaptive_v2_per_outcome_difficulty_enabled",
+        "rich_closing": "adaptive_v2_rich_closing_enabled",
+    }
+
+    def adaptive_v2_feature_enabled(self, input_mode: str, feature: str) -> bool:
+        """Resolve whether a v2 sub-feature runs for an input mode.
+
+        A v2 sub-feature runs only when the v1 static mode gate is ON (master
+        AND per-mode flag), the v2 master switch is ON, AND the named sub-flag
+        is ON. An unknown feature name fails closed (returns False), so a typo
+        can never silently enable behaviour.
+        """
+        if not self.adaptive_enabled_for_mode(input_mode):
+            return False
+        if not self.adaptive_interviewer_v2_enabled:
+            return False
+        attr = self._V2_SUBFLAGS.get(feature)
+        return bool(attr and getattr(self, attr, False))
 
     @staticmethod
     def _rollout_bucket(student_id: str, config_id: str) -> int:
