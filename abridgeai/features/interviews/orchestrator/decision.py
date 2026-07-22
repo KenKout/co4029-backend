@@ -22,7 +22,6 @@ are meant to cross the API boundary; ``internal_rationale`` stays server-side.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import Enum
 
 from abridgeai.features.interviews.orchestrator.analysis import (
     AnswerAnalysis,
@@ -30,59 +29,25 @@ from abridgeai.features.interviews.orchestrator.analysis import (
     ProbeType,
     Relevance,
 )
+from abridgeai.features.interviews.orchestrator.coverage import (
+    is_confidently_wrong,
+    is_strong_answer,
+)
+
+# Action / acknowledgement / reason enums live in a sibling module so this file
+# stays under the feature-wide 800-LOC ceiling as v2 slices add cases. Re-export
+# them here so existing ``from ...decision import ReasonCode`` imports (21 sites)
+# keep working unchanged.
+from abridgeai.features.interviews.orchestrator.decision_types import (  # noqa: E402
+    AcknowledgementStyle,
+    InterviewerActionType,
+    ReasonCode,
+)
 from abridgeai.features.interviews.orchestrator.intent import (
     IntentClassification,
     StudentIntent,
 )
-
-
-class InterviewerActionType(str, Enum):  # noqa: UP042 -- match codebase convention
-    OPENING = "opening"
-    ACKNOWLEDGE = "acknowledge"
-    REPEAT_QUESTION = "repeat_question"
-    REFRAME_QUESTION = "reframe_question"
-    CLARIFY_WITHOUT_REVEALING_ANSWER = "clarify_without_revealing_answer"
-    ASK_MAIN_QUESTION = "ask_main_question"
-    PROBE_DEEPER = "probe_deeper"
-    ASK_FOR_EXAMPLE = "ask_for_example"
-    CHALLENGE_REASONING = "challenge_reasoning"
-    EXPLORE_TRADEOFF = "explore_tradeoff"
-    RESOLVE_CONTRADICTION = "resolve_contradiction"
-    REDIRECT_TO_TOPIC = "redirect_to_topic"
-    TRANSITION_TOPIC = "transition_topic"
-    SKIP_QUESTION = "skip_question"
-    OFFER_BRIEF_PAUSE = "offer_brief_pause"
-    HANDLE_TECHNICAL_ISSUE = "handle_technical_issue"
-    BEGIN_CLOSING = "begin_closing"
-    CLOSE_INTERVIEW = "close_interview"
-
-
-class AcknowledgementStyle(str, Enum):  # noqa: UP042 -- match codebase convention
-    NONE = "none"
-    NEUTRAL = "neutral"
-    POSITIVE = "positive"
-    CORRECTIVE = "corrective"
-
-
-class ReasonCode(str, Enum):  # noqa: UP042 -- match codebase convention
-    OPENING_REQUIRED = "opening_required"
-    STUDENT_REQUESTED_REPEAT = "student_requested_repeat"
-    STUDENT_REQUESTED_CLARIFICATION = "student_requested_clarification"
-    ANSWER_TOO_VAGUE = "answer_too_vague"
-    MISSING_EXAMPLE = "missing_example"
-    PARTIAL_OUTCOME_COVERAGE = "partial_outcome_coverage"
-    CONTRADICTION_DETECTED = "contradiction_detected"
-    OUTCOME_SUFFICIENTLY_COVERED = "outcome_sufficiently_covered"
-    OUTCOME_NOT_COVERED = "outcome_not_covered"
-    TIME_RUNNING_LOW = "time_running_low"
-    ALL_REQUIRED_OUTCOMES_COVERED = "all_required_outcomes_covered"
-    FOLLOWUP_LIMIT_REACHED = "followup_limit_reached"
-    STUDENT_REQUESTED_END = "student_requested_end"
-    TECHNICAL_ISSUE = "technical_issue"
-    CLOSING_REQUIRED = "closing_required"
-    OFF_TOPIC_REDIRECT = "off_topic_redirect"
-    CANNOT_ANSWER_TRANSITION = "cannot_answer_transition"
-
+from abridgeai.features.interviews.orchestrator.state import InterviewPhase
 
 # Follow-up / loop-protection limits (Phase 11). Conservative defaults; Phase 6
 # will let a question override ``max_follow_ups`` and Phase 16 will expose these
@@ -161,6 +126,48 @@ class DecisionInputs:
     max_follow_ups_per_question: int = DEFAULT_MAX_FOLLOWUPS_PER_QUESTION
     max_total_follow_ups: int = DEFAULT_MAX_TOTAL_FOLLOWUPS
     closing_time_fraction: float = 0.1
+    # End-confirmation gate (Slice 4): True while a prior turn asked the
+    # candidate to confirm ending. It changes how CONFIRM_END / CANCEL_END and a
+    # bare answer are interpreted this turn (see _decide_from_intent_request).
+    pending_confirmation: bool = False
+    # Depth probing (Slice 8, v2): when enabled AND the answer is strong AND we
+    # are in CORE/DEEP_PROBE with follow-up budget + time, probe for the ceiling
+    # instead of advancing. Defaults False + CORE → byte-for-byte v1 behaviour.
+    depth_probe_enabled: bool = False
+    phase: InterviewPhase = InterviewPhase.CORE
+    # Rich closing (Slice 13, v2): when enabled, the CLOSING phase runs a short
+    # deterministic sub-sequence (self-reflection → invite questions → sign-off)
+    # instead of a one-shot close. ``closing_step`` is the current marker from
+    # state (""/"reflection"/"questions"/"done"). Off → v1 one-shot close.
+    rich_closing_enabled: bool = False
+    closing_step: str = ""
+    # Self-correction (Slice 15, v2): when enabled AND the analysis flags the
+    # candidate fixed their own mistake, reward it with a POSITIVE acknowledgement
+    # and suppress a RESOLVE_CONTRADICTION probe pointing at what they already
+    # resolved. Off → the self_corrected signal is ignored (byte-for-byte v1).
+    self_correction_enabled: bool = False
+    # Confident-but-wrong forced challenge (Slice 16, v2): when enabled AND the
+    # answer is confidently wrong (relevant, specific, high-confidence
+    # incorrect/mixed) AND budget + time remain AND the analyzer recommended no
+    # other probe, force a CHALLENGE_REASONING probe instead of advancing. Off →
+    # the confidently-wrong answer advances as in v1.
+    confident_wrong_challenge_enabled: bool = False
+    # Rambling redirect (Slice 17, v2): ``rambling`` is the plain affect signal
+    # (candidate gave a long, on-topic, low-substance answer). When enabled AND
+    # rambling AND the answer is on-topic AND budget + time remain AND no other
+    # probe fired, steer back with REDIRECT_TO_TOPIC instead of advancing. Off →
+    # the rambling signal is ignored (byte-for-byte v1).
+    rambling: bool = False
+    rambling_redirect_enabled: bool = False
+    # Frustration de-escalation (Slice 19A, v2): when enabled AND the intent is
+    # FRUSTRATED, acknowledge and resume the SAME question (never scored, never
+    # advanced, does not consume the follow-up budget). Off → FRUSTRATED is not
+    # a recognised request and falls through to answer handling (byte-for-byte v1).
+    frustration_deescalation_enabled: bool = False
+    # Mid-interview question deferral (Slice 19B, v2): when enabled AND the intent
+    # is ASK_INTERVIEWER_QUESTION OUTSIDE the closing phase, briefly defer and
+    # resume the current question. Off → the intent falls through to v1 handling.
+    question_deferral_enabled: bool = False
 
 
 # Below this fraction of time remaining, stop probing and head for closing.
@@ -175,6 +182,8 @@ def _probe_action(probe: ProbeType) -> InterviewerActionType:
         ProbeType.CHALLENGE_ASSUMPTION: InterviewerActionType.CHALLENGE_REASONING,
         ProbeType.EXPLORE_TRADEOFF: InterviewerActionType.EXPLORE_TRADEOFF,
         ProbeType.RESOLVE_CONTRADICTION: InterviewerActionType.RESOLVE_CONTRADICTION,
+        ProbeType.EXTEND_STRONG: InterviewerActionType.EXTEND_ANSWER,
+        ProbeType.PROBE_EDGE_CASE: InterviewerActionType.PROBE_EDGE_CASE,
     }.get(probe, InterviewerActionType.PROBE_DEEPER)
 
 
@@ -186,18 +195,242 @@ def _probe_reason(probe: ProbeType) -> ReasonCode:
         ProbeType.CHALLENGE_ASSUMPTION: ReasonCode.PARTIAL_OUTCOME_COVERAGE,
         ProbeType.EXPLORE_TRADEOFF: ReasonCode.PARTIAL_OUTCOME_COVERAGE,
         ProbeType.RESOLVE_CONTRADICTION: ReasonCode.CONTRADICTION_DETECTED,
+        ProbeType.EXTEND_STRONG: ReasonCode.STRONG_ANSWER_DEPTH_PROBE,
+        ProbeType.PROBE_EDGE_CASE: ReasonCode.STRONG_ANSWER_DEPTH_PROBE,
     }.get(probe, ReasonCode.PARTIAL_OUTCOME_COVERAGE)
+
+
+def _rich_closing_step(inputs: DecisionInputs) -> InterviewerDecision | None:
+    """Advance the rich-closing sub-sequence (Slice 13, v2).
+
+    Runs a short deterministic sequence once closing is reached, keyed by the
+    ``closing_step`` marker from state:
+
+        ""          → prompt self-reflection      (marker becomes "reflection")
+        "reflection"→ invite candidate questions  (marker becomes "questions")
+        "questions" → answer a candidate question OR final sign-off
+        "done"      → final sign-off (CLOSE_INTERVIEW)
+
+    Every sub-step except the final one is a NON-finishing turn (mapping.py only
+    finishes on BEGIN_CLOSING / CLOSE_INTERVIEW), so the interview keeps
+    collecting one more reply. None means rich closing does not apply (feature
+    off), so the caller falls back to the v1 one-shot close.
+    """
+    if not inputs.rich_closing_enabled:
+        return None
+
+    step = inputs.closing_step
+    if step == "":
+        return InterviewerDecision(
+            action=InterviewerActionType.PROMPT_SELF_REFLECTION,
+            reason_code=ReasonCode.CLOSING_SELF_REFLECTION,
+            should_record_academic_evidence=False,
+            should_advance_question=False,
+            acknowledgement_style=AcknowledgementStyle.POSITIVE,
+            internal_rationale="Closing: prompt candidate self-reflection.",
+            tags=["closing", "self_reflection"],
+        )
+    if step == "reflection":
+        return InterviewerDecision(
+            action=InterviewerActionType.INVITE_CANDIDATE_QUESTIONS,
+            reason_code=ReasonCode.CLOSING_INVITE_QUESTIONS,
+            should_record_academic_evidence=False,
+            should_advance_question=False,
+            acknowledgement_style=AcknowledgementStyle.NEUTRAL,
+            internal_rationale="Closing: invite candidate questions.",
+            tags=["closing", "invite_questions"],
+        )
+    if step == "questions" and inputs.intent.intent is StudentIntent.ASK_INTERVIEWER_QUESTION:
+        # Candidate asked something — acknowledge briefly (answer-safe), then the
+        # NEXT turn (still "questions") will sign off. Non-finishing.
+        return InterviewerDecision(
+            action=InterviewerActionType.ANSWER_CANDIDATE_QUESTION,
+            reason_code=ReasonCode.CLOSING_ANSWERED_QUESTION,
+            should_record_academic_evidence=False,
+            should_advance_question=False,
+            acknowledgement_style=AcknowledgementStyle.NEUTRAL,
+            internal_rationale="Closing: acknowledge candidate question (answer-safe).",
+            tags=["closing", "answer_question"],
+        )
+    # step == "questions" (no question asked) or "done" → final sign-off.
+    return InterviewerDecision(
+        action=InterviewerActionType.CLOSE_INTERVIEW,
+        reason_code=ReasonCode.CLOSING_REQUIRED,
+        should_record_academic_evidence=False,
+        should_advance_question=False,
+        acknowledgement_style=AcknowledgementStyle.POSITIVE,
+        internal_rationale="Closing: final sign-off.",
+        tags=["closing", "sign_off"],
+    )
+
+
+def _begin_closing_decision(
+    inputs: DecisionInputs, reason: ReasonCode, rationale: str
+) -> InterviewerDecision:
+    """The turn that ENTERS closing.
+
+    Rich closing (Slice 13): emit the first sub-step (self-reflection), a
+    NON-finishing turn that also flips the phase to CLOSING in turn_state so
+    subsequent turns route through the sub-sequence. Off → the v1 one-shot
+    BEGIN_CLOSING (finishing).
+    """
+    if inputs.rich_closing_enabled:
+        rich = _rich_closing_step(inputs)
+        if rich is not None:
+            return rich
+    return InterviewerDecision(
+        action=InterviewerActionType.BEGIN_CLOSING,
+        reason_code=reason,
+        should_record_academic_evidence=False,
+        should_advance_question=False,
+        internal_rationale=rationale,
+    )
+
+
+def _reward_self_correction(decision: InterviewerDecision, *, self_corrected: bool) -> None:
+    """Reward a self-correction (Slice 15, v2) on an advancing/closing decision.
+
+    When the candidate fixed their own mistake this turn, upgrade the
+    acknowledgement to POSITIVE and tag it — a real interviewer credits the
+    catch. Only ever touches TONE (ack style + tag); the action, advance/close,
+    and evidence flags are untouched, so every decision invariant holds. No-op
+    when the feature is off or the answer was not self-corrected.
+    """
+    if not self_corrected:
+        return
+    decision.acknowledgement_style = AcknowledgementStyle.POSITIVE
+    if "self_correction" not in decision.tags:
+        decision.tags.append("self_correction")
+
+
+def _depth_probe(
+    inputs: DecisionInputs, *, followups_exhausted: bool, time_low: bool
+) -> InterviewerDecision | None:
+    """Depth probe on a STRONG answer to find the candidate's ceiling (Slice 8).
+
+    Only when the feature is enabled, the answer is strong, we are in
+    CORE/DEEP_PROBE, and we still have follow-up budget + time. DEEP_PROBE
+    pushes on edge cases; CORE asks them to extend. Consumes the follow-up
+    budget (falls into the else branch of _apply_state_updates), so loop
+    protection is preserved. Returns None when it does not apply.
+    """
+    if not (
+        inputs.depth_probe_enabled
+        and inputs.analysis is not None
+        and is_strong_answer(inputs.analysis)
+        and inputs.phase in (InterviewPhase.CORE, InterviewPhase.DEEP_PROBE)
+        and not followups_exhausted
+        and not time_low
+    ):
+        return None
+    depth = (
+        ProbeType.PROBE_EDGE_CASE
+        if inputs.phase is InterviewPhase.DEEP_PROBE
+        else ProbeType.EXTEND_STRONG
+    )
+    return InterviewerDecision(
+        action=_probe_action(depth),
+        reason_code=ReasonCode.STRONG_ANSWER_DEPTH_PROBE,
+        should_record_academic_evidence=True,
+        should_advance_question=False,
+        acknowledgement_style=AcknowledgementStyle.POSITIVE,
+        internal_rationale="Strong answer; probing for depth/ceiling.",
+        tags=["depth_probe", depth.value],
+    )
+
+
+def _confident_wrong_challenge(
+    inputs: DecisionInputs, *, followups_exhausted: bool, time_low: bool
+) -> InterviewerDecision | None:
+    """Forced challenge on a confident-but-wrong answer (Slice 16, v2).
+
+    The candidate committed confidently to a specific, relevant, but WRONG
+    claim, and no other probe was recommended. Instead of quietly advancing
+    (which feels like the interviewer didn't notice), lean in with a
+    CHALLENGE_REASONING probe so they can defend or revise. Gated on budget +
+    time, so loop protection holds. Returns None when the feature is off, the
+    answer is not confidently wrong, or budget/time are spent → the caller
+    advances as in v1.
+    """
+    if not (
+        inputs.confident_wrong_challenge_enabled
+        and is_confidently_wrong(inputs.analysis)
+        and not followups_exhausted
+        and not time_low
+    ):
+        return None
+    return InterviewerDecision(
+        action=InterviewerActionType.CHALLENGE_REASONING,
+        reason_code=ReasonCode.CONFIDENT_BUT_WRONG_CHALLENGE,
+        should_record_academic_evidence=True,
+        should_advance_question=False,
+        acknowledgement_style=AcknowledgementStyle.CORRECTIVE,
+        internal_rationale="Confident but wrong; challenge the reasoning.",
+        tags=["confident_wrong", "challenge"],
+    )
+
+
+def _rambling_redirect(
+    inputs: DecisionInputs, *, followups_exhausted: bool, time_low: bool
+) -> InterviewerDecision | None:
+    """Steer a long, on-topic, low-substance ramble back to focus (Slice 17, v2).
+
+    The candidate is meandering: the affect layer flagged the answer as rambling
+    and it is on-topic (off-topic is already handled at rule 8). Instead of
+    quietly advancing past the sprawl, interrupt gently and redirect them to the
+    point. Gated on budget + time (REDIRECT_TO_TOPIC consumes the follow-up
+    budget, so loop protection holds). Returns None when the feature is off, the
+    answer is not rambling, it is off-topic, or budget/time are spent → the
+    caller advances as in v1.
+    """
+    analysis = inputs.analysis
+    off_topic = analysis is not None and analysis.relevance is Relevance.OFF_TOPIC
+    if not (
+        inputs.rambling_redirect_enabled
+        and inputs.rambling
+        and not off_topic
+        and not followups_exhausted
+        and not time_low
+    ):
+        return None
+    return InterviewerDecision(
+        action=InterviewerActionType.REDIRECT_TO_TOPIC,
+        reason_code=ReasonCode.RAMBLING_REDIRECT,
+        should_record_academic_evidence=True,
+        should_advance_question=False,
+        acknowledgement_style=AcknowledgementStyle.NEUTRAL,
+        internal_rationale="Rambling; steer back to the focus of the question.",
+        tags=["rambling", "redirect"],
+    )
+
+
+def _advance_reason(inputs: DecisionInputs, *, followups_exhausted: bool) -> ReasonCode:
+    """Pick the reason code for a plain advance (rule 12).
+
+    Precedence: exhausted budget → all-covered → (mostly-)correct answer →
+    partial coverage. Extracted from ``decide_next_action`` to keep that
+    function under the cyclomatic-complexity cap.
+    """
+    if followups_exhausted:
+        return ReasonCode.FOLLOWUP_LIMIT_REACHED
+    if inputs.all_required_outcomes_covered:
+        return ReasonCode.ALL_REQUIRED_OUTCOMES_COVERED
+    analysis = inputs.analysis
+    if analysis is not None and analysis.correctness in (
+        Correctness.CORRECT,
+        Correctness.MOSTLY_CORRECT,
+    ):
+        return ReasonCode.OUTCOME_SUFFICIENTLY_COVERED
+    return ReasonCode.PARTIAL_OUTCOME_COVERAGE
 
 
 def _advance_or_close(inputs: DecisionInputs, reason: ReasonCode) -> InterviewerDecision:
     """Move to the next question, or begin closing when none remain / time low."""
     if not inputs.has_next_question:
-        return InterviewerDecision(
-            action=InterviewerActionType.BEGIN_CLOSING,
-            reason_code=ReasonCode.CLOSING_REQUIRED,
-            should_record_academic_evidence=False,
-            should_advance_question=False,
-            internal_rationale="No further approved questions available; closing.",
+        return _begin_closing_decision(
+            inputs,
+            ReasonCode.CLOSING_REQUIRED,
+            "No further approved questions available; closing.",
         )
     return InterviewerDecision(
         action=InterviewerActionType.TRANSITION_TOPIC,
@@ -216,11 +449,6 @@ _SIMPLE_INTENT_ACTIONS: dict[StudentIntent, tuple[InterviewerActionType, ReasonC
         ReasonCode.TECHNICAL_ISSUE,
         "Student reported a technical issue; not scored.",
     ),
-    StudentIntent.END_INTERVIEW: (
-        InterviewerActionType.BEGIN_CLOSING,
-        ReasonCode.STUDENT_REQUESTED_END,
-        "Student asked to end the interview.",
-    ),
     StudentIntent.ASK_TO_REPEAT: (
         InterviewerActionType.REPEAT_QUESTION,
         ReasonCode.STUDENT_REQUESTED_REPEAT,
@@ -230,6 +458,11 @@ _SIMPLE_INTENT_ACTIONS: dict[StudentIntent, tuple[InterviewerActionType, ReasonC
         InterviewerActionType.CLARIFY_WITHOUT_REVEALING_ANSWER,
         ReasonCode.STUDENT_REQUESTED_CLARIFICATION,
         "Student asked for clarification; do not leak answer.",
+    ),
+    StudentIntent.ASK_FOR_HINT: (
+        InterviewerActionType.PROVIDE_NEUTRAL_HINT,
+        ReasonCode.STUDENT_REQUESTED_HINT,
+        "Student asked for a neutral scaffold; do not leak answer content.",
     ),
     StudentIntent.ASK_FOR_MORE_TIME: (
         InterviewerActionType.OFFER_BRIEF_PAUSE,
@@ -246,6 +479,78 @@ def _decide_from_intent_request(inputs: DecisionInputs) -> InterviewerDecision |
     analysis-driven probing / advancement logic.
     """
     intent = inputs.intent.intent
+
+    # Frustration de-escalation (Slice 19A, v2). Acknowledge the candidate's
+    # frustration and resume the SAME question — never scored, never advanced,
+    # and NOT gated on the follow-up budget (this is candidate support, not an
+    # academic probe). Off → FRUSTRATED falls through to answer handling (v1).
+    if inputs.frustration_deescalation_enabled and intent is StudentIntent.FRUSTRATED:
+        return InterviewerDecision(
+            action=InterviewerActionType.DEESCALATE,
+            reason_code=ReasonCode.CANDIDATE_FRUSTRATED,
+            should_record_academic_evidence=False,
+            should_advance_question=False,
+            acknowledgement_style=AcknowledgementStyle.POSITIVE,
+            internal_rationale="Candidate frustrated; de-escalate and resume.",
+            tags=["frustrated"],
+        )
+
+    # Mid-interview question deferral (Slice 19B, v2). When the candidate asks
+    # the interviewer a question OUTSIDE closing, briefly defer and resume the
+    # current question. During CLOSING the rich-closing sub-sequence (which runs
+    # before this) answers it instead. Off → falls through to v1 handling.
+    if (
+        inputs.question_deferral_enabled
+        and intent is StudentIntent.ASK_INTERVIEWER_QUESTION
+        and inputs.phase is not InterviewPhase.CLOSING
+    ):
+        return InterviewerDecision(
+            action=InterviewerActionType.DEFER_CANDIDATE_QUESTION,
+            reason_code=ReasonCode.CANDIDATE_QUESTION_DEFERRED,
+            should_record_academic_evidence=False,
+            should_advance_question=False,
+            acknowledgement_style=AcknowledgementStyle.NEUTRAL,
+            internal_rationale="Candidate asked a question mid-interview; defer to closing.",
+            tags=["deferred"],
+        )
+
+    # End-confirmation gate (Slice 4).
+    if inputs.pending_confirmation:
+        # A confirmation is outstanding. An explicit end-confirm — or a repeated
+        # natural end request — closes; anything else cancels and resumes the
+        # SAME question (never scored, never advanced).
+        if intent in (StudentIntent.CONFIRM_END, StudentIntent.END_INTERVIEW):
+            return InterviewerDecision(
+                action=InterviewerActionType.BEGIN_CLOSING,
+                reason_code=ReasonCode.END_CONFIRMED,
+                should_record_academic_evidence=False,
+                internal_rationale="Candidate confirmed ending; closing.",
+                tags=["end_confirmed"],
+            )
+        return InterviewerDecision(
+            action=InterviewerActionType.CANCEL_END,
+            reason_code=ReasonCode.END_CANCELLED,
+            should_record_academic_evidence=False,
+            should_advance_question=False,
+            internal_rationale="End cancelled; resume the current question.",
+            tags=["end_cancelled"],
+        )
+
+    # A fresh end request does NOT close immediately — it asks to confirm.
+    if intent is StudentIntent.END_INTERVIEW:
+        return InterviewerDecision(
+            action=InterviewerActionType.REQUEST_END_CONFIRMATION,
+            reason_code=ReasonCode.END_CONFIRMATION_REQUESTED,
+            should_record_academic_evidence=False,
+            should_advance_question=False,
+            internal_rationale="Candidate asked to end; request confirmation.",
+            tags=["confirm_end_requested"],
+        )
+
+    # A confirm/cancel reply with NO pending confirmation is not an end signal —
+    # treat it as an ordinary answer (fall through to analysis-driven handling).
+    if intent in (StudentIntent.CONFIRM_END, StudentIntent.CANCEL_END):
+        return None
 
     simple = _SIMPLE_INTENT_ACTIONS.get(intent)
     if simple is not None:
@@ -313,6 +618,15 @@ def decide_next_action(inputs: DecisionInputs) -> InterviewerDecision:
     11. Analysis recommends a probe → probe (record evidence).
     12. Otherwise             → advance to next question / close.
     """
+    # Rich closing continuation (Slice 13, v2). Once the phase is CLOSING and the
+    # feature is on, the closing sub-sequence owns every turn (self-reflection →
+    # invite questions → answer/​sign-off), regardless of intent — so an end
+    # request during closing simply signs off. Off → falls through to v1.
+    if inputs.rich_closing_enabled and inputs.phase is InterviewPhase.CLOSING:
+        rich = _rich_closing_step(inputs)
+        if rich is not None:
+            return rich
+
     request_decision = _decide_from_intent_request(inputs)
     if request_decision is not None:
         return request_decision
@@ -340,8 +654,18 @@ def decide_next_action(inputs: DecisionInputs) -> InterviewerDecision:
         or inputs.total_follow_up_count >= inputs.max_total_follow_ups
     )
 
+    # Self-correction (Slice 15, v2): the candidate noticed and fixed their own
+    # mistake this turn. When enabled, don't point a RESOLVE_CONTRADICTION probe
+    # at what they already resolved — that would feel like the interviewer wasn't
+    # listening. Off → self_corrected is ignored (byte-for-byte v1).
+    self_corrected = (
+        inputs.self_correction_enabled and analysis is not None and analysis.self_corrected
+    )
+
     # 11. Probe when the analysis recommends it AND we're allowed to.
     probe = analysis.recommended_probe_type if analysis is not None else ProbeType.NONE
+    if self_corrected and probe is ProbeType.RESOLVE_CONTRADICTION:
+        probe = ProbeType.NONE
     if probe is not ProbeType.NONE and not followups_exhausted and not time_low:
         return InterviewerDecision(
             action=_probe_action(probe),
@@ -353,30 +677,42 @@ def decide_next_action(inputs: DecisionInputs) -> InterviewerDecision:
             tags=["probe", probe.value],
         )
 
+    # 11.5 Depth probe on a strong answer (Slice 8, v2).
+    depth_probe = _depth_probe(inputs, followups_exhausted=followups_exhausted, time_low=time_low)
+    if depth_probe is not None:
+        return depth_probe
+
+    # 11.6 Confident-but-wrong forced challenge (Slice 16, v2).
+    challenge = _confident_wrong_challenge(
+        inputs, followups_exhausted=followups_exhausted, time_low=time_low
+    )
+    if challenge is not None:
+        return challenge
+
+    # 11.7 Rambling redirect (Slice 17, v2).
+    redirect = _rambling_redirect(
+        inputs, followups_exhausted=followups_exhausted, time_low=time_low
+    )
+    if redirect is not None:
+        return redirect
+
     # 12. Otherwise advance (recording this answer's evidence first).
-    if followups_exhausted:
-        reason = ReasonCode.FOLLOWUP_LIMIT_REACHED
-    elif inputs.all_required_outcomes_covered:
-        reason = ReasonCode.ALL_REQUIRED_OUTCOMES_COVERED
-    elif analysis is not None and analysis.correctness in (
-        Correctness.CORRECT,
-        Correctness.MOSTLY_CORRECT,
-    ):
-        reason = ReasonCode.OUTCOME_SUFFICIENTLY_COVERED
-    else:
-        reason = ReasonCode.PARTIAL_OUTCOME_COVERAGE
+    reason = _advance_reason(inputs, followups_exhausted=followups_exhausted)
 
     if inputs.all_required_outcomes_covered and not time_low:
         # Everything required is covered → begin closing rather than pad.
-        return InterviewerDecision(
-            action=InterviewerActionType.BEGIN_CLOSING,
-            reason_code=ReasonCode.ALL_REQUIRED_OUTCOMES_COVERED,
-            should_record_academic_evidence=True,
-            internal_rationale="All required outcomes covered; begin closing.",
+        decision = _begin_closing_decision(
+            inputs,
+            ReasonCode.ALL_REQUIRED_OUTCOMES_COVERED,
+            "All required outcomes covered; begin closing.",
         )
+        decision.should_record_academic_evidence = True
+        _reward_self_correction(decision, self_corrected=self_corrected)
+        return decision
 
     decision = _advance_or_close(inputs, reason)
     decision.should_record_academic_evidence = True
+    _reward_self_correction(decision, self_corrected=self_corrected)
     return decision
 
 

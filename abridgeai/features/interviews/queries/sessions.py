@@ -300,7 +300,7 @@ async def list_session_messages(
 async def list_in_progress_voice_sessions_with_limit(
     db: AsyncSession,
 ) -> list[tuple[InterviewSession, int | None]]:
-    """In-progress voice/hybrid sessions paired with their config time-limit.
+    """In-progress sessions paired with their config time-limit.
 
     Used by the stale-session sweep (Phase 4). Returns ``(session,
     time_limit_minutes)`` so the caller decides staleness in Python (avoids
@@ -312,15 +312,34 @@ async def list_in_progress_voice_sessions_with_limit(
         .join(InterviewConfig, InterviewConfig.id == InterviewSession.interview_config_id)
         .where(
             InterviewSession.status == "in_progress",
-            InterviewSession.input_mode.in_(("voice", "hybrid")),
         )
     )
     rows = (await db.execute(stmt)).all()
     return [(row[0], row[1]) for row in rows]
 
 
+async def list_pending_evaluation_sessions(
+    db: AsyncSession,
+    *,
+    ended_before: datetime,
+) -> list[InterviewSession]:
+    """Terminal sessions whose async evaluation appears to be stranded.
+
+    The grace cutoff keeps an actively running evaluation job out of the
+    recovery scan. ``failed`` and ``abandoned`` rows are intentionally
+    excluded because they are already terminal from the grader's perspective.
+    """
+    stmt = select(InterviewSession).where(
+        InterviewSession.status.in_(("completed", "timed_out")),
+        InterviewSession.pass_verdict.is_(None),
+        InterviewSession.ended_at.is_not(None),
+        InterviewSession.ended_at <= ended_before,
+    )
+    return list((await db.execute(stmt)).scalars().all())
+
+
 async def count_user_messages(db: AsyncSession, session_id: UUID) -> int:
-    """Number of student (``role='user'``) turns recorded for a session.
+    """Number of graded student answer turns recorded for a session.
 
     The sweep uses this to decide whether a stale session has enough
     transcript to evaluate (>=1) or should simply be marked ``abandoned``.
@@ -328,6 +347,7 @@ async def count_user_messages(db: AsyncSession, session_id: UUID) -> int:
     stmt = select(func.count(InterviewSessionMessage.id)).where(
         InterviewSessionMessage.session_id == session_id,
         InterviewSessionMessage.role == "user",
+        InterviewSessionMessage.session_question_id.is_not(None),
     )
     return int((await db.execute(stmt)).scalar_one())
 
@@ -360,6 +380,7 @@ __all__ = [
     "get_session_with_responses",
     "get_user_interview_sessions",
     "list_in_progress_voice_sessions_with_limit",
+    "list_pending_evaluation_sessions",
     "list_session_messages",
     "list_sessions_for_config",
 ]

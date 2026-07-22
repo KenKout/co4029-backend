@@ -25,6 +25,7 @@ from arq import Retry
 from abridgeai.ai.llm.errors import ProviderError
 from abridgeai.core.audit import current_actor_var
 from abridgeai.features.interviews.workers import (
+    EVALUATION_MAX_TRIES,
     JOBS,
     evaluate_interview_session_task,
     run_interview_generation_task,
@@ -54,12 +55,19 @@ class _FakeSessionmaker:
 def test_jobs_export() -> None:
     assert len(JOBS) == 2
     assert run_interview_generation_task in JOBS
-    assert evaluate_interview_session_task in JOBS
+    evaluation_job = next(job for job in JOBS if getattr(job, "coroutine", None))
+    assert evaluation_job.coroutine is evaluate_interview_session_task
+    assert evaluation_job.max_tries == EVALUATION_MAX_TRIES
 
 
 def test_arq_app_includes_interview_jobs() -> None:
     assert run_interview_generation_task in WorkerSettings.functions
-    assert evaluate_interview_session_task in WorkerSettings.functions
+    evaluation_job = next(
+        job
+        for job in WorkerSettings.functions
+        if getattr(job, "coroutine", None) is evaluate_interview_session_task
+    )
+    assert evaluation_job.max_tries == EVALUATION_MAX_TRIES
 
 
 def test_run_interview_generation_task_signature() -> None:
@@ -186,7 +194,7 @@ async def test_evaluate_interview_session_task_sets_actor_context(
 async def test_evaluate_interview_session_task_final_attempt_detection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """job_try >= max_tries in ctx must flow through as is_final_attempt=True.
+    """The production ARQ context's final job_try must mark the final attempt.
 
     Without this, a session stuck after the last ARQ retry never gets its
     terminal 'failed' status stamped and the student-facing poll in
@@ -200,7 +208,9 @@ async def test_evaluate_interview_session_task_final_attempt_detection(
 
     session_id = uuid.uuid4()
     await evaluate_interview_session_task(
-        ctx={"job_try": 3, "max_tries": 3}, actor_id=uuid.uuid4(), session_id=session_id
+        ctx={"job_try": EVALUATION_MAX_TRIES},
+        actor_id=uuid.uuid4(),
+        session_id=session_id,
     )
 
     service_mock.assert_awaited_once_with(ANY, session_id, is_final_attempt=True)
@@ -210,7 +220,7 @@ async def test_evaluate_interview_session_task_final_attempt_detection(
 async def test_evaluate_interview_session_task_non_final_attempt(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """job_try < max_tries must flow through as is_final_attempt=False."""
+    """job_try below the configured budget is not the final attempt."""
     service_mock = AsyncMock()
     monkeypatch.setattr(
         eval_worker_mod.evaluation_service, "evaluate_and_generate_report", service_mock
@@ -219,7 +229,7 @@ async def test_evaluate_interview_session_task_non_final_attempt(
 
     session_id = uuid.uuid4()
     await evaluate_interview_session_task(
-        ctx={"job_try": 1, "max_tries": 3}, actor_id=uuid.uuid4(), session_id=session_id
+        ctx={"job_try": 1}, actor_id=uuid.uuid4(), session_id=session_id
     )
 
     service_mock.assert_awaited_once_with(ANY, session_id, is_final_attempt=False)
@@ -245,7 +255,7 @@ async def test_evaluate_interview_session_task_retries_on_transient_failure(
     session_id = uuid.uuid4()
     with pytest.raises(Retry):
         await evaluate_interview_session_task(
-            ctx={"job_try": 1, "max_tries": 3}, actor_id=uuid.uuid4(), session_id=session_id
+            ctx={"job_try": 1}, actor_id=uuid.uuid4(), session_id=session_id
         )
 
     # Service was invoked as a non-final attempt (so it did NOT stamp
@@ -270,7 +280,7 @@ async def test_evaluate_interview_session_task_retry_defer_grows(
     for job_try in (1, 2):
         try:
             await evaluate_interview_session_task(
-                ctx={"job_try": job_try, "max_tries": 3},
+                ctx={"job_try": job_try},
                 actor_id=uuid.uuid4(),
                 session_id=uuid.uuid4(),
             )
@@ -278,7 +288,8 @@ async def test_evaluate_interview_session_task_retry_defer_grows(
             # Retry.defer_score is in milliseconds.
             defers[job_try] = retry.defer_score
 
-    assert defers[1] is not None and defers[2] is not None
+    assert defers[1] is not None
+    assert defers[2] is not None
     assert defers[2] > defers[1]  # backoff grows
 
 
@@ -286,7 +297,7 @@ async def test_evaluate_interview_session_task_retry_defer_grows(
 async def test_evaluate_interview_session_task_final_attempt_propagates(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """On the FINAL attempt (job_try >= max_tries) the original exception must
+    """On the configured FINAL attempt the original exception must
     propagate (NOT Retry) so arq records a terminal job failure.
 
     The service was called with is_final_attempt=True, so it already stamped
@@ -301,7 +312,9 @@ async def test_evaluate_interview_session_task_final_attempt_propagates(
     session_id = uuid.uuid4()
     with pytest.raises(ProviderError, match="judge 503"):
         await evaluate_interview_session_task(
-            ctx={"job_try": 3, "max_tries": 3}, actor_id=uuid.uuid4(), session_id=session_id
+            ctx={"job_try": EVALUATION_MAX_TRIES},
+            actor_id=uuid.uuid4(),
+            session_id=session_id,
         )
 
     service_mock.assert_awaited_once_with(ANY, session_id, is_final_attempt=True)

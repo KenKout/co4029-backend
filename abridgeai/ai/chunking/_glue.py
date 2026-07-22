@@ -70,7 +70,9 @@ async def glue_by_similarity(
     if not chunks:
         return []
     if embedder is None:
-        windows = [_single_member_window(c, group_id=i) for i, c in enumerate(chunks)]
+        windows: list[RawChunk] = [
+            _single_member_window(c, group_id=i) for i, c in enumerate(chunks)
+        ]
         if min_window_tokens > 0:
             windows = _absorb_tiny_windows(
                 windows, min_tokens=min_window_tokens, max_tokens=max_window_tokens
@@ -81,7 +83,7 @@ async def glue_by_similarity(
     if len(embeddings) != len(chunks):
         raise ValueError(f"embedder returned {len(embeddings)} vectors for {len(chunks)} chunks")
 
-    windows: list[RawChunk] = []
+    windows = []
     cur_members: list[RawChunk] = [chunks[0]]
     cur_tokens = _tokens_of(chunks[0])
     cur_role = _role_of(chunks[0])

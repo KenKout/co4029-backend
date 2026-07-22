@@ -525,6 +525,23 @@ def test_submit_answer_voice_mode() -> None:
     assert submit.latency_ms == 1234
 
 
+def test_submit_answer_supports_backward_compatible_turn_actions() -> None:
+    legacy = InterviewSubmitAnswerRequest(
+        session_id=uuid4(),
+        session_question_id=uuid4(),
+        answer_text="My answer",
+    )
+    clarification = InterviewSubmitAnswerRequest(
+        session_id=uuid4(),
+        session_question_id=uuid4(),
+        answer_text="Could you clarify this question, please?",
+        turn_action="clarify",
+    )
+
+    assert legacy.turn_action is None
+    assert clarification.turn_action == "clarify"
+
+
 def test_submit_answer_extra_forbidden() -> None:
     with pytest.raises(ValidationError):
         InterviewSubmitAnswerRequest.model_validate(

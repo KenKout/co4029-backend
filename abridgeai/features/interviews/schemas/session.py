@@ -55,6 +55,62 @@ SessionStatusLiteral = Literal[
     "abandoned",
     "failed",
 ]
+InterviewFinishReasonLiteral = Literal["natural", "ended_early", "timed_out"]
+InterviewLanguageLiteral = Literal["en", "vi"]
+InterviewTurnActionLiteral = Literal[
+    "answer",
+    "repeat",
+    "clarify",
+    "explain_term",
+    "hint",
+]
+InterviewAssistanceKindLiteral = Literal["repeat", "clarification", "term", "hint"]
+InterviewOnboardingStageLiteral = Literal[
+    "identity_check",
+    "audio_check",
+    "language_check",
+    "preparation",
+    "readiness",
+    "completed",
+]
+InterviewOnboardingActionLiteral = Literal[
+    "confirm_identity",
+    "audio_clear",
+    "confirm_language",
+    "continue_setup",
+    # Retained for compatibility with the original combined setup prompt.
+    "confirm_setup",
+    "needs_adjustment",
+    "ready",
+    "not_ready",
+    # Identity correction during identity_check: the candidate rejects the
+    # profile-derived name, then supplies the name the interviewer should use.
+    "reject_identity",
+    "set_name",
+]
+
+
+class InterviewSessionHistoryTurn(BaseModel):
+    """One learner-visible turn restored when an active attempt resumes."""
+
+    id: str
+    role: Literal["ai", "user"]
+    content_text: str
+    kind: Literal[
+        "opening",
+        "briefing",
+        "transition",
+        "question",
+        "followup",
+        "clarification",
+        "hint",
+        "answer",
+        "closing",
+    ]
+    created_at: datetime
+    elapsed_seconds: int | None = None
+    question_type: str | None = None
+    is_follow_up: bool = False
 
 
 class InterviewSessionStartRequest(BaseModel):
@@ -82,9 +138,14 @@ class InterviewSessionStartResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     session_id: UUID
+    opening_text: str | None = None
     first_question: InterviewQuestionPublic | None = None
     time_remaining_seconds: int | None = None
     question_count_remaining: int | None = None
+    onboarding_stage: InterviewOnboardingStageLiteral = "completed"
+    interview_language: InterviewLanguageLiteral = "en"
+    assessment_started_at: datetime | None = None
+    history: list[InterviewSessionHistoryTurn] = Field(default_factory=list)
 
 
 class InterviewSessionPublic(BaseModel):
@@ -109,11 +170,44 @@ class InterviewSessionPublic(BaseModel):
     input_mode: InputModeLiteral
     attempt_number: int
     started_at: datetime
+    assessment_started_at: datetime | None = None
+    onboarding_stage: InterviewOnboardingStageLiteral = "completed"
+    interview_language: InterviewLanguageLiteral = "en"
     ended_at: datetime | None = None
     resume_deadline_at: datetime | None = None
     current_question_index: int | None = None
     time_remaining_seconds: int | None = None
     pass_verdict: bool | None = None
+
+
+class InterviewOnboardingRespondRequest(BaseModel):
+    """One idempotent candidate response during pre-assessment onboarding."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    stage: Literal[
+        "identity_check",
+        "audio_check",
+        "language_check",
+        "preparation",
+        "readiness",
+    ]
+    response_text: str | None = Field(default=None, max_length=1000)
+    action: InterviewOnboardingActionLiteral | None = None
+    language: InterviewLanguageLiteral | None = None
+    turn_key: str = Field(min_length=1, max_length=200)
+
+
+class InterviewOnboardingRespondResponse(BaseModel):
+    """Next persisted onboarding turn, or question one after readiness."""
+
+    onboarding_stage: InterviewOnboardingStageLiteral
+    interview_language: InterviewLanguageLiteral
+    ai_text: str | None = None
+    is_complete: bool
+    first_question: InterviewQuestionPublic | None = None
+    assessment_started_at: datetime | None = None
+    time_remaining_seconds: int | None = None
 
 
 class InterviewSubmitAnswerRequest(BaseModel):
@@ -131,6 +225,9 @@ class InterviewSubmitAnswerRequest(BaseModel):
     session_question_id: UUID
     answer_text: str | None = None
     audio_object_id: UUID | None = None
+    # Optional explicit UI intent. Older clients omit this and retain the
+    # existing answer-classification behavior.
+    turn_action: InterviewTurnActionLiteral | None = None
     latency_ms: int | None = Field(default=None, ge=0)
     # Optional client-provided idempotency key for THIS turn (safeguard #1).
     # A retry carrying the same key returns the previously-persisted step
@@ -174,6 +271,26 @@ class InterviewSubmitAnswerResponse(BaseModel):
     should_narrate: bool | None = None
     should_await_response: bool | None = None
     should_finish: bool | None = None
+    assistance_kind: InterviewAssistanceKindLiteral | None = None
+
+    # ── End-confirmation gate (Slice 4) ──────────────────────────────────────
+    # pending_confirmation is True while the interviewer has asked the candidate
+    # to confirm ending (action=request_end_confirmation) and is awaiting a
+    # yes/no. interaction_state exposes the per-turn lifecycle axis (separate
+    # from interview progress/phase) so the client can render the confirm UI.
+    # Additive/optional; legacy + non-adaptive paths leave both None.
+    pending_confirmation: bool | None = None
+    interaction_state: str | None = None
+
+    # ── Natural Interview Transitions ────────────────────────────────────────
+    # A standardized between-turn transition, persisted as its own AI turn and
+    # surfaced here so the client can show + narrate it BEFORE revealing the
+    # next Question Card (or, when target is "closing", before the goodbye).
+    # Additive/optional: legacy clients ignore these; the transition text is
+    # ALSO carried in the legacy ai_followup_text for those clients.
+    transition_id: str | None = None
+    transition_text: str | None = None
+    transition_target: Literal["next_question", "closing"] | None = None
 
 
 class InterviewRubricScore(BaseModel):
@@ -185,6 +302,18 @@ class InterviewRubricScore(BaseModel):
     outcome_text: str
     verdict_met: bool
     evidence_excerpt: str | None = None
+
+
+class InterviewSessionFinishRequest(BaseModel):
+    """Optional close context supplied by ceremony-aware clients.
+
+    Older clients may continue sending no request body; that is treated as a
+    normal completion.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    reason: InterviewFinishReasonLiteral = "natural"
 
 
 class InterviewSessionFinishResponse(BaseModel):
@@ -206,6 +335,7 @@ class InterviewSessionFinishResponse(BaseModel):
 
     session_id: UUID
     status: SessionStatusLiteral
+    closing_text: str | None = None
     # Deprecated for students (always None) — see §4.3. Kept for API stability.
     total_score: Decimal | None = None
     # Deprecated for students (always []) — see §4.3. Kept for API stability.
@@ -216,8 +346,11 @@ class InterviewSessionFinishResponse(BaseModel):
 
 __all__ = [
     "InputModeLiteral",
+    "InterviewFinishReasonLiteral",
     "InterviewRubricScore",
+    "InterviewSessionFinishRequest",
     "InterviewSessionFinishResponse",
+    "InterviewSessionHistoryTurn",
     "InterviewSessionPublic",
     "InterviewSessionStartRequest",
     "InterviewSessionStartResponse",

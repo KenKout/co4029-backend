@@ -43,6 +43,7 @@ from abridgeai.features.spaced_repetition.services import (
     dispatch_remediation_for_card_failure,
     record_card_review,
 )
+from abridgeai.features.spaced_repetition.sm2 import check_lesson_unlock
 
 from ._dto import CardStateDTO
 
@@ -88,6 +89,7 @@ __all__ = [
     "CardFailedEvent",
     "CardReviewResult",
     "CardStateDTO",
+    "check_lesson_unlock",
     "dispatch_remediation_for_card_failure",
     "get_card_state",
     "get_compliance_rate",

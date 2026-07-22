@@ -37,6 +37,8 @@ from abridgeai.features.quizzes.queries import published as published_queries
 from abridgeai.features.quizzes.queries.published import (
     CooldownActive,
     MaxAttemptsReached,
+    QuizClosed,  # noqa: F401  -- re-exported for the learner router (see __all__)
+    QuizNotYetOpen,  # noqa: F401  -- re-exported for the learner router (see __all__)
 )
 from abridgeai.features.quizzes.schemas.attempt import (
     QuizAttemptProgressAnswer,
@@ -128,7 +130,12 @@ async def _load_quiz_questions_for_taking(db: AsyncSession, quiz_id: UUID) -> li
         (
             await db.execute(
                 select(QuizQuestion)
-                .where(QuizQuestion.quiz_id == quiz_id)
+                .where(
+                    QuizQuestion.quiz_id == quiz_id,
+                    # Students only ever see approved questions — pending /
+                    # rejected drafts are never served to the taking surface.
+                    QuizQuestion.review_status == "approved",
+                )
                 .order_by(QuizQuestion.position)
             )
         )
@@ -439,6 +446,7 @@ async def submit_attempt(
     question_count = int(question_count_row.scalar_one()) or len(answers) or 1
     score_points = sum((answer.points_awarded for answer in answers), Decimal("0"))
     score_percent = (score_points / Decimal(question_count)) * Decimal("100")
+    correct_count = sum(1 for answer in answers if answer.is_correct)
 
     attempt.status = "submitted"
     attempt.submitted_at = utcnow()
@@ -448,6 +456,14 @@ async def submit_attempt(
     attempt.passed = score_percent >= quiz.passing_score_percent
     await flush_or_conflict(db)
     await db.refresh(attempt)
+    # correct_count / total_questions are response-only fields (not ORM
+    # columns) that QuizAttemptRead surfaces so the results page can show
+    # "N/total correct". Attach them as transient attributes after refresh so
+    # pydantic's from_attributes picks them up; without this they default to
+    # None and the UI renders "0/N correct" despite a correct score_percent.
+    # response-only (not ORM columns); dynamic attrs picked up by from_attributes
+    setattr(attempt, "correct_count", correct_count)  # noqa: B010 -- dynamic, not column
+    setattr(attempt, "total_questions", question_count)  # noqa: B010 -- dynamic, not column
     return attempt
 
 
@@ -494,9 +510,7 @@ async def get_attempt_review(
     if attempt is None:
         return None
 
-    answers_by_question: dict[UUID, QuizAttemptAnswer] = {
-        a.question_id: a for a in attempt.answers
-    }
+    answers_by_question: dict[UUID, QuizAttemptAnswer] = {a.question_id: a for a in attempt.answers}
 
     questions_with_options = await published_queries.list_quiz_questions_with_options(
         db, attempt.quiz_id
@@ -513,9 +527,7 @@ async def get_attempt_review(
                 prompt_text=question.prompt_text,
                 explanation=question.explanation,
                 hint_text=question.hint_text,
-                options=[
-                    QuizAttemptReviewOption.model_validate(opt) for opt in options
-                ],
+                options=[QuizAttemptReviewOption.model_validate(opt) for opt in options],
                 selected_option_id=ans.selected_option_id if ans else None,
                 answer_text=ans.answer_text if ans else None,
                 is_correct=ans.is_correct if ans else False,
@@ -590,6 +602,8 @@ __all__ = [
     "AllCardsInCooldownError",
     "CooldownActive",
     "MaxAttemptsReached",
+    "QuizClosed",
+    "QuizNotYetOpen",
     "answer_attempt",
     "get_attempt_history",
     "get_attempt_progress",

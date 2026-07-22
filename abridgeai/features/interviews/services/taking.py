@@ -41,6 +41,10 @@ from abridgeai.features.interviews.models import (
     InterviewSessionMessage,
     InterviewSessionQuestion,
 )
+from abridgeai.features.interviews.orchestrator.assistance_logic import (
+    generate_question_assistance,
+    is_term_selection_reply,
+)
 from abridgeai.features.interviews.orchestrator.security import (
     SecurityAction,
     SecurityAssessment,
@@ -48,6 +52,7 @@ from abridgeai.features.interviews.orchestrator.security import (
     SecurityResponsePolicy,
 )
 from abridgeai.features.interviews.orchestrator.security_logic import (
+    assess_by_rules,
     assess_security,
     choose_security_action,
     extract_separable_academic_text,
@@ -61,6 +66,12 @@ from abridgeai.features.interviews.queries import authoring as authoring_queries
 from abridgeai.features.interviews.queries import sessions as sessions_queries
 from abridgeai.features.interviews.realtime import observability as security_obs
 from abridgeai.features.interviews.services import security as security_service
+from abridgeai.features.interviews.services.ceremony import (
+    FinishReason,
+    ensure_ceremony_message,
+    normalize_language,
+    onboarding_ceremony_kind,
+)
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -203,6 +214,8 @@ async def start_session(
     config_id: UUID,
     payload: Any,  # noqa: ANN401  -- InterviewSessionStartRequest at router edge.
     actor: CurrentUser,
+    *,
+    language: str = "en",
 ) -> InterviewSession:
     """Create (or return the existing live) :class:`InterviewSession`.
 
@@ -236,6 +249,12 @@ async def start_session(
     if existing is not None:
         await _ensure_first_question_attached(db, existing.id, config_id)
         await _maybe_upgrade_input_mode(db, existing, config_id, requested_input_mode)
+        await ensure_ceremony_message(
+            db,
+            session=existing,
+            kind=onboarding_ceremony_kind(existing.onboarding_stage),
+            language=existing.interview_language,
+        )
         return existing
 
     # FR-5.3 retake policy — gate a *new* attempt on the config's
@@ -251,6 +270,8 @@ async def start_session(
         attempt_number=attempt_number,
         status="in_progress",
         input_mode=requested_input_mode,
+        onboarding_stage="identity_check",
+        interview_language=normalize_language(language),
     )
     db.add(session)
     await flush_or_conflict(db)
@@ -267,6 +288,12 @@ async def start_session(
         await flush_or_conflict(db)
 
     await db.refresh(session)
+    await ensure_ceremony_message(
+        db,
+        session=session,
+        kind="candidate_confirmation",
+        language=session.interview_language,
+    )
     return session
 
 
@@ -339,7 +366,7 @@ async def _ensure_first_question_attached(
     await flush_or_conflict(db)
 
 
-async def take_session_step(
+async def take_session_step(  # noqa: C901 - shared legacy/adaptive turn coordinator
     db: AsyncSession,
     session_id: UUID,
     answer_text: str,
@@ -348,6 +375,7 @@ async def take_session_step(
     audio_object_id: UUID | None = None,
     turn_key: str | None = None,
     language: str = "en",
+    turn_action: str = "answer",
 ) -> dict[str, Any]:
     """Record the student's answer + advance the session.
 
@@ -367,6 +395,9 @@ async def take_session_step(
     """
     session = await _require_session(db, session_id)
     _assert_owns_session(session, actor)
+    language = getattr(session, "interview_language", language)
+    if getattr(session, "onboarding_stage", "completed") != "completed":
+        raise AppError("Complete interview onboarding before answering questions")
     if session.status != "in_progress":
         raise AppError(f"Cannot record answer on session with status={session.status}")
 
@@ -391,6 +422,7 @@ async def take_session_step(
             audio_object_id=audio_object_id,
             client_turn_key=turn_key,
             language=language,
+            turn_action=turn_action,
         )
     except Exception:  # noqa: BLE001 -- enforcement must fail closed, never bypass
         logger.exception("interview security stage failed (session=%s)", session_id)
@@ -425,6 +457,50 @@ async def take_session_step(
         config_id=str(session.interview_config_id),
     )
 
+    # v2 phase-progression sub-feature (Slice 7). Resolved once here and threaded
+    # into both the live and shadow adaptive calls. Defaults OFF → v1 behaviour.
+    phases_enabled = settings.adaptive_v2_feature_enabled(session.input_mode, "phases")
+    # v2 depth-probe sub-feature (Slice 8): dig into strong answers for the ceiling.
+    depth_probe_enabled = settings.adaptive_v2_feature_enabled(session.input_mode, "depth_probe")
+    # v2 cross-turn memory (Slice 9): feed prior claims into analysis for contradiction.
+    cross_turn_enabled = settings.adaptive_v2_feature_enabled(session.input_mode, "cross_turn")
+    # v2 affect (Slice 10): read candidate affect to warm utterance tone (phrasing only).
+    affect_enabled = settings.adaptive_v2_feature_enabled(session.input_mode, "affect")
+    # v2 hint ladder (Slice 11): escalate hints + vary rephrasing on the same question.
+    hint_ladder_enabled = settings.adaptive_v2_feature_enabled(session.input_mode, "hint_ladder")
+    # v2 per-outcome difficulty (Slice 12): calibrate question difficulty per topic competence.
+    per_outcome_difficulty_enabled = settings.adaptive_v2_feature_enabled(
+        session.input_mode, "per_outcome_difficulty"
+    )
+    # v2 rich closing (Slice 13): self-reflection + invite-questions closing sub-steps.
+    rich_closing_enabled = settings.adaptive_v2_feature_enabled(session.input_mode, "rich_closing")
+    # v2 self-correction (Slice 15): reward a candidate who fixes their own mistake.
+    self_correction_enabled = settings.adaptive_v2_feature_enabled(
+        session.input_mode, "self_correction"
+    )
+    # v2 confident-but-wrong challenge (Slice 16): lean in on a confidently wrong answer.
+    confident_wrong_challenge_enabled = settings.adaptive_v2_feature_enabled(
+        session.input_mode, "confident_wrong_challenge"
+    )
+    # v2 rambling redirect (Slice 17): steer a long, on-topic, low-substance ramble.
+    rambling_redirect_enabled = settings.adaptive_v2_feature_enabled(
+        session.input_mode, "rambling_redirect"
+    )
+    # v2 outcome backtracking (Slice 18): revisit under-covered outcomes before closing.
+    backtrack_undercovered_enabled = settings.adaptive_v2_feature_enabled(
+        session.input_mode, "backtrack_undercovered"
+    )
+    # v2 communication polish (Slice 20): time-pressure signaling + recovery framing (tone only).
+    comms_polish_enabled = settings.adaptive_v2_feature_enabled(session.input_mode, "comms_polish")
+    # v2 frustration de-escalation (Slice 19A): acknowledge + resume on frustration.
+    frustration_deescalation_enabled = settings.adaptive_v2_feature_enabled(
+        session.input_mode, "frustration_deescalation"
+    )
+    # v2 mid-interview question deferral (Slice 19B): defer a mid-interview candidate question.
+    question_deferral_enabled = settings.adaptive_v2_feature_enabled(
+        session.input_mode, "question_deferral"
+    )
+
     if adaptive_on:
         adaptive_result = await _try_adaptive_step(
             db,
@@ -438,11 +514,33 @@ async def take_session_step(
             security_assessment=security_stage.assessment,
             security_action=security_stage.action,
             security_attempt_count=security_stage.attempt_count,
+            phases_enabled=phases_enabled,
+            depth_probe_enabled=depth_probe_enabled,
+            cross_turn_enabled=cross_turn_enabled,
+            affect_enabled=affect_enabled,
+            hint_ladder_enabled=hint_ladder_enabled,
+            per_outcome_difficulty_enabled=per_outcome_difficulty_enabled,
+            rich_closing_enabled=rich_closing_enabled,
+            self_correction_enabled=self_correction_enabled,
+            confident_wrong_challenge_enabled=confident_wrong_challenge_enabled,
+            rambling_redirect_enabled=rambling_redirect_enabled,
+            backtrack_undercovered_enabled=backtrack_undercovered_enabled,
+            comms_polish_enabled=comms_polish_enabled,
+            frustration_deescalation_enabled=frustration_deescalation_enabled,
+            question_deferral_enabled=question_deferral_enabled,
         )
         if adaptive_result is not None:
             return adaptive_result
         # adaptive declined/failed → answer already recorded; run legacy advance
-        # WITHOUT re-inserting the answer (safeguard #2).
+        # WITHOUT re-inserting the answer (safeguard #2). Emit a live fallback
+        # event (Slice 6) so the aggregator can track the adaptive→legacy
+        # fallback rate that gates the staged rollout.
+        security_obs.emit(
+            security_obs.EV_FALLBACK,
+            session_id=session.id,
+            shadow=False,
+            input_mode=session.input_mode,
+        )
         return await _legacy_advance(
             db,
             session=session,
@@ -500,6 +598,20 @@ async def take_session_step(
             security_assessment=security_stage.assessment,
             security_action=security_stage.action,
             security_attempt_count=security_stage.attempt_count,
+            phases_enabled=phases_enabled,
+            depth_probe_enabled=depth_probe_enabled,
+            cross_turn_enabled=cross_turn_enabled,
+            affect_enabled=affect_enabled,
+            hint_ladder_enabled=hint_ladder_enabled,
+            per_outcome_difficulty_enabled=per_outcome_difficulty_enabled,
+            rich_closing_enabled=rich_closing_enabled,
+            self_correction_enabled=self_correction_enabled,
+            confident_wrong_challenge_enabled=confident_wrong_challenge_enabled,
+            rambling_redirect_enabled=rambling_redirect_enabled,
+            backtrack_undercovered_enabled=backtrack_undercovered_enabled,
+            comms_polish_enabled=comms_polish_enabled,
+            frustration_deescalation_enabled=frustration_deescalation_enabled,
+            question_deferral_enabled=question_deferral_enabled,
         )
 
     return await _legacy_advance(
@@ -594,12 +706,51 @@ async def _run_security_stage(  # noqa: C901 -- precedence is kept explicit and 
     audio_object_id: UUID | None,
     client_turn_key: str | None,
     language: str,
+    turn_action: str = "answer",
 ) -> _SecurityStageResult:
     """Shared pre-academic gate for adaptive, legacy, and LiveKit turns."""
     from abridgeai.features.interviews.orchestrator import repository as state_repo
 
     settings = get_settings()
-    if settings.interview_security_guard_mode == "off":
+    # Slice 11 upgrade: unify the hint ladder across BOTH hint paths. When the
+    # hint_ladder v2 sub-flag is on for this mode, the assistance-stage hint
+    # renders the SAME deterministic laddered hint (keyed on the shared
+    # data.hint_level) that the adaptive decision path uses, and advances the
+    # shared counter — so escalation is consistent no matter which path fires.
+    # Off → the assistance stage keeps its one-hint-per-question reuse (v1).
+    hint_ladder_enabled = settings.adaptive_v2_feature_enabled(session.input_mode, "hint_ladder")
+    explicit_actions = {
+        "repeat": SecurityAction.REPEAT_CURRENT_QUESTION,
+        "clarify": SecurityAction.CLARIFY_CURRENT_QUESTION,
+        "explain_term": SecurityAction.EXPLAIN_CURRENT_TERM,
+        "hint": SecurityAction.HINT_CURRENT_QUESTION,
+    }
+    structured_action = explicit_actions.get(turn_action)
+    if structured_action is not None and assess_by_rules(answer_text).detected:
+        # A client-supplied control cannot override a mixed request for hidden
+        # answers, rubrics, future questions, or internal instructions.
+        structured_action = None
+    explicit_end = is_explicit_end_request(answer_text) if turn_action == "answer" else False
+    control_action = structured_action or (
+        requested_current_question_action(answer_text) if turn_action == "answer" else None
+    )
+    if (
+        control_action is None
+        and turn_action == "answer"
+        and current_question is not None
+        and await _is_pending_term_selection(
+            db,
+            session_question_id=current_session_question.id,
+            answer_text=answer_text,
+            question_text=current_question.prompt_text,
+        )
+    ):
+        control_action = SecurityAction.EXPLAIN_CURRENT_TERM
+    if (
+        settings.interview_security_guard_mode == "off"
+        and not explicit_end
+        and control_action is None
+    ):
         return _SecurityStageResult(
             turn_key=client_turn_key,
             assessment=_benign_assessment(source="off"),
@@ -687,8 +838,6 @@ async def _run_security_stage(  # noqa: C901 -- precedence is kept explicit and 
             prior_category = None
 
     started = time.monotonic()
-    explicit_end = is_explicit_end_request(answer_text)
-    control_action = requested_current_question_action(answer_text)
     if explicit_end or control_action is not None:
         assessment = _benign_assessment(source="control_rules")
         action = control_action or SecurityAction.ALLOW
@@ -747,6 +896,8 @@ async def _run_security_stage(  # noqa: C901 -- precedence is kept explicit and 
     data.last_security_turn_key = turn_key
 
     academic_text = answer_text
+    if control_action is not None:
+        academic_text = ""
     if assessment.detected and action is not SecurityAction.ALLOW:
         separable = extract_separable_academic_text(answer_text)
         if separable:
@@ -761,6 +912,15 @@ async def _run_security_stage(  # noqa: C901 -- precedence is kept explicit and 
             )
         else:
             academic_text = ""
+
+    # Slice 11 upgrade: shared hint ladder. When enabled and this turn is a hint
+    # request, render at the CURRENT shared level then advance it (before the
+    # save below), so a repeated hint on the same question escalates — unified
+    # with the adaptive decision path, which reads/resets the same counter.
+    hint_render_level: int | None = None
+    if hint_ladder_enabled and action is SecurityAction.HINT_CURRENT_QUESTION:
+        hint_render_level = data.hint_level
+        data.hint_level += 1
 
     security_handled = explicit_end or action is not SecurityAction.ALLOW
     await state_repo.save(
@@ -842,6 +1002,7 @@ async def _run_security_stage(  # noqa: C901 -- precedence is kept explicit and 
             action=action,
             attempt_count=data.security_attempt_count,
             academic_text=academic_text or None,
+            hint_render_level=hint_render_level,
         )
 
     return _SecurityStageResult(
@@ -868,6 +1029,9 @@ async def _record_separable_evidence(
     from abridgeai.features.interviews.orchestrator.analysis_logic import (  # noqa: PLC0415
         analyze_answer,
     )
+    from abridgeai.features.interviews.orchestrator.coverage import (  # noqa: PLC0415
+        apply_evidence_to_coverage,
+    )
     from abridgeai.features.interviews.orchestrator.state import (  # noqa: PLC0415
         OutcomeCoverageState,
     )
@@ -891,9 +1055,7 @@ async def _record_separable_evidence(
         if coverage is None:
             coverage = OutcomeCoverageState(outcome_id=evidence.outcome_id)
             data.outcome_coverage[evidence.outcome_id] = coverage
-        coverage.evidence_count += 1
-        if evidence.turn_id not in coverage.supporting_turn_ids:
-            coverage.supporting_turn_ids.append(evidence.turn_id)
+        apply_evidence_to_coverage(coverage, evidence)
 
 
 async def _normal_end_result(
@@ -944,7 +1106,14 @@ async def _security_action_result(
     attempt_count: int,
     academic_text: str | None = None,
     persist_messages: bool = True,
+    hint_render_level: int | None = None,
 ) -> dict[str, Any]:
+    assistance_kind = {
+        SecurityAction.REPEAT_CURRENT_QUESTION: "repeat",
+        SecurityAction.CLARIFY_CURRENT_QUESTION: "clarification",
+        SecurityAction.EXPLAIN_CURRENT_TERM: "term",
+        SecurityAction.HINT_CURRENT_QUESTION: "hint",
+    }.get(action)
     custom = None
     if config is not None:
         custom = (
@@ -958,11 +1127,59 @@ async def _security_action_result(
         current_question=(current_question.prompt_text if current_question else None),
         custom_refusal=custom,
     )
+    if (
+        hint_render_level is not None
+        and action is SecurityAction.HINT_CURRENT_QUESTION
+        and current_question is not None
+    ):
+        # Slice 11 upgrade: generate a question-SPECIFIC hint at the escalation
+        # level the caller captured from data.hint_level. The model produces
+        # phrasing tied to THIS question at this rung, and the shared
+        # deterministic laddered hint (same one the adaptive decision path uses)
+        # is the answer-safe fallback baked into generate_question_assistance if
+        # the model is unavailable — so escalation holds either way. We do NOT
+        # reuse the persisted one-hint here: each rung is a fresh, harder hint.
+        response = await generate_question_assistance(
+            db,
+            action=action,
+            question_text=current_question.prompt_text,
+            request_text=answer_text,
+            language=language,
+            persona=getattr(config, "persona", None),
+            hint_level=hint_render_level,
+        )
+    elif current_question is not None and action in {
+        SecurityAction.CLARIFY_CURRENT_QUESTION,
+        SecurityAction.EXPLAIN_CURRENT_TERM,
+        SecurityAction.HINT_CURRENT_QUESTION,
+    }:
+        persisted = await _existing_assistance_text(
+            db,
+            session_question_id=current_session_question.id,
+            kind=assistance_kind or "clarification",
+        )
+        # Generate a clarification once and allow only one neutral hint per
+        # question. Reusing persisted text also makes repeated controls stable.
+        if persisted is not None and action in {
+            SecurityAction.CLARIFY_CURRENT_QUESTION,
+            SecurityAction.HINT_CURRENT_QUESTION,
+        }:
+            response = persisted
+        else:
+            response = await generate_question_assistance(
+                db,
+                action=action,
+                question_text=current_question.prompt_text,
+                request_text=answer_text,
+                language=language,
+                persona=getattr(config, "persona", None),
+            )
     if not persist_messages:
         return _controlled_result_dict(
             response,
             language=language,
             is_finished=action is SecurityAction.END_AND_FLAG,
+            assistance_kind=assistance_kind,
         )
     return await _persist_controlled_result(
         db,
@@ -978,8 +1195,82 @@ async def _security_action_result(
         attempt_count=attempt_count,
         response_text=response,
         is_finished=action is SecurityAction.END_AND_FLAG,
-        message_kind=("security" if assessment.detected else "turn_control"),
+        message_kind=(
+            "security"
+            if assessment.detected
+            else {
+                "repeat": "turn_control",
+                "clarification": "clarification",
+                "term": "term_explanation",
+                "hint": "hint",
+            }.get(assistance_kind or "", "turn_control")
+        ),
         academic_text=academic_text,
+        assistance_kind=assistance_kind,
+    )
+
+
+async def _existing_assistance_text(
+    db: AsyncSession,
+    *,
+    session_question_id: UUID,
+    kind: str,
+) -> str | None:
+    """Return the latest persisted assistance of this kind for one question."""
+    from sqlalchemy import select  # noqa: PLC0415
+
+    rows = (
+        await db.execute(
+            select(InterviewSessionMessage)
+            .where(
+                InterviewSessionMessage.session_question_id == session_question_id,
+                InterviewSessionMessage.role == "ai",
+            )
+            .order_by(InterviewSessionMessage.created_at.desc())
+        )
+    ).scalars()
+    metadata_kind = {
+        "clarification": "clarification",
+        "term": "term_explanation",
+        "hint": "hint",
+    }.get(kind, kind)
+    for message in rows:
+        metadata = message.metadata_json if isinstance(message.metadata_json, dict) else {}
+        content = (message.content_text or "").strip()
+        if metadata.get("kind") == metadata_kind and content:
+            return content
+    return None
+
+
+async def _is_pending_term_selection(
+    db: AsyncSession,
+    *,
+    session_question_id: UUID,
+    answer_text: str,
+    question_text: str,
+) -> bool:
+    """Treat a bare term as assistance only after an explicit term prompt."""
+    from sqlalchemy import select  # noqa: PLC0415
+
+    message = (
+        await db.execute(
+            select(InterviewSessionMessage)
+            .where(
+                InterviewSessionMessage.session_question_id == session_question_id,
+                InterviewSessionMessage.role == "ai",
+            )
+            .order_by(InterviewSessionMessage.created_at.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if message is None:
+        return False
+    metadata = message.metadata_json if isinstance(message.metadata_json, dict) else {}
+    return is_term_selection_reply(
+        answer_text,
+        question_text,
+        prior_assistance_text=message.content_text or "",
+        prior_assistance_kind=metadata.get("kind"),
     )
 
 
@@ -1000,6 +1291,7 @@ async def _persist_controlled_result(
     is_finished: bool,
     message_kind: str,
     academic_text: str | None = None,
+    assistance_kind: str | None = None,
 ) -> dict[str, Any]:
     allowed_ids = [current_question.id] if current_question is not None else []
     deterministic_fallback = safe_security_response(
@@ -1050,11 +1342,22 @@ async def _persist_controlled_result(
         )
     )
     await flush_or_conflict(db)
-    return _controlled_result_dict(guarded.text, language=language, is_finished=is_finished)
+    return _controlled_result_dict(
+        guarded.text,
+        language=language,
+        is_finished=is_finished,
+        assistance_kind=assistance_kind,
+    )
 
 
-def _controlled_result_dict(text: str, *, language: str, is_finished: bool) -> dict[str, Any]:
-    return {
+def _controlled_result_dict(
+    text: str,
+    *,
+    language: str,
+    is_finished: bool,
+    assistance_kind: str | None = None,
+) -> dict[str, Any]:
+    result = {
         "next_question": None,
         "is_finished": is_finished,
         "followup_text": text,
@@ -1064,6 +1367,9 @@ def _controlled_result_dict(text: str, *, language: str, is_finished: bool) -> d
         "should_await_response": not is_finished,
         "should_finish": is_finished,
     }
+    if assistance_kind is not None:
+        result["assistance_kind"] = assistance_kind
+    return result
 
 
 def _security_emergency_result(
@@ -1092,6 +1398,20 @@ async def _try_adaptive_step(
     security_assessment: SecurityAssessment | None = None,
     security_action: SecurityAction = SecurityAction.ALLOW,
     security_attempt_count: int = 0,
+    phases_enabled: bool = False,
+    depth_probe_enabled: bool = False,
+    cross_turn_enabled: bool = False,
+    affect_enabled: bool = False,
+    hint_ladder_enabled: bool = False,
+    per_outcome_difficulty_enabled: bool = False,
+    rich_closing_enabled: bool = False,
+    self_correction_enabled: bool = False,
+    confident_wrong_challenge_enabled: bool = False,
+    rambling_redirect_enabled: bool = False,
+    backtrack_undercovered_enabled: bool = False,
+    comms_polish_enabled: bool = False,
+    frustration_deescalation_enabled: bool = False,
+    question_deferral_enabled: bool = False,
 ) -> dict[str, Any] | None:
     """Attempt one adaptive turn. Returns the canonical result, or None to fall back.
 
@@ -1164,12 +1484,56 @@ async def _try_adaptive_step(
                 security_assessment=security_assessment,
                 security_action=security_action,
                 security_attempt_count=security_attempt_count,
+                phases_enabled=phases_enabled,
+                depth_probe_enabled=depth_probe_enabled,
+                cross_turn_enabled=cross_turn_enabled,
+                affect_enabled=affect_enabled,
+                hint_ladder_enabled=hint_ladder_enabled,
+                per_outcome_difficulty_enabled=per_outcome_difficulty_enabled,
+                rich_closing_enabled=rich_closing_enabled,
+                self_correction_enabled=self_correction_enabled,
+                confident_wrong_challenge_enabled=confident_wrong_challenge_enabled,
+                rambling_redirect_enabled=rambling_redirect_enabled,
+                backtrack_undercovered_enabled=backtrack_undercovered_enabled,
+                comms_polish_enabled=comms_polish_enabled,
+                frustration_deescalation_enabled=frustration_deescalation_enabled,
+                question_deferral_enabled=question_deferral_enabled,
             )
         if outcome.result is not None:
+            _emit_live_decision(session_id, outcome.result)
             return _project_adaptive_result(outcome.result)
     except Exception:  # noqa: BLE001 — adaptive is best-effort; savepoint rolled back
         logger.exception("adaptive: pipeline failed (session=%s) — legacy fallback", session_id)
     return None
+
+
+def _emit_live_decision(session_id: Any, canonical: dict[str, Any]) -> None:  # noqa: ANN401 - session_id is UUID|str
+    """Emit the LIVE adaptive decision event (Slice 6).
+
+    Mirrors the shadow-path emit but with ``shadow=False`` so the aggregator
+    counts it toward the live adaptive-success / fallback rates that gate the
+    staged rollout. Transcript-free (same privacy contract). Never raises.
+    """
+    from abridgeai.features.interviews.realtime import observability as obs  # noqa: PLC0415
+
+    next_q = canonical.get("next_question")
+    obs.emit(
+        obs.EV_DECISION,
+        session_id=session_id,
+        shadow=False,
+        adaptive=canonical.get("action") is not None,
+        action=canonical.get("action"),
+        reason_code=canonical.get("reason_code"),
+        selected_question_id=canonical.get("current_question_id"),
+        selected_question_type=getattr(next_q, "question_type", None),
+        selected_question_difficulty=getattr(next_q, "difficulty", None),
+        target_outcome_id=canonical.get("target_outcome_id"),
+        state_version=canonical.get("state_version"),
+        utterance_status=canonical.get("_utterance_status"),
+        interaction_state=canonical.get("interaction_state"),
+        pending_confirmation=bool(canonical.get("pending_confirmation")),
+        finished=bool(canonical.get("should_finish")),
+    )
 
 
 def _project_adaptive_result(canonical: dict[str, Any]) -> dict[str, Any]:
@@ -1189,6 +1553,20 @@ async def _run_shadow_step(
     security_assessment: SecurityAssessment | None = None,
     security_action: SecurityAction = SecurityAction.ALLOW,
     security_attempt_count: int = 0,
+    phases_enabled: bool = False,
+    depth_probe_enabled: bool = False,
+    cross_turn_enabled: bool = False,
+    affect_enabled: bool = False,
+    hint_ladder_enabled: bool = False,
+    per_outcome_difficulty_enabled: bool = False,
+    rich_closing_enabled: bool = False,
+    self_correction_enabled: bool = False,
+    confident_wrong_challenge_enabled: bool = False,
+    rambling_redirect_enabled: bool = False,
+    backtrack_undercovered_enabled: bool = False,
+    comms_polish_enabled: bool = False,
+    frustration_deescalation_enabled: bool = False,
+    question_deferral_enabled: bool = False,
 ) -> None:
     """Compute the adaptive decision for comparison WITHOUT driving the student.
 
@@ -1229,6 +1607,20 @@ async def _run_shadow_step(
                 security_assessment=security_assessment,
                 security_action=security_action,
                 security_attempt_count=security_attempt_count,
+                phases_enabled=phases_enabled,
+                depth_probe_enabled=depth_probe_enabled,
+                cross_turn_enabled=cross_turn_enabled,
+                affect_enabled=affect_enabled,
+                hint_ladder_enabled=hint_ladder_enabled,
+                per_outcome_difficulty_enabled=per_outcome_difficulty_enabled,
+                rich_closing_enabled=rich_closing_enabled,
+                self_correction_enabled=self_correction_enabled,
+                confident_wrong_challenge_enabled=confident_wrong_challenge_enabled,
+                rambling_redirect_enabled=rambling_redirect_enabled,
+                backtrack_undercovered_enabled=backtrack_undercovered_enabled,
+                comms_polish_enabled=comms_polish_enabled,
+                frustration_deescalation_enabled=frustration_deescalation_enabled,
+                question_deferral_enabled=question_deferral_enabled,
             )
             canonical = outcome.result or {}
             # Emit the shadow decision (no transcript content — same privacy
@@ -1405,10 +1797,49 @@ async def _legacy_advance(
     asked_ids = await _asked_question_ids(db, session.id)
     next_question = await _next_published_question_after(db, session.interview_config_id, asked_ids)
     if next_question is None:
+        # No further question: persist the short final-question transition as
+        # its OWN AI turn (Natural Interview Transitions spec §ending). The
+        # separate goodbye/closing turn is added later by the finish flow, so
+        # the ending is two short turns. Idempotent via a stable turn key.
+        from abridgeai.features.interviews.orchestrator.utterance import (  # noqa: PLC0415
+            persona_from,
+            transition_text,
+        )
+
+        config = await db.get(InterviewConfig, session.interview_config_id)
+        persona = persona_from(config.persona if config is not None else None)
+        final_turn_key = f"transition-final:{effective_turn_key}"
+        final_text = transition_text(persona, language, final=True)
+        existing_messages = await sessions_queries.list_session_messages(db, session.id)
+        final_exists = any(
+            message.role == "ai"
+            and isinstance(message.metadata_json, dict)
+            and message.metadata_json.get("turn_key") == final_turn_key
+            for message in existing_messages
+        )
+        if not final_exists:
+            db.add(
+                InterviewSessionMessage(
+                    session_id=session.id,
+                    session_question_id=current_session_question.id,
+                    role="ai",
+                    content_text=final_text,
+                    metadata_json={
+                        "kind": "transition",
+                        "turn_key": final_turn_key,
+                        "transition_target": "closing",
+                    },
+                )
+            )
+            await flush_or_conflict(db)
         return {
             "next_question": None,
             "is_finished": True,
-            "followup_text": None,
+            "followup_text": final_text,
+            "ai_turn_text": final_text,
+            "transition_id": final_turn_key,
+            "transition_text": final_text,
+            "transition_target": "closing",
         }
 
     allowed_ids = [next_question.id]
@@ -1454,6 +1885,43 @@ async def _legacy_advance(
             "ai_turn_text": next_guard.text,
         }
 
+    # Persist a standardized, persona-aware transition as its OWN AI turn before
+    # the next question turn (Natural Interview Transitions spec). The question
+    # text is NOT included here — it rides in ``next_question`` — so it is never
+    # duplicated. A stable turn key keyed to the destination question makes
+    # retries idempotent (no duplicate transition on resend).
+    from abridgeai.features.interviews.orchestrator.utterance import (  # noqa: PLC0415
+        persona_from,
+        transition_text,
+    )
+
+    config = await db.get(InterviewConfig, session.interview_config_id)
+    persona = persona_from(config.persona if config is not None else None)
+    transition_turn_key = f"transition:{effective_turn_key}:{next_question.id}"
+    transition_text_value = transition_text(persona, language)
+    existing_messages = await sessions_queries.list_session_messages(db, session.id)
+    transition_exists = any(
+        message.role == "ai"
+        and isinstance(message.metadata_json, dict)
+        and message.metadata_json.get("turn_key") == transition_turn_key
+        for message in existing_messages
+    )
+    if not transition_exists:
+        db.add(
+            InterviewSessionMessage(
+                session_id=session.id,
+                session_question_id=current_session_question.id,
+                role="ai",
+                content_text=transition_text_value,
+                metadata_json={
+                    "kind": "transition",
+                    "turn_key": transition_turn_key,
+                    "transition_target": "next_question",
+                },
+            )
+        )
+        await flush_or_conflict(db)
+
     sequence_no = await _next_session_sequence(db, session.id)
     db.add(
         InterviewSessionQuestion(
@@ -1466,7 +1934,11 @@ async def _legacy_advance(
     return {
         "next_question": next_question,
         "is_finished": False,
-        "followup_text": None,
+        "followup_text": transition_text_value,
+        "ai_turn_text": transition_text_value,
+        "transition_id": transition_turn_key,
+        "transition_text": transition_text_value,
+        "transition_target": "next_question",
     }
 
 
@@ -1476,28 +1948,89 @@ async def submit_session(
     actor: CurrentUser,
     *,
     arq_pool: object | None = None,
+    reason: FinishReason = "natural",
+    language: str = "en",
 ) -> InterviewSession:
-    """Mark session ``completed`` + enqueue evaluation.
+    """Persist the final ceremony, terminalize the session, and enqueue evaluation.
 
-    Commits inline so the ARQ worker sees the terminal status before
-    the evaluation job dequeues. Tolerates ``arq_pool=None`` (test
-    mode); production routers inject the real pool via Depends.
+    Natural and explicit early completion are always ``completed`` and graded;
+    unanswered questions receive zero in the evaluation stage. A deadline
+    completion is ``timed_out`` when answers exist, or ``abandoned`` when there
+    is no gradeable transcript. Commits inline so the worker sees terminal
+    state before dequeueing.
     """
     session = await _require_session(db, session_id)
     _assert_owns_session(session, actor)
+    language = getattr(session, "interview_language", language)
     if session.status != "in_progress":
         return session
 
-    session.status = "completed"
-    session.ended_at = utcnow()
+    config = await db.get(InterviewConfig, session.interview_config_id)
+    ended_at = utcnow()
+    if reason == "timed_out":
+        if config is None or not config.time_limit_minutes:
+            raise AppError("Cannot time out an interview without a time limit")
+        started_at = session.assessment_started_at or session.started_at
+        if started_at.tzinfo is None:
+            started_at = started_at.replace(tzinfo=UTC)
+        deadline = started_at + timedelta(minutes=config.time_limit_minutes)
+        # Allow a small client/server scheduling tolerance at the boundary.
+        if ended_at + timedelta(seconds=2) < deadline:
+            raise AppError("Interview time limit has not elapsed")
+
+    from sqlalchemy import func, select  # noqa: PLC0415
+
+    user_message_count = int(
+        (
+            await db.execute(
+                select(func.count(InterviewSessionMessage.id)).where(
+                    InterviewSessionMessage.session_id == session.id,
+                    InterviewSessionMessage.role == "user",
+                    InterviewSessionMessage.session_question_id.is_not(None),
+                )
+            )
+        ).scalar_one()
+    )
+    await ensure_ceremony_message(
+        db,
+        session=session,
+        kind="closing",
+        language=language,
+        reason=reason,
+    )
+    session.status = (
+        "abandoned"
+        if user_message_count == 0 and reason == "timed_out"
+        else "timed_out"
+        if reason == "timed_out"
+        else "completed"
+    )
+    session.ended_at = ended_at
     await db.commit()
     await db.refresh(session)
 
-    if arq_pool is not None:
+    if arq_pool is not None and (user_message_count > 0 or reason != "timed_out"):
         await arq_pool.enqueue_job(  # type: ignore[attr-defined]
-            _EVALUATE_INTERVIEW_SESSION_TASK, actor.user_id, session.id
+            _EVALUATE_INTERVIEW_SESSION_TASK,
+            actor.user_id,
+            session.id,
+            _job_id=f"interview-evaluation:{session.id}",
         )
     return session
+
+
+async def session_time_remaining_seconds(db: AsyncSession, session: InterviewSession) -> int | None:
+    """Return the authoritative whole-second countdown for a live session."""
+    config = await db.get(InterviewConfig, session.interview_config_id)
+    if config is None or not config.time_limit_minutes:
+        return None
+    started_at = session.assessment_started_at
+    if started_at is None:
+        return int(config.time_limit_minutes * 60)
+    if started_at.tzinfo is None:
+        started_at = started_at.replace(tzinfo=UTC)
+    deadline = started_at + timedelta(minutes=config.time_limit_minutes)
+    return max(0, int((deadline - datetime.now(UTC)).total_seconds()))
 
 
 async def get_session_for_user(
@@ -1546,6 +2079,7 @@ __all__ = [
     "get_session_for_user",
     "get_user_sessions",
     "start_session",
+    "session_time_remaining_seconds",
     "submit_session",
     "take_session_step",
 ]

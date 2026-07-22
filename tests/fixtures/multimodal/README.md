@@ -14,6 +14,7 @@ and any future end-to-end ingestion tests (T4.9+).
 | `sample.mp4`      | `ffmpeg lavfi testsrc + sine` (5s, 320x240@10fps) | < 200 KB |
 | `text-image.png`  | `Pillow` (200x100 white canvas, "Hello World") | < 5 KB |
 | `sample.html`     | string write (`<h1>Title</h1><p>Body</p>`) | < 1 KB |
+| `sample.xlsx`     | `openpyxl` (2 sheets; "Hello World"/42 + "Second sheet content") | < 10 KB |
 
 The aggregate size is held below 500 KB to clear the pre-commit
 `check-added-large-files` gate (T0.22).

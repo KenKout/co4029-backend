@@ -76,6 +76,10 @@ _logger = get_logger(__name__)
 # is never hammered and the job never sits deferred for minutes.
 _RETRY_BASE_DELAY_S = 5.0
 _RETRY_MAX_DELAY_S = 60.0
+# ARQ includes ``job_try`` in the runtime context but does not expose the
+# configured function/worker ``max_tries`` value there. Keep the evaluation
+# budget explicit and reuse this constant when registering the ARQ function.
+EVALUATION_MAX_TRIES = 3
 
 
 def _retry_defer_seconds(job_try: int) -> float:
@@ -94,9 +98,9 @@ async def evaluate_interview_session_task(
     Parameters
     ----------
     ctx
-        ARQ task context. Carries ``job_try`` (1-indexed current attempt)
-        and ``max_tries`` (``WorkerSettings.max_tries``, currently 3).
-        Used both to detect the FINAL attempt (so the service stamps a
+        ARQ task context. Carries ``job_try`` (1-indexed current attempt).
+        ARQ does not include ``max_tries`` in this mapping, so the task uses
+        :data:`EVALUATION_MAX_TRIES` to detect the FINAL attempt (and stamps a
         terminal ``status='failed'`` instead of leaving the session stuck
         at ``'completed'`` with ``pass_verdict`` forever ``null``) and to
         decide whether a transient AI-call failure should raise
@@ -113,13 +117,8 @@ async def evaluate_interview_session_task(
         single transaction.
     """
     job_try_raw = ctx.get("job_try")
-    max_tries_raw = ctx.get("max_tries")
     job_try = job_try_raw if isinstance(job_try_raw, int) else 1
-    is_final_attempt = bool(
-        isinstance(job_try_raw, int)
-        and isinstance(max_tries_raw, int)
-        and job_try_raw >= max_tries_raw
-    )
+    is_final_attempt = job_try >= EVALUATION_MAX_TRIES
     set_worker_actor(actor_id)
     bind_request_context(
         session_id=str(session_id),
@@ -143,7 +142,7 @@ async def evaluate_interview_session_task(
                     "interview_evaluation_task_failed",
                     session_id=str(session_id),
                     job_try=job_try,
-                    max_tries=max_tries_raw,
+                    max_tries=EVALUATION_MAX_TRIES,
                     is_final_attempt=is_final_attempt,
                 )
                 if is_final_attempt:
@@ -159,7 +158,7 @@ async def evaluate_interview_session_task(
                     "interview_evaluation_task_retry",
                     session_id=str(session_id),
                     job_try=job_try,
-                    max_tries=max_tries_raw,
+                    max_tries=EVALUATION_MAX_TRIES,
                     defer_seconds=defer,
                     error=str(exc),
                 )
@@ -169,4 +168,4 @@ async def evaluate_interview_session_task(
         clear_request_context()
 
 
-__all__ = ["evaluate_interview_session_task"]
+__all__ = ["EVALUATION_MAX_TRIES", "evaluate_interview_session_task"]

@@ -176,6 +176,14 @@ class Quiz(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftDeleteMixin,
         ForeignKey("generation_runs.id", ondelete="SET NULL"),
     )
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Scheduling window (migration 0032). All nullable = "no restriction":
+    # available_from → quiz opens for attempts at this instant (NULL = open now);
+    # available_until → quiz locks (no new attempts) after this instant (NULL = never locks);
+    # due_at → soft deadline shown to students; attempts after it are flagged "late"
+    #   but NOT blocked (available_until is the hard lock).
+    available_from: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    available_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    due_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     questions: Mapped[list[QuizQuestion]] = relationship(
         back_populates="quiz",

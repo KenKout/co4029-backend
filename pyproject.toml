@@ -21,6 +21,7 @@ dependencies = [
     "pymupdf>=1.24",
     "python-docx>=1.1",
     "python-pptx>=1.0",
+    "openpyxl>=3.1",
     "tiktoken>=0.7",
     "jinja2>=3.1",
     "aioboto3>=13.0",
@@ -175,8 +176,29 @@ module = [
     "pytesseract.*",
     "pgvector",
     "pgvector.*",
+    # livekit ships no type hints / py.typed marker (agents + plugins). Narrow
+    # ignore so the realtime voice modules (agent.py, session_runtime.py) type-
+    # check without livekit's untyped surface producing import-untyped noise.
+    "livekit",
+    "livekit.*",
 ]
 ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# The realtime voice modules subclass / consume livekit's Agent + rtc surface.
+# livekit ships no stubs, so under ignore_missing_imports those names resolve
+# to Any. strict's disallow_subclassing_any would then reject `class
+# InterviewAgent(Agent)`. Scope the relaxation to exactly these two modules so
+# the rest of the tree keeps full strictness. warn_unused_ignores is disabled
+# here too because whether an ignore is "used" depends on whether livekit is
+# installed in the checking env (present in the app venv, absent in the
+# pre-commit hook venv), and we don't want that env split to break the hook.
+module = [
+    "abridgeai.features.interviews.realtime.agent",
+    "abridgeai.features.interviews.realtime.session_runtime",
+]
+disallow_subclassing_any = false
+warn_unused_ignores = false
 
 [tool.setuptools.packages.find]
 include = ["abridgeai*"]
@@ -342,6 +364,13 @@ ignore_imports = [
     # Material visibility clause reads LearningMaterial.visible_to_students
     # (plan §4062). Read-only, lazy-imported at call time.
     "abridgeai.features.courses.visibility -> abridgeai.features.materials.models",
+    # assessment_integrity_events is SHARED proctoring infrastructure: the
+    # table carries both quiz + interview events (assessment_kind column),
+    # but its ORM model happens to live in the interviews feature. The quiz
+    # learner router writes quiz-kind integrity rows via that model
+    # (lazy-imported at call time). A second ORM class for the same table
+    # would collide at mapper registration, so we share the one model.
+    "abridgeai.features.quizzes.routers.learner -> abridgeai.features.interviews.models",
 ]
 
 [[tool.importlinter.contracts]]

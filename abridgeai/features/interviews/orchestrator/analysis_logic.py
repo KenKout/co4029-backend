@@ -49,6 +49,7 @@ async def analyze_answer(
     expected_evidence: Sequence[str] | None = None,
     common_misconceptions: Sequence[str] | None = None,
     supplementary_instructions: str | None = None,
+    prior_claims: Sequence[str] | None = None,
     pipeline_run_id: UUID | None = None,
     gateway: LLMGateway | None = None,
 ) -> AnswerAnalysis:
@@ -73,6 +74,7 @@ async def analyze_answer(
                 "expected_evidence": list(expected_evidence or []),
                 "common_misconceptions": list(common_misconceptions or []),
                 "supplementary_instructions": supplementary_instructions or "",
+                "prior_claims": list(prior_claims or []),
             },
             ensure_ascii=False,
         )

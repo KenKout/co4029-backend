@@ -139,6 +139,7 @@ async def test_handle_student_turn_session_finished(session_id, student_id):
             "abridgeai.features.interviews.realtime.orchestration_bridge.submit_session",
             new_callable=AsyncMock,
         ) as mock_submit:
+            mock_submit.return_value = MagicMock(id=session_id)
             # Mock the ARQ pool
             mock_arq_pool = AsyncMock()
 
@@ -159,6 +160,13 @@ async def test_handle_student_turn_session_finished(session_id, student_id):
                     "abridgeai.features.interviews.realtime.orchestration_bridge._get_arq_pool",
                     new_callable=AsyncMock,
                     return_value=mock_arq_pool,
+                ),
+                patch(
+                    "abridgeai.features.interviews.realtime.orchestration_bridge.ensure_ceremony_message",
+                    new_callable=AsyncMock,
+                    return_value=MagicMock(
+                        content_text="Thank you. That concludes the interview."
+                    ),
                 ),
             ):
                 result = await handle_student_turn(
@@ -409,7 +417,15 @@ async def test_adaptive_closing_suppresses_canned_remark(session_id, student_id)
             "abridgeai.features.interviews.realtime.orchestration_bridge.submit_session",
             new_callable=AsyncMock,
         ) as mock_submit,
+        patch(
+            "abridgeai.features.interviews.realtime.orchestration_bridge.ensure_ceremony_message",
+            new_callable=AsyncMock,
+            return_value=MagicMock(
+                content_text="Thank you. That concludes your interview. Goodbye."
+            ),
+        ),
     ):
+        mock_submit.return_value = MagicMock(id=session_id)
         mock_arq_pool = AsyncMock()
         mock_db = AsyncMock()
         mock_session_ctx = AsyncMock()
@@ -434,6 +450,6 @@ async def test_adaptive_closing_suppresses_canned_remark(session_id, student_id)
             )
 
     assert result.is_finished is True
-    assert result.speak_text == "That concludes the interview. Thank you for your time."
+    assert result.speak_text == "Thank you. That concludes your interview. Goodbye."
     assert result.suppress_default_closing is True
     mock_submit.assert_called_once()

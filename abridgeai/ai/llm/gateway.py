@@ -129,6 +129,7 @@ class LLMGateway:
         pipeline_run_id: UUID | None = None,
         parent_job_id: UUID | None = None,
         parent_run_id: UUID | None = None,
+        image_data_url: str | None = None,
     ) -> LLMResult:
         if role is LLMRole.EMBEDDING:
             raise ConfigError(
@@ -138,13 +139,44 @@ class LLMGateway:
 
         binding = binding_for(role, self._settings)
         client = OpenAICompatibleClient(binding)
-        messages = [
+        # When ``image_data_url`` is supplied the user turn becomes an
+        # OpenAI-style multimodal content array (text part + image_url part)
+        # so vision models actually SEE the image. Text-only callers keep the
+        # plain-string content shape — no behaviour change for them.
+        user_content: str | list[dict[str, Any]]
+        if image_data_url is not None:
+            user_content = [
+                {"type": "text", "text": user_prompt},
+                {"type": "image_url", "image_url": {"url": image_data_url}},
+            ]
+        else:
+            user_content = user_prompt
+        messages: list[dict[str, Any]] = [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
+            {"role": "user", "content": user_content},
         ]
+        # The audit payload redacts any inline image data URL to a short
+        # placeholder — a base64-encoded image is multi-MB and would bloat
+        # every ``ai_model_calls`` row. The real ``messages`` (with the full
+        # image) still go over the wire; only the stored copy is trimmed.
+        audit_messages = messages
+        if image_data_url is not None:
+            audit_messages = [
+                {"role": "system", "content": system_prompt},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": user_prompt},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"<image redacted: {len(image_data_url)} chars>"},
+                        },
+                    ],
+                },
+            ]
         request_payload: dict[str, Any] = {
             "model": binding.model,
-            "messages": messages,
+            "messages": audit_messages,
             "response_format": {"type": "json_object"},
         }
 

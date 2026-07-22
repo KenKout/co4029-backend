@@ -96,6 +96,10 @@ class Notification(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     entity_id: Mapped[uuid.UUID | None] = mapped_column(PGUUID(as_uuid=True))
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     body: Mapped[str] = mapped_column(Text, nullable=False)
+    # Precomputed relative deep-link (e.g. '/courses/{slug}/quiz/{id}') built
+    # by the producing feature at creation time. Frontend renders it as a
+    # "Take action" link; NULL means the notification is informational only.
+    action_url: Mapped[str | None] = mapped_column(Text)
     scheduled_for: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

@@ -41,7 +41,6 @@ _INSTRUCTIONS = (
     "You are an AI mock interviewer. You ask the provided interview questions "
     "and listen to the candidate's spoken answers. You never invent questions."
 )
-_CLOSING_REMARK = "Thank you. That concludes the interview."
 # Hard ceiling on how long we wait for the closing utterance to finish playing
 # out before shutting the room down. Playback-aware shutdown (below) must not
 # hang the job forever if a SpeechHandle never completes (e.g. transport
@@ -58,18 +57,34 @@ class InterviewAgent(Agent):
         interview_session_id: UUID,
         student_id: UUID,
         first_question_text: str | None,
+        opening_text: str | None = None,
         language: str = "en",
     ) -> None:
         super().__init__(instructions=_INSTRUCTIONS)
         self._interview_session_id = interview_session_id
         self._student_id = student_id
         self._first_question_text = first_question_text
+        self._opening_text = opening_text
         # Language for adaptive interviewer utterances ("vi"/"en"). Voice parity
         # with the REST path, which reads Accept-Language. Default "en".
         self._language = language
 
     async def on_enter(self) -> None:
-        """Speak the current pending question when the agent joins the room."""
+        """Speak the greeting completely, then begin with question one."""
+        if self._opening_text:
+            opening_handle = self.session.say(self._opening_text, allow_interruptions=False)
+            await opening_handle
+            if hasattr(opening_handle, "wait_for_playout"):
+                try:
+                    await asyncio.wait_for(
+                        opening_handle.wait_for_playout(),
+                        timeout=_CLOSING_PLAYOUT_TIMEOUT_S,
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.warning(
+                        "opening playout wait failed; continuing (session=%s)",
+                        self._interview_session_id,
+                    )
         if self._first_question_text:
             await self.session.say(self._first_question_text, allow_interruptions=False)
 
@@ -155,13 +170,6 @@ class InterviewAgent(Agent):
             )
 
         if result.is_finished:
-            # The adaptive interviewer may already have spoken its own closing
-            # (in result.speak_text); in that case skip the canned remark so the
-            # student doesn't hear two closings. Legacy path leaves the flag
-            # False, preserving the original behaviour exactly.
-            if not result.suppress_default_closing:
-                last_handle = self.session.say(_CLOSING_REMARK, allow_interruptions=False)
-                await last_handle
             # Playback-aware shutdown: ``say()`` returning / awaiting only means
             # the turn was scheduled and generated — NOT that the audio finished
             # reaching the student. Wait for the closing's full playout (bounded

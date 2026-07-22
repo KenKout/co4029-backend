@@ -22,6 +22,7 @@ Convention (Phase 0.8 / plan §5107-5108):
 
 from __future__ import annotations
 
+from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -33,6 +34,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from abridgeai.ai.llm import LLMGateway
 from abridgeai.core.audit import current_actor_var
+from abridgeai.core.config import get_settings
 from abridgeai.core.db import get_sessionmaker
 from abridgeai.core.observability import (
     bind_request_context,
@@ -41,6 +43,7 @@ from abridgeai.core.observability import (
 )
 from abridgeai.features.materials.ingestion import run_material_ingest
 from abridgeai.features.materials.models import LearningMaterialVersion
+from abridgeai.infrastructure.neo4j import graph_client
 from abridgeai.infrastructure.s3 import download_to_temp
 from abridgeai.workers.actor import set_worker_actor
 
@@ -132,15 +135,27 @@ async def ingest_material_version_task(
                     )
                     return
 
-                with TemporaryDirectory(prefix="abridgeai-worker-") as temp_dir:
-                    local_path = await download_to_temp(storage_view, dest_dir=Path(temp_dir))
-                    await run_material_ingest(
-                        db,
-                        material_version_id,
-                        pipeline_run_id,
-                        source_path=local_path,
-                        llm_gateway=LLMGateway(),
-                    )
+                # Stage 5 (knowledge graph) only runs when the feature flag is
+                # on. We open a Neo4j-backed KnowledgeGraphClient here and pass
+                # it into the pipeline; without it the pipeline's
+                # ``kg_client is not None`` guard skips KG entirely (which is
+                # why the flag alone previously did nothing). The client is
+                # scoped to the task via AsyncExitStack so its driver session
+                # closes even on failure.
+                async with AsyncExitStack() as stack:
+                    kg_client = None
+                    if get_settings().knowledge_graph_enabled:
+                        kg_client = await stack.enter_async_context(graph_client())
+                    with TemporaryDirectory(prefix="abridgeai-worker-") as temp_dir:
+                        local_path = await download_to_temp(storage_view, dest_dir=Path(temp_dir))
+                        await run_material_ingest(
+                            db,
+                            material_version_id,
+                            pipeline_run_id,
+                            source_path=local_path,
+                            kg_client=kg_client,
+                            llm_gateway=LLMGateway(),
+                        )
                 await db.commit()
             except (KeyboardInterrupt, SystemExit):
                 raise

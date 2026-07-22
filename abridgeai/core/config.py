@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import logging
 from functools import lru_cache
-from typing import Literal
+from typing import ClassVar, Literal
 
 from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -154,10 +154,42 @@ class Settings(BaseSettings):
     s3_bucket_name: str = "abridgeai-materials"
 
     audio_extraction_local: bool = False
+    # STT backend for material-ingestion audio/video transcription (ignored
+    # when audio_extraction_local=True, which forces local faster-whisper).
+    # 'deepgram' calls Deepgram /v1/listen with deepgram_api_key (API-only,
+    # supports EN+VI via language detection). 'whisper_api' calls the
+    # OpenAI-compatible gateway /audio/transcriptions (needs the gateway to
+    # serve an STT model named by whisper_model).
+    audio_stt_provider: Literal["deepgram", "whisper_api"] = "whisper_api"
+    # Deepgram STT model + endpoint (used when audio_stt_provider=deepgram).
+    # nova-2 handles EN and VI; detect_language picks per-file at runtime.
+    deepgram_stt_model: str = "nova-2"
+    deepgram_stt_base_url: str = "https://api.deepgram.com/v1"
     image_ocr_provider: Literal["tesseract", "llm_vision"] = "tesseract"
+    # Tesseract language(s) for image/frame OCR. '+'-joined traineddata names
+    # (e.g. "eng+vie" for the bilingual EN/VI corpus). Each must be installed
+    # under tessdata (apt: tesseract-ocr-<lang>); pytesseract passes this
+    # verbatim as the ``lang=`` argument. Ignored when provider=llm_vision.
+    image_ocr_lang: str = "eng+vie"
     ffmpeg_path: str = "ffmpeg"
     whisper_model: str = "whisper-1"
     video_frame_sample_fps: float = Field(default=1.0, gt=0, le=30)
+
+    # Deepgram TTS for browser-played interview narration (REST path only).
+    # When a key is present, ENGLISH narration is synthesized with Deepgram's
+    # Aura voices; Vietnamese always falls back to the OpenAI-compatible TTS
+    # (Deepgram TTS is English-only). When the key is unset the whole narration
+    # path uses the OpenAI-compatible gateway exactly as before — this is an
+    # additive, default-off change. The key is SecretStr (never logged).
+    deepgram_api_key: SecretStr | None = None
+    deepgram_tts_base_url: str = "https://api.deepgram.com/v1"
+    # Single English Aura voice model for narration. See
+    # https://developers.deepgram.com/docs/tts-models for the catalog.
+    deepgram_tts_model_en: str = "aura-2-thalia-en"
+    # Audio container returned by /v1/speak (mp3 keeps the browser <audio> path
+    # identical to the OpenAI-compatible gateway).
+    deepgram_tts_encoding: str = "mp3"
+    deepgram_tts_timeout_seconds: float = 30.0
 
     # LiveKit voice-interview (Phase 1+). Target is LiveKit Cloud for dev +
     # initial prod; ``livekit_ws_url`` is the project WS endpoint
@@ -231,6 +263,31 @@ class Settings(BaseSettings):
     # already be on for the percentage to matter.
     adaptive_interviewer_rollout_percent: int = Field(default=100, ge=0, le=100)
 
+    # ── Adaptive Interviewer v2 (real-life coverage upgrade) ─────────────────
+    # v2 layers richer interviewer behaviour on top of the v1 adaptive path
+    # (phase progression, depth probing, cross-turn memory, affect, laddered
+    # hints, per-outcome difficulty, rich closing).
+    #
+    # MASTER v2 switch, default OFF: when OFF, run_adaptive_turn produces the
+    # exact v1 result. v2 also requires the v1 master + per-mode gate to already
+    # be on (v2 cannot run where v1 does not). Each sub-feature is independently
+    # gated and defaults OFF so it can shadow/canary one behaviour at a time.
+    adaptive_interviewer_v2_enabled: bool = False
+    adaptive_v2_phases_enabled: bool = False
+    adaptive_v2_depth_probe_enabled: bool = False
+    adaptive_v2_cross_turn_enabled: bool = False
+    adaptive_v2_affect_enabled: bool = False
+    adaptive_v2_hint_ladder_enabled: bool = False
+    adaptive_v2_per_outcome_difficulty_enabled: bool = False
+    adaptive_v2_rich_closing_enabled: bool = False
+    adaptive_v2_self_correction_enabled: bool = False
+    adaptive_v2_confident_wrong_challenge_enabled: bool = False
+    adaptive_v2_rambling_redirect_enabled: bool = False
+    adaptive_v2_backtrack_undercovered_enabled: bool = False
+    adaptive_v2_comms_polish_enabled: bool = False
+    adaptive_v2_frustration_deescalation_enabled: bool = False
+    adaptive_v2_question_deferral_enabled: bool = False
+
     # Prompt-injection guard is operations-only. ``shadow`` is the safe rollout
     # default: assess and report without changing the learner experience.
     # Production enforcement must be enabled explicitly by operators.
@@ -258,6 +315,38 @@ class Settings(BaseSettings):
             "voice": self.adaptive_interviewer_voice_enabled,
         }.get(input_mode)
         return bool(mode_flag)
+
+    _V2_SUBFLAGS: ClassVar[dict[str, str]] = {
+        "phases": "adaptive_v2_phases_enabled",
+        "depth_probe": "adaptive_v2_depth_probe_enabled",
+        "cross_turn": "adaptive_v2_cross_turn_enabled",
+        "affect": "adaptive_v2_affect_enabled",
+        "hint_ladder": "adaptive_v2_hint_ladder_enabled",
+        "per_outcome_difficulty": "adaptive_v2_per_outcome_difficulty_enabled",
+        "rich_closing": "adaptive_v2_rich_closing_enabled",
+        "self_correction": "adaptive_v2_self_correction_enabled",
+        "confident_wrong_challenge": "adaptive_v2_confident_wrong_challenge_enabled",
+        "rambling_redirect": "adaptive_v2_rambling_redirect_enabled",
+        "backtrack_undercovered": "adaptive_v2_backtrack_undercovered_enabled",
+        "comms_polish": "adaptive_v2_comms_polish_enabled",
+        "frustration_deescalation": "adaptive_v2_frustration_deescalation_enabled",
+        "question_deferral": "adaptive_v2_question_deferral_enabled",
+    }
+
+    def adaptive_v2_feature_enabled(self, input_mode: str, feature: str) -> bool:
+        """Resolve whether a v2 sub-feature runs for an input mode.
+
+        A v2 sub-feature runs only when the v1 static mode gate is ON (master
+        AND per-mode flag), the v2 master switch is ON, AND the named sub-flag
+        is ON. An unknown feature name fails closed (returns False), so a typo
+        can never silently enable behaviour.
+        """
+        if not self.adaptive_enabled_for_mode(input_mode):
+            return False
+        if not self.adaptive_interviewer_v2_enabled:
+            return False
+        attr = self._V2_SUBFLAGS.get(feature)
+        return bool(attr and getattr(self, attr, False))
 
     @staticmethod
     def _rollout_bucket(student_id: str, config_id: str) -> int:

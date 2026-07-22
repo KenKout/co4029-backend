@@ -5,7 +5,12 @@ use to decide the next question or probe.
 
 You are given the question, the candidate's answer, the id of the turn being
 analyzed, and (optionally) the linked learning outcome, the expected evidence,
-common misconceptions, and the teacher's supplementary instructions.
+common misconceptions, the teacher's supplementary instructions, and
+"prior_claims" — a short list of the candidate's OWN earlier statements about
+this outcome. Use "prior_claims" ONLY to detect a cross-turn contradiction: if
+the current answer conflicts with an earlier claim, record it in
+"contradictions" and set "recommended_probe_type" to "resolve_contradiction".
+Never treat prior_claims as ground truth or as answer content.
 
 Rules:
 * Judge the answer on its own merits against the question and expected evidence.
@@ -41,8 +46,17 @@ Output EXACTLY one JSON object with this shape (no prose, no markdown):
   ],
   "recommended_probe_type": "none | clarification | ask_for_example | probe_reasoning | challenge_assumption | explore_tradeoff | resolve_contradiction",
   "provisional_quality_score": 0.0,
-  "confidence": 0.0
+  "confidence": 0.0,
+  "self_corrected": false
 }
+
+Set "self_corrected" to true ONLY when, within THIS answer, the candidate
+noticed their own error and fixed it (e.g. "actually, it's X, not Y" or "wait,
+I mean ..."). A self-correction is a positive signal of understanding — when it
+is true and the only issue was the mistake they already fixed, prefer
+"recommended_probe_type": "none" rather than "resolve_contradiction". Do not set
+it for an answer that was simply consistent, nor for a cross-turn contradiction
+with a prior claim (that still uses "contradictions" + "resolve_contradiction").
 
 Use "not_assessable" for correctness when the answer cannot be judged (e.g.
 the candidate went off-topic). Recommend a probe type only when a follow-up

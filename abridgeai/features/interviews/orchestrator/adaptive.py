@@ -27,13 +27,16 @@ Safeguard compliance
 This module performs DB reads + one AI-turn insert + one state save, but does
 NOT commit and does NOT open its own savepoint — the caller owns both the
 savepoint and the outer commit, so the rollback boundary is unambiguous.
+
+Slice 7 note: the pure/near-pure perception + state-application helpers were
+extracted into ``turn_perception`` and ``turn_state`` sibling modules to keep
+this file under the orchestrator LOC cap. Behaviour is unchanged.
 """
 
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
@@ -44,32 +47,34 @@ from abridgeai.features.interviews.models import (
     InterviewSessionQuestion,
 )
 from abridgeai.features.interviews.orchestrator import repository as state_repo
+from abridgeai.features.interviews.orchestrator import turn_perception, turn_state
+from abridgeai.features.interviews.orchestrator.affect import Affect, detect_affect
 from abridgeai.features.interviews.orchestrator.analysis import AnswerAnalysis
 from abridgeai.features.interviews.orchestrator.analysis_logic import analyze_answer
+from abridgeai.features.interviews.orchestrator.coverage import is_provisionally_sufficient
 from abridgeai.features.interviews.orchestrator.decision import (
+    DEFAULT_MAX_TOTAL_FOLLOWUPS,
     DecisionInputs,
-    InterviewerActionType,
     decide_next_action,
 )
-from abridgeai.features.interviews.orchestrator.intent import (
-    StudentIntent,
+from abridgeai.features.interviews.orchestrator.difficulty import (
+    target_difficulty_level,
+    update_streaks,
 )
+from abridgeai.features.interviews.orchestrator.intent import StudentIntent
 from abridgeai.features.interviews.orchestrator.intent_logic import classify_intent
 from abridgeai.features.interviews.orchestrator.mapping import canonical_step_result
+from abridgeai.features.interviews.orchestrator.phases import resolve_phase_and_level
 from abridgeai.features.interviews.orchestrator.security import (
     SecurityAction,
     SecurityAssessment,
     SecurityCategory,
 )
 from abridgeai.features.interviews.orchestrator.selection import (
-    CandidateQuestion,
     SelectionContext,
     select_next_question,
 )
-from abridgeai.features.interviews.orchestrator.state import (
-    InterviewPhase,
-    OutcomeCoverageState,
-)
+from abridgeai.features.interviews.orchestrator.turn_state import ADVANCE_ACTIONS
 from abridgeai.features.interviews.orchestrator.utterance import (
     Utterance,
     build_fallback_utterance,
@@ -85,17 +90,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Provisional coverage is "sufficient" at this many pieces of evidence — used to
-# decide which outcomes still need covering (guides selection, not scoring).
-_SUFFICIENT_EVIDENCE = 2
-
-ADVANCE_ACTIONS = frozenset(
-    {
-        InterviewerActionType.ASK_MAIN_QUESTION,
-        InterviewerActionType.TRANSITION_TOPIC,
-        InterviewerActionType.SKIP_QUESTION,
-    }
-)
+# Sufficiency is decided by weighted coverage points — see coverage.py
+# (COVERAGE_SUFFICIENT_POINTS / is_provisionally_sufficient), not a raw count.
 
 
 class AdaptiveUnavailable(RuntimeError):  # noqa: N818 -- signal, not an error condition; matches codebase style
@@ -115,64 +111,69 @@ class AdaptiveOutcome:
     fallback_reason: str | None
 
 
-def _time_fraction_remaining(session: InterviewSession, config: InterviewConfig) -> float | None:
-    """Authoritative backend time fraction (never trusts the browser clock).
+def _resolve_affect(
+    data: Any,  # noqa: ANN401 -- InterviewRuntimeStateData; loose to avoid import churn
+    *,
+    answer_text: str,
+    analysis: AnswerAnalysis | None,
+    enabled: bool,
+) -> Any | None:  # noqa: ANN401 -- Affect | None; loose to avoid import churn
+    """Detect candidate affect + record it on state (Slice 10, v2).
 
-    None when the config is untimed. Clamped to [0, 1].
+    Returns the detected ``Affect`` (and stores its value on candidate_signals)
+    when the feature is enabled, else None → v1 tone. Kept as a helper so
+    ``run_adaptive_turn`` stays under the complexity cap.
     """
-    limit_min = config.time_limit_minutes
-    if not limit_min or limit_min <= 0:
+    if not enabled:
         return None
-    started = session.started_at
-    if started.tzinfo is None:
-        started = started.replace(tzinfo=UTC)
-    elapsed = (datetime.now(UTC) - started).total_seconds()
-    total = float(limit_min) * 60.0
-    return max(0.0, min(1.0, (total - elapsed) / total))
+    affect = detect_affect(answer_text=answer_text, analysis=analysis)
+    data.candidate_signals.last_affect = affect.value
+    return affect
 
 
-async def _load_candidates(
-    db: AsyncSession, config_id: UUID
-) -> tuple[list[CandidateQuestion], dict[str, InterviewQuestion]]:
-    """Load approved questions as scorer candidates + an id→ORM lookup.
+def _is_rambling(
+    *,
+    answer_text: str,
+    analysis: AnswerAnalysis | None,
+    enabled: bool,
+) -> bool:
+    """Whether the candidate is rambling (Slice 17, v2), gated on the flag.
 
-    The outcome importance weight is denormalised onto each candidate so the
-    scorer stays pure. Questions with no linked outcome default to weight 1.
+    Uses the same deterministic ``detect_affect`` as the tone layer (single
+    source of truth) so the decision-time signal and the tone lead-in never
+    disagree. Off → False → the decision is byte-for-byte v1.
     """
-    questions = await authoring_list_questions(db, config_id)
-    outcomes = await authoring_list_outcomes(db, config_id)
-    weight_by_outcome = {str(o.id): int(o.importance_weight) for o in outcomes}
-
-    candidates: list[CandidateQuestion] = []
-    orm_by_id: dict[str, InterviewQuestion] = {}
-    for q in questions:
-        oid = str(q.linked_outcome_id) if q.linked_outcome_id is not None else None
-        candidates.append(
-            CandidateQuestion(
-                question_id=str(q.id),
-                linked_outcome_id=oid,
-                question_type=q.question_type,
-                difficulty=q.difficulty,
-                position=q.position,
-                importance_weight=weight_by_outcome.get(oid or "", 1),
-            )
-        )
-        orm_by_id[str(q.id)] = q
-    return candidates, orm_by_id
+    if not enabled:
+        return False
+    return detect_affect(answer_text=answer_text, analysis=analysis) is Affect.RAMBLING
 
 
-async def authoring_list_questions(db: AsyncSession, config_id: UUID) -> list[InterviewQuestion]:
-    from abridgeai.features.interviews.queries import authoring as authoring_queries
+# Communication-polish thresholds (Slice 20, v2).
+_COMMS_TIME_PRESSURE_FRACTION = 0.2  # signal to prioritise below this time fraction
+_COMMS_RECOVERY_WEAK_STREAK = 2  # rebuild after this many consecutive weak answers
 
-    return await authoring_queries.list_questions_for_config(
-        db, config_id, review_status="approved"
+
+def _comms_polish_signals(
+    *,
+    time_fraction_remaining: float | None,
+    consecutive_weak_answers: int,
+    enabled: bool,
+) -> tuple[bool, bool]:
+    """Return ``(time_pressure, recovery)`` tone signals (Slice 20, v2).
+
+    ``time_pressure`` fires when little time remains so the interviewer can tell
+    the candidate to prioritise; ``recovery`` fires after a weak streak so a
+    rattled candidate gets an encouraging, scoped lead-in. TONE ONLY — these
+    feed the utterance lead-in, never the decision. Off → (False, False) → v1.
+    """
+    if not enabled:
+        return False, False
+    time_pressure = (
+        time_fraction_remaining is not None
+        and time_fraction_remaining <= _COMMS_TIME_PRESSURE_FRACTION
     )
-
-
-async def authoring_list_outcomes(db: AsyncSession, config_id: UUID) -> list[InterviewOutcome]:
-    from abridgeai.features.interviews.queries import authoring as authoring_queries
-
-    return await authoring_queries.list_outcomes_for_config(db, config_id)
+    recovery = consecutive_weak_answers >= _COMMS_RECOVERY_WEAK_STREAK
+    return time_pressure, recovery
 
 
 async def run_adaptive_turn(
@@ -189,6 +190,20 @@ async def run_adaptive_turn(
     security_assessment: SecurityAssessment | None = None,
     security_action: SecurityAction = SecurityAction.ALLOW,
     security_attempt_count: int = 0,
+    phases_enabled: bool = False,
+    depth_probe_enabled: bool = False,
+    cross_turn_enabled: bool = False,
+    affect_enabled: bool = False,
+    hint_ladder_enabled: bool = False,
+    per_outcome_difficulty_enabled: bool = False,
+    rich_closing_enabled: bool = False,
+    self_correction_enabled: bool = False,
+    confident_wrong_challenge_enabled: bool = False,
+    rambling_redirect_enabled: bool = False,
+    backtrack_undercovered_enabled: bool = False,
+    comms_polish_enabled: bool = False,
+    frustration_deescalation_enabled: bool = False,
+    question_deferral_enabled: bool = False,
 ) -> AdaptiveOutcome:
     """Run one adaptive turn. MUST be called inside a caller-owned savepoint.
 
@@ -206,10 +221,15 @@ async def run_adaptive_turn(
         prior = loaded.data.last_answer_analysis or {}
         replay = prior.get("_canonical_result") if isinstance(prior, dict) else None
         if isinstance(replay, dict):
-            return AdaptiveOutcome(result=_rehydrate_replay(replay, db), fallback_reason=None)
+            return AdaptiveOutcome(result=turn_state.rehydrate_replay(replay), fallback_reason=None)
         # No stored canonical result (shouldn't happen) → treat as fresh.
 
     data = loaded.data
+    turn_state.sync_question_history(
+        data,
+        await turn_perception.persisted_question_ids(db, session_id),
+        current_question=current_question,
+    )
     question_text = current_question.prompt_text if current_question is not None else ""
     outcome_id = (
         str(current_question.linked_outcome_id)
@@ -222,7 +242,12 @@ async def run_adaptive_turn(
         db,
         question_text=question_text,
         student_utterance=answer_text,
-        gateway=None if use_llm else _no_gateway(),
+        gateway=None if use_llm else turn_perception.no_gateway(),
+    )
+
+    # 1b. End-confirmation gate (Slice 4) — see turn_perception.confirmation_override.
+    intent = turn_perception.confirmation_override(
+        intent, answer_text, pending=data.pending_confirmation
     )
 
     # 2. Analysis — only for genuine academic answers.
@@ -233,6 +258,11 @@ async def run_adaptive_turn(
         if outcome_id is not None:
             oc = await db.get(InterviewOutcome, current_question.linked_outcome_id)  # type: ignore[union-attr]
             outcome_text = oc.outcome_text if oc is not None else None
+        # Cross-turn memory (Slice 9, v2): the candidate's own prior claims about
+        # THIS outcome, so the analyzer can flag a cross-turn contradiction.
+        prior_claims = turn_perception.prior_claims_for(
+            data, outcome_id, enabled=cross_turn_enabled
+        )
         analysis = await analyze_answer(
             db,
             question_text=question_text,
@@ -244,31 +274,95 @@ async def run_adaptive_turn(
             # hidden criteria. Runtime analysis gets only this question and its
             # linked outcome.
             supplementary_instructions=None,
+            prior_claims=prior_claims,
         )
 
+    # 2b. Difficulty streaks (Slice 3). Fold THIS answer's quality into the
+    # strong/weak streaks BEFORE selection so it shapes the next question's
+    # difficulty. Neutral / low-confidence answers leave both streaks untouched.
+    # These fields were persisted but never written until now; apply_state_updates
+    # deliberately does not touch them, so this is their single write site.
+    data.consecutive_strong_answers, data.consecutive_weak_answers = update_streaks(
+        consecutive_strong=data.consecutive_strong_answers,
+        consecutive_weak=data.consecutive_weak_answers,
+        analysis=analysis,
+    )
+    current_difficulty = current_question.difficulty if current_question is not None else None
+    student_level = target_difficulty_level(
+        current_difficulty=current_difficulty,
+        consecutive_strong=data.consecutive_strong_answers,
+        consecutive_weak=data.consecutive_weak_answers,
+    )
+
     # 3. Load candidate pool + compute selection context.
-    candidates, orm_by_id = await _load_candidates(db, session.interview_config_id)
+    candidates, orm_by_id = await turn_perception.load_candidates(db, session.interview_config_id)
     asked = frozenset(data.asked_question_ids)
     skipped = frozenset(data.skipped_question_ids)
-    evidence_counts = {oid: cov.evidence_count for oid, cov in data.outcome_coverage.items()}
+    # Weighted coverage points (Slice 2) — not the raw evidence count — drive
+    # both the "uncovered" signal for scoring and the sufficiency gate below, so
+    # a single low-value (partial/contradictory) turn cannot mark an outcome
+    # covered the way a flat count once did.
+    coverage_points = {oid: cov.coverage_points for oid, cov in data.outcome_coverage.items()}
 
     # Required outcomes not yet sufficiently covered (guides selection priority).
-    outcomes = await authoring_list_outcomes(db, session.interview_config_id)
+    outcomes = await turn_perception.list_outcomes(db, session.interview_config_id)
     uncovered_required = frozenset(
-        str(o.id) for o in outcomes if evidence_counts.get(str(o.id), 0) < _SUFFICIENT_EVIDENCE
+        str(o.id)
+        for o in outcomes
+        if not is_provisionally_sufficient(coverage_points.get(str(o.id), 0))
     )
     all_required_covered = len(uncovered_required) == 0 and len(outcomes) > 0
+
+    time_fraction = turn_perception.time_fraction_remaining(session, config)
+
+    # Phase progression (Slice 7, v2). When the phases feature is enabled we
+    # compute the phase the NEXT turn should be in and bias the difficulty
+    # target accordingly (warmup eases down, deep-probe pushes up). When the
+    # flag is OFF, target_phase stays the current phase and the bias is 0, so
+    # ``student_level`` and every downstream decision are byte-for-byte v1.
+    target_phase = data.phase
+    if phases_enabled:
+        target_phase, student_level = resolve_phase_and_level(
+            current_phase=data.phase,
+            turns_in_phase=data.turns_in_phase,
+            warmup_turns_target=data.warmup_turns_target,
+            all_required_covered=all_required_covered,
+            time_fraction_remaining=time_fraction,
+            total_follow_up_count=data.total_follow_up_count,
+            max_total_follow_ups=DEFAULT_MAX_TOTAL_FOLLOWUPS,
+            student_level=student_level,
+        )
+
+    # Per-outcome difficulty calibration (Slice 12, v2): expose each outcome's
+    # competence estimate so selection targets question difficulty per topic.
+    # Gated: None → selection falls back to the global student level (v1).
+    outcome_competence = (
+        {oid: cov.competence_estimate for oid, cov in data.outcome_coverage.items()}
+        if per_outcome_difficulty_enabled
+        else None
+    )
 
     ctx = SelectionContext(
         asked_question_ids=asked,
         skipped_question_ids=skipped,
-        outcome_evidence_counts=evidence_counts,
+        outcome_evidence_counts=coverage_points,
         uncovered_required_outcome_ids=uncovered_required,
-        time_fraction_remaining=_time_fraction_remaining(session, config),
+        student_difficulty_level=student_level,
+        time_fraction_remaining=time_fraction,
         last_targeted_outcome_id=data.current_outcome_id,
+        outcome_competence=outcome_competence,
+        backtrack_undercovered=backtrack_undercovered_enabled,
     )
     scored = select_next_question(candidates, ctx)
     has_next = scored is not None
+
+    # Rambling signal (Slice 17, v2). Computed BEFORE the decision so the policy
+    # can steer a long, on-topic, low-substance ramble back to focus. Uses the
+    # same deterministic detect_affect as the tone layer (single source), gated
+    # on the flag. Off → False → the decision is byte-for-byte v1.
+    rambling = _is_rambling(
+        answer_text=answer_text, analysis=analysis, enabled=rambling_redirect_enabled
+    )
 
     # 4. Deterministic decision.
     decision = decide_next_action(
@@ -280,6 +374,17 @@ async def run_adaptive_turn(
             time_fraction_remaining=ctx.time_fraction_remaining,
             has_next_question=has_next,
             all_required_outcomes_covered=all_required_covered,
+            pending_confirmation=data.pending_confirmation,
+            depth_probe_enabled=depth_probe_enabled,
+            phase=data.phase,
+            rich_closing_enabled=rich_closing_enabled,
+            closing_step=data.closing_step,
+            self_correction_enabled=self_correction_enabled,
+            confident_wrong_challenge_enabled=confident_wrong_challenge_enabled,
+            rambling=rambling,
+            rambling_redirect_enabled=rambling_redirect_enabled,
+            frustration_deescalation_enabled=frustration_deescalation_enabled,
+            question_deferral_enabled=question_deferral_enabled,
         )
     )
 
@@ -290,12 +395,31 @@ async def run_adaptive_turn(
         decision.target_question_id = scored.candidate.question_id
         decision.target_outcome_id = scored.candidate.linked_outcome_id
 
+    # 5b. Candidate affect (Slice 10, v2). Read lightweight affect to warm the
+    # utterance TONE only — never control flow. Gated: off → None → v1 tone.
+    affect = _resolve_affect(
+        data, answer_text=answer_text, analysis=analysis, enabled=affect_enabled
+    )
+
     # 6. Natural utterance (LLM phrasing + deterministic fallback).
     persona = persona_from(config.persona)
     probe_or_question_text = (
         selected_orm.prompt_text
         if selected_orm is not None
-        else _probe_seed_text(decision, current_question)
+        else turn_state.probe_seed_text(decision, current_question)
+    )
+    # Assistance laddering (Slice 11, v2): render this turn at the CURRENT ladder
+    # level; apply_state_updates advances the level AFTER, so a repeated hint /
+    # reframe escalates next turn. Gated: off → level 0 → v1 wording.
+    hint_level = data.hint_level if hint_ladder_enabled else 0
+    reframe_count = data.reframe_count if hint_ladder_enabled else 0
+    # Communication polish (Slice 20, v2): TONE-ONLY lead-ins — signal time
+    # pressure when little time remains, and an encouraging recovery framing
+    # after a weak streak. Gated: off → (False, False) → v1 wording.
+    time_pressure, recovery = _comms_polish_signals(
+        time_fraction_remaining=time_fraction,
+        consecutive_weak_answers=data.consecutive_weak_answers,
+        enabled=comms_polish_enabled,
     )
     utterance, utt_status = await generate_utterance(
         db,
@@ -304,12 +428,22 @@ async def run_adaptive_turn(
         language=language,
         question_text=probe_or_question_text,
         use_llm=use_llm,
+        affect=affect,
+        hint_level=hint_level,
+        reframe_count=reframe_count,
+        time_pressure=time_pressure,
+        recovery=recovery,
     )
     fallback_utterance = build_fallback_utterance(
         decision,
         persona=persona,
         language=language,
         question_text=probe_or_question_text,
+        affect=affect,
+        hint_level=hint_level,
+        reframe_count=reframe_count,
+        time_pressure=time_pressure,
+        recovery=recovery,
     )
     assessment = security_assessment or SecurityAssessment(
         category=SecurityCategory.BENIGN,
@@ -363,7 +497,7 @@ async def run_adaptive_turn(
             "reason_code": decision.reason_code.value,
             "utterance_status": utt_status,
             "turn_key": turn_key,
-            "top_candidates": _compact_scores(scored),
+            "top_candidates": turn_state.compact_scores(scored),
             "output_leakage_blocked": guarded.output_leakage_blocked,
             "output_fallback_used": guarded.output_fallback_used,
             "protected_content_category": guarded.protected_content_category,
@@ -373,7 +507,7 @@ async def run_adaptive_turn(
 
     # 8. If advancing, append the selected question as the next session question.
     if selected_orm is not None:
-        seq = await _next_sequence(db, session_id)
+        seq = await turn_perception.next_sequence(db, session_id)
         db.add(
             InterviewSessionQuestion(
                 session_id=session_id,
@@ -385,13 +519,17 @@ async def run_adaptive_turn(
     await db.flush()  # assign ai_msg.id; surface the idempotency unique-index race
 
     # 9. Update runtime state (in memory) then SAVE ONCE (the one version owner).
-    _apply_state_updates(
+    turn_state.apply_state_updates(
         data,
         intent=intent,
         analysis=analysis,
         decision=decision,
         selected_question_id=(str(selected_orm.id) if selected_orm is not None else None),
         target_outcome_id=decision.target_outcome_id,
+        target_phase=target_phase if phases_enabled else None,
+        cross_turn_enabled=cross_turn_enabled,
+        hint_ladder_enabled=hint_ladder_enabled,
+        per_outcome_difficulty_enabled=per_outcome_difficulty_enabled,
     )
 
     canonical = canonical_step_result(
@@ -402,11 +540,15 @@ async def run_adaptive_turn(
         state_version=loaded.version + 1,
         ai_turn_id=str(ai_msg.id) if ai_msg.id is not None else None,
         utterance_status=utt_status,
+        pending_confirmation=data.pending_confirmation,
+        interaction_state=data.interaction_state.value,
     )
 
     # Stash a replay-safe copy of the canonical result (ids as strings) so a
     # duplicate turn_key can be answered without re-running the pipeline.
-    data.last_answer_analysis = _with_replay(data.last_answer_analysis, canonical, selected_orm)
+    data.last_answer_analysis = turn_state.with_replay(
+        data.last_answer_analysis, canonical, selected_orm
+    )
 
     await state_repo.save(
         db,
@@ -417,135 +559,6 @@ async def run_adaptive_turn(
     )
 
     return AdaptiveOutcome(result=canonical, fallback_reason=None)
-
-
-def _apply_state_updates(
-    data: Any,  # noqa: ANN401 -- InterviewRuntimeStateData; loose to avoid import churn
-    *,
-    intent: Any,  # noqa: ANN401
-    analysis: AnswerAnalysis | None,
-    decision: Any,  # noqa: ANN401
-    selected_question_id: str | None,
-    target_outcome_id: str | None,
-) -> None:
-    """Mutate the loaded state in memory (NO save here — caller saves once)."""
-    now = datetime.now(UTC).isoformat()
-    data.last_student_intent = intent.to_dict()
-
-    # Candidate signals.
-    sig = data.candidate_signals
-    sig.requested_repeat = intent.intent is StudentIntent.ASK_TO_REPEAT
-    sig.requested_clarification = intent.intent is StudentIntent.ASK_FOR_CLARIFICATION
-    sig.requested_skip = intent.intent is StudentIntent.SKIP_QUESTION
-    sig.technical_issue_detected = intent.intent is StudentIntent.TECHNICAL_ISSUE
-    sig.appeared_uncertain = intent.intent is StudentIntent.CANNOT_ANSWER
-    sig.appeared_off_topic = intent.intent is StudentIntent.OFF_TOPIC
-
-    # Evidence / coverage from analysis.
-    if analysis is not None and analysis.confidence > 0.0:
-        for ev in analysis.evidence:
-            cov = data.outcome_coverage.get(ev.outcome_id)
-            if cov is None:
-                cov = OutcomeCoverageState(outcome_id=ev.outcome_id)
-                data.outcome_coverage[ev.outcome_id] = cov
-            cov.evidence_count += 1
-            cov.last_updated_at = now
-            if ev.turn_id not in cov.supporting_turn_ids:
-                cov.supporting_turn_ids.append(ev.turn_id)
-
-    # Follow-up counters + phase.
-    if decision.action in ADVANCE_ACTIONS:
-        data.current_question_follow_up_count = 0
-        if selected_question_id is not None:
-            if selected_question_id not in data.asked_question_ids:
-                data.asked_question_ids.append(selected_question_id)
-            data.current_question_id = selected_question_id
-        if (
-            decision.action is InterviewerActionType.SKIP_QUESTION
-            and data.current_question_id
-            and data.current_question_id not in data.skipped_question_ids
-        ):
-            data.skipped_question_ids.append(data.current_question_id)
-        if data.phase is InterviewPhase.OPENING:
-            data.phase = InterviewPhase.CORE
-    elif decision.action in (
-        InterviewerActionType.BEGIN_CLOSING,
-        InterviewerActionType.CLOSE_INTERVIEW,
-    ):
-        data.phase = InterviewPhase.CLOSING
-    else:
-        # A probe / clarify / repeat keeps the same question → count the follow-up.
-        data.current_question_follow_up_count += 1
-        data.total_follow_up_count += 1
-
-    if target_outcome_id:
-        data.current_outcome_id = target_outcome_id
-
-
-def _probe_seed_text(decision: Any, current_question: InterviewQuestion | None) -> str | None:  # noqa: ANN401
-    """Text the utterance layer phrases for a non-advance action.
-
-    For a repeat we re-speak the current question; for clarify/probe we let the
-    utterance layer supply an answer-safe generic probe (returns None).
-    """
-    if decision.action is InterviewerActionType.REPEAT_QUESTION and current_question is not None:
-        return current_question.prompt_text
-    return None
-
-
-def _compact_scores(scored: Any) -> list[dict[str, Any]]:  # noqa: ANN401
-    """At most the top candidate's compact score (safeguard #8 — bounded audit)."""
-    if scored is None:
-        return []
-    return [
-        {
-            "question_id": scored.candidate.question_id,
-            "score": round(float(scored.score), 2),
-        }
-    ]
-
-
-def _with_replay(
-    existing: dict[str, Any] | None,
-    canonical: dict[str, Any],
-    selected_orm: InterviewQuestion | None,
-) -> dict[str, Any]:
-    """Store a JSON-safe copy of the canonical result for idempotent replay."""
-    base = dict(existing) if isinstance(existing, dict) else {}
-    replay = {k: v for k, v in canonical.items() if not k.startswith("_")}
-    # next_question is an ORM object — store just its id for rehydration.
-    replay["next_question"] = str(selected_orm.id) if selected_orm is not None else None
-    base["_canonical_result"] = replay
-    return base
-
-
-def _rehydrate_replay(replay: dict[str, Any], db: AsyncSession) -> dict[str, Any]:  # noqa: ARG001
-    """Rebuild a result dict from a stored replay (next_question stays an id).
-
-    The caller (take_session_step) is responsible for turning the id back into
-    an ORM row if needed; for the router's purposes the structured fields plus
-    the legacy scalar fields are sufficient, and next_question is re-fetched
-    there. Here we return the stored dict as-is (next_question = id string).
-    """
-    return dict(replay)
-
-
-async def _next_sequence(db: AsyncSession, session_id: UUID) -> int:
-    from sqlalchemy import func, select
-
-    row = await db.execute(
-        select(func.coalesce(func.max(InterviewSessionQuestion.sequence_no), 0)).where(
-            InterviewSessionQuestion.session_id == session_id
-        )
-    )
-    return int(row.scalar_one()) + 1
-
-
-def _no_gateway() -> Any:  # noqa: ANN401
-    """Sentinel: when use_llm is False we still pass gateway=None and rely on
-    the logic modules' deterministic fallbacks. Kept as a function for clarity.
-    """
-    return None
 
 
 __all__ = ["ADVANCE_ACTIONS", "AdaptiveOutcome", "AdaptiveUnavailable", "run_adaptive_turn"]

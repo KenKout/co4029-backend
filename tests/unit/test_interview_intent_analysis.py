@@ -31,6 +31,7 @@ from abridgeai.features.interviews.orchestrator.intent import (
 @pytest.mark.parametrize(
     ("utterance", "expected"),
     [
+        ("repeat", StudentIntent.ASK_TO_REPEAT),
         ("Could you repeat the question?", StudentIntent.ASK_TO_REPEAT),
         ("Can you say that again", StudentIntent.ASK_TO_REPEAT),
         ("What do you mean by granularity?", StudentIntent.ASK_FOR_CLARIFICATION),
@@ -84,6 +85,56 @@ def test_non_academic_intents_membership() -> None:
     assert StudentIntent.TECHNICAL_ISSUE in NON_ACADEMIC_INTENTS
     assert StudentIntent.ANSWER not in NON_ACADEMIC_INTENTS
     assert StudentIntent.PARTIAL_ANSWER not in NON_ACADEMIC_INTENTS
+
+
+# ── Intent: frustration (Slice 19A) ──────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "utterance",
+    [
+        "This is pointless.",
+        "I give up.",
+        "This is a waste of time.",
+        "I'm so frustrated with this.",
+        "What's the point of this.",
+        "This is ridiculous.",
+    ],
+)
+def test_frustration_rules_match_english(utterance: str) -> None:
+    verdict = classify_by_rules(utterance)
+    assert verdict is not None
+    assert verdict.intent is StudentIntent.FRUSTRATED
+    assert verdict.source == "rules"
+    assert verdict.confidence >= 0.9
+
+
+@pytest.mark.parametrize(
+    "utterance",
+    [
+        "Chán quá đi.",
+        "Thôi tôi bỏ cuộc.",
+        "Mất thời gian quá.",
+        "Cái này vô nghĩa.",
+    ],
+)
+def test_frustration_rules_match_vietnamese(utterance: str) -> None:
+    verdict = classify_by_rules(utterance)
+    assert verdict is not None
+    assert verdict.intent is StudentIntent.FRUSTRATED
+
+
+def test_frustration_rules_do_not_hijack_genuine_answer() -> None:
+    # A real content answer that happens to mention difficulty must NOT match —
+    # high-precision only.
+    assert (
+        classify_by_rules("This is a hard problem, but a fact table stores measurable events.")
+        is None
+    )
+
+
+def test_frustrated_is_non_academic() -> None:
+    assert StudentIntent.FRUSTRATED in NON_ACADEMIC_INTENTS
 
 
 # ── Intent: parser ───────────────────────────────────────────────────────────
@@ -207,3 +258,17 @@ def test_analysis_roundtrips_through_dict() -> None:
     assert restored.correctness is original.correctness
     assert restored.misconceptions == original.misconceptions
     assert restored.evidence[0].outcome_id == "o1"
+
+
+def test_analysis_self_corrected_defaults_false_and_roundtrips() -> None:
+    # Slice 15: self_corrected is a positive signal (candidate fixed their own
+    # mistake). Defaults False, parses from the payload, and survives a round trip.
+    default = parse_analysis_response({}, default_turn_id="t1")
+    assert default is not None
+    assert default.self_corrected is False
+
+    corrected = parse_analysis_response({"self_corrected": True}, default_turn_id="t1")
+    assert corrected is not None
+    assert corrected.self_corrected is True
+    restored = AnswerAnalysis.from_dict(corrected.to_dict(), default_turn_id="t1")
+    assert restored.self_corrected is True

@@ -11,6 +11,14 @@ guarantees that make lazy initialisation of pre-existing sessions safe:
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+from uuid import uuid4
+
+from abridgeai.features.interviews.orchestrator.selection import (
+    CandidateQuestion,
+    SelectionContext,
+    select_next_question,
+)
 from abridgeai.features.interviews.orchestrator.state import (
     STATE_SCHEMA_VERSION,
     CandidateSignals,
@@ -19,6 +27,41 @@ from abridgeai.features.interviews.orchestrator.state import (
     InterviewRuntimeStateData,
     OutcomeCoverageState,
 )
+from abridgeai.features.interviews.orchestrator.turn_state import (
+    sync_question_history as _sync_question_history,
+)
+
+
+def test_persisted_first_question_is_merged_before_adaptive_selection() -> None:
+    first_id, second_id, outcome_id = uuid4(), uuid4(), uuid4()
+    data = InterviewRuntimeStateData()
+    current = SimpleNamespace(id=first_id, linked_outcome_id=outcome_id)
+
+    _sync_question_history(
+        data,
+        [first_id, first_id],
+        current_question=current,
+    )
+
+    assert data.asked_question_ids == [str(first_id)]
+    assert data.current_question_id == str(first_id)
+    assert data.current_outcome_id == str(outcome_id)
+
+    candidates = [
+        CandidateQuestion(str(first_id), str(outcome_id), "technical", None, 1),
+        CandidateQuestion(str(second_id), None, "technical", None, 2),
+    ]
+    selected = select_next_question(
+        candidates,
+        SelectionContext(
+            asked_question_ids=frozenset(data.asked_question_ids),
+            skipped_question_ids=frozenset(),
+            outcome_evidence_counts={},
+            uncovered_required_outcome_ids=frozenset(),
+        ),
+    )
+    assert selected is not None
+    assert selected.candidate.question_id == str(second_id)
 
 
 def test_empty_dict_yields_valid_default_state() -> None:
@@ -118,3 +161,44 @@ def test_to_dict_is_json_serializable() -> None:
     # Must not raise — the payload is stored as JSONB.
     dumped = json.dumps(data.to_dict())
     assert "closing" in dumped
+
+
+def test_outcome_competence_default_and_roundtrip() -> None:
+    """Slice 12: per-outcome competence estimate defaults to 0.5 and round-trips."""
+    cov = OutcomeCoverageState(outcome_id="o-1")
+    assert cov.competence_estimate == 0.5  # neutral prior
+    cov.competence_estimate = 0.8
+    again = OutcomeCoverageState.from_dict(cov.to_dict())
+    assert again.competence_estimate == 0.8
+    # Tolerant load of an OLD row without the field → neutral prior.
+    legacy = OutcomeCoverageState.from_dict({"outcome_id": "o-2"})
+    assert legacy.competence_estimate == 0.5
+
+
+def test_outcome_claims_default_and_roundtrip() -> None:
+    """Slice 9: per-outcome bounded claims log defaults empty and round-trips."""
+    cov = OutcomeCoverageState(outcome_id="o-1")
+    assert cov.claims == []
+    cov.claims = ["stores facts", "grain is per-transaction"]
+    again = OutcomeCoverageState.from_dict(cov.to_dict())
+    assert again.claims == ["stores facts", "grain is per-transaction"]
+    # Tolerant load of an OLD row without the field → empty list.
+    legacy = OutcomeCoverageState.from_dict({"outcome_id": "o-2"})
+    assert legacy.claims == []
+
+
+def test_turns_in_phase_defaults_and_roundtrips() -> None:
+    """Slice 7: phase-dwell tracking defaults safely and survives a round-trip."""
+    d = InterviewRuntimeStateData()
+    assert d.turns_in_phase == 0
+    assert d.warmup_turns_target == 1
+    # Tolerant load of an OLD row without the field → default 0.
+    loaded = InterviewRuntimeStateData.from_dict({"phase": "core"})
+    assert loaded.turns_in_phase == 0
+    assert loaded.warmup_turns_target == 1
+    # Round-trip preserves an explicit value.
+    d.turns_in_phase = 3
+    d.warmup_turns_target = 2
+    again = InterviewRuntimeStateData.from_dict(d.to_dict())
+    assert again.turns_in_phase == 3
+    assert again.warmup_turns_target == 2

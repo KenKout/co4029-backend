@@ -7,9 +7,11 @@ Two providers are selected by ``settings.image_ocr_provider``:
   ``SourceLocation`` records when the ``image_to_data`` call surfaces
   per-word geometry.
 * ``llm_vision`` — calls ``LLMGateway.generate_json`` with
-  ``LLMRole.VISION`` and a base64-encoded image part. Used in cloud
-  deployments where shipping a tesseract binary is undesirable. Output
-  is a single ``SourceLocation`` covering the whole image.
+  ``LLMRole.VISION`` and a proper OpenAI-style multimodal image part
+  (a base64 ``data:`` URL passed as an ``image_url`` content block, so
+  the model actually sees the image). Used in API-only deployments where
+  shipping a tesseract binary is undesirable. Output is a single
+  ``SourceLocation`` covering the whole image.
 """
 
 from __future__ import annotations
@@ -50,9 +52,9 @@ def _read_source(source: BinaryIO | bytes | str) -> bytes:
     return source.read()
 
 
-def _tesseract_extract(raw: bytes) -> ExtractedContent:
+def _tesseract_extract(raw: bytes, *, lang: str) -> ExtractedContent:
     image = Image.open(io.BytesIO(raw))
-    data = pytesseract.image_to_data(image, output_type=pytesseract.Output.DICT)
+    data = pytesseract.image_to_data(image, lang=lang, output_type=pytesseract.Output.DICT)
     words = data.get("text") or []
     lefts = data.get("left") or []
     tops = data.get("top") or []
@@ -85,10 +87,18 @@ def _tesseract_extract(raw: bytes) -> ExtractedContent:
     )
 
 
-def _image_size(raw: bytes) -> tuple[int, int]:
+def _image_meta(raw: bytes) -> tuple[tuple[int, int], str]:
+    """Return ``((width, height), mime)`` for the raw image bytes.
+
+    The MIME drives the data-URL prefix sent to the vision model. Falls back
+    to ``image/png`` when Pillow can't map the format (rare; keeps the data
+    URL well-formed rather than emitting an empty subtype).
+    """
     with Image.open(io.BytesIO(raw)) as image:
         width, height = image.size
-        return int(width), int(height)
+        fmt = (image.format or "PNG").lower()
+        mime = f"image/{'jpeg' if fmt in ('jpg', 'jpeg') else fmt}"
+        return (int(width), int(height)), mime
 
 
 @register_extractor("image/png")
@@ -113,7 +123,9 @@ class ImageExtractor:
         raw = await asyncio.to_thread(_read_source, source)
         provider = self._settings.image_ocr_provider
         if provider == "tesseract":
-            return await asyncio.to_thread(_tesseract_extract, raw)
+            return await asyncio.to_thread(
+                _tesseract_extract, raw, lang=self._settings.image_ocr_lang
+            )
         if provider == "llm_vision":
             return await self._llm_vision_extract(raw)
         raise ValueError(f"Unknown image_ocr_provider: {provider!r}")
@@ -126,16 +138,19 @@ class ImageExtractor:
                 "instantiating outside the registry dispatch path."
             )
         encoded = await asyncio.to_thread(base64.b64encode, raw)
-        size = await asyncio.to_thread(_image_size, raw)
-        user_prompt = (
-            f"{_VISION_USER_PROMPT}\n\nImage (base64, {len(raw)} bytes): {encoded.decode('ascii')}"
-        )
+        size, mime = await asyncio.to_thread(_image_meta, raw)
+        # Proper OpenAI-style multimodal image part: the model receives a
+        # base64 data URL as a real image_url content block, not text. The
+        # earlier implementation pasted base64 into the prompt string, so the
+        # model never actually saw the image.
+        data_url = f"data:{mime};base64,{encoded.decode('ascii')}"
         result = await self._gateway.generate_json(
             role=LLMRole.VISION,
             system_prompt=_VISION_SYSTEM_PROMPT,
-            user_prompt=user_prompt,
+            user_prompt=_VISION_USER_PROMPT,
             db=self._db,
             stage_name=self._stage_name,
+            image_data_url=data_url,
         )
         content = result.content_json
         text = ""

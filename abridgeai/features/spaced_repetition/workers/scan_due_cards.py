@@ -140,6 +140,10 @@ async def _dispatch_for_student(
         notification_type="spaced_repetition",
         title=messages.due_cards_title(due_count=due_count, locale=locale),
         body=messages.due_cards_body(locale=locale),
+        # Cross-course summary ("N cards due") — no single course context, so
+        # point at the learner progress page where due cards surface. Option B:
+        # the producer builds the navigable path at creation time.
+        action_url="/progress",
     )
 
 

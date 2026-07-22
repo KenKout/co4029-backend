@@ -8,12 +8,14 @@ Classify the utterance into exactly ONE of these intents:
 * "partial_answer" — relevant content but clearly incomplete / trails off.
 * "ask_to_repeat" — asks the interviewer to repeat/say the question again.
 * "ask_for_clarification" — asks what a term/the question means.
+* "ask_for_hint" — asks for a small hint or a way to structure the response.
 * "ask_for_more_time" — asks for a moment to think.
 * "skip_question" — asks to skip / move on / pass this question.
 * "cannot_answer" — says they don't know / can't answer.
 * "technical_issue" — reports a mic/audio/camera/connection problem.
 * "off_topic" — talks about something unrelated to the question.
 * "end_interview" — asks to end/stop/finish the whole interview.
+* "frustrated" — expresses frustration or intent to give up ("this is pointless", "I give up", "waste of time"). NOT the same as a wrong answer or "I don't know".
 
 Rules:
 * When in doubt between "answer" and "partial_answer", prefer "answer".

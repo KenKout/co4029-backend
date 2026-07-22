@@ -13,6 +13,8 @@ from __future__ import annotations
 
 from scripts.voice_harness.run_harness import (
     ScenarioResult,
+    _security_failure_reason,
+    _security_requirement_ok,
     _strict_adaptive_ok,
     _strict_failure_reason,
 )
@@ -81,3 +83,28 @@ def test_strict_ok_with_partial_fallback() -> None:
     """Some fallback is fine as long as not EVERY turn fell back."""
     r = _adaptive_result(decision_count=3, fallback_count=1)
     assert _strict_adaptive_ok(r) is True
+
+
+def test_security_requirement_is_opt_in() -> None:
+    assert _security_requirement_ok(_adaptive_result()) is True
+
+
+def test_security_requirement_uses_persisted_assessed_and_blocked_events() -> None:
+    result = _adaptive_result(
+        required_security_blocks=3,
+        security_assessment_count=3,
+        security_blocked_count=3,
+    )
+    assert _security_requirement_ok(result) is True
+
+
+def test_security_requirement_fails_when_voice_turn_was_not_blocked() -> None:
+    result = _adaptive_result(
+        required_security_blocks=2,
+        security_assessment_count=2,
+        security_blocked_count=1,
+    )
+    assert _security_requirement_ok(result) is False
+    reason = _security_failure_reason(result)
+    assert "required at least 2" in reason
+    assert "blocked=1" in reason

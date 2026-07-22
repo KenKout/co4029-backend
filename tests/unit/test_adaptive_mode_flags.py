@@ -42,7 +42,12 @@ def _settings(**overrides: bool) -> Settings:
         "test_database_url": "postgresql+psycopg://u:p@localhost:5432/db_test",
     }
     base.update(overrides)  # type: ignore[arg-type]
-    return Settings(**base)  # type: ignore[arg-type]
+    # _env_file=None disables .env file loading so these tests assert against
+    # the declared code defaults, not an ambient host .env (the deployed .env
+    # exports ADAPTIVE_INTERVIEWER_VOICE_ENABLED=true to run the live agent,
+    # which would otherwise override the default this suite verifies). The
+    # autouse fixture clears the process env; this closes the file-load hole.
+    return Settings(_env_file=None, **base)  # type: ignore[arg-type,call-arg]
 
 
 def test_master_off_disables_every_mode() -> None:
@@ -101,3 +106,55 @@ def test_unknown_mode_is_disabled() -> None:
     """An unrecognized mode is treated conservatively as legacy."""
     s = _settings(adaptive_interviewer_enabled=True)
     assert s.adaptive_enabled_for_mode("carrier-pigeon") is False
+
+
+# ── Adaptive v2 flag matrix ──────────────────────────────────────────────────
+
+
+def test_v2_flags_default_off() -> None:
+    """Every v2 flag defaults OFF so existing traffic is untouched."""
+    s = _settings()
+    assert s.adaptive_interviewer_v2_enabled is False
+    assert s.adaptive_v2_phases_enabled is False
+    assert s.adaptive_v2_depth_probe_enabled is False
+    assert s.adaptive_v2_cross_turn_enabled is False
+    assert s.adaptive_v2_affect_enabled is False
+    assert s.adaptive_v2_hint_ladder_enabled is False
+    assert s.adaptive_v2_per_outcome_difficulty_enabled is False
+    assert s.adaptive_v2_rich_closing_enabled is False
+
+
+def test_v2_resolver_requires_master_and_v1() -> None:
+    """A v2 sub-feature needs v1 mode gate ON, v2 master ON, and sub-flag ON."""
+    s = _settings(
+        adaptive_interviewer_enabled=True,
+        adaptive_interviewer_text_enabled=True,
+        adaptive_interviewer_v2_enabled=True,
+        adaptive_v2_phases_enabled=True,
+    )
+    assert s.adaptive_v2_feature_enabled("text", "phases") is True
+    # v2 master off → every sub-feature off even if the sub-flag is on.
+    s2 = _settings(
+        adaptive_interviewer_enabled=True,
+        adaptive_interviewer_text_enabled=True,
+        adaptive_interviewer_v2_enabled=False,
+        adaptive_v2_phases_enabled=True,
+    )
+    assert s2.adaptive_v2_feature_enabled("text", "phases") is False
+    # v1 mode gate off → v2 cannot run for that mode.
+    s3 = _settings(
+        adaptive_interviewer_enabled=True,
+        adaptive_interviewer_text_enabled=False,
+        adaptive_interviewer_v2_enabled=True,
+        adaptive_v2_phases_enabled=True,
+    )
+    assert s3.adaptive_v2_feature_enabled("text", "phases") is False
+
+
+def test_v2_unknown_feature_fails_closed() -> None:
+    s = _settings(
+        adaptive_interviewer_enabled=True,
+        adaptive_interviewer_text_enabled=True,
+        adaptive_interviewer_v2_enabled=True,
+    )
+    assert s.adaptive_v2_feature_enabled("text", "not-a-feature") is False

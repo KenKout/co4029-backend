@@ -39,6 +39,7 @@ async def insert_notification(
     body: str,
     entity_type: str | None,
     entity_id: UUID | None,
+    action_url: str | None = None,
     delivery_status: str = "pending",
 ) -> Notification:
     """Persist a Notification row (no commit -- caller controls transaction)."""
@@ -49,6 +50,7 @@ async def insert_notification(
         body=body,
         entity_type=entity_type,
         entity_id=entity_id,
+        action_url=action_url,
         delivery_status=delivery_status,
     )
     db.add(row)

@@ -26,7 +26,7 @@ from typing import Any
 
 # Current schema version of the serialized state payload. Bump on incompatible
 # shape changes so ``from_dict`` can migrate old payloads if ever needed.
-STATE_SCHEMA_VERSION = 2
+STATE_SCHEMA_VERSION = 9
 
 
 class InterviewPhase(str, Enum):  # noqa: UP042 -- StrEnum changes value coercion; match codebase convention
@@ -45,6 +45,29 @@ class CoverageStatus(str, Enum):  # noqa: UP042 -- StrEnum changes value coercio
     INSUFFICIENT = "insufficient"
 
 
+class InteractionState(str, Enum):  # noqa: UP042 -- match codebase convention
+    """Per-turn interaction lifecycle (Slice 4).
+
+    This is a SEPARATE axis from ``InterviewPhase``. ``InterviewPhase`` tracks
+    *progress* through the interview (opening → core → closing → completed);
+    ``InteractionState`` tracks what the current *turn* is waiting on. Keeping
+    them distinct avoids overloading ``phase`` — e.g. an end-confirmation can be
+    pending (``CONFIRMING_END``) while the phase is still ``CORE``.
+
+    Most turns sit in ``AWAITING_ANSWER``. ``CONFIRMING_END`` is the only state
+    that currently changes control flow (it gates the confirm/cancel handling);
+    the others are reserved for richer client rendering and future slices, and
+    default deserialization is tolerant so older rows load as ``AWAITING_ANSWER``.
+    """
+
+    ASKING = "asking"
+    AWAITING_ANSWER = "awaiting_answer"
+    ANALYZING = "analyzing"
+    CONFIRMING_END = "confirming_end"
+    CLOSING = "closing"
+    COMPLETED = "completed"
+
+
 @dataclass
 class OutcomeCoverageState:
     """Provisional (runtime) coverage of a single learning outcome.
@@ -54,13 +77,28 @@ class OutcomeCoverageState:
     """
 
     outcome_id: str
+    # Raw count of evidence items attributed to this outcome (audit / traceability).
     evidence_count: int = 0
+    # Weighted provisional coverage (Slice 2): confident supporting evidence adds
+    # 2, confident partial support adds 1, contradiction/insufficient/low-confidence
+    # add 0. An outcome is provisionally sufficient at COVERAGE_SUFFICIENT_POINTS.
+    # This — not the raw evidence_count — drives runtime selection sufficiency.
+    coverage_points: int = 0
     provisional_score: float | None = None
     confidence: float = 0.0
     status: CoverageStatus = CoverageStatus.NOT_STARTED
     last_updated_at: str | None = None
     supporting_turn_ids: list[str] = field(default_factory=list)
     missing_evidence: list[str] = field(default_factory=list)
+    # Bounded log of the candidate's own prior claims about this outcome (Slice
+    # 9, v2). Fed back into answer analysis so the interviewer can spot a
+    # cross-turn contradiction ("earlier you said X"). Their words only — never
+    # rubric/answer content. Bounded to the last few by the writer.
+    claims: list[str] = field(default_factory=list)
+    # Per-outcome competence estimate (Slice 12, v2): EWMA of answer quality for
+    # THIS outcome (0..1), used to calibrate the difficulty of questions probing
+    # it — push harder on strengths, ease on weak areas. 0.5 is the neutral prior.
+    competence_estimate: float = 0.5
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
@@ -69,15 +107,24 @@ class OutcomeCoverageState:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> OutcomeCoverageState:
+        evidence_count = int(data.get("evidence_count", 0))
+        # Backfill for sessions persisted before weighted coverage existed: when
+        # coverage_points is absent, seed it from the raw count so a resumed
+        # in-flight session keeps its already-earned coverage instead of
+        # resetting every outcome to "uncovered".
+        coverage_points = int(data.get("coverage_points", evidence_count) or 0)
         return cls(
             outcome_id=str(data.get("outcome_id", "")),
-            evidence_count=int(data.get("evidence_count", 0)),
+            evidence_count=evidence_count,
+            coverage_points=coverage_points,
             provisional_score=data.get("provisional_score"),
             confidence=float(data.get("confidence", 0.0)),
             status=_coverage_status(data.get("status")),
             last_updated_at=data.get("last_updated_at"),
             supporting_turn_ids=list(data.get("supporting_turn_ids", []) or []),
             missing_evidence=list(data.get("missing_evidence", []) or []),
+            claims=list(data.get("claims", []) or []),
+            competence_estimate=float(data.get("competence_estimate", 0.5)),
         )
 
 
@@ -89,6 +136,10 @@ class CandidateSignals:
     appeared_off_topic: bool = False
     appeared_uncertain: bool = False
     technical_issue_detected: bool = False
+    # Latest detected candidate affect (Slice 10, v2): terse/rambling/nervous/
+    # confident/neutral. Drives utterance TONE only, never control flow. Stored
+    # as the enum value string; None when affect detection is disabled.
+    last_affect: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -103,6 +154,7 @@ class CandidateSignals:
             appeared_off_topic=bool(data.get("appeared_off_topic", False)),
             appeared_uncertain=bool(data.get("appeared_uncertain", False)),
             technical_issue_detected=bool(data.get("technical_issue_detected", False)),
+            last_affect=data.get("last_affect"),
         )
 
 
@@ -125,6 +177,27 @@ class InterviewRuntimeStateData:
     current_question_follow_up_count: int = 0
     total_follow_up_count: int = 0
 
+    # Phase-dwell tracking (Slice 7). ``turns_in_phase`` counts turns spent in
+    # the CURRENT phase (reset to 0 on any phase change); the phase policy uses
+    # it to decide when to advance OPENING → WARMUP → CORE. ``warmup_turns_target``
+    # is how many warmup turns to run before entering CORE (authorable later).
+    turns_in_phase: int = 0
+    warmup_turns_target: int = 1
+
+    # Assistance laddering (Slice 11, v2). ``hint_level`` escalates each time the
+    # candidate asks for a hint on the SAME question (neutral nudge → structural
+    # → worked-approach, never the answer); ``reframe_count`` tracks how many
+    # times the current question has been reframed so each rephrasing differs.
+    # Both reset to 0 when the interview advances to a new question.
+    hint_level: int = 0
+    reframe_count: int = 0
+
+    # Rich closing sub-step marker (Slice 13, v2). Sequences the closing phase:
+    # "" (not started) → "reflection" (self-reflection prompted) → "questions"
+    # (candidate questions invited) → "done" (final sign-off emitted). Only
+    # advanced when rich_closing is enabled; otherwise stays "" → v1 one-shot close.
+    closing_step: str = ""
+
     outcome_coverage: dict[str, OutcomeCoverageState] = field(default_factory=dict)
 
     last_student_intent: dict[str, Any] | None = None
@@ -132,6 +205,13 @@ class InterviewRuntimeStateData:
 
     consecutive_weak_answers: int = 0
     consecutive_strong_answers: int = 0
+
+    # Per-turn interaction lifecycle (Slice 4) — a SEPARATE axis from ``phase``.
+    # ``pending_confirmation`` is True only while an end-confirmation is awaiting
+    # the candidate's yes/no; it gates the confirm/cancel branch and is cleared
+    # on either resolution.
+    interaction_state: InteractionState = InteractionState.AWAITING_ANSWER
+    pending_confirmation: bool = False
 
     candidate_signals: CandidateSignals = field(default_factory=CandidateSignals)
 
@@ -165,11 +245,18 @@ class InterviewRuntimeStateData:
             "completed_question_ids": list(self.completed_question_ids),
             "current_question_follow_up_count": self.current_question_follow_up_count,
             "total_follow_up_count": self.total_follow_up_count,
+            "turns_in_phase": self.turns_in_phase,
+            "warmup_turns_target": self.warmup_turns_target,
+            "hint_level": self.hint_level,
+            "reframe_count": self.reframe_count,
+            "closing_step": self.closing_step,
             "outcome_coverage": {k: v.to_dict() for k, v in self.outcome_coverage.items()},
             "last_student_intent": self.last_student_intent,
             "last_answer_analysis": self.last_answer_analysis,
             "consecutive_weak_answers": self.consecutive_weak_answers,
             "consecutive_strong_answers": self.consecutive_strong_answers,
+            "interaction_state": self.interaction_state.value,
+            "pending_confirmation": self.pending_confirmation,
             "candidate_signals": self.candidate_signals.to_dict(),
             "security_assessment_count": self.security_assessment_count,
             "security_attempt_count": self.security_attempt_count,
@@ -211,17 +298,22 @@ class InterviewRuntimeStateData:
             completed_question_ids=list(data.get("completed_question_ids", []) or []),
             current_question_follow_up_count=int(data.get("current_question_follow_up_count", 0)),
             total_follow_up_count=int(data.get("total_follow_up_count", 0)),
+            turns_in_phase=int(data.get("turns_in_phase", 0)),
+            warmup_turns_target=int(data.get("warmup_turns_target", 1)),
+            hint_level=int(data.get("hint_level", 0)),
+            reframe_count=int(data.get("reframe_count", 0)),
+            closing_step=str(data.get("closing_step", "") or ""),
             outcome_coverage=coverage,
             last_student_intent=data.get("last_student_intent"),
             last_answer_analysis=data.get("last_answer_analysis"),
             consecutive_weak_answers=int(data.get("consecutive_weak_answers", 0)),
             consecutive_strong_answers=int(data.get("consecutive_strong_answers", 0)),
+            interaction_state=_interaction_state(data.get("interaction_state")),
+            pending_confirmation=bool(data.get("pending_confirmation", False)),
             candidate_signals=CandidateSignals.from_dict(data.get("candidate_signals")),
             security_assessment_count=max(0, int(data.get("security_assessment_count", 0))),
             security_attempt_count=max(0, int(data.get("security_attempt_count", 0))),
-            consecutive_security_attempts=max(
-                0, int(data.get("consecutive_security_attempts", 0))
-            ),
+            consecutive_security_attempts=max(0, int(data.get("consecutive_security_attempts", 0))),
             repeated_security_attempt_count=max(
                 0, int(data.get("repeated_security_attempt_count", 0))
             ),
@@ -231,9 +323,7 @@ class InterviewRuntimeStateData:
             security_fallback_count=max(0, int(data.get("security_fallback_count", 0))),
             last_security_category=_optional_short_string(data.get("last_security_category")),
             last_security_action=_optional_short_string(data.get("last_security_action")),
-            last_security_fingerprint=_optional_short_string(
-                data.get("last_security_fingerprint")
-            ),
+            last_security_fingerprint=_optional_short_string(data.get("last_security_fingerprint")),
             last_security_turn_key=_optional_short_string(data.get("last_security_turn_key")),
             security_warning_issued=bool(data.get("security_warning_issued", False)),
             session_security_flagged=bool(data.get("session_security_flagged", False)),
@@ -246,6 +336,13 @@ def _phase(value: object) -> InterviewPhase:
         return InterviewPhase(value)
     except (ValueError, TypeError):
         return InterviewPhase.OPENING
+
+
+def _interaction_state(value: object) -> InteractionState:
+    try:
+        return InteractionState(value)
+    except (ValueError, TypeError):
+        return InteractionState.AWAITING_ANSWER
 
 
 def _coverage_status(value: object) -> CoverageStatus:
@@ -265,6 +362,7 @@ __all__ = [
     "STATE_SCHEMA_VERSION",
     "CandidateSignals",
     "CoverageStatus",
+    "InteractionState",
     "InterviewPhase",
     "InterviewRuntimeStateData",
     "OutcomeCoverageState",

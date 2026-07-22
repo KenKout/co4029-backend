@@ -62,8 +62,20 @@ class ClassKRDistributionRead(BaseModel):
 class DifficultCardRead(BaseModel):
     question_id: UUID
     quiz_id: UUID
+    prompt_text: str
     mean_ef: float
     student_count: int
+
+
+class CardStudentResultRead(BaseModel):
+    student_id: UUID
+    name: str
+    ef: float
+    total_reviews: int
+    last_reviewed_at: datetime | None = None
+    last_correct: bool | None = None
+    correct_count: int
+    review_count: int
 
 
 class AtRiskStudentRead(BaseModel):
@@ -101,6 +113,7 @@ class StudentSrDetailRead(BaseModel):
 
 __all__ = [
     "AtRiskStudentRead",
+    "CardStudentResultRead",
     "CardsDueItem",
     "CardsDuePage",
     "ClassKRDistributionRead",

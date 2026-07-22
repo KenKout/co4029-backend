@@ -34,6 +34,7 @@ def _make_session(*, started_at: datetime):
         id=uuid4(),
         student_id=uuid4(),
         started_at=started_at,
+        assessment_started_at=started_at,
         status="in_progress",
         ended_at=None,
     )
@@ -64,6 +65,45 @@ async def test_time_limit_breached_with_transcript_times_out_and_enqueues():
     assert session.status == "timed_out"
     assert session.ended_at == _NOW
     arq.enqueue_job.assert_awaited_once()
+    assert arq.enqueue_job.await_args.kwargs["_job_id"] == (f"interview-evaluation:{session.id}")
+
+
+@pytest.mark.asyncio
+async def test_recover_stalled_evaluation_uses_deduplicated_job_id():
+    session = _make_session(started_at=_NOW - timedelta(hours=1))
+    session.status = "completed"
+    session.ended_at = _NOW - timedelta(minutes=30)
+    db = AsyncMock()
+    arq = AsyncMock()
+    arq.enqueue_job.return_value = object()
+    with (
+        patch(f"{_LIFECYCLE}.utcnow", return_value=_NOW),
+        patch.object(
+            lifecycle_service.sessions_queries,
+            "list_pending_evaluation_sessions",
+            AsyncMock(return_value=[session]),
+        ) as pending_query,
+    ):
+        count = await lifecycle_service.recover_stalled_evaluations(db, arq_pool=arq)
+
+    assert count == 1
+    assert pending_query.await_args.kwargs["ended_before"] == _NOW - timedelta(minutes=15)
+    arq.enqueue_job.assert_awaited_once_with(
+        "evaluate_interview_session_task",
+        session.student_id,
+        session.id,
+        _job_id=f"interview-evaluation:{session.id}",
+    )
+
+
+@pytest.mark.asyncio
+async def test_recover_stalled_evaluation_skips_without_queue():
+    count = await lifecycle_service.recover_stalled_evaluations(
+        AsyncMock(),
+        arq_pool=None,
+    )
+
+    assert count == 0
 
 
 @pytest.mark.asyncio

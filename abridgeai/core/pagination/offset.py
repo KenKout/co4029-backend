@@ -63,7 +63,7 @@ def _clamp(value: int, lo: int, hi: int) -> int:
 
 async def paginate(
     db: AsyncSession,
-    stmt: Select,
+    stmt: Select[Any],
     *,
     page: int,
     page_size: int,

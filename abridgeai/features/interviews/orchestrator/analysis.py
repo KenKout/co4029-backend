@@ -61,6 +61,11 @@ class ProbeType(str, Enum):  # noqa: UP042 -- match codebase convention
     CHALLENGE_ASSUMPTION = "challenge_assumption"
     EXPLORE_TRADEOFF = "explore_tradeoff"
     RESOLVE_CONTRADICTION = "resolve_contradiction"
+    # Depth probes (Slice 8, v2): dig into a STRONG answer to find the
+    # candidate's ceiling instead of advancing. EXTEND_STRONG asks them to
+    # generalize/extend; PROBE_EDGE_CASE pushes on boundaries/failure modes.
+    EXTEND_STRONG = "extend_strong"
+    PROBE_EDGE_CASE = "probe_edge_case"
 
 
 class EvidenceType(str, Enum):  # noqa: UP042 -- match codebase convention
@@ -125,6 +130,12 @@ class AnswerAnalysis:
     provisional_quality_score: float | None = None
     confidence: float = 0.0
 
+    # Self-correction (Slice 15, v2). True when the candidate noticed and fixed
+    # their OWN mistake within the answer ("actually, it's X, not Y"). A positive
+    # signal: it earns a POSITIVE acknowledgement and suppresses a contradiction
+    # probe pointing at what they already resolved. Defaults False.
+    self_corrected: bool = False
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "relevance": self.relevance.value,
@@ -140,6 +151,7 @@ class AnswerAnalysis:
             "recommended_probe_type": self.recommended_probe_type.value,
             "provisional_quality_score": self.provisional_quality_score,
             "confidence": self.confidence,
+            "self_corrected": self.self_corrected,
         }
 
     @classmethod
@@ -167,6 +179,7 @@ class AnswerAnalysis:
             ),
             provisional_quality_score=_opt_float(data.get("provisional_quality_score")),
             confidence=_confidence(data.get("confidence")),
+            self_corrected=bool(data.get("self_corrected", False)),
         )
 
 

@@ -29,6 +29,10 @@ from abridgeai.core.config import get_settings
 from abridgeai.core.db import get_sessionmaker
 from abridgeai.core.security import CurrentUser
 from abridgeai.features.interviews.realtime import observability as obs
+from abridgeai.features.interviews.services.ceremony import (
+    ensure_ceremony_message,
+    onboarding_ceremony_kind,
+)
 from abridgeai.features.interviews.services.taking import submit_session, take_session_step
 
 logger = logging.getLogger(__name__)
@@ -42,11 +46,9 @@ _arq_pool: ArqRedis | None = None
 class TurnResult:
     """What the agent should speak after a student turn, and whether to end.
 
-    ``suppress_default_closing`` is True when the adaptive interviewer already
-    produced its own closing utterance (in ``speak_text``) — the runtime then
-    skips the generic canned closing remark so the student doesn't hear two
-    closings. False on the legacy path (no adaptive closing was generated), so
-    the runtime speaks its canned remark exactly as before.
+    ``suppress_default_closing`` remains for compatibility with existing voice
+    runtime consumers. Ceremony-aware terminal turns always carry their one
+    canonical closing in ``speak_text`` and set this flag.
     """
 
     speak_text: str | None
@@ -102,6 +104,8 @@ async def get_current_question_text(session_id: UUID, *, language: str = "en") -
         session = await db.get(InterviewSession, session_id)
         if question is None or session is None:
             return None
+        if getattr(session, "onboarding_stage", "completed") != "completed":
+            return None
         assessment = SecurityAssessment(
             category=SecurityCategory.BENIGN,
             detected=False,
@@ -131,6 +135,26 @@ async def get_current_question_text(session_id: UUID, *, language: str = "en") -
         )
         await db.commit()
         return guarded.text
+
+
+async def get_opening_text(session_id: UUID, *, language: str = "en") -> str | None:
+    """Return the persisted greeting for a voice session."""
+    from abridgeai.features.interviews.models import InterviewSession  # noqa: PLC0415
+
+    async with get_sessionmaker()() as db:
+        session = await db.get(InterviewSession, session_id)
+        if session is None:
+            return None
+        if getattr(session, "onboarding_stage", "completed") == "completed":
+            return None
+        message = await ensure_ceremony_message(
+            db,
+            session=session,
+            kind=onboarding_ceremony_kind(session.onboarding_stage),
+            language=getattr(session, "interview_language", language),
+        )
+        await db.commit()
+        return message.content_text
 
 
 async def handle_student_turn(
@@ -224,12 +248,27 @@ async def handle_student_turn(
 
         if finished:
             pool = await _get_arq_pool()
-            await submit_session(db, session_id, actor, arq_pool=pool)
+            session = await submit_session(
+                db,
+                session_id,
+                actor,
+                arq_pool=pool,
+                reason="natural",
+                language=language,
+            )
+            closing_message = await ensure_ceremony_message(
+                db,
+                session=session,
+                kind="closing",
+                language=language,
+                reason="natural",
+            )
             obs.emit(obs.EV_SESSION_SUBMITTED, session_id=session_id, turn_id=turn_id)
             obs.emit(obs.EV_EVALUATION_ENQUEUED, session_id=session_id, turn_id=turn_id)
-            # If the adaptive path generated a closing utterance, speak THAT and
-            # suppress the runtime's canned remark (avoid a double closing).
-            closing = ai_turn_text or followup_text
+            # Ceremony is the canonical terminal utterance for both adaptive
+            # and legacy paths. This prevents the adaptive phrasing layer from
+            # asking one more question after the interview is already final.
+            closing = closing_message.content_text
             suppress = closing is not None
             obs.emit(
                 obs.EV_CLOSING_EMITTED,
@@ -309,6 +348,7 @@ async def record_integrity_event(
 __all__ = [
     "TurnResult",
     "get_current_question_text",
+    "get_opening_text",
     "handle_student_turn",
     "record_integrity_event",
 ]

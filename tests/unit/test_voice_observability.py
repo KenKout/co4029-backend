@@ -215,6 +215,36 @@ def test_report_question_metadata_absent_when_no_advance() -> None:
     assert r.selected_question_difficulty_counts == {}
 
 
+def test_report_counts_v2_actions_and_no_false_loop_rollback() -> None:
+    """Slice 14: new v2 actions (depth probe, closing sub-steps) surface in the
+    action histogram, and consuming the follow-up budget does NOT trip a false
+    question_loop_detected rollback (the histogram is dynamic; loop detection is
+    not action-name based)."""
+    events = [
+        {"event": obs.EV_DECISION, "session_id": "s1", "adaptive": True, "action": "extend_answer"},
+        {
+            "event": obs.EV_DECISION,
+            "session_id": "s1",
+            "adaptive": True,
+            "action": "prompt_self_reflection",
+        },
+        {
+            "event": obs.EV_DECISION,
+            "session_id": "s1",
+            "adaptive": True,
+            "action": "invite_candidate_questions",
+        },
+    ]
+    r = vr.build_report(events)
+    assert r.action_counts.get("extend_answer") == 1
+    assert r.action_counts.get("prompt_self_reflection") == 1
+    assert r.action_counts.get("invite_candidate_questions") == 1
+    # These are normal adaptive decisions → no rollback trigger.
+    signals = vr.evaluate_rollback(r)
+    assert signals.question_loop_detected is False
+    assert signals.should_rollback is False
+
+
 def test_report_latency_percentiles() -> None:
     r = vr.build_report(_events())
     # decision latencies: [1800, 2200, 400] → p50 nearest-rank = 1800, p95 = 2200.
@@ -311,4 +341,78 @@ def test_cli_main_reads_file_and_filters_session(tmp_path: Any, capsys: Any) -> 
     assert out["sessions"] == 1
     assert out["decisions"] == 1
     assert out["adaptive_decisions"] == 1
-    assert out["legacy_decisions"] == 0
+
+
+# ── rollback signal evaluation (Slice 6) ─────────────────────────────────────
+
+
+def test_evaluate_rollback_clean_window_does_not_trip() -> None:
+    # All-adaptive, no errors, no fallback → no rollback.
+    report = vr.build_report(
+        [
+            {"event": obs.EV_TURN_STARTED, "session_id": "s"},
+            {"event": obs.EV_TURN_COMPLETED, "session_id": "s"},
+            {
+                "event": obs.EV_DECISION,
+                "session_id": "s",
+                "adaptive": True,
+                "action": "ask_main_question",
+            },
+        ]
+    )
+    signals = vr.evaluate_rollback(report)
+    assert signals.should_rollback is False
+    assert signals.turn_error_rate_breached is False
+    assert signals.utterance_fallback_rate_breached is False
+    assert signals.legacy_fallback_rate_breached is False
+
+
+def test_evaluate_rollback_trips_on_high_legacy_fallback() -> None:
+    # 1 adaptive vs 9 legacy decisions → 90% legacy fallback, way over 5%.
+    events: list[dict[str, Any]] = [
+        {
+            "event": obs.EV_DECISION,
+            "session_id": "s",
+            "adaptive": True,
+            "action": "ask_main_question",
+        },
+    ]
+    events += [{"event": obs.EV_DECISION, "session_id": "s", "adaptive": False} for _ in range(9)]
+    signals = vr.evaluate_rollback(vr.build_report(events))
+    assert signals.legacy_fallback_rate_breached is True
+    assert signals.should_rollback is True
+
+
+def test_evaluate_rollback_trips_on_turn_errors() -> None:
+    # 100 turns, 5 errored → 5% > 1% threshold.
+    events: list[dict[str, Any]] = []
+    for _ in range(100):
+        events.append({"event": obs.EV_TURN_STARTED, "session_id": "s"})
+    for _ in range(5):
+        events.append({"event": obs.EV_TURN_ERROR, "session_id": "s"})
+    signals = vr.evaluate_rollback(vr.build_report(events))
+    assert signals.turn_error_rate_breached is True
+    assert signals.should_rollback is True
+
+
+def test_evaluate_rollback_empty_window_never_trips() -> None:
+    signals = vr.evaluate_rollback(vr.build_report([]))
+    assert signals.should_rollback is False
+
+
+def test_main_rollback_flag_exit_code(tmp_path: Any, capsys: Any) -> None:
+    import json as _json
+
+    # A window with only legacy decisions → rollback should fire → exit 2.
+    log = tmp_path / "ev.jsonl"
+    log.write_text(
+        "\n".join(
+            '{"event": "voice.decision", "session_id": "s", "adaptive": false}' for _ in range(4)
+        ),
+        encoding="utf-8",
+    )
+    rc = vr.main([str(log), "--rollback"])
+    assert rc == 2
+    out = _json.loads(capsys.readouterr().out)
+    assert out["legacy_fallback_rate_breached"] is True
+    assert out["should_rollback"] is True

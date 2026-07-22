@@ -66,6 +66,8 @@ def canonical_step_result(
     state_version: int,
     ai_turn_id: str | None,
     utterance_status: str,
+    pending_confirmation: bool = False,
+    interaction_state: str | None = None,
 ) -> dict[str, Any]:
     """Produce the canonical superset result for one adaptive turn.
 
@@ -116,6 +118,9 @@ def canonical_step_result(
         "should_finish": should_finish,
         "state_version": state_version,
         "ai_turn_id": ai_turn_id,
+        # ── end-confirmation gate (Slice 4) ──────────────────────────────────
+        "pending_confirmation": pending_confirmation,
+        "interaction_state": interaction_state,
         # ── internal (NOT projected to the student API; audit/logs only) ─────
         "_utterance_status": utterance_status,
         "_should_record_evidence": decision.should_record_academic_evidence,

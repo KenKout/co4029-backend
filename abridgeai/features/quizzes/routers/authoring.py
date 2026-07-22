@@ -67,6 +67,7 @@ from abridgeai.features.quizzes.services import (
     question_bank as question_bank_service,
 )
 from abridgeai.features.quizzes.services.authoring import QuizPublishValidationError
+from abridgeai.features.quizzes.services.publish_gate import QuizApprovalRequiredError
 
 router = APIRouter(prefix="/teacher", tags=["quizzes-authoring"])
 
@@ -328,6 +329,15 @@ async def publish_quiz(
                 "missing_t_exp_question_ids": [str(q) for q in exc.missing_t_exp_question_ids],
             },
         ) from exc
+    except QuizApprovalRequiredError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={
+                "error": "pending_review",
+                "message": str(exc),
+                "pending_question_ids": [str(q) for q in exc.pending_question_ids],
+            },
+        ) from exc
     except AppError as exc:
         raise _bad_request(str(exc)) from exc
     await db.commit()
@@ -368,6 +378,37 @@ async def bulk_set_expected_time(
         raise _bad_request(str(exc)) from exc
     await db.commit()
     return BulkSetExpectedTimeResponse(updated=updated)
+
+
+class BulkApproveRequest(BaseModel):
+    question_ids: list[UUID] = Field(min_length=1)
+
+
+class BulkApproveResponse(BaseModel):
+    approved: int
+
+
+@router.post(
+    "/quizzes/{quiz_id}/questions/bulk-approve",
+    response_model=BulkApproveResponse,
+)
+async def bulk_approve_questions(
+    quiz_id: UUID,
+    payload: BulkApproveRequest,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_QUIZ)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> BulkApproveResponse:
+    """Approve many questions at once (bulk sign-off for AI content)."""
+    try:
+        approved = await authoring_service.bulk_approve_questions(
+            db, quiz_id, payload.question_ids, current_user
+        )
+    except NotFoundError as exc:
+        raise _not_found("quiz", quiz_id) from exc
+    except AppError as exc:
+        raise _bad_request(str(exc)) from exc
+    await db.commit()
+    return BulkApproveResponse(approved=approved)
 
 
 @router.delete("/quizzes/{quiz_id}", status_code=status.HTTP_204_NO_CONTENT)

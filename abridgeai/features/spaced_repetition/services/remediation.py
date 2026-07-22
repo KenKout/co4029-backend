@@ -478,6 +478,13 @@ async def dispatch_remediation_for_card_failure(
         missed_concepts=seed_concepts, resources=resources, locale=locale
     )
 
+    # Precomputed deep-link (Option B): the producer holds the routing
+    # context (course slug) so it builds the exact relative path once. The
+    # learner "continue learning" route is the valid navigable target — the
+    # per-material resources route does not exist on the client, so the body
+    # links (build_deep_link) land nowhere; action_url is the reliable path.
+    action_url = f"/courses/{course_slug}/learn"
+
     await send_notification(
         db,
         recipient_user_id=student_id,
@@ -486,6 +493,7 @@ async def dispatch_remediation_for_card_failure(
         body=body,
         entity_type="quiz_question",
         entity_id=question_id,
+        action_url=action_url,
         arq_pool=arq_pool,
     )
     _logger.info(

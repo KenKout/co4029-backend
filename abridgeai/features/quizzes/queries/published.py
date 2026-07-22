@@ -34,13 +34,11 @@ from uuid import UUID
 
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
-
 from sqlalchemy.orm import selectinload
 
 from abridgeai.features.quizzes.models import (
     Quiz,
     QuizAttempt,
-    QuizAttemptAnswer,
     QuizQuestion,
     QuizQuestionOption,
 )
@@ -69,6 +67,62 @@ class MaxAttemptsReached(Exception):  # noqa: N818  # spec-mandated name (T5.3 �
         super().__init__(f"Quiz {quiz_id} max_attempts={max_attempts} reached")
         self.quiz_id = quiz_id
         self.max_attempts = max_attempts
+
+
+class QuizNotYetOpen(Exception):  # noqa: N818  # matches CooldownActive/MaxAttemptsReached naming
+    """Student tried to start before ``Quiz.available_from``.
+
+    Service layer maps to HTTP 409. Carries ``available_from`` so the
+    router can tell the student when the quiz opens.
+    """
+
+    def __init__(self, *, quiz_id: UUID, available_from: datetime) -> None:
+        super().__init__(f"Quiz {quiz_id} not open until {available_from.isoformat()}")
+        self.quiz_id = quiz_id
+        self.available_from = available_from
+
+
+class QuizClosed(Exception):  # noqa: N818  # matches CooldownActive/MaxAttemptsReached naming
+    """Student tried to start after ``Quiz.available_until``.
+
+    Service layer maps to HTTP 409. Carries ``available_until`` so the
+    router can tell the student when the quiz closed.
+    """
+
+    def __init__(self, *, quiz_id: UUID, available_until: datetime) -> None:
+        super().__init__(f"Quiz {quiz_id} closed at {available_until.isoformat()}")
+        self.quiz_id = quiz_id
+        self.available_until = available_until
+
+
+def _assert_within_schedule_window(quiz: Quiz) -> None:
+    """Enforce the migration-0032 scheduling window on attempt start.
+
+    NULL columns disable the respective bound, so pre-existing quizzes
+    (all NULL) are unaffected.
+
+    * ``available_from`` → hard "not open yet" floor (raises
+      :class:`QuizNotYetOpen`, router → 409).
+    * ``available_until`` → hard "closed" ceiling (raises
+      :class:`QuizClosed`, router → 409).
+
+    ``due_at`` is a SOFT deadline and is deliberately NOT enforced here —
+    the UI flags late attempts, but a student can still start after it.
+    Only the two hard bounds gate attempt creation.
+    """
+    now = datetime.now(UTC)
+    available_from = quiz.available_from
+    if available_from is not None:
+        if available_from.tzinfo is None:
+            available_from = available_from.replace(tzinfo=UTC)
+        if now < available_from:
+            raise QuizNotYetOpen(quiz_id=quiz.id, available_from=available_from)
+    available_until = quiz.available_until
+    if available_until is not None:
+        if available_until.tzinfo is None:
+            available_until = available_until.replace(tzinfo=UTC)
+        if now > available_until:
+            raise QuizClosed(quiz_id=quiz.id, available_until=available_until)
 
 
 def _published_clause() -> tuple[Any, ...]:
@@ -150,6 +204,8 @@ async def get_quiz_for_taking(
     quiz = await get_published_quiz(db, quiz_id)
     if quiz is None:
         return None
+
+    _assert_within_schedule_window(quiz)
 
     # ------------------------------------------------------------------
     # Cooldown gate — most-recent submitted_at + cooldown_hours > now ?
@@ -251,7 +307,12 @@ async def list_quiz_questions_with_options(
     """
     stmt = (
         select(QuizQuestion)
-        .where(QuizQuestion.quiz_id == quiz_id)
+        .where(
+            QuizQuestion.quiz_id == quiz_id,
+            # Approved-only: the published/preview view mirrors what a student
+            # sees, so pending/rejected drafts must not surface here either.
+            QuizQuestion.review_status == "approved",
+        )
         .order_by(QuizQuestion.position)
     )
     questions = list((await db.execute(stmt)).scalars().all())
@@ -271,6 +332,8 @@ async def list_quiz_questions_with_options(
 __all__ = [
     "CooldownActive",
     "MaxAttemptsReached",
+    "QuizClosed",
+    "QuizNotYetOpen",
     "get_attempt_for_review",
     "get_published_quiz",
     "get_quiz_for_taking",

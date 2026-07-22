@@ -26,6 +26,15 @@ from abridgeai.features.interviews.orchestrator.analysis import (
     Relevance,
     Specificity,
 )
+from abridgeai.features.interviews.orchestrator.coverage import (
+    COVERAGE_SUFFICIENT_POINTS,
+    STRONG_CONFIDENCE_MIN,
+    apply_evidence_to_coverage,
+    evidence_points,
+    is_provisionally_sufficient,
+    is_strong_answer,
+    is_weak_answer,
+)
 from abridgeai.features.interviews.orchestrator.decision import (
     AcknowledgementStyle,
     DecisionInputs,
@@ -34,10 +43,17 @@ from abridgeai.features.interviews.orchestrator.decision import (
     ReasonCode,
     decide_next_action,
 )
+from abridgeai.features.interviews.orchestrator.difficulty import (
+    STREAK_ADJUST_THRESHOLD,
+    difficulty_rank,
+    target_difficulty_level,
+    update_streaks,
+)
 from abridgeai.features.interviews.orchestrator.intent import (
     NON_ACADEMIC_INTENTS,
     IntentClassification,
     StudentIntent,
+    classify_confirmation_reply,
 )
 from abridgeai.features.interviews.orchestrator.mapping import canonical_step_result
 from abridgeai.features.interviews.orchestrator.pipeline import (
@@ -56,6 +72,7 @@ from abridgeai.features.interviews.orchestrator.selection import (
 from abridgeai.features.interviews.orchestrator.state import (
     CandidateSignals,
     CoverageStatus,
+    InteractionState,
     InterviewPhase,
     InterviewRuntimeStateData,
     OutcomeCoverageState,
@@ -75,6 +92,17 @@ __all__ = [
     "persona_from",
     "ACADEMIC_INTENTS",
     "NON_ACADEMIC_INTENTS",
+    "COVERAGE_SUFFICIENT_POINTS",
+    "STRONG_CONFIDENCE_MIN",
+    "apply_evidence_to_coverage",
+    "evidence_points",
+    "is_provisionally_sufficient",
+    "is_strong_answer",
+    "is_weak_answer",
+    "STREAK_ADJUST_THRESHOLD",
+    "difficulty_rank",
+    "target_difficulty_level",
+    "update_streaks",
     "AcknowledgementStyle",
     "AnswerAnalysis",
     "CandidateQuestion",
@@ -85,6 +113,7 @@ __all__ = [
     "DecisionInputs",
     "EvidenceType",
     "IntentClassification",
+    "InteractionState",
     "InterviewPhase",
     "InterviewRuntimeStateData",
     "InterviewerActionType",
@@ -100,6 +129,7 @@ __all__ = [
     "Specificity",
     "StudentIntent",
     "decide_next_action",
+    "classify_confirmation_reply",
     "perceive_turn",
     "score_candidate",
     "select_next_question",

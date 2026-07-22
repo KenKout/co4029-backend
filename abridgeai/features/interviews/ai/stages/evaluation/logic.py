@@ -1,7 +1,7 @@
 """Interview EVALUATION stage orchestrator (T6.8).
 
 Runs after ``interview_sessions.status='completed'`` to compute per-criterion
-rubric scores. Each candidate response is judged in **one** LLM call against
+rubric scores. Each answered question is judged in **one** LLM call against
 **all** configured rubric criteria (per-criterion calls would N×M too many
 round-trips for a typical 10-question interview). Per-response evaluations
 are then folded into a session-level :class:`RubricScores` by
@@ -43,6 +43,7 @@ from abridgeai.features.interviews.ai.stages.evaluation.rubric import (
     ResponseEvaluation,
     RubricScores,
     aggregate_rubric_scores,
+    build_criterion_score,
     resolve_rubric,
 )
 
@@ -69,6 +70,7 @@ async def evaluate_outcomes(
     outcomes: Sequence[InterviewOutcome],
     questions: Sequence[InterviewQuestion],
     answers: Sequence[InterviewSessionMessage],
+    question_prompts: Mapping[UUID, str] | None = None,
     pipeline_run_id: UUID | None = None,
     gateway: LLMGateway | None = None,
 ) -> OutcomeVerdicts:
@@ -88,7 +90,11 @@ async def evaluate_outcomes(
     if not expected_outcome_ids:
         return build_outcome_verdicts([])
 
-    transcript = _build_transcript(questions, answers)
+    transcript = _build_transcript(
+        questions,
+        answers,
+        question_prompts=question_prompts,
+    )
     if not transcript:
         # No candidate answers → every outcome defaults to not-met via the parser.
         return build_outcome_verdicts(
@@ -122,14 +128,17 @@ async def evaluate_outcomes(
 def _build_transcript(
     questions: Sequence[InterviewQuestion],
     answers: Sequence[InterviewSessionMessage],
+    *,
+    question_prompts: Mapping[UUID, str] | None = None,
 ) -> list[dict[str, str]]:
     """Pair each candidate answer with its question prompt, in answer order.
 
-    Answers are ``role='user'`` rows; each carries ``session_question_id`` ->
-    ``InterviewQuestion.id``. Answers with no resolvable question still surface
-    (question text empty) so the judge sees the full candidate input.
+    Answers are ``role='user'`` rows whose ``session_question_id`` references
+    ``InterviewSessionQuestion.id``. The service supplies the resolved prompt
+    mapping; direct callers can still use question IDs. Unresolvable answers
+    remain in the transcript with an empty prompt.
     """
-    prompts_by_question = _question_prompts(questions)
+    prompts_by_question = dict(question_prompts or _question_prompts(questions))
     transcript: list[dict[str, str]] = []
     for answer in answers:
         if not _is_candidate_answer(answer):
@@ -153,7 +162,6 @@ def _outcome_for_verdict(outcome: InterviewOutcome) -> dict[str, Any]:
     }
 
 
-
 async def evaluate_session(
     db: AsyncSession,
     *,
@@ -162,10 +170,12 @@ async def evaluate_session(
     questions: Sequence[InterviewQuestion],
     answers: Sequence[InterviewSessionMessage],
     config: Mapping[str, Any] | None = None,
+    question_prompts: Mapping[UUID, str] | None = None,
+    expected_question_ids: Sequence[UUID] | None = None,
     pipeline_run_id: UUID | None = None,
     gateway: LLMGateway | None = None,
 ) -> RubricScores:
-    """Score every candidate answer against the configured rubric.
+    """Score every configured question against the configured rubric.
 
     Parameters
     ----------
@@ -185,8 +195,8 @@ async def evaluate_session(
         message's ``session_question_id``.
     answers
         Candidate response messages (``role='user'`` rows in
-        ``interview_session_messages``). One LLM judge call is fired
-        per answer.
+        ``interview_session_messages``). Turns tied to the same question are
+        combined and judged in one LLM call.
     config
         Interview run config (``rubric_weights``, ``rubric_criteria``).
         Falls back to four-criterion equal-weight default — see
@@ -209,25 +219,36 @@ async def evaluate_session(
     rubric_weights = resolve_rubric(config)
     expected_criteria = tuple(rubric_weights.keys())
 
-    if not answers or not expected_criteria:
+    if not expected_criteria:
         return aggregate_rubric_scores([], rubric_weights)
 
-    prompts_by_question = _question_prompts(questions)
+    prompts_by_question = dict(question_prompts or _question_prompts(questions))
+    all_question_ids = list(
+        expected_question_ids
+        if expected_question_ids is not None
+        else (question.id for question in questions)
+    )
     outcome_views = [_outcome_for_prompt(outcome) for outcome in outcomes]
     gateway = gateway or LLMGateway()
     system_prompt = render_prompt("prompts/system.j2")
 
-    response_evaluations: list[ResponseEvaluation] = []
+    # Adaptive follow-ups can persist several user turns against the same
+    # session question. Grade those turns together so one answered question
+    # contributes exactly one rubric row and cannot outweigh skipped questions.
+    responses_by_question: dict[UUID, list[str]] = {}
     for answer in answers:
         if not _is_candidate_answer(answer):
             continue
-        question_id = getattr(answer, "session_question_id", None)
-        question_prompt = (
-            prompts_by_question.get(question_id, "") if isinstance(question_id, UUID) else ""
-        )
         response_text = _candidate_response_text(answer)
         if not response_text:
             continue
+        question_id = _resolve_session_question_id(answer, session)
+        responses_by_question.setdefault(question_id, []).append(response_text)
+
+    response_evaluations: list[ResponseEvaluation] = []
+    for question_id, response_parts in responses_by_question.items():
+        question_prompt = prompts_by_question.get(question_id, "")
+        response_text = "\n\n".join(response_parts)
 
         user_prompt = json.dumps(
             {
@@ -253,8 +274,30 @@ async def evaluate_session(
         criterion_scores = parse_evaluation_response(payload, expected_criteria=expected_criteria)
         response_evaluations.append(
             ResponseEvaluation(
-                session_question_id=_resolve_session_question_id(answer, session),
+                session_question_id=question_id,
                 criterion_scores=criterion_scores,
+            )
+        )
+
+    # A completed attempt is graded against the complete published question
+    # set, including when the candidate ends early. Unanswered questions must
+    # not disappear from the denominator: represent each one as an explicit
+    # zero across every rubric criterion without spending an LLM call.
+    answered_question_ids = {evaluation.session_question_id for evaluation in response_evaluations}
+    for question_id in all_question_ids:
+        if question_id in answered_question_ids:
+            continue
+        response_evaluations.append(
+            ResponseEvaluation(
+                session_question_id=question_id,
+                criterion_scores=[
+                    build_criterion_score(
+                        criterion,
+                        0,
+                        "No answer was submitted for this question.",
+                    )
+                    for criterion in expected_criteria
+                ],
             )
         )
 
@@ -291,6 +334,9 @@ def _candidate_response_text(message: InterviewSessionMessage) -> str:
     if isinstance(metadata, dict) and metadata.get("kind") in {
         "security",
         "turn_control",
+        "clarification",
+        "term_explanation",
+        "hint",
         "end_request",
     }:
         safe = metadata.get("safe_academic_text")

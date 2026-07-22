@@ -16,6 +16,7 @@ class NotificationRead(BaseModel):
     entity_id: UUID | None
     title: str
     body: str
+    action_url: str | None
     scheduled_for: datetime | None
     delivered_at: datetime | None
     read_at: datetime | None

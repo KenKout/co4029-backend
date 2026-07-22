@@ -30,12 +30,29 @@ class StudentIntent(str, Enum):  # noqa: UP042 -- StrEnum changes value coercion
     PARTIAL_ANSWER = "partial_answer"
     ASK_TO_REPEAT = "ask_to_repeat"
     ASK_FOR_CLARIFICATION = "ask_for_clarification"
+    ASK_FOR_HINT = "ask_for_hint"
     ASK_FOR_MORE_TIME = "ask_for_more_time"
     SKIP_QUESTION = "skip_question"
     CANNOT_ANSWER = "cannot_answer"
     TECHNICAL_ISSUE = "technical_issue"
     OFF_TOPIC = "off_topic"
     END_INTERVIEW = "end_interview"
+    # End-confirmation replies (Slice 4). Only meaningful while the runtime has
+    # a pending end-confirmation; otherwise they fall through to answer-handling
+    # (a bare "yes"/"no" mid-question is not an end signal).
+    CONFIRM_END = "confirm_end"
+    CANCEL_END = "cancel_end"
+    # Rich closing (Slice 13, v2). The candidate asks the interviewer a question
+    # ("do you have feedback?", "can I ask something?"). Benign, NEVER scored —
+    # handled only during the closing phase; mid-interview it falls through to
+    # the normal classifier so a genuine answer is never hijacked.
+    ASK_INTERVIEWER_QUESTION = "ask_interviewer_question"
+    # Frustration / disengagement (Slice 19A, v2). The candidate expresses
+    # frustration or intent to give up ("this is pointless", "I give up"). Benign
+    # and NEVER scored — the decision layer de-escalates (acknowledges, resumes
+    # the same question) only when the feature is enabled; otherwise it falls
+    # through to normal answer handling (byte-for-byte v1).
+    FRUSTRATED = "frustrated"
 
 
 # Intents that must NEVER be recorded as an academic answer / scored.
@@ -43,10 +60,15 @@ NON_ACADEMIC_INTENTS: frozenset[StudentIntent] = frozenset(
     {
         StudentIntent.ASK_TO_REPEAT,
         StudentIntent.ASK_FOR_CLARIFICATION,
+        StudentIntent.ASK_FOR_HINT,
         StudentIntent.ASK_FOR_MORE_TIME,
         StudentIntent.SKIP_QUESTION,
         StudentIntent.TECHNICAL_ISSUE,
         StudentIntent.END_INTERVIEW,
+        StudentIntent.CONFIRM_END,
+        StudentIntent.CANCEL_END,
+        StudentIntent.ASK_INTERVIEWER_QUESTION,
+        StudentIntent.FRUSTRATED,
     }
 )
 
@@ -82,15 +104,42 @@ class IntentClassification:
 
 _RULES: tuple[tuple[StudentIntent, tuple[str, ...]], ...] = (
     (
+        # Rich closing (Slice 13): candidate asks the interviewer a question.
+        # HIGH-PRECISION only — these phrasings are unambiguous requests directed
+        # at the interviewer, so they won't hijack a normal mid-interview answer.
+        # (The decision layer only acts on this intent during the closing phase.)
+        StudentIntent.ASK_INTERVIEWER_QUESTION,
+        (
+            r"\b(can|could|may) i ask you (a |one )?(quick )?question\b",
+            r"\bdo you have (any )?(feedback|questions for me)\b",
+            r"\bcan i ask you something\b",
+            r"\b(tôi|mình|em) (có thể )?hỏi (bạn|anh|chị|thầy|cô) (một )?(câu|chút)\b",
+            r"\b(bạn|anh|chị|thầy|cô) có (nhận xét|góp ý|phản hồi) (gì )?(cho (tôi|mình|em))?\b",
+        ),
+    ),
+    (
         StudentIntent.ASK_TO_REPEAT,
         (
+            r"^(please )?repeat([\s,]+please)?[.!?]*$",
+            r"^(again|one more time)[.!?]*$",
             r"\b(can|could) you (please )?repeat\b",
             r"\brepeat the question\b",
             r"\bsay (that|it) again\b",
             r"\bcome again\b",
+            r"^(vui lòng |xin )?(nhắc lại|lặp lại)( (đi|giúp (tôi|mình|em)))?[.!?]*$",
             r"\bnhắc lại câu hỏi\b",
             r"\b(bạn )?(có thể )?nhắc lại\b",
             r"\blặp lại (câu hỏi)?\b",
+        ),
+    ),
+    (
+        StudentIntent.ASK_FOR_HINT,
+        (
+            r"\b(can|could|would) you (please )?(give|provide) me (a )?"
+            r"(small |brief |little )?hint\b",
+            r"\b(can|could) i (please )?(get|have) (a )?(small |brief |little )?hint\b",
+            r"\b(give|provide) me (a )?(small |brief |little )?hint\b",
+            r"\b(gợi ý|cho (tôi|mình|em) một gợi ý)\b",
         ),
     ),
     (
@@ -163,6 +212,28 @@ _RULES: tuple[tuple[StudentIntent, tuple[str, ...]], ...] = (
             r"\b(tôi|mình|em) (muốn )?(dừng|kết thúc)\b",
         ),
     ),
+    (
+        # Frustration / disengagement (Slice 19A). HIGH-PRECISION only — these
+        # are unambiguous expressions of frustration or giving up, so they never
+        # hijack a genuine answer that merely mentions difficulty. The decision
+        # layer de-escalates (does not score, resumes the same question) only
+        # when the feature flag is on.
+        StudentIntent.FRUSTRATED,
+        (
+            r"\bthis is (so |really )?(pointless|useless|ridiculous|stupid)\b",
+            r"\bpointless\b",
+            r"\bwaste of (my )?time\b",
+            r"\bi (just )?give up\b",
+            r"\bi'?m giving up\b",
+            r"\bi'?m (so |really |getting )?frustrated\b",
+            r"\bwhat'?s the point\b",
+            r"\bi can'?t do this\b",
+            r"\bchán (quá|thật|ghê)\b",
+            r"\bbỏ cuộc\b",
+            r"\bmất thời gian\b",
+            r"\bvô nghĩa\b",
+        ),
+    ),
 )
 
 
@@ -191,6 +262,62 @@ def classify_by_rules(utterance: str) -> IntentClassification | None:
                     rationale=f"Deterministic rule match for {intent.value}.",
                     source="rules",
                 )
+    return None
+
+
+# Confirm / cancel replies (Slice 4). These are CONTEXT-SCOPED: a bare "yes" or
+# "no" is only an end-confirm/cancel signal while an end-confirmation is pending,
+# so they are NOT in the general _RULES (that would hijack a legitimate "yes,
+# because…" answer mid-question). ``classify_confirmation_reply`` is called by
+# the runtime ONLY when ``pending_confirmation`` is set.
+_CONFIRM_END_PATTERNS: tuple[str, ...] = (
+    r"^(yes|yeah|yep|yup|confirm|confirmed|end it|do it|sure)[.!?]*$",
+    # While a confirmation is pending, an explicit end-the-interview phrase is a
+    # confirm (the comma/leading "yes," variants are common, so match anywhere).
+    r"\bend (and submit|the interview|this interview|the session|this session)\b",
+    r"\b(yes|please)\b.{0,10}\bend\b",
+    r"\bi'?m sure\b",
+    r"^(có|đúng|vâng|ừ|ok|okay|đồng ý)[.!?]*$",
+    r"\b(kết thúc|dừng)\b.{0,12}\b(đi|luôn|nhé|phỏng vấn)\b",
+)
+_CANCEL_END_PATTERNS: tuple[str, ...] = (
+    r"^(no|nope|nah|cancel|continue|keep going|not yet|wait)[.!?]*$",
+    r"\b(continue|keep going|carry on) (the |with )?(interview|session)?\b",
+    r"\bdon'?t end\b",
+    r"\bnever ?mind\b",
+    r"^(không|khoan|tiếp tục|chưa)[.!?]*$",
+    r"\btiếp tục (đi|nhé)?\b",
+    r"\bđừng (dừng|kết thúc)\b",
+)
+
+
+def classify_confirmation_reply(utterance: str) -> IntentClassification | None:
+    """Classify a reply while an end-confirmation is pending.
+
+    Returns a CONFIRM_END / CANCEL_END verdict on an unambiguous yes/no, or None
+    to let the normal classifier + decision policy decide (the decision layer
+    treats "anything that isn't a confirm" as a cancel while pending, so a
+    None here still resolves safely — this only short-circuits the clear cases).
+    """
+    text = (utterance or "").strip().lower()
+    if not text:
+        return None
+    for pattern in _CANCEL_END_PATTERNS:
+        if re.search(pattern, text):
+            return IntentClassification(
+                intent=StudentIntent.CANCEL_END,
+                confidence=0.9,
+                rationale="Confirmation-scoped cancel reply.",
+                source="rules",
+            )
+    for pattern in _CONFIRM_END_PATTERNS:
+        if re.search(pattern, text):
+            return IntentClassification(
+                intent=StudentIntent.CONFIRM_END,
+                confidence=0.9,
+                rationale="Confirmation-scoped confirm reply.",
+                source="rules",
+            )
     return None
 
 
@@ -244,5 +371,6 @@ __all__ = [
     "IntentClassification",
     "StudentIntent",
     "classify_by_rules",
+    "classify_confirmation_reply",
     "parse_intent_response",
 ]

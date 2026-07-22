@@ -183,6 +183,46 @@ async def test_send_notification_creates_in_app_row(
         assert row is not None
         assert row.title == "Welcome"
         assert row.read_at is None
+        # No action_url passed → informational only (NULL).
+        assert row.action_url is None
+
+
+@pytest.mark.asyncio
+async def test_send_notification_persists_action_url(
+    client: httpx.AsyncClient,
+    session_factory: async_sessionmaker[AsyncSession],
+    seeded_users: SeededUsers,
+    student_bearer: str,
+    clean_notifications: None,
+) -> None:
+    """action_url is persisted and surfaced on the learner API (Option B)."""
+    async with session_factory() as session:
+        notif = await dispatch_service.send_notification(
+            session,
+            recipient_user_id=seeded_users.student_id,
+            notification_type="spaced_repetition",
+            title="Review due",
+            body="You have cards to review.",
+            entity_type="quiz_question",
+            entity_id=uuid.uuid4(),
+            action_url="/courses/intro-to-ml/learn",
+            arq_pool=None,
+        )
+        await session.commit()
+
+    async with session_factory() as session:
+        row = await session.get(Notification, notif.id)
+        assert row is not None
+        assert row.action_url == "/courses/intro-to-ml/learn"
+
+    # The learner inbox API exposes action_url so the client can deep-link.
+    resp = await client.get("/api/v1/me/notifications", headers=_auth(student_bearer))
+    assert resp.status_code == 200, resp.text
+    payload = resp.json()
+    rows = payload["items"] if isinstance(payload, dict) else payload
+    match = next((r for r in rows if r["id"] == str(notif.id)), None)
+    assert match is not None
+    assert match["action_url"] == "/courses/intro-to-ml/learn"
 
 
 @pytest.mark.asyncio

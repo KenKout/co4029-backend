@@ -113,28 +113,62 @@ def _ack_text(persona: Persona, style: AcknowledgementStyle, lang: str) -> str:
 # or probe text. Where the action carries no question (technical issue, pause),
 # the template is self-contained.
 
-# Transitions used when advancing to a new question.
+# Transitions used when advancing to a new question. Standardized natural
+# wording (Natural Interview Transitions spec): a brief thanks + an explicit
+# "move on to the next question" signpost, persona-shaped in tone only. The
+# question text itself is appended separately (never duplicated here).
 _TRANSITION: dict[tuple[Persona, str], str] = {
-    (Persona.STRICT, "en"): "Next question.",
-    (Persona.STRICT, "vi"): "Câu hỏi tiếp theo.",
-    (Persona.NEUTRAL, "en"): "Let's move on.",
-    (Persona.NEUTRAL, "vi"): "Chúng ta tiếp tục nhé.",
-    (Persona.SUPPORTIVE, "en"): "Let's move on to the next one.",
-    (Persona.SUPPORTIVE, "vi"): "Chúng ta chuyển sang câu tiếp theo nhé.",
+    (Persona.STRICT, "en"): "Thank you. Let's move on to the next question.",
+    (Persona.STRICT, "vi"): "Cảm ơn bạn. Chúng ta sang câu hỏi tiếp theo.",
+    (Persona.NEUTRAL, "en"): "Thank you. Now let's move on to the next question.",
+    (Persona.NEUTRAL, "vi"): "Cảm ơn bạn. Bây giờ chúng ta chuyển sang câu hỏi tiếp theo.",
+    (Persona.SUPPORTIVE, "en"): ("Thank you. Now let's move on to the next question together."),
+    (Persona.SUPPORTIVE, "vi"): (
+        "Cảm ơn bạn. Bây giờ chúng ta cùng chuyển sang câu hỏi tiếp theo nhé."
+    ),
+}
+
+# Final-question transition (spec §ending): a short acknowledgment that the
+# last question has been reached. This is a transition-only turn; the separate
+# goodbye/closing turn follows via the existing finish flow.
+_FINAL_QUESTION_TRANSITION: dict[tuple[Persona, str], str] = {
+    (Persona.STRICT, "en"): "Thank you. That was the final question.",
+    (Persona.STRICT, "vi"): "Cảm ơn bạn. Đó là câu hỏi cuối cùng.",
+    (Persona.NEUTRAL, "en"): "Thank you. That was the final question.",
+    (Persona.NEUTRAL, "vi"): "Cảm ơn bạn. Đó là câu hỏi cuối cùng.",
+    (Persona.SUPPORTIVE, "en"): "Thank you. That was the final question — well done.",
+    (Persona.SUPPORTIVE, "vi"): "Cảm ơn bạn. Đó là câu hỏi cuối cùng — bạn đã làm rất tốt.",
 }
 
 
-def _fallback_parts(  # noqa: C901 -- flat per-action dispatch; readability > splitting
+def transition_text(persona: Persona, language: str | None, *, final: bool = False) -> str:
+    """Standardized persona-aware EN/VI transition wording.
+
+    ``final=True`` returns the final-question acknowledgment (spec §ending);
+    otherwise the next-question signpost. Reused by both the legacy-mode
+    deterministic path and transcript persistence so wording stays identical.
+    """
+    lang = _lang(language)
+    table = _FINAL_QUESTION_TRANSITION if final else _TRANSITION
+    return table.get((persona, lang), table[(Persona.NEUTRAL, "en")])
+
+
+def _fallback_parts(  # noqa: C901, PLR0911 -- flat per-action dispatch; readability > splitting
     decision: InterviewerDecision,
     persona: Persona,
     lang: str,
     *,
     question_text: str | None,
+    hint_level: int = 0,
+    reframe_count: int = 0,
 ) -> tuple[str, str, str]:
     """Deterministic (acknowledgement, transition, question_or_probe) per action.
 
     This is the guaranteed fallback (requirement #9): every action type has a
     persona-aware, bilingual template so a failed LLM call never blocks the turn.
+
+    ``hint_level`` / ``reframe_count`` (Slice 11, v2) select an escalating hint
+    or a rephrasing variant; both default to 0 → the original v1 wording.
     """
     action = decision.action
     ack = _ack_text(persona, decision.acknowledgement_style, lang)
@@ -150,23 +184,46 @@ def _fallback_parts(  # noqa: C901 -- flat per-action dispatch; readability > sp
         return ack, transition, q
 
     if action in (
+        InterviewerActionType.CLARIFY_WITHOUT_REVEALING_ANSWER,
+        InterviewerActionType.REFRAME_QUESTION,
+    ):
+        # Spec §wording: clarification/rephrase signpost precedes the safe,
+        # answer-preserving rephrasing. The current question is never advanced
+        # or scored by this control turn. Slice 11: vary the signpost by
+        # reframe_count so a repeated reframe never repeats verbatim.
+        signpost = _reframe_signpost(reframe_count, lang)
+        probe = q or _generic_probe(action, persona, lang)
+        return ack, signpost, probe
+
+    if action is InterviewerActionType.PROVIDE_NEUTRAL_HINT:
+        # Laddered hint (Slice 11): escalate neutral nudge → structural →
+        # worked-approach by hint_level, NEVER revealing the answer.
+        signpost = _probe_signpost(action, persona, lang)
+        probe = q or _laddered_hint(hint_level, lang)
+        return ack, signpost, probe
+
+    if action in (
         InterviewerActionType.PROBE_DEEPER,
         InterviewerActionType.ASK_FOR_EXAMPLE,
         InterviewerActionType.CHALLENGE_REASONING,
         InterviewerActionType.EXPLORE_TRADEOFF,
         InterviewerActionType.RESOLVE_CONTRADICTION,
-        InterviewerActionType.CLARIFY_WITHOUT_REVEALING_ANSWER,
-        InterviewerActionType.REFRAME_QUESTION,
+        InterviewerActionType.EXTEND_ANSWER,
+        InterviewerActionType.PROBE_EDGE_CASE,
     ):
-        # Probe text is supplied by the caller (from analysis / a reframing);
-        # when absent we ask a generic, answer-safe probe.
+        # Hint/term explanation and follow-up probes get a short natural
+        # signpost before the safe assistance (spec §wording). The signpost
+        # acknowledges without implying the previous answer was correct.
+        signpost = _probe_signpost(action, persona, lang)
         probe = q or _generic_probe(action, persona, lang)
-        return ack, "", probe
+        return ack, signpost, probe
 
     if action is InterviewerActionType.REPEAT_QUESTION:
+        # Spec §wording: repeat signpost is a fixed natural phrase; the current
+        # question follows verbatim and unchanged (never advances or scores).
         prefix = {
-            "en": "Of course. Here is the question again:",
-            "vi": "Tất nhiên. Câu hỏi được nhắc lại:",
+            "en": "Of course. I'll repeat the question.",
+            "vi": "Tất nhiên. Tôi sẽ nhắc lại câu hỏi.",
         }[lang]
         return "", prefix, q
 
@@ -191,27 +248,141 @@ def _fallback_parts(  # noqa: C901 -- flat per-action dispatch; readability > sp
         }[lang]
         return "", tech, ""
 
+    if action is InterviewerActionType.REQUEST_END_CONFIRMATION:
+        # End-confirmation gate (Slice 4): ask the candidate to confirm ending
+        # rather than closing immediately. Keeps the current question in play.
+        confirm = {
+            "en": "Just to confirm — would you like to end and submit for grading, or continue the interview?",  # noqa: E501
+            "vi": "Xin xác nhận — bạn muốn kết thúc và nộp bài để chấm điểm, hay tiếp tục buổi phỏng vấn?",  # noqa: E501
+        }[lang]
+        return "", confirm, ""
+
+    if action is InterviewerActionType.CANCEL_END:
+        resume = {
+            "en": "No problem — let's continue.",
+            "vi": "Không sao — chúng ta tiếp tục nhé.",
+        }[lang]
+        return "", resume, q
+
     if action is InterviewerActionType.OPENING:
         return "", "", q
 
     if action in (InterviewerActionType.BEGIN_CLOSING, InterviewerActionType.CLOSE_INTERVIEW):
         closing = {
-            "en": (
-                "That concludes the interview. Before we finish, is there anything "
-                "you would like to clarify or add?"
-            ),
-            "vi": (
-                "Buổi phỏng vấn đến đây là kết thúc. Trước khi dừng lại, bạn có muốn "
-                "làm rõ hay bổ sung điều gì không?"
-            ),
+            "en": "Thank you. That concludes the interview.",
+            "vi": "Cảm ơn bạn. Buổi phỏng vấn kết thúc tại đây.",
         }[lang]
         return ack, "", closing
+
+    # Rich closing sub-steps (Slice 13, v2). Brief, answer-safe, bilingual. Each
+    # is a self-contained turn (no question metadata needed).
+    if action is InterviewerActionType.PROMPT_SELF_REFLECTION:
+        reflection = {
+            "en": (
+                "Before we wrap up: looking back on the interview, what's one thing "
+                "you feel went well, and one you'd approach differently?"
+            ),
+            "vi": (
+                "Trước khi kết thúc: nhìn lại buổi phỏng vấn, bạn thấy điều gì mình "
+                "đã làm tốt, và điều gì bạn sẽ làm khác đi?"
+            ),
+        }[lang]
+        return ack, "", reflection
+
+    if action is InterviewerActionType.INVITE_CANDIDATE_QUESTIONS:
+        invite = {
+            "en": "Thank you for sharing that. Is there anything you'd like to ask me?",
+            "vi": "Cảm ơn bạn đã chia sẻ. Bạn có muốn hỏi tôi điều gì không?",
+        }[lang]
+        return ack, "", invite
+
+    if action is InterviewerActionType.ANSWER_CANDIDATE_QUESTION:
+        # Answer-safe acknowledgement — never reveals rubric/answers or makes
+        # commitments; defers specifics to the teacher/results.
+        reply = {
+            "en": (
+                "That's a good question. I can't share the evaluation details here, "
+                "but your instructor will follow up with feedback and results."
+            ),
+            "vi": (
+                "Đó là một câu hỏi hay. Tôi không thể chia sẻ chi tiết đánh giá ở đây, "
+                "nhưng giảng viên của bạn sẽ phản hồi kèm kết quả sau."
+            ),
+        }[lang]
+        return ack, "", reply
+
+    # Frustration de-escalation (Slice 19A, v2). Warm, encouraging, answer-safe;
+    # acknowledges the feeling and resumes the SAME question (``q``). Never
+    # reveals answer content.
+    if action is InterviewerActionType.DEESCALATE:
+        reassure = {
+            "en": (
+                "That's completely okay — take a breath. There's no penalty here; "
+                "let's take it one step at a time."
+            ),
+            "vi": (
+                "Không sao đâu — bạn cứ bình tĩnh. Không có điểm trừ gì cả; "
+                "chúng ta cứ đi từng bước một nhé."
+            ),
+        }[lang]
+        return reassure, "", q
+
+    # Mid-interview question deferral (Slice 19B, v2). Briefly acknowledge the
+    # candidate's question, defer it to the end, and resume the current question.
+    if action is InterviewerActionType.DEFER_CANDIDATE_QUESTION:
+        defer = {
+            "en": (
+                "Good question — let's come back to that at the end. For now, "
+                "let's stay with the current one."
+            ),
+            "vi": (
+                "Câu hỏi hay — mình sẽ quay lại cuối buổi nhé. Bây giờ, "
+                "chúng ta tiếp tục với câu hiện tại."
+            ),
+        }[lang]
+        return defer, "", q
 
     if action is InterviewerActionType.ACKNOWLEDGE:
         return ack, "", q
 
     # Unknown / unmapped action → neutral, safe.
     return ack, "", q
+
+
+def _probe_signpost(action: InterviewerActionType, persona: Persona, lang: str) -> str:
+    """Short natural signpost before a follow-up probe or safe assistance.
+
+    Spec §wording: follow-ups acknowledge the answer WITHOUT implying it was
+    correct, then ask the probe; hint/term explanations get a brief lead-in
+    before the answer-safe assistance. Tone is persona-shaped only.
+    """
+    if action is InterviewerActionType.PROVIDE_NEUTRAL_HINT:
+        table = {
+            "en": "Here's a small hint to guide you.",
+            "vi": "Đây là một gợi ý nhỏ để bạn định hướng.",
+        }
+        return table[lang]
+    # Depth probes (Slice 8): follow a STRONG answer, so the lead-in genuinely
+    # affirms before pushing further (unlike the neutral follow-up lead-in).
+    if action in (
+        InterviewerActionType.EXTEND_ANSWER,
+        InterviewerActionType.PROBE_EDGE_CASE,
+    ):
+        table = {
+            "en": "That's a strong answer — let's go further.",
+            "vi": "Đó là một câu trả lời tốt — chúng ta hãy đi xa hơn.",
+        }
+        return table[lang]
+    # Follow-up / deeper probing: neutral lead-in, never affirms correctness.
+    followup = {
+        (Persona.STRICT, "en"): "Let's dig into that.",
+        (Persona.STRICT, "vi"): "Chúng ta hãy đi sâu hơn.",
+        (Persona.NEUTRAL, "en"): "Let me follow up on that.",
+        (Persona.NEUTRAL, "vi"): "Tôi muốn hỏi thêm về điều đó.",
+        (Persona.SUPPORTIVE, "en"): "Thanks — let me follow up on that.",
+        (Persona.SUPPORTIVE, "vi"): "Cảm ơn bạn — tôi muốn hỏi thêm một chút.",
+    }
+    return followup.get((persona, lang), followup[(Persona.NEUTRAL, "en")])
 
 
 def _generic_probe(action: InterviewerActionType, persona: Persona, lang: str) -> str:
@@ -243,15 +414,155 @@ def _generic_probe(action: InterviewerActionType, persona: Persona, lang: str) -
         (InterviewerActionType.CLARIFY_WITHOUT_REVEALING_ANSWER, "vi"): (
             "Bạn muốn tôi diễn đạt lại phần nào của câu hỏi?"
         ),
+        (InterviewerActionType.PROVIDE_NEUTRAL_HINT, "en"): (
+            "A small hint: organize your answer around the main concepts in the question "
+            "and how they relate."
+        ),
+        (InterviewerActionType.PROVIDE_NEUTRAL_HINT, "vi"): (
+            "Gợi ý nhỏ: hãy sắp xếp câu trả lời theo các khái niệm chính trong câu hỏi "
+            "và mối quan hệ giữa chúng."
+        ),
         (InterviewerActionType.REFRAME_QUESTION, "en"): "Let me put the question another way.",
         (InterviewerActionType.REFRAME_QUESTION, "vi"): "Để tôi diễn đạt câu hỏi theo cách khác.",
+        (InterviewerActionType.EXTEND_ANSWER, "en"): (
+            "That's solid — can you generalize it or extend it to a broader case?"
+        ),
+        (InterviewerActionType.EXTEND_ANSWER, "vi"): (
+            "Rất tốt — bạn có thể khái quát hóa hoặc mở rộng nó cho một trường hợp rộng hơn không?"
+        ),
+        (InterviewerActionType.PROBE_EDGE_CASE, "en"): (
+            "Where might that break down — what edge cases or failure modes should we consider?"
+        ),
+        (InterviewerActionType.PROBE_EDGE_CASE, "vi"): (
+            "Nó có thể thất bại ở đâu — có trường hợp biên hay tình huống lỗi nào cần cân nhắc không?"  # noqa: E501
+        ),
     }
     return table.get((action, lang), table.get((action, "en"), "Could you say more?"))
+
+
+# Laddered hints (Slice 11, v2). Escalate by hint_level, NEVER revealing the
+# answer: level 0 = neutral structural nudge (the original v1 hint), level 1 =
+# stronger structural scaffold, level 2+ = a worked-approach hint (how to think,
+# not what to say). Level clamps to the last rung.
+_HINT_LADDER: dict[str, tuple[str, ...]] = {
+    "en": (
+        "A small hint: organize your answer around the main concepts in the question "
+        "and how they relate.",
+        "A bigger hint: break the question into its parts and address each one in turn — "
+        "start with the definition, then the 'why', then an example.",
+        "Let's approach it together: pick the single most central idea, state it plainly, "
+        "then explain one consequence of it. You don't need the whole answer at once.",
+    ),
+    "vi": (
+        "Gợi ý nhỏ: hãy sắp xếp câu trả lời theo các khái niệm chính trong câu hỏi "
+        "và mối quan hệ giữa chúng.",
+        "Gợi ý rõ hơn: hãy chia câu hỏi thành các phần và trả lời lần lượt — "
+        "bắt đầu từ định nghĩa, rồi đến 'tại sao', rồi một ví dụ.",
+        "Chúng ta cùng tiếp cận nhé: chọn ý trọng tâm nhất, nêu rõ ràng, "
+        "rồi giải thích một hệ quả của nó. Bạn không cần trả lời hết ngay.",
+    ),
+}
+
+
+def _laddered_hint(hint_level: int, lang: str) -> str:
+    """Answer-safe hint escalating by ``hint_level`` (clamped to the last rung)."""
+    rungs = _HINT_LADDER.get(lang, _HINT_LADDER["en"])
+    idx = max(0, min(hint_level, len(rungs) - 1))
+    return rungs[idx]
+
+
+def laddered_hint(hint_level: int, language: str | None) -> str:
+    """Public answer-safe laddered hint (Slice 11 upgrade).
+
+    Shared by BOTH hint paths so escalation is identical no matter which fires:
+    the adaptive decision path (via ``build_fallback_utterance``) and the
+    pre-adaptive assistance stage (student types "give me a hint"). Accepts a
+    raw ``language`` and normalises it, so callers outside this module don't
+    need to know the en/vi keying.
+    """
+    return _laddered_hint(hint_level, _lang(language))
+
+
+# Rephrasing signposts (Slice 11, v2). Vary by reframe_count so a repeated
+# reframe/clarify never repeats verbatim. Index 0 is the original v1 wording.
+_REFRAME_SIGNPOSTS: dict[str, tuple[str, ...]] = {
+    "en": (
+        "Of course. Let me rephrase the question.",
+        "Let me put it a different way.",
+        "Here's another way to think about what I'm asking.",
+    ),
+    "vi": (
+        "Tất nhiên. Để tôi diễn đạt lại câu hỏi.",
+        "Để tôi nói theo một cách khác.",
+        "Đây là một cách khác để hiểu câu hỏi của tôi.",
+    ),
+}
+
+
+def _reframe_signpost(reframe_count: int, lang: str) -> str:
+    """Rephrasing signpost that differs by ``reframe_count`` (clamped)."""
+    variants = _REFRAME_SIGNPOSTS.get(lang, _REFRAME_SIGNPOSTS["en"])
+    idx = max(0, min(reframe_count, len(variants) - 1))
+    return variants[idx]
 
 
 def _combine(acknowledgement: str, transition: str, question_or_probe: str) -> str:
     """Join the parts into one natural utterance, single-spaced, no doubling."""
     return " ".join(p for p in (acknowledgement, transition, question_or_probe) if p).strip()
+
+
+# Affect-aware tone lead-ins (Slice 10, v2). Prepended to the acknowledgement to
+# warm the tone for a nervous candidate or gently steer a rambling one. TONE
+# ONLY — the action/reason/question are unchanged, so this never affects control
+# flow or leaks answer content. Keyed by affect value string (avoids importing
+# the Affect enum here and any import cycle); unknown/neutral → no lead-in.
+_AFFECT_LEAD_IN: dict[tuple[str, str], str] = {
+    ("nervous", "en"): "No rush — you're doing fine.",
+    ("nervous", "vi"): "Bạn cứ từ từ — bạn đang làm tốt mà.",
+    ("rambling", "en"): "Let's focus in a little.",
+    ("rambling", "vi"): "Chúng ta hãy tập trung lại một chút.",
+    ("terse", "en"): "Feel free to expand.",
+    ("terse", "vi"): "Bạn cứ trình bày thêm nhé.",
+}
+
+
+def _affect_lead_in(affect_value: str | None, lang: str) -> str:
+    """Optional tone lead-in for the detected affect (empty when none applies)."""
+    if not affect_value:
+        return ""
+    return _AFFECT_LEAD_IN.get((affect_value, lang), "")
+
+
+# Communication-polish lead-ins (Slice 20, v2). Same TONE-ONLY mechanism as the
+# affect lead-in: prepended to the acknowledgement, never touching the
+# question/probe or control flow. ``time_pressure`` signals the candidate to
+# prioritise when little time remains; ``recovery`` rebuilds a rattled candidate
+# after a weak streak with an encouraging, scoped lead-in.
+_TIME_PRESSURE_LEAD_IN: dict[str, str] = {
+    "en": "We're a little short on time, so let's prioritise.",
+    "vi": "Chúng ta còn hơi ít thời gian, nên hãy tập trung vào điểm chính.",
+}
+_RECOVERY_LEAD_IN: dict[str, str] = {
+    "en": "No problem — let's take a fresh, straightforward one.",
+    "vi": "Không sao — mình thử một câu nhẹ nhàng, rõ ràng hơn nhé.",
+}
+
+
+def _polish_lead_in(
+    *, recovery: bool, time_pressure: bool, affect_value: str | None, lang: str
+) -> str:
+    """Pick the single lead-in to prepend (Slice 20, v2).
+
+    Precedence: recovery > time_pressure > affect. Only ONE lead-in is ever
+    prepended so the tones never stack (a struggling candidate is rebuilt, not
+    also told "we're short on time" and "you're doing fine"). With neither new
+    signal set, this falls through to the existing affect lead-in → v1 wording.
+    """
+    if recovery:
+        return _RECOVERY_LEAD_IN.get(lang, "")
+    if time_pressure:
+        return _TIME_PRESSURE_LEAD_IN.get(lang, "")
+    return _affect_lead_in(affect_value, lang)
 
 
 def build_fallback_utterance(
@@ -260,14 +571,43 @@ def build_fallback_utterance(
     persona: Persona,
     language: str | None,
     question_text: str | None = None,
+    affect: object | None = None,
+    hint_level: int = 0,
+    reframe_count: int = 0,
+    time_pressure: bool = False,
+    recovery: bool = False,
 ) -> Utterance:
     """Deterministic, persona-aware, bilingual utterance for a decision.
 
     This is the guaranteed path — no I/O, never fails. The LLM phrasing layer
     (added in the logic module) wraps this and falls back to it on any error.
+
+    ``affect`` (Slice 10, v2) optionally warms the TONE: a short reassuring /
+    steering lead-in is prepended for a nervous / rambling / terse candidate.
+    It only prepends to the acknowledgement — the question/probe text is
+    untouched, so control flow and the answer-leak guard are unaffected. When
+    None or NEUTRAL, the utterance is byte-for-byte the v1 result.
+
+    ``hint_level`` / ``reframe_count`` (Slice 11, v2) select an escalating
+    answer-safe hint or a rephrasing variant; both default to 0 → v1 wording.
     """
     lang = _lang(language)
-    ack, transition, qp = _fallback_parts(decision, persona, lang, question_text=question_text)
+    ack, transition, qp = _fallback_parts(
+        decision,
+        persona,
+        lang,
+        question_text=question_text,
+        hint_level=hint_level,
+        reframe_count=reframe_count,
+    )
+    affect_value = getattr(affect, "value", affect) if affect is not None else None
+    lead_in = _polish_lead_in(
+        recovery=recovery,
+        time_pressure=time_pressure,
+        affect_value=affect_value if isinstance(affect_value, str) else None,
+        lang=lang,
+    )
+    ack = _combine(lead_in, "", ack) if lead_in else ack
     return Utterance(
         acknowledgement=ack,
         transition=transition,
@@ -280,5 +620,7 @@ __all__ = [
     "Persona",
     "Utterance",
     "build_fallback_utterance",
+    "laddered_hint",
     "persona_from",
+    "transition_text",
 ]

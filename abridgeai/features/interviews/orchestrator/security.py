@@ -11,8 +11,8 @@ from dataclasses import dataclass
 from enum import Enum
 
 SECURITY_POLICY_VERSION = "2026-07-19"
-SECURITY_RULES_VERSION = "1.0.0"
-SECURITY_PROMPT_VERSION = "1.0.0"
+SECURITY_RULES_VERSION = "1.2.0"
+SECURITY_PROMPT_VERSION = "1.1.0"
 OUTPUT_GUARD_VERSION = "1.0.0"
 
 
@@ -34,6 +34,8 @@ class SecurityAction(str, Enum):  # noqa: UP042 -- preserve API/audit values
     ALLOW = "allow"
     REPEAT_CURRENT_QUESTION = "repeat_current_question"
     CLARIFY_CURRENT_QUESTION = "clarify_current_question"
+    EXPLAIN_CURRENT_TERM = "explain_current_term"
+    HINT_CURRENT_QUESTION = "hint_current_question"
     REFUSE_AND_REDIRECT = "refuse_and_redirect"
     WARN_AND_REDIRECT = "warn_and_redirect"
     END_AND_FLAG = "end_and_flag"

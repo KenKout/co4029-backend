@@ -87,3 +87,4 @@ openapi-snapshot.json
 
 # Voice smoke-test harness captured audio (scratch WAVs, never committed)
 voice-harness-out*/
+.venv/

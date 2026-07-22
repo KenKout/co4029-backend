@@ -30,7 +30,11 @@ from abridgeai.core.db.conflict_mapper import flush_or_conflict
 from abridgeai.core.exceptions import NotFoundError
 from abridgeai.core.security import utcnow
 from abridgeai.features.interviews.ai.stages.evaluation import evaluate_outcomes, evaluate_session
-from abridgeai.features.interviews.ai.stages.evaluation.outcome_verdicts import OutcomeVerdicts
+from abridgeai.features.interviews.ai.stages.evaluation.outcome_verdicts import (
+    OutcomeVerdict,
+    OutcomeVerdicts,
+    build_outcome_verdicts,
+)
 from abridgeai.features.interviews.ai.stages.evaluation.rubric import RubricScores
 from abridgeai.features.interviews.ai.stages.gap_report import (
     GapReportDraft,
@@ -39,6 +43,7 @@ from abridgeai.features.interviews.ai.stages.gap_report import (
 from abridgeai.features.interviews.models import (
     GapReport,
     InterviewOutcomeEvaluation,
+    InterviewQuestion,
     InterviewSession,
     InterviewSessionMessage,
     InterviewSessionQuestion,
@@ -92,10 +97,30 @@ async def evaluate_and_generate_report(
 
     try:
         outcomes = await authoring_queries.list_outcomes_for_config(db, session.interview_config_id)
-        questions = await authoring_queries.list_questions_for_config(
+        all_questions = await authoring_queries.list_questions_for_config(
             db, session.interview_config_id
         )
         candidate_answers = await _list_candidate_answers(db, session_id)
+        snapshot = await sessions_queries.get_session_with_responses(db, session_id)
+        if snapshot is None:
+            raise NotFoundError(f"Interview session {session_id} not found")
+        _, session_questions, _ = snapshot
+        (
+            questions,
+            question_prompts,
+            expected_question_ids,
+            answered_question_ids,
+        ) = _build_question_evaluation_context(
+            all_questions,
+            session_questions,
+            candidate_answers,
+        )
+
+        config = await authoring_queries.get_interview_for_authoring(
+            db, session.interview_config_id
+        )
+        if config is None:
+            raise NotFoundError(f"Interview config {session.interview_config_id} not found")
 
         # Thesis §4.3 gate: per-outcome met/not-met verdicts decide pass/fail.
         outcome_verdicts = await evaluate_outcomes(
@@ -104,7 +129,13 @@ async def evaluate_and_generate_report(
             outcomes=outcomes,
             questions=questions,
             answers=candidate_answers,
+            question_prompts=question_prompts,
             pipeline_run_id=None,
+        )
+        outcome_verdicts = _fail_unanswered_outcomes(
+            outcome_verdicts,
+            questions=questions,
+            answered_question_ids=answered_question_ids,
         )
 
         # Rubric stays as a teacher-facing diagnostic feeding the Gap Report;
@@ -115,14 +146,11 @@ async def evaluate_and_generate_report(
             outcomes=outcomes,
             questions=questions,
             answers=candidate_answers,
+            question_prompts=question_prompts,
+            expected_question_ids=expected_question_ids,
             pipeline_run_id=None,
         )
 
-        config = await authoring_queries.get_interview_for_authoring(
-            db, session.interview_config_id
-        )
-        if config is None:
-            raise NotFoundError(f"Interview config {session.interview_config_id} not found")
         min_outcomes_to_pass = getattr(config, "min_outcomes_to_pass", None)
         course_id, module_id = config.course_id, config.module_id
 
@@ -146,6 +174,8 @@ async def evaluate_and_generate_report(
             rubric_scores=rubric_scores,
             verdicts=outcome_verdicts,
             min_outcomes_to_pass=min_outcomes_to_pass,
+            question_count=len(expected_question_ids),
+            answered_question_count=len(answered_question_ids),
         )
         await _persist_gap_report(
             db,
@@ -184,7 +214,123 @@ async def _list_candidate_answers(
     db: AsyncSession, session_id: UUID
 ) -> list[InterviewSessionMessage]:
     messages = await sessions_queries.list_session_messages(db, session_id)
-    return [m for m in messages if getattr(m, "role", None) == "user"]
+    return [
+        m
+        for m in messages
+        if getattr(m, "role", None) == "user"
+        and getattr(m, "session_question_id", None) is not None
+        and (getattr(m, "metadata_json", None) or {}).get("kind") != "onboarding"
+    ]
+
+
+def _build_question_evaluation_context(
+    all_questions: list[InterviewQuestion],
+    session_questions: list[InterviewSessionQuestion],
+    candidate_answers: list[InterviewSessionMessage],
+) -> tuple[list[InterviewQuestion], dict[UUID, str], list[UUID], set[UUID]]:
+    """Resolve answer FKs and the complete gradeable question set.
+
+    Message rows reference ``InterviewSessionQuestion.id``, not
+    ``InterviewQuestion.id``. The old evaluator indexed prompts by the latter,
+    so production judge prompts silently had an empty question. This mapping
+    also includes every approved but unasked question in the score denominator
+    when a candidate ends the interview early.
+    """
+    question_by_id = {question.id: question for question in all_questions}
+    asked_config_ids = {
+        asked.interview_question_id
+        for asked in session_questions
+        if asked.interview_question_id is not None
+    }
+    questions = [
+        question
+        for question in all_questions
+        if question.review_status == "approved" or question.id in asked_config_ids
+    ]
+    gradeable_config_ids = {question.id for question in questions}
+
+    prompts: dict[UUID, str] = {}
+    first_session_id_by_question: dict[UUID, UUID] = {}
+    config_id_by_session_id: dict[UUID, UUID] = {}
+    for asked in session_questions:
+        config_question_id = asked.interview_question_id
+        if config_question_id is None or config_question_id not in gradeable_config_ids:
+            continue
+        question = question_by_id.get(config_question_id)
+        if question is None:
+            continue
+        prompts[asked.id] = question.prompt_text
+        config_id_by_session_id[asked.id] = config_question_id
+        first_session_id_by_question.setdefault(config_question_id, asked.id)
+
+    answered_session_ids = {
+        answer.session_question_id
+        for answer in candidate_answers
+        if answer.session_question_id in config_id_by_session_id and _gradable_answer_text(answer)
+    }
+    answered_session_id_by_question: dict[UUID, UUID] = {}
+    for asked in session_questions:
+        if asked.id in answered_session_ids and asked.interview_question_id is not None:
+            answered_session_id_by_question.setdefault(asked.interview_question_id, asked.id)
+
+    expected_question_ids = [
+        answered_session_id_by_question.get(
+            question.id,
+            first_session_id_by_question.get(question.id, question.id),
+        )
+        for question in questions
+    ]
+    answered_question_ids = {
+        config_id_by_session_id[answer.session_question_id]
+        for answer in candidate_answers
+        if answer.session_question_id in config_id_by_session_id and _gradable_answer_text(answer)
+    }
+    return questions, prompts, expected_question_ids, answered_question_ids
+
+
+def _gradable_answer_text(message: InterviewSessionMessage) -> str:
+    """Mirror the evaluation-stage evidence filter for answer counting."""
+    metadata = message.metadata_json or {}
+    if metadata.get("kind") in {
+        "security",
+        "turn_control",
+        "clarification",
+        "term_explanation",
+        "hint",
+        "end_request",
+    }:
+        safe = metadata.get("safe_academic_text")
+        return safe.strip() if isinstance(safe, str) else ""
+    return (message.content_text or "").strip()
+
+
+def _fail_unanswered_outcomes(
+    verdicts: OutcomeVerdicts,
+    *,
+    questions: list[InterviewQuestion],
+    answered_question_ids: set[UUID],
+) -> OutcomeVerdicts:
+    """Make outcomes with no submitted linked answer deterministically fail."""
+    question_ids_by_outcome: dict[UUID, set[UUID]] = {}
+    for question in questions:
+        if question.linked_outcome_id is not None:
+            question_ids_by_outcome.setdefault(question.linked_outcome_id, set()).add(question.id)
+
+    adjusted: list[OutcomeVerdict] = []
+    for verdict in verdicts.verdicts:
+        linked_question_ids = question_ids_by_outcome.get(verdict.outcome_id, set())
+        if linked_question_ids and linked_question_ids.isdisjoint(answered_question_ids):
+            adjusted.append(
+                OutcomeVerdict(
+                    outcome_id=verdict.outcome_id,
+                    met=False,
+                    reasoning="No answer was submitted for questions linked to this outcome.",
+                    evidence=None,
+                )
+            )
+        else:
+            adjusted.append(verdict)
+    return build_outcome_verdicts(adjusted)
 
 
 async def _load_student_quiz_attempts(
@@ -273,13 +419,19 @@ def _stamp_session_summary(
     rubric_scores: RubricScores,
     verdicts: OutcomeVerdicts,
     min_outcomes_to_pass: int | None,
+    question_count: int,
+    answered_question_count: int,
 ) -> None:
     summary: dict[str, Any] = dict(session.internal_summary_json or {})
+    summary.pop("evaluation_failure", None)
     summary["total_score"] = float(rubric_scores.total_score)
     summary["rubric_aggregated"] = dict(rubric_scores.aggregated)
     summary["outcomes_met"] = verdicts.met_count
     summary["outcomes_total"] = verdicts.total
     summary["min_outcomes_to_pass"] = min_outcomes_to_pass
+    summary["questions_total"] = question_count
+    summary["questions_answered"] = answered_question_count
+    summary["questions_unanswered"] = max(0, question_count - answered_question_count)
     summary["evaluated_at"] = utcnow().isoformat()
     session.internal_summary_json = summary
     session.pass_verdict = _derive_pass_verdict(verdicts, min_outcomes_to_pass)

@@ -40,6 +40,7 @@ _CLASS_CARD_DIFFICULTY_SQL = text(
     SELECT
         qq.id AS question_id,
         qq.quiz_id AS quiz_id,
+        qq.prompt_text AS prompt_text,
         AVG(scs.ef)::float AS mean_ef,
         COUNT(DISTINCT scs.student_id) AS student_count
     FROM quiz_questions qq
@@ -49,7 +50,7 @@ _CLASS_CARD_DIFFICULTY_SQL = text(
     WHERE qsl.lesson_id = CAST(:lesson_id AS uuid)
       AND qq.deleted_at IS NULL
       AND q.deleted_at IS NULL
-    GROUP BY qq.id, qq.quiz_id
+    GROUP BY qq.id, qq.quiz_id, qq.prompt_text
     HAVING COUNT(DISTINCT scs.student_id) > 0
     ORDER BY mean_ef ASC, student_count DESC
     LIMIT :top_n
@@ -102,6 +103,7 @@ class DifficultCard:
 
     question_id: UUID
     quiz_id: UUID
+    prompt_text: str
     mean_ef: float
     student_count: int
 
@@ -123,8 +125,86 @@ async def class_card_difficulty(
         DifficultCard(
             question_id=_as_uuid(row[0]),
             quiz_id=_as_uuid(row[1]),
-            mean_ef=float(row[2] or 0.0),
-            student_count=int(row[3] or 0),
+            prompt_text=str(row[2] or ""),
+            mean_ef=float(row[3] or 0.0),
+            student_count=int(row[4] or 0),
+        )
+        for row in rows
+    ]
+
+
+_CARD_STUDENT_RESULTS_SQL = text(
+    """
+    SELECT
+        scs.student_id AS student_id,
+        COALESCE(up.display_name, u.primary_email) AS name,
+        scs.ef::float AS ef,
+        scs.total_reviews AS total_reviews,
+        scs.last_reviewed_at AS last_reviewed_at,
+        lr.correct AS last_correct,
+        stats.correct_count AS correct_count,
+        stats.review_count AS review_count
+    FROM student_card_state scs
+    JOIN users u ON u.id = scs.student_id
+    LEFT JOIN user_profiles up ON up.user_id = scs.student_id
+    LEFT JOIN LATERAL (
+        SELECT cr.correct
+        FROM card_reviews cr
+        WHERE cr.question_id = scs.question_id
+          AND cr.student_id = scs.student_id
+        ORDER BY cr.created_at DESC
+        LIMIT 1
+    ) lr ON TRUE
+    LEFT JOIN LATERAL (
+        SELECT
+            COUNT(*) FILTER (WHERE cr.correct) AS correct_count,
+            COUNT(*) AS review_count
+        FROM card_reviews cr
+        WHERE cr.question_id = scs.question_id
+          AND cr.student_id = scs.student_id
+    ) stats ON TRUE
+    WHERE scs.question_id = CAST(:question_id AS uuid)
+    ORDER BY scs.ef ASC, name ASC
+    """
+)
+
+
+@dataclass(frozen=True)
+class CardStudentResult:
+    """One student's standing on a single question (card)."""
+
+    student_id: UUID
+    name: str
+    ef: float
+    total_reviews: int
+    last_reviewed_at: datetime | None
+    last_correct: bool | None
+    correct_count: int
+    review_count: int
+
+
+async def card_student_results(
+    db: AsyncSession,
+    *,
+    question_id: UUID,
+) -> list[CardStudentResult]:
+    """Per-student results for one question, weakest (lowest EF) first."""
+    rows = (
+        await db.execute(
+            _CARD_STUDENT_RESULTS_SQL,
+            {"question_id": str(question_id)},
+        )
+    ).all()
+    return [
+        CardStudentResult(
+            student_id=_as_uuid(row[0]),
+            name=str(row[1]),
+            ef=float(row[2] or 0.0),
+            total_reviews=int(row[3] or 0),
+            last_reviewed_at=row[4],
+            last_correct=row[5],
+            correct_count=int(row[6] or 0),
+            review_count=int(row[7] or 0),
         )
         for row in rows
     ]
@@ -168,9 +248,11 @@ def _as_uuid(value: object) -> UUID:
 
 __all__ = [
     "AtRiskStudent",
+    "CardStudentResult",
     "ClassKRDistribution",
     "DifficultCard",
     "at_risk_students",
+    "card_student_results",
     "class_card_difficulty",
     "class_kr_distribution",
 ]

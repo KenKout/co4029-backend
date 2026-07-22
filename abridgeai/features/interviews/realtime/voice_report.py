@@ -237,6 +237,69 @@ def build_report(events: list[dict[str, Any]]) -> VoiceOpsReport:
     return r
 
 
+# Staged-rollout rollback thresholds (Slice 6/7). Breaching any of these on a
+# rollout stage is the documented signal to pause/roll back that stage. Kept
+# here as the single source of truth so the report and the rollout runbook agree.
+ROLLBACK_TURN_ERROR_RATE_MAX = 0.01  # >1% of turns erroring
+ROLLBACK_UTTERANCE_FALLBACK_RATE_MAX = 0.05  # >5% of adaptive turns using fallback text
+ROLLBACK_LEGACY_FALLBACK_RATE_MAX = 0.05  # >5% adaptive→legacy fallback
+
+
+@dataclass
+class RollbackSignals:
+    """Boolean rollback triggers derived from a :class:`VoiceOpsReport`.
+
+    Each flag is True when the corresponding metric BREACHES its threshold on
+    the analysed window. ``should_rollback`` is the OR of all triggers — a
+    single True means the stage should be paused/rolled back. A None metric
+    (no data) is treated as "not breached" so an empty window never trips.
+    """
+
+    turn_error_rate_breached: bool = False
+    utterance_fallback_rate_breached: bool = False
+    legacy_fallback_rate_breached: bool = False
+    question_loop_detected: bool = False
+    should_rollback: bool = False
+
+    def to_json(self) -> str:
+        return json.dumps(asdict(self), ensure_ascii=False, indent=2)
+
+
+def _over(value: float | None, threshold: float) -> bool:
+    """True iff ``value`` is present AND strictly over ``threshold``."""
+    return value is not None and value > threshold
+
+
+def evaluate_rollback(report: VoiceOpsReport) -> RollbackSignals:
+    """Derive rollback triggers from an aggregated report (pure).
+
+    Flags each metric that breaches its documented threshold. A None metric
+    (no data in the window) never trips. ``question_loop_detected`` is reserved
+    for a future dedicated loop-counter event and defaults False — the decision
+    policy already caps follow-ups (Slice 1 invariants), so an offline proxy
+    would be noisier than the guarantee it duplicates.
+    """
+    signals = RollbackSignals(
+        turn_error_rate_breached=_over(report.turn_error_rate, ROLLBACK_TURN_ERROR_RATE_MAX),
+        utterance_fallback_rate_breached=_over(
+            report.utterance_fallback_rate, ROLLBACK_UTTERANCE_FALLBACK_RATE_MAX
+        ),
+        legacy_fallback_rate_breached=_over(
+            report.legacy_fallback_rate, ROLLBACK_LEGACY_FALLBACK_RATE_MAX
+        ),
+        question_loop_detected=False,
+    )
+    signals.should_rollback = any(
+        (
+            signals.turn_error_rate_breached,
+            signals.utterance_fallback_rate_breached,
+            signals.legacy_fallback_rate_breached,
+            signals.question_loop_detected,
+        )
+    )
+    return signals
+
+
 def parse_jsonl(lines: list[str]) -> list[dict[str, Any]]:
     """Extract voice-event dicts from raw log lines.
 
@@ -306,6 +369,12 @@ def main(argv: list[str] | None = None) -> int:
         "--session",
         help="Only aggregate events for this interview session id (per-session sign-off).",
     )
+    p.add_argument(
+        "--rollback",
+        action="store_true",
+        help="Print the rollback-signal evaluation (staged-rollout gate) instead "
+        "of the full report; exit code 2 when any trigger is breached.",
+    )
     args = p.parse_args(argv if argv is not None else sys.argv[1:])
 
     if args.path:
@@ -316,7 +385,13 @@ def main(argv: list[str] | None = None) -> int:
     events = parse_jsonl(lines)
     if args.session:
         events = filter_by_session(events, args.session)
-    print(build_report(events).to_json())  # noqa: T201 - CLI report writes to stdout by design
+    report = build_report(events)
+    if args.rollback:
+        signals = evaluate_rollback(report)
+        print(signals.to_json())  # noqa: T201 - CLI writes to stdout by design
+        # Non-zero exit lets CI / a rollout script gate on the signal.
+        return 2 if signals.should_rollback else 0
+    print(report.to_json())  # noqa: T201 - CLI report writes to stdout by design
     return 0
 
 
