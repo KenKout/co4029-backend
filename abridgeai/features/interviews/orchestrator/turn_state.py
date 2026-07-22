@@ -1,0 +1,222 @@
+"""State-application + replay helpers extracted from adaptive.py (Slice 7).
+
+Near-pure mutation of the loaded runtime state in memory — NO DB save (the
+caller owns the single ``state_repo.save``). Extracted verbatim from
+``run_adaptive_turn`` to keep ``adaptive.py`` under the orchestrator LOC cap;
+behaviour is unchanged.
+
+``ADVANCE_ACTIONS`` lives here (the lowest layer) so both this module and
+``adaptive.py`` can import it without a cycle.
+"""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any
+
+from abridgeai.features.interviews.orchestrator.coverage import apply_evidence_to_coverage
+from abridgeai.features.interviews.orchestrator.decision import (
+    InterviewerActionType,
+    ReasonCode,
+)
+from abridgeai.features.interviews.orchestrator.intent import StudentIntent
+from abridgeai.features.interviews.orchestrator.state import (
+    InteractionState,
+    InterviewPhase,
+    InterviewRuntimeStateData,
+    OutcomeCoverageState,
+)
+
+if TYPE_CHECKING:
+    from uuid import UUID
+
+    from abridgeai.features.interviews.models import InterviewQuestion
+    from abridgeai.features.interviews.orchestrator.analysis import AnswerAnalysis
+
+# Actions that move the interview forward to a (different) question. Depth
+# probes / clarify / repeat are NOT here — they keep the same question and
+# consume the follow-up budget.
+ADVANCE_ACTIONS = frozenset(
+    {
+        InterviewerActionType.ASK_MAIN_QUESTION,
+        InterviewerActionType.TRANSITION_TOPIC,
+        InterviewerActionType.SKIP_QUESTION,
+    }
+)
+
+
+def sync_question_history(
+    data: InterviewRuntimeStateData,
+    persisted_question_ids: list[UUID],
+    *,
+    current_question: InterviewQuestion | None,
+) -> None:
+    """Merge the database transcript into lazily-created adaptive state.
+
+    The first session question is attached before runtime state exists. Legacy
+    fallbacks can also append questions without updating adaptive state. Unless
+    those persisted IDs are merged here, selection treats an already displayed
+    question as new and can ask it again immediately after a valid answer.
+    """
+    known_ids = set(data.asked_question_ids)
+    for question_id in persisted_question_ids:
+        value = str(question_id)
+        if value not in known_ids:
+            data.asked_question_ids.append(value)
+            known_ids.add(value)
+
+    if current_question is not None:
+        current_id = str(current_question.id)
+        if current_id not in known_ids:
+            data.asked_question_ids.append(current_id)
+        data.current_question_id = current_id
+        data.current_outcome_id = (
+            str(current_question.linked_outcome_id)
+            if current_question.linked_outcome_id is not None
+            else None
+        )
+
+
+def apply_state_updates(  # noqa: C901 -- explicit action branches are auditable
+    data: Any,  # noqa: ANN401 -- InterviewRuntimeStateData; loose to avoid import churn
+    *,
+    intent: Any,  # noqa: ANN401
+    analysis: AnswerAnalysis | None,
+    decision: Any,  # noqa: ANN401
+    selected_question_id: str | None,
+    target_outcome_id: str | None,
+) -> None:
+    """Mutate the loaded state in memory (NO save here — caller saves once)."""
+    now = datetime.now(UTC).isoformat()
+    data.last_student_intent = intent.to_dict()
+
+    # Candidate signals.
+    sig = data.candidate_signals
+    sig.requested_repeat = intent.intent is StudentIntent.ASK_TO_REPEAT
+    sig.requested_clarification = intent.intent is StudentIntent.ASK_FOR_CLARIFICATION
+    sig.requested_skip = intent.intent is StudentIntent.SKIP_QUESTION
+    sig.technical_issue_detected = intent.intent is StudentIntent.TECHNICAL_ISSUE
+    sig.appeared_uncertain = intent.intent is StudentIntent.CANNOT_ANSWER
+    sig.appeared_off_topic = intent.intent is StudentIntent.OFF_TOPIC
+
+    # Evidence / coverage from analysis (weighted — see coverage.py).
+    if analysis is not None and analysis.confidence > 0.0:
+        for ev in analysis.evidence:
+            cov = data.outcome_coverage.get(ev.outcome_id)
+            if cov is None:
+                cov = OutcomeCoverageState(outcome_id=ev.outcome_id)
+                data.outcome_coverage[ev.outcome_id] = cov
+            apply_evidence_to_coverage(cov, ev, now=now)
+
+    # End-confirmation state (Slice 4). These actions keep the SAME question and
+    # never consume the academic probe budget; they only flip the confirmation
+    # flag + interaction state, so they are handled before the follow-up logic.
+    if decision.action is InterviewerActionType.REQUEST_END_CONFIRMATION:
+        data.pending_confirmation = True
+        data.interaction_state = InteractionState.CONFIRMING_END
+        return
+    if decision.action is InterviewerActionType.CANCEL_END:
+        data.pending_confirmation = False
+        data.interaction_state = InteractionState.AWAITING_ANSWER
+        return
+
+    # Any other resolved action clears a pending confirmation (a confirmed end
+    # flows into the closing branch below; nothing else should stay pending).
+    data.pending_confirmation = False
+
+    # Follow-up counters + phase.
+    if decision.action in ADVANCE_ACTIONS:
+        data.current_question_follow_up_count = 0
+        if selected_question_id is not None:
+            if selected_question_id not in data.asked_question_ids:
+                data.asked_question_ids.append(selected_question_id)
+            data.current_question_id = selected_question_id
+        if (
+            decision.action is InterviewerActionType.SKIP_QUESTION
+            and data.current_question_id
+            and data.current_question_id not in data.skipped_question_ids
+        ):
+            data.skipped_question_ids.append(data.current_question_id)
+        if data.phase is InterviewPhase.OPENING:
+            data.phase = InterviewPhase.CORE
+        data.interaction_state = InteractionState.AWAITING_ANSWER
+    elif decision.action in (
+        InterviewerActionType.BEGIN_CLOSING,
+        InterviewerActionType.CLOSE_INTERVIEW,
+    ):
+        data.phase = InterviewPhase.CLOSING
+        data.interaction_state = InteractionState.CLOSING
+    elif decision.reason_code in {
+        ReasonCode.STUDENT_REQUESTED_REPEAT,
+        ReasonCode.STUDENT_REQUESTED_CLARIFICATION,
+        ReasonCode.STUDENT_REQUESTED_HINT,
+    }:
+        # Candidate controls and assistance do not consume the academic probe
+        # budget used to prevent assessment loops.
+        pass
+    else:
+        # A probe / clarify / repeat keeps the same question → count the follow-up.
+        data.current_question_follow_up_count += 1
+        data.total_follow_up_count += 1
+
+    if target_outcome_id:
+        data.current_outcome_id = target_outcome_id
+
+
+def probe_seed_text(decision: Any, current_question: InterviewQuestion | None) -> str | None:  # noqa: ANN401
+    """Text the utterance layer phrases for a non-advance action.
+
+    For a repeat we re-speak the current question; for clarify/probe we let the
+    utterance layer supply an answer-safe generic probe (returns None).
+    """
+    if decision.action is InterviewerActionType.REPEAT_QUESTION and current_question is not None:
+        return current_question.prompt_text
+    return None
+
+
+def compact_scores(scored: Any) -> list[dict[str, Any]]:  # noqa: ANN401
+    """At most the top candidate's compact score (safeguard #8 — bounded audit)."""
+    if scored is None:
+        return []
+    return [
+        {
+            "question_id": scored.candidate.question_id,
+            "score": round(float(scored.score), 2),
+        }
+    ]
+
+
+def with_replay(
+    existing: dict[str, Any] | None,
+    canonical: dict[str, Any],
+    selected_orm: InterviewQuestion | None,
+) -> dict[str, Any]:
+    """Store a JSON-safe copy of the canonical result for idempotent replay."""
+    base = dict(existing) if isinstance(existing, dict) else {}
+    replay = {k: v for k, v in canonical.items() if not k.startswith("_")}
+    # next_question is an ORM object — store just its id for rehydration.
+    replay["next_question"] = str(selected_orm.id) if selected_orm is not None else None
+    base["_canonical_result"] = replay
+    return base
+
+
+def rehydrate_replay(replay: dict[str, Any]) -> dict[str, Any]:
+    """Rebuild a result dict from a stored replay (next_question stays an id).
+
+    The caller (take_session_step) is responsible for turning the id back into
+    an ORM row if needed; for the router's purposes the structured fields plus
+    the legacy scalar fields are sufficient, and next_question is re-fetched
+    there. Here we return the stored dict as-is (next_question = id string).
+    """
+    return dict(replay)
+
+
+__all__ = [
+    "ADVANCE_ACTIONS",
+    "apply_state_updates",
+    "compact_scores",
+    "probe_seed_text",
+    "rehydrate_replay",
+    "sync_question_history",
+    "with_replay",
+]

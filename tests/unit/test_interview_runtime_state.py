@@ -14,7 +14,6 @@ from __future__ import annotations
 from types import SimpleNamespace
 from uuid import uuid4
 
-from abridgeai.features.interviews.orchestrator.adaptive import _sync_question_history
 from abridgeai.features.interviews.orchestrator.selection import (
     CandidateQuestion,
     SelectionContext,
@@ -27,6 +26,9 @@ from abridgeai.features.interviews.orchestrator.state import (
     InterviewPhase,
     InterviewRuntimeStateData,
     OutcomeCoverageState,
+)
+from abridgeai.features.interviews.orchestrator.turn_state import (
+    sync_question_history as _sync_question_history,
 )
 
 
