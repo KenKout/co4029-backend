@@ -662,8 +662,28 @@ async def list_course_roster(db: AsyncSession, course_id: UUID) -> list[dict[str
 async def list_course_roster_with_progress(
     db: AsyncSession, course_id: UUID
 ) -> list[dict[str, Any]]:
-    """Enrolled students for the teacher "Students" page, with progress + risk."""
-    return await authoring_queries.list_course_roster_with_progress(db, course_id)
+    """Enrolled students for the teacher "Students" page, with progress + risk.
+
+    Mints a short-TTL presigned ``avatar_url`` for each student that has an
+    avatar image uploaded (the SQL projects the avatar object's bucket/key);
+    students without an avatar get ``avatar_url = None`` and the SPA falls back
+    to initials.
+    """
+    rows = await authoring_queries.list_course_roster_with_progress(db, course_id)
+    for row in rows:
+        bucket = row.pop("avatar_bucket", None)
+        object_key = row.pop("avatar_object_key", None)
+        avatar_url: str | None = None
+        if bucket and object_key:
+            try:
+                url, _ = await create_stream_url(
+                    _AuthoringStorageTarget(bucket=bucket, object_key=object_key)
+                )
+                avatar_url = url
+            except Exception:  # noqa: BLE001 — a storage blip must not break the roster
+                avatar_url = None
+        row["avatar_url"] = avatar_url
+    return rows
 
 
 # ---------------------------------------------------------------------------

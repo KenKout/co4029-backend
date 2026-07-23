@@ -32,6 +32,8 @@ SELECT
     ce.dropped_at,
     u.primary_email,
     COALESCE(p.display_name, u.primary_email) AS display_name,
+    so.bucket AS avatar_bucket,
+    so.object_key AS avatar_object_key,
     COALESCE(pr.completion_percent, 0) AS progress_percent,
     pr.last_activity_at,
     CASE
@@ -46,6 +48,7 @@ SELECT
 FROM course_enrollments ce
 JOIN users u ON u.id = ce.student_id
 LEFT JOIN user_profiles p ON p.user_id = u.id
+LEFT JOIN storage_objects so ON so.id = p.avatar_object_id
 LEFT JOIN progress pr ON pr.student_id = ce.student_id
 WHERE ce.course_id = :course_id
 ORDER BY ce.enrolled_at DESC

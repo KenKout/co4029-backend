@@ -93,6 +93,10 @@ class RosterStudentRead(BaseModel):
     at_risk_level: str
     last_activity_at: datetime | None = None
     final_grade: str | None = None
+    # Short-TTL presigned GET URL for the student's uploaded avatar, minted by
+    # the service layer. ``None`` when no avatar is set (SPA falls back to
+    # initials). Not persisted — a projection.
+    avatar_url: str | None = None
 
     model_config = ConfigDict(from_attributes=True)
 
