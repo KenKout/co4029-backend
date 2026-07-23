@@ -461,6 +461,46 @@ class AdaptiveReadinessRead(BaseModel):
     blocks_publish: bool = False
 
 
+# --------------------------------------------------------------------------- #
+# Course-scoped question bank (§QBank-1) — reusable interview questions
+# --------------------------------------------------------------------------- #
+
+
+class InterviewQuestionBankItemCreate(BaseModel):
+    """Body for ``POST /teacher/courses/{course_id}/interview-question-bank``.
+
+    Either supplied directly by a teacher or forwarded from an existing
+    interview question ("add to bank"). ``source_config_id`` is provenance
+    only.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    prompt_text: str
+    question_type: QuestionTypeLiteral
+    difficulty: DifficultyLiteral | None = None
+    model_answer: str | None = None
+    tags: list[str] = Field(default_factory=list)
+    source_config_id: UUID | None = None
+
+
+class InterviewQuestionBankItemRead(BaseModel):
+    """Read projection of a course-scoped interview question-bank item."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    course_id: UUID
+    prompt_text: str
+    question_type: QuestionTypeLiteral
+    difficulty: DifficultyLiteral | None = None
+    model_answer: str | None = None
+    tags: list[str] = Field(default_factory=list, validation_alias="tags_json")
+    source_config_id: UUID | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
 # Suppress unused-import warning — Decimal is exported in case downstream
 # generation-config payloads carry numeric thresholds. Keep available.
 _DECIMAL_AVAILABLE = Decimal
@@ -482,6 +522,8 @@ __all__ = [
     "InterviewOutcomeAuthoring",
     "InterviewOutcomeCreate",
     "InterviewQuestionAuthoring",
+    "InterviewQuestionBankItemCreate",
+    "InterviewQuestionBankItemRead",
     "InterviewQuestionCreate",
     "InterviewSessionSummary",
     "InterviewSessionTeacherRead",

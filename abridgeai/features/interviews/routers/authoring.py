@@ -64,6 +64,8 @@ from abridgeai.features.interviews.schemas import (
     InterviewOutcomeAuthoring,
     InterviewOutcomeCreate,
     InterviewQuestionAuthoring,
+    InterviewQuestionBankItemCreate,
+    InterviewQuestionBankItemRead,
     InterviewQuestionCreate,
     InterviewSessionPublic,
     InterviewSessionSummary,
@@ -105,6 +107,69 @@ def _conflict(message: str) -> HTTPException:
 
 async def get_arq_pool() -> object | None:
     return None
+
+
+# --------------------------------------------------------------------------- #
+# Course-scoped interview question bank (§QBank-1). Course-update permission
+# gates all three. Import into a config reuses the existing create-question
+# endpoint client-side (copy semantics), so no dedicated import route here.
+# --------------------------------------------------------------------------- #
+@router.get(
+    "/courses/{course_id}/interview-question-bank",
+    response_model=list[InterviewQuestionBankItemRead],
+)
+async def list_interview_question_bank(
+    course_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_COURSE_UPDATE)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> list[InterviewQuestionBankItemRead]:
+    """List the course's reusable interview questions, newest first."""
+    del current_user
+    try:
+        items = await authoring_service.list_question_bank(db, course_id)
+    except NotFoundError as exc:
+        raise _not_found("course", course_id) from exc
+    return [InterviewQuestionBankItemRead.model_validate(i) for i in items]
+
+
+@router.post(
+    "/courses/{course_id}/interview-question-bank",
+    response_model=InterviewQuestionBankItemRead,
+    status_code=status.HTTP_201_CREATED,
+)
+async def add_interview_question_bank_item(
+    course_id: UUID,
+    payload: InterviewQuestionBankItemCreate,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_COURSE_UPDATE)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> InterviewQuestionBankItemRead:
+    """Add a reusable question to the course bank (copy semantics)."""
+    try:
+        item = await authoring_service.add_to_question_bank(db, course_id, payload, current_user)
+    except NotFoundError as exc:
+        raise _not_found("course", course_id) from exc
+    except ConflictError as exc:
+        raise _conflict(str(exc)) from exc
+    await db.commit()
+    return InterviewQuestionBankItemRead.model_validate(item)
+
+
+@router.delete(
+    "/courses/{course_id}/interview-question-bank/{item_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def delete_interview_question_bank_item(
+    course_id: UUID,
+    item_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_COURSE_UPDATE)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> None:
+    """Soft-delete a bank item; already-imported questions are untouched."""
+    try:
+        await authoring_service.delete_question_bank_item(db, course_id, item_id, current_user)
+    except NotFoundError as exc:
+        raise _not_found("interview_question_bank_item", item_id) from exc
+    await db.commit()
 
 
 @router.post(

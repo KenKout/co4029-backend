@@ -35,6 +35,7 @@ from abridgeai.features.interviews.models import (
     InterviewConfig,
     InterviewOutcome,
     InterviewQuestion,
+    InterviewQuestionBankItem,
 )
 from abridgeai.features.interviews.queries import authoring as authoring_queries
 from abridgeai.features.quizzes.api import public as quizzes_public
@@ -510,15 +511,91 @@ async def get_generation_run(
     return run
 
 
+# --------------------------------------------------------------------------- #
+# Course-scoped interview question bank (§QBank-1)
+# --------------------------------------------------------------------------- #
+
+
+async def _require_course(db: AsyncSession, course_id: UUID) -> None:
+    """Ensure the course exists (permission is enforced at the router edge)."""
+    course = await courses_public.get_course_by_id(db, course_id)
+    if course is None:
+        raise NotFoundError(f"Course {course_id} not found")
+
+
+async def list_question_bank(db: AsyncSession, course_id: UUID) -> list[InterviewQuestionBankItem]:
+    """All non-deleted bank items for a course, newest first."""
+    from sqlalchemy import select  # noqa: PLC0415
+
+    await _require_course(db, course_id)
+    stmt = (
+        select(InterviewQuestionBankItem)
+        .where(
+            InterviewQuestionBankItem.course_id == course_id,
+            InterviewQuestionBankItem.deleted_at.is_(None),
+        )
+        .order_by(InterviewQuestionBankItem.created_at.desc())
+    )
+    return list((await db.execute(stmt)).scalars().all())
+
+
+async def add_to_question_bank(
+    db: AsyncSession,
+    course_id: UUID,
+    payload: Any,  # noqa: ANN401  -- InterviewQuestionBankItemCreate at edge
+    actor: CurrentUser,
+) -> InterviewQuestionBankItem:
+    """Add a reusable question to the course bank (copy semantics)."""
+    await _require_course(db, course_id)
+    data = payload.model_dump(exclude_unset=True)
+    item = InterviewQuestionBankItem(
+        course_id=course_id,
+        prompt_text=data["prompt_text"],
+        question_type=data["question_type"],
+        difficulty=data.get("difficulty"),
+        model_answer=data.get("model_answer"),
+        tags_json=data.get("tags", []),
+        source_config_id=data.get("source_config_id"),
+        created_by=actor.user_id,
+    )
+    db.add(item)
+    await flush_or_conflict(db)
+    await db.refresh(item)
+    return item
+
+
+async def delete_question_bank_item(
+    db: AsyncSession,
+    course_id: UUID,
+    item_id: UUID,
+    actor: CurrentUser,
+) -> None:
+    """Soft-delete a bank item. Already-imported questions are untouched."""
+    from sqlalchemy import select  # noqa: PLC0415
+
+    stmt = select(InterviewQuestionBankItem).where(
+        InterviewQuestionBankItem.id == item_id,
+        InterviewQuestionBankItem.course_id == course_id,
+        InterviewQuestionBankItem.deleted_at.is_(None),
+    )
+    item = (await db.execute(stmt)).scalar_one_or_none()
+    if item is None:
+        raise NotFoundError(f"Question bank item {item_id} not found")
+    await soft_delete_cascade(db, item, actor_id=actor.user_id)
+
+
 __all__ = [
     "add_outcome",
     "add_question",
+    "add_to_question_bank",
     "archive_interview_config",
     "create_interview_config",
     "delete_interview_config",
     "delete_outcome",
     "delete_question",
+    "delete_question_bank_item",
     "get_generation_run",
+    "list_question_bank",
     "publish_interview_config",
     "regenerate_question",
     "start_generation_run",

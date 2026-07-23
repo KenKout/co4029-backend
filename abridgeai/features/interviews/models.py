@@ -749,6 +749,58 @@ class InterviewRuntimeState(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
 
 
+class InterviewQuestionBankItem(
+    UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftDeleteMixin, Base
+):
+    """Course-scoped reusable interview question (§QBank-1).
+
+    A shared pool a teacher can add generated/authored interview questions
+    into, then copy from into any interview config in the same course.
+    Copy semantics: importing from the bank creates a fresh
+    :class:`InterviewQuestion` row (edits diverge; deleting the bank item
+    does not touch already-imported questions, and vice versa).
+
+    Scope is course-level only. This mirrors the copyable subset of
+    ``InterviewQuestion`` columns; it deliberately does NOT carry
+    per-config state (position, review_status, linked_outcome_id, audit of
+    the config question) since those are meaningless outside a config.
+    """
+
+    __tablename__ = "interview_question_bank_items"
+    __table_args__ = (
+        CheckConstraint(
+            "question_type IN ('conceptual', 'behavioral', 'technical', "
+            "'situational', 'system_design')",
+            name="ck_iq_bank_question_type",
+        ),
+        CheckConstraint(
+            "difficulty IS NULL OR difficulty IN ('junior', 'mid_level', 'senior')",
+            name="ck_iq_bank_difficulty",
+        ),
+    )
+
+    course_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("courses.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    prompt_text: Mapped[str] = mapped_column(Text, nullable=False)
+    question_type: Mapped[str] = mapped_column(String(30), nullable=False)
+    difficulty: Mapped[str | None] = mapped_column(String(20))
+    model_answer: Mapped[str | None] = mapped_column(Text)
+    # Free-text tags for filtering the bank (topic labels). Optional.
+    tags_json: Mapped[Any] = mapped_column(
+        JSONB, nullable=False, server_default=text("'[]'::jsonb")
+    )
+    # Provenance: which config this question was first added from (audit
+    # only; SET NULL so deleting the source config keeps the bank item).
+    source_config_id: Mapped[uuid.UUID | None] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("interview_configs.id", ondelete="SET NULL"),
+    )
+
+
 __all__ = [
     "AssessmentIntegrityEvent",
     "GapReport",
@@ -756,6 +808,7 @@ __all__ = [
     "InterviewOutcome",
     "InterviewOutcomeEvaluation",
     "InterviewQuestion",
+    "InterviewQuestionBankItem",
     "InterviewRuntimeState",
     "InterviewSecurityEvent",
     "InterviewSession",
