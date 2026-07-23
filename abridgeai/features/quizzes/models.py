@@ -132,6 +132,10 @@ class Quiz(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftDeleteMixin,
             "status IN ('draft', 'published', 'archived')",
             name="ck_quizzes_status",
         ),
+        CheckConstraint(
+            "grading_method IN ('highest', 'average', 'first', 'last')",
+            name="ck_quizzes_grading_method",
+        ),
     )
 
     course_id: Mapped[uuid.UUID] = mapped_column(
@@ -151,6 +155,10 @@ class Quiz(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftDeleteMixin,
     time_limit_seconds: Mapped[int | None] = mapped_column(Integer)
     passing_score_percent: Mapped[Decimal] = mapped_column(
         Numeric(5, 2), nullable=False, server_default=text("70.00")
+    )
+    # Moodle-style: which attempt counts as the headline score.
+    grading_method: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default=text("'highest'")
     )
     allow_retakes: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=text("TRUE")
@@ -244,6 +252,17 @@ class QuizQuestion(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftDele
         PGUUID(as_uuid=True),
         ForeignKey("quizzes.id", ondelete="NO ACTION"),
         nullable=False,
+        index=True,
+    )
+    # Course learning outcome this question assesses (migration 0034).
+    # Nullable = "no outcome"; ON DELETE SET NULL so deleting an outcome
+    # reverts its questions to unassigned rather than cascade-deleting them.
+    # The teacher-facing ``(L.O.x)`` prefix is derived from the outcome's
+    # live position at display time — nothing about the code is stored here.
+    learning_outcome_id: Mapped[uuid.UUID | None] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("course_learning_outcomes.id", ondelete="SET NULL"),
+        nullable=True,
         index=True,
     )
     position: Mapped[int] = mapped_column(Integer, nullable=False)

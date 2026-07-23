@@ -35,6 +35,7 @@ from abridgeai.features.interviews.models import (
     InterviewConfig,
     InterviewOutcome,
     InterviewQuestion,
+    InterviewQuestionBankItem,
 )
 from abridgeai.features.interviews.queries import authoring as authoring_queries
 from abridgeai.features.quizzes.api import public as quizzes_public
@@ -438,8 +439,24 @@ async def start_generation_run(
     """
     config = await _require_config(db, config_id)
     request_data = request.model_dump(exclude_unset=True, mode="json") if request else {}
+
+    # Module-scoped retrieval (§QGen-scope): each selected module expands to
+    # its lessons, which are merged into the ``source_lesson_ids`` retrieval
+    # filter (retrieval reads ``lesson_ids`` / ``source_lesson_ids`` from
+    # config_json). When no modules are chosen we default to the interview's
+    # own module so generation stays scoped to it rather than the whole course.
+    raw_module_ids = request_data.get("source_module_ids") or []
+    module_ids: list[UUID] = [UUID(str(m)) for m in raw_module_ids]
+    if not module_ids and config.module_id is not None:
+        module_ids = [config.module_id]
+    module_lesson_ids = await courses_public.list_lesson_ids_for_modules(db, module_ids)
+    explicit_lesson_ids = [UUID(str(x)) for x in (request_data.get("source_lesson_ids") or [])]
+    merged_lesson_ids = sorted({*explicit_lesson_ids, *module_lesson_ids})
+
     config_json: dict[str, Any] = dict(request_data) | {
         "interview_config_id": str(config.id),
+        "source_module_ids": [str(m) for m in module_ids],
+        "source_lesson_ids": [str(x) for x in merged_lesson_ids],
     }
     run = await quizzes_public.create_generation_run(
         db,
@@ -510,16 +527,125 @@ async def get_generation_run(
     return run
 
 
+# --------------------------------------------------------------------------- #
+# Course-scoped interview question bank (§QBank-1)
+# --------------------------------------------------------------------------- #
+
+
+async def _require_course(db: AsyncSession, course_id: UUID) -> None:
+    """Ensure the course exists (permission is enforced at the router edge)."""
+    course = await courses_public.get_course_by_id(db, course_id)
+    if course is None:
+        raise NotFoundError(f"Course {course_id} not found")
+
+
+async def list_question_bank(db: AsyncSession, course_id: UUID) -> list[InterviewQuestionBankItem]:
+    """All non-deleted bank items for a course, newest first."""
+    from sqlalchemy import select  # noqa: PLC0415
+
+    await _require_course(db, course_id)
+    stmt = (
+        select(InterviewQuestionBankItem)
+        .where(
+            InterviewQuestionBankItem.course_id == course_id,
+            InterviewQuestionBankItem.deleted_at.is_(None),
+        )
+        .order_by(InterviewQuestionBankItem.created_at.desc())
+    )
+    return list((await db.execute(stmt)).scalars().all())
+
+
+async def add_to_question_bank(
+    db: AsyncSession,
+    course_id: UUID,
+    payload: Any,  # noqa: ANN401  -- InterviewQuestionBankItemCreate at edge
+    actor: CurrentUser,
+) -> InterviewQuestionBankItem:
+    """Add a reusable question to the course bank (copy semantics)."""
+    await _require_course(db, course_id)
+    data = payload.model_dump(exclude_unset=True)
+    item = InterviewQuestionBankItem(
+        course_id=course_id,
+        prompt_text=data["prompt_text"],
+        question_type=data["question_type"],
+        difficulty=data.get("difficulty"),
+        model_answer=data.get("model_answer"),
+        tags_json=data.get("tags", []),
+        source_config_id=data.get("source_config_id"),
+        created_by=actor.user_id,
+    )
+    db.add(item)
+    await flush_or_conflict(db)
+    await db.refresh(item)
+    return item
+
+
+async def update_question_bank_item(
+    db: AsyncSession,
+    course_id: UUID,
+    item_id: UUID,
+    payload: Any,  # noqa: ANN401  -- InterviewQuestionBankItemUpdate at edge
+    actor: CurrentUser,
+) -> InterviewQuestionBankItem:
+    """Edit a bank item (management page). Only supplied fields change.
+
+    ``tags`` maps to the ``tags_json`` column; everything else maps 1:1.
+    """
+    from sqlalchemy import select  # noqa: PLC0415
+
+    stmt = select(InterviewQuestionBankItem).where(
+        InterviewQuestionBankItem.id == item_id,
+        InterviewQuestionBankItem.course_id == course_id,
+        InterviewQuestionBankItem.deleted_at.is_(None),
+    )
+    item = (await db.execute(stmt)).scalar_one_or_none()
+    if item is None:
+        raise NotFoundError(f"Question bank item {item_id} not found")
+    data = payload.model_dump(exclude_unset=True)
+    if "tags" in data:
+        item.tags_json = data.pop("tags")
+    for key, value in data.items():
+        setattr(item, key, value)
+    item.updated_by = actor.user_id
+    await flush_or_conflict(db)
+    await db.refresh(item)
+    return item
+
+
+async def delete_question_bank_item(
+    db: AsyncSession,
+    course_id: UUID,
+    item_id: UUID,
+    actor: CurrentUser,
+) -> None:
+    """Soft-delete a bank item. Already-imported questions are untouched."""
+    from sqlalchemy import select  # noqa: PLC0415
+
+    stmt = select(InterviewQuestionBankItem).where(
+        InterviewQuestionBankItem.id == item_id,
+        InterviewQuestionBankItem.course_id == course_id,
+        InterviewQuestionBankItem.deleted_at.is_(None),
+    )
+    item = (await db.execute(stmt)).scalar_one_or_none()
+    if item is None:
+        raise NotFoundError(f"Question bank item {item_id} not found")
+    await soft_delete_cascade(db, item, actor_id=actor.user_id)
+
+
 __all__ = [
     "add_outcome",
     "add_question",
+    "add_to_question_bank",
     "archive_interview_config",
     "create_interview_config",
     "delete_interview_config",
     "delete_outcome",
     "delete_question",
+    "delete_question_bank_item",
     "get_generation_run",
+    "list_question_bank",
     "publish_interview_config",
+    "update_question_bank_item",
     "regenerate_question",
     "start_generation_run",
     "unarchive_interview_config",

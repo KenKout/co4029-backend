@@ -50,6 +50,7 @@ from abridgeai.features.materials.services.authoring._storage import (
     reset_other_versions_current,
     update_storage_object_metadata,
 )
+from abridgeai.features.materials.workers.enqueue import enqueue_material_ingest
 from abridgeai.infrastructure.s3 import head_object
 
 if TYPE_CHECKING:
@@ -146,13 +147,12 @@ async def complete_upload(
     await flush_or_conflict(db)
     await db.refresh(job)
 
-    if arq_pool is not None:
-        await arq_pool.enqueue_job(  # type: ignore[attr-defined]
-            "ingest_material_version_task",
-            actor.user_id,
-            version.id,
-            pipeline_run_id,
-        )
+    await enqueue_material_ingest(
+        arq_pool,
+        actor_id=actor.user_id,
+        material_version_id=version.id,
+        pipeline_run_id=pipeline_run_id,
+    )
 
     return UploadCompleteResponse(
         material_id=material.id,
@@ -204,13 +204,12 @@ async def reprocess_material(
     await flush_or_conflict(db)
     await db.refresh(job)
 
-    if arq_pool is not None:
-        await arq_pool.enqueue_job(  # type: ignore[attr-defined]
-            "ingest_material_version_task",
-            actor.user_id,
-            version.id,
-            pipeline_run_id,
-        )
+    await enqueue_material_ingest(
+        arq_pool,
+        actor_id=actor.user_id,
+        material_version_id=version.id,
+        pipeline_run_id=pipeline_run_id,
+    )
 
     return ReprocessResponse(
         material_id=material.id,

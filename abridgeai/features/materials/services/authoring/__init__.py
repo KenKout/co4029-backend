@@ -61,6 +61,7 @@ from abridgeai.features.materials.services.authoring._common import (
 from abridgeai.features.materials.services.authoring._reads import (
     get_authoring_material,
     get_authoring_stream_url,
+    get_lesson_knowledge_graph,
     get_lesson_processing_summary_view,
     get_processing_progress,
     link_existing_material,
@@ -96,6 +97,7 @@ __all__ = [
     "fetch_multipart_parts",
     "get_authoring_material",
     "get_authoring_stream_url",
+    "get_lesson_knowledge_graph",
     "get_lesson_processing_summary_view",
     "get_processing_progress",
     "get_settings",

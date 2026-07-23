@@ -161,6 +161,32 @@ async def _load_quiz_questions_for_taking(db: AsyncSession, quiz_id: UUID) -> li
 
     for question in questions:
         question.options = options_by_qid.get(question.id, [])  # type: ignore[attr-defined]
+
+    # Stamp the derived (L.O.x) position so the take payload can render the
+    # prefix student-side. Raw SQL against course_learning_outcomes keeps the
+    # quizzes feature from importing the courses ORM (T0.4 contract), same
+    # precedent as the cross-feature cooldown read below. Soft-deleted /
+    # missing outcomes resolve to None → no prefix.
+    outcome_ids = [q.learning_outcome_id for q in questions if q.learning_outcome_id]
+    positions: dict[UUID, int] = {}
+    if outcome_ids:
+        from sqlalchemy import text as _text  # noqa: PLC0415
+
+        rows = (
+            await db.execute(
+                _text(
+                    "SELECT id, position FROM course_learning_outcomes "
+                    "WHERE id = ANY(:ids) AND deleted_at IS NULL"
+                ),
+                {"ids": list(set(outcome_ids))},
+            )
+        ).all()
+        positions = {row[0]: row[1] for row in rows}
+    for question in questions:
+        lo_id = question.learning_outcome_id
+        question.outcome_position = (  # type: ignore[attr-defined]
+            positions.get(lo_id) if lo_id is not None else None
+        )
     return list(questions)
 
 
@@ -440,8 +466,17 @@ async def submit_attempt(
         .scalars()
         .all()
     )
+    # Denominator MUST match what the student was actually served: only
+    # approved questions reach the taking surface (see
+    # _load_quiz_questions_for_taking), so counting all questions here would
+    # divide by a larger set than the student ever saw — silently deflating
+    # every score once a quiz is partially published (e.g. 15 approved of 30
+    # → a perfect attempt would read 50%). Filter to approved to stay honest.
     question_count_row = await db.execute(
-        select(func.count(QuizQuestion.id)).where(QuizQuestion.quiz_id == quiz.id)
+        select(func.count(QuizQuestion.id)).where(
+            QuizQuestion.quiz_id == quiz.id,
+            QuizQuestion.review_status == "approved",
+        )
     )
     question_count = int(question_count_row.scalar_one()) or len(answers) or 1
     score_points = sum((answer.points_awarded for answer in answers), Decimal("0"))

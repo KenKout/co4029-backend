@@ -29,9 +29,14 @@ if TYPE_CHECKING:
 
 
 class _RunLike(Protocol):
-    """Stub of ``GenerationRun`` — only ``requested_by`` is read."""
+    """Stub of ``GenerationRun`` — ``requested_by`` + ``config_json`` are read.
+
+    ``config_json`` carries ``target_outcome_ids`` (§LO-3): when non-empty,
+    every persisted question is round-robin bound to one of those outcomes.
+    """
 
     requested_by: UUID | None
+    config_json: dict[str, Any] | None
 
 
 def _structure_source_refs(
@@ -79,6 +84,27 @@ def _ref_chunk_id(raw_ref: object) -> str | None:
     return None
 
 
+def _parse_target_outcome_ids(config_json: dict[str, Any] | None) -> list[UUID]:
+    """Read + coerce ``config_json['target_outcome_ids']`` to ``list[UUID]``.
+
+    The service serializes them as strings; parse back defensively, dropping
+    any malformed entry rather than aborting the whole run. Returns [] when
+    the key is absent/empty (→ questions stay unassigned).
+    """
+    if not config_json:
+        return []
+    raw = config_json.get("target_outcome_ids")
+    if not isinstance(raw, list):
+        return []
+    parsed: list[UUID] = []
+    for item in raw:
+        try:
+            parsed.append(UUID(str(item)))
+        except (ValueError, TypeError):
+            continue
+    return parsed
+
+
 async def persist_questions(
     db: AsyncSession,
     run: _RunLike,
@@ -105,9 +131,22 @@ async def persist_questions(
     )
     start_position = int(position_result.scalar_one())
 
+    # §LO-3 auto-assign: when the teacher targeted specific outcomes, bind
+    # every generated question to one of them round-robin. This honours the
+    # hard rule "if outcomes are given, no generated question is left
+    # unassigned" deterministically, without depending on the LLM emitting a
+    # correct outcome tag. Empty list → learning_outcome_id stays NULL and the
+    # teacher assigns manually. Invalid UUID strings are skipped defensively.
+    target_outcome_ids = _parse_target_outcome_ids(run.config_json)
+
     persisted: list[QuizQuestion] = []
     for offset, payload in enumerate(questions, start=1):
         structured_refs = _structure_source_refs(payload.get("source_refs"), chunks)
+        learning_outcome_id = (
+            target_outcome_ids[(offset - 1) % len(target_outcome_ids)]
+            if target_outcome_ids
+            else None
+        )
         question = QuizQuestion(
             quiz_id=quiz.id,
             position=start_position + offset,
@@ -119,6 +158,7 @@ async def persist_questions(
             bloom_level=payload.get("bloom_level"),
             review_status="pending",
             expected_response_time_ms=payload.get("expected_response_time_ms"),
+            learning_outcome_id=learning_outcome_id,
             source_refs=structured_refs,
             original_generated_payload=payload.get("original_generated_payload"),
         )

@@ -35,6 +35,21 @@ async def get_module(db: AsyncSession, module_id: UUID) -> Module | None:
     return await db.get(Module, module_id)
 
 
+async def list_lesson_ids_for_modules(db: AsyncSession, module_ids: Sequence[UUID]) -> list[UUID]:
+    """All lesson ids belonging to the given modules (non-deleted).
+
+    Backs module-scoped interview generation: each selected module expands
+    to its lessons, which become the ``lesson_ids`` retrieval filter.
+    """
+    if not module_ids:
+        return []
+    stmt = select(Lesson.id).where(
+        Lesson.module_id.in_(list(module_ids)),
+        Lesson.deleted_at.is_(None),
+    )
+    return list((await db.execute(stmt)).scalars().all())
+
+
 async def walk_resource_to_course(db: AsyncSession, resource_id: UUID) -> Course | None:
     stmt = (
         select(Course)
@@ -140,6 +155,7 @@ __all__ = [
     "get_lesson_title",
     "get_module",
     "get_published_lessons_for_course",
+    "list_lesson_ids_for_modules",
     "get_user_primary_org_id",
     "insert_module_item",
     "next_module_item_position",

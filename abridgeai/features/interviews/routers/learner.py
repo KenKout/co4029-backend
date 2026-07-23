@@ -737,7 +737,7 @@ async def get_gap_report(
     report = (await db.execute(stmt)).scalar_one_or_none()
     if report is None:
         raise _not_found("gap_report", session_id)
-    return _gap_report_view(report)
+    return await _gap_report_view(db, report)
 
 
 @router.get("/me/interview-sessions", response_model=list[InterviewSessionPublic])
@@ -809,6 +809,18 @@ def _history_message_kind(message: InterviewSessionMessage) -> str:
     # transcript renders them as their own chronological AI turn.
     if stored_kind == "transition":
         return "transition"
+    # Rich-closing sub-steps (Slice 13): self-reflection prompt, invite-candidate-
+    # questions, and the answer-safe reply are NON-assessed ceremony that the
+    # adaptive path persists attached to the last question. Without this they'd
+    # fall through to "followup" below and render under "Question N", so classify
+    # them as "closing" — the transcript then groups them in their own wrap-up
+    # section, never under a numbered assessed question.
+    if metadata.get("action") in {
+        "prompt_self_reflection",
+        "invite_candidate_questions",
+        "answer_candidate_question",
+    }:
+        return "closing"
     if message.role == "user":
         return "answer"
     ceremony_key = metadata.get("ceremony_key")
@@ -948,8 +960,39 @@ async def _current_session_question(db: AsyncSession, session_id: UUID) -> objec
     return await db.get(InterviewQuestion, sq.interview_question_id)
 
 
-def _gap_report_view(report: Any) -> GapReportRead:  # noqa: ANN401  -- ORM row, typed via duck shape
-    report_json = report.report_json or {}
+async def _resolve_resource_titles(
+    db: AsyncSession,
+    resource_ids: set[str],
+) -> dict[str, str]:
+    """Map resource UUID → human title for study-plan display.
+
+    The gap report persists only resource UUIDs in ``report_json``; resolving
+    them to titles at projection time repairs existing reports WITHOUT a data
+    migration. IDs that no longer resolve (deleted resource, malformed id) are
+    simply omitted so the UI never shows a raw UUID.
+    """
+    if not resource_ids:
+        return {}
+    from sqlalchemy import bindparam  # noqa: PLC0415
+    from sqlalchemy import text as _text  # noqa: PLC0415
+
+    valid: list[UUID] = []
+    for rid in resource_ids:
+        try:
+            valid.append(UUID(str(rid)))
+        except (ValueError, AttributeError, TypeError):
+            continue
+    if not valid:
+        return {}
+    stmt = _text(
+        "SELECT id, title FROM lesson_resources WHERE id IN :ids AND deleted_at IS NULL"
+    ).bindparams(bindparam("ids", expanding=True))
+    rows = (await db.execute(stmt, {"ids": valid})).mappings().all()
+    return {str(row["id"]): row["title"] for row in rows}
+
+
+def _study_plan_from_report(report_json: object) -> list[dict[str, Any]]:
+    """Extract the raw study-plan entries (UUID resources) from report_json."""
     raw_plan = report_json.get("study_plan") if isinstance(report_json, dict) else None
     study_plan: list[dict[str, Any]] = []
     if isinstance(raw_plan, list):
@@ -965,6 +1008,30 @@ def _gap_report_view(report: Any) -> GapReportRead:  # noqa: ANN401  -- ORM row,
                     ],
                 }
             )
+    return study_plan
+
+
+def _apply_resource_titles(
+    study_plan: list[dict[str, Any]],
+    titles: dict[str, str],
+) -> None:
+    """Replace each item's UUID resource list with resolved human titles.
+
+    Mutates in place. Unresolvable ids are dropped rather than shown raw, so a
+    study-plan item may end up with an empty resource list (the UI already
+    hides the resource line when empty).
+    """
+    for item in study_plan:
+        item["suggested_resources"] = [
+            titles[rid] for rid in item["suggested_resources"] if rid in titles
+        ]
+
+
+async def _gap_report_view(db: AsyncSession, report: Any) -> GapReportRead:  # noqa: ANN401  -- ORM row, typed via duck shape
+    report_json = report.report_json or {}
+    study_plan = _study_plan_from_report(report_json)
+    resource_ids = {rid for item in study_plan for rid in item["suggested_resources"]}
+    _apply_resource_titles(study_plan, await _resolve_resource_titles(db, resource_ids))
     # FR-5.7: student sees pass/fail + qualitative remediation only. The
     # per-criterion mean rubric scores (report_json["rubric_aggregated"]) are
     # deliberately NOT projected here — they are teacher-only via

@@ -41,6 +41,7 @@ from abridgeai.core.exceptions import AppError, NotFoundError
 from abridgeai.core.security import CurrentUser
 from abridgeai.features.courses.models import (
     Course,
+    CourseLearningOutcome,
     Lesson,
     LessonResource,
     Module,
@@ -58,6 +59,9 @@ from abridgeai.features.courses.queries import (
 from abridgeai.features.courses.schemas import (
     CourseAuthoring,
     CourseCreate,
+    CourseLearningOutcomeAuthoring,
+    CourseLearningOutcomeCreate,
+    CourseLearningOutcomeUpdate,
     CourseUpdate,
     LessonAuthoring,
     LessonCreate,
@@ -662,13 +666,98 @@ async def list_course_roster_with_progress(
     return await authoring_queries.list_course_roster_with_progress(db, course_id)
 
 
+# ---------------------------------------------------------------------------
+# Course learning outcomes (§LO-1/2) — teacher-side CRUD.
+# ---------------------------------------------------------------------------
+async def _require_outcome(
+    db: AsyncSession, course_id: UUID, outcome_id: UUID
+) -> CourseLearningOutcome:
+    outcome = await authoring_queries.get_course_outcome(db, outcome_id)
+    if (
+        outcome is None
+        or outcome.deleted_at is not None
+        or outcome.course_id != course_id
+    ):
+        raise NotFoundError(f"Course outcome {outcome_id} not found")
+    return outcome
+
+
+async def list_course_outcomes(
+    db: AsyncSession, course_id: UUID
+) -> list[CourseLearningOutcomeAuthoring]:
+    """All learning outcomes for a course, ordered by position (§LO-1)."""
+    await _require_course(db, course_id)
+    outcomes = await authoring_queries.list_course_outcomes(db, course_id)
+    return [CourseLearningOutcomeAuthoring.model_validate(o) for o in outcomes]
+
+
+async def add_course_outcome(
+    db: AsyncSession,
+    course_id: UUID,
+    payload: CourseLearningOutcomeCreate,
+    actor: CurrentUser,
+) -> CourseLearningOutcomeAuthoring:
+    """Append a new outcome at the next free position (§LO-1).
+
+    ``position`` is server-assigned (MAX+1); the ``(L.O.x)`` code is
+    derived from it at display time and never stored.
+    """
+    del actor
+    await _require_course(db, course_id)
+    next_pos = await authoring_queries.next_course_outcome_position(db, course_id)
+    outcome = CourseLearningOutcome(
+        course_id=course_id,
+        position=next_pos,
+        outcome_text=payload.outcome_text,
+    )
+    db.add(outcome)
+    await _flush_or_conflict(db)
+    await db.refresh(outcome)
+    return CourseLearningOutcomeAuthoring.model_validate(outcome)
+
+
+async def update_course_outcome(
+    db: AsyncSession,
+    course_id: UUID,
+    outcome_id: UUID,
+    payload: CourseLearningOutcomeUpdate,
+    actor: CurrentUser,
+) -> CourseLearningOutcomeAuthoring:
+    """Edit an outcome's text (§LO-2). Position/code are not client-editable."""
+    del actor
+    outcome = await _require_outcome(db, course_id, outcome_id)
+    _apply_patch(outcome, payload)
+    await _flush_or_conflict(db)
+    await db.refresh(outcome)
+    return CourseLearningOutcomeAuthoring.model_validate(outcome)
+
+
+async def delete_course_outcome(
+    db: AsyncSession, course_id: UUID, outcome_id: UUID, actor: CurrentUser
+) -> None:
+    """Soft-delete an outcome, then compact positions to 1..N (§LO-2).
+
+    The FK on ``quiz_questions.learning_outcome_id`` is ``ON DELETE SET
+    NULL``, but that fires only on a hard DELETE; we soft-delete here, so
+    questions keep pointing at the now-deleted outcome row. That's benign:
+    the projection layer treats a soft-deleted / missing outcome as "no
+    outcome" (NULL position → no ``(L.O.x)`` prefix). After removal the
+    surviving outcomes are re-indexed so the display codes never gap.
+    """
+    outcome = await _require_outcome(db, course_id, outcome_id)
+    await soft_delete_cascade(db, outcome, actor_id=actor.user_id)
+    await authoring_queries.reindex_course_outcomes(db, course_id)
+
+
 __all__ = [
+    "add_course_outcome",
     "add_lesson",
     "add_lesson_resource",
     "add_module",
     "archive_course",
     "check_course_slug_available",
     "create_course",
+    "delete_course_outcome",
     "delete_lesson_resource",
     "delete_module_item",
     "get_authoring_content",
@@ -677,12 +766,14 @@ __all__ = [
     "get_authoring_resource_download_url",
     "list_authoring_courses_for_user",
     "list_authoring_lesson_resources",
+    "list_course_outcomes",
     "list_course_roster",
     "list_course_roster_with_progress",
     "publish_course",
     "reorder_module_items",
     "set_module_prerequisites",
     "update_course",
+    "update_course_outcome",
     "update_lesson",
     "update_module",
     "update_module_item",

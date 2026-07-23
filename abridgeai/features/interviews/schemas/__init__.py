@@ -37,6 +37,9 @@ from abridgeai.features.interviews.schemas.authoring import (
     InterviewOutcomeAuthoring,
     InterviewOutcomeCreate,
     InterviewQuestionAuthoring,
+    InterviewQuestionBankItemCreate,
+    InterviewQuestionBankItemRead,
+    InterviewQuestionBankItemUpdate,
     InterviewQuestionCreate,
     InterviewSessionSummary,
     InterviewSessionTeacherRead,
@@ -65,9 +68,10 @@ from abridgeai.features.interviews.schemas.real_time import (
 )
 from abridgeai.features.interviews.schemas.report import (
     GapReportAuthoringRead,
+    GapReportNotesUpdate,
     GapReportRead,
     StudyPlanItem,
-)
+)  # noqa: F401  -- re-exported
 from abridgeai.features.interviews.schemas.session import (
     InputModeLiteral,
     InterviewFinishReasonLiteral,
@@ -92,6 +96,7 @@ __all__ = [
     "ConfigStatusLiteral",
     "DifficultyLiteral",
     "GapReportAuthoringRead",
+    "GapReportNotesUpdate",
     "GapReportRead",
     "GenerationModeLiteral",
     "GenerationRunStatusLiteral",
@@ -118,6 +123,9 @@ __all__ = [
     "InterviewOutcomeCreate",
     "InterviewOutcomePublic",
     "InterviewQuestionAuthoring",
+    "InterviewQuestionBankItemCreate",
+    "InterviewQuestionBankItemRead",
+    "InterviewQuestionBankItemUpdate",
     "InterviewQuestionCreate",
     "InterviewQuestionPublic",
     "InterviewRubricScore",

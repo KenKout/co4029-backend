@@ -17,6 +17,7 @@ Four concerns split across sibling files:
 from __future__ import annotations
 
 from abridgeai.features.quizzes.schemas.attempt import (
+    QuizAttemptIntegrityEvent,
     QuizAttemptProgressAnswer,
     QuizAttemptProgressRead,
     QuizAttemptRead,
@@ -28,6 +29,7 @@ from abridgeai.features.quizzes.schemas.attempt import (
     QuizAttemptSubmit,
     QuizAttemptSubmitAnswer,
     QuizAttemptTeacherRead,
+    QuizAttemptTeacherReview,
 )
 from abridgeai.features.quizzes.schemas.authoring import (
     QuizAuthoring,
@@ -47,14 +49,24 @@ from abridgeai.features.quizzes.schemas.public import (
     QuizQuestionOptionPublic,
     QuizQuestionPublic,
 )
+from abridgeai.features.quizzes.schemas.results import (
+    QuizOptionDistribution,
+    QuizPerStudentRow,
+    QuizQuestionBreakdown,
+    QuizResultsRead,
+    QuizResultsSummary,
+    QuizScoreBucket,
+)
 from abridgeai.features.quizzes.schemas.run import (
     CoverageOptions,
     GenerationMode,
     GenerationRunStatus,
     QuestionRegenerationRequest,
     QuestionType,
+    QuizGenerationProgress,
     QuizGenerationRequest,
     QuizGenerationRunRead,
+    QuizGenerationStageEvent,
 )
 
 __all__ = [
@@ -67,6 +79,7 @@ __all__ = [
     "QuestionRegenerationRequest",
     "QuestionType",
     "QuestionTypeLiteral",
+    "QuizAttemptIntegrityEvent",
     "QuizAttemptProgressAnswer",
     "QuizAttemptProgressRead",
     "QuizAttemptRead",
@@ -78,14 +91,23 @@ __all__ = [
     "QuizAttemptSubmit",
     "QuizAttemptSubmitAnswer",
     "QuizAttemptTeacherRead",
+    "QuizAttemptTeacherReview",
     "QuizAuthoring",
     "QuizForAuthoringPublic",
     "QuizForTakingPublic",
+    "QuizGenerationProgress",
     "QuizGenerationRequest",
     "QuizGenerationRunRead",
+    "QuizGenerationStageEvent",
+    "QuizOptionDistribution",
+    "QuizPerStudentRow",
     "QuizPublic",
     "QuizQuestionAuthoring",
+    "QuizQuestionBreakdown",
     "QuizQuestionOptionAuthoring",
     "QuizQuestionOptionPublic",
     "QuizQuestionPublic",
+    "QuizResultsRead",
+    "QuizResultsSummary",
+    "QuizScoreBucket",
 ]

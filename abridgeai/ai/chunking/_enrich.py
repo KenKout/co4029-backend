@@ -18,15 +18,28 @@ from abridgeai.ai.chunking.base import EnrichedChunk, RawChunk
 from abridgeai.ai.chunking.token_aware import truncate_to_tokens
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+    from contextlib import AbstractAsyncContextManager
+
     from sqlalchemy.ext.asyncio import AsyncSession
 
     from abridgeai.ai.chunking.cache import ChunkingCache
     from abridgeai.ai.llm.gateway import LLMResult
 
+    # A zero-arg callable returning an async-context-manager session — i.e.
+    # ``async_sessionmaker`` (``get_sessionmaker()``). Each call yields a fresh
+    # ``AsyncSession`` so concurrent enrichment coroutines never share one.
+    SessionFactory = Callable[[], AbstractAsyncContextManager[AsyncSession]]
+
 logger = logging.getLogger(__name__)
 
 PROMPT_VERSION = "v1"
 _LLM_INPUT_TOKEN_BUDGET = 3000
+# A large semaphore used as an effective no-op when the caller already gates
+# concurrency at a higher level (``_enrich_one_isolated`` acquires the real
+# bounded semaphore around the whole session, then hands this to the inner
+# ``_enrich_one`` so the LLM call is not double-gated).
+_UNBOUNDED_SEMAPHORE = asyncio.Semaphore(1_000_000)
 _VALID_ROLES = frozenset({"body", "summary", "review", "front_matter"})
 
 _ENRICHMENT_SYSTEM_PROMPT = (
@@ -83,13 +96,58 @@ async def enrich_with_llm(
     pipeline_run_id: UUID | None = None,
     parent_job_id: UUID | None = None,
     parallelism: int = 4,
+    session_factory: SessionFactory | None = None,
 ) -> list[EnrichedChunk]:
+    """Enrich each window with LLM-derived semantic metadata.
+
+    Concurrency model (the crux of the multi-window PDF fix):
+
+    Every ``_enrich_one`` touches a DB session — ``cache.get`` / ``cache.put``
+    and the gateway's ``write_ai_model_call`` audit-row flush. A single
+    ``AsyncSession`` CANNOT be driven by two coroutines at once: interleaved
+    flushes raise ``InvalidRequestError: Session is already flushing``, which
+    used to break every multi-window document (PDF/slides) — it stuck in
+    ``pending`` forever. Single-window inputs escaped by luck.
+
+    * When ``session_factory`` is provided (the production/worker path), each
+      window runs CONCURRENTLY (bounded by ``parallelism``) inside its OWN
+      short-lived session + its own :class:`ChunkingCache`. No two coroutines
+      ever share a session, so the flush race is impossible AND throughput is
+      restored — large PDFs no longer serialise dozens of LLM calls. Each
+      per-window session commits independently (the ``ai_model_calls`` audit
+      rows and cache writes are independent inserts).
+    * When ``session_factory`` is ``None`` (unit tests passing a mock ``db`` /
+      ``cache``, or any caller without a real sessionmaker), it falls back to
+      the SEQUENTIAL shared-``db`` path — correct, just not parallel.
+    """
     if not windows:
         return []
 
-    semaphore = asyncio.Semaphore(max(1, parallelism))
-    tasks = [
-        _enrich_one(
+    if session_factory is not None:
+        semaphore = asyncio.Semaphore(max(1, parallelism))
+        enrichments = await asyncio.gather(
+            *(
+                _enrich_one_isolated(
+                    window=w,
+                    llm_gateway=llm_gateway,
+                    session_factory=session_factory,
+                    document_title=document_title,
+                    pipeline_run_id=pipeline_run_id,
+                    parent_job_id=parent_job_id,
+                    semaphore=semaphore,
+                )
+                for w in windows
+            )
+        )
+        return [_promote_to_enriched(w, e) for w, e in zip(windows, enrichments, strict=True)]
+
+    # Fallback: sequential on the shared session (no per-call isolation
+    # available). Semaphore(1) is belt-and-suspenders — the ``await`` in the
+    # comprehension already serialises — so no two coroutines touch ``db``
+    # concurrently.
+    semaphore = asyncio.Semaphore(1)
+    enrichments = [
+        await _enrich_one(
             window=w,
             llm_gateway=llm_gateway,
             db=db,
@@ -101,8 +159,57 @@ async def enrich_with_llm(
         )
         for w in windows
     ]
-    enrichments = await asyncio.gather(*tasks)
     return [_promote_to_enriched(w, e) for w, e in zip(windows, enrichments, strict=True)]
+
+async def _enrich_one_isolated(
+    *,
+    window: RawChunk,
+    llm_gateway: LLMGatewayProto,
+    session_factory: SessionFactory,
+    document_title: str | None,
+    pipeline_run_id: UUID | None,
+    parent_job_id: UUID | None,
+    semaphore: asyncio.Semaphore,
+) -> WindowEnrichment:
+    """Run one window's enrichment inside its OWN session.
+
+    Isolates all DB I/O (cache get/put + the gateway audit flush) onto a
+    dedicated session so concurrent windows never share one. Commits the
+    session on the way out so the audit row + cache entry persist; a commit
+    failure must never sink the ingest, so it degrades to the LLM result we
+    already computed (the enrichment value is independent of the audit write).
+    """
+    from abridgeai.ai.chunking.cache import ChunkingCache  # noqa: PLC0415
+
+    # CRITICAL: the semaphore must gate the ENTIRE session lifecycle, not just
+    # the LLM call. ``asyncio.gather`` schedules all N window coroutines at
+    # once; if each opened its session before acquiring the semaphore, an
+    # N-window PDF would open N sessions simultaneously and exhaust the DB
+    # connection pool (``QueuePool limit ... reached``). Acquiring FIRST caps
+    # concurrent open sessions at ``parallelism``. The inner ``_enrich_one``
+    # then runs with an unbounded semaphore so it does not double-gate.
+    async with semaphore:
+        async with session_factory() as session:
+            cache = ChunkingCache(session)
+            enrichment = await _enrich_one(
+                window=window,
+                llm_gateway=llm_gateway,
+                db=session,
+                cache=cache,
+                document_title=document_title,
+                pipeline_run_id=pipeline_run_id,
+                parent_job_id=parent_job_id,
+                semaphore=_UNBOUNDED_SEMAPHORE,
+            )
+            try:
+                await session.commit()
+            except Exception as exc:  # noqa: BLE001 -- audit persistence must not break ingest
+                logger.warning(
+                    "chunking enrichment session commit failed (group=%s): %s",
+                    window.metadata.get("glue_group_id"),
+                    exc,
+                )
+            return enrichment
 
 
 async def _enrich_one(

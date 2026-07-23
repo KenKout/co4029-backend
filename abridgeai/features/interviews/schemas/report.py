@@ -35,7 +35,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class StudyPlanItem(BaseModel):
@@ -94,10 +94,24 @@ class GapReportAuthoringRead(GapReportRead):
     teacher_summary: str | None = None
     source_quiz_attempt_id: UUID | None = None
     source_interview_session_id: UUID | None = None
+    # Human-readable context so the teacher view isn't a wall of UUIDs. These
+    # are resolved server-side (student display name, interview config title)
+    # and are read-only projections, never persisted on the GapReport row.
+    student_name: str | None = None
+    interview_title: str | None = None
+
+
+class GapReportNotesUpdate(BaseModel):
+    """Teacher edit of the instructor-authored ``teacher_summary`` note."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    teacher_summary: str | None = Field(default=None, max_length=5000)
 
 
 __all__ = [
     "GapReportAuthoringRead",
+    "GapReportNotesUpdate",
     "GapReportRead",
     "StudyPlanItem",
 ]

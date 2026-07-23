@@ -119,6 +119,10 @@ class QuizAuthoring(QuizPublic):
     status: Literal["draft", "published", "archived"]  # type: ignore[assignment]
     course_id: UUID
     module_id: UUID
+    # Moodle-style headline-score policy (migration 0033). Patchable via
+    # PATCH /teacher/quizzes/{id}; surfaced so the Settings tab can edit it
+    # and the results dashboard can label the headline column.
+    grading_method: Literal["highest", "average", "first", "last"] = "highest"
     shuffle_questions: bool = False
     shuffle_options: bool = False
     initial_ef: Decimal | None = None

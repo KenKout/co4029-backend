@@ -51,6 +51,11 @@ from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 
 from abridgeai.core.db import get_sessionmaker
+from abridgeai.features.quizzes.ai.pipelines._progress import (
+    COVERAGE_STAGES,
+    record_config_patch,
+    record_stage,
+)
 from abridgeai.features.quizzes.ai.pipelines._telemetry import log_validator_aborted_run
 from abridgeai.features.quizzes.ai.stages.dedup import discard_duplicates
 from abridgeai.features.quizzes.ai.stages.generation import generate_questions
@@ -84,7 +89,7 @@ _DEFAULT_PARALLELISM = 4
 _DEFAULT_MAX_ATTEMPTS = 2
 
 
-async def run_coverage_pipeline(
+async def run_coverage_pipeline(  # noqa: C901 -- pre-existing linear stage sequence (was 15>12 at HEAD); progress checkpoints add statements, not branches
     db: AsyncSession,
     run: Any,  # noqa: ANN401 -- GenerationRun ORM still in legacy backend
     quiz: Quiz,
@@ -116,16 +121,29 @@ async def run_coverage_pipeline(
     flat_sections = [s for o in outlines for s in o.sections]
 
     # Stash budget on the run for observability — same shape as legacy.
-    run.config_json = run.config_json | {
-        "coverage": {
-            "section_count": len(flat_sections),
-            "eligible_count": len(budget),
-            "budget": dict(budget),
-            "skipped_sections": [s.id for s in flat_sections if s.id not in budget],
-        }
-    }
+    # Written through a dedicated short-lived transaction (NOT the shared
+    # pipeline session) so the generation_runs row is never left locked
+    # across the ideation/generation LLM calls that follow.
+    await record_config_patch(
+        run.id,
+        {
+            "coverage": {
+                "section_count": len(flat_sections),
+                "eligible_count": len(budget),
+                "budget": dict(budget),
+                "skipped_sections": [s.id for s in flat_sections if s.id not in budget],
+            }
+        },
+    )
 
+    await record_stage(
+        run.id,
+        stages=COVERAGE_STAGES,
+        current_stage="outline",
+        detail=f"{len(flat_sections)} sections, {len(budget)} eligible",
+    )
     # Step 1 — outline-aware ideation (one LLM call across the whole outline).
+    await record_stage(run.id, stages=COVERAGE_STAGES, current_stage="ideation")
     templates = await ideate_for_outline(
         db,
         run,
@@ -140,6 +158,12 @@ async def run_coverage_pipeline(
 
     template_dicts: list[dict[str, Any]] = [t.model_dump() for t in templates]
 
+    await record_stage(
+        run.id,
+        stages=COVERAGE_STAGES,
+        current_stage="generation",
+        detail=f"{len(template_dicts)} sections",
+    )
     # Step 2 — per-template fanout under a bounded semaphore.
     parallelism = _resolve_parallelism(config)
     semaphore = asyncio.Semaphore(max(1, parallelism))
@@ -212,6 +236,12 @@ async def run_coverage_pipeline(
     all_chunks = await _load_chunks_by_id(db, list(all_chunk_ids))
 
     # Step 4 — validation across the whole batch (one LLM call).
+    await record_stage(
+        run.id,
+        stages=COVERAGE_STAGES,
+        current_stage="validation",
+        detail=f"{len(questions)} candidates",
+    )
     _, verdicts = await validate_questions(
         title=quiz.title,
         chunks=all_chunks,
@@ -224,6 +254,12 @@ async def run_coverage_pipeline(
     accepted, rejected, _reasons = apply_verdicts(questions, verdicts)
 
     # Step 5 — dedup against the existing quiz + within-batch.
+    await record_stage(
+        run.id,
+        stages=COVERAGE_STAGES,
+        current_stage="dedup",
+        detail=f"{len(accepted)} accepted",
+    )
     kept, drops = await discard_duplicates(db, quiz, accepted)
     if not kept:
         log_validator_aborted_run(
@@ -241,27 +277,36 @@ async def run_coverage_pipeline(
         )
 
     # Step 6 — persistence (one batched insert).
+    await record_stage(
+        run.id,
+        stages=COVERAGE_STAGES,
+        current_stage="persistence",
+        detail=f"{len(kept)} questions",
+    )
     persisted = await persist_questions(db, run, quiz, all_chunks, kept)
 
-    run.config_json = run.config_json | {
-        "pipeline": {
-            "stage": "completed",
-            "mode": "coverage",
-            "pipeline_run_id": str(pipeline_run_id),
-            "ideation": {"received_templates": len(templates)},
-            "generation": {
-                "requested_questions": sum(budget.values()),
-                "received_questions": len(questions),
-                "parallelism": parallelism,
-                "max_attempts": max_attempts,
-            },
-            "validation": {"accepted": len(accepted), "rejected": rejected},
-            "dedup": {
-                "kept": len(kept),
-                "dropped": [{"index": d.index, "reason": d.reason} for d in drops],
-            },
-        }
-    }
+    await record_config_patch(
+        run.id,
+        {
+            "pipeline": {
+                "stage": "completed",
+                "mode": "coverage",
+                "pipeline_run_id": str(pipeline_run_id),
+                "ideation": {"received_templates": len(templates)},
+                "generation": {
+                    "requested_questions": sum(budget.values()),
+                    "received_questions": len(questions),
+                    "parallelism": parallelism,
+                    "max_attempts": max_attempts,
+                },
+                "validation": {"accepted": len(accepted), "rejected": rejected},
+                "dedup": {
+                    "kept": len(kept),
+                    "dropped": [{"index": d.index, "reason": d.reason} for d in drops],
+                },
+            }
+        },
+    )
     return persisted
 
 

@@ -156,6 +156,39 @@ class QuizAttemptReviewRead(BaseModel):
     questions: list[QuizAttemptReviewQuestion]
 
 
+class QuizAttemptIntegrityEvent(BaseModel):
+    """One proctoring signal recorded during an attempt (teacher review).
+
+    Projection of :class:`features.interviews.models.AssessmentIntegrityEvent`
+    rows scoped to ``assessment_kind='quiz'``. Surfaced only in the
+    teacher-facing attempt detail — never to the student.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    event_type: str
+    severity: str
+    metadata_json: dict = {}
+    created_at: datetime
+
+
+class QuizAttemptTeacherReview(BaseModel):
+    """Teacher-facing detail for a single attempt.
+
+    Backs ``GET /teacher/courses/{course_id}/quiz-attempts/{attempt_id}``.
+    Combines the self-describing attempt summary (student name + quiz title),
+    the full per-question review (prompt, options, the student's answer,
+    correctness), and any integrity events captured during the take.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    attempt: QuizAttemptTeacherRead
+    questions: list[QuizAttemptReviewQuestion]
+    integrity_events: list[QuizAttemptIntegrityEvent] = []
+
+
 class QuizAttemptProgressAnswer(BaseModel):
     """One saved answer for an in-progress attempt (resume payload).
 

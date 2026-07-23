@@ -12,6 +12,7 @@ from sqlalchemy.sql.elements import ColumnElement
 from abridgeai.features.access_control.models import Role, UserRoleAssignment
 from abridgeai.features.courses.models import (
     Course,
+    CourseLearningOutcome,
     Lesson,
     LessonResource,
     Module,
@@ -297,15 +298,73 @@ async def list_course_roster_with_progress(
     return [dict(row) for row in rows]
 
 
+# ---------------------------------------------------------------------------
+# Course learning outcomes (§LO-1/2) — teacher-side CRUD reads.
+# ---------------------------------------------------------------------------
+async def list_course_outcomes(db: AsyncSession, course_id: UUID) -> list[CourseLearningOutcome]:
+    """All (non-deleted) learning outcomes for a course, ordered by position.
+
+    The ``(L.O.x)`` display code is derived from this 1-based ``position``
+    at render time; the list order IS the code order.
+    """
+    stmt = (
+        select(CourseLearningOutcome)
+        .where(
+            CourseLearningOutcome.course_id == course_id,
+            CourseLearningOutcome.deleted_at.is_(None),
+        )
+        .order_by(CourseLearningOutcome.position)
+    )
+    return list((await db.execute(stmt)).scalars().all())
+
+
+async def get_course_outcome(
+    db: AsyncSession, outcome_id: UUID
+) -> CourseLearningOutcome | None:
+    return await db.get(CourseLearningOutcome, outcome_id)
+
+
+async def next_course_outcome_position(db: AsyncSession, course_id: UUID) -> int:
+    """Return ``MAX(position) + 1`` for a course's outcomes (1 when empty)."""
+    stmt = select(func.coalesce(func.max(CourseLearningOutcome.position), 0)).where(
+        CourseLearningOutcome.course_id == course_id,
+        CourseLearningOutcome.deleted_at.is_(None),
+    )
+    return int((await db.execute(stmt)).scalar_one()) + 1
+
+
+async def reindex_course_outcomes(db: AsyncSession, course_id: UUID) -> None:
+    """Compact outcome positions to a contiguous 1..N chain (§LO-2).
+
+    Called after a delete so the ``L.O.x`` codes never gap. Uses the
+    ``_OFFSET`` two-phase shift to dodge the ``uq_course_learning_outcomes_position``
+    UNIQUE collision mid-update: first bump every row far out of the way,
+    then renumber 1..N in position order.
+    """
+    outcomes = await list_course_outcomes(db, course_id)
+    if not outcomes:
+        return
+    # Phase 1: shift all rows out of the target range to avoid UNIQUE clashes.
+    for offset_idx, outcome in enumerate(outcomes, start=1):
+        outcome.position = 100_000 + offset_idx
+    await db.flush()
+    # Phase 2: renumber contiguously in the original order.
+    for new_pos, outcome in enumerate(outcomes, start=1):
+        outcome.position = new_pos
+    await db.flush()
+
+
 __all__ = [
     "get_authoring_resource_storage_target",
     "get_course_for_authoring",
     "get_course_with_content_tree",
+    "get_course_outcome",
     "get_lesson",
     "get_lesson_resource",
     "get_module",
     "get_module_item",
     "list_all_lesson_resources",
+    "list_course_outcomes",
     "list_course_roster",
     "list_course_roster_with_progress",
     "list_courses_assigned_to_teacher",

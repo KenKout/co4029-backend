@@ -9,12 +9,14 @@ Composed by ``GET`` endpoints in
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
-from uuid import UUID
+from uuid import UUID, uuid4
 
+from abridgeai.ai.models import ProcessingJob
 from abridgeai.core.config import get_settings
 from abridgeai.core.db.conflict_mapper import flush_or_conflict
 from abridgeai.core.security import CurrentUser
 from abridgeai.features.materials.models import LearningMaterial, LearningMaterialVersion
+from abridgeai.features.materials.workers.enqueue import enqueue_material_ingest
 from abridgeai.features.materials.queries import (
     get_authoring_stream_target_for_material,
     get_latest_processing_job,
@@ -29,6 +31,11 @@ from abridgeai.features.materials.schemas import (
     MaterialStreamUrl,
     MaterialUpdate,
     ProcessingProgress,
+)
+from abridgeai.features.materials.schemas.status import (
+    KGEdge,
+    KGNode,
+    LessonKnowledgeGraph,
 )
 from abridgeai.features.materials.services.authoring._common import (
     present_version,
@@ -80,7 +87,18 @@ async def _present_material(db: AsyncSession, material: LearningMaterial) -> Mat
 
 
 async def get_processing_progress(db: AsyncSession, material_id: UUID) -> ProcessingProgress | None:
-    """Return the latest version's progress slice (or ``None``)."""
+    """Return the latest version's progress slice (or ``None``).
+
+    Prefers the live Redis progress snapshot the worker publishes at each
+    stage transition. The ingest runs in one long DB transaction that only
+    commits at the end, so the DB ``processing_jobs.progress_percent`` /
+    ``version.processing_status`` stay frozen at their pre-run values for
+    the whole run (MVCC). Redis is written outside that transaction, so it
+    reflects the real, live stage. When no live key exists (run finished,
+    never started, or Redis down) we fall back to the authoritative DB row.
+    """
+    from abridgeai.features.materials.ingestion.progress import read_progress  # noqa: PLC0415
+
     material = await get_material_for_authoring(db, material_id)
     if material is None or material.current_version_id is None:
         return None
@@ -88,11 +106,38 @@ async def get_processing_progress(db: AsyncSession, material_id: UUID) -> Proces
     if version is None:
         return None
     job = await get_latest_processing_job(db, version.id)
+    db_percent = int(job.progress_percent) if job is not None else 0
+    db_status = version.processing_status
+
+    live = await read_progress(version.id)
+    if live is not None:
+        # A live key means a run is in flight NOW; it is strictly more
+        # current than the DB row (which stays frozen at its pre-run
+        # snapshot until the ingest's final commit — and on a *reprocess*
+        # that snapshot is the previous run's ready/100). So trust the live
+        # values verbatim rather than max()-ing against the stale DB, which
+        # would otherwise show e.g. "embedding 100%". The key is cleared on
+        # clean completion, at which point we fall through to the DB row.
+        # Fold any sub-progress detail (e.g. "42/85" from the per-chunk KG
+        # build) onto the stage label so a long-running looping stage shows
+        # a live running count instead of a frozen percent.
+        stage_label = live.get("stage_label")
+        detail = live.get("detail")
+        log_line = f"{stage_label} · {detail}" if stage_label and detail else (stage_label or detail)
+        return ProcessingProgress(
+            material_id=material.id,
+            version_id=version.id,
+            processing_status=live.get("status") or db_status,
+            progress_percent=max(0, min(100, int(live.get("percent", db_percent)))),
+            latest_log_line=log_line,
+            error_message=version.processing_error,
+        )
+
     return ProcessingProgress(
         material_id=material.id,
         version_id=version.id,
-        processing_status=version.processing_status,
-        progress_percent=int(job.progress_percent) if job is not None else 0,
+        processing_status=db_status,
+        progress_percent=db_percent,
         latest_log_line=None,
         error_message=version.processing_error,
     )
@@ -156,16 +201,102 @@ async def get_lesson_processing_summary_view(
     return LessonProcessingSummary(lesson_id=lesson_id, **counts)
 
 
+async def get_lesson_knowledge_graph(
+    db: AsyncSession, lesson_id: UUID, *, limit: int = 24
+) -> LessonKnowledgeGraph:
+    """Bounded concept graph for a lesson, for the teacher AI-Hub viz.
+
+    Reads the top-``limit`` most-mentioned concepts (+ edges among them)
+    from Neo4j via :func:`lesson_concept_graph_preview`. Degrades
+    gracefully: when the KG feature is disabled or Neo4j is unreachable,
+    returns ``enabled`` accordingly with empty lists rather than raising,
+    so the SPA renders a hint instead of erroring. ``db`` is currently
+    unused (KG lives in Neo4j) but kept in the signature for consistency
+    with the other read-service functions and future SQL-side gating.
+    """
+    del db  # KG data lives in Neo4j, not Postgres
+    from abridgeai.ai.knowledge_graph import lesson_concept_graph_preview  # noqa: PLC0415
+    from abridgeai.ai.knowledge_graph.retrieval import lesson_concepts  # noqa: PLC0415
+    from abridgeai.infrastructure.neo4j import (  # noqa: PLC0415
+        KnowledgeGraphDisabledError,
+        graph_client,
+    )
+
+    settings = get_settings()
+    if not settings.knowledge_graph_enabled:
+        return LessonKnowledgeGraph(lesson_id=lesson_id, enabled=False)
+
+    try:
+        async with graph_client() as client:
+            concepts, relationships = await lesson_concept_graph_preview(
+                client, lesson_id, limit=limit
+            )
+            # Full concept count so the UI can say "top N of M".
+            total = len(await lesson_concepts(client, lesson_id))
+    except KnowledgeGraphDisabledError:
+        return LessonKnowledgeGraph(lesson_id=lesson_id, enabled=False)
+    except Exception:  # noqa: BLE001 -- Neo4j down: degrade, don't 500
+        return LessonKnowledgeGraph(lesson_id=lesson_id, enabled=True)
+
+    # Concepts come back ordered by centrality (mention count DESC), so the
+    # first node is the most-mentioned. We stamp a descending weight from
+    # that ordering (N, N-1, …, 1) — enough for the UI to size nodes by
+    # relative importance without threading the raw count through the
+    # shared Concept dataclass.
+    n = len(concepts)
+    nodes = [
+        KGNode(
+            id=c.name.lower(),
+            label=c.name,
+            type=c.type,
+            definition=c.definition,
+            weight=n - i,
+        )
+        for i, c in enumerate(concepts)
+    ]
+    node_ids = {n.id for n in nodes}
+    edges = [
+        KGEdge(
+            source=r.source,
+            target=r.target,
+            relation="PREREQUISITE_OF" if r.relation == "PREREQUISITE_OF" else "RELATED_TO",
+        )
+        for r in relationships
+        if r.source in node_ids and r.target in node_ids
+    ]
+    return LessonKnowledgeGraph(
+        lesson_id=lesson_id,
+        enabled=True,
+        nodes=nodes,
+        edges=edges,
+        total_concepts=total,
+    )
+
+
 async def link_existing_material(
     db: AsyncSession,
     lesson_id: UUID,
     payload: MaterialLinkExisting,
     actor: CurrentUser,
+    *,
+    arq_pool: object | None = None,
 ) -> MaterialAuthoring:
     """Create a material record linked to an already-uploaded storage object.
 
-    No upload flow, no AI processing enqueued. The material appears in
-    the AI Hub as a draft that the teacher can later enable processing on.
+    Bug-fix (material-ingestion "pending forever"): previously this always
+    stamped ``processing_status='pending'`` but NEVER created a
+    ``ProcessingJob`` or enqueued ingestion — so the version sat in
+    "pending" forever with nothing scheduled to move it, and no viewable
+    rendition was ever produced. Now:
+
+    * ``ai_processing_enabled=True`` → create a ``ProcessingJob`` and
+      enqueue ``ingest_material_version_task`` (via the resilient
+      :func:`enqueue_material_ingest`, which never silently no-ops). The
+      version legitimately starts ``pending`` because a job is now queued.
+    * ``ai_processing_enabled=False`` → leave the version ``cancelled``
+      (a terminal, non-misleading state) so it doesn't masquerade as an
+      in-flight job the teacher is waiting on. The AI Hub's "Enable AI"
+      action re-enables + reprocesses to kick off ingestion later.
     """
     from datetime import UTC, datetime  # noqa: PLC0415
 
@@ -182,12 +313,15 @@ async def link_existing_material(
     await flush_or_conflict(db)
     await db.refresh(material)
 
+    # "pending" only when a job is actually being scheduled; otherwise the
+    # version is parked in a terminal state so it never looks stuck.
+    initial_status = "pending" if payload.ai_processing_enabled else "cancelled"
     version = LearningMaterialVersion(
         material_id=material.id,
         storage_object_id=payload.storage_object_id,
         version_no=1,
         is_current=True,
-        processing_status="pending",
+        processing_status=initial_status,
         uploaded_by=actor.user_id,
         uploaded_at=datetime.now(tz=UTC),
     )
@@ -198,5 +332,22 @@ async def link_existing_material(
     material.current_version_id = version.id
     await flush_or_conflict(db)
     await db.refresh(material)
+
+    if payload.ai_processing_enabled:
+        pipeline_run_id = uuid4()
+        job = ProcessingJob(
+            entity_type="material_version",
+            entity_id=version.id,
+            job_type="full_pipeline",
+            status="pending",
+        )
+        db.add(job)
+        await flush_or_conflict(db)
+        await enqueue_material_ingest(
+            arq_pool,
+            actor_id=actor.user_id,
+            material_version_id=version.id,
+            pipeline_run_id=pipeline_run_id,
+        )
 
     return await _present_material(db, material)

@@ -134,6 +134,7 @@ def _guided_text(action: str | None, language: str) -> str:
         ),
         "ready": "Tôi đã sẵn sàng bắt đầu." if vi else "I’m ready to begin.",
         "not_ready": "Tôi chưa sẵn sàng." if vi else "I’m not ready yet.",
+        "skip_setup": "Bỏ qua phần thiết lập." if vi else "Skip the setup.",
     }
     return values.get(action or "", "")
 
@@ -169,10 +170,11 @@ async def respond(  # noqa: C901 - explicit persisted state machine
             "confirm_setup",
             "reject_identity",
             "set_name",
+            "skip_setup",
         },
-        "audio_check": {"audio_clear", "needs_adjustment"},
-        "language_check": {"confirm_language"},
-        "preparation": {"continue_setup", "needs_adjustment"},
+        "audio_check": {"audio_clear", "needs_adjustment", "skip_setup"},
+        "language_check": {"confirm_language", "skip_setup"},
+        "preparation": {"continue_setup", "needs_adjustment", "skip_setup"},
         "readiness": {"ready", "not_ready"},
     }
     if action is not None and action not in allowed_actions[stage]:
@@ -198,6 +200,7 @@ async def respond(  # noqa: C901 - explicit persisted state machine
         "confirm_language",
         "continue_setup",
         "ready",
+        "skip_setup",
     }:
         decision = "advance"
     elif action in {"needs_adjustment", "not_ready", "reject_identity"}:
@@ -260,12 +263,18 @@ async def respond(  # noqa: C901 - explicit persisted state machine
         session.preferred_name = text[:60]
         ack_text = preferred_name_ack_text(name=session.preferred_name, language=lang)
 
-    next_stage = {
-        "identity_check": "audio_check",
-        "audio_check": "language_check",
-        "language_check": "preparation",
-        "preparation": "readiness",
-    }.get(stage)
+    # "skip_setup" fast-forwards past the remaining setup steps straight to the
+    # readiness briefing. It stops AT readiness (never past it): the assessed
+    # timer only starts when the candidate explicitly confirms "ready".
+    if action == "skip_setup":
+        next_stage: str | None = "readiness"
+    else:
+        next_stage = {
+            "identity_check": "audio_check",
+            "audio_check": "language_check",
+            "language_check": "preparation",
+            "preparation": "readiness",
+        }.get(stage)
     if next_stage is not None:
         session.onboarding_stage = next_stage
         message = await ensure_ceremony_message(

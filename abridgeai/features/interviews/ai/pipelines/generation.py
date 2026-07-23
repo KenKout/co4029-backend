@@ -142,7 +142,12 @@ async def run_interview_generation(
         await _write_progress(
             db, state, phase="saving", accepted=len(accepted), target=target_count
         )
-        await _persist_questions(db, config=config, accepted=accepted)
+        await _persist_questions(
+            db,
+            config=config,
+            accepted=accepted,
+            source_module_ids=_module_ids_for_questions(state.config_json, config),
+        )
 
         state.config_json = state.config_json | {
             "pipeline": {
@@ -272,11 +277,26 @@ def _persist_difficulty(value: str | None) -> str | None:
     return _DIFFICULTY_DRAFT_TO_ORM.get(value, value)
 
 
+def _module_ids_for_questions(config_json: dict[str, Any], config: InterviewConfig) -> list[str]:
+    """Module attribution for generated questions.
+
+    Prefers the run's ``source_module_ids`` (the modules the teacher scoped
+    generation to). Falls back to the interview config's own module so a
+    question is never left unattributed.
+    """
+    raw = config_json.get("source_module_ids") or []
+    ids = [str(m) for m in raw if m]
+    if ids:
+        return ids
+    return [str(config.module_id)] if config.module_id is not None else []
+
+
 async def _persist_questions(
     db: AsyncSession,
     *,
     config: InterviewConfig,
     accepted: list[InterviewQuestionDraft],
+    source_module_ids: list[str],
 ) -> None:
     for draft in accepted:
         position = await next_question_position(db, config.id)
@@ -292,6 +312,7 @@ async def _persist_questions(
                 review_status="pending",
                 ai_generated=True,
                 source_refs_json=[str(c) for c in draft.source_refs],
+                source_module_ids=source_module_ids,
             )
         )
         await db.flush()

@@ -55,12 +55,16 @@ from abridgeai.features.courses.routers._deps import (
     require_lesson_authoring_access,
     require_module_authoring_access,
     require_module_item_authoring_access,
+    require_outcome_authoring_access,
     require_resource_authoring_access,
 )
 from abridgeai.features.courses.schemas import (
     CourseAuthoring,
     CourseContentAuthoring,
     CourseCreate,
+    CourseLearningOutcomeAuthoring,
+    CourseLearningOutcomeCreate,
+    CourseLearningOutcomeUpdate,
     CourseRosterRead,
     CourseUpdate,
     LessonAuthoring,
@@ -100,6 +104,7 @@ _REQUIRE_MODULE = require_module_authoring_access()
 _REQUIRE_MODULE_ITEM = require_module_item_authoring_access()
 _REQUIRE_LESSON = require_lesson_authoring_access()
 _REQUIRE_RESOURCE = require_resource_authoring_access()
+_REQUIRE_OUTCOME = require_outcome_authoring_access()
 
 
 def _not_found(detail: str) -> HTTPException:
@@ -333,6 +338,96 @@ async def update_module(
         raise _conflict(str(exc)) from exc
     await db.commit()
     return module
+
+
+# ---------------------------------------------------------------------------
+# Course learning outcomes (§LO-1/2) — teacher CRUD. Positions are
+# server-managed (append on create, contiguous re-index on delete); the
+# ``(L.O.x)`` code is derived from position at display time.
+# ---------------------------------------------------------------------------
+@router.get(
+    "/courses/{course_id}/outcomes",
+    response_model=list[CourseLearningOutcomeAuthoring],
+)
+async def list_course_outcomes(
+    course_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_COURSE_UPDATE)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> list[CourseLearningOutcomeAuthoring]:
+    """Teacher view of a course's learning outcomes, ordered by position."""
+    del current_user
+    try:
+        return await authoring_service.list_course_outcomes(db, course_id)
+    except NotFoundError as exc:
+        raise _not_found(str(exc)) from exc
+
+
+@router.post(
+    "/courses/{course_id}/outcomes",
+    response_model=CourseLearningOutcomeAuthoring,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_course_outcome(
+    course_id: UUID,
+    payload: CourseLearningOutcomeCreate,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_COURSE_UPDATE)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> CourseLearningOutcomeAuthoring:
+    """Append a learning outcome to a course (§LO-1)."""
+    try:
+        outcome = await authoring_service.add_course_outcome(
+            db, course_id, payload, current_user
+        )
+    except NotFoundError as exc:
+        raise _not_found(str(exc)) from exc
+    except ConflictError as exc:
+        raise _conflict(str(exc)) from exc
+    await db.commit()
+    return outcome
+
+
+@router.patch(
+    "/courses/{course_id}/outcomes/{outcome_id}",
+    response_model=CourseLearningOutcomeAuthoring,
+)
+async def update_course_outcome(
+    course_id: UUID,
+    outcome_id: UUID,
+    payload: CourseLearningOutcomeUpdate,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_OUTCOME)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> CourseLearningOutcomeAuthoring:
+    """Edit an outcome's text (§LO-2)."""
+    try:
+        outcome = await authoring_service.update_course_outcome(
+            db, course_id, outcome_id, payload, current_user
+        )
+    except NotFoundError as exc:
+        raise _not_found(str(exc)) from exc
+    except ConflictError as exc:
+        raise _conflict(str(exc)) from exc
+    await db.commit()
+    return outcome
+
+
+@router.delete(
+    "/courses/{course_id}/outcomes/{outcome_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def delete_course_outcome(
+    course_id: UUID,
+    outcome_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_OUTCOME)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> None:
+    """Soft-delete an outcome and compact positions to 1..N (§LO-2)."""
+    try:
+        await authoring_service.delete_course_outcome(
+            db, course_id, outcome_id, current_user
+        )
+    except NotFoundError as exc:
+        raise _not_found(str(exc)) from exc
+    await db.commit()
 
 
 @router.put("/modules/{module_id}/prerequisites", response_model=ModuleAuthoring)

@@ -53,6 +53,7 @@ from abridgeai.features.interviews.routers._deps import (
 from abridgeai.features.interviews.schemas import (
     AdaptiveReadinessRead,
     GapReportAuthoringRead,
+    GapReportNotesUpdate,
     GenerationRunStatusLiteral,
     InterviewConfigAuthoring,
     InterviewConfigCreate,
@@ -63,6 +64,9 @@ from abridgeai.features.interviews.schemas import (
     InterviewOutcomeAuthoring,
     InterviewOutcomeCreate,
     InterviewQuestionAuthoring,
+    InterviewQuestionBankItemCreate,
+    InterviewQuestionBankItemRead,
+    InterviewQuestionBankItemUpdate,
     InterviewQuestionCreate,
     InterviewSessionPublic,
     InterviewSessionSummary,
@@ -104,6 +108,93 @@ def _conflict(message: str) -> HTTPException:
 
 async def get_arq_pool() -> object | None:
     return None
+
+
+# --------------------------------------------------------------------------- #
+# Course-scoped interview question bank (§QBank-1). Course-update permission
+# gates all three. Import into a config reuses the existing create-question
+# endpoint client-side (copy semantics), so no dedicated import route here.
+# --------------------------------------------------------------------------- #
+@router.get(
+    "/courses/{course_id}/interview-question-bank",
+    response_model=list[InterviewQuestionBankItemRead],
+)
+async def list_interview_question_bank(
+    course_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_COURSE_UPDATE)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> list[InterviewQuestionBankItemRead]:
+    """List the course's reusable interview questions, newest first."""
+    del current_user
+    try:
+        items = await authoring_service.list_question_bank(db, course_id)
+    except NotFoundError as exc:
+        raise _not_found("course", course_id) from exc
+    return [InterviewQuestionBankItemRead.model_validate(i) for i in items]
+
+
+@router.post(
+    "/courses/{course_id}/interview-question-bank",
+    response_model=InterviewQuestionBankItemRead,
+    status_code=status.HTTP_201_CREATED,
+)
+async def add_interview_question_bank_item(
+    course_id: UUID,
+    payload: InterviewQuestionBankItemCreate,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_COURSE_UPDATE)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> InterviewQuestionBankItemRead:
+    """Add a reusable question to the course bank (copy semantics)."""
+    try:
+        item = await authoring_service.add_to_question_bank(db, course_id, payload, current_user)
+    except NotFoundError as exc:
+        raise _not_found("course", course_id) from exc
+    except ConflictError as exc:
+        raise _conflict(str(exc)) from exc
+    await db.commit()
+    return InterviewQuestionBankItemRead.model_validate(item)
+
+
+@router.patch(
+    "/courses/{course_id}/interview-question-bank/{item_id}",
+    response_model=InterviewQuestionBankItemRead,
+)
+async def update_interview_question_bank_item(
+    course_id: UUID,
+    item_id: UUID,
+    payload: InterviewQuestionBankItemUpdate,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_COURSE_UPDATE)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> InterviewQuestionBankItemRead:
+    """Edit a bank item (management page). Only supplied fields change."""
+    try:
+        item = await authoring_service.update_question_bank_item(
+            db, course_id, item_id, payload, current_user
+        )
+    except NotFoundError as exc:
+        raise _not_found("interview_question_bank_item", item_id) from exc
+    except ConflictError as exc:
+        raise _conflict(str(exc)) from exc
+    await db.commit()
+    return InterviewQuestionBankItemRead.model_validate(item)
+
+
+@router.delete(
+    "/courses/{course_id}/interview-question-bank/{item_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def delete_interview_question_bank_item(
+    course_id: UUID,
+    item_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_COURSE_UPDATE)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> None:
+    """Soft-delete a bank item; already-imported questions are untouched."""
+    try:
+        await authoring_service.delete_question_bank_item(db, course_id, item_id, current_user)
+    except NotFoundError as exc:
+        raise _not_found("interview_question_bank_item", item_id) from exc
+    await db.commit()
 
 
 @router.post(
@@ -828,26 +919,56 @@ async def get_session_gap_report_authoring(
     # required ``generated_at`` field and silently default study_plan
     # to []. Build the DTO explicitly instead, mirroring the student
     # projection (_gap_report_view) plus the teacher-only fields.
+    from abridgeai.features.interviews.routers.learner import (  # noqa: PLC0415
+        _apply_resource_titles,
+        _resolve_resource_titles,
+        _study_plan_from_report,
+    )
+
     report_json = report.report_json or {}
-    raw_plan = report_json.get("study_plan") if isinstance(report_json, dict) else None
-    study_plan: list[dict[str, Any]] = []
-    if isinstance(raw_plan, list):
-        for entry in raw_plan:
-            if not isinstance(entry, dict):
-                continue
-            study_plan.append(
-                {
-                    "topic": entry.get("topic", ""),
-                    "lesson_id": entry.get("suggested_lesson_id"),
-                    "suggested_resources": [
-                        str(rid) for rid in entry.get("suggested_resource_ids", []) or []
-                    ],
-                }
-            )
+    study_plan = _study_plan_from_report(report_json)
+    # Resolve resource UUIDs → human titles so the teacher study plan shows real
+    # resource names instead of a wall of hex (mirrors the student projection).
+    resource_ids = {rid for item in study_plan for rid in item["suggested_resources"]}
+    _apply_resource_titles(study_plan, await _resolve_resource_titles(db, resource_ids))
     # FR-5.7: per-criterion mean rubric scores are teacher-only. They live
     # in ``report_json["rubric_aggregated"]`` and are surfaced here (never on
     # the student-facing GapReportRead).
     per_criterion = report_json.get("rubric_aggregated") if isinstance(report_json, dict) else None
+
+    # Resolve human-readable context so the teacher view isn't a wall of UUIDs:
+    # the student's display name (falling back to email) and the interview
+    # config title. Both are read-only projections.
+    from sqlalchemy import text as _text  # noqa: PLC0415
+
+    from abridgeai.features.interviews.models import (  # noqa: PLC0415
+        InterviewConfig,
+        InterviewSession,
+    )
+
+    name_row = (
+        (
+            await db.execute(
+                _text(
+                    "SELECT COALESCE(p.display_name, u.primary_email) AS name "
+                    "FROM users u "
+                    "LEFT JOIN user_profiles p ON p.user_id = u.id "
+                    "WHERE u.id = :id"
+                ),
+                {"id": report.student_id},
+            )
+        )
+        .mappings()
+        .first()
+    )
+    student_name = name_row["name"] if name_row else None
+
+    interview_title: str | None = None
+    session_row = await db.get(InterviewSession, session_id)
+    if session_row is not None:
+        config_row = await db.get(InterviewConfig, session_row.interview_config_id)
+        interview_title = config_row.title if config_row is not None else None
+
     return GapReportAuthoringRead.model_validate(
         {
             "id": report.id,
@@ -862,7 +983,48 @@ async def get_session_gap_report_authoring(
             "teacher_summary": report.teacher_summary,
             "source_quiz_attempt_id": report.source_quiz_attempt_id,
             "source_interview_session_id": report.source_interview_session_id,
+            "student_name": student_name,
+            "interview_title": interview_title,
         }
+    )
+
+
+@router.patch(
+    "/interview-sessions/{session_id}/gap-report/notes",
+    response_model=GapReportAuthoringRead,
+)
+async def update_session_gap_report_notes(
+    session_id: UUID,
+    payload: GapReportNotesUpdate,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_SESSION_AUTHORING)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> GapReportAuthoringRead:
+    """Persist the teacher-authored note (``teacher_summary``) on the report.
+
+    Course-scoped teacher access only (same gate as the GET). Empty/blank input
+    clears the note. Returns the full refreshed authoring projection so the
+    client re-renders with the saved value.
+    """
+    from sqlalchemy import select  # noqa: PLC0415
+
+    from abridgeai.features.interviews.models import GapReport  # noqa: PLC0415
+
+    report_stmt = (
+        select(GapReport)
+        .where(GapReport.source_interview_session_id == session_id)
+        .order_by(GapReport.created_at.desc())
+        .limit(1)
+    )
+    report = (await db.execute(report_stmt)).scalar_one_or_none()
+    if report is None:
+        raise _not_found("gap_report", session_id)
+
+    cleaned = (payload.teacher_summary or "").strip()
+    report.teacher_summary = cleaned or None
+    await db.commit()
+
+    return await get_session_gap_report_authoring(
+        session_id=session_id, current_user=current_user, db=db
     )
 
 

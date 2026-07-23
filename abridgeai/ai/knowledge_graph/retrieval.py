@@ -65,6 +65,71 @@ async def lesson_concepts(
     ]
 
 
+async def lesson_concept_graph_preview(
+    client: KnowledgeGraphClient,
+    lesson_id: str | UUID,
+    *,
+    limit: int = 24,
+) -> tuple[list[Concept], list[ConceptRelationship]]:
+    """Bounded top-``limit`` concept graph for a lesson (UI preview).
+
+    Unlike :func:`lesson_concept_graph` (which fans out to *all* seed
+    concepts + their neighbourhood — hundreds of nodes for a big lesson,
+    an unreadable hairball), this returns only the ``limit`` most-central
+    concepts directly mentioned in the lesson (ranked by mention count
+    then max confidence) plus the edges strictly *among that selected
+    set*. That yields a legible graph the teacher can actually read.
+
+    Nodes carry a ``weight`` (mention count) so the UI can size them.
+    Returns ``([], [])`` when the lesson has no concepts.
+    """
+    safe_limit = max(1, min(limit, 60))
+    async with client.session() as session:
+        result = await session.run(
+            """
+            MATCH (:Lesson {id: $lesson_id})-[:HAS_MATERIAL]->(:Material)
+              -[:HAS_CHUNK]->(:Chunk)-[mention:MENTIONS_CONCEPT]->(concept:Concept)
+            WITH concept,
+                 count(mention) AS mentions,
+                 max(coalesce(mention.confidence, 0.0)) AS confidence
+            ORDER BY mentions DESC, confidence DESC, concept.name ASC
+            LIMIT $limit
+            WITH collect(concept) AS top_concepts,
+                 collect({
+                     id: concept.name_norm,
+                     label: concept.name,
+                     type: concept.type,
+                     definition: concept.definition,
+                     weight: mentions,
+                     confidence: confidence
+                 }) AS nodes
+            UNWIND top_concepts AS c1
+            OPTIONAL MATCH (c1)-[rel:RELATED_TO|PREREQUISITE_OF]->(c2:Concept)
+            WHERE c2 IN top_concepts
+            RETURN nodes,
+                   collect(DISTINCT {
+                       source: startNode(rel).name_norm,
+                       target: endNode(rel).name_norm,
+                       relation: coalesce(rel.relation, type(rel)),
+                       evidence: rel.evidence,
+                       confidence: rel.confidence
+                   }) AS edges
+            """,
+            lesson_id=str(lesson_id),
+            limit=safe_limit,
+        )
+        record = await result.single()
+
+    if record is None:
+        return [], []
+    raw_nodes = record["nodes"] or []
+    raw_edges = record["edges"] or []
+
+    concepts = [c for c in (_concept_from_record(n) for n in raw_nodes) if c is not None]
+    relationships = [r for r in (_edge_from_record(e) for e in raw_edges) if r is not None]
+    return concepts, relationships
+
+
 async def lesson_concept_graph(
     client: KnowledgeGraphClient,
     lesson_id: str | UUID,

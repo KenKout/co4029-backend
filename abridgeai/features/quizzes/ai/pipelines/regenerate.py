@@ -25,6 +25,11 @@ from uuid import uuid4
 
 from sqlalchemy import select
 
+from abridgeai.features.quizzes.ai.pipelines._progress import (
+    REGENERATE_STAGES,
+    record_config_patch,
+    record_stage,
+)
 from abridgeai.features.quizzes.ai.stages.dedup import discard_duplicates
 from abridgeai.features.quizzes.ai.stages.generation import generate_questions
 from abridgeai.features.quizzes.ai.stages.persistence import replace_question_in_place
@@ -62,6 +67,7 @@ async def run_question_regeneration(
 
     pipeline_run_id = uuid4()
 
+    await record_stage(run.id, stages=REGENERATE_STAGES, current_stage="retrieval")
     if not chunks:
         chunks, _, _ = await retrieve_chunks(
             db,
@@ -87,6 +93,7 @@ async def run_question_regeneration(
 
     previous_questions = await _fetch_sibling_prompts(db, quiz, exclude_id=question.id)
 
+    await record_stage(run.id, stages=REGENERATE_STAGES, current_stage="generation")
     candidates = await generate_questions(
         title=quiz.title,
         config=config | {"question_count": 1},
@@ -103,6 +110,7 @@ async def run_question_regeneration(
 
     candidate_dicts: list[dict[str, Any]] = [c.model_dump() for c in candidates]
 
+    await record_stage(run.id, stages=REGENERATE_STAGES, current_stage="validation")
     _, verdicts = await validate_questions(
         title=quiz.title,
         chunks=chunks,
@@ -119,11 +127,13 @@ async def run_question_regeneration(
         )
         raise ValueError(f"Validator rejected the regenerated question: {reason}")
 
+    await record_stage(run.id, stages=REGENERATE_STAGES, current_stage="dedup")
     kept, drops = await discard_duplicates(db, quiz, accepted)
     if not kept:
         drop_reason = drops[0].reason if drops else "unknown"
         raise ValueError(f"Quiz regeneration aborted: candidate dropped by dedup ({drop_reason})")
 
+    await record_stage(run.id, stages=REGENERATE_STAGES, current_stage="persistence")
     payload = kept[0]
     payload["source_refs"] = payload.get("source_refs") or payload.get("source_refs_json") or []
     persisted = await replace_question_in_place(
@@ -134,19 +144,22 @@ async def run_question_regeneration(
         chunks=chunks,
     )
 
-    run.config_json = run.config_json | {
-        "pipeline": {
-            "stage": "completed",
-            "mode": "regenerate_question",
-            "pipeline_run_id": str(pipeline_run_id),
-            "question_id": str(question.id),
-            "validation": {"accepted": len(accepted), "rejected": rejected},
-            "dedup": {
-                "kept": len(kept),
-                "dropped": [{"index": d.index, "reason": d.reason} for d in drops],
-            },
-        }
-    }
+    await record_config_patch(
+        run.id,
+        {
+            "pipeline": {
+                "stage": "completed",
+                "mode": "regenerate_question",
+                "pipeline_run_id": str(pipeline_run_id),
+                "question_id": str(question.id),
+                "validation": {"accepted": len(accepted), "rejected": rejected},
+                "dedup": {
+                    "kept": len(kept),
+                    "dropped": [{"index": d.index, "reason": d.reason} for d in drops],
+                },
+            }
+        },
+    )
     return persisted
 
 

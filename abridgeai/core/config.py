@@ -63,6 +63,14 @@ class Settings(BaseSettings):
     db_pool_size: int = Field(default=5, ge=1, le=100)
     db_max_overflow: int = Field(default=10, ge=0, le=100)
     db_pool_timeout_seconds: float = Field(default=30.0, gt=0)
+    # Server-side backstop: Postgres aborts any session left "idle in
+    # transaction" longer than this, releasing whatever row locks it held.
+    # Defends against an app-level bug (e.g. a coroutine cancelled mid-run that
+    # fails to roll back) orphaning a transaction that wedges a row forever —
+    # the exact "stuck at 25%" failure mode. Generous enough (10 min) never to
+    # trip a legitimately long transaction, since our pipelines commit terminal
+    # state promptly and never idle-wait inside a transaction. 0 disables it.
+    db_idle_in_transaction_timeout_seconds: float = Field(default=600.0, ge=0)
     db_pool_recycle_seconds: int = Field(default=1800, ge=0)
 
     redis_url: str = "redis://localhost:6379/0"
@@ -95,6 +103,13 @@ class Settings(BaseSettings):
     llm_model_standard: str = "gpt-4o-mini"
     llm_model_large: str = "gpt-4o"
     llm_timeout_seconds: float = 60.0
+    # Tighter per-call timeout for INTERACTIVE pipeline stages (quiz/interview
+    # ideation, generation, validation) where a user is actively waiting. The
+    # global llm_timeout_seconds was raised to 600s for long batch PDF ingest,
+    # but 600s on an interactive stage means one stalled LAN endpoint hangs the
+    # worker (and the user's spinner) for ten minutes. Roles NOT in
+    # INTERACTIVE_LLM_ROLES keep using llm_timeout_seconds.
+    llm_interactive_timeout_seconds: float = 240.0
     llm_extra_headers_json: str | None = None
 
     # Per-role overrides; None means "fall back to the tier mapping".

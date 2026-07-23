@@ -37,7 +37,12 @@ class QuizPublishValidationError(AppError):
 
 
 async def assert_t_exp_set_for_all_questions(db: AsyncSession, quiz_id: UUID) -> None:
-    """Assert every live question on ``quiz_id`` has positive ``expected_response_time_ms``.
+    """Assert every APPROVED question on ``quiz_id`` has positive ``expected_response_time_ms``.
+
+    Only approved questions are ever served to students (see
+    ``taking._load_quiz_questions_for_taking``), so the expected-time gate
+    only needs to hold for them — a pending/rejected draft the student will
+    never see must not block publishing the approved set.
 
     The ``deleted_at IS NULL`` predicate is applied automatically by the
     SoftDeleteMixin SELECT filter (``core.db.soft_delete``) — no need to
@@ -47,6 +52,7 @@ async def assert_t_exp_set_for_all_questions(db: AsyncSession, quiz_id: UUID) ->
 
     stmt = select(QuizQuestion.id).where(
         QuizQuestion.quiz_id == quiz_id,
+        QuizQuestion.review_status == "approved",
         or_(
             QuizQuestion.expected_response_time_ms.is_(None),
             QuizQuestion.expected_response_time_ms <= 0,
@@ -59,38 +65,44 @@ async def assert_t_exp_set_for_all_questions(db: AsyncSession, quiz_id: UUID) ->
 
 
 class QuizApprovalRequiredError(AppError):
-    """Raised when publish is attempted with un-approved questions.
+    """Raised when publish is attempted with no approved questions.
 
-    Carries the list of question IDs whose ``review_status`` is not
-    ``approved`` so the frontend can highlight them. The router maps this
-    to HTTP 422 with structured detail (code ``pending_review``).
+    Partial publish (chosen product behaviour): a quiz publishes as soon as
+    it has at least one approved question. Pending/rejected questions are
+    retained as drafts and simply never served to students (see
+    ``taking._load_quiz_questions_for_taking``), so a teacher can generate a
+    surplus, approve the subset they want, publish, and keep the rest for
+    later reuse. The only thing that blocks publish is having *zero* approved
+    questions — an empty quiz. The router maps this to HTTP 422 with
+    structured detail (code ``pending_review``).
     """
 
     def __init__(self, pending_question_ids: list[UUID]) -> None:
+        # Kept for response-shape compatibility with the router/frontend;
+        # empty here because the gate is now "needs ≥1 approved", not
+        # "these specific questions are pending".
         self.pending_question_ids = pending_question_ids
-        super().__init__(
-            f"Cannot publish quiz: {len(pending_question_ids)} question(s) "
-            f"pending review (not approved)"
-        )
+        super().__init__("Cannot publish quiz: at least one question must be approved")
 
 
 async def assert_all_questions_approved(db: AsyncSession, quiz_id: UUID) -> None:
-    """Assert every live question on ``quiz_id`` has ``review_status='approved'``.
+    """Assert ``quiz_id`` has at least one ``review_status='approved'`` question.
 
-    Human-in-the-loop gate for AI-generated content: a teacher must
-    explicitly approve each question before students can see it. Soft-deleted
+    Human-in-the-loop gate for AI-generated content: students only ever see
+    approved questions, so publishing is safe as long as at least one exists.
+    Un-approved questions stay on the quiz as reusable drafts. Soft-deleted
     rows are auto-filtered by the SoftDeleteMixin SELECT filter.
     """
     from sqlalchemy import select  # noqa: PLC0415
 
     stmt = select(QuizQuestion.id).where(
         QuizQuestion.quiz_id == quiz_id,
-        QuizQuestion.review_status != "approved",
+        QuizQuestion.review_status == "approved",
     )
     result = await db.execute(stmt)
-    pending = list(result.scalars().all())
-    if pending:
-        raise QuizApprovalRequiredError(pending_question_ids=pending)
+    approved = list(result.scalars().all())
+    if not approved:
+        raise QuizApprovalRequiredError(pending_question_ids=[])
 
 
 async def bulk_set_expected_response_time(
