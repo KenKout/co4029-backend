@@ -87,6 +87,9 @@ InterviewOnboardingActionLiteral = Literal[
     # profile-derived name, then supplies the name the interviewer should use.
     "reject_identity",
     "set_name",
+    # Skip the remaining setup steps and jump straight to the readiness
+    # briefing (does NOT start the assessed timer — that still needs "ready").
+    "skip_setup",
 ]
 
 
