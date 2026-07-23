@@ -809,6 +809,18 @@ def _history_message_kind(message: InterviewSessionMessage) -> str:
     # transcript renders them as their own chronological AI turn.
     if stored_kind == "transition":
         return "transition"
+    # Rich-closing sub-steps (Slice 13): self-reflection prompt, invite-candidate-
+    # questions, and the answer-safe reply are NON-assessed ceremony that the
+    # adaptive path persists attached to the last question. Without this they'd
+    # fall through to "followup" below and render under "Question N", so classify
+    # them as "closing" — the transcript then groups them in their own wrap-up
+    # section, never under a numbered assessed question.
+    if metadata.get("action") in {
+        "prompt_self_reflection",
+        "invite_candidate_questions",
+        "answer_candidate_question",
+    }:
+        return "closing"
     if message.role == "user":
         return "answer"
     ceremony_key = metadata.get("ceremony_key")

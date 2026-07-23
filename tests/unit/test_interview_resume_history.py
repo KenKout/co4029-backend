@@ -163,3 +163,34 @@ def test_resume_history_preserves_clarification_and_hint_kinds() -> None:
         "clarification",
         "hint",
     ]
+
+
+def test_resume_history_classifies_rich_closing_substeps_as_closing() -> None:
+    # Rich-closing sub-steps (self-reflection / invite-questions) are persisted
+    # by the adaptive path attached to the last question. They must classify as
+    # "closing" (their own wrap-up section), NOT "followup" under "Question N".
+    started = datetime(2026, 7, 20, 10, 0, tzinfo=UTC)
+    question_id = uuid4()
+    session = SimpleNamespace(onboarding_stage="completed", assessment_started_at=started)
+    session_question = SimpleNamespace(id=question_id, sequence_no=1, asked_at=started)
+    question = SimpleNamespace(prompt_text="Explain indexing.", question_type="technical")
+    messages = [
+        _message(
+            role="ai",
+            text="Before we wrap up: what went well, and what would you do differently?",
+            created_at=started + timedelta(seconds=5),
+            session_question_id=question_id,
+            metadata={"kind": "adaptive", "action": "prompt_self_reflection"},
+        ),
+        _message(
+            role="ai",
+            text="Thank you for sharing that. Is there anything you'd like to ask me?",
+            created_at=started + timedelta(seconds=6),
+            session_question_id=question_id,
+            metadata={"kind": "adaptive", "action": "invite_candidate_questions"},
+        ),
+    ]
+
+    history = _build_session_history(session, [(session_question, question)], messages)
+
+    assert [turn.kind for turn in history] == ["question", "closing", "closing"]
