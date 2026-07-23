@@ -139,6 +139,21 @@ async def _course_with_instructor(db: AsyncSession, course: object) -> CoursePub
     public = CoursePublic.model_validate(course)
     instructor_data = await get_course_instructor(db, public.id)
     if instructor_data is not None:
+        # Mint a presigned avatar_url from the instructor's storage object
+        # (bucket/key), if they have an avatar uploaded. A storage blip must
+        # never break the course detail page, so fall back to None.
+        bucket = instructor_data.pop("avatar_bucket", None)
+        object_key = instructor_data.pop("avatar_object_key", None)
+        avatar_url: str | None = None
+        if bucket and object_key:
+            try:
+                url, _ = await create_stream_url(
+                    _StorageTarget(bucket=bucket, object_key=object_key)
+                )
+                avatar_url = url
+            except Exception:  # noqa: BLE001 — storage blip must not break detail
+                avatar_url = None
+        instructor_data["avatar_url"] = avatar_url
         public = public.model_copy(
             update={"instructor": InstructorRead.model_validate(instructor_data)}
         )
