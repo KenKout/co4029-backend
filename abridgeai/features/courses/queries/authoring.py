@@ -76,6 +76,63 @@ async def count_students_and_modules_for_courses(
     return result
 
 
+async def count_pending_grading_for_courses(
+    db: AsyncSession, course_ids: list[UUID]
+) -> tuple[int, int]:
+    """Count ungraded quiz attempts + pending interview evaluations.
+
+    Returns ``(ungraded_quizzes, pending_interviews)`` summed across all
+    ``course_ids``. Two aggregate queries, no N+1:
+
+    * ungraded_quizzes = quiz attempts with ``status='submitted'`` and
+      ``passed IS NULL`` (submitted but not yet graded) whose quiz belongs to
+      one of the courses.
+    * pending_interviews = interview sessions in a terminal-but-ungraded state
+      (``status IN ('completed','timed_out')`` and ``pass_verdict IS NULL``)
+      whose config belongs to one of the courses.
+
+    Both power the teacher dashboard's actionable "needs grading" widgets.
+    """
+    # Local imports keep the cross-feature model dependency out of module load
+    # order (quizzes / interviews import courses, not the other way around).
+    from abridgeai.features.interviews.models import (
+        InterviewConfig,
+        InterviewSession,
+    )
+    from abridgeai.features.quizzes.models import Quiz, QuizAttempt
+
+    if not course_ids:
+        return (0, 0)
+
+    quiz_stmt = (
+        select(func.count())
+        .select_from(QuizAttempt)
+        .join(Quiz, Quiz.id == QuizAttempt.quiz_id)
+        .where(
+            Quiz.course_id.in_(course_ids),
+            Quiz.deleted_at.is_(None),
+            QuizAttempt.status == "submitted",
+            QuizAttempt.passed.is_(None),
+        )
+    )
+    ungraded_quizzes = int((await db.execute(quiz_stmt)).scalar_one())
+
+    interview_stmt = (
+        select(func.count())
+        .select_from(InterviewSession)
+        .join(InterviewConfig, InterviewConfig.id == InterviewSession.interview_config_id)
+        .where(
+            InterviewConfig.course_id.in_(course_ids),
+            InterviewConfig.deleted_at.is_(None),
+            InterviewSession.status.in_(("completed", "timed_out")),
+            InterviewSession.pass_verdict.is_(None),
+        )
+    )
+    pending_interviews = int((await db.execute(interview_stmt)).scalar_one())
+
+    return (ungraded_quizzes, pending_interviews)
+
+
 async def list_courses_for_owner(
     db: AsyncSession,
     user_id: UUID,

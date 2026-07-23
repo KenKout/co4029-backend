@@ -46,6 +46,7 @@ from abridgeai.features.courses.schemas.authoring import (
     SlugAvailability,
     StreamUrlResponse,
     TagAuthoring,
+    TeacherDashboardStats,
 )
 from abridgeai.features.courses.schemas.public import (
     CourseContentPublic,
@@ -82,6 +83,7 @@ __all__ = [
     "AssignTeacherRequest",
     "CourseArchiveRequest",
     "CourseAuthoring",
+    "TeacherDashboardStats",
     "CourseContentAuthoring",
     "CourseContentPublic",
     "CourseCreate",

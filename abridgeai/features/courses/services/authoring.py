@@ -74,6 +74,7 @@ from abridgeai.features.courses.schemas import (
     ModuleItemAuthoring,
     ModuleItemUpdate,
     ModuleUpdate,
+    TeacherDashboardStats,
 )
 from abridgeai.features.identity.models import StorageObject
 from abridgeai.infrastructure.s3 import create_stream_url, put_object_bytes
@@ -526,6 +527,44 @@ async def list_authoring_courses_for_user(
         dto.student_count = students
         dto.module_count = modules
     return result
+
+
+async def get_teacher_dashboard_stats(
+    db: AsyncSession, *, user: CurrentUser
+) -> TeacherDashboardStats:
+    """Aggregate the teacher dashboard's actionable counts.
+
+    Scopes to every course the caller can author (owned + assigned), then
+    returns the "needs attention" tallies that power the dashboard's
+    clickable widgets: courses in draft, ungraded quiz attempts, and
+    interview sessions awaiting evaluation. All aggregate queries are
+    batched over the course-id set — no N+1.
+    """
+    owned = await authoring_queries.list_courses_for_owner(
+        db, user.user_id, include_archived=False
+    )
+    assigned = await authoring_queries.list_courses_assigned_to_teacher(
+        db, user.user_id, include_archived=False
+    )
+    seen: set[UUID] = set()
+    course_ids: list[UUID] = []
+    draft_courses = 0
+    for course in (*owned, *assigned):
+        if course.id in seen:
+            continue
+        seen.add(course.id)
+        course_ids.append(course.id)
+        if course.status == "draft":
+            draft_courses += 1
+
+    ungraded_quizzes, pending_interviews = (
+        await authoring_queries.count_pending_grading_for_courses(db, course_ids)
+    )
+    return TeacherDashboardStats(
+        draft_courses=draft_courses,
+        ungraded_quizzes=ungraded_quizzes,
+        pending_interviews=pending_interviews,
+    )
 
 
 async def get_authoring_course(db: AsyncSession, course_id: UUID) -> CourseAuthoring:

@@ -84,6 +84,7 @@ from abridgeai.features.courses.schemas import (
     RosterStudentRead,
     SlugAvailability,
     StreamUrlResponse,
+    TeacherDashboardStats,
 )
 from abridgeai.features.courses.services import authoring as authoring_service
 from abridgeai.features.quizzes.ai.outline import build_lesson_outline
@@ -193,6 +194,21 @@ async def list_authoring_courses(
     return await authoring_service.list_authoring_courses_for_user(
         db, user=current_user, include_archived=include_archived
     )
+
+
+@router.get("/dashboard/stats", response_model=TeacherDashboardStats)
+async def get_teacher_dashboard_stats(
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_AUTHORING_LIST)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> TeacherDashboardStats:
+    """Actionable counts for the teacher dashboard's clickable widgets.
+
+    Scoped to the caller's authorable courses (owned + assignments):
+    draft courses, ungraded quiz attempts, and interview sessions awaiting
+    evaluation. Same lax permission as the courses list — visibility is
+    enforced in the service via owner/assignment match.
+    """
+    return await authoring_service.get_teacher_dashboard_stats(db, user=current_user)
 
 
 @router.get("/courses/{course_id}", response_model=CourseAuthoring)

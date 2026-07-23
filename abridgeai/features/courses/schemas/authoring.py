@@ -159,6 +159,23 @@ class CourseAuthoring(CoursePublic):
     deleted_by: UUID | None = None
 
 
+class TeacherDashboardStats(BaseModel):
+    """Actionable counts for the teacher dashboard's clickable widgets.
+
+    Scoped to every course the caller can author. ``draft_courses`` =
+    courses in draft status; ``ungraded_quizzes`` = submitted-but-ungraded
+    quiz attempts; ``pending_interviews`` = interview sessions awaiting
+    evaluation. All are \"needs attention\" signals that deep-link into the
+    relevant page.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    draft_courses: int = 0
+    ungraded_quizzes: int = 0
+    pending_interviews: int = 0
+
+
 class ModuleAuthoring(ModulePublic):
     description: str | None = None
     status: Literal["draft", "published", "archived"]
