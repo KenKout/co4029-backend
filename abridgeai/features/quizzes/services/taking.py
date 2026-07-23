@@ -466,8 +466,17 @@ async def submit_attempt(
         .scalars()
         .all()
     )
+    # Denominator MUST match what the student was actually served: only
+    # approved questions reach the taking surface (see
+    # _load_quiz_questions_for_taking), so counting all questions here would
+    # divide by a larger set than the student ever saw — silently deflating
+    # every score once a quiz is partially published (e.g. 15 approved of 30
+    # → a perfect attempt would read 50%). Filter to approved to stay honest.
     question_count_row = await db.execute(
-        select(func.count(QuizQuestion.id)).where(QuizQuestion.quiz_id == quiz.id)
+        select(func.count(QuizQuestion.id)).where(
+            QuizQuestion.quiz_id == quiz.id,
+            QuizQuestion.review_status == "approved",
+        )
     )
     question_count = int(question_count_row.scalar_one()) or len(answers) or 1
     score_points = sum((answer.points_awarded for answer in answers), Decimal("0"))

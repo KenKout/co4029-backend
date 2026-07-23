@@ -75,6 +75,28 @@ ROLE_TO_TIER: dict[LLMRole, Literal["small", "standard", "large"]] = {
 }
 
 
+# Roles that run in an interactive pipeline stage where a user is actively
+# waiting on a spinner (quiz + interview ideation/generation/validation, plus
+# the latency-sensitive interview runtime roles). These use the tighter
+# ``llm_interactive_timeout_seconds`` instead of the 600s batch timeout, so a
+# stalled LAN endpoint can't hang the worker (and the user) for ten minutes.
+# Batch/background roles (extraction, enrichment, kg_extraction) intentionally
+# keep the long ``llm_timeout_seconds``.
+INTERACTIVE_LLM_ROLES: frozenset[LLMRole] = frozenset(
+    {
+        LLMRole.IDEATION,
+        LLMRole.GENERATION,
+        LLMRole.VALIDATION,
+        LLMRole.INTERVIEW_GENERATION,
+        LLMRole.INTERVIEW_VALIDATION,
+        LLMRole.INTERVIEW_FOLLOWUP,
+        LLMRole.INTERVIEW_INTENT,
+        LLMRole.INTERVIEW_ANALYSIS,
+        LLMRole.INTERVIEW_SECURITY,
+    }
+)
+
+
 @dataclass(frozen=True)
 class ModelBinding:
     """One concrete (endpoint, key, model) tuple resolved for a single call.
@@ -127,6 +149,16 @@ def binding_for(role: LLMRole, settings: Settings) -> ModelBinding:
     tier_model = getattr(settings, f"llm_model_{tier}")
     model = per_role_override or tier_model
 
+    # Interactive stages (user waiting on a spinner) get the tighter timeout so
+    # a stalled endpoint fails fast and the job-level retry engages, instead of
+    # hanging the worker for the full batch timeout. Batch roles keep the long
+    # one for large-context ingest calls.
+    timeout_s = (
+        settings.llm_interactive_timeout_seconds
+        if role in INTERACTIVE_LLM_ROLES
+        else settings.llm_timeout_seconds
+    )
+
     return ModelBinding(
         role=role,
         tier=tier,
@@ -134,7 +166,7 @@ def binding_for(role: LLMRole, settings: Settings) -> ModelBinding:
         api_key=settings.llm_api_key,
         model=model,
         extra_headers=_resolve_extra_headers(settings),
-        timeout_s=settings.llm_timeout_seconds,
+        timeout_s=timeout_s,
     )
 
 

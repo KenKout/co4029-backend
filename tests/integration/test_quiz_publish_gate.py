@@ -165,6 +165,7 @@ async def _insert_question(
     quiz_id: uuid.UUID,
     position: int,
     expected_response_time_ms: int | None,
+    review_status: str = "approved",
 ) -> uuid.UUID:
     question_id = uuid.uuid4()
     async with engine.begin() as conn:
@@ -173,13 +174,14 @@ async def _insert_question(
                 "INSERT INTO quiz_questions "
                 "(id, quiz_id, position, question_type, prompt_text, review_status, "
                 "expected_response_time_ms) "
-                "VALUES (:id, :qz, :pos, 'multiple_choice', :prompt, 'approved', :ms)"
+                "VALUES (:id, :qz, :pos, 'multiple_choice', :prompt, :review_status, :ms)"
             ),
             {
                 "id": question_id,
                 "qz": quiz_id,
                 "pos": position,
                 "prompt": f"Question {position}?",
+                "review_status": review_status,
                 "ms": expected_response_time_ms,
             },
         )
@@ -281,6 +283,64 @@ async def test_bulk_set_expected_time(
     async with session_factory() as session, session.begin():
         quiz = await authoring_service.publish_quiz(session, quiz_id, _actor(scenario["owner_id"]))
     assert quiz.status == "published"
+
+
+@pytest.mark.asyncio
+async def test_partial_publish_pending_questions_do_not_block(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict,
+) -> None:
+    """Partial publish: a mix of approved + pending publishes fine.
+
+    Students only ever see approved questions, so a pending draft must not
+    block publish — it's retained for later reuse. This is the "generate 30,
+    approve 15, publish, keep the rest" workflow.
+    """
+    quiz_id = scenario["quiz_id"]
+    await _insert_question(
+        engine,
+        quiz_id=quiz_id,
+        position=1,
+        expected_response_time_ms=30_000,
+        review_status="approved",
+    )
+    # Pending draft with NO expected time — must neither block the approval
+    # gate nor the t_exp gate, because students never see it.
+    await _insert_question(
+        engine,
+        quiz_id=quiz_id,
+        position=2,
+        expected_response_time_ms=None,
+        review_status="pending",
+    )
+
+    async with session_factory() as session, session.begin():
+        quiz = await authoring_service.publish_quiz(session, quiz_id, _actor(scenario["owner_id"]))
+    assert quiz.status == "published"
+
+
+@pytest.mark.asyncio
+async def test_publish_with_zero_approved_returns_422(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict,
+) -> None:
+    """A quiz with only pending/rejected questions can't publish (empty for students)."""
+    from abridgeai.features.quizzes.services.publish_gate import QuizApprovalRequiredError
+
+    quiz_id = scenario["quiz_id"]
+    await _insert_question(
+        engine,
+        quiz_id=quiz_id,
+        position=1,
+        expected_response_time_ms=30_000,
+        review_status="pending",
+    )
+
+    async with session_factory() as session, session.begin():
+        with pytest.raises(QuizApprovalRequiredError):
+            await authoring_service.publish_quiz(session, quiz_id, _actor(scenario["owner_id"]))
 
 
 @pytest.mark.asyncio

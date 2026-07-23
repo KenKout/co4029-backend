@@ -54,9 +54,9 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 
-from abridgeai.ai.models import ProcessingJob
+from abridgeai.ai.models import GenerationRun, ProcessingJob
 from abridgeai.core.config import get_settings
 from abridgeai.core.db import get_sessionmaker
 from abridgeai.core.observability import (
@@ -98,7 +98,14 @@ async def reconcile_orphaned_ingests_task(ctx: dict[str, Any]) -> None:
     """
     bind_request_context(task="reconcile_orphaned_ingests")
     try:
-        await _run_reconcile(arq_pool=ctx.get("redis"))
+        redis = ctx.get("redis")
+        await _run_reconcile(arq_pool=redis)
+        # Quiz generation runs are driven by the same "DB row + ARQ job"
+        # pairing and suffer the identical orphan failure mode (a worker
+        # restart mid-run drops the ARQ job while the generation_runs row
+        # stays status='running' forever — the "stuck at 25%" symptom). Run
+        # the quiz reconciler in the same tick so both recover automatically.
+        await _run_reconcile_quiz(arq_pool=redis)
     finally:
         clear_request_context()
 
@@ -158,14 +165,18 @@ async def _run_reconcile(*, arq_pool: Any) -> None:
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as db:
         stuck = (
-            await db.execute(
-                select(ProcessingJob).where(
-                    ProcessingJob.entity_type == _INGEST_ENTITY_TYPE,
-                    ProcessingJob.status.in_(_STUCK_STATUSES),
-                    ProcessingJob.created_at < cutoff,
+            (
+                await db.execute(
+                    select(ProcessingJob).where(
+                        ProcessingJob.entity_type == _INGEST_ENTITY_TYPE,
+                        ProcessingJob.status.in_(_STUCK_STATUSES),
+                        ProcessingJob.created_at < cutoff,
+                    )
                 )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
 
         for job in stuck:
             version_id = job.entity_id
@@ -272,6 +283,179 @@ async def _run_reconcile(*, arq_pool: Any) -> None:
         requeued=requeued,
         failed=failed,
         live_jobs=len(live_version_ids),
+    )
+
+
+# --- Quiz generation-run reconciliation -------------------------------------
+
+# generation_runs has no retry_count column, so the durable re-enqueue budget
+# is tracked inside config_json under this key.
+_QUIZ_REAP_KEY = "reap_count"
+_QUIZ_MAX_REQUEUE_ATTEMPTS = 2
+# A quiz run legitimately runs for minutes (several sequential LLM calls). Only
+# consider a run orphaned once it's older than this AND absent from the live
+# ARQ set — long enough that a healthy in-flight run is never reaped.
+_QUIZ_ORPHAN_GRACE_SECONDS = 300
+_QUIZ_STUCK_STATUSES = ("pending", "running")
+
+
+async def _live_quiz_run_ids(redis: Any) -> set[UUID]:
+    """Run IDs that currently have a live ARQ ``run_quiz_generation_task``.
+
+    ``run_quiz_generation_task``'s stored args are ``(actor_id,
+    generation_run_id)`` (ctx is not stored), so the run id is ``args[1]``.
+    Same liveness contract as ingests: an ``arq:job:*`` key exists for a
+    job's whole lifecycle and is deleted on completion. On any Redis error
+    we re-raise so the caller aborts rather than reaping live runs.
+    """
+    from arq.jobs import deserialize_job_raw  # noqa: PLC0415
+
+    live: set[UUID] = set()
+    if redis is None:
+        return live
+    keys = await redis.keys("arq:job:*")
+    for key in keys:
+        raw = await redis.get(key)
+        if raw is None:
+            continue
+        try:
+            fn, args, _kwargs, *_ = deserialize_job_raw(raw)
+        except Exception:  # noqa: BLE001 -- a malformed job shouldn't break the sweep
+            continue
+        if fn != "run_quiz_generation_task":
+            continue
+        # args == (actor_id, generation_run_id). ARQ may serialize the run id
+        # as a UUID or as its string form depending on how it was enqueued;
+        # coerce both so a live run is NEVER misread as an orphan (a false
+        # "orphan" would get a duplicate re-enqueue, doubling load on the LLM
+        # endpoint and racing the still-running original).
+        if len(args) >= 2:
+            try:
+                live.add(args[1] if isinstance(args[1], UUID) else UUID(str(args[1])))
+            except (TypeError, ValueError):
+                continue
+    return live
+
+
+async def _run_reconcile_quiz(*, arq_pool: Any) -> None:
+    """Re-enqueue or fail quiz ``generation_runs`` stuck with no live ARQ job.
+
+    Mirrors the ingest reaper. A quiz run only writes its terminal state
+    (questions + ``status='completed'``) in a single commit at the very end,
+    so an orphaned run has persisted nothing and is safe to re-enqueue: the
+    re-run starts cleanly from retrieval.
+    """
+    cutoff = datetime.now(tz=UTC) - timedelta(seconds=_QUIZ_ORPHAN_GRACE_SECONDS)
+
+    try:
+        live_run_ids = await _live_quiz_run_ids(arq_pool)
+    except Exception:  # noqa: BLE001 -- Redis down: abort rather than reap live runs
+        _logger.warning("reaper_quiz_aborted_live_scan_unavailable", exc_info=True)
+        return
+
+    requeued = 0
+    failed = 0
+    inspected = 0
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as db:
+        # A still-zombie run row may be lock-held by an orphaned transaction
+        # that hasn't been cleaned up yet. Use a short lock_timeout so the
+        # reaper never blocks on it — a locked row is skipped this tick and
+        # retried next tick (by which point the idle-in-transaction backstop
+        # will have released it).
+        await db.execute(text("SET LOCAL lock_timeout = '3s'"))
+        stuck = (
+            (
+                await db.execute(
+                    select(GenerationRun).where(
+                        GenerationRun.generation_type == "quiz",
+                        GenerationRun.status.in_(_QUIZ_STUCK_STATUSES),
+                        GenerationRun.updated_at < cutoff,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+        for run in stuck:
+            if run.id in live_run_ids:
+                continue  # backed by a live ARQ job — leave it alone
+
+            # Staleness is measured from the last activity timestamp, not
+            # created_at: a re-enqueued run's row can be hours old while the
+            # current attempt only just started. started_at (set when the
+            # dispatcher marks the run 'running') is the truthful "work began"
+            # signal; fall back to updated_at / created_at when it's unset
+            # (still 'pending'). A running row that started within the grace
+            # window is left alone even if absent from the live set (covers the
+            # tiny gap between enqueue and the ARQ job key appearing).
+            started = run.started_at or run.updated_at or run.created_at
+            if started is not None and started >= cutoff:
+                continue
+
+            inspected += 1
+            config = dict(run.config_json or {})
+            reap_count = int(config.get(_QUIZ_REAP_KEY) or 0)
+
+            if reap_count >= _QUIZ_MAX_REQUEUE_ATTEMPTS:
+                run.status = "failed"
+                run.finished_at = datetime.now(tz=UTC)
+                run.config_json = config | {
+                    "failure": {
+                        "message": (
+                            f"quiz generation could not be recovered after "
+                            f"{reap_count} automatic re-enqueue attempts; "
+                            "please retry generation"
+                        )
+                    }
+                }
+                failed += 1
+                _logger.warning(
+                    "reaper_quiz_run_failed_exhausted",
+                    generation_run_id=str(run.id),
+                    reap_count=reap_count,
+                )
+                continue
+
+            # Re-enqueue: bump the durable counter, reset to a clean pending
+            # state, commit BEFORE enqueuing so the worker never races a
+            # not-yet-committed row.
+            run.status = "pending"
+            run.started_at = None
+            run.config_json = config | {_QUIZ_REAP_KEY: reap_count + 1}
+            actor_id = run.requested_by
+            await db.commit()
+
+            if arq_pool is None:
+                continue
+            try:
+                await arq_pool.enqueue_job(  # type: ignore[attr-defined]
+                    "run_quiz_generation_task", actor_id, run.id
+                )
+            except Exception:  # noqa: BLE001 -- log + continue; next run retries
+                _logger.exception(
+                    "reaper_quiz_requeue_enqueue_failed",
+                    generation_run_id=str(run.id),
+                )
+                continue
+
+            requeued += 1
+            _logger.info(
+                "reaper_quiz_run_requeued",
+                generation_run_id=str(run.id),
+                attempt=reap_count + 1,
+            )
+
+        await db.commit()
+
+    _logger.info(
+        "reaper_quiz_run_completed",
+        orphans_inspected=inspected,
+        requeued=requeued,
+        failed=failed,
+        live_runs=len(live_run_ids),
     )
 
 

@@ -51,7 +51,11 @@ from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 
 from abridgeai.core.db import get_sessionmaker
-from abridgeai.features.quizzes.ai.pipelines._progress import COVERAGE_STAGES, record_stage
+from abridgeai.features.quizzes.ai.pipelines._progress import (
+    COVERAGE_STAGES,
+    record_config_patch,
+    record_stage,
+)
 from abridgeai.features.quizzes.ai.pipelines._telemetry import log_validator_aborted_run
 from abridgeai.features.quizzes.ai.stages.dedup import discard_duplicates
 from abridgeai.features.quizzes.ai.stages.generation import generate_questions
@@ -117,14 +121,20 @@ async def run_coverage_pipeline(  # noqa: C901 -- pre-existing linear stage sequ
     flat_sections = [s for o in outlines for s in o.sections]
 
     # Stash budget on the run for observability — same shape as legacy.
-    run.config_json = run.config_json | {
-        "coverage": {
-            "section_count": len(flat_sections),
-            "eligible_count": len(budget),
-            "budget": dict(budget),
-            "skipped_sections": [s.id for s in flat_sections if s.id not in budget],
-        }
-    }
+    # Written through a dedicated short-lived transaction (NOT the shared
+    # pipeline session) so the generation_runs row is never left locked
+    # across the ideation/generation LLM calls that follow.
+    await record_config_patch(
+        run.id,
+        {
+            "coverage": {
+                "section_count": len(flat_sections),
+                "eligible_count": len(budget),
+                "budget": dict(budget),
+                "skipped_sections": [s.id for s in flat_sections if s.id not in budget],
+            }
+        },
+    )
 
     await record_stage(
         run.id,
@@ -275,25 +285,28 @@ async def run_coverage_pipeline(  # noqa: C901 -- pre-existing linear stage sequ
     )
     persisted = await persist_questions(db, run, quiz, all_chunks, kept)
 
-    run.config_json = run.config_json | {
-        "pipeline": {
-            "stage": "completed",
-            "mode": "coverage",
-            "pipeline_run_id": str(pipeline_run_id),
-            "ideation": {"received_templates": len(templates)},
-            "generation": {
-                "requested_questions": sum(budget.values()),
-                "received_questions": len(questions),
-                "parallelism": parallelism,
-                "max_attempts": max_attempts,
-            },
-            "validation": {"accepted": len(accepted), "rejected": rejected},
-            "dedup": {
-                "kept": len(kept),
-                "dropped": [{"index": d.index, "reason": d.reason} for d in drops],
-            },
-        }
-    }
+    await record_config_patch(
+        run.id,
+        {
+            "pipeline": {
+                "stage": "completed",
+                "mode": "coverage",
+                "pipeline_run_id": str(pipeline_run_id),
+                "ideation": {"received_templates": len(templates)},
+                "generation": {
+                    "requested_questions": sum(budget.values()),
+                    "received_questions": len(questions),
+                    "parallelism": parallelism,
+                    "max_attempts": max_attempts,
+                },
+                "validation": {"accepted": len(accepted), "rejected": rejected},
+                "dedup": {
+                    "kept": len(kept),
+                    "dropped": [{"index": d.index, "reason": d.reason} for d in drops],
+                },
+            }
+        },
+    )
     return persisted
 
 

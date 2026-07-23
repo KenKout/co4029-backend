@@ -44,6 +44,8 @@ sees validated payloads.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
@@ -156,9 +158,7 @@ async def _precompute_coverage_inputs(
     """
     lesson_ids = _config_uuid_list(config, "source_lesson_ids")
     if not lesson_ids:
-        raise ValueError(
-            "coverage mode requires source_lesson_ids in config_json"
-        )
+        raise ValueError("coverage mode requires source_lesson_ids in config_json")
 
     cov_opts = config.get("coverage_options") or {}
     if not isinstance(cov_opts, dict):
@@ -172,15 +172,11 @@ async def _precompute_coverage_inputs(
         force_bundle=(section_grouping == "fixed"),
     )
     if not outlines:
-        raise ValueError(
-            "coverage mode: no document chunks found for source_lesson_ids"
-        )
+        raise ValueError("coverage mode: no document chunks found for source_lesson_ids")
 
     question_count = int(config.get("question_count") or 0)
     if question_count <= 0:
-        raise ValueError(
-            "coverage mode requires positive question_count in config_json"
-        )
+        raise ValueError("coverage mode requires positive question_count in config_json")
 
     section_ids = cov_opts.get("section_ids")
     if section_ids is not None and not isinstance(section_ids, list):
@@ -274,6 +270,18 @@ async def run_quiz_generation(db: AsyncSession, generation_run_id: UUID) -> None
         run.status = "completed"
         run.finished_at = utcnow()
         await db.commit()
+    except asyncio.CancelledError:
+        # Worker shutdown / restart / job_timeout cancels the coroutine.
+        # CancelledError is a BaseException (not Exception) so it bypasses the
+        # failure handler below — we MUST still roll back here, otherwise the
+        # open transaction is orphaned as a Postgres backend "idle in
+        # transaction" that keeps holding the generation_runs row lock,
+        # wedging the run (and any recovery) until the connection is killed.
+        # The reaper will re-enqueue/fail the run row; our job is just to
+        # release the lock. Re-raise so ARQ sees the cancellation.
+        with contextlib.suppress(Exception):
+            await db.rollback()
+        raise
     except Exception as exc:
         await db.rollback()
         run = await db.get(GenerationRun, run_id)

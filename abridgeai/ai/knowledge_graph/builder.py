@@ -168,6 +168,55 @@ def _hierarchy_dict(hierarchy: HierarchyPayload) -> dict[str, str]:
     }
 
 
+async def _already_built_previews_by_index(
+    client: KnowledgeGraphClient,
+    material_id: UUID,
+) -> dict[int, str]:
+    """Map of ``chunk_index -> text_preview`` already committed to Neo4j.
+
+    ``upsert_chunk_graph`` MERGEs a ``Chunk`` node (linked under the
+    material's stable ``Material`` node) for every chunk it finishes,
+    stamping ``index`` + ``text_preview``. Querying them back lets the
+    build **resume**: a run killed by ``job_timeout`` mid-way leaves its
+    completed chunks committed in Neo4j (writes are per-chunk, outside the
+    pipeline's Postgres transaction), so the next run can skip them instead
+    of restarting from chunk 1. Without this, a document with more chunks
+    than fit in one timeout window can never finish — it rebuilds from
+    scratch every run and times out at the same place forever.
+
+    Why index+preview, not chunk id: the pipeline deletes and recreates
+    ``document_chunks`` on every run, so a chunk's Postgres UUID (and thus
+    the Neo4j ``Chunk.id``) is NOT stable across runs — resuming by id
+    would never match. ``chunk_index`` IS stable (deterministic chunking of
+    the same source), and we verify the stored ``text_preview`` matches the
+    current chunk's content before skipping, so a genuine reprocess with
+    different content at the same index rebuilds rather than reusing stale
+    concepts.
+
+    Keyed by the stable ``material_id`` (``Material`` nodes persist across
+    versions). Best-effort: on any Neo4j error returns an empty map (full
+    rebuild — correct, just slower), never raises.
+    """
+    try:
+        async with client.session() as session:
+            result = await session.run(
+                """
+                MATCH (m:Material {id: $material_id})-[:HAS_CHUNK]->(c:Chunk)
+                WHERE c.index IS NOT NULL
+                RETURN c.index AS idx, c.text_preview AS preview
+                """,
+                material_id=str(material_id),
+            )
+            return {
+                int(record["idx"]): (record["preview"] or "")
+                async for record in result
+                if record["idx"] is not None
+            }
+    except Exception:  # noqa: BLE001 -- resume is an optimisation; degrade to full rebuild
+        logger.warning("kg_build resume-scan failed; rebuilding all chunks", exc_info=True)
+        return {}
+
+
 async def _extract_concepts_from_chunk(
     chunk: EnrichedChunk,
     *,
@@ -303,7 +352,25 @@ async def build_knowledge_graph_for_material_version(
     concept_names: set[str] = set()
     relationship_keys: set[tuple[str, str, str]] = set()
 
+    # Resume support: skip chunks already committed to Neo4j by an earlier
+    # run that was killed mid-build (e.g. job_timeout). Each skipped chunk
+    # avoids an LLM call, so a re-run fast-forwards through completed work
+    # and only spends its time budget on what's left — the build makes
+    # forward progress across runs instead of restarting from chunk 1 and
+    # timing out at the same place forever.
+    # material_id (stable across versions) keys the Material node in Neo4j.
+    material_id = hierarchy.material_id
+    already_built = await _already_built_previews_by_index(kg_client, material_id)
+    if already_built:
+        logger.info(
+            "kg_build resuming: %d chunk(s) already built in Neo4j for material %s (%d total this run)",
+            len(already_built),
+            material_id,
+            len(chunks),
+        )
+
     total = len(chunks)
+    resumed = 0
     for done, chunk in enumerate(chunks, start=1):
         if chunk.material_version_id != material_version_id:
             logger.warning(
@@ -312,6 +379,21 @@ async def build_knowledge_graph_for_material_version(
                 material_version_id,
                 chunk.material_version_id,
             )
+            continue
+
+        # Resume: skip a chunk only if a node with the SAME index AND the same
+        # text_preview (content[:300]) already exists — matching both guards
+        # against reusing stale concepts if a reprocess changed the content at
+        # this index. Still fire the progress callback so the UI count advances
+        # through the resumed range instead of appearing stalled.
+        prior_preview = already_built.get(chunk.chunk_index)
+        if prior_preview is not None and prior_preview == chunk.content[:300]:
+            resumed += 1
+            if on_progress is not None:
+                try:
+                    await on_progress(done, total)
+                except Exception:  # noqa: BLE001 -- progress must never fail the build
+                    logger.debug("kg_build on_progress callback failed", exc_info=True)
             continue
 
         concepts, relationships = await _extract_concepts_from_chunk(

@@ -702,13 +702,37 @@ async def test_full_generation_lifecycle_publish_take_score(
     assert poll_resp.json()["status"] == "completed"
 
     async with engine.begin() as conn:
-        question_count = (
+        question_rows = (
             await conn.execute(
-                text("SELECT COUNT(*) FROM quiz_questions WHERE quiz_id = :q"),
+                text("SELECT id FROM quiz_questions WHERE quiz_id = :q"),
                 {"q": quiz_id},
             )
-        ).scalar_one()
+        ).all()
+    question_count = len(question_rows)
     assert question_count >= 1, "pipeline must have persisted at least one question"
+
+    # Real teacher workflow before publish: generated questions land as
+    # 'pending' with no expected time. Set an expected time and approve them
+    # so the publish gate (needs >=1 approved question, each with a positive
+    # expected_response_time_ms) is satisfied. Partial publish means we could
+    # approve a subset, but here we sign off all of them.
+    question_ids = [str(row.id) for row in question_rows]
+    set_time_resp = await client.post(
+        f"/api/v1/teacher/quizzes/{quiz_id}/questions/bulk-set-expected-time",
+        json={
+            "items": [
+                {"question_id": qid, "expected_response_time_ms": 60_000} for qid in question_ids
+            ]
+        },
+        headers=_auth(admin_bearer),
+    )
+    assert set_time_resp.status_code == 200, set_time_resp.text
+    approve_resp = await client.post(
+        f"/api/v1/teacher/quizzes/{quiz_id}/questions/bulk-approve",
+        json={"question_ids": question_ids},
+        headers=_auth(admin_bearer),
+    )
+    assert approve_resp.status_code == 200, approve_resp.text
 
     pub_resp = await client.post(
         f"/api/v1/teacher/quizzes/{quiz_id}/publish",
@@ -730,9 +754,11 @@ async def test_full_generation_lifecycle_publish_take_score(
         headers=_auth(student_bearer),
     )
     assert attempt_resp.status_code == 201, attempt_resp.text
-    take_payload = attempt_resp.json()
+    progress_payload = attempt_resp.json()
     assert "is_correct" not in attempt_resp.text
-    questions = take_payload["questions"]
+    # Questions are nested under `take` (QuizAttemptProgressRead.take is a
+    # QuizForTakingPublic), not at the top level.
+    questions = progress_payload["take"]["questions"]
     assert questions, "take payload must list questions"
 
     async with engine.begin() as conn:

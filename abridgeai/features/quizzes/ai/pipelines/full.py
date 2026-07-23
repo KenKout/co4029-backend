@@ -15,7 +15,11 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
-from abridgeai.features.quizzes.ai.pipelines._progress import FULL_STAGES, record_stage
+from abridgeai.features.quizzes.ai.pipelines._progress import (
+    FULL_STAGES,
+    record_config_patch,
+    record_stage,
+)
 from abridgeai.features.quizzes.ai.pipelines._synthetic_outline import resolve_outline_inputs
 from abridgeai.features.quizzes.ai.pipelines._telemetry import log_validator_aborted_run
 from abridgeai.features.quizzes.ai.stages.dedup import discard_duplicates
@@ -63,8 +67,15 @@ async def run_full_pipeline(
 
     pipeline_run_id = uuid4()
     requested_count = int(config.get("question_count") or 3)
+    # Oversample templates so validation/dedup attrition doesn't starve the
+    # final count. The buffer must be a genuine surplus over requested_count
+    # (a bare 1.5x rounds to only +1 for small requests — e.g. count=1 -> 2 --
+    # which a single UNGROUNDED rejection wipes out, aborting the whole run).
+    # The floor of "+2" guarantees real margin even for a 1-question quiz.
+    # This is cheap: generation is ONE LLM call that emits all candidates, so
+    # more templates cost slightly more output tokens, not more calls.
     template_target = max(
-        requested_count,
+        requested_count + 2,
         int(round(requested_count * _IDEATION_OVERSAMPLE)),
     )
 
@@ -77,13 +88,19 @@ async def run_full_pipeline(
             config=config,
             pipeline_run_id=pipeline_run_id,
         )
-        run.config_json = run.config_json | {
-            "retrieval": retrieval_metadata(
-                chunks,
-                anchors=anchors,
-                primary_embedding=primary_embedding,
-            ),
-        }
+        # Write through a dedicated short-lived transaction (NOT the shared
+        # pipeline session) so we don't leave the generation_runs row locked
+        # across the ideation/generation LLM calls that follow.
+        await record_config_patch(
+            run.id,
+            {
+                "retrieval": retrieval_metadata(
+                    chunks,
+                    anchors=anchors,
+                    primary_embedding=primary_embedding,
+                ),
+            },
+        )
 
     if not chunks:
         raise ValueError("Quiz pipeline aborted: retrieval produced zero chunks")
@@ -107,7 +124,12 @@ async def run_full_pipeline(
         budget=effective_budget,
         pipeline_run_id=pipeline_run_id,
     )
-    template_dicts: list[dict[str, Any]] = [t.model_dump() for t in templates[:requested_count]]
+    # Carry the FULL oversampled template set into generation (do NOT truncate
+    # to requested_count here). Truncating before generation threw the entire
+    # oversample buffer away, so a single validator rejection could starve the
+    # run — the "generated=1, rejected=1, no questions survived" abort. The
+    # surplus is trimmed to requested_count AFTER validation/dedup instead.
+    template_dicts: list[dict[str, Any]] = [t.model_dump() for t in templates]
 
     await record_stage(
         run.id,
@@ -175,6 +197,13 @@ async def run_full_pipeline(
             f"dropped_by_dedup={len(drops)})"
         )
 
+    # Trim the oversampled survivors back down to what the teacher asked for.
+    # We intentionally generated + validated a surplus (see template_target)
+    # to survive validation/dedup attrition; keep the best requested_count in
+    # rank order and discard the rest so the persisted quiz matches the count.
+    if len(kept) > requested_count:
+        kept = kept[:requested_count]
+
     await record_stage(
         run.id,
         stages=FULL_STAGES,
@@ -183,26 +212,29 @@ async def run_full_pipeline(
     )
     persisted = await persist_questions(db, run, quiz, chunks, kept)
 
-    run.config_json = run.config_json | {
-        "pipeline": {
-            "stage": "completed",
-            "pipeline_run_id": str(pipeline_run_id),
-            "ideation": {
-                "requested_templates": template_target,
-                "received_templates": len(templates),
-                "used_templates": len(template_dicts),
-            },
-            "generation": {
-                "requested_questions": requested_count,
-                "received_questions": len(candidate_dicts),
-            },
-            "validation": {"accepted": len(accepted), "rejected": rejected},
-            "dedup": {
-                "kept": len(kept),
-                "dropped": [{"index": d.index, "reason": d.reason} for d in drops],
-            },
-        }
-    }
+    await record_config_patch(
+        run.id,
+        {
+            "pipeline": {
+                "stage": "completed",
+                "pipeline_run_id": str(pipeline_run_id),
+                "ideation": {
+                    "requested_templates": template_target,
+                    "received_templates": len(templates),
+                    "used_templates": len(template_dicts),
+                },
+                "generation": {
+                    "requested_questions": requested_count,
+                    "received_questions": len(candidate_dicts),
+                },
+                "validation": {"accepted": len(accepted), "rejected": rejected},
+                "dedup": {
+                    "kept": len(kept),
+                    "dropped": [{"index": d.index, "reason": d.reason} for d in drops],
+                },
+            }
+        },
+    )
     return persisted
 
 

@@ -163,6 +163,63 @@ async def record_stage(
         )
 
 
+async def record_config_patch(run_id: UUID, patch: dict[str, Any]) -> None:
+    """Shallow-merge ``patch`` into ``generation_runs.config_json`` and commit.
+
+    Why this exists (row-lock avoidance)
+    ------------------------------------
+    The pipeline used to accumulate metadata by mutating the shared-session
+    ``run.config_json`` object directly (e.g. retrieval stats, the final
+    pipeline summary). Because the session is ``autoflush=False`` and only
+    commits when the whole run finishes, that dirty ``run`` row got flushed
+    as an ``UPDATE generation_runs ...`` by the *next* explicit ``flush()``
+    (an LLM audit-row write) — and the row lock it took was then held for the
+    entire duration of the following LLM call. A worker restart mid-call
+    orphaned that transaction ``idle in transaction`` with the lock still
+    held, wedging the run (and any recovery) forever.
+
+    Writing patches through a DEDICATED short-lived session that commits
+    immediately keeps the pipeline's long-lived transaction from ever
+    locking the ``generation_runs`` row across an LLM call. Read-modify-write
+    (not a blind overwrite) so concurrent progress checkpoints and the
+    original request config are preserved; the merge is shallow, matching
+    the previous ``run.config_json | {key: value}`` semantics.
+
+    Best-effort on the telemetry side, but note: unlike ``record_stage``
+    this carries real run metadata, so failures are logged at WARNING. It
+    still never raises — a metadata write must not fail a live run.
+    """
+    if not patch:
+        return
+    try:
+        sessionmaker = get_sessionmaker()
+        async with sessionmaker() as db:
+            row = (
+                await db.execute(
+                    text("SELECT config_json FROM generation_runs WHERE id = :id"),
+                    {"id": run_id},
+                )
+            ).first()
+            existing: dict[str, Any] = (row[0] if row and isinstance(row[0], dict) else {}) or {}
+            merged = existing | patch
+            await db.execute(
+                text(
+                    "UPDATE generation_runs "
+                    "SET config_json = CAST(:payload AS jsonb), updated_at = NOW() "
+                    "WHERE id = :id"
+                ),
+                {"payload": _json_dumps(merged), "id": run_id},
+            )
+            await db.commit()
+    except Exception as exc:  # noqa: BLE001 -- metadata write must never fail a run
+        _logger.warning(
+            "generation_config_patch_failed",
+            generation_run_id=str(run_id),
+            keys=sorted(patch.keys()),
+            error=str(exc),
+        )
+
+
 def _json_dumps(payload: dict[str, Any]) -> str:
     import json  # noqa: PLC0415
 
@@ -173,5 +230,6 @@ __all__ = [
     "COVERAGE_STAGES",
     "FULL_STAGES",
     "REGENERATE_STAGES",
+    "record_config_patch",
     "record_stage",
 ]
