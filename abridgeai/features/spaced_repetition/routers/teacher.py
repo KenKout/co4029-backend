@@ -124,7 +124,8 @@ _RECENT_REVIEWS_SQL = text(
         cr.created_at,
         cr.q_derived,
         cr.ef_after,
-        cr.correct
+        cr.correct,
+        qq.prompt_text
     FROM card_reviews cr
     JOIN quiz_questions qq ON qq.id = cr.question_id
     JOIN quizzes q ON q.id = qq.quiz_id
@@ -317,6 +318,7 @@ async def get_student_sr_detail(
             q_derived=int(r[2] or 0),
             ef_after=float(r[3] or 0.0),
             correct=bool(r[4]),
+            prompt_text=str(r[5] or ""),
         )
         for r in review_rows
     ]

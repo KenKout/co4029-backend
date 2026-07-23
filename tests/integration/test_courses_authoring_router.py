@@ -1358,3 +1358,91 @@ async def test_get_lesson_outline_accepts_grouping_query_params(
         headers={"Authorization": f"Bearer {admin_bearer}"},
     )
     assert response.status_code == 422, response.text
+
+
+@pytest.mark.asyncio
+async def test_course_outcome_crud_and_reindex_on_delete(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    scenario: dict[str, uuid.UUID | str],
+    engine: AsyncEngine,
+) -> None:
+    """LO CRUD (§LO-1/2): create appends, delete renumbers to a 1..N chain.
+
+    admin owns course_a, so it holds ``course.update`` there. Creates four
+    outcomes (positions 1..4), deletes the 2nd, and asserts the survivors
+    compact to contiguous positions 1,2,3 in their original relative order —
+    the strict-chain requirement for the ``L.O.x`` display codes.
+    """
+    course_a = scenario["course_a"]
+    auth = {"Authorization": f"Bearer {admin_bearer}"}
+    base = f"/api/v1/teacher/courses/{course_a}/outcomes"
+
+    created: list[dict[str, object]] = []
+    for text_val in ("Understand X", "Apply Y", "Analyze Z", "Evaluate W"):
+        resp = await client.post(base, json={"outcome_text": text_val}, headers=auth)
+        assert resp.status_code == 201, resp.text
+        created.append(resp.json())
+
+    # Positions are server-assigned 1..4 in creation order.
+    assert [o["position"] for o in created] == [1, 2, 3, 4]
+
+    # List returns them ordered by position.
+    list_resp = await client.get(base, headers=auth)
+    assert list_resp.status_code == 200, list_resp.text
+    listed = list_resp.json()
+    assert [o["outcome_text"] for o in listed] == [
+        "Understand X",
+        "Apply Y",
+        "Analyze Z",
+        "Evaluate W",
+    ]
+
+    # Edit the third outcome's text.
+    third_id = created[2]["id"]
+    patch_resp = await client.patch(
+        f"{base}/{third_id}",
+        json={"outcome_text": "Analyze Z (revised)"},
+        headers=auth,
+    )
+    assert patch_resp.status_code == 200, patch_resp.text
+    assert patch_resp.json()["outcome_text"] == "Analyze Z (revised)"
+
+    # Delete the SECOND outcome ("Apply Y").
+    second_id = created[1]["id"]
+    del_resp = await client.delete(f"{base}/{second_id}", headers=auth)
+    assert del_resp.status_code == 204, del_resp.text
+
+    # Survivors renumber to a contiguous 1..N chain, order preserved.
+    after = (await client.get(base, headers=auth)).json()
+    assert [(o["position"], o["outcome_text"]) for o in after] == [
+        (1, "Understand X"),
+        (2, "Analyze Z (revised)"),
+        (3, "Evaluate W"),
+    ]
+
+    # Cleanup: HARD-delete the rows (the DELETE endpoint only soft-deletes,
+    # which would leave course_learning_outcomes rows referencing the shared
+    # seeded course and trip the conftest course teardown's FK on hard-DELETE).
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("DELETE FROM course_learning_outcomes WHERE course_id = :cid"),
+            {"cid": course_a},
+        )
+
+
+@pytest.mark.asyncio
+async def test_course_outcome_student_403(
+    client: httpx.AsyncClient,
+    student_bearer: str,
+    scenario: dict[str, uuid.UUID | str],
+) -> None:
+    """A student lacks ``course.update`` — outcome writes return 403."""
+    course_a = scenario["course_a"]
+    auth = {"Authorization": f"Bearer {student_bearer}"}
+    resp = await client.post(
+        f"/api/v1/teacher/courses/{course_a}/outcomes",
+        json={"outcome_text": "Sneaky"},
+        headers=auth,
+    )
+    assert resp.status_code == 403, resp.text

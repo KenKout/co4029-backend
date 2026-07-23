@@ -111,6 +111,14 @@ class QuizQuestionPublic(_ORMModel):
     hint_text: str | None = None
     options: list[QuizQuestionOptionPublic] = []
 
+    # Course learning outcome this question assesses (§LO-3). The FK is
+    # stored on the row; ``outcome_position`` is NOT — it's filled by the
+    # projection layer (batch lookup) so the client can render the derived
+    # ``(L.O.{outcome_position})`` prefix without an ORM relationship
+    # crossing the quizzes→courses feature boundary. Both NULL = no outcome.
+    learning_outcome_id: UUID | None = None
+    outcome_position: int | None = None
+
 
 class QuizPublic(_ORMModel):
     """Student-facing quiz summary.

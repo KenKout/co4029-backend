@@ -69,11 +69,13 @@ from abridgeai.ai.knowledge_graph import (
 from abridgeai.ai.llm import EmbeddingClient, LLMGateway
 from abridgeai.ai.models import ProcessingJob
 from abridgeai.core.config import get_settings
+from abridgeai.core.db import get_sessionmaker
 from abridgeai.features.materials.models import (
     DocumentChunk,
     LearningMaterial,
     LearningMaterialVersion,
 )
+from abridgeai.features.materials.ingestion.progress import clear_progress, publish_progress
 from abridgeai.features.materials.queries.processing import get_latest_processing_job
 from abridgeai.infrastructure.s3 import download_to_temp
 
@@ -258,6 +260,13 @@ async def _run_chunking(
         if llm_gateway is None:
             return TokenAwareChunker(max_tokens=_DEFAULT_TEXT_TOKENS).chunk(extracted)
         cache = ChunkingCache(db)
+        # Pass the process sessionmaker so Stage-C enrichment runs each window
+        # CONCURRENTLY inside its own short-lived session (audit + cache writes
+        # are isolated per coroutine). This restores parallelism without the
+        # shared-session flush race that used to hang multi-window PDFs. The
+        # per-window sessions only touch ``ai_model_calls`` /
+        # ``chunking_enrichment_cache`` — no lock conflict with the main ``db``
+        # transaction (which holds the version/job rows).
         enriched = await SemanticChunker().chunk(
             extracted,
             llm_gateway=llm_gateway,  # type: ignore[arg-type]  # LLMGateway satisfies LLMGatewayProto structurally; mypy flags role: LLMRole vs role: object
@@ -266,6 +275,7 @@ async def _run_chunking(
             document_title=document_title,
             pipeline_run_id=pipeline_run_id,
             parent_job_id=parent_job_id,
+            session_factory=get_sessionmaker(),
         )
         return list(enriched)
     return TokenAwareChunker(max_tokens=_DEFAULT_TEXT_TOKENS).chunk(extracted)
@@ -304,6 +314,21 @@ async def _persist_chunks(
             f"chunk/embedding length mismatch: {len(raw_chunks)} chunks vs "
             f"{len(embeddings)} embeddings"
         )
+
+    # Idempotency guard: purge any pre-existing chunks for this version before
+    # inserting. Ingestion can legitimately re-run on the SAME version — ARQ
+    # auto-retries a failed job (max_tries=3), and a re-enqueue that doesn't go
+    # through ``reprocess_material`` (which purges) would otherwise trip the
+    # ``document_chunks_material_version_id_chunk_index_key`` UNIQUE constraint
+    # on ``(material_version_id, chunk_index)`` and fail the whole run with a
+    # duplicate-key error — leaving the document stuck in ``pending``. Deleting
+    # first makes persist a clean overwrite, so retries converge instead of
+    # dead-locking on their own partial output.
+    await db.execute(
+        text("DELETE FROM document_chunks WHERE material_version_id = :vid"),
+        {"vid": ctx.version.id},
+    )
+    await db.flush()
 
     rows: list[DocumentChunk] = []
     zero_vector_indices: list[int] = []
@@ -446,6 +471,9 @@ async def _run_stages(
         job.started_at = job.started_at or _utcnow()
         job.progress_percent = 10
         await db.flush()
+        await publish_progress(
+            ctx.version.id, status="extracting", percent=10, stage_label=stage_label
+        )
 
         extracted = await _run_extraction(db, ctx, source_path=source_path, llm_gateway=llm_gateway)
 
@@ -453,6 +481,9 @@ async def _run_stages(
         ctx.version.processing_status = "chunking"
         job.progress_percent = 30
         await db.flush()
+        await publish_progress(
+            ctx.version.id, status="chunking", percent=30, stage_label=stage_label
+        )
 
         raw_chunks = await _run_chunking(
             extracted,
@@ -467,6 +498,9 @@ async def _run_stages(
         ctx.version.processing_status = "embedding"
         job.progress_percent = 60
         await db.flush()
+        await publish_progress(
+            ctx.version.id, status="embedding", percent=60, stage_label=stage_label
+        )
 
         # Drop empty / whitespace-only chunks before embedding. The embedding
         # API rejects an empty input string with HTTP 400 and fails the WHOLE
@@ -492,6 +526,7 @@ async def _run_stages(
             job.progress_percent = 100
             job.finished_at = _utcnow()
             await db.flush()
+            await clear_progress(ctx.version.id)
             return
 
         # Anthropic Contextual Retrieval: prepend Stage C section_title +
@@ -511,6 +546,10 @@ async def _run_stages(
         stage_label = "persist"
         ctx.version.processing_status = "enriching"
         job.progress_percent = 80
+        await db.flush()
+        await publish_progress(
+            ctx.version.id, status="enriching", percent=80, stage_label=stage_label
+        )
         persisted = await _persist_chunks(db, ctx, raw_chunks, embeddings)
 
         kg_summary: dict[str, Any] = {
@@ -523,6 +562,26 @@ async def _run_stages(
             ctx.version.processing_status = "building_kg"
             job.progress_percent = 95
             await db.flush()
+            await publish_progress(
+                ctx.version.id, status="building_kg", percent=95, stage_label=stage_label
+            )
+
+            # KG build is one sequential LLM call per chunk — on a big doc it
+            # runs for minutes at a fixed 95%. Emit live sub-progress per
+            # chunk (mapped into the 95→99% band, with a "done/total" detail)
+            # so the teacher can see it's still working, not frozen.
+            version_id_for_progress = ctx.version.id
+
+            async def _kg_progress(done: int, total: int) -> None:
+                pct = 95 + int(4 * done / total) if total else 95
+                await publish_progress(
+                    version_id_for_progress,
+                    status="building_kg",
+                    percent=min(99, pct),
+                    stage_label="kg_build",
+                    detail=f"{done}/{total}",
+                )
+
             summary = await build_knowledge_graph_for_material_version(
                 ctx.version.id,
                 list(persisted),
@@ -532,6 +591,7 @@ async def _run_stages(
                 kg_client=kg_client,
                 llm_gateway=llm_gateway,
                 parent_job_id=job.id,
+                on_progress=_kg_progress,
             )
             kg_summary = {
                 "enabled": summary.enabled,
@@ -550,11 +610,17 @@ async def _run_stages(
         job.progress_percent = 100
         job.finished_at = _utcnow()
         await db.flush()
+        await clear_progress(ctx.version.id)
 
     except (KeyboardInterrupt, SystemExit):
         raise
     except Exception as exc:
         await _capture_failure(db, ctx=ctx, job=job, stage_label=stage_label, exc=exc)
+        # Surface the failure to the live-progress channel so the UI flips
+        # to "failed" immediately instead of waiting on the DB commit.
+        await publish_progress(
+            ctx.version.id, status="failed", percent=job.progress_percent, stage_label=stage_label
+        )
         raise
 
 

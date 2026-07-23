@@ -12,6 +12,7 @@ the hierarchy payload that anchors every chunk in Neo4j.
 from __future__ import annotations
 
 import logging
+from collections.abc import Awaitable, Callable
 from typing import Any, Literal, Protocol
 from uuid import UUID
 
@@ -273,12 +274,20 @@ async def build_knowledge_graph_for_material_version(
     kg_client: KnowledgeGraphClient,
     llm_gateway: LLMGateway,
     parent_job_id: UUID | None = None,
+    on_progress: Callable[[int, int], Awaitable[None]] | None = None,
 ) -> KGSummary:
     """Run KG extraction + upsert for every chunk of one material version.
 
     Each LLM call writes one ``ai_model_calls`` row tagged with
     ``stage_name='kg_build'`` and the supplied ``pipeline_run_id`` so the
     cost dashboard can roll up KG-build spend per pipeline run.
+
+    ``on_progress`` is an optional async callback invoked after each chunk
+    is processed with ``(done, total)``. The KG build is one sequential LLM
+    call per chunk, so on a large document it can run for minutes at a
+    single overall percent — the callback lets the caller surface live
+    sub-progress ("42/85 chunks") so the UI doesn't look frozen. Callback
+    errors are swallowed: progress reporting must never fail the build.
 
     Returns a summary; never raises ``KnowledgeGraphDisabledError`` — when
     the feature flag is off we short-circuit to ``KGSummary(enabled=False)``.
@@ -294,7 +303,8 @@ async def build_knowledge_graph_for_material_version(
     concept_names: set[str] = set()
     relationship_keys: set[tuple[str, str, str]] = set()
 
-    for chunk in chunks:
+    total = len(chunks)
+    for done, chunk in enumerate(chunks, start=1):
         if chunk.material_version_id != material_version_id:
             logger.warning(
                 "skipping chunk %s: material_version_id mismatch (expected %s, got %s)",
@@ -326,6 +336,12 @@ async def build_knowledge_graph_for_material_version(
         relationship_keys.update(
             (rel["source"].lower(), rel["target"].lower(), rel["relation"]) for rel in relationships
         )
+
+        if on_progress is not None:
+            try:
+                await on_progress(done, total)
+            except Exception:  # noqa: BLE001 -- progress must never fail the build
+                logger.debug("kg_build on_progress callback failed", exc_info=True)
 
     return KGSummary(
         concept_count=len(concept_names),

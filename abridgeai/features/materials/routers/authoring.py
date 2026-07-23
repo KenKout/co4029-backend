@@ -53,6 +53,7 @@ from abridgeai.features.materials.schemas import (
     MaterialUploadInit,
     MaterialVersionAuthoring,
     ProcessingProgress,
+    LessonKnowledgeGraph,
 )
 from abridgeai.features.materials.schemas.public import MaterialStreamUrl
 from abridgeai.features.materials.schemas.status import LessonProcessingSummary
@@ -546,9 +547,18 @@ async def link_existing_material(
     payload: MaterialLinkExisting,
     current_user: Annotated[CurrentUser, Depends(_REQUIRE_LESSON)],
     db: Annotated[AsyncSession, Depends(get_db)],
+    arq_pool: Annotated[object | None, Depends(get_arq_pool)],
 ) -> MaterialAuthoring:
-    """Link an already-uploaded storage object as a material (no upload, no AI processing)."""
-    result = await authoring_service.link_existing_material(db, lesson_id, payload, current_user)
+    """Link an already-uploaded storage object as a material.
+
+    When ``ai_processing_enabled`` is set, a ``ProcessingJob`` is created
+    and ``ingest_material_version_task`` is enqueued so the document gets a
+    viewable rendition. When disabled, the version is parked in a terminal
+    state (not a misleading ``pending``) and the teacher can enable AI later.
+    """
+    result = await authoring_service.link_existing_material(
+        db, lesson_id, payload, current_user, arq_pool=arq_pool
+    )
     await db.commit()
     return result
 
@@ -569,6 +579,26 @@ async def lesson_processing_summary(
     """
     del current_user
     return await authoring_service.get_lesson_processing_summary_view(db, lesson_id)
+
+
+@router.get(
+    "/lessons/{lesson_id}/knowledge-graph",
+    response_model=LessonKnowledgeGraph,
+)
+async def lesson_knowledge_graph(
+    lesson_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_LESSON)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    limit: Annotated[int, Query(ge=1, le=60)] = 24,
+) -> LessonKnowledgeGraph:
+    """Bounded concept graph for the lesson's AI-Hub knowledge-graph viz.
+
+    Returns the top-``limit`` most-mentioned concepts plus the edges among
+    them. Degrades gracefully (``enabled=False`` / empty lists) when the KG
+    feature is off or Neo4j is unreachable, so the SPA never errors.
+    """
+    del current_user
+    return await authoring_service.get_lesson_knowledge_graph(db, lesson_id, limit=limit)
 
 
 @router.get("/materials/{material_id}", response_model=MaterialAuthoring)
@@ -728,12 +758,43 @@ async def delete_material(
     current_user: Annotated[CurrentUser, Depends(_REQUIRE_MATERIAL)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> None:
-    """Soft-delete (plan §4946 + §4954) — does NOT touch S3."""
+    """Soft-delete (plan §4946 + §4954) — does NOT touch S3.
+
+    A running ingest holds a row lock on the material's version(s) for the
+    full duration of its (potentially multi-minute) transaction. Without a
+    bound, the soft-delete ``UPDATE`` would block on that lock and the
+    request would hang until the worker finished — the frontend delete
+    button would just spin. We set a short ``lock_timeout`` so the delete
+    fails fast with a clear 409 ("still processing, try again shortly")
+    instead of hanging indefinitely.
+    """
+    from sqlalchemy import text as _text  # noqa: PLC0415
+    from sqlalchemy.exc import DBAPIError, OperationalError  # noqa: PLC0415
+
+    # Scoped to this transaction only; reset implicitly on commit/rollback.
+    await db.execute(_text("SET LOCAL lock_timeout = '3s'"))
     try:
         await authoring_service.soft_delete_material(db, material_id, current_user)
+        await db.commit()
     except NotFoundError as exc:
         raise _not_found("material", material_id) from exc
-    await db.commit()
+    except (OperationalError, DBAPIError) as exc:
+        await db.rollback()
+        # Postgres raises lock_not_available (SQLSTATE 55P03) when the
+        # lock_timeout elapses. Surface it as a retryable conflict so the
+        # UI can tell the teacher the material is mid-processing.
+        if "55P03" in str(exc) or "lock timeout" in str(exc).lower():
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "error": "material_busy",
+                    "message": (
+                        "This material is still being processed and can't be "
+                        "deleted right now. Try again in a moment."
+                    ),
+                },
+            ) from exc
+        raise
 
 
 __all__ = [

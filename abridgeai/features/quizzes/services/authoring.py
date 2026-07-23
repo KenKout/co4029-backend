@@ -412,6 +412,7 @@ async def create_question(
         bloom_level=getattr(payload, "bloom_level", None),
         review_status=getattr(payload, "review_status", "pending"),
         expected_response_time_ms=getattr(payload, "expected_response_time_ms", None),
+        learning_outcome_id=getattr(payload, "learning_outcome_id", None),
         source_refs=getattr(payload, "source_refs", []) or [],
         original_generated_payload=None,
         reviewed_by=(
@@ -745,6 +746,7 @@ async def start_generation_run(
         "extra_instructions": payload.extra_instructions,
         "append": payload.append,
         "coverage_options": coverage_dump,
+        "target_outcome_ids": [str(x) for x in payload.target_outcome_ids],
     }
     run = GenerationRun(
         generation_type="quiz",

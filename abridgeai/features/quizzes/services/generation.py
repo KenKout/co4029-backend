@@ -101,6 +101,49 @@ def _config_uuid_list(config: dict[str, Any], key: str) -> list[UUID]:
     return out
 
 
+async def _resolve_outcome_texts(db: AsyncSession, config: dict[str, Any]) -> list[str]:
+    """Resolve ``target_outcome_ids`` → ordered outcome text strings (§LO-3).
+
+    Raw SQL against ``course_learning_outcomes`` (quizzes must not import the
+    courses ORM — T0.4 feature-independence). Ordered by ``position`` so the
+    injected ``L.O.x`` labels line up with the teacher-facing codes.
+    Soft-deleted outcomes are excluded. Empty list when none targeted.
+    """
+    outcome_ids = _config_uuid_list(config, "target_outcome_ids")
+    if not outcome_ids:
+        return []
+    from sqlalchemy import text as _text  # noqa: PLC0415
+
+    rows = (
+        await db.execute(
+            _text(
+                "SELECT position, outcome_text FROM course_learning_outcomes "
+                "WHERE id = ANY(:ids) AND deleted_at IS NULL ORDER BY position"
+            ),
+            {"ids": outcome_ids},
+        )
+    ).all()
+    return [f"L.O.{row[0]}: {row[1]}" for row in rows]
+
+
+def _inject_outcome_guidance(config: dict[str, Any], outcome_texts: list[str]) -> dict[str, Any]:
+    """Merge learning-outcome guidance into ``config['extra_instructions']``.
+
+    Reuses the existing prompt slot (no template/signature change) so the
+    generation LLM steers questions toward the targeted outcomes. Returns a
+    new config dict; the original is left untouched.
+    """
+    if not outcome_texts:
+        return config
+    block = (
+        "Target these course learning outcomes — every question must assess "
+        "one of them:\n" + "\n".join(f"- {t}" for t in outcome_texts)
+    )
+    existing = (config.get("extra_instructions") or "").strip()
+    merged = f"{existing}\n\n{block}" if existing else block
+    return dict(config) | {"extra_instructions": merged}
+
+
 async def _precompute_coverage_inputs(
     db: AsyncSession, config: dict[str, Any]
 ) -> tuple[list[Any], dict[str, int]]:
@@ -200,6 +243,12 @@ async def run_quiz_generation(db: AsyncSession, generation_run_id: UUID) -> None
                 config=config,
             )
         else:
+            # §LO-3: inject targeted learning-outcome text into the prompt so
+            # the generation LLM steers questions toward them. The round-robin
+            # binding at persistence guarantees each question is bound; this
+            # just improves relevance. No-op when no outcomes were targeted.
+            outcome_texts = await _resolve_outcome_texts(db, config)
+            config = _inject_outcome_guidance(config, outcome_texts)
             generation_mode = str(config.get("generation_mode") or "topic").strip().lower()
             if generation_mode == "coverage":
                 outlines, budget = await _precompute_coverage_inputs(db, config)

@@ -254,6 +254,17 @@ class QuizQuestion(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftDele
         nullable=False,
         index=True,
     )
+    # Course learning outcome this question assesses (migration 0034).
+    # Nullable = "no outcome"; ON DELETE SET NULL so deleting an outcome
+    # reverts its questions to unassigned rather than cascade-deleting them.
+    # The teacher-facing ``(L.O.x)`` prefix is derived from the outcome's
+    # live position at display time — nothing about the code is stored here.
+    learning_outcome_id: Mapped[uuid.UUID | None] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("course_learning_outcomes.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     position: Mapped[int] = mapped_column(Integer, nullable=False)
     question_type: Mapped[str] = mapped_column(String(30), nullable=False)
     prompt_text: Mapped[str] = mapped_column(Text, nullable=False)

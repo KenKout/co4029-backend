@@ -73,6 +73,7 @@ class SemanticChunker:
         pipeline_run_id: UUID | None = None,
         parent_job_id: UUID | None = None,
         section_context: str = "",
+        session_factory: Any = None,  # noqa: ANN401 -- optional sessionmaker for parallel enrichment
         **opts: Any,  # noqa: ANN401 -- forwarded chunker kwargs
     ) -> list[EnrichedChunk]:
         rule_chunks = window_chunks(
@@ -102,6 +103,7 @@ class SemanticChunker:
                 pipeline_run_id=pipeline_run_id,
                 parent_job_id=parent_job_id,
                 parallelism=int(opts.get("parallelism", self._parallelism)),
+                session_factory=session_factory,
             )
 
         return [promote_rule_based(w) for w in windows]

@@ -43,7 +43,7 @@ verifies the leak guard.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -91,6 +91,32 @@ class CourseLearningOutcomeAuthoring(CourseLearningOutcomePublic):
     updated_at: datetime
     deleted_at: datetime | None = None
     deleted_by: UUID | None = None
+
+
+class CourseLearningOutcomeCreate(BaseModel):
+    """Body for ``POST /teacher/courses/{course_id}/outcomes`` (§LO-1).
+
+    Only ``outcome_text`` is client-supplied. ``position`` is assigned
+    server-side (append at the end); the ``(L.O.x)`` code is derived from
+    that position at display time and is never stored.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    outcome_text: Annotated[str, Field(min_length=1, max_length=1000)]
+
+
+class CourseLearningOutcomeUpdate(BaseModel):
+    """Body for ``PATCH /teacher/courses/{course_id}/outcomes/{outcome_id}``.
+
+    Only the text is editable — position is managed by the server
+    (append on create, contiguous re-index on delete), and the code is
+    display-only, so neither is accepted from the client.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    outcome_text: Annotated[str | None, Field(min_length=1, max_length=1000)] = None
 
 
 class CourseAuthoring(CoursePublic):

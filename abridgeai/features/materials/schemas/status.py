@@ -68,7 +68,48 @@ class LessonProcessingSummary(BaseModel):
     failed_versions: int
 
 
+class KGNode(BaseModel):
+    """A single concept node in the lesson knowledge-graph preview.
+
+    ``id`` is the normalized concept name (stable key for edges); ``label``
+    is the human display name. ``weight`` is the mention count across the
+    lesson's chunks — the UI sizes the node by it.
+    """
+
+    id: str
+    label: str
+    type: str = "Concept"
+    definition: str | None = None
+    weight: int = 1
+
+
+class KGEdge(BaseModel):
+    """A directed relationship between two concept nodes in the preview."""
+
+    source: str
+    target: str
+    relation: Literal["PREREQUISITE_OF", "RELATED_TO"] = "RELATED_TO"
+
+
+class LessonKnowledgeGraph(BaseModel):
+    """Bounded concept graph for one lesson, for the teacher AI-Hub viz.
+
+    ``enabled`` is False when the KG feature is off (UI shows a disabled
+    hint rather than an empty graph). ``total_concepts`` is the full
+    lesson concept count so the UI can say "showing top 24 of 830".
+    """
+
+    lesson_id: UUID
+    enabled: bool
+    nodes: list[KGNode] = []
+    edges: list[KGEdge] = []
+    total_concepts: int = 0
+
+
 __all__ = [
+    "KGEdge",
+    "KGNode",
+    "LessonKnowledgeGraph",
     "LessonProcessingSummary",
     "ProcessingProgress",
     "ProcessingStatusLiteral",

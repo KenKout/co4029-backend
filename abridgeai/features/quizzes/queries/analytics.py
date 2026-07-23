@@ -239,6 +239,49 @@ async def list_attempts_for_course(db: AsyncSession, course_id: UUID) -> list[An
     return list((await db.execute(stmt)).all())
 
 
+async def get_course_attempt_for_review(
+    db: AsyncSession, course_id: UUID, attempt_id: UUID
+) -> Any | None:  # noqa: ANN401 -- SQLAlchemy Row
+    """Load one attempt scoped to a course, for teacher review.
+
+    Returns a ``Row`` with ``.QuizAttempt`` (answers eagerly loaded) and
+    ``.title`` (quiz title), or ``None`` when the attempt doesn't exist or
+    belongs to a quiz outside ``course_id`` (router → 404). Unlike the
+    student-facing ``get_attempt_for_review`` this does NOT filter on
+    ``student_id`` (teachers review any student's attempt) nor on status
+    (teachers may inspect an in-flight attempt), but it DOES enforce the
+    course boundary so a teacher can't read attempts from another course.
+    """
+    from sqlalchemy.orm import selectinload  # noqa: PLC0415
+
+    stmt = (
+        select(QuizAttempt, Quiz.title)
+        .join(Quiz, Quiz.id == QuizAttempt.quiz_id)
+        .where(QuizAttempt.id == attempt_id, Quiz.course_id == course_id)
+        .options(selectinload(QuizAttempt.answers))
+    )
+    return (await db.execute(stmt)).first()
+
+
+async def list_integrity_events_for_attempt(db: AsyncSession, attempt_id: UUID) -> list[Any]:
+    """Return proctoring events for one quiz attempt, oldest first.
+
+    Projection source for the teacher attempt-detail integrity timeline.
+    Empty list when none were recorded (the common case for an honest take).
+    """
+    from abridgeai.features.interviews.models import AssessmentIntegrityEvent  # noqa: PLC0415
+
+    stmt = (
+        select(AssessmentIntegrityEvent)
+        .where(
+            AssessmentIntegrityEvent.assessment_kind == "quiz",
+            AssessmentIntegrityEvent.quiz_attempt_id == attempt_id,
+        )
+        .order_by(AssessmentIntegrityEvent.created_at.asc())
+    )
+    return list((await db.execute(stmt)).scalars().all())
+
+
 async def list_attempts_for_student_in_course(
     db: AsyncSession, course_id: UUID, student_id: UUID
 ) -> list[Any]:

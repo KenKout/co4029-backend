@@ -27,6 +27,7 @@ from abridgeai.features.interviews.workers import JOBS as INTERVIEW_JOBS
 from abridgeai.features.interviews.workers.lifecycle import sweep_interview_sessions_task
 from abridgeai.features.materials.workers import JOBS as MATERIAL_JOBS
 from abridgeai.features.materials.workers.cron import cleanup_orphaned_uploads_task
+from abridgeai.features.materials.workers.reaper import reconcile_orphaned_ingests_task
 from abridgeai.features.notifications.workers import JOBS as NOTIFICATION_JOBS
 from abridgeai.features.quizzes.workers import JOBS as QUIZ_JOBS
 from abridgeai.features.spaced_repetition.workers import JOBS as SR_JOBS
@@ -57,11 +58,16 @@ class WorkerSettings:
         + list(SR_JOBS)
     )
     max_jobs = 10
-    job_timeout = 600
+    job_timeout = 1200 # Nam 23/07/2026: Increase timeout window for long pdf context
     keep_result_seconds = 3600
     max_tries = 3
     cron_jobs: list[CronJob] = [
         cron(cleanup_orphaned_uploads_task, hour={3}, minute=0),
+        # Reconcile ingest ProcessingJob rows stuck pending/running with no
+        # live ARQ job (dropped across a worker restart / Redis blip). Runs
+        # every 3 minutes so a stranded document auto-recovers within one
+        # interval instead of spinning forever with no signal.
+        cron(reconcile_orphaned_ingests_task, minute=set(range(0, 60, 3))),
         cron(scan_due_cards_task, minute=0),
         # Finalise stale in-progress voice interview sessions every 5 minutes.
         cron(sweep_interview_sessions_task, minute=set(range(0, 60, 5))),

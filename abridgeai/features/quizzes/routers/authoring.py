@@ -53,7 +53,11 @@ from abridgeai.features.quizzes.schemas import (
     QuestionBankEntry,
     QuestionBankImportRequest,
     QuestionBankPage,
+    QuizAttemptIntegrityEvent,
+    QuizAttemptReviewOption,
+    QuizAttemptReviewQuestion,
     QuizAttemptTeacherRead,
+    QuizAttemptTeacherReview,
     QuizAuthoring,
     QuizForAuthoringPublic,
     QuizGenerationProgress,
@@ -202,6 +206,9 @@ async def get_quiz_authoring(
             options_by_qid.setdefault(option.question_id, []).append(option)
         for question in questions:
             question.options = options_by_qid.get(question.id, [])  # type: ignore[attr-defined]
+        outcome_ids = {q.learning_outcome_id for q in questions if q.learning_outcome_id}
+        positions = await _resolve_outcome_positions(db, outcome_ids)
+        _fill_outcome_positions(questions, positions)
 
     return QuizForAuthoringPublic(
         quiz=QuizAuthoring.model_validate(quiz),
@@ -300,6 +307,97 @@ async def list_student_quiz_attempts(
     names = await _resolve_student_names(db, {student_id})
     student_name = names.get(student_id)
     return [_attempt_teacher_view(row.QuizAttempt, row.title, student_name) for row in rows]
+
+
+@router.get(
+    "/courses/{course_id}/quiz-attempts/{attempt_id}",
+    response_model=QuizAttemptTeacherReview,
+)
+async def get_course_quiz_attempt_detail(
+    course_id: UUID,
+    attempt_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_COURSE_UPDATE)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> QuizAttemptTeacherReview:
+    """Teacher-facing detail for a single attempt.
+
+    Powers the quiz-attempt detail page. Combines the attempt summary
+    (student name + quiz title), the full per-question review (prompt,
+    options, the student's answer, correctness), and any integrity events.
+
+    404s when the attempt doesn't exist or belongs to a quiz outside this
+    course (enforced by the course-scoped query + the ``course.update``
+    permission guard).
+    """
+    del current_user  # permission enforced by Depends
+    from decimal import Decimal  # noqa: PLC0415
+
+    from abridgeai.features.quizzes.queries import analytics as _analytics_q  # noqa: PLC0415
+    from abridgeai.features.quizzes.queries import published as _published_q  # noqa: PLC0415
+
+    row = await _analytics_q.get_course_attempt_for_review(db, course_id, attempt_id)
+    if row is None:
+        raise _not_found("quiz_attempt", attempt_id)
+
+    attempt = row.QuizAttempt
+    names = await _resolve_student_names(db, {attempt.student_id})
+
+    answers_by_question = {a.question_id: a for a in attempt.answers}
+    questions_with_options = await _published_q.list_quiz_questions_with_options(
+        db, attempt.quiz_id
+    )
+    review_questions = [
+        QuizAttemptReviewQuestion(
+            question_id=question.id,
+            position=question.position,
+            question_type=question.question_type,
+            prompt_text=question.prompt_text,
+            explanation=question.explanation,
+            hint_text=question.hint_text,
+            options=[QuizAttemptReviewOption.model_validate(opt) for opt in options],
+            selected_option_id=(
+                answers_by_question[question.id].selected_option_id
+                if question.id in answers_by_question
+                else None
+            ),
+            answer_text=(
+                answers_by_question[question.id].answer_text
+                if question.id in answers_by_question
+                else None
+            ),
+            is_correct=(
+                answers_by_question[question.id].is_correct
+                if question.id in answers_by_question
+                else False
+            ),
+            points_awarded=(
+                answers_by_question[question.id].points_awarded
+                if question.id in answers_by_question
+                else Decimal("0")
+            ),
+            hint_used=(
+                answers_by_question[question.id].hint_used
+                if question.id in answers_by_question
+                else False
+            ),
+            t_actual_ms=(
+                answers_by_question[question.id].t_actual_ms
+                if question.id in answers_by_question
+                else None
+            ),
+        )
+        for question, options in questions_with_options
+    ]
+
+    integrity_rows = await _analytics_q.list_integrity_events_for_attempt(db, attempt_id)
+
+    return QuizAttemptTeacherReview(
+        attempt=_attempt_teacher_view(attempt, row.title, names.get(attempt.student_id)),
+        questions=review_questions,
+        integrity_events=[
+            QuizAttemptIntegrityEvent.model_validate(ev) for ev in integrity_rows
+        ],
+    )
 
 
 @router.get(
@@ -618,6 +716,9 @@ async def create_question(
         raise _bad_request(str(exc)) from exc
     await _attach_question_options(db, question)
     await db.commit()
+    if question.learning_outcome_id:
+        positions = await _resolve_outcome_positions(db, {question.learning_outcome_id})
+        _fill_outcome_positions([question], positions)
     return QuizQuestionAuthoring.model_validate(question)
 
 
@@ -645,6 +746,9 @@ async def update_question(
         raise _bad_request(str(exc)) from exc
     await _attach_question_options(db, question)
     await db.commit()
+    if question.learning_outcome_id:
+        positions = await _resolve_outcome_positions(db, {question.learning_outcome_id})
+        _fill_outcome_positions([question], positions)
     return QuizQuestionAuthoring.model_validate(question)
 
 
@@ -861,6 +965,50 @@ async def _attach_question_options(db: AsyncSession, question: QuizQuestion) -> 
         .all()
     )
     question.options = options  # type: ignore[attr-defined]
+
+
+async def _resolve_outcome_positions(
+    db: AsyncSession, outcome_ids: set[UUID]
+) -> dict[UUID, int]:
+    """Batch-resolve ``{outcome_id: live position}`` for the ``(L.O.x)`` code.
+
+    Read via raw SQL against ``course_learning_outcomes`` (rather than an ORM
+    relationship) so the quizzes feature does not import the courses ORM —
+    honours the T0.4 feature-independence contract, same pattern as
+    ``_resolve_student_names``. Soft-deleted outcomes are excluded, so a
+    question pointing at a deleted outcome resolves to no position (→ the
+    projection renders no prefix, i.e. "no outcome").
+    """
+    if not outcome_ids:
+        return {}
+    from sqlalchemy import text as _text  # noqa: PLC0415
+
+    rows = (
+        await db.execute(
+            _text(
+                "SELECT id, position FROM course_learning_outcomes "
+                "WHERE id = ANY(:ids) AND deleted_at IS NULL"
+            ),
+            {"ids": list(outcome_ids)},
+        )
+    ).all()
+    return {row[0]: row[1] for row in rows}
+
+
+def _fill_outcome_positions(
+    questions: list[QuizQuestion], positions: dict[UUID, int]
+) -> None:
+    """Stamp ``outcome_position`` on each question from the resolved map.
+
+    ``outcome_position`` is a projection-only field (not an ORM column), so
+    setting it here lets ``QuizQuestionAuthoring.model_validate`` pick it up
+    via ``from_attributes``. Questions with no / deleted outcome stay ``None``.
+    """
+    for question in questions:
+        lo_id = question.learning_outcome_id
+        question.outcome_position = (  # type: ignore[attr-defined]
+            positions.get(lo_id) if lo_id is not None else None
+        )
 
 
 __all__ = [

@@ -69,9 +69,7 @@ GenerationMode = Literal["topic", "coverage"]
   single synthetic section until the outline porter (Phase 3) lands.
 """
 
-QuestionType = Literal[
-    "multiple_choice", "true_false", "short_answer", "fill_blank", "code"
-]
+QuestionType = Literal["multiple_choice", "true_false", "short_answer", "fill_blank", "code"]
 """Mirrors the ``quiz_questions.question_type`` CHECK constraint.
 
 Legacy used the ``"mcq"`` alias; the new DB standardised on
@@ -84,9 +82,7 @@ _DEFAULT_QUESTION_TYPES: tuple[QuestionType, ...] = ("multiple_choice",)
 loop that hits inline lambdas with ``Literal`` element types.
 """
 
-GenerationRunStatus = Literal[
-    "pending", "running", "completed", "failed", "cancelled"
-]
+GenerationRunStatus = Literal["pending", "running", "completed", "failed", "cancelled"]
 """Mirrors ``generation_runs.status`` CHECK constraint."""
 
 
@@ -143,9 +139,7 @@ class CoverageOptions(BaseModel):
     @model_validator(mode="after")
     def _check_min_le_max(self) -> CoverageOptions:
         if self.min_per_section > self.max_per_section:
-            raise ValueError(
-                "min_per_section cannot exceed max_per_section"
-            )
+            raise ValueError("min_per_section cannot exceed max_per_section")
         return self
 
 
@@ -204,6 +198,15 @@ class QuizGenerationRequest(BaseModel):
     # --- Source material selection ---
     source_lesson_ids: list[UUID] = Field(default_factory=list)
 
+    # --- Learning-outcome targeting (§LO-3) ---
+    target_outcome_ids: list[UUID] = Field(default_factory=list)
+    """Course learning outcomes to target. When non-empty, their text is
+    injected into the generation prompt AND every generated question is
+    bound to one of them (the model tags each question; a round-robin
+    fallback assigns any the model leaves untagged). When empty, questions
+    are generated without outcome linkage (``learning_outcome_id`` stays
+    NULL) and the teacher assigns them manually afterwards."""
+
     config_json: dict[str, Any] = Field(default_factory=dict)
     """Escape hatch for forward-compatible knobs. Merged into
     ``GenerationRun.config_json`` AFTER the structured fields, so
@@ -211,12 +214,8 @@ class QuizGenerationRequest(BaseModel):
 
     # --- FR-5 personalisation ---
     generation_mode: GenerationMode = "topic"
-    focus_topics: Annotated[list[str], Field(max_length=10)] = Field(
-        default_factory=list
-    )
-    avoid_topics: Annotated[list[str], Field(max_length=10)] = Field(
-        default_factory=list
-    )
+    focus_topics: Annotated[list[str], Field(max_length=10)] = Field(default_factory=list)
+    avoid_topics: Annotated[list[str], Field(max_length=10)] = Field(default_factory=list)
     extra_instructions: Annotated[str | None, Field(max_length=1000)] = None
     append: bool = False
     """When ``True`` the run appends to existing questions instead of
@@ -260,8 +259,7 @@ class QuizGenerationRequest(BaseModel):
             raise ValueError("bloom_distribution counts must be >= 0")
         if total > self.question_count:
             raise ValueError(
-                f"bloom_distribution total ({total}) exceeds "
-                f"question_count ({self.question_count})"
+                f"bloom_distribution total ({total}) exceeds question_count ({self.question_count})"
             )
         return self
 

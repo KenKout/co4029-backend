@@ -89,6 +89,7 @@ class AtRiskStudentRead(BaseModel):
 
 class StudentSrDetailReviewRead(BaseModel):
     question_id: UUID
+    prompt_text: str = ""
     created_at: datetime
     q_derived: int
     ef_after: float
