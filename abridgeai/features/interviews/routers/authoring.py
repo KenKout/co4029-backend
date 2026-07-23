@@ -66,6 +66,7 @@ from abridgeai.features.interviews.schemas import (
     InterviewQuestionAuthoring,
     InterviewQuestionBankItemCreate,
     InterviewQuestionBankItemRead,
+    InterviewQuestionBankItemUpdate,
     InterviewQuestionCreate,
     InterviewSessionPublic,
     InterviewSessionSummary,
@@ -148,6 +149,30 @@ async def add_interview_question_bank_item(
         item = await authoring_service.add_to_question_bank(db, course_id, payload, current_user)
     except NotFoundError as exc:
         raise _not_found("course", course_id) from exc
+    except ConflictError as exc:
+        raise _conflict(str(exc)) from exc
+    await db.commit()
+    return InterviewQuestionBankItemRead.model_validate(item)
+
+
+@router.patch(
+    "/courses/{course_id}/interview-question-bank/{item_id}",
+    response_model=InterviewQuestionBankItemRead,
+)
+async def update_interview_question_bank_item(
+    course_id: UUID,
+    item_id: UUID,
+    payload: InterviewQuestionBankItemUpdate,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_COURSE_UPDATE)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> InterviewQuestionBankItemRead:
+    """Edit a bank item (management page). Only supplied fields change."""
+    try:
+        item = await authoring_service.update_question_bank_item(
+            db, course_id, item_id, payload, current_user
+        )
+    except NotFoundError as exc:
+        raise _not_found("interview_question_bank_item", item_id) from exc
     except ConflictError as exc:
         raise _conflict(str(exc)) from exc
     await db.commit()

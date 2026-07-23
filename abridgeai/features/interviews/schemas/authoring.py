@@ -501,6 +501,18 @@ class InterviewQuestionBankItemRead(BaseModel):
     updated_at: datetime
 
 
+class InterviewQuestionBankItemUpdate(BaseModel):
+    """Partial edit of a bank item (management page). All fields optional."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    prompt_text: str | None = None
+    question_type: QuestionTypeLiteral | None = None
+    difficulty: DifficultyLiteral | None = None
+    model_answer: str | None = None
+    tags: list[str] | None = None
+
+
 # Suppress unused-import warning — Decimal is exported in case downstream
 # generation-config payloads carry numeric thresholds. Keep available.
 _DECIMAL_AVAILABLE = Decimal
@@ -524,6 +536,7 @@ __all__ = [
     "InterviewQuestionAuthoring",
     "InterviewQuestionBankItemCreate",
     "InterviewQuestionBankItemRead",
+    "InterviewQuestionBankItemUpdate",
     "InterviewQuestionCreate",
     "InterviewSessionSummary",
     "InterviewSessionTeacherRead",

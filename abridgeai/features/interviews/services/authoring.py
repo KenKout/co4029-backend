@@ -564,6 +564,38 @@ async def add_to_question_bank(
     return item
 
 
+async def update_question_bank_item(
+    db: AsyncSession,
+    course_id: UUID,
+    item_id: UUID,
+    payload: Any,  # noqa: ANN401  -- InterviewQuestionBankItemUpdate at edge
+    actor: CurrentUser,
+) -> InterviewQuestionBankItem:
+    """Edit a bank item (management page). Only supplied fields change.
+
+    ``tags`` maps to the ``tags_json`` column; everything else maps 1:1.
+    """
+    from sqlalchemy import select  # noqa: PLC0415
+
+    stmt = select(InterviewQuestionBankItem).where(
+        InterviewQuestionBankItem.id == item_id,
+        InterviewQuestionBankItem.course_id == course_id,
+        InterviewQuestionBankItem.deleted_at.is_(None),
+    )
+    item = (await db.execute(stmt)).scalar_one_or_none()
+    if item is None:
+        raise NotFoundError(f"Question bank item {item_id} not found")
+    data = payload.model_dump(exclude_unset=True)
+    if "tags" in data:
+        item.tags_json = data.pop("tags")
+    for key, value in data.items():
+        setattr(item, key, value)
+    item.updated_by = actor.user_id
+    await flush_or_conflict(db)
+    await db.refresh(item)
+    return item
+
+
 async def delete_question_bank_item(
     db: AsyncSession,
     course_id: UUID,
@@ -597,6 +629,7 @@ __all__ = [
     "get_generation_run",
     "list_question_bank",
     "publish_interview_config",
+    "update_question_bank_item",
     "regenerate_question",
     "start_generation_run",
     "unarchive_interview_config",
