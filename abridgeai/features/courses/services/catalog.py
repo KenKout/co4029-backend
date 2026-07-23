@@ -22,6 +22,7 @@ from abridgeai.features.courses.queries import (
     get_published_course_by_id,
     get_published_course_by_slug,
     get_published_course_content,
+    get_published_course_thumbnail_storage_target,
     get_published_lesson_by_id,
     get_published_module_by_id,
     get_user_primary_organization_id,
@@ -106,8 +107,13 @@ async def list_published_courses_for_user(
     page = await list_published_courses(
         db, organization_id=organization_id, limit=limit, cursor=cursor
     )
+    items = []
+    for course in page.items:
+        dto = CoursePublic.model_validate(course)
+        dto.thumbnail_url = await _mint_course_thumbnail_url(db, dto.id)
+        items.append(dto)
     return CursorPage(
-        items=[CoursePublic.model_validate(course) for course in page.items],
+        items=items,
         next_cursor=page.next_cursor,
     )
 
@@ -121,8 +127,13 @@ async def list_enrolled_courses_for_user(
 ) -> CursorPage[CoursePublic]:
     """Active enrollments → published courses for the requesting student."""
     page = await list_enrolled_courses(db, user_id, limit=limit, cursor=cursor)
+    items = []
+    for course in page.items:
+        dto = CoursePublic.model_validate(course)
+        dto.thumbnail_url = await _mint_course_thumbnail_url(db, dto.id)
+        items.append(dto)
     return CursorPage(
-        items=[CoursePublic.model_validate(course) for course in page.items],
+        items=items,
         next_cursor=page.next_cursor,
     )
 
@@ -157,7 +168,28 @@ async def _course_with_instructor(db: AsyncSession, course: object) -> CoursePub
         public = public.model_copy(
             update={"instructor": InstructorRead.model_validate(instructor_data)}
         )
+    public.thumbnail_url = await _mint_course_thumbnail_url(db, public.id)
     return public
+
+
+async def _mint_course_thumbnail_url(db: AsyncSession, course_id: UUID) -> str | None:
+    """Mint a short-TTL presigned GET URL for a published course's thumbnail.
+
+    Returns ``None`` when the course has no thumbnail set, or a storage blip
+    occurs (a blip must never break a course read — the SPA falls back to the
+    gradient banner).
+    """
+    target = await get_published_course_thumbnail_storage_target(db, course_id)
+    if target is None:
+        return None
+    bucket, object_key = target
+    try:
+        url, _ = await create_stream_url(
+            _StorageTarget(bucket=bucket, object_key=object_key)
+        )
+        return url
+    except Exception:  # noqa: BLE001 — a storage blip must not break the course read
+        return None
 
 
 async def get_published_course_detail(

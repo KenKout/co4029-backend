@@ -522,6 +522,30 @@ async def get_visible_resource_storage_target(
     return row.bucket, row.object_key
 
 
+async def get_published_course_thumbnail_storage_target(
+    db: AsyncSession, course_id: UUID
+) -> tuple[str, str] | None:
+    """Bucket + object_key for a published course's thumbnail image, or ``None``.
+
+    Joins ``courses.thumbnail_object_id -> storage_objects.id`` gated on the
+    published-course clause. Returns ``None`` when the course has no thumbnail
+    or is unpublished. The service maps ``None`` to no thumbnail_url (the SPA
+    falls back to the gradient banner).
+    """
+    stmt = (
+        select(StorageObject.bucket, StorageObject.object_key)
+        .join(Course, Course.thumbnail_object_id == StorageObject.id)
+        .where(
+            Course.id == course_id,
+            published_course_clause(),
+        )
+    )
+    row = (await db.execute(stmt)).one_or_none()
+    if row is None:
+        return None
+    return row.bucket, row.object_key
+
+
 __all__ = [
     "get_published_course_by_id",
     "get_published_course_by_slug",

@@ -104,6 +104,11 @@ class CoursePublic(_ORMModel):
     organization_id: UUID
     instructor: InstructorRead | None = None
     status: Literal["published"]
+    # Short-TTL presigned GET URL for the course thumbnail, minted by the
+    # service layer from the thumbnail's storage object. None when no thumbnail
+    # is set (the SPA falls back to the gradient banner). Not persisted — a
+    # projection.
+    thumbnail_url: str | None = None
     tags: list[TagPublic] = []
     outcomes: list[CourseLearningOutcomePublic] = []
 
