@@ -264,6 +264,7 @@ class InterviewQuestionAuthoring(InterviewQuestionPublic):
     review_status: ReviewStatusLiteral
     ai_generated: bool
     source_refs_json: list[Any] = []
+    source_module_ids: list[UUID] = []
     reviewed_by: UUID | None = None
     reviewed_at: datetime | None = None
     created_by: UUID | None = None

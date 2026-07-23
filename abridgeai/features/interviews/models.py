@@ -356,6 +356,13 @@ class InterviewQuestion(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, Sof
     source_refs_json: Mapped[Any] = mapped_column(
         JSONB, nullable=False, server_default=text("'[]'::jsonb")
     )
+    source_module_ids: Mapped[Any] = mapped_column(
+        JSONB, nullable=False, server_default=text("'[]'::jsonb")
+    )
+    """Module attribution for the Question Bank grouping. Populated from the
+    generation run's ``source_module_ids`` (falling back to the config's own
+    module). A question drawing from 2+ modules lands in the multi-module
+    section of the bank."""
     reviewed_by: Mapped[uuid.UUID | None] = mapped_column(
         PGUUID(as_uuid=True),
         ForeignKey("users.id", ondelete="SET NULL"),
