@@ -155,6 +155,7 @@ class InterviewConfigAuthoring(InterviewConfigPublic):
     generation_run_id: UUID | None = None
     draft_question_count: int | None = None
     total_importance_weight: int | None = None
+    published_at: datetime | None = None
     created_by: UUID | None = None
     updated_by: UUID | None = None
     created_at: datetime
