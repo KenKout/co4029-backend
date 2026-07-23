@@ -515,8 +515,16 @@ async def list_authoring_courses_for_user(
         merged.append(course)
     merged.sort(key=lambda c: c.created_at, reverse=True)
     result = [CourseAuthoring.model_validate(c) for c in merged]
+    # Batch-count students + modules once for the whole page (no N+1), then
+    # attach to each DTO for the "My courses" grid's course-health line.
+    counts = await authoring_queries.count_students_and_modules_for_courses(
+        db, [c.id for c in merged]
+    )
     for dto, orm in zip(result, merged, strict=True):
         dto.thumbnail_url = await _mint_thumbnail_url(db, orm.id)
+        students, modules = counts.get(orm.id, (0, 0))
+        dto.student_count = students
+        dto.module_count = modules
     return result
 
 

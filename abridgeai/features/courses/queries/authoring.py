@@ -37,6 +37,45 @@ def _archived_filter(
     return status_col != "archived"
 
 
+async def count_students_and_modules_for_courses(
+    db: AsyncSession, course_ids: list[UUID]
+) -> dict[UUID, tuple[int, int]]:
+    """Batch-count active students + published/draft modules per course.
+
+    Returns ``{course_id: (student_count, module_count)}`` for every id in
+    ``course_ids``. Two grouped aggregate queries (one per table) keep this
+    O(1) round-trips regardless of course count — no N+1. Courses with no
+    enrollments / modules are backfilled to ``(0, 0)`` by the caller.
+
+    * student_count = enrollments with ``status='active'`` (matches the
+      roster's "active students" definition; dropped/completed excluded).
+    * module_count = modules not soft-deleted (any status).
+    """
+    result: dict[UUID, tuple[int, int]] = {cid: (0, 0) for cid in course_ids}
+    if not course_ids:
+        return result
+
+    student_stmt = (
+        select(Enrollment.course_id, func.count().label("n"))
+        .where(Enrollment.course_id.in_(course_ids), Enrollment.status == "active")
+        .group_by(Enrollment.course_id)
+    )
+    for course_id, n in (await db.execute(student_stmt)).all():
+        _students, modules = result[course_id]
+        result[course_id] = (int(n), modules)
+
+    module_stmt = (
+        select(Module.course_id, func.count().label("n"))
+        .where(Module.course_id.in_(course_ids), Module.deleted_at.is_(None))
+        .group_by(Module.course_id)
+    )
+    for course_id, n in (await db.execute(module_stmt)).all():
+        students, _modules = result[course_id]
+        result[course_id] = (students, int(n))
+
+    return result
+
+
 async def list_courses_for_owner(
     db: AsyncSession,
     user_id: UUID,

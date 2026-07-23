@@ -142,6 +142,12 @@ class CourseAuthoring(CoursePublic):
     estimated_minutes: int | None = None
     expected_completion_days: int | None = None
     enrollment_cap: int | None = None
+    # Course-health projections computed by the service layer for the "My
+    # courses" grid — active enrollments and non-deleted module count. Not
+    # persisted; default 0 so single-course reads that don't populate them
+    # still validate.
+    student_count: int = 0
+    module_count: int = 0
     instructor: InstructorAuthoring | None = None
     tags: list[TagAuthoring] = []  # type: ignore[assignment]
     outcomes: list[CourseLearningOutcomeAuthoring] = []  # type: ignore[assignment]
