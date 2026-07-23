@@ -53,6 +53,7 @@ from abridgeai.features.interviews.routers._deps import (
 from abridgeai.features.interviews.schemas import (
     AdaptiveReadinessRead,
     GapReportAuthoringRead,
+    GapReportNotesUpdate,
     GenerationRunStatusLiteral,
     InterviewConfigAuthoring,
     InterviewConfigCreate,
@@ -848,6 +849,40 @@ async def get_session_gap_report_authoring(
     # in ``report_json["rubric_aggregated"]`` and are surfaced here (never on
     # the student-facing GapReportRead).
     per_criterion = report_json.get("rubric_aggregated") if isinstance(report_json, dict) else None
+
+    # Resolve human-readable context so the teacher view isn't a wall of UUIDs:
+    # the student's display name (falling back to email) and the interview
+    # config title. Both are read-only projections.
+    from sqlalchemy import text as _text  # noqa: PLC0415
+
+    from abridgeai.features.interviews.models import (  # noqa: PLC0415
+        InterviewConfig,
+        InterviewSession,
+    )
+
+    name_row = (
+        (
+            await db.execute(
+                _text(
+                    "SELECT COALESCE(p.display_name, u.primary_email) AS name "
+                    "FROM users u "
+                    "LEFT JOIN user_profiles p ON p.user_id = u.id "
+                    "WHERE u.id = :id"
+                ),
+                {"id": report.student_id},
+            )
+        )
+        .mappings()
+        .first()
+    )
+    student_name = name_row["name"] if name_row else None
+
+    interview_title: str | None = None
+    session_row = await db.get(InterviewSession, session_id)
+    if session_row is not None:
+        config_row = await db.get(InterviewConfig, session_row.interview_config_id)
+        interview_title = config_row.title if config_row is not None else None
+
     return GapReportAuthoringRead.model_validate(
         {
             "id": report.id,
@@ -862,7 +897,48 @@ async def get_session_gap_report_authoring(
             "teacher_summary": report.teacher_summary,
             "source_quiz_attempt_id": report.source_quiz_attempt_id,
             "source_interview_session_id": report.source_interview_session_id,
+            "student_name": student_name,
+            "interview_title": interview_title,
         }
+    )
+
+
+@router.patch(
+    "/interview-sessions/{session_id}/gap-report/notes",
+    response_model=GapReportAuthoringRead,
+)
+async def update_session_gap_report_notes(
+    session_id: UUID,
+    payload: GapReportNotesUpdate,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_SESSION_AUTHORING)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> GapReportAuthoringRead:
+    """Persist the teacher-authored note (``teacher_summary``) on the report.
+
+    Course-scoped teacher access only (same gate as the GET). Empty/blank input
+    clears the note. Returns the full refreshed authoring projection so the
+    client re-renders with the saved value.
+    """
+    from sqlalchemy import select  # noqa: PLC0415
+
+    from abridgeai.features.interviews.models import GapReport  # noqa: PLC0415
+
+    report_stmt = (
+        select(GapReport)
+        .where(GapReport.source_interview_session_id == session_id)
+        .order_by(GapReport.created_at.desc())
+        .limit(1)
+    )
+    report = (await db.execute(report_stmt)).scalar_one_or_none()
+    if report is None:
+        raise _not_found("gap_report", session_id)
+
+    cleaned = (payload.teacher_summary or "").strip()
+    report.teacher_summary = cleaned or None
+    await db.commit()
+
+    return await get_session_gap_report_authoring(
+        session_id=session_id, current_user=current_user, db=db
     )
 
 
