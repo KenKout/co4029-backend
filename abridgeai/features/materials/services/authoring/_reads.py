@@ -16,13 +16,13 @@ from abridgeai.core.config import get_settings
 from abridgeai.core.db.conflict_mapper import flush_or_conflict
 from abridgeai.core.security import CurrentUser
 from abridgeai.features.materials.models import LearningMaterial, LearningMaterialVersion
-from abridgeai.features.materials.workers.enqueue import enqueue_material_ingest
 from abridgeai.features.materials.queries import (
     get_authoring_stream_target_for_material,
     get_latest_processing_job,
     get_lesson_processing_summary,
     get_material_for_authoring,
     list_all_materials,
+    list_deleted_materials,
 )
 from abridgeai.features.materials.schemas import (
     LessonProcessingSummary,
@@ -41,6 +41,7 @@ from abridgeai.features.materials.services.authoring._common import (
     present_version,
     require_material,
 )
+from abridgeai.features.materials.workers.enqueue import enqueue_material_ingest
 from abridgeai.infrastructure.s3 import create_stream_url
 
 if TYPE_CHECKING:
@@ -51,6 +52,21 @@ async def list_authoring_materials(
     db: AsyncSession, lesson_id: UUID, *, include_archived: bool = False
 ) -> list[MaterialAuthoring]:
     materials = await list_all_materials(db, lesson_id, include_archived=include_archived)
+    return [await _present_material(db, m) for m in materials]
+
+
+async def list_deleted_authoring_materials(
+    db: AsyncSession, lesson_id: UUID, *, retention_days: int = 30
+) -> list[MaterialAuthoring]:
+    """Soft-deleted materials on a lesson within the retention window.
+
+    Backs the teacher-facing "Recently deleted" recovery view. ``since`` is
+    computed from ``retention_days`` so the trash list stays bounded.
+    """
+    from datetime import UTC, datetime, timedelta  # noqa: PLC0415
+
+    since = datetime.now(tz=UTC) - timedelta(days=retention_days)
+    materials = await list_deleted_materials(db, lesson_id, since=since)
     return [await _present_material(db, m) for m in materials]
 
 

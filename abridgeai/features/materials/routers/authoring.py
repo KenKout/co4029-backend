@@ -46,6 +46,7 @@ from abridgeai.features.courses.routers._deps import require_lesson_authoring_ac
 from abridgeai.features.materials.api import public as materials_api
 from abridgeai.features.materials.models import LearningMaterialVersion
 from abridgeai.features.materials.schemas import (
+    LessonKnowledgeGraph,
     MaterialAuthoring,
     MaterialLinkExisting,
     MaterialUpdate,
@@ -53,7 +54,6 @@ from abridgeai.features.materials.schemas import (
     MaterialUploadInit,
     MaterialVersionAuthoring,
     ProcessingProgress,
-    LessonKnowledgeGraph,
 )
 from abridgeai.features.materials.schemas.public import MaterialStreamUrl
 from abridgeai.features.materials.schemas.status import LessonProcessingSummary
@@ -535,6 +535,65 @@ async def list_materials(
     """List materials (any state) on a lesson — teacher view."""
     del current_user
     return await authoring_service.list_authoring_materials(db, lesson_id)
+
+
+@router.get(
+    "/lessons/{lesson_id}/materials/deleted",
+    response_model=list[MaterialAuthoring],
+)
+async def list_deleted_materials_endpoint(
+    lesson_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_LESSON)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> list[MaterialAuthoring]:
+    """Soft-deleted materials on a lesson within the retention window.
+
+    Backs the teacher-facing "Recently deleted" recovery view. Scoped to the
+    lesson (not the material) because a soft-deleted material can't resolve
+    course context through the material-level dependency — the lesson can.
+    """
+    del current_user
+    return await authoring_service.list_deleted_authoring_materials(db, lesson_id)
+
+
+@router.post(
+    "/lessons/{lesson_id}/materials/{material_id}/restore",
+    response_model=MaterialAuthoring,
+)
+async def restore_material_endpoint(
+    lesson_id: UUID,
+    material_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_LESSON)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> MaterialAuthoring:
+    """Lift the soft-delete tombstone on a material (+ its versions).
+
+    Auth is lesson-scoped (``_REQUIRE_LESSON``) because a soft-deleted
+    material can't resolve course context via the material-level dependency.
+    We verify the restored material actually belongs to ``lesson_id`` to
+    prevent a cross-lesson restore smuggling a foreign material_id.
+
+    Returns 404 when there is no soft-deleted material to restore (already
+    active or nonexistent — both are "nothing to do", no existence leak).
+    """
+    from abridgeai.features.materials.queries import get_material_including_deleted
+
+    # Guard cross-lesson smuggling BEFORE mutating: the material (incl.
+    # tombstoned) must belong to the lesson the caller is authorised for.
+    existing = await get_material_including_deleted(db, material_id)
+    if existing is None or existing.lesson_id != lesson_id:
+        raise _not_found("material", material_id)
+
+    try:
+        await authoring_service.restore_material(db, material_id, current_user)
+    except NotFoundError as exc:
+        raise _not_found("material", material_id) from exc
+
+    await db.commit()
+    restored = await authoring_service.get_authoring_material(db, material_id)
+    if restored is None:  # pragma: no cover -- just restored, must exist
+        raise _not_found("material", material_id)
+    return restored
 
 
 @router.post(

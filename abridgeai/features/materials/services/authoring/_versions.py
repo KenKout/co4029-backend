@@ -28,6 +28,7 @@ from abridgeai.core.security import CurrentUser
 from abridgeai.features.materials.queries import (
     get_latest_processing_job,
     get_material_with_versions,
+    restore_soft_deleted_material,
 )
 from abridgeai.features.materials.schemas import (
     MaterialUploadComplete,
@@ -223,6 +224,24 @@ async def soft_delete_material(db: AsyncSession, material_id: UUID, actor: Curre
     """Soft-delete the material + cascade to versions. Does NOT touch S3."""
     material = await require_material(db, material_id)
     await soft_delete_cascade(db, material, actor_id=actor.user_id)
+
+
+async def restore_material(db: AsyncSession, material_id: UUID, actor: CurrentUser) -> None:
+    """Lift the soft-delete tombstone on a material + its versions.
+
+    The inverse of :func:`soft_delete_material`. Because the delete never
+    touched S3 (plan §4946/§4954) and version-scoped chunks/embeddings were
+    only tombstoned (not purged), a restored material comes back with its
+    processed AI state intact — no reprocess needed. Raises
+    :class:`NotFoundError` when there is no soft-deleted material to restore
+    (already-active rows included — nothing to do).
+    """
+    restored = await restore_soft_deleted_material(db, material_id)
+    if not restored:
+        raise NotFoundError(f"No soft-deleted material {material_id} to restore")
+    material = await require_material(db, material_id)
+    material.updated_by = actor.user_id
+    await flush_or_conflict(db)
 
 
 async def list_material_versions(
