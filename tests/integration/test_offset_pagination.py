@@ -27,6 +27,7 @@ import abridgeai.features.access_control.models  # noqa: F401  -- FK targets
 import abridgeai.features.courses.models  # noqa: F401
 import abridgeai.features.identity.models  # noqa: F401
 import abridgeai.features.interviews.models  # noqa: F401  -- courses relationship target
+import abridgeai.features.quizzes.models  # noqa: F401  -- ModuleItem.relationship("Quiz") target
 from abridgeai.core.config import get_settings
 from abridgeai.core.pagination import paginate
 from abridgeai.features.access_control.models import Organization
