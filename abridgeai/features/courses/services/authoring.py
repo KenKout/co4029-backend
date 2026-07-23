@@ -268,6 +268,20 @@ async def archive_course(db: AsyncSession, course_id: UUID, actor: CurrentUser) 
     return CourseAuthoring.model_validate(course)
 
 
+async def delete_course(db: AsyncSession, course_id: UUID, actor: CurrentUser) -> None:
+    """Soft-delete a course (teacher-facing), cascading to its children.
+
+    Reversible tombstone via :func:`soft_delete_cascade` — nothing is
+    physically removed, the row is stamped ``deleted_at`` / ``deleted_by`` and
+    filtered out of every non-admin ``Course`` SELECT. Mirrors the admin
+    delete but is scoped to the caller's ``course.delete`` permission on this
+    course. Raises ``NotFoundError`` when the course is missing or already
+    soft-deleted (``_require_course`` enforces the active-course guard).
+    """
+    course = await _require_course(db, course_id)
+    await soft_delete_cascade(db, course, actor_id=actor.user_id)
+
+
 async def add_module(
     db: AsyncSession,
     course_id: UUID,

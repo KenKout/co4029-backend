@@ -337,6 +337,26 @@ async def archive_course(
     return course
 
 
+@router.delete("/courses/{course_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_course(
+    course_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_COURSE_DELETE)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> None:
+    """Soft-delete a course the caller can delete (reversible tombstone).
+
+    Cascades to the course's modules/lessons/items via
+    ``soft_delete_cascade``. Requires ``course.delete`` on the course.
+    Returns 204 on success; 404 when the course is missing or already
+    soft-deleted.
+    """
+    try:
+        await authoring_service.delete_course(db, course_id, current_user)
+    except NotFoundError as exc:
+        raise _not_found(str(exc)) from exc
+    await db.commit()
+
+
 @router.post(
     "/courses/{course_id}/modules",
     response_model=ModuleAuthoring,
