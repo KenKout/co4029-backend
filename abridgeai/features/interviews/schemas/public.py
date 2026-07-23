@@ -152,10 +152,18 @@ class InterviewForTakingPublic(_ORMModel):
     Plan §6.2 explicit MUST NOT: do not bake all questions into the
     start payload. The ``first_question`` singular field enforces this
     at the schema layer.
+
+    ``outcome_count`` is a SAFE expectation-setting signal: it exposes only
+    *how many* rubric criteria the interview assesses, never their text,
+    ``importance_weight``, or the ``min_outcomes_to_pass`` threshold — all of
+    which remain teacher-only per the security invariants above. A bare count
+    lets the learner UI show "assessed on N criteria" without leaking anything
+    gameable.
     """
 
     config: InterviewConfigPublic
     first_question: InterviewQuestionPublic | None = None
+    outcome_count: int = 0
 
 
 __all__ = [

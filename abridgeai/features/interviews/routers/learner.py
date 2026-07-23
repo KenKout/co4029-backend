@@ -122,6 +122,7 @@ async def get_interview_for_taking(
 
     from abridgeai.features.interviews.models import (  # noqa: PLC0415
         InterviewConfig,
+        InterviewOutcome,
         InterviewQuestion,
         InterviewSession,
     )
@@ -153,6 +154,17 @@ async def get_interview_for_taking(
             .limit(1)
         )
     ).scalar_one_or_none()
+    # Count-only signal: how many rubric criteria this interview assesses. We
+    # count rows rather than fetch them so no outcome text / weight / threshold
+    # is materialized in the learner path (see InterviewForTakingPublic docs).
+    outcome_count = (
+        await db.execute(
+            select(func.count(InterviewOutcome.id)).where(
+                InterviewOutcome.interview_config_id == config_id,
+                InterviewOutcome.deleted_at.is_(None),
+            )
+        )
+    ).scalar_one()
     return InterviewForTakingPublic(
         config=InterviewConfigPublic.model_validate(config),
         first_question=(
@@ -160,6 +172,7 @@ async def get_interview_for_taking(
             if first_question is not None
             else None
         ),
+        outcome_count=int(outcome_count),
     )
 
 
