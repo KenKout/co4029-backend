@@ -53,6 +53,11 @@ async def get_module_by_id(db: AsyncSession, module_id: UUID) -> ModuleDTO | Non
     return ModuleDTO.model_validate(module) if module else None
 
 
+async def list_lesson_ids_for_modules(db: AsyncSession, module_ids: list[UUID]) -> list[UUID]:
+    """All lesson ids under the given modules — backs module-scoped generation."""
+    return await queries.list_lesson_ids_for_modules(db, module_ids)
+
+
 async def walk_resource_to_course(db: AsyncSession, resource_id: UUID) -> CourseDTO | None:
     course = await queries.walk_resource_to_course(db, resource_id)
     return CourseDTO.model_validate(course) if course else None
@@ -141,6 +146,7 @@ __all__ = [
     "get_published_lessons_for_course",
     "get_user_primary_org",
     "insert_module_item",
+    "list_lesson_ids_for_modules",
     "next_module_item_position",
     "require_lesson_authoring_access",
     "walk_resource_to_course",

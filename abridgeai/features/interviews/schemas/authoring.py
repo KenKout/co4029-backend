@@ -294,6 +294,7 @@ class InterviewGenerationRequest(BaseModel):
     mode: GenerationModeLiteral
     course_id: UUID
     module_id: UUID
+    source_module_ids: list[UUID] = []
     source_lesson_ids: list[UUID] = []
     question_count: int = Field(default=5, ge=1, le=50)
     focus_topics: list[str] = []

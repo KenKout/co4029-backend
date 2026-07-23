@@ -439,8 +439,24 @@ async def start_generation_run(
     """
     config = await _require_config(db, config_id)
     request_data = request.model_dump(exclude_unset=True, mode="json") if request else {}
+
+    # Module-scoped retrieval (§QGen-scope): each selected module expands to
+    # its lessons, which are merged into the ``source_lesson_ids`` retrieval
+    # filter (retrieval reads ``lesson_ids`` / ``source_lesson_ids`` from
+    # config_json). When no modules are chosen we default to the interview's
+    # own module so generation stays scoped to it rather than the whole course.
+    raw_module_ids = request_data.get("source_module_ids") or []
+    module_ids: list[UUID] = [UUID(str(m)) for m in raw_module_ids]
+    if not module_ids and config.module_id is not None:
+        module_ids = [config.module_id]
+    module_lesson_ids = await courses_public.list_lesson_ids_for_modules(db, module_ids)
+    explicit_lesson_ids = [UUID(str(x)) for x in (request_data.get("source_lesson_ids") or [])]
+    merged_lesson_ids = sorted({*explicit_lesson_ids, *module_lesson_ids})
+
     config_json: dict[str, Any] = dict(request_data) | {
         "interview_config_id": str(config.id),
+        "source_module_ids": [str(m) for m in module_ids],
+        "source_lesson_ids": [str(x) for x in merged_lesson_ids],
     }
     run = await quizzes_public.create_generation_run(
         db,
