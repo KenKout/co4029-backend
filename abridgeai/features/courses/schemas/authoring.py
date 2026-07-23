@@ -134,6 +134,11 @@ class CourseAuthoring(CoursePublic):
     owner_user_id: UUID
     level: str | None = None
     thumbnail_object_id: UUID | None = None
+    # Short-TTL presigned GET URL for the course thumbnail, minted by the
+    # service layer from the thumbnail's storage object. None when no
+    # thumbnail is set (the SPA falls back to the gradient banner). Not
+    # persisted — a projection.
+    thumbnail_url: str | None = None
     estimated_minutes: int | None = None
     expected_completion_days: int | None = None
     enrollment_cap: int | None = None

@@ -218,6 +218,25 @@ async def get_authoring_resource_storage_target(
     return row.bucket, row.object_key
 
 
+async def get_course_thumbnail_storage_target(
+    db: AsyncSession, course_id: UUID
+) -> tuple[str, str] | None:
+    """Bucket + object_key for a course's thumbnail image, or ``None``.
+
+    Joins ``courses.thumbnail_object_id → storage_objects.id``. Returns
+    ``None`` when the course has no thumbnail set.
+    """
+    stmt = (
+        select(StorageObject.bucket, StorageObject.object_key)
+        .join(Course, Course.thumbnail_object_id == StorageObject.id)
+        .where(Course.id == course_id)
+    )
+    row = (await db.execute(stmt)).one_or_none()
+    if row is None:
+        return None
+    return row.bucket, row.object_key
+
+
 async def get_module_item(db: AsyncSession, item_id: UUID) -> ModuleItem | None:
     return await db.get(ModuleItem, item_id)
 

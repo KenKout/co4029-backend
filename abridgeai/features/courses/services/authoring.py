@@ -26,10 +26,11 @@ accept ``actor: CurrentUser`` to permit explicit ownership writes
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
 
+from abridgeai.core.config import get_settings
 from abridgeai.core.db.conflict_mapper import (
     flush_or_conflict as _flush_or_conflict,
 )
@@ -74,13 +75,28 @@ from abridgeai.features.courses.schemas import (
     ModuleItemUpdate,
     ModuleUpdate,
 )
-from abridgeai.infrastructure.s3 import create_stream_url
+from abridgeai.features.identity.models import StorageObject
+from abridgeai.infrastructure.s3 import create_stream_url, put_object_bytes
 
 
 @dataclass
 class _AuthoringStorageTarget:
     bucket: str
     object_key: str
+
+
+# Course thumbnail upload constraints (mirrors the avatar upload feature).
+_THUMBNAIL_MIME_TYPES: dict[str, str] = {
+    "image/jpeg": "jpg",
+    "image/png": "png",
+    "image/webp": "webp",
+    "image/gif": "gif",
+}
+_THUMBNAIL_MAX_BYTES = 5 * 1024 * 1024  # 5 MiB — thumbnails can be larger than avatars.
+
+
+class ThumbnailUploadError(ValueError):
+    """Raised on an unsupported type or oversized course-thumbnail upload."""
 
 
 if TYPE_CHECKING:
@@ -484,12 +500,102 @@ async def list_authoring_courses_for_user(
         seen.add(course.id)
         merged.append(course)
     merged.sort(key=lambda c: c.created_at, reverse=True)
-    return [CourseAuthoring.model_validate(c) for c in merged]
+    result = [CourseAuthoring.model_validate(c) for c in merged]
+    for dto, orm in zip(result, merged, strict=True):
+        dto.thumbnail_url = await _mint_thumbnail_url(db, orm.id)
+    return result
 
 
 async def get_authoring_course(db: AsyncSession, course_id: UUID) -> CourseAuthoring:
     course = await _require_course(db, course_id)
-    return CourseAuthoring.model_validate(course)
+    dto = CourseAuthoring.model_validate(course)
+    dto.thumbnail_url = await _mint_thumbnail_url(db, course_id)
+    return dto
+
+
+async def upload_course_thumbnail(
+    db: AsyncSession,
+    course_id: UUID,
+    *,
+    data: bytes,
+    content_type: str,
+    uploaded_by: UUID,
+) -> CourseAuthoring:
+    """Validate + store a course thumbnail image and point the course at it.
+
+    Uploads the bytes server-side to object storage, records a
+    ``storage_objects`` row, and sets ``courses.thumbnail_object_id``. Mirrors
+    the avatar upload flow (raw-body, server-side put). Raises
+    :class:`ThumbnailUploadError` on an unsupported type or oversized file.
+    """
+    ext = _THUMBNAIL_MIME_TYPES.get(content_type)
+    if ext is None:
+        raise ThumbnailUploadError(
+            "unsupported_thumbnail_type: allowed types are JPEG, PNG, WebP, GIF."
+        )
+    if len(data) == 0:
+        raise ThumbnailUploadError("empty_thumbnail: the uploaded file is empty.")
+    if len(data) > _THUMBNAIL_MAX_BYTES:
+        raise ThumbnailUploadError(
+            "thumbnail_too_large: images must be 5 MiB or smaller."
+        )
+
+    course = await _require_course(db, course_id)
+
+    settings = get_settings()
+    bucket = settings.s3_bucket_name or "abridgeai-local"
+    object_id = uuid4()
+    object_key = f"course-thumbnails/{course_id}/{object_id}.{ext}"
+
+    # Upload bytes first — if storage fails we never touch the DB.
+    await put_object_bytes(
+        _AuthoringStorageTarget(bucket=bucket, object_key=object_key),
+        data,
+        content_type=content_type,
+    )
+
+    storage = StorageObject(
+        id=object_id,
+        bucket=bucket,
+        object_key=object_key,
+        original_filename=f"thumbnail.{ext}",
+        mime_type=content_type,
+        size_bytes=len(data),
+        uploaded_by=uploaded_by,
+        uploaded_at=datetime.now(tz=UTC),
+    )
+    db.add(storage)
+    # Flush the storage row before setting the FK — this session has
+    # autoflush=False, so without this the courses UPDATE can hit the DB
+    # before the storage_objects INSERT and trip the FK constraint.
+    await db.flush()
+    course.thumbnail_object_id = object_id
+
+    await db.commit()
+    await db.refresh(course)
+    dto = CourseAuthoring.model_validate(course)
+    dto.thumbnail_url = await _mint_thumbnail_url(db, course_id)
+    return dto
+
+
+async def _mint_thumbnail_url(db: AsyncSession, course_id: UUID) -> str | None:
+    """Mint a short-TTL presigned GET URL for a course's thumbnail image.
+
+    Returns ``None`` when the course has no thumbnail set, or a storage blip
+    occurs (a blip must never break a course read — the SPA falls back to the
+    gradient banner).
+    """
+    target = await authoring_queries.get_course_thumbnail_storage_target(db, course_id)
+    if target is None:
+        return None
+    bucket, object_key = target
+    try:
+        url, _ = await create_stream_url(
+            _AuthoringStorageTarget(bucket=bucket, object_key=object_key)
+        )
+        return url
+    except Exception:  # noqa: BLE001 — a storage blip must not break the course read
+        return None
 
 
 async def get_authoring_content(

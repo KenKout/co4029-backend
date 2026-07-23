@@ -40,7 +40,7 @@ from __future__ import annotations
 from typing import Annotated, Literal, cast
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from abridgeai.core.db import get_db
@@ -269,6 +269,41 @@ async def update_course(
     except ConflictError as exc:
         raise _conflict(str(exc)) from exc
     await db.commit()
+    return course
+
+
+@router.put("/courses/{course_id}/thumbnail", response_model=CourseAuthoring)
+async def upload_course_thumbnail(
+    course_id: UUID,
+    request: Request,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_COURSE_UPDATE)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> CourseAuthoring:
+    """Upload a course thumbnail image (JPEG/PNG/WebP/GIF, ≤ 5 MiB).
+
+    The raw image bytes are sent as the request body with the image's MIME
+    type in the ``Content-Type`` header (no multipart wrapper — matches the
+    avatar upload pattern). Stores the image in object storage and points the
+    course at it. Requires ``course.update`` on the course.
+    """
+    data = await request.body()
+    content_type = request.headers.get("content-type", "application/octet-stream")
+    content_type = content_type.split(";", 1)[0].strip().lower()
+    try:
+        course = await authoring_service.upload_course_thumbnail(
+            db,
+            course_id,
+            data=data,
+            content_type=content_type,
+            uploaded_by=current_user.user_id,
+        )
+    except authoring_service.ThumbnailUploadError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+    except NotFoundError as exc:
+        raise _not_found(str(exc)) from exc
     return course
 
 
