@@ -919,22 +919,18 @@ async def get_session_gap_report_authoring(
     # required ``generated_at`` field and silently default study_plan
     # to []. Build the DTO explicitly instead, mirroring the student
     # projection (_gap_report_view) plus the teacher-only fields.
+    from abridgeai.features.interviews.routers.learner import (  # noqa: PLC0415
+        _apply_resource_titles,
+        _resolve_resource_titles,
+        _study_plan_from_report,
+    )
+
     report_json = report.report_json or {}
-    raw_plan = report_json.get("study_plan") if isinstance(report_json, dict) else None
-    study_plan: list[dict[str, Any]] = []
-    if isinstance(raw_plan, list):
-        for entry in raw_plan:
-            if not isinstance(entry, dict):
-                continue
-            study_plan.append(
-                {
-                    "topic": entry.get("topic", ""),
-                    "lesson_id": entry.get("suggested_lesson_id"),
-                    "suggested_resources": [
-                        str(rid) for rid in entry.get("suggested_resource_ids", []) or []
-                    ],
-                }
-            )
+    study_plan = _study_plan_from_report(report_json)
+    # Resolve resource UUIDs → human titles so the teacher study plan shows real
+    # resource names instead of a wall of hex (mirrors the student projection).
+    resource_ids = {rid for item in study_plan for rid in item["suggested_resources"]}
+    _apply_resource_titles(study_plan, await _resolve_resource_titles(db, resource_ids))
     # FR-5.7: per-criterion mean rubric scores are teacher-only. They live
     # in ``report_json["rubric_aggregated"]`` and are surfaced here (never on
     # the student-facing GapReportRead).
