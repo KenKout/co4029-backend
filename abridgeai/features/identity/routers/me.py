@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from abridgeai.core.db import get_db
@@ -89,6 +89,39 @@ async def update_my_profile(
     user = await _load_user(db, current_user)
     await profile_service.update_profile(db, user, payload)
     return await get_current_user_read(db, user)
+
+
+@router.put("/avatar", response_model=UserRead)
+async def upload_my_avatar(
+    request: Request,
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> UserRead:
+    """Upload a new avatar image (JPEG/PNG/WebP/GIF, ≤ 2 MiB).
+
+    The raw image bytes are sent as the request body with the image's MIME type
+    in the ``Content-Type`` header (no multipart wrapper — keeps the backend
+    dependency-free and matches the small-blob upload pattern). Stores the image
+    in object storage and points the caller's profile at it. Self-scoped: a user
+    can only change their own avatar.
+    """
+    user = await _load_user(db, current_user)
+    data = await request.body()
+    content_type = request.headers.get("content-type", "application/octet-stream")
+    # Strip any parameters (e.g. "image/png; charset=binary").
+    content_type = content_type.split(";", 1)[0].strip().lower()
+    try:
+        return await profile_service.upload_avatar(
+            db,
+            user,
+            data=data,
+            content_type=content_type,
+        )
+    except profile_service.AvatarUploadError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
 
 
 @router.get("/permissions", response_model=UserPermissionsRead)

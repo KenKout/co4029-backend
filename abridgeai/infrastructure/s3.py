@@ -195,6 +195,40 @@ async def create_upload_url(
     return url, expires_at
 
 
+async def put_object_bytes(
+    storage_object: StorageObject,
+    data: bytes,
+    *,
+    content_type: str | None = None,
+    settings: Settings | None = None,
+) -> None:
+    """Server-side upload of a small object (avatars, thumbnails).
+
+    Unlike ``create_upload_url`` (browser → S3 direct PUT), this streams the
+    bytes from the backend. Preferred for small server-validated blobs where a
+    presigned round-trip + CORS config would be overkill. Uses the internal
+    endpoint (in-cluster, low latency).
+    """
+
+    settings = settings or get_settings()
+    _ensure_configured(settings)
+    endpoint = _internal_endpoint(settings)
+
+    params: dict[str, Any] = {
+        "Bucket": storage_object.bucket,
+        "Key": storage_object.object_key,
+        "Body": data,
+    }
+    if content_type:
+        params["ContentType"] = content_type
+
+    async with _session().client("s3", **_client_kwargs(settings, endpoint)) as client:
+        try:
+            await client.put_object(**params)
+        except ClientError as exc:
+            raise _translate_client_error(exc, action="put_object_bytes") from exc
+
+
 async def create_stream_url(
     storage_object: StorageObject,
     *,

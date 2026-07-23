@@ -82,6 +82,36 @@ def test_serialize_user_without_profile() -> None:
 
 
 @pytest.mark.asyncio
+async def test_upload_avatar_rejects_unsupported_type() -> None:
+    db = _make_db()
+    user = _make_user()
+    with pytest.raises(profile.AvatarUploadError, match="unsupported_avatar_type"):
+        await profile.upload_avatar(
+            db, user, data=b"\x00\x01\x02", content_type="application/pdf"
+        )
+    db.commit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_upload_avatar_rejects_empty_file() -> None:
+    db = _make_db()
+    user = _make_user()
+    with pytest.raises(profile.AvatarUploadError, match="empty_avatar"):
+        await profile.upload_avatar(db, user, data=b"", content_type="image/png")
+    db.commit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_upload_avatar_rejects_oversized_file() -> None:
+    db = _make_db()
+    user = _make_user()
+    too_big = b"\x00" * (2 * 1024 * 1024 + 1)
+    with pytest.raises(profile.AvatarUploadError, match="avatar_too_large"):
+        await profile.upload_avatar(db, user, data=too_big, content_type="image/png")
+    db.commit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_login_handle_callback_rejects_unprovisioned_email() -> None:
     """Invite-only OAuth: brand-new emails get HTTP 403 (ForbiddenError)."""
     from abridgeai.core.exceptions import ForbiddenError
