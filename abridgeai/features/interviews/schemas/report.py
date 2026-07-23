@@ -90,6 +90,18 @@ class GapReportAuthoringRead(GapReportRead):
     """
 
     per_criterion_breakdown: dict[str, Any] = {}
+    # Qualitative analysis surfaced from ``report_json``: short criterion-tagged
+    # bullet phrases (e.g. "technical_accuracy: Cited specific bounds"). These
+    # are the judge's per-criterion notes — the "why" behind the mean scores.
+    strengths: list[str] = []
+    weaknesses: list[str] = []
+    # Quantitative rollup surfaced from ``internal_summary_json``: the weighted
+    # session total (0-100), outcomes met/total, and answered/total/unanswered
+    # question counts — the numbers that contextualize the per-criterion means.
+    score_summary: dict[str, Any] = {}
+    # Per-criterion rubric weights (sum to 1.0) so the teacher sees how much each
+    # criterion contributes to the total — resolved from the interview config.
+    rubric_weights: dict[str, float] = {}
     raw_evaluation_json: dict[str, Any] = {}
     teacher_summary: str | None = None
     source_quiz_attempt_id: UUID | None = None
