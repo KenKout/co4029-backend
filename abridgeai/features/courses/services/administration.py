@@ -11,6 +11,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
+from abridgeai.core.db.recursive_delete import soft_delete_cascade
 from abridgeai.core.exceptions import NotFoundError
 from abridgeai.core.pagination import Page
 from abridgeai.core.security import CurrentUser
@@ -100,6 +101,34 @@ async def restore_soft_deleted_course(
     return CourseAuthoring.model_validate(course)
 
 
+async def soft_delete_course(
+    db: AsyncSession, course_id: UUID, actor: CurrentUser
+) -> CourseAuthoring:
+    """Soft-delete a course (+ its module/lesson/item subtree) via cascade.
+
+    Reversible: the tombstone set here is exactly what
+    :func:`restore_soft_deleted_course` lifts. Consistent with the
+    project-wide no-HARD-delete invariant — nothing is physically removed,
+    the row is just stamped ``deleted_at`` / ``deleted_by`` and filtered
+    out of every non-admin ``Course`` SELECT by the T0.7 loader.
+
+    Returns the tombstoned course (fetched with the soft-delete filter
+    lifted so the response reflects the new ``deleted_at``). Raises
+    ``NotFoundError`` when the course does not exist or is already
+    soft-deleted (idempotent guard — nothing to delete).
+    """
+    course = await admin_queries.get_course_including_deleted(db, course_id)
+    if course is None or course.deleted_at is not None:
+        raise NotFoundError(f"No active course {course_id} to delete")
+
+    await soft_delete_cascade(db, course, actor_id=actor.user_id)
+
+    refreshed = await admin_queries.get_course_including_deleted(db, course_id)
+    if refreshed is None:  # pragma: no cover -- just soft-deleted, still present
+        raise NotFoundError(f"Course {course_id} not found after delete")
+    return CourseAuthoring.model_validate(refreshed)
+
+
 async def get_course_processing_audit(db: AsyncSession, course_id: UUID) -> dict[str, Any]:
     """Aggregate AI processing audit for ``course_id`` (plan §4217).
 
@@ -128,4 +157,5 @@ __all__ = [
     "list_all_courses_admin",
     "list_course_processing_jobs",
     "restore_soft_deleted_course",
+    "soft_delete_course",
 ]

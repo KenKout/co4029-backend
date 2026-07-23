@@ -3,8 +3,8 @@
 Covers the IT-Admin operational surface at ``/api/v1/admin``. Acceptance
 criteria from plan §4541-4545 + QA §4547-4564 map to:
 
-* ``test_router_metadata`` — 5 endpoints registered under ``/admin``,
-  no DELETE on ``/admin/courses/{id}`` (no-hard-delete invariant).
+* ``test_router_metadata`` — endpoints registered under ``/admin``,
+  including a DELETE on ``/admin/courses/{id}`` that is a *soft* delete.
 * ``test_unauthenticated_returns_401`` — bearer-less requests rejected.
 * ``test_admin_token_lists_soft_deleted_courses`` — soft-delete a
   course, admin GET ``/admin/courses`` returns it.
@@ -293,6 +293,7 @@ def test_router_metadata() -> None:
     paths = {(r.path, tuple(sorted(r.methods))) for r in administration_router.routes}  # type: ignore[attr-defined]
     expected = {
         ("/admin/courses", ("GET",)),
+        ("/admin/courses/{course_id}", ("DELETE",)),
         ("/admin/courses/{course_id}/restore", ("POST",)),
         ("/admin/courses/{course_id}/audit", ("GET",)),
         ("/admin/courses/{course_id}/processing", ("GET",)),
@@ -302,14 +303,23 @@ def test_router_metadata() -> None:
     assert administration_router.prefix == "/admin"
 
 
-def test_no_hard_delete_endpoint_exists() -> None:
-    """Plan §4526: hard-delete is forbidden; restore is the recovery path."""
+def test_delete_course_endpoint_is_soft_delete() -> None:
+    """Plan §4526: no HARD delete. The DELETE route is a reversible soft
+    delete (cascade tombstone) — its mirror is POST .../restore. This guards
+    the invariant that the delete path never hard-removes: the service goes
+    through ``soft_delete_cascade`` (asserted behaviourally in
+    ``test_delete_soft_deletes_course_and_children`` below), and both the
+    delete and restore verbs are registered on the same ``{course_id}`` path.
+    """
+    by_path: dict[str, set[str]] = {}
     for route in administration_router.routes:
         methods = getattr(route, "methods", set())
         path = getattr(route, "path", "")
-        assert not ("DELETE" in methods and path.startswith("/admin/courses/{")), (
-            f"Hard-delete endpoint registered: {methods} {path}"
-        )
+        by_path.setdefault(path, set()).update(methods)
+    # DELETE exists on the course path...
+    assert "DELETE" in by_path.get("/admin/courses/{course_id}", set())
+    # ...and the reversible recovery path is present alongside it.
+    assert "POST" in by_path.get("/admin/courses/{course_id}/restore", set())
 
 
 async def test_unauthenticated_returns_401(client: httpx.AsyncClient) -> None:
@@ -392,6 +402,114 @@ async def test_restore_404_on_active_course(
         headers={"Authorization": f"Bearer {admin_bearer}"},
     )
     assert response.status_code == 404
+
+
+async def test_delete_soft_deletes_course_and_children(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    engine: AsyncEngine,
+    scenario: dict[str, uuid.UUID],
+    seeded_users: SeededUsers,
+) -> None:
+    """DELETE on an ACTIVE course tombstones it (and cascades to children).
+
+    Nothing is hard-removed: the row still exists with ``deleted_at`` set,
+    ``deleted_by`` = the acting admin. The active_course fixture has no
+    module children, so we just assert the course row itself is tombstoned
+    and still physically present (soft, not hard, delete).
+    """
+    response = await client.request(
+        "DELETE",
+        f"/api/v1/admin/courses/{scenario['active_course']}",
+        headers={"Authorization": f"Bearer {admin_bearer}"},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["id"] == str(scenario["active_course"])
+    assert body["deleted_at"] is not None
+
+    async with engine.begin() as conn:
+        row = (
+            await conn.execute(
+                text(
+                    "SELECT deleted_at, deleted_by FROM courses WHERE id = :id"
+                ),
+                {"id": scenario["active_course"]},
+            )
+        ).one()
+    # Still present (soft delete) with the tombstone stamped by the admin.
+    assert row.deleted_at is not None
+    assert row.deleted_by == seeded_users.admin_id
+
+
+async def test_delete_then_restore_roundtrip(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    engine: AsyncEngine,
+    scenario: dict[str, uuid.UUID],
+) -> None:
+    """A mistaken delete is undoable: DELETE then POST restore returns the
+    course to active (``deleted_at IS NULL``)."""
+    del_resp = await client.request(
+        "DELETE",
+        f"/api/v1/admin/courses/{scenario['active_course']}",
+        headers={"Authorization": f"Bearer {admin_bearer}"},
+    )
+    assert del_resp.status_code == 200, del_resp.text
+
+    restore_resp = await client.post(
+        f"/api/v1/admin/courses/{scenario['active_course']}/restore",
+        headers={"Authorization": f"Bearer {admin_bearer}"},
+    )
+    assert restore_resp.status_code == 200, restore_resp.text
+
+    async with engine.begin() as conn:
+        deleted_at = (
+            await conn.execute(
+                text("SELECT deleted_at FROM courses WHERE id = :id"),
+                {"id": scenario["active_course"]},
+            )
+        ).scalar_one()
+    assert deleted_at is None
+
+
+async def test_delete_404_on_unknown_course(
+    client: httpx.AsyncClient, admin_bearer: str
+) -> None:
+    response = await client.request(
+        "DELETE",
+        f"/api/v1/admin/courses/{uuid.uuid4()}",
+        headers={"Authorization": f"Bearer {admin_bearer}"},
+    )
+    assert response.status_code == 404
+
+
+async def test_delete_404_on_already_deleted_course(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    scenario: dict[str, uuid.UUID],
+) -> None:
+    """Deleting an already-soft-deleted course is a 404 (nothing to delete)."""
+    response = await client.request(
+        "DELETE",
+        f"/api/v1/admin/courses/{scenario['soft_deleted_course']}",
+        headers={"Authorization": f"Bearer {admin_bearer}"},
+    )
+    assert response.status_code == 404
+
+
+async def test_delete_manager_token_403(
+    client: httpx.AsyncClient,
+    manager_bearer: str,
+    scenario: dict[str, uuid.UUID],
+) -> None:
+    """Non-admins cannot delete a course."""
+    response = await client.request(
+        "DELETE",
+        f"/api/v1/admin/courses/{scenario['active_course']}",
+        headers={"Authorization": f"Bearer {manager_bearer}"},
+    )
+    assert response.status_code == 403
 
 
 async def test_audit_endpoint_aggregates_ai_model_calls(

@@ -11,10 +11,11 @@ capability code is the canonical gate. Manager / HOD / Teacher /
 Student all 403 here.
 
 **No hard-delete contract (plan §4526)**: the soft-delete invariant is
-project-wide. This module deliberately exposes no ``DELETE`` route on
-``/admin/courses/{id}``; the recovery path is the dedicated
-``POST .../restore`` endpoint that lifts the T0.7 soft-delete loader
-filter via :mod:`features.courses.services.administration`.
+project-wide. ``DELETE /admin/courses/{id}`` performs a *soft* delete
+(cascade tombstone via ``soft_delete_cascade``) — nothing is physically
+removed. It is the mirror of the ``POST .../restore`` endpoint, which
+lifts the T0.7 soft-delete loader filter to bring a tombstoned course
+back. Both go through :mod:`features.courses.services.administration`.
 
 **Service-commit discipline**: the underlying queries (T3.5) flush
 their ``UPDATE`` / ``SELECT`` statements but do NOT commit. This
@@ -145,6 +146,32 @@ async def restore_soft_deleted_course(
 
     await db.commit()
     return restored
+
+
+@router.delete("/courses/{course_id}", response_model=CourseAuthoring)
+async def soft_delete_course(
+    course_id: UUID,
+    admin: Annotated[CurrentUser, Depends(_REQUIRE_ADMIN)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> CourseAuthoring:
+    """Soft-delete a course and its module/lesson/item subtree.
+
+    Reversible cascade tombstone (``soft_delete_cascade``) — nothing is
+    physically removed, so a mistaken create can be undone via the
+    matching ``POST .../restore`` endpoint. Stamps ``deleted_at`` /
+    ``deleted_by`` with the acting admin.
+
+    Returns the tombstoned course (soft-delete filter lifted so the
+    response carries the new ``deleted_at``). Returns 404 when the
+    course does not exist or is already soft-deleted (nothing to delete).
+    """
+    try:
+        deleted = await administration_service.soft_delete_course(db, course_id, admin)
+    except NotFoundError as exc:
+        raise _not_found(str(exc)) from exc
+
+    await db.commit()
+    return deleted
 
 
 @router.get("/courses/{course_id}/audit", response_model=CourseProcessingAudit)
