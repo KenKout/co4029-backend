@@ -964,10 +964,43 @@ async def get_session_gap_report_authoring(
     student_name = name_row["name"] if name_row else None
 
     interview_title: str | None = None
+    score_summary: dict[str, Any] = {}
+    rubric_weights: dict[str, float] = {}
     session_row = await db.get(InterviewSession, session_id)
     if session_row is not None:
         config_row = await db.get(InterviewConfig, session_row.interview_config_id)
         interview_title = config_row.title if config_row is not None else None
+        # Quantitative rollup lives in internal_summary_json (teacher-only). Project
+        # the numbers that contextualize the per-criterion means: weighted total,
+        # outcomes met/total, answered/total/unanswered question counts.
+        summary_json = session_row.internal_summary_json or {}
+        if isinstance(summary_json, dict):
+            score_summary = {
+                key: summary_json[key]
+                for key in (
+                    "total_score",
+                    "outcomes_met",
+                    "outcomes_total",
+                    "questions_total",
+                    "questions_answered",
+                    "questions_unanswered",
+                )
+                if key in summary_json
+            }
+        # Resolve the per-criterion rubric weights so the teacher sees each
+        # criterion's contribution to the weighted total.
+        if config_row is not None:
+            from abridgeai.features.interviews.ai.stages.evaluation.rubric import (  # noqa: PLC0415
+                resolve_rubric,
+            )
+
+            config_json = getattr(config_row, "config_json", None)
+            rubric_weights = resolve_rubric(config_json if isinstance(config_json, dict) else None)
+
+    # Qualitative per-criterion notes (criterion-tagged bullet phrases) already
+    # live in report_json; surface them so the teacher sees the "why" per criterion.
+    strengths = report_json.get("strengths") if isinstance(report_json, dict) else None
+    weaknesses = report_json.get("weaknesses") if isinstance(report_json, dict) else None
 
     return GapReportAuthoringRead.model_validate(
         {
@@ -979,6 +1012,10 @@ async def get_session_gap_report_authoring(
             "study_plan": study_plan,
             "generated_at": report.created_at,
             "per_criterion_breakdown": (per_criterion if isinstance(per_criterion, dict) else {}),
+            "strengths": [str(s) for s in strengths] if isinstance(strengths, list) else [],
+            "weaknesses": [str(w) for w in weaknesses] if isinstance(weaknesses, list) else [],
+            "score_summary": score_summary,
+            "rubric_weights": rubric_weights,
             "raw_evaluation_json": raw_evaluation_json,
             "teacher_summary": report.teacher_summary,
             "source_quiz_attempt_id": report.source_quiz_attempt_id,

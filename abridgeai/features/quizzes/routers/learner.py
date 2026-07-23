@@ -41,12 +41,15 @@ from abridgeai.features.quizzes.schemas import (
     QuizPublic,
 )
 from abridgeai.features.quizzes.services import taking as taking_service
+
+# NOTE: QuizClosed / QuizNotYetOpen are imported above from queries.published
+# (their canonical definition site). taking.py only re-exports them, so they are
+# intentionally NOT re-imported from taking here (that was a redundant
+# redefinition — ruff F811).
 from abridgeai.features.quizzes.services.taking import (
     AllCardsInCooldownError,
     CooldownActive,
     MaxAttemptsReached,
-    QuizClosed,
-    QuizNotYetOpen,
 )
 from abridgeai.features.spaced_repetition.api.public import (
     dispatch_remediation_for_card_failure,
