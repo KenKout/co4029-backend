@@ -343,6 +343,21 @@ async def commit_regrade(
     run.status = "committed"
     run.committed_at = utcnow()
     await flush_or_conflict(db)
+
+    # Phase 13: append a correctness-bearing audit event in the same transaction.
+    from abridgeai.features.quizzes.services.audit import record_event  # noqa: PLC0415
+
+    await record_event(
+        db,
+        event_name="attempt_regraded",
+        quiz_id=quiz_id,
+        payload={
+            "run_id": str(run.id),
+            "answers_changed": run.answers_changed,
+            "attempts_affected": run.attempts_affected,
+        },
+    )
+
     await db.refresh(run)
     return run
 

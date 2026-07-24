@@ -131,6 +131,21 @@ async def grade_answer_manually(
             attempt.status = "graded"
         await flush_or_conflict(db)
 
+        # Phase 13: correctness-bearing audit event in the same transaction.
+        from abridgeai.features.quizzes.services.audit import (  # noqa: PLC0415
+            record_event,
+        )
+
+        await record_event(
+            db,
+            event_name="attempt_manually_graded",
+            quiz_id=quiz_id,
+            actor_user_id=grader_id,
+            subject_attempt_id=attempt.id,
+            subject_user_id=attempt.student_id,
+            payload={"answer_id": str(answer_id), "score": str(score)},
+        )
+
     await db.refresh(answer)
     return answer
 

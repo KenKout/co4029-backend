@@ -32,6 +32,7 @@ stay HTTP-agnostic.
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Annotated, Any
 from uuid import UUID
 
@@ -1233,6 +1234,15 @@ async def create_quiz_override(
         # A duplicate (quiz, scope, user/group) trips a unique constraint.
         await db.rollback()
         raise _conflict("an override for this target already exists") from exc
+    from abridgeai.features.quizzes.services import audit as _audit  # noqa: PLC0415
+
+    await _audit.record_event(
+        db,
+        event_name="override_created",
+        quiz_id=quiz_id,
+        subject_user_id=body.user_id,
+        payload={"scope": body.scope, "override_id": str(row.id)},
+    )
     await db.commit()
     await db.refresh(row)
     return QuizOverrideRead.model_validate(row)
@@ -1433,6 +1443,37 @@ async def get_statistics_report(
             headers, rows, format, filename_stem=f"quiz-{quiz_id}-statistics"
         )
     return report
+
+
+class _AuditEventRow(BaseModel):
+    model_config = {"from_attributes": True}
+    id: UUID
+    event_name: str
+    quiz_id: UUID
+    actor_user_id: UUID | None = None
+    subject_attempt_id: UUID | None = None
+    subject_question_id: UUID | None = None
+    subject_user_id: UUID | None = None
+    payload_json: dict[str, Any] = Field(default_factory=dict)
+    occurred_at: datetime
+
+
+@router.get(
+    "/quizzes/{quiz_id}/audit-events",
+    response_model=list[_AuditEventRow],
+)
+async def list_quiz_audit_events(
+    quiz_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_QUIZ)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    limit: int = 100,
+) -> list[_AuditEventRow]:
+    """Most-recent-first append-only audit trail for a quiz (Phase 13)."""
+    del current_user
+    from abridgeai.features.quizzes.services import audit as _audit  # noqa: PLC0415
+
+    rows = await _audit.list_events_for_quiz(db, quiz_id, limit=limit)
+    return [_AuditEventRow.model_validate(r) for r in rows]
 
 
 __all__ = [
