@@ -55,6 +55,12 @@ from abridgeai.features.quizzes.schemas.feedback import (
     OverallFeedbackRead,
     QuizGradeRow,
 )
+from abridgeai.features.quizzes.schemas.reports import (
+    ResponsesReportRead,
+    ResponsesReportRow,
+    StatisticsReportRead,
+    StatisticsReportRow,
+)
 from abridgeai.features.quizzes.schemas.manual_grading import (
     ManualGradeIn,
     ManualGradeRead,
@@ -146,6 +152,10 @@ __all__ = [
     "RegradeItemRead",
     "RegradeRunRead",
     "RegradeScopeIn",
+    "ResponsesReportRead",
+    "ResponsesReportRow",
+    "StatisticsReportRead",
+    "StatisticsReportRow",
     "ReviewOptions",
     "ReviewWindowFlags",
 ]

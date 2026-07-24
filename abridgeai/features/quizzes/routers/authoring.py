@@ -36,6 +36,7 @@ from typing import Annotated, Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -71,6 +72,8 @@ from abridgeai.features.quizzes.schemas import (
     FeedbackBandIn,
     FeedbackBandRead,
     QuizGradeRow,
+    ResponsesReportRead,
+    StatisticsReportRead,
     ManualGradeIn,
     ManualGradeRead,
     NeedsGradingRow,
@@ -1341,6 +1344,95 @@ async def get_quiz_gradebook(
 
     rows = await _gb.list_quiz_grades(db, quiz_id)
     return [QuizGradeRow.model_validate(r) for r in rows]
+
+
+def _report_download(
+    headers: list[str],
+    rows: list[list[object]],
+    fmt: str,
+    *,
+    filename_stem: str,
+) -> Response:
+    """Serialize a flattened report table to a CSV or XLSX download response."""
+    from datetime import datetime, timezone  # noqa: PLC0415
+
+    from abridgeai.features.quizzes.services import reports_export as _exp  # noqa: PLC0415
+
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d")
+    if fmt == "xlsx":
+        content = _exp.build_xlsx(headers, rows)
+        return Response(
+            content=content,
+            media_type=(
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            ),
+            headers={
+                "Content-Disposition": (
+                    f'attachment; filename="{filename_stem}-{stamp}.xlsx"'
+                )
+            },
+        )
+    return StreamingResponse(
+        _exp.stream_csv(headers, rows),
+        media_type="text/csv",
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="{filename_stem}-{stamp}.csv"'
+            )
+        },
+    )
+
+
+@router.get("/quizzes/{quiz_id}/reports/responses")
+async def get_responses_report(
+    quiz_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_QUIZ)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    format: str = "json",
+) -> object:
+    """Per-student, per-question responses report (Phase 10). ?format=json|csv|xlsx."""
+    del current_user
+    from abridgeai.features.quizzes.services import reports as _rep  # noqa: PLC0415
+    from abridgeai.features.quizzes.services import (  # noqa: PLC0415
+        reports_export as _exp,
+    )
+
+    try:
+        report = await _rep.build_responses_report(db, quiz_id)
+    except NotFoundError as exc:
+        raise _not_found("quiz", quiz_id) from exc
+    if format in ("csv", "xlsx"):
+        headers, rows = _exp.responses_to_table(report)
+        return _report_download(
+            headers, rows, format, filename_stem=f"quiz-{quiz_id}-responses"
+        )
+    return report
+
+
+@router.get("/quizzes/{quiz_id}/reports/statistics")
+async def get_statistics_report(
+    quiz_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_QUIZ)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    format: str = "json",
+) -> object:
+    """Per-question facility + discrimination statistics (Phase 10). ?format=json|csv|xlsx."""
+    del current_user
+    from abridgeai.features.quizzes.services import reports as _rep  # noqa: PLC0415
+    from abridgeai.features.quizzes.services import (  # noqa: PLC0415
+        reports_export as _exp,
+    )
+
+    try:
+        report = await _rep.build_statistics_report(db, quiz_id)
+    except NotFoundError as exc:
+        raise _not_found("quiz", quiz_id) from exc
+    if format in ("csv", "xlsx"):
+        headers, rows = _exp.statistics_to_table(report)
+        return _report_download(
+            headers, rows, format, filename_stem=f"quiz-{quiz_id}-statistics"
+        )
+    return report
 
 
 __all__ = [
