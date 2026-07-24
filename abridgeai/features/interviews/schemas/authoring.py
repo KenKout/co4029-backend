@@ -430,6 +430,31 @@ class InterviewTranscriptRead(BaseModel):
     turns: list[InterviewTranscriptTurn] = []
 
 
+class InterviewIntegrityEvent(BaseModel):
+    """One FR-5.8 proctoring signal recorded during an interview session.
+
+    Projection of :class:`features.interviews.models.AssessmentIntegrityEvent`
+    rows scoped to ``assessment_kind='interview'``. Surfaced only in the
+    teacher-facing gap-report review — never to the student. Mirrors the
+    quiz-side ``QuizAttemptIntegrityEvent``.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    event_type: str
+    severity: str
+    metadata_json: dict[str, Any] = {}
+    created_at: datetime
+
+
+class InterviewIntegrityRead(BaseModel):
+    """Teacher-facing integrity timeline for one interview session (FR-5.8)."""
+
+    session_id: UUID
+    events: list[InterviewIntegrityEvent] = []
+
+
 # --------------------------------------------------------------------------- #
 # Adaptive readiness (Slice 5) — advisory authoring analysis
 # --------------------------------------------------------------------------- #

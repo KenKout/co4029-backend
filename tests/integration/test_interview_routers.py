@@ -1538,6 +1538,65 @@ async def test_teacher_transcript_returns_turns_and_blocks_student(
             )
 
 
+async def test_teacher_integrity_events_returns_signals_and_blocks_student(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    engine: AsyncEngine,
+    scenario: dict[str, uuid.UUID],
+    seeded_users: SeededUsers,
+) -> None:
+    """FR-5.8: teacher fetches the proctoring-signal timeline for a session;
+    the owning student cannot hit the teacher authoring endpoint."""
+    config_id = await _seed_published_config(
+        engine,
+        course_id=scenario["course_id"],
+        module_id=scenario["module_id"],
+        actor_id=seeded_users.admin_id,
+    )
+    student_sid = await _seed_session(engine, seeded_users.student_id)
+    student_token = create_access_token(user_id=seeded_users.student_id, session_id=student_sid)
+    try:
+        start_resp = await client.post(
+            f"/api/v1/interview-configs/{config_id}/sessions",
+            json={"input_mode": "text"},
+            headers=_auth(student_token),
+        )
+        assert start_resp.status_code == 201, start_resp.text
+        session_id = start_resp.json()["session_id"]
+
+        # Student posts an integrity signal via the learner endpoint (Gap 1
+        # wires this in for text mode too; here we exercise the record path).
+        rec = await client.post(
+            f"/api/v1/interview-sessions/{session_id}/integrity-events",
+            json={"events": [{"event_type": "tab_switch", "severity": "warning"}]},
+            headers=_auth(student_token),
+        )
+        assert rec.status_code in (200, 201, 202, 204), rec.text
+
+        # Teacher reads the timeline back.
+        events_resp = await client.get(
+            f"/api/v1/teacher/interview-sessions/{session_id}/integrity-events",
+            headers=_auth(admin_bearer),
+        )
+        assert events_resp.status_code == 200, events_resp.text
+        payload = events_resp.json()
+        assert payload["session_id"] == session_id
+        assert any(ev["event_type"] == "tab_switch" for ev in payload["events"])
+
+        # The student cannot reach the teacher integrity endpoint.
+        denied = await client.get(
+            f"/api/v1/teacher/interview-sessions/{session_id}/integrity-events",
+            headers=_auth(student_token),
+        )
+        assert denied.status_code in (403, 404), denied.text
+    finally:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("DELETE FROM auth_sessions WHERE id = :id"),
+                {"id": student_sid},
+            )
+
+
 async def test_teacher_session_detail_endpoint_returns_200(
     client: httpx.AsyncClient,
     admin_bearer: str,
