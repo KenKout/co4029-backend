@@ -49,6 +49,8 @@ class QuizAttemptStart(BaseModel):
 
     quiz_id: UUID
     idempotency_key: UUID | None = None
+    # Phase 12: submitted when the quiz has an access password configured.
+    password: str | None = None
 
 
 class QuizAttemptSubmitAnswer(BaseModel):

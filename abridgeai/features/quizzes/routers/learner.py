@@ -21,7 +21,7 @@ from __future__ import annotations
 from typing import Annotated, Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -49,6 +49,9 @@ from abridgeai.features.quizzes.services import taking as taking_service
 from abridgeai.features.quizzes.services.taking import (
     AllCardsInCooldownError,
     CooldownActive,
+    QuizPasswordIncorrect,
+    QuizPasswordRequired,
+    QuizSubnetBlocked,
     MaxAttemptsReached,
 )
 from abridgeai.features.spaced_repetition.api.public import (
@@ -164,6 +167,7 @@ async def get_published_quiz(
 async def start_attempt(
     quiz_id: UUID,
     payload: QuizAttemptStart,
+    request: Request,
     current_user: Annotated[CurrentUser, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> QuizAttemptProgressRead:
@@ -196,9 +200,26 @@ async def start_attempt(
             quiz_id,
             current_user,
             idempotency_key=payload.idempotency_key,
+            password=payload.password,
+            client_ip=(request.client.host if request.client else None),
         )
     except NotFoundError as exc:
         raise _not_found("quiz", quiz_id) from exc
+    except QuizPasswordRequired as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"reason": "quiz_password_required"},
+        ) from exc
+    except QuizPasswordIncorrect as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"reason": "quiz_password_incorrect"},
+        ) from exc
+    except QuizSubnetBlocked as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"reason": "quiz_subnet_blocked"},
+        ) from exc
     except CooldownActive as exc:
         retry_after_seconds = max(0, int((exc.retry_after - utcnow()).total_seconds()))
         raise HTTPException(

@@ -40,6 +40,9 @@ from abridgeai.features.quizzes.queries.published import (
     MaxAttemptsReached,
     QuizClosed,  # noqa: F401  -- re-exported for the learner router (see __all__)
     QuizNotYetOpen,  # noqa: F401  -- re-exported for the learner router (see __all__)
+    QuizPasswordIncorrect,  # noqa: F401  -- re-exported for the learner router
+    QuizPasswordRequired,  # noqa: F401  -- re-exported for the learner router
+    QuizSubnetBlocked,  # noqa: F401  -- re-exported for the learner router
 )
 from abridgeai.features.quizzes.schemas.attempt import (
     QuizAttemptProgressAnswer,
@@ -232,6 +235,8 @@ async def start_attempt(
     actor: CurrentUser,
     *,
     idempotency_key: UUID | None = None,
+    password: str | None = None,
+    client_ip: str | None = None,
 ) -> tuple[QuizAttempt, QuizAttemptProgressRead]:
     """Create a :class:`QuizAttempt` and return the no-leak take payload.
 
@@ -291,7 +296,8 @@ async def start_attempt(
         else None
     )
     quiz = await published_queries.get_quiz_for_taking(
-        db, quiz_id, actor.user_id, effective=effective
+        db, quiz_id, actor.user_id, effective=effective,
+        password=password, client_ip=client_ip,
     )
     if quiz is None:
         raise NotFoundError(f"Quiz {quiz_id} not found")
@@ -808,6 +814,9 @@ __all__ = [
     "MaxAttemptsReached",
     "QuizClosed",
     "QuizNotYetOpen",
+    "QuizPasswordIncorrect",
+    "QuizPasswordRequired",
+    "QuizSubnetBlocked",
     "answer_attempt",
     "get_attempt_history",
     "get_attempt_progress",

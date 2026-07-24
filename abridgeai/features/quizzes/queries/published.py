@@ -69,6 +69,33 @@ class MaxAttemptsReached(Exception):  # noqa: N818  # spec-mandated name (T5.3 Â
         self.max_attempts = max_attempts
 
 
+class QuizPasswordRequired(Exception):  # noqa: N818  # matches sibling gate exceptions
+    """A quiz password is configured and none (or an empty one) was submitted.
+
+    Service layer maps to HTTP 403 (Phase 12).
+    """
+
+    def __init__(self, *, quiz_id: UUID) -> None:
+        super().__init__(f"Quiz {quiz_id} requires a password")
+        self.quiz_id = quiz_id
+
+
+class QuizPasswordIncorrect(Exception):  # noqa: N818  # matches sibling gate exceptions
+    """A quiz password was submitted but did not match. Service maps to HTTP 403."""
+
+    def __init__(self, *, quiz_id: UUID) -> None:
+        super().__init__(f"Quiz {quiz_id} password incorrect")
+        self.quiz_id = quiz_id
+
+
+class QuizSubnetBlocked(Exception):  # noqa: N818  # matches sibling gate exceptions
+    """Client IP is not within the quiz's allowed subnet(s). Service maps to HTTP 403."""
+
+    def __init__(self, *, quiz_id: UUID) -> None:
+        super().__init__(f"Quiz {quiz_id} blocked for client subnet")
+        self.quiz_id = quiz_id
+
+
 class QuizNotYetOpen(Exception):  # noqa: N818  # matches CooldownActive/MaxAttemptsReached naming
     """Student tried to start before ``Quiz.available_from``.
 
@@ -209,6 +236,9 @@ async def get_quiz_for_taking(
     quiz_id: UUID,
     user_id: UUID,
     effective: object | None = None,
+    *,
+    password: str | None = None,
+    client_ip: str | None = None,
 ) -> Quiz | None:
     """Validate and return a published quiz for a student to take.
 
@@ -254,6 +284,31 @@ async def get_quiz_for_taking(
     _assert_within_schedule_window_values(
         quiz.id, eff_available_from, eff_available_until
     )
+
+    # Phase 12: access rules. Subnet allowlist first (fail closed), then password.
+    # These are quiz-level (not overridable). Both raise gate exceptions the
+    # service maps to HTTP 403.
+    require_subnet = getattr(quiz, "require_subnet", None)
+    if require_subnet:
+        from abridgeai.features.quizzes.queries.access_rules import (  # noqa: PLC0415
+            ip_in_allowlist,
+            parse_subnet_allowlist,
+        )
+
+        allowlist = parse_subnet_allowlist(require_subnet)
+        if allowlist and not ip_in_allowlist(client_ip, allowlist):
+            raise QuizSubnetBlocked(quiz_id=quiz.id)
+
+    require_password = getattr(quiz, "require_password", None)
+    if require_password:
+        from abridgeai.features.quizzes.queries.access_rules import (  # noqa: PLC0415
+            password_matches,
+        )
+
+        if not password:
+            raise QuizPasswordRequired(quiz_id=quiz.id)
+        if not password_matches(require_password, password):
+            raise QuizPasswordIncorrect(quiz_id=quiz.id)
 
     # ------------------------------------------------------------------
     # Cooldown gate â€” most-recent submitted_at + cooldown_hours > now ?
