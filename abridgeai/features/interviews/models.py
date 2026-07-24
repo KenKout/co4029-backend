@@ -248,6 +248,12 @@ class InterviewConfig(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftD
     )
     time_limit_minutes: Mapped[int | None] = mapped_column(Integer)
     persona: Mapped[str | None] = mapped_column(String(20))
+    # TTS voice for English narration/voice sessions: a Deepgram Aura-2 model id
+    # (one voice per model, e.g. 'aura-2-thalia-en'). NULL = the deployment
+    # default (settings.deepgram_tts_model_en). Vietnamese has no server TTS, so
+    # this only affects English sessions. Validated against a curated allow-list
+    # in the authoring schema (see narration.ALLOWED_TTS_VOICES).
+    tts_voice: Mapped[str | None] = mapped_column(String(40))
     supported_modes: Mapped[str] = mapped_column(
         String(20), nullable=False, server_default=text("'hybrid'")
     )

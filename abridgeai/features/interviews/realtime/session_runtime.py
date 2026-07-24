@@ -32,6 +32,7 @@ from livekit.plugins import deepgram, openai, silero
 from abridgeai.core.config import Settings
 from abridgeai.features.interviews.realtime import observability as obs
 from abridgeai.features.interviews.realtime import orchestration_bridge as bridge
+from abridgeai.features.interviews.services import narration
 
 logger = logging.getLogger(__name__)
 
@@ -237,7 +238,9 @@ def _is_english(language: str) -> bool:
     return not language.lower().startswith("vi")
 
 
-def build_agent_session(settings: Settings, *, language: str = "en") -> AgentSession[None]:
+def build_agent_session(
+    settings: Settings, *, language: str = "en", voice: str | None = None
+) -> AgentSession[None]:
     """Construct the STT→(brain)→TTS pipeline, language-aware.
 
     Voice provider is chosen by session language:
@@ -247,6 +250,10 @@ def build_agent_session(settings: Settings, *, language: str = "en") -> AgentSes
     * **Vietnamese** (or any non-English) → the OpenAI-compatible gateway,
       because Deepgram Aura TTS is English-only and Deepgram STT does not
       support Vietnamese. This matches the REST narration fallback policy.
+
+    ``voice`` is the config's chosen Deepgram Aura voice (English only),
+    validated against the narration allow-list; an unknown/absent value
+    degrades to the deployment default. No effect on the Vietnamese gateway.
 
     silero VAD handles turn detection for both (KISS — no turn-detector model
     until manual E2E shows it is needed).
@@ -265,7 +272,7 @@ def build_agent_session(settings: Settings, *, language: str = "en") -> AgentSes
                 base_url=stt_base,
             ),
             tts=deepgram.TTS(
-                model=settings.deepgram_tts_model_en,
+                model=narration.resolve_tts_voice(voice, settings=settings),
                 api_key=dg_key,
                 base_url=tts_base,
             ),

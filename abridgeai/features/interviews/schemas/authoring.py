@@ -78,6 +78,28 @@ SecurityResponsePolicyLiteral = Literal[
     "warn_and_continue",
     "end_and_flag",
 ]
+# Deepgram Aura-2 English voices offered in the teacher UI. MUST stay in sync
+# with ``services.narration.ALLOWED_TTS_VOICES`` (the runtime allow-list) and
+# the frontend voice dropdown. NULL = deployment default
+# (settings.deepgram_tts_model_en). English-only: Vietnamese has no server TTS.
+TtsVoiceLiteral = Literal[
+    "aura-2-thalia-en",
+    "aura-2-andromeda-en",
+    "aura-2-helena-en",
+    "aura-2-apollo-en",
+    "aura-2-arcas-en",
+    "aura-2-aries-en",
+    "aura-2-asteria-en",
+    "aura-2-athena-en",
+    "aura-2-hera-en",
+    "aura-2-hyperion-en",
+    "aura-2-luna-en",
+    "aura-2-orion-en",
+    "aura-2-orpheus-en",
+    "aura-2-ophelia-en",
+    "aura-2-zeus-en",
+    "aura-2-vesta-en",
+]
 
 
 # --------------------------------------------------------------------------- #
@@ -95,6 +117,7 @@ class InterviewConfigCreate(BaseModel):
     module_id: UUID
     persona: PersonaLiteral | None = None
     supported_modes: SupportedModesLiteral = "hybrid"
+    tts_voice: TtsVoiceLiteral | None = None
     time_limit_minutes: int | None = Field(default=None, ge=1)
     max_attempts: int | None = Field(default=None, ge=1)
     cooldown_hours: int | None = Field(default=None, ge=1)
@@ -121,6 +144,7 @@ class InterviewConfigUpdate(BaseModel):
     title: str | None = Field(default=None, max_length=255)
     persona: PersonaLiteral | None = None
     supported_modes: SupportedModesLiteral | None = None
+    tts_voice: TtsVoiceLiteral | None = None
     time_limit_minutes: int | None = Field(default=None, ge=1)
     max_attempts: int | None = Field(default=None, ge=1)
     cooldown_hours: int | None = Field(default=None, ge=1)
@@ -146,6 +170,7 @@ class InterviewConfigAuthoring(InterviewConfigPublic):
 
     status: ConfigStatusLiteral  # type: ignore[assignment]
     supplementary_instructions: str | None = None
+    tts_voice: TtsVoiceLiteral | None = None
     min_outcomes_to_pass: int | None = None
     security_response_policy: SecurityResponsePolicyLiteral = "warn_and_continue"
     security_max_consecutive_attempts: int = 3

@@ -484,9 +484,11 @@ async def narrate_session_text(
     await db.commit()
 
     persona: str | None = None
+    tts_voice: str | None = None
     config = await db.get(InterviewConfig, session.interview_config_id)
     if config is not None:
         persona = config.persona
+        tts_voice = config.tts_voice
 
     settings = get_settings()
     try:
@@ -495,6 +497,7 @@ async def narrate_session_text(
             persona=persona,
             settings=settings,
             language=narration_language,
+            voice=tts_voice,
         )
     except narration_service.NarrationUnavailable as exc:
         raise HTTPException(

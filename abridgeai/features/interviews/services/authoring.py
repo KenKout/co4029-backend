@@ -143,6 +143,7 @@ async def create_interview_config(
         title=data["title"],
         persona=data.get("persona"),
         supported_modes=data.get("supported_modes", "hybrid"),
+        tts_voice=data.get("tts_voice"),
         time_limit_minutes=data.get("time_limit_minutes"),
         max_attempts=data.get("max_attempts"),
         cooldown_hours=data.get("cooldown_hours"),

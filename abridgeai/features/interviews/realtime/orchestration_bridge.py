@@ -157,6 +157,25 @@ async def get_opening_text(session_id: UUID, *, language: str = "en") -> str | N
         return message.content_text
 
 
+async def get_tts_voice(session_id: UUID) -> str | None:
+    """Return the config's chosen Deepgram Aura voice for a voice session.
+
+    ``None`` when the session/config is missing or no voice is set, in which
+    case the runtime falls back to the deployment default.
+    """
+    from abridgeai.features.interviews.models import (  # noqa: PLC0415
+        InterviewConfig,
+        InterviewSession,
+    )
+
+    async with get_sessionmaker()() as db:
+        session = await db.get(InterviewSession, session_id)
+        if session is None:
+            return None
+        config = await db.get(InterviewConfig, session.interview_config_id)
+        return getattr(config, "tts_voice", None) if config is not None else None
+
+
 async def handle_student_turn(
     session_id: UUID,
     student_id: UUID,
