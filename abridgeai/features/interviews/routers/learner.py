@@ -456,7 +456,15 @@ async def narrate_session_text(
         source="narration_boundary",
     )
     narration_key = "narration:" + hashlib.sha256(payload.text.encode()).hexdigest()[:32]
-    narration_language = realtime_service.normalize_language(accept_language)
+    # Narration provider is chosen by the SESSION's interview_language, NOT the
+    # Accept-Language UI locale. An English interview viewed with a Vietnamese
+    # UI must still narrate in English via Deepgram — routing by the header sent
+    # English sessions down the VI gateway path (tts-1), which 403s on this
+    # deployment (no gateway TTS model), forcing a 503 + browser-voice fallback.
+    # interview_language is NOT NULL and constrained to 'en'/'vi'.
+    narration_language = realtime_service.normalize_language(
+        session.interview_language or accept_language
+    )
     guarded_narration = await security_service.guard_student_output(
         db,
         session_id=session_id,
