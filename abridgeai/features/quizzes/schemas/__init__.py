@@ -49,6 +49,11 @@ from abridgeai.features.quizzes.schemas.public import (
     QuizQuestionOptionPublic,
     QuizQuestionPublic,
 )
+from abridgeai.features.quizzes.schemas.feedback import (
+    FeedbackBandIn,
+    FeedbackBandRead,
+    OverallFeedbackRead,
+)
 from abridgeai.features.quizzes.schemas.manual_grading import (
     ManualGradeIn,
     ManualGradeRead,
@@ -128,9 +133,12 @@ __all__ = [
     "QuizResultsRead",
     "QuizResultsSummary",
     "QuizScoreBucket",
+    "FeedbackBandIn",
+    "FeedbackBandRead",
     "ManualGradeIn",
     "ManualGradeRead",
     "NeedsGradingRow",
+    "OverallFeedbackRead",
     "QuizOverrideIn",
     "QuizOverrideRead",
     "RegradeItemRead",

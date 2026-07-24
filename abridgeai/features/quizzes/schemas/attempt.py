@@ -174,6 +174,10 @@ class QuizAttemptReviewRead(BaseModel):
     questions: list[QuizAttemptReviewQuestion]
     # Phase 2: teacher-configurable visibility for the active review window.
     visibility: ReviewVisibilityFlags = ReviewVisibilityFlags()
+    # Phase 8: the matched overall grade-band feedback for this score (or None).
+    # Only populated when the Phase 2 score visibility is on.
+    overall_feedback_text: str | None = None
+    overall_feedback_format: str | None = None
 
 
 class QuizAttemptIntegrityEvent(BaseModel):

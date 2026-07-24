@@ -68,6 +68,8 @@ from abridgeai.features.quizzes.schemas import (
     QuizQuestionAuthoring,
     QuizQuestionBreakdown,
     QuizResultsRead,
+    FeedbackBandIn,
+    FeedbackBandRead,
     ManualGradeIn,
     ManualGradeRead,
     NeedsGradingRow,
@@ -1273,6 +1275,54 @@ async def delete_quiz_override(
     if not deleted:
         raise _not_found("override", override_id)
     await db.commit()
+
+
+class _FeedbackBandsBody(BaseModel):
+    model_config = {"extra": "forbid"}
+    bands: list[FeedbackBandIn] = Field(default_factory=list)
+
+
+@router.get(
+    "/quizzes/{quiz_id}/feedback-bands",
+    response_model=list[FeedbackBandRead],
+)
+async def list_feedback_bands(
+    quiz_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_QUIZ)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> list[FeedbackBandRead]:
+    """List a quiz's grade-band feedback rows (Phase 8)."""
+    del current_user
+    from abridgeai.features.quizzes.services import feedback as _fb  # noqa: PLC0415
+
+    rows = await _fb.list_bands(db, quiz_id)
+    return [FeedbackBandRead.model_validate(r) for r in rows]
+
+
+@router.put(
+    "/quizzes/{quiz_id}/feedback-bands",
+    response_model=list[FeedbackBandRead],
+)
+async def set_feedback_bands(
+    quiz_id: UUID,
+    body: _FeedbackBandsBody,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_QUIZ)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> list[FeedbackBandRead]:
+    """Wholesale-replace a quiz's grade bands. Overlapping bands → 422."""
+    del current_user
+    from abridgeai.features.quizzes.services import feedback as _fb  # noqa: PLC0415
+
+    try:
+        rows = await _fb.set_feedback_bands(db, quiz_id=quiz_id, bands=body.bands)
+    except NotFoundError as exc:
+        raise _not_found("quiz", quiz_id) from exc
+    except AppError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
+        ) from exc
+    await db.commit()
+    return [FeedbackBandRead.model_validate(r) for r in rows]
 
 
 __all__ = [

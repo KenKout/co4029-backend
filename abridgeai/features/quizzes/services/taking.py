@@ -740,6 +740,20 @@ async def get_attempt_review(
         attempt_read.passed = None
         attempt_read.correct_count = None
 
+    # Phase 8: attach the matched overall grade-band feedback, but only when the
+    # score is visible (feedback is a review-time disclosure like the score).
+    overall_text: str | None = None
+    overall_format: str | None = None
+    if vis.show_score:
+        from abridgeai.features.quizzes.services import feedback as _fb  # noqa: PLC0415
+
+        band = await _fb.select_overall_feedback(
+            db, quiz_id=attempt.quiz_id, score_percent=attempt.score_percent
+        )
+        if band is not None:
+            overall_text = band.feedback_text
+            overall_format = band.feedback_format
+
     return QuizAttemptReviewRead(
         attempt=attempt_read,
         questions=review_questions,
@@ -750,6 +764,8 @@ async def get_attempt_review(
             show_explanation=vis.show_explanation,
             show_points=vis.show_points,
         ),
+        overall_feedback_text=overall_text,
+        overall_feedback_format=overall_format,
     )
 
 
