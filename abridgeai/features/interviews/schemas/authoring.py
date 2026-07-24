@@ -303,6 +303,13 @@ class InterviewGenerationRequest(BaseModel):
     avoid_topics: list[str] = []
     persona: PersonaLiteral | None = None
     supplementary_instructions: str | None = None
+    # Optional subset of the interview's OWN rubric outcomes
+    # (:class:`InterviewOutcome`) to target. Empty = use every outcome (the
+    # prior behaviour). When non-empty, the generation pipeline filters the
+    # outcomes it feeds the ideation stage to just these ids, so a teacher can
+    # focus a run on specific criteria. Flows into ``config_json`` via the
+    # router's ``model_dump`` — the pipeline reads it back from there.
+    target_outcome_ids: list[UUID] = []
 
 
 class InterviewGenerationRunPublic(BaseModel):
