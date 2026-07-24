@@ -638,6 +638,24 @@ async def respond_to_session(
             detail={"error": "internal_error", "message": "Unable to save this turn"},
         ) from exc
     next_question = result.get("next_question")
+    # Server-authoritative timer (resilience A-Tier-1 #4): return the current
+    # whole-second countdown on every turn so the client reconciles its locally
+    # computed deadline against the server clock instead of trusting a value
+    # captured once at start. Best-effort — a lookup failure must never fail the
+    # turn (the answer is already committed), so fall back to None.
+    remaining_seconds: int | None = None
+    try:
+        fresh_session = await taking_service.get_session_for_user(
+            db, session_id, current_user.user_id
+        )
+        if fresh_session is not None:
+            remaining_seconds = await taking_service.session_time_remaining_seconds(
+                db, fresh_session
+            )
+    except Exception:  # noqa: BLE001 -- timer reconciliation is advisory, never fatal
+        logger.warning(
+            "respond_to_session: time-remaining lookup failed (session=%s)", session_id
+        )
     return InterviewSubmitAnswerResponse(
         # ── legacy fields (always present; unchanged for existing clients) ───
         next_question=(
@@ -647,7 +665,7 @@ async def respond_to_session(
         ),
         is_finished=bool(result.get("is_finished")),
         ai_followup_text=result.get("followup_text"),
-        time_remaining_seconds=None,
+        time_remaining_seconds=remaining_seconds,
         # ── adaptive structured fields (None on the legacy/sequential path) ──
         ai_turn_text=result.get("ai_turn_text"),
         language=result.get("language"),
