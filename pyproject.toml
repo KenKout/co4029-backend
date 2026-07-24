@@ -129,6 +129,10 @@ max-complexity = 12
 # app. Legitimately writes to stdout (T20), uses a timeout kwarg on its own
 # async helpers (ASYNC109), and does sync pathlib in async setup (ASYNC240).
 "scripts/voice_harness/**/*.py" = ["T20", "E501", "ASYNC109", "ASYNC240", "C901"]
+# Security replay harness — a manual-trigger CLI for the security-hardening
+# workstream. Legitimately writes to stdout (T20) and has long usage lines
+# (E501); imports the corpus loader from the tests tree via sys.path (E402).
+"scripts/security_replay.py" = ["T20", "E501", "E402", "I001"]
 
 [tool.mypy]
 python_version = "3.12"
