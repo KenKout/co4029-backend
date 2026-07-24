@@ -619,6 +619,13 @@ async def _finalize_attempt(
     attempt.score_percent = score_percent
     attempt.passed = score_percent >= quiz.passing_score_percent
     await flush_or_conflict(db)
+    # Phase 9: refresh the student's materialised grade-of-record from all their
+    # completed attempts (grading_method-aware). Participates in this transaction.
+    from abridgeai.features.quizzes.services.gradebook import (  # noqa: PLC0415
+        recompute_final_grade,
+    )
+
+    await recompute_final_grade(db, quiz, attempt.student_id)
     await db.refresh(attempt)
     setattr(attempt, "correct_count", correct_count)  # noqa: B010 -- dynamic, not column
     setattr(attempt, "total_questions", question_count)  # noqa: B010 -- dynamic, not column

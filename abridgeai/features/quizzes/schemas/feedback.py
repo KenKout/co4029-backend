@@ -58,9 +58,23 @@ class OverallFeedbackRead(BaseModel):
     feedback_format: str
 
 
+class QuizGradeRow(BaseModel):
+    """One student's materialised grade-of-record for a quiz (Phase 9)."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    student_id: UUID
+    grade_percent: Decimal
+    grade_points: Decimal
+    passed: bool
+    grading_method: str
+    based_on_attempt_id: UUID | None = None
+    attempts_counted: int
+
+
 __all__ = [
     "FeedbackBandIn",
     "FeedbackBandRead",
-    "FeedbackBandsIn",
     "OverallFeedbackRead",
+    "QuizGradeRow",
 ]

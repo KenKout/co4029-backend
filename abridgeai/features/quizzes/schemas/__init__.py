@@ -53,6 +53,7 @@ from abridgeai.features.quizzes.schemas.feedback import (
     FeedbackBandIn,
     FeedbackBandRead,
     OverallFeedbackRead,
+    QuizGradeRow,
 )
 from abridgeai.features.quizzes.schemas.manual_grading import (
     ManualGradeIn,
@@ -139,6 +140,7 @@ __all__ = [
     "ManualGradeRead",
     "NeedsGradingRow",
     "OverallFeedbackRead",
+    "QuizGradeRow",
     "QuizOverrideIn",
     "QuizOverrideRead",
     "RegradeItemRead",

@@ -70,6 +70,7 @@ from abridgeai.features.quizzes.schemas import (
     QuizResultsRead,
     FeedbackBandIn,
     FeedbackBandRead,
+    QuizGradeRow,
     ManualGradeIn,
     ManualGradeRead,
     NeedsGradingRow,
@@ -1323,6 +1324,23 @@ async def set_feedback_bands(
         ) from exc
     await db.commit()
     return [FeedbackBandRead.model_validate(r) for r in rows]
+
+
+@router.get(
+    "/quizzes/{quiz_id}/gradebook",
+    response_model=list[QuizGradeRow],
+)
+async def get_quiz_gradebook(
+    quiz_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_QUIZ)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> list[QuizGradeRow]:
+    """List every student's materialised grade-of-record for a quiz (Phase 9)."""
+    del current_user
+    from abridgeai.features.quizzes.services import gradebook as _gb  # noqa: PLC0415
+
+    rows = await _gb.list_quiz_grades(db, quiz_id)
+    return [QuizGradeRow.model_validate(r) for r in rows]
 
 
 __all__ = [

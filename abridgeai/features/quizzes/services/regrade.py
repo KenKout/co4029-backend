@@ -320,6 +320,15 @@ async def commit_regrade(
         attempt.score_percent = score_percent
         attempt.passed = score_percent >= quiz.passing_score_percent
 
+    # Phase 9: refresh the materialised grade-of-record for each affected student
+    # (dedup — grade is per student, not per attempt).
+    from abridgeai.features.quizzes.services.gradebook import (  # noqa: PLC0415
+        recompute_final_grade,
+    )
+
+    for student_id in {a.student_id for a in attempts}:
+        await recompute_final_grade(db, quiz, student_id)
+
     if reconcile_sr:
         # SM-2 reconciliation is deferred behind a flag (v1 default off). Re-firing
         # a card review here risks double-counting; we log intent instead so the
