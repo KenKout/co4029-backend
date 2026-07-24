@@ -87,6 +87,7 @@ from abridgeai.features.courses.routers import (
 from abridgeai.features.courses.routers import (
     me_courses_router,
 )
+from abridgeai.features.discussions.router import router as discussions_router
 from abridgeai.features.enrollments.routers import (
     assignment_dept_router as enrollments_dept_router,
 )
@@ -263,6 +264,9 @@ def create_app() -> FastAPI:
     app.include_router(materials_learner_router, prefix=API_V1_PREFIX)
     app.include_router(materials_authoring_router, prefix=API_V1_PREFIX)
     app.include_router(materials_upload_router, prefix=API_V1_PREFIX)
+
+    # Lesson discussions (teacher topics + student comments)
+    app.include_router(discussions_router, prefix=API_V1_PREFIX)
 
     # Phase 5 -- quizzes
     app.include_router(quizzes_learner_router, prefix=API_V1_PREFIX)

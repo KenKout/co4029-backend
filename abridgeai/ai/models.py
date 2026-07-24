@@ -139,7 +139,7 @@ class ProcessingJob(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
 
 class AIModelPricing(UUIDPrimaryKeyMixin, TimestampMixin, Base):
-    """Admin-configurable USD-per-1k-token pricing for one model.
+    """Admin-configurable USD-per-1M-token pricing for one model.
 
     Replaces the hand-maintained ``abridgeai.ai.llm.pricing.PRICE_TABLE``
     dict: cost computation now reads this table (cached in-process with a
@@ -151,13 +151,13 @@ class AIModelPricing(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
     __tablename__ = "ai_model_pricing"
     __table_args__ = (
-        CheckConstraint("input_usd_per_1k >= 0", name="ck_ai_model_pricing_input_nonneg"),
-        CheckConstraint("output_usd_per_1k >= 0", name="ck_ai_model_pricing_output_nonneg"),
+        CheckConstraint("input_usd_per_1m >= 0", name="ck_ai_model_pricing_input_nonneg"),
+        CheckConstraint("output_usd_per_1m >= 0", name="ck_ai_model_pricing_output_nonneg"),
     )
 
     model_name: Mapped[str] = mapped_column(String(100), nullable=False, unique=True, index=True)
-    input_usd_per_1k: Mapped[Decimal] = mapped_column(Numeric(12, 6), nullable=False)
-    output_usd_per_1k: Mapped[Decimal] = mapped_column(Numeric(12, 6), nullable=False)
+    input_usd_per_1m: Mapped[Decimal] = mapped_column(Numeric(14, 6), nullable=False)
+    output_usd_per_1m: Mapped[Decimal] = mapped_column(Numeric(14, 6), nullable=False)
     notes: Mapped[str | None] = mapped_column(String(255))
     updated_by: Mapped[uuid.UUID | None] = mapped_column(
         PGUUID(as_uuid=True),
@@ -176,7 +176,8 @@ class GenerationRun(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "generation_runs"
     __table_args__ = (
         CheckConstraint(
-            "generation_type IN ('quiz', 'interview', 'knowledge_graph', 'material_index')",
+            "generation_type IN ('quiz', 'interview', 'knowledge_graph', "
+            "'material_index', 'interview_evaluation')",
             name="ck_generation_runs_type",
         ),
         CheckConstraint(

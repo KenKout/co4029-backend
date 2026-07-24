@@ -37,6 +37,102 @@ def _archived_filter(
     return status_col != "archived"
 
 
+async def count_students_and_modules_for_courses(
+    db: AsyncSession, course_ids: list[UUID]
+) -> dict[UUID, tuple[int, int]]:
+    """Batch-count active students + published/draft modules per course.
+
+    Returns ``{course_id: (student_count, module_count)}`` for every id in
+    ``course_ids``. Two grouped aggregate queries (one per table) keep this
+    O(1) round-trips regardless of course count — no N+1. Courses with no
+    enrollments / modules are backfilled to ``(0, 0)`` by the caller.
+
+    * student_count = enrollments with ``status='active'`` (matches the
+      roster's "active students" definition; dropped/completed excluded).
+    * module_count = modules not soft-deleted (any status).
+    """
+    result: dict[UUID, tuple[int, int]] = {cid: (0, 0) for cid in course_ids}
+    if not course_ids:
+        return result
+
+    student_stmt = (
+        select(Enrollment.course_id, func.count().label("n"))
+        .where(Enrollment.course_id.in_(course_ids), Enrollment.status == "active")
+        .group_by(Enrollment.course_id)
+    )
+    for course_id, n in (await db.execute(student_stmt)).all():
+        _students, modules = result[course_id]
+        result[course_id] = (int(n), modules)
+
+    module_stmt = (
+        select(Module.course_id, func.count().label("n"))
+        .where(Module.course_id.in_(course_ids), Module.deleted_at.is_(None))
+        .group_by(Module.course_id)
+    )
+    for course_id, n in (await db.execute(module_stmt)).all():
+        students, _modules = result[course_id]
+        result[course_id] = (students, int(n))
+
+    return result
+
+
+async def count_pending_grading_for_courses(
+    db: AsyncSession, course_ids: list[UUID]
+) -> tuple[int, int]:
+    """Count ungraded quiz attempts + pending interview evaluations.
+
+    Returns ``(ungraded_quizzes, pending_interviews)`` summed across all
+    ``course_ids``. Two aggregate queries, no N+1:
+
+    * ungraded_quizzes = quiz attempts with ``status='submitted'`` and
+      ``passed IS NULL`` (submitted but not yet graded) whose quiz belongs to
+      one of the courses.
+    * pending_interviews = interview sessions in a terminal-but-ungraded state
+      (``status IN ('completed','timed_out')`` and ``pass_verdict IS NULL``)
+      whose config belongs to one of the courses.
+
+    Both power the teacher dashboard's actionable "needs grading" widgets.
+    """
+    # Local imports keep the cross-feature model dependency out of module load
+    # order (quizzes / interviews import courses, not the other way around).
+    from abridgeai.features.interviews.models import (
+        InterviewConfig,
+        InterviewSession,
+    )
+    from abridgeai.features.quizzes.models import Quiz, QuizAttempt
+
+    if not course_ids:
+        return (0, 0)
+
+    quiz_stmt = (
+        select(func.count())
+        .select_from(QuizAttempt)
+        .join(Quiz, Quiz.id == QuizAttempt.quiz_id)
+        .where(
+            Quiz.course_id.in_(course_ids),
+            Quiz.deleted_at.is_(None),
+            QuizAttempt.status == "submitted",
+            QuizAttempt.passed.is_(None),
+        )
+    )
+    ungraded_quizzes = int((await db.execute(quiz_stmt)).scalar_one())
+
+    interview_stmt = (
+        select(func.count())
+        .select_from(InterviewSession)
+        .join(InterviewConfig, InterviewConfig.id == InterviewSession.interview_config_id)
+        .where(
+            InterviewConfig.course_id.in_(course_ids),
+            InterviewConfig.deleted_at.is_(None),
+            InterviewSession.status.in_(("completed", "timed_out")),
+            InterviewSession.pass_verdict.is_(None),
+        )
+    )
+    pending_interviews = int((await db.execute(interview_stmt)).scalar_one())
+
+    return (ungraded_quizzes, pending_interviews)
+
+
 async def list_courses_for_owner(
     db: AsyncSession,
     user_id: UUID,
@@ -147,7 +243,21 @@ async def list_modules_for_authoring(db: AsyncSession, course_id: UUID) -> list[
 
 
 async def list_lessons_for_authoring(db: AsyncSession, module_id: UUID) -> list[Lesson]:
-    stmt = select(Lesson).where(Lesson.module_id == module_id).order_by(Lesson.title)
+    """Lessons that are LIVE members of ``module_id``.
+
+    Membership is defined by a non-soft-deleted ``ModuleItem`` link, NOT by
+    ``Lesson.module_id`` alone. Deleting a module item soft-deletes only the
+    link (the lesson row survives, keeping its ``module_id``); joining through
+    ``ModuleItem`` lets the T0.7 ``with_loader_criteria`` soft-delete filter
+    drop lessons whose only link was removed — otherwise a deleted item keeps
+    reappearing in the quiz-generation source picker.
+    """
+    stmt = (
+        select(Lesson)
+        .join(ModuleItem, ModuleItem.lesson_id == Lesson.id)
+        .where(ModuleItem.module_id == module_id)
+        .order_by(Lesson.title)
+    )
     return list((await db.execute(stmt)).scalars().all())
 
 
@@ -211,6 +321,25 @@ async def get_authoring_resource_storage_target(
             LessonResource.id == resource_id,
             LessonResource.deleted_at.is_(None),
         )
+    )
+    row = (await db.execute(stmt)).one_or_none()
+    if row is None:
+        return None
+    return row.bucket, row.object_key
+
+
+async def get_course_thumbnail_storage_target(
+    db: AsyncSession, course_id: UUID
+) -> tuple[str, str] | None:
+    """Bucket + object_key for a course's thumbnail image, or ``None``.
+
+    Joins ``courses.thumbnail_object_id → storage_objects.id``. Returns
+    ``None`` when the course has no thumbnail set.
+    """
+    stmt = (
+        select(StorageObject.bucket, StorageObject.object_key)
+        .join(Course, Course.thumbnail_object_id == StorageObject.id)
+        .where(Course.id == course_id)
     )
     row = (await db.execute(stmt)).one_or_none()
     if row is None:

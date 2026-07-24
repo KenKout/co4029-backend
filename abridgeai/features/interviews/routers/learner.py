@@ -122,6 +122,7 @@ async def get_interview_for_taking(
 
     from abridgeai.features.interviews.models import (  # noqa: PLC0415
         InterviewConfig,
+        InterviewOutcome,
         InterviewQuestion,
         InterviewSession,
     )
@@ -153,6 +154,17 @@ async def get_interview_for_taking(
             .limit(1)
         )
     ).scalar_one_or_none()
+    # Count-only signal: how many rubric criteria this interview assesses. We
+    # count rows rather than fetch them so no outcome text / weight / threshold
+    # is materialized in the learner path (see InterviewForTakingPublic docs).
+    outcome_count = (
+        await db.execute(
+            select(func.count(InterviewOutcome.id)).where(
+                InterviewOutcome.interview_config_id == config_id,
+                InterviewOutcome.deleted_at.is_(None),
+            )
+        )
+    ).scalar_one()
     return InterviewForTakingPublic(
         config=InterviewConfigPublic.model_validate(config),
         first_question=(
@@ -160,6 +172,7 @@ async def get_interview_for_taking(
             if first_question is not None
             else None
         ),
+        outcome_count=int(outcome_count),
     )
 
 
@@ -443,7 +456,15 @@ async def narrate_session_text(
         source="narration_boundary",
     )
     narration_key = "narration:" + hashlib.sha256(payload.text.encode()).hexdigest()[:32]
-    narration_language = realtime_service.normalize_language(accept_language)
+    # Narration provider is chosen by the SESSION's interview_language, NOT the
+    # Accept-Language UI locale. An English interview viewed with a Vietnamese
+    # UI must still narrate in English via Deepgram — routing by the header sent
+    # English sessions down the VI gateway path (tts-1), which 403s on this
+    # deployment (no gateway TTS model), forcing a 503 + browser-voice fallback.
+    # interview_language is NOT NULL and constrained to 'en'/'vi'.
+    narration_language = realtime_service.normalize_language(
+        session.interview_language or accept_language
+    )
     guarded_narration = await security_service.guard_student_output(
         db,
         session_id=session_id,
@@ -463,9 +484,11 @@ async def narrate_session_text(
     await db.commit()
 
     persona: str | None = None
+    tts_voice: str | None = None
     config = await db.get(InterviewConfig, session.interview_config_id)
     if config is not None:
         persona = config.persona
+        tts_voice = config.tts_voice
 
     settings = get_settings()
     try:
@@ -474,6 +497,7 @@ async def narrate_session_text(
             persona=persona,
             settings=settings,
             language=narration_language,
+            voice=tts_voice,
         )
     except narration_service.NarrationUnavailable as exc:
         raise HTTPException(
@@ -540,6 +564,9 @@ async def get_session(
     session = await taking_service.get_session_for_user(db, session_id, current_user.user_id)
     if session is None:
         raise _not_found("interview_session", session_id)
+    retake = await taking_service.compute_retake_status(
+        db, config_id=session.interview_config_id, student_id=current_user.user_id
+    )
     return InterviewSessionPublic(
         session_id=session.id,
         interview_config_id=session.interview_config_id,
@@ -555,6 +582,9 @@ async def get_session(
         current_question_index=None,
         time_remaining_seconds=await taking_service.session_time_remaining_seconds(db, session),
         pass_verdict=session.pass_verdict,
+        remaining_attempts=retake.remaining_attempts,
+        retake_available_at=retake.retake_available_at,
+        can_retake=retake.can_retake,
     )
 
 
@@ -625,6 +655,24 @@ async def respond_to_session(
             detail={"error": "internal_error", "message": "Unable to save this turn"},
         ) from exc
     next_question = result.get("next_question")
+    # Server-authoritative timer (resilience A-Tier-1 #4): return the current
+    # whole-second countdown on every turn so the client reconciles its locally
+    # computed deadline against the server clock instead of trusting a value
+    # captured once at start. Best-effort — a lookup failure must never fail the
+    # turn (the answer is already committed), so fall back to None.
+    remaining_seconds: int | None = None
+    try:
+        fresh_session = await taking_service.get_session_for_user(
+            db, session_id, current_user.user_id
+        )
+        if fresh_session is not None:
+            remaining_seconds = await taking_service.session_time_remaining_seconds(
+                db, fresh_session
+            )
+    except Exception:  # noqa: BLE001 -- timer reconciliation is advisory, never fatal
+        logger.warning(
+            "respond_to_session: time-remaining lookup failed (session=%s)", session_id
+        )
     return InterviewSubmitAnswerResponse(
         # ── legacy fields (always present; unchanged for existing clients) ───
         next_question=(
@@ -634,7 +682,7 @@ async def respond_to_session(
         ),
         is_finished=bool(result.get("is_finished")),
         ai_followup_text=result.get("followup_text"),
-        time_remaining_seconds=None,
+        time_remaining_seconds=remaining_seconds,
         # ── adaptive structured fields (None on the legacy/sequential path) ──
         ai_turn_text=result.get("ai_turn_text"),
         language=result.get("language"),
@@ -706,6 +754,9 @@ async def finish_session(
     # the additive ceremony field self-healing for older terminal sessions that
     # predate persisted closing turns.
     await db.commit()
+    retake = await taking_service.compute_retake_status(
+        db, config_id=session.interview_config_id, student_id=current_user.user_id
+    )
     return InterviewSessionFinishResponse(
         session_id=session.id,
         status=session.status,
@@ -714,6 +765,9 @@ async def finish_session(
         rubric_scores=[],
         pass_verdict=session.pass_verdict,
         ended_at=session.ended_at,
+        remaining_attempts=retake.remaining_attempts,
+        retake_available_at=retake.retake_available_at,
+        can_retake=retake.can_retake,
     )
 
 

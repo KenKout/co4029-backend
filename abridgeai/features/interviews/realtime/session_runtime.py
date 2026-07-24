@@ -27,11 +27,12 @@ from livekit.agents import (
     StopResponse,
     get_job_context,
 )
-from livekit.plugins import openai, silero
+from livekit.plugins import deepgram, openai, silero
 
 from abridgeai.core.config import Settings
 from abridgeai.features.interviews.realtime import observability as obs
 from abridgeai.features.interviews.realtime import orchestration_bridge as bridge
+from abridgeai.features.interviews.services import narration
 
 logger = logging.getLogger(__name__)
 
@@ -227,16 +228,61 @@ class InterviewAgent(Agent):
         )
 
 
-def build_agent_session(settings: Settings) -> AgentSession[None]:
-    """Construct the STT→(brain)→TTS pipeline.
+def _is_english(language: str) -> bool:
+    """True when the session language is English (the only Deepgram voice locale).
 
-    STT/TTS reuse the OpenAI-compatible LLM credentials (same key/base_url as
-    the gateway). silero VAD handles turn detection (KISS — no turn-detector
-    model until manual E2E shows it is needed).
+    Deepgram Aura TTS is English-only and Deepgram STT (nova-2/3) does not list
+    Vietnamese, so VI sessions must fall back to the OpenAI-compatible gateway.
+    This mirrors the REST narration policy in ``services/narration.py``.
     """
+    return not language.lower().startswith("vi")
+
+
+def build_agent_session(
+    settings: Settings, *, language: str = "en", voice: str | None = None
+) -> AgentSession[None]:
+    """Construct the STT→(brain)→TTS pipeline, language-aware.
+
+    Voice provider is chosen by session language:
+
+    * **English** → Deepgram (STT ``nova-2``/configured model + Aura-2 TTS).
+      Deepgram gives lower-latency streaming STT and natural Aura voices.
+    * **Vietnamese** (or any non-English) → the OpenAI-compatible gateway,
+      because Deepgram Aura TTS is English-only and Deepgram STT does not
+      support Vietnamese. This matches the REST narration fallback policy.
+
+    ``voice`` is the config's chosen Deepgram Aura voice (English only),
+    validated against the narration allow-list; an unknown/absent value
+    degrades to the deployment default. No effect on the Vietnamese gateway.
+
+    silero VAD handles turn detection for both (KISS — no turn-detector model
+    until manual E2E shows it is needed).
+    """
+    if _is_english(language) and settings.deepgram_api_key is not None:
+        dg_key = settings.deepgram_api_key.get_secret_value()
+        # Deepgram plugin base URLs are the /listen and /speak endpoints; the
+        # configured settings store the /v1 root, so append the operation path.
+        stt_base = f"{settings.deepgram_stt_base_url.rstrip('/')}/listen"
+        tts_base = f"{settings.deepgram_tts_base_url.rstrip('/')}/speak"
+        return AgentSession[None](
+            stt=deepgram.STT(
+                model=settings.deepgram_stt_model,
+                language="en-US",
+                api_key=dg_key,
+                base_url=stt_base,
+            ),
+            tts=deepgram.TTS(
+                model=narration.resolve_tts_voice(voice, settings=settings),
+                api_key=dg_key,
+                base_url=tts_base,
+            ),
+            vad=silero.VAD.load(),
+        )
+
+    # Non-English (Vietnamese) — Deepgram cannot serve this locale; use the
+    # OpenAI-compatible gateway for both STT and TTS (same key/base_url).
     api_key = settings.llm_api_key or NOT_GIVEN
     base_url = settings.llm_base_url or NOT_GIVEN
-
     return AgentSession[None](
         stt=openai.STT(model=settings.whisper_model, api_key=api_key, base_url=base_url),
         tts=openai.TTS(api_key=api_key, base_url=base_url),

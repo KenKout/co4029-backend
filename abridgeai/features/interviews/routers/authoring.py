@@ -61,6 +61,8 @@ from abridgeai.features.interviews.schemas import (
     InterviewForAuthoringPublic,
     InterviewGenerationRequest,
     InterviewGenerationRunPublic,
+    InterviewIntegrityEvent,
+    InterviewIntegrityRead,
     InterviewOutcomeAuthoring,
     InterviewOutcomeCreate,
     InterviewQuestionAuthoring,
@@ -866,6 +868,31 @@ async def get_session_transcript(
         for m in messages
     ]
     return InterviewTranscriptRead(session_id=session_id, turns=turns)
+
+
+@router.get(
+    "/interview-sessions/{session_id}/integrity-events",
+    response_model=InterviewIntegrityRead,
+)
+async def get_session_integrity_events(
+    session_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_SESSION_AUTHORING)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> InterviewIntegrityRead:
+    """FR-5.8 proctoring timeline for teacher post-session integrity review.
+
+    Returns the session's ``assessment_integrity_events`` (focus_lost /
+    tab_switch / fullscreen_exit / reconnect / disconnect), oldest first.
+    Teacher-only (course-scoped authoring access); never exposed to students.
+    """
+    del current_user
+    from abridgeai.features.interviews.queries import sessions as _sessions_q  # noqa: PLC0415
+
+    rows = await _sessions_q.list_integrity_events_for_session(db, session_id)
+    return InterviewIntegrityRead(
+        session_id=session_id,
+        events=[InterviewIntegrityEvent.model_validate(ev) for ev in rows],
+    )
 
 
 @router.get(

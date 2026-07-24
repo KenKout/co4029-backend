@@ -24,8 +24,8 @@ def _to_dict(row: AIModelPricing) -> dict[str, Any]:
     return {
         "id": row.id,
         "model_name": row.model_name,
-        "input_usd_per_1k": float(row.input_usd_per_1k),
-        "output_usd_per_1k": float(row.output_usd_per_1k),
+        "input_usd_per_1m": float(row.input_usd_per_1m),
+        "output_usd_per_1m": float(row.output_usd_per_1m),
         "notes": row.notes,
         "updated_by": row.updated_by,
         "created_at": row.created_at,
@@ -46,15 +46,15 @@ async def create_pricing(
     db: AsyncSession,
     *,
     model_name: str,
-    input_usd_per_1k: Decimal,
-    output_usd_per_1k: Decimal,
+    input_usd_per_1m: Decimal,
+    output_usd_per_1m: Decimal,
     notes: str | None,
     updated_by: UUID | None,
 ) -> dict[str, Any]:
     row = AIModelPricing(
         model_name=model_name,
-        input_usd_per_1k=input_usd_per_1k,
-        output_usd_per_1k=output_usd_per_1k,
+        input_usd_per_1m=input_usd_per_1m,
+        output_usd_per_1m=output_usd_per_1m,
         notes=notes,
         updated_by=updated_by,
     )
@@ -73,8 +73,8 @@ async def update_pricing(
     db: AsyncSession,
     pricing_id: UUID,
     *,
-    input_usd_per_1k: Decimal | None,
-    output_usd_per_1k: Decimal | None,
+    input_usd_per_1m: Decimal | None,
+    output_usd_per_1m: Decimal | None,
     notes: str | None,
     notes_provided: bool,
     updated_by: UUID | None,
@@ -85,10 +85,10 @@ async def update_pricing(
     if row is None:
         raise NotFoundError(f"pricing row '{pricing_id}' not found")
 
-    if input_usd_per_1k is not None:
-        row.input_usd_per_1k = input_usd_per_1k
-    if output_usd_per_1k is not None:
-        row.output_usd_per_1k = output_usd_per_1k
+    if input_usd_per_1m is not None:
+        row.input_usd_per_1m = input_usd_per_1m
+    if output_usd_per_1m is not None:
+        row.output_usd_per_1m = output_usd_per_1m
     if notes_provided:
         row.notes = notes
     row.updated_by = updated_by

@@ -66,7 +66,13 @@ from abridgeai.core.observability import (
 )
 from abridgeai.features.materials.ingestion.progress import publish_progress
 from abridgeai.features.materials.models import LearningMaterialVersion
+from abridgeai.features.materials.services.completion_notify import (
+    notify_material_processing_outcome,
+)
 from abridgeai.features.materials.workers.enqueue import enqueue_material_ingest
+from abridgeai.features.quizzes.services.completion_notify import (
+    notify_quiz_generation_outcome,
+)
 
 _logger = get_logger(__name__)
 
@@ -161,6 +167,9 @@ async def _run_reconcile(*, arq_pool: Any) -> None:
     requeued = 0
     failed = 0
     inspected = 0
+    # material_version_ids the reaper gives up on this tick; the initiating
+    # teacher is notified AFTER the terminal commit (best-effort, decoupled).
+    versions_to_notify: list[UUID] = []
 
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as db:
@@ -215,6 +224,8 @@ async def _run_reconcile(*, arq_pool: Any) -> None:
                     stage_label="reaper",
                     detail="auto-recovery exhausted",
                 )
+                if version_id is not None:
+                    versions_to_notify.append(version_id)
                 _logger.warning(
                     "reaper_job_failed_exhausted",
                     processing_job_id=str(job.id),
@@ -276,6 +287,27 @@ async def _run_reconcile(*, arq_pool: Any) -> None:
         # per row above).
         await db.commit()
 
+    # Notify each teacher whose ingest the reaper gave up on (best-effort; a
+    # fresh session so it's decoupled from the reaper's terminal commit above).
+    if versions_to_notify:
+        async with sessionmaker() as notify_db:
+            for version_id in versions_to_notify:
+                # Recipient is the version's uploader.
+                version = await notify_db.get(LearningMaterialVersion, version_id)
+                if version is None:
+                    continue
+                await notify_material_processing_outcome(
+                    notify_db,
+                    recipient_user_id=version.uploaded_by,
+                    material_version_id=version_id,
+                    succeeded=False,
+                    error_message=(
+                        "Automatic recovery gave up; please reprocess the material."
+                    ),
+                    arq_pool=arq_pool,
+                )
+            await notify_db.commit()
+
     del settings  # reserved for future per-env tuning
     _logger.info(
         "reaper_run_completed",
@@ -297,6 +329,18 @@ _QUIZ_MAX_REQUEUE_ATTEMPTS = 2
 # ARQ set — long enough that a healthy in-flight run is never reaped.
 _QUIZ_ORPHAN_GRACE_SECONDS = 300
 _QUIZ_STUCK_STATUSES = ("pending", "running")
+
+
+def _coerce_uuid(value: object) -> UUID | None:
+    """Best-effort coerce a config_json value into a UUID (or None)."""
+    if isinstance(value, UUID):
+        return value
+    if isinstance(value, str):
+        try:
+            return UUID(value)
+        except ValueError:
+            return None
+    return None
 
 
 async def _live_quiz_run_ids(redis: Any) -> set[UUID]:
@@ -356,6 +400,10 @@ async def _run_reconcile_quiz(*, arq_pool: Any) -> None:
     requeued = 0
     failed = 0
     inspected = 0
+    # (recipient_user_id, course_id, quiz_id) for each run the reaper gives up
+    # on this tick. Notifications are dispatched AFTER the terminal commit so a
+    # notify failure can't roll back the fail-state write.
+    to_notify: list[tuple[UUID | None, UUID | None, UUID | None]] = []
 
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as db:
@@ -412,6 +460,11 @@ async def _run_reconcile_quiz(*, arq_pool: Any) -> None:
                     }
                 }
                 failed += 1
+                # quiz_id (from config_json) + course_id (on the run) feed the
+                # notification deep-link. Queue the notify for after the commit.
+                to_notify.append(
+                    (run.requested_by, run.course_id, _coerce_uuid(config.get("quiz_id")))
+                )
                 _logger.warning(
                     "reaper_quiz_run_failed_exhausted",
                     generation_run_id=str(run.id),
@@ -449,6 +502,23 @@ async def _run_reconcile_quiz(*, arq_pool: Any) -> None:
             )
 
         await db.commit()
+
+    # Notify each teacher whose run the reaper gave up on (best-effort; a fresh
+    # session so it's fully decoupled from the reaper's terminal commit above).
+    if to_notify:
+        async with sessionmaker() as notify_db:
+            for recipient_id, course_id, quiz_id in to_notify:
+                await notify_quiz_generation_outcome(
+                    notify_db,
+                    recipient_user_id=recipient_id,
+                    quiz_id=quiz_id,
+                    course_id=course_id,
+                    quiz_title=None,
+                    succeeded=False,
+                    error_message="Automatic recovery gave up; please retry generation.",
+                    arq_pool=arq_pool,
+                )
+            await notify_db.commit()
 
     _logger.info(
         "reaper_quiz_run_completed",

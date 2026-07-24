@@ -17,6 +17,7 @@ round-trips, no lazy-load risk in async context.
 
 from __future__ import annotations
 
+from datetime import datetime
 from uuid import UUID
 
 from sqlalchemy import select, text
@@ -137,9 +138,95 @@ async def get_lesson_processing_summary(db: AsyncSession, lesson_id: UUID) -> di
     }
 
 
+async def get_material_including_deleted(
+    db: AsyncSession, material_id: UUID
+) -> LearningMaterial | None:
+    """Material-by-id that bypasses the T0.7 soft-delete loader filter.
+
+    Unlike :func:`get_material_for_authoring` (which is gated by the
+    ``deleted_at IS NULL`` listener), this surfaces tombstoned rows so the
+    restore flow can find and revive them. Mirrors the courses feature's
+    ``get_course_including_deleted``.
+    """
+    stmt = (
+        select(LearningMaterial)
+        .where(LearningMaterial.id == material_id)
+        .execution_options(include_deleted=True)
+    )
+    return (await db.execute(stmt)).scalar_one_or_none()
+
+
+async def restore_soft_deleted_material(db: AsyncSession, material_id: UUID) -> bool:
+    """Clear ``deleted_at`` / ``deleted_by`` on the material AND its versions.
+
+    ``soft_delete_material`` cascades the tombstone to every version, so a
+    faithful restore must lift it on both. Returns ``False`` when there is no
+    soft-deleted material to restore (already-active rows included — nothing
+    to do). The S3 object was never touched by the delete (plan §4946/§4954),
+    so the revived material's chunks/embeddings are exactly as they were.
+    """
+    material = (
+        await db.execute(
+            select(LearningMaterial)
+            .where(
+                LearningMaterial.id == material_id,
+                LearningMaterial.deleted_at.is_not(None),
+            )
+            .execution_options(include_deleted=True)
+        )
+    ).scalar_one_or_none()
+    if material is None:
+        return False
+    material.deleted_at = None
+    material.deleted_by = None
+    # Lift the cascaded tombstone on every version of this material.
+    versions = (
+        await db.execute(
+            select(LearningMaterialVersion)
+            .where(
+                LearningMaterialVersion.material_id == material_id,
+                LearningMaterialVersion.deleted_at.is_not(None),
+            )
+            .execution_options(include_deleted=True)
+        )
+    ).scalars().all()
+    for version in versions:
+        version.deleted_at = None
+        version.deleted_by = None
+    await db.flush()
+    return True
+
+
+async def list_deleted_materials(
+    db: AsyncSession, lesson_id: UUID, *, since: datetime | None = None
+) -> list[LearningMaterial]:
+    """Soft-deleted materials on ``lesson_id``, newest-deleted first.
+
+    Backs the teacher-facing "Recently deleted" recovery view. Bypasses the
+    T0.7 soft-delete filter (``include_deleted=True``) and instead requires
+    ``deleted_at IS NOT NULL``. ``since`` clamps to a retention window so the
+    trash view doesn't grow unbounded.
+    """
+    stmt = (
+        select(LearningMaterial)
+        .where(
+            LearningMaterial.lesson_id == lesson_id,
+            LearningMaterial.deleted_at.is_not(None),
+        )
+        .execution_options(include_deleted=True)
+    )
+    if since is not None:
+        stmt = stmt.where(LearningMaterial.deleted_at >= since)
+    stmt = stmt.order_by(LearningMaterial.deleted_at.desc())
+    return list((await db.execute(stmt)).scalars().all())
+
+
 __all__ = [
     "get_lesson_processing_summary",
     "get_material_for_authoring",
+    "get_material_including_deleted",
     "get_material_with_versions",
     "list_all_materials",
+    "list_deleted_materials",
+    "restore_soft_deleted_material",
 ]

@@ -116,6 +116,18 @@ async def run_interview_generation(
         await db.commit()
 
         outcomes = await list_outcomes_for_config(db, config.id)
+        # Optional teacher-selected subset (§interview outcome targeting): when
+        # config_json carries a non-empty ``target_outcome_ids``, narrow the
+        # outcomes fed to the ideation stage to just those. Empty / absent =
+        # use every outcome (prior behaviour). Unknown ids are ignored; if the
+        # filter would empty the list we fall back to all outcomes so a stale
+        # selection never produces a zero-outcome run.
+        raw_target_ids = state.config_json.get("target_outcome_ids") or []
+        target_id_set = {str(x) for x in raw_target_ids}
+        if target_id_set:
+            filtered = [o for o in outcomes if str(o.id) in target_id_set]
+            if filtered:
+                outcomes = filtered
         target_count = resolve_question_count(
             run_config_json=state.config_json,
             supplementary=config.supplementary_instructions,

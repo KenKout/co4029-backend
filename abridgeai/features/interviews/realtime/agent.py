@@ -20,7 +20,7 @@ from uuid import UUID
 from livekit import (
     rtc,  # type: ignore[attr-defined]  # rtc is a lazy submodule; livekit ships no stubs
 )
-from livekit.agents import JobContext, WorkerOptions, cli
+from livekit.agents import JobContext, RoomOutputOptions, WorkerOptions, cli
 
 from abridgeai.core.config import get_settings
 from abridgeai.features.interviews.realtime import observability as obs
@@ -93,6 +93,7 @@ async def entrypoint(ctx: JobContext) -> None:
         interview_session_id, language=language
     )
     opening_text = await bridge.get_opening_text(interview_session_id, language=language)
+    tts_voice = await bridge.get_tts_voice(interview_session_id)
     agent = InterviewAgent(
         interview_session_id=interview_session_id,
         student_id=student_id,
@@ -100,8 +101,22 @@ async def entrypoint(ctx: JobContext) -> None:
         opening_text=opening_text,
         language=language,
     )
-    session = build_agent_session(settings)
-    await session.start(agent, room=ctx.room)
+    session = build_agent_session(settings, language=language, voice=tts_voice)
+    # Make transcript↔audio sync EXPLICIT (do not rely on SDK defaults). With
+    # transcription_enabled + sync_transcription True, livekit-agents attaches a
+    # TranscriptSynchronizer that paces the published transcript to the ACTUAL
+    # TTS audio playout (RMS-based speaking-rate detection) — so the on-screen
+    # text advances at the same speed as the spoken voice. transcription_speed_factor
+    # 1.0 keeps text exactly in step with audio (no lead/lag).
+    await session.start(
+        agent,
+        room=ctx.room,
+        room_output_options=RoomOutputOptions(
+            transcription_enabled=True,
+            sync_transcription=True,
+            transcription_speed_factor=1.0,
+        ),
+    )
 
 
 def run() -> None:

@@ -1,8 +1,11 @@
 from abridgeai.features.materials.queries.authoring import (
     get_lesson_processing_summary,
     get_material_for_authoring,
+    get_material_including_deleted,
     get_material_with_versions,
     list_all_materials,
+    list_deleted_materials,
+    restore_soft_deleted_material,
 )
 from abridgeai.features.materials.queries.chunks import (
     get_authoring_stream_target_for_material,
@@ -26,12 +29,15 @@ __all__ = [
     "get_latest_ready_version",
     "get_lesson_processing_summary",
     "get_material_for_authoring",
+    "get_material_including_deleted",
     "get_material_with_versions",
     "get_stream_target_for_material",
     "get_visible_material",
     "list_all_materials",
     "list_chunks_preview",
+    "list_deleted_materials",
     "list_failed_jobs_recent",
     "list_jobs_in_progress",
     "list_visible_materials",
+    "restore_soft_deleted_material",
 ]

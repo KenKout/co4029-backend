@@ -216,6 +216,19 @@ class ModuleItemReorder(_StrictRequest):
     new_order: list[UUID]
 
 
+class ModuleReorder(_StrictRequest):
+    """Reorder Module rows under a single course.
+
+    ``new_order`` is the full list of ``Module.id`` values in the target
+    order — the service applies the ``_OFFSET=100_000`` two-phase swap
+    pattern to avoid violating the ``uq_modules_course_position`` unique
+    constraint mid-update (mirrors :class:`ModuleItemReorder`).
+    """
+
+    course_id: UUID
+    new_order: list[UUID]
+
+
 class ModuleItemUpdate(_StrictRequest):
     """Patch payload for ``PATCH /teacher/module-items/{item_id}``.
 

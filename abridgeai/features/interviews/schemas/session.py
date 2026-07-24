@@ -181,6 +181,12 @@ class InterviewSessionPublic(BaseModel):
     current_question_index: int | None = None
     time_remaining_seconds: int | None = None
     pass_verdict: bool | None = None
+    # Proactive retake context (#7) — see InterviewSessionFinishResponse. Present
+    # here too so the results screen survives a reload (the FE re-fetches the
+    # session and must still know remaining attempts / cooldown).
+    remaining_attempts: int | None = None
+    retake_available_at: datetime | None = None
+    can_retake: bool = True
 
 
 class InterviewOnboardingRespondRequest(BaseModel):
@@ -345,6 +351,14 @@ class InterviewSessionFinishResponse(BaseModel):
     rubric_scores: list[InterviewRubricScore] = []
     pass_verdict: bool | None = None
     ended_at: datetime | None = None
+    # ── Proactive retake context (#7) ────────────────────────────────────────
+    # Surfaced so the results screen can show "N attempts left" and a cooldown
+    # countdown instead of only learning the ceiling reactively via a 429/409.
+    # remaining_attempts is None when max_attempts is unset (unlimited);
+    # retake_available_at is None when no cooldown is currently blocking.
+    remaining_attempts: int | None = None
+    retake_available_at: datetime | None = None
+    can_retake: bool = True
 
 
 __all__ = [

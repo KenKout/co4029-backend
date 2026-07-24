@@ -40,7 +40,7 @@ from __future__ import annotations
 from typing import Annotated, Literal, cast
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from abridgeai.core.db import get_db
@@ -79,11 +79,13 @@ from abridgeai.features.courses.schemas import (
     ModuleItemReorder,
     ModuleItemUpdate,
     ModulePrerequisiteSet,
+    ModuleReorder,
     ModuleUpdate,
     OutlineSection,
     RosterStudentRead,
     SlugAvailability,
     StreamUrlResponse,
+    TeacherDashboardStats,
 )
 from abridgeai.features.courses.services import authoring as authoring_service
 from abridgeai.features.quizzes.ai.outline import build_lesson_outline
@@ -195,6 +197,21 @@ async def list_authoring_courses(
     )
 
 
+@router.get("/dashboard/stats", response_model=TeacherDashboardStats)
+async def get_teacher_dashboard_stats(
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_AUTHORING_LIST)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> TeacherDashboardStats:
+    """Actionable counts for the teacher dashboard's clickable widgets.
+
+    Scoped to the caller's authorable courses (owned + assignments):
+    draft courses, ungraded quiz attempts, and interview sessions awaiting
+    evaluation. Same lax permission as the courses list — visibility is
+    enforced in the service via owner/assignment match.
+    """
+    return await authoring_service.get_teacher_dashboard_stats(db, user=current_user)
+
+
 @router.get("/courses/{course_id}", response_model=CourseAuthoring)
 async def get_authoring_course(
     course_id: UUID,
@@ -272,6 +289,41 @@ async def update_course(
     return course
 
 
+@router.put("/courses/{course_id}/thumbnail", response_model=CourseAuthoring)
+async def upload_course_thumbnail(
+    course_id: UUID,
+    request: Request,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_COURSE_UPDATE)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> CourseAuthoring:
+    """Upload a course thumbnail image (JPEG/PNG/WebP/GIF, ≤ 5 MiB).
+
+    The raw image bytes are sent as the request body with the image's MIME
+    type in the ``Content-Type`` header (no multipart wrapper — matches the
+    avatar upload pattern). Stores the image in object storage and points the
+    course at it. Requires ``course.update`` on the course.
+    """
+    data = await request.body()
+    content_type = request.headers.get("content-type", "application/octet-stream")
+    content_type = content_type.split(";", 1)[0].strip().lower()
+    try:
+        course = await authoring_service.upload_course_thumbnail(
+            db,
+            course_id,
+            data=data,
+            content_type=content_type,
+            uploaded_by=current_user.user_id,
+        )
+    except authoring_service.ThumbnailUploadError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+    except NotFoundError as exc:
+        raise _not_found(str(exc)) from exc
+    return course
+
+
 @router.post("/courses/{course_id}/publish", response_model=CourseAuthoring)
 async def publish_course(
     course_id: UUID,
@@ -300,6 +352,26 @@ async def archive_course(
         raise _not_found(str(exc)) from exc
     await db.commit()
     return course
+
+
+@router.delete("/courses/{course_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_course(
+    course_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_COURSE_DELETE)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> None:
+    """Soft-delete a course the caller can delete (reversible tombstone).
+
+    Cascades to the course's modules/lessons/items via
+    ``soft_delete_cascade``. Requires ``course.delete`` on the course.
+    Returns 204 on success; 404 when the course is missing or already
+    soft-deleted.
+    """
+    try:
+        await authoring_service.delete_course(db, course_id, current_user)
+    except NotFoundError as exc:
+        raise _not_found(str(exc)) from exc
+    await db.commit()
 
 
 @router.post(
@@ -375,9 +447,7 @@ async def create_course_outcome(
 ) -> CourseLearningOutcomeAuthoring:
     """Append a learning outcome to a course (§LO-1)."""
     try:
-        outcome = await authoring_service.add_course_outcome(
-            db, course_id, payload, current_user
-        )
+        outcome = await authoring_service.add_course_outcome(db, course_id, payload, current_user)
     except NotFoundError as exc:
         raise _not_found(str(exc)) from exc
     except ConflictError as exc:
@@ -422,9 +492,7 @@ async def delete_course_outcome(
 ) -> None:
     """Soft-delete an outcome and compact positions to 1..N (§LO-2)."""
     try:
-        await authoring_service.delete_course_outcome(
-            db, course_id, outcome_id, current_user
-        )
+        await authoring_service.delete_course_outcome(db, course_id, outcome_id, current_user)
     except NotFoundError as exc:
         raise _not_found(str(exc)) from exc
     await db.commit()
@@ -470,6 +538,32 @@ async def reorder_module_items(
         raise _not_found(str(exc)) from exc
     await db.commit()
     return items
+
+
+@router.put(
+    "/courses/{course_id}/modules/reorder",
+    response_model=list[ModuleAuthoring],
+)
+async def reorder_modules(
+    course_id: UUID,
+    payload: ModuleReorder,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_COURSE_UPDATE)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> list[ModuleAuthoring]:
+    """Reorder ``Module`` rows under ``course_id``.
+
+    The service uses the ``_OFFSET=100_000`` two-phase swap to escape the
+    ``uq_modules_course_position`` unique constraint mid-update (mirrors
+    the module-items reorder endpoint above).
+    """
+    try:
+        modules = await authoring_service.reorder_modules(
+            db, course_id, payload.new_order, current_user
+        )
+    except NotFoundError as exc:
+        raise _not_found(str(exc)) from exc
+    await db.commit()
+    return modules
 
 
 @router.patch(

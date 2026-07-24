@@ -16,13 +16,31 @@ WITH bounded AS (
         amc.stage_name,
         amc.estimated_cost_usd,
         amc.total_tokens,
+        amc.input_tokens,
+        amc.output_tokens,
+        amc.cached_input_tokens,
+        amc.status,
         amc.called_at
     FROM ai_model_calls amc
     WHERE amc.called_at >= CAST(:since AS timestamptz)
+      AND (CAST(:f_model AS text) IS NULL OR amc.model_name = CAST(:f_model AS text))
+      AND (CAST(:f_role AS text) IS NULL OR amc.role = CAST(:f_role AS text))
+      AND (CAST(:f_operation AS text) IS NULL OR amc.operation = CAST(:f_operation AS text))
+      AND (CAST(:f_status AS text) IS NULL OR amc.status = CAST(:f_status AS text))
+),
+failed AS (
+    SELECT
+        COUNT(*)::bigint AS failed_call_count,
+        COALESCE(SUM(estimated_cost_usd), 0)::numeric(18, 6) AS failed_usd
+    FROM bounded
+    WHERE status = 'failed'
 ),
 totals AS (
     SELECT
         COALESCE(SUM(total_tokens), 0)::bigint AS total_tokens,
+        COALESCE(SUM(input_tokens), 0)::bigint AS input_tokens,
+        COALESCE(SUM(output_tokens), 0)::bigint AS output_tokens,
+        COALESCE(SUM(cached_input_tokens), 0)::bigint AS cached_tokens,
         COALESCE(SUM(estimated_cost_usd), 0)::numeric(18, 6) AS total_usd,
         COUNT(*)::bigint AS call_count
     FROM bounded
@@ -56,8 +74,13 @@ buckets AS (
 )
 SELECT
     (SELECT total_tokens FROM totals) AS total_tokens,
+    (SELECT input_tokens FROM totals) AS input_tokens,
+    (SELECT output_tokens FROM totals) AS output_tokens,
+    (SELECT cached_tokens FROM totals) AS cached_tokens,
     (SELECT total_usd FROM totals) AS total_usd,
     (SELECT call_count FROM totals) AS call_count,
+    (SELECT failed_call_count FROM failed) AS failed_call_count,
+    (SELECT failed_usd FROM failed) AS failed_usd,
     COALESCE(
         (SELECT jsonb_agg(jsonb_build_object(
             'role', role, 'tokens', tokens, 'usd', usd

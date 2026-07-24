@@ -26,10 +26,11 @@ accept ``actor: CurrentUser`` to permit explicit ownership writes
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
 
+from abridgeai.core.config import get_settings
 from abridgeai.core.db.conflict_mapper import (
     flush_or_conflict as _flush_or_conflict,
 )
@@ -73,14 +74,30 @@ from abridgeai.features.courses.schemas import (
     ModuleItemAuthoring,
     ModuleItemUpdate,
     ModuleUpdate,
+    TeacherDashboardStats,
 )
-from abridgeai.infrastructure.s3 import create_stream_url
+from abridgeai.features.identity.models import StorageObject
+from abridgeai.infrastructure.s3 import create_stream_url, put_object_bytes
 
 
 @dataclass
 class _AuthoringStorageTarget:
     bucket: str
     object_key: str
+
+
+# Course thumbnail upload constraints (mirrors the avatar upload feature).
+_THUMBNAIL_MIME_TYPES: dict[str, str] = {
+    "image/jpeg": "jpg",
+    "image/png": "png",
+    "image/webp": "webp",
+    "image/gif": "gif",
+}
+_THUMBNAIL_MAX_BYTES = 5 * 1024 * 1024  # 5 MiB — thumbnails can be larger than avatars.
+
+
+class ThumbnailUploadError(ValueError):
+    """Raised on an unsupported type or oversized course-thumbnail upload."""
 
 
 if TYPE_CHECKING:
@@ -250,6 +267,20 @@ async def archive_course(db: AsyncSession, course_id: UUID, actor: CurrentUser) 
     await db.flush()
     await db.refresh(course)
     return CourseAuthoring.model_validate(course)
+
+
+async def delete_course(db: AsyncSession, course_id: UUID, actor: CurrentUser) -> None:
+    """Soft-delete a course (teacher-facing), cascading to its children.
+
+    Reversible tombstone via :func:`soft_delete_cascade` — nothing is
+    physically removed, the row is stamped ``deleted_at`` / ``deleted_by`` and
+    filtered out of every non-admin ``Course`` SELECT. Mirrors the admin
+    delete but is scoped to the caller's ``course.delete`` permission on this
+    course. Raises ``NotFoundError`` when the course is missing or already
+    soft-deleted (``_require_course`` enforces the active-course guard).
+    """
+    course = await _require_course(db, course_id)
+    await soft_delete_cascade(db, course, actor_id=actor.user_id)
 
 
 async def add_module(
@@ -431,6 +462,43 @@ async def reorder_module_items(
     ]
 
 
+async def reorder_modules(
+    db: AsyncSession,
+    course_id: UUID,
+    module_ids: list[UUID],
+    actor: CurrentUser,
+) -> list[ModuleAuthoring]:
+    """Reorder ``Module`` rows under ``course_id``.
+
+    Two-phase swap pattern (mirrors :func:`reorder_module_items`):
+
+    1. Bump every target row to ``_OFFSET + i`` (escapes the
+       ``uq_modules_course_position`` unique constraint).
+    2. Re-assign final positions ``i + 1`` (1-indexed).
+
+    Modules not in ``module_ids`` keep their existing positions; callers
+    are expected to send the FULL ordered list.
+    """
+    del actor
+    modules_by_id: dict[UUID, Module] = {}
+    for idx, module_id in enumerate(module_ids):
+        module = await authoring_queries.get_module(db, module_id)
+        if module is None or module.course_id != course_id:
+            raise NotFoundError(f"Module {module_id} not found in course {course_id}")
+        module.position = _OFFSET + idx
+        modules_by_id[module_id] = module
+    await _flush_or_conflict(db)
+
+    for idx, module_id in enumerate(module_ids, start=1):
+        modules_by_id[module_id].position = idx
+    await _flush_or_conflict(db)
+
+    return [
+        ModuleAuthoring.model_validate(module)
+        for module in await authoring_queries.list_modules_for_authoring(db, course_id)
+    ]
+
+
 async def set_module_prerequisites(
     db: AsyncSession,
     module_id: UUID,
@@ -484,12 +552,145 @@ async def list_authoring_courses_for_user(
         seen.add(course.id)
         merged.append(course)
     merged.sort(key=lambda c: c.created_at, reverse=True)
-    return [CourseAuthoring.model_validate(c) for c in merged]
+    result = [CourseAuthoring.model_validate(c) for c in merged]
+    # Batch-count students + modules once for the whole page (no N+1), then
+    # attach to each DTO for the "My courses" grid's course-health line.
+    counts = await authoring_queries.count_students_and_modules_for_courses(
+        db, [c.id for c in merged]
+    )
+    for dto, orm in zip(result, merged, strict=True):
+        dto.thumbnail_url = await _mint_thumbnail_url(db, orm.id)
+        students, modules = counts.get(orm.id, (0, 0))
+        dto.student_count = students
+        dto.module_count = modules
+    return result
+
+
+async def get_teacher_dashboard_stats(
+    db: AsyncSession, *, user: CurrentUser
+) -> TeacherDashboardStats:
+    """Aggregate the teacher dashboard's actionable counts.
+
+    Scopes to every course the caller can author (owned + assigned), then
+    returns the "needs attention" tallies that power the dashboard's
+    clickable widgets: courses in draft, ungraded quiz attempts, and
+    interview sessions awaiting evaluation. All aggregate queries are
+    batched over the course-id set — no N+1.
+    """
+    owned = await authoring_queries.list_courses_for_owner(db, user.user_id, include_archived=False)
+    assigned = await authoring_queries.list_courses_assigned_to_teacher(
+        db, user.user_id, include_archived=False
+    )
+    seen: set[UUID] = set()
+    course_ids: list[UUID] = []
+    draft_courses = 0
+    for course in (*owned, *assigned):
+        if course.id in seen:
+            continue
+        seen.add(course.id)
+        course_ids.append(course.id)
+        if course.status == "draft":
+            draft_courses += 1
+
+    (
+        ungraded_quizzes,
+        pending_interviews,
+    ) = await authoring_queries.count_pending_grading_for_courses(db, course_ids)
+    return TeacherDashboardStats(
+        draft_courses=draft_courses,
+        ungraded_quizzes=ungraded_quizzes,
+        pending_interviews=pending_interviews,
+    )
 
 
 async def get_authoring_course(db: AsyncSession, course_id: UUID) -> CourseAuthoring:
     course = await _require_course(db, course_id)
-    return CourseAuthoring.model_validate(course)
+    dto = CourseAuthoring.model_validate(course)
+    dto.thumbnail_url = await _mint_thumbnail_url(db, course_id)
+    return dto
+
+
+async def upload_course_thumbnail(
+    db: AsyncSession,
+    course_id: UUID,
+    *,
+    data: bytes,
+    content_type: str,
+    uploaded_by: UUID,
+) -> CourseAuthoring:
+    """Validate + store a course thumbnail image and point the course at it.
+
+    Uploads the bytes server-side to object storage, records a
+    ``storage_objects`` row, and sets ``courses.thumbnail_object_id``. Mirrors
+    the avatar upload flow (raw-body, server-side put). Raises
+    :class:`ThumbnailUploadError` on an unsupported type or oversized file.
+    """
+    ext = _THUMBNAIL_MIME_TYPES.get(content_type)
+    if ext is None:
+        raise ThumbnailUploadError(
+            "unsupported_thumbnail_type: allowed types are JPEG, PNG, WebP, GIF."
+        )
+    if len(data) == 0:
+        raise ThumbnailUploadError("empty_thumbnail: the uploaded file is empty.")
+    if len(data) > _THUMBNAIL_MAX_BYTES:
+        raise ThumbnailUploadError("thumbnail_too_large: images must be 5 MiB or smaller.")
+
+    course = await _require_course(db, course_id)
+
+    settings = get_settings()
+    bucket = settings.s3_bucket_name or "abridgeai-local"
+    object_id = uuid4()
+    object_key = f"course-thumbnails/{course_id}/{object_id}.{ext}"
+
+    # Upload bytes first — if storage fails we never touch the DB.
+    await put_object_bytes(
+        _AuthoringStorageTarget(bucket=bucket, object_key=object_key),
+        data,
+        content_type=content_type,
+    )
+
+    storage = StorageObject(
+        id=object_id,
+        bucket=bucket,
+        object_key=object_key,
+        original_filename=f"thumbnail.{ext}",
+        mime_type=content_type,
+        size_bytes=len(data),
+        uploaded_by=uploaded_by,
+        uploaded_at=datetime.now(tz=UTC),
+    )
+    db.add(storage)
+    # Flush the storage row before setting the FK — this session has
+    # autoflush=False, so without this the courses UPDATE can hit the DB
+    # before the storage_objects INSERT and trip the FK constraint.
+    await db.flush()
+    course.thumbnail_object_id = object_id
+
+    await db.commit()
+    await db.refresh(course)
+    dto = CourseAuthoring.model_validate(course)
+    dto.thumbnail_url = await _mint_thumbnail_url(db, course_id)
+    return dto
+
+
+async def _mint_thumbnail_url(db: AsyncSession, course_id: UUID) -> str | None:
+    """Mint a short-TTL presigned GET URL for a course's thumbnail image.
+
+    Returns ``None`` when the course has no thumbnail set, or a storage blip
+    occurs (a blip must never break a course read — the SPA falls back to the
+    gradient banner).
+    """
+    target = await authoring_queries.get_course_thumbnail_storage_target(db, course_id)
+    if target is None:
+        return None
+    bucket, object_key = target
+    try:
+        url, _ = await create_stream_url(
+            _AuthoringStorageTarget(bucket=bucket, object_key=object_key)
+        )
+        return url
+    except Exception:  # noqa: BLE001 — a storage blip must not break the course read
+        return None
 
 
 async def get_authoring_content(
@@ -662,8 +863,28 @@ async def list_course_roster(db: AsyncSession, course_id: UUID) -> list[dict[str
 async def list_course_roster_with_progress(
     db: AsyncSession, course_id: UUID
 ) -> list[dict[str, Any]]:
-    """Enrolled students for the teacher "Students" page, with progress + risk."""
-    return await authoring_queries.list_course_roster_with_progress(db, course_id)
+    """Enrolled students for the teacher "Students" page, with progress + risk.
+
+    Mints a short-TTL presigned ``avatar_url`` for each student that has an
+    avatar image uploaded (the SQL projects the avatar object's bucket/key);
+    students without an avatar get ``avatar_url = None`` and the SPA falls back
+    to initials.
+    """
+    rows = await authoring_queries.list_course_roster_with_progress(db, course_id)
+    for row in rows:
+        bucket = row.pop("avatar_bucket", None)
+        object_key = row.pop("avatar_object_key", None)
+        avatar_url: str | None = None
+        if bucket and object_key:
+            try:
+                url, _ = await create_stream_url(
+                    _AuthoringStorageTarget(bucket=bucket, object_key=object_key)
+                )
+                avatar_url = url
+            except Exception:  # noqa: BLE001 — a storage blip must not break the roster
+                avatar_url = None
+        row["avatar_url"] = avatar_url
+    return rows
 
 
 # ---------------------------------------------------------------------------
@@ -673,11 +894,7 @@ async def _require_outcome(
     db: AsyncSession, course_id: UUID, outcome_id: UUID
 ) -> CourseLearningOutcome:
     outcome = await authoring_queries.get_course_outcome(db, outcome_id)
-    if (
-        outcome is None
-        or outcome.deleted_at is not None
-        or outcome.course_id != course_id
-    ):
+    if outcome is None or outcome.deleted_at is not None or outcome.course_id != course_id:
         raise NotFoundError(f"Course outcome {outcome_id} not found")
     return outcome
 

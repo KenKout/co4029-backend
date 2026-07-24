@@ -133,6 +133,10 @@ class InterviewConfigPublic(_ORMModel):
     title: str
     status: Literal["published"]
     persona: PersonaLiteral | None = None
+    # Deepgram Aura voice for English sessions (NULL = deployment default). Safe
+    # to expose: it only names the spoken voice, nothing gameable. Vietnamese
+    # sessions ignore it (browser voice), so the UI shows it for English only.
+    tts_voice: str | None = None
     supported_modes: SupportedModesLiteral
     time_limit_minutes: int | None = None
     max_attempts: int | None = None
@@ -152,10 +156,18 @@ class InterviewForTakingPublic(_ORMModel):
     Plan §6.2 explicit MUST NOT: do not bake all questions into the
     start payload. The ``first_question`` singular field enforces this
     at the schema layer.
+
+    ``outcome_count`` is a SAFE expectation-setting signal: it exposes only
+    *how many* rubric criteria the interview assesses, never their text,
+    ``importance_weight``, or the ``min_outcomes_to_pass`` threshold — all of
+    which remain teacher-only per the security invariants above. A bare count
+    lets the learner UI show "assessed on N criteria" without leaking anything
+    gameable.
     """
 
     config: InterviewConfigPublic
     first_question: InterviewQuestionPublic | None = None
+    outcome_count: int = 0
 
 
 __all__ = [

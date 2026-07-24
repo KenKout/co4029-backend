@@ -71,7 +71,11 @@ def test_taking_payload_cannot_serialize_outcome_or_bank_metadata() -> None:
     payload = InterviewForTakingPublic(config=config, first_question=question).model_dump(
         mode="json"
     )
-    assert set(payload) == {"config", "first_question"}
+    # outcome_count is a SAFE count-only signal (how many criteria this
+    # interview assesses) — it carries no outcome text / weight / threshold, so
+    # it's an allowed field. The contract still forbids the raw bank/outcomes.
+    assert set(payload) == {"config", "first_question", "outcome_count"}
+    assert isinstance(payload["outcome_count"], int)
     assert "questions" not in payload
     assert "outcomes" not in payload
     assert not (_HIDDEN_FIELDS & set(payload["config"]))

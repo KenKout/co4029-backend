@@ -150,6 +150,19 @@ async def _purge(session: AsyncSession, users_data: dict, roles_data: dict) -> N
         ),
         {"org_id": org_id},
     )
+    # document_chunks reference courses (document_chunks_course_id_fkey) and are
+    # created by material-processing tests. Purge any that reference the test
+    # courses BEFORE deleting the courses themselves, else the course delete
+    # trips a FK violation and every test sharing this session-scoped fixture
+    # errors at setup.
+    await session.execute(
+        text(
+            "DELETE FROM document_chunks WHERE course_id = :cid "
+            "OR course_id IN (SELECT id FROM courses WHERE owner_user_id = ANY(:ids)) "
+            "OR course_id IN (SELECT id FROM courses WHERE organization_id = :org_id)"
+        ),
+        {"cid": course_id, "ids": user_ids, "org_id": org_id},
+    )
     await session.execute(text("DELETE FROM courses WHERE id = :id"), {"id": course_id})
     await session.execute(
         text("DELETE FROM courses WHERE owner_user_id = ANY(:ids)"),

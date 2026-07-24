@@ -25,7 +25,7 @@ from abridgeai.ai.models import AIModelPricing
 
 _CACHE_TTL_SECONDS = 30.0
 
-# module-level cache: model_name -> (input_per_1k, output_per_1k)
+# module-level cache: model_name -> (input_per_1m, output_per_1m)
 _cache: dict[str, tuple[Decimal, Decimal]] = {}
 _cache_loaded_at: float = 0.0
 
@@ -37,7 +37,7 @@ async def _load_price_table(db: AsyncSession) -> dict[str, tuple[Decimal, Decima
         return _cache
 
     rows = (await db.execute(select(AIModelPricing))).scalars().all()
-    _cache = {row.model_name: (row.input_usd_per_1k, row.output_usd_per_1k) for row in rows}
+    _cache = {row.model_name: (row.input_usd_per_1m, row.output_usd_per_1m) for row in rows}
     _cache_loaded_at = now
     return _cache
 
@@ -74,8 +74,8 @@ async def compute_cost(
     if entry is None:
         return None
     input_rate, output_rate = entry
-    input_cost = input_rate * input_tokens / Decimal(1000)
-    output_cost = output_rate * (output_tokens or 0) / Decimal(1000)
+    input_cost = input_rate * input_tokens / Decimal(1_000_000)
+    output_cost = output_rate * (output_tokens or 0) / Decimal(1_000_000)
     return input_cost + output_cost
 
 
@@ -86,14 +86,18 @@ async def compute_cost(
 # a frozen snapshot maintained separately from the admin-configurable
 # ``ai_model_pricing`` DB table; keep it in sync manually if judge-model
 # pricing drifts. Update the dated comment when you touch this table.
+#
+# Rates are USD per 1,000,000 tokens (per-1M convention, matching the DB
+# table). Updated 2026-07-24 to per-1M — values are the prior per-1K rates
+# ×1000, so per-call cost is unchanged.
 # ---------------------------------------------------------------------------
 
-# Updated: 2026-05-16 (OpenAI list pricing).
+# Updated: 2026-07-24 (per-1M convention; OpenAI list pricing).
 _STATIC_PRICE_TABLE: dict[str, tuple[Decimal, Decimal]] = {
-    "gpt-4o": (Decimal("0.005"), Decimal("0.015")),
-    "gpt-4o-mini": (Decimal("0.00015"), Decimal("0.0006")),
-    "text-embedding-3-small": (Decimal("0.00002"), Decimal("0")),
-    "text-embedding-3-large": (Decimal("0.00013"), Decimal("0")),
+    "gpt-4o": (Decimal("5.00"), Decimal("15.00")),
+    "gpt-4o-mini": (Decimal("0.15"), Decimal("0.60")),
+    "text-embedding-3-small": (Decimal("0.02"), Decimal("0")),
+    "text-embedding-3-large": (Decimal("0.13"), Decimal("0")),
 }
 
 

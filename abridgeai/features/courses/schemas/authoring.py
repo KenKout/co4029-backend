@@ -134,9 +134,20 @@ class CourseAuthoring(CoursePublic):
     owner_user_id: UUID
     level: str | None = None
     thumbnail_object_id: UUID | None = None
+    # Short-TTL presigned GET URL for the course thumbnail, minted by the
+    # service layer from the thumbnail's storage object. None when no
+    # thumbnail is set (the SPA falls back to the gradient banner). Not
+    # persisted — a projection.
+    thumbnail_url: str | None = None
     estimated_minutes: int | None = None
     expected_completion_days: int | None = None
     enrollment_cap: int | None = None
+    # Course-health projections computed by the service layer for the "My
+    # courses" grid — active enrollments and non-deleted module count. Not
+    # persisted; default 0 so single-course reads that don't populate them
+    # still validate.
+    student_count: int = 0
+    module_count: int = 0
     instructor: InstructorAuthoring | None = None
     tags: list[TagAuthoring] = []  # type: ignore[assignment]
     outcomes: list[CourseLearningOutcomeAuthoring] = []  # type: ignore[assignment]
@@ -146,6 +157,23 @@ class CourseAuthoring(CoursePublic):
     updated_at: datetime
     deleted_at: datetime | None = None
     deleted_by: UUID | None = None
+
+
+class TeacherDashboardStats(BaseModel):
+    """Actionable counts for the teacher dashboard's clickable widgets.
+
+    Scoped to every course the caller can author. ``draft_courses`` =
+    courses in draft status; ``ungraded_quizzes`` = submitted-but-ungraded
+    quiz attempts; ``pending_interviews`` = interview sessions awaiting
+    evaluation. All are \"needs attention\" signals that deep-link into the
+    relevant page.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    draft_courses: int = 0
+    ungraded_quizzes: int = 0
+    pending_interviews: int = 0
 
 
 class ModuleAuthoring(ModulePublic):

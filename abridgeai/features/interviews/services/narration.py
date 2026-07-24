@@ -46,6 +46,44 @@ _PERSONA_VOICE: dict[str, str] = {
 }
 _DEFAULT_VOICE = "alloy"
 
+# Curated allow-list of Deepgram Aura-2 English voices offered in the teacher
+# UI. Deepgram exposes one voice per model id; this is a stable, representative
+# subset (not the full ~45) chosen for tonal variety. A config's ``tts_voice``
+# is validated against this set in the authoring schema so a bad value can
+# never reach Deepgram. NULL/absent → settings.deepgram_tts_model_en (the
+# deployment default). Keep in sync with the frontend voice dropdown.
+ALLOWED_TTS_VOICES: tuple[str, ...] = (
+    "aura-2-thalia-en",
+    "aura-2-andromeda-en",
+    "aura-2-helena-en",
+    "aura-2-apollo-en",
+    "aura-2-arcas-en",
+    "aura-2-aries-en",
+    "aura-2-asteria-en",
+    "aura-2-athena-en",
+    "aura-2-hera-en",
+    "aura-2-hyperion-en",
+    "aura-2-luna-en",
+    "aura-2-orion-en",
+    "aura-2-orpheus-en",
+    "aura-2-ophelia-en",
+    "aura-2-zeus-en",
+    "aura-2-vesta-en",
+)
+
+
+def resolve_tts_voice(voice: str | None, *, settings: Settings) -> str:
+    """Return a valid Deepgram Aura model id.
+
+    Uses the config's chosen ``voice`` when it is in the allow-list, otherwise
+    the deployment default. Defensive: an unknown value degrades to the default
+    rather than 400ing Deepgram mid-session.
+    """
+    if voice and voice in ALLOWED_TTS_VOICES:
+        return voice
+    return settings.deepgram_tts_model_en
+
+
 # Fast, cheap model — narration does not need HD. Verified available on the
 # gateway alongside tts-1-hd and gpt-4o-mini-tts.
 _TTS_MODEL = "tts-1"
@@ -92,8 +130,12 @@ async def _synthesize_deepgram(
     *,
     persona: str | None,
     settings: Settings,
+    voice: str | None = None,
 ) -> bytes:
     """Synthesize English ``text`` to MP3 bytes via Deepgram Aura-2.
+
+    ``voice`` (a config's ``tts_voice``) selects the Aura model when it is in
+    the allow-list; otherwise the deployment default is used.
 
     Raises :class:`NarrationUnavailable` on any error so the caller can fall
     back to the OpenAI-compatible gateway.
@@ -106,7 +148,7 @@ async def _synthesize_deepgram(
     if not base_url:
         raise NarrationUnavailable("Deepgram base URL not configured")
 
-    model = _deepgram_model_for_persona(persona, settings=settings)
+    model = resolve_tts_voice(voice, settings=settings)
     # Deepgram /v1/speak: model + audio container are query params; the text
     # is a JSON body ``{"text": ...}``. encoding=mp3 returns an MP3 stream that
     # the browser plays through the exact same <audio> path as the gateway.
@@ -189,6 +231,7 @@ async def synthesize_speech(
     persona: str | None,
     settings: Settings,
     language: str | None = None,
+    voice: str | None = None,
 ) -> bytes:
     """Synthesize ``text`` to MP3 bytes, routing by ``language``.
 
@@ -196,6 +239,10 @@ async def synthesize_speech(
     configured, transparently falling back to the OpenAI-compatible gateway if
     Deepgram is unavailable or errors. Vietnamese always uses the gateway
     (Deepgram TTS is English-only).
+
+    ``voice`` is the config's chosen Deepgram Aura voice (English only); an
+    unknown/absent value degrades to the deployment default. It has no effect
+    on the Vietnamese gateway path (which has no voice selection here).
 
     Raises :class:`NarrationUnavailable` when no provider can produce audio, so
     the router maps it to a 503 (the browser then falls back to its local
@@ -210,7 +257,9 @@ async def synthesize_speech(
     use_deepgram = _is_english(language) and settings.deepgram_api_key is not None
     if use_deepgram:
         try:
-            return await _synthesize_deepgram(clean, persona=persona, settings=settings)
+            return await _synthesize_deepgram(
+                clean, persona=persona, settings=settings, voice=voice
+            )
         except NarrationUnavailable as exc:
             # Deepgram is best-effort for English; degrade to the gateway
             # rather than dropping to the browser's local voice.
@@ -219,4 +268,10 @@ async def synthesize_speech(
     return await _synthesize_openai(clean, persona=persona, settings=settings)
 
 
-__all__ = ["synthesize_speech", "voice_for_persona", "NarrationUnavailable"]
+__all__ = [
+    "synthesize_speech",
+    "voice_for_persona",
+    "resolve_tts_voice",
+    "ALLOWED_TTS_VOICES",
+    "NarrationUnavailable",
+]

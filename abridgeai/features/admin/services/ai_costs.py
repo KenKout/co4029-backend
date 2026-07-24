@@ -47,8 +47,15 @@ def _normalise_summary(row: dict[str, Any]) -> dict[str, Any]:
     return {
         "totals": {
             "tokens": _to_int(row.get("total_tokens")),
+            "input_tokens": _to_int(row.get("input_tokens")),
+            "output_tokens": _to_int(row.get("output_tokens")),
+            "cached_tokens": _to_int(row.get("cached_tokens")),
             "usd": _to_float(row.get("total_usd")),
             "call_count": _to_int(row.get("call_count")),
+        },
+        "failed": {
+            "call_count": _to_int(row.get("failed_call_count")),
+            "usd": _to_float(row.get("failed_usd")),
         },
         "by_role": [
             {
@@ -82,8 +89,20 @@ async def summary(
     *,
     since: datetime,
     period: str,
+    model: str | None = None,
+    role: str | None = None,
+    operation: str | None = None,
+    status: str | None = None,
 ) -> dict[str, Any]:
-    row = await ai_costs_queries.summary(db, since=since, period=period)
+    row = await ai_costs_queries.summary(
+        db,
+        since=since,
+        period=period,
+        model=model,
+        role=role,
+        operation=operation,
+        status=status,
+    )
     return _normalise_summary(row)
 
 
@@ -108,6 +127,41 @@ async def by_user(
     if is_today_window:
         await _maybe_warn_threshold_exceeded(result)
     return result
+
+
+async def by_category(
+    db: AsyncSession,
+    *,
+    dimension: str,
+    since: datetime,
+    top_n: int,
+    model: str | None = None,
+    role: str | None = None,
+    operation: str | None = None,
+    status: str | None = None,
+) -> list[dict[str, Any]]:
+    rows = await ai_costs_queries.by_category(
+        db,
+        dimension=dimension,
+        since=since,
+        top_n=top_n,
+        model=model,
+        role=role,
+        operation=operation,
+        status=status,
+    )
+    return [
+        {
+            "dimension_value": str(r.get("dimension_value") or "unknown"),
+            "call_count": _to_int(r.get("call_count")),
+            "total_tokens": _to_int(r.get("total_tokens")),
+            "input_tokens": _to_int(r.get("input_tokens")),
+            "output_tokens": _to_int(r.get("output_tokens")),
+            "cached_tokens": _to_int(r.get("cached_tokens")),
+            "total_usd": _to_float(r.get("total_usd")),
+        }
+        for r in rows
+    ]
 
 
 async def by_pipeline(
@@ -149,10 +203,47 @@ async def recent(db: AsyncSession, *, limit: int) -> list[dict[str, Any]]:
             "stage_name": r.get("stage_name"),
             "model": r.get("model"),
             "tokens": _to_int(r.get("tokens")),
+            "input_tokens": _to_int(r.get("input_tokens")),
+            "output_tokens": _to_int(r.get("output_tokens")),
+            "cached_tokens": _to_int(r.get("cached_tokens")),
             "usd": _to_float(r.get("usd")),
             "latency_ms": r.get("latency_ms"),
+            "status": r.get("status"),
             "created_at": r.get("called_at"),
             "pipeline_run_id": r.get("pipeline_run_id"),
+        }
+        for r in rows
+    ]
+
+
+async def by_model(
+    db: AsyncSession,
+    *,
+    since: datetime,
+    top_n: int,
+    model: str | None = None,
+    role: str | None = None,
+    operation: str | None = None,
+    status: str | None = None,
+) -> list[dict[str, Any]]:
+    rows = await ai_costs_queries.by_model(
+        db,
+        since=since,
+        top_n=top_n,
+        model=model,
+        role=role,
+        operation=operation,
+        status=status,
+    )
+    return [
+        {
+            "model_name": str(r.get("model_name") or "unknown"),
+            "call_count": _to_int(r.get("call_count")),
+            "total_tokens": _to_int(r.get("total_tokens")),
+            "total_usd": _to_float(r.get("total_usd")),
+            "latency_p50_ms": _to_int(r.get("latency_p50_ms")),
+            "latency_p95_ms": _to_int(r.get("latency_p95_ms")),
+            "usd_per_1m_tokens": _to_float(r.get("usd_per_1m_tokens")),
         }
         for r in rows
     ]
@@ -201,8 +292,14 @@ def default_since(days: int = 30) -> datetime:
     return today_start - timedelta(days=days)
 
 
+VALID_CATEGORY_DIMENSIONS = ai_costs_queries.VALID_CATEGORY_DIMENSIONS
+
+
 __all__ = [
+    "VALID_CATEGORY_DIMENSIONS",
     "VALID_PERIODS",
+    "by_category",
+    "by_model",
     "by_pipeline",
     "by_user",
     "default_since",

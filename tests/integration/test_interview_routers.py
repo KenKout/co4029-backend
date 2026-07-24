@@ -148,6 +148,27 @@ async def _seed_session(engine: AsyncEngine, user_id: uuid.UUID) -> uuid.UUID:
     return session_id
 
 
+async def _complete_onboarding(engine: AsyncEngine, session_id: uuid.UUID) -> None:
+    """Fast-forward a session past onboarding so the answer path is reachable.
+
+    The /respond path gates on ``onboarding_stage == 'completed'`` (added in the
+    onboarding-ceremony slice). Tests that exercise the *answering* endpoints —
+    not onboarding itself — jump straight to the completed terminal state (the
+    same state ``onboarding_service.respond`` reaches on readiness confirmation:
+    stage='completed' + assessment_started_at set).
+    """
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "UPDATE interview_sessions "
+                "SET onboarding_stage = 'completed', "
+                "    assessment_started_at = COALESCE(assessment_started_at, NOW()) "
+                "WHERE id = :id"
+            ),
+            {"id": session_id},
+        )
+
+
 @pytest_asyncio.fixture
 async def admin_bearer(engine: AsyncEngine, seeded_users: SeededUsers) -> AsyncIterator[str]:
     sid = await _seed_session(engine, seeded_users.admin_id)
@@ -477,6 +498,7 @@ async def test_audio_storage_object_id_accepted_but_not_transcribed(
     )
     assert start_resp.status_code == 201, start_resp.text
     session_id = uuid.UUID(start_resp.json()["session_id"])
+    await _complete_onboarding(engine, session_id)
 
     audio_id = uuid.uuid4()
     async with engine.begin() as conn:
@@ -944,6 +966,9 @@ async def test_start_session_self_heals_stale_empty_session(
         student_bearer = create_access_token(
             user_id=seeded_users.student_id, session_id=student_sid
         )
+        # The seeded session sits at the default 'identity_check' stage; the
+        # start response only reveals first_question once onboarding is done.
+        await _complete_onboarding(engine, session_id)
         start_resp = await client.post(
             f"/api/v1/interview-configs/{config_id}/sessions",
             json={"input_mode": "text"},
@@ -1213,23 +1238,31 @@ async def test_respond_surfaces_unhandled_error_with_class_and_message(
         assert start_resp.status_code == 201, start_resp.text
         body = start_resp.json()
         session_id = body["session_id"]
-        first_question = body["first_question"]
-        assert first_question is not None
+        # Answering requires completed onboarding; this test targets the
+        # unhandled-error path in take_session_step, so fast-forward past setup.
+        # session_question_id is required by the schema but the service resolves
+        # the current question from session_id, so a placeholder uuid is fine.
+        await _complete_onboarding(engine, uuid.UUID(session_id))
 
         respond_resp = await client.post(
             f"/api/v1/interview-sessions/{session_id}/respond",
             json={
                 "session_id": session_id,
-                "session_question_id": first_question["id"],
+                "session_question_id": str(uuid.uuid4()),
                 "answer_text": "an answer",
             },
             headers=_auth(student_token),
         )
         assert respond_resp.status_code == 500, respond_resp.text
         detail = respond_resp.json()["detail"]
+        # The route returns an ALLOWLISTED generic error and logs the real
+        # exception server-side only. Leaking the exception class / message to
+        # the client (as an earlier version did) is an information-disclosure
+        # anti-pattern; the hardened contract guards against a bare 500 while
+        # keeping internal details out of the response body.
         assert detail["error"] == "internal_error"
-        assert detail["error_class"] == "RuntimeError"
-        assert "boom" in detail["message"]
+        assert "error_class" not in detail
+        assert "boom" not in json.dumps(detail)
     finally:
         async with engine.begin() as conn:
             await conn.execute(
@@ -1286,14 +1319,17 @@ async def test_respond_succeeds_when_followup_stage_raises(
         assert start_resp.status_code == 201, start_resp.text
         body = start_resp.json()
         session_id = body["session_id"]
-        first_question = body["first_question"]
-        assert first_question is not None
+        # Answering requires completed onboarding; this test targets the
+        # gateway-failure degradation path, so fast-forward past setup. The
+        # service resolves the current question from session_id, so a
+        # placeholder session_question_id satisfies the schema.
+        await _complete_onboarding(engine, uuid.UUID(session_id))
 
         respond_resp = await client.post(
             f"/api/v1/interview-sessions/{session_id}/respond",
             json={
                 "session_id": session_id,
-                "session_question_id": first_question["id"],
+                "session_question_id": str(uuid.uuid4()),
                 "answer_text": "Recursion is when a function calls itself.",
             },
             headers=_auth(student_token),
@@ -1462,14 +1498,16 @@ async def test_teacher_transcript_returns_turns_and_blocks_student(
         assert start_resp.status_code == 201, start_resp.text
         body = start_resp.json()
         session_id = body["session_id"]
-        first_q = body["first_question"]
-        assert first_q is not None
+        # Answering requires completed onboarding; this test targets the teacher
+        # transcript view, so fast-forward past setup. The service resolves the
+        # current question from session_id, so a placeholder question id is fine.
+        await _complete_onboarding(engine, uuid.UUID(session_id))
 
         respond = await client.post(
             f"/api/v1/interview-sessions/{session_id}/respond",
             json={
                 "session_id": session_id,
-                "session_question_id": first_q["id"],
+                "session_question_id": str(uuid.uuid4()),
                 "answer_text": "Recursion calls itself with a smaller input until a base case.",
             },
             headers=_auth(student_token),
@@ -1489,6 +1527,65 @@ async def test_teacher_transcript_returns_turns_and_blocks_student(
         # The student cannot reach the teacher transcript endpoint.
         denied = await client.get(
             f"/api/v1/teacher/interview-sessions/{session_id}/transcript",
+            headers=_auth(student_token),
+        )
+        assert denied.status_code in (403, 404), denied.text
+    finally:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("DELETE FROM auth_sessions WHERE id = :id"),
+                {"id": student_sid},
+            )
+
+
+async def test_teacher_integrity_events_returns_signals_and_blocks_student(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    engine: AsyncEngine,
+    scenario: dict[str, uuid.UUID],
+    seeded_users: SeededUsers,
+) -> None:
+    """FR-5.8: teacher fetches the proctoring-signal timeline for a session;
+    the owning student cannot hit the teacher authoring endpoint."""
+    config_id = await _seed_published_config(
+        engine,
+        course_id=scenario["course_id"],
+        module_id=scenario["module_id"],
+        actor_id=seeded_users.admin_id,
+    )
+    student_sid = await _seed_session(engine, seeded_users.student_id)
+    student_token = create_access_token(user_id=seeded_users.student_id, session_id=student_sid)
+    try:
+        start_resp = await client.post(
+            f"/api/v1/interview-configs/{config_id}/sessions",
+            json={"input_mode": "text"},
+            headers=_auth(student_token),
+        )
+        assert start_resp.status_code == 201, start_resp.text
+        session_id = start_resp.json()["session_id"]
+
+        # Student posts an integrity signal via the learner endpoint (Gap 1
+        # wires this in for text mode too; here we exercise the record path).
+        rec = await client.post(
+            f"/api/v1/interview-sessions/{session_id}/integrity-events",
+            json={"events": [{"event_type": "tab_switch", "severity": "warning"}]},
+            headers=_auth(student_token),
+        )
+        assert rec.status_code in (200, 201, 202, 204), rec.text
+
+        # Teacher reads the timeline back.
+        events_resp = await client.get(
+            f"/api/v1/teacher/interview-sessions/{session_id}/integrity-events",
+            headers=_auth(admin_bearer),
+        )
+        assert events_resp.status_code == 200, events_resp.text
+        payload = events_resp.json()
+        assert payload["session_id"] == session_id
+        assert any(ev["event_type"] == "tab_switch" for ev in payload["events"])
+
+        # The student cannot reach the teacher integrity endpoint.
+        denied = await client.get(
+            f"/api/v1/teacher/interview-sessions/{session_id}/integrity-events",
             headers=_auth(student_token),
         )
         assert denied.status_code in (403, 404), denied.text

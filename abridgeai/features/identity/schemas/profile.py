@@ -17,6 +17,9 @@ class UserProfileRead(_ORMModel):
     family_name: str | None = None
     display_name: str
     avatar_object_id: UUID | None = None
+    # Presigned GET URL for the avatar image, minted server-side on each read
+    # (short TTL). ``None`` when no avatar is set. Not persisted — a projection.
+    avatar_url: str | None = None
     bio: str | None = None
     locale: str | None = None
 

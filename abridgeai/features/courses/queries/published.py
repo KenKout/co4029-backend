@@ -125,24 +125,28 @@ async def get_course_instructor(db: AsyncSession, course_id: UUID) -> dict[str, 
     """Compose the instructor block for a course's public detail page.
 
     Joins ``courses.owner_user_id → users.id → user_profiles.user_id`` and
-    returns ``{user_id, display_name, avatar_url, headline}`` shaped for
-    :class:`abridgeai.features.courses.schemas.public.InstructorRead`.
-    Returns ``None`` when the course is unpublished, the owner row is
-    missing, or the owner has no ``user_profiles`` row.
+    returns ``{user_id, display_name, avatar_bucket, avatar_object_key,
+    headline}`` shaped for the service layer, which mints a presigned
+    ``avatar_url`` from the bucket/key. Returns ``None`` when the course is
+    unpublished, the owner row is missing, or the owner has no
+    ``user_profiles`` row.
 
-    ``avatar_url`` and ``headline`` are reserved for future expansion;
-    today both fall back to ``None`` because the baseline DDL stores
-    avatars in ``storage_objects`` (not directly URLed) and there is
-    no ``headline`` column on ``user_profiles`` (only ``bio``).
+    ``headline`` maps to ``user_profiles.bio`` (there is no dedicated
+    headline column). The avatar bucket/key are ``None`` when the instructor
+    has not uploaded an avatar; the service leaves ``avatar_url`` as ``None``
+    in that case and the SPA falls back to initials.
     """
     stmt = (
         select(
             User.id.label("user_id"),
             UserProfile.display_name,
             UserProfile.bio,
+            StorageObject.bucket.label("avatar_bucket"),
+            StorageObject.object_key.label("avatar_object_key"),
         )
         .join(Course, Course.owner_user_id == User.id)
         .outerjoin(UserProfile, UserProfile.user_id == User.id)
+        .outerjoin(StorageObject, StorageObject.id == UserProfile.avatar_object_id)
         .where(Course.id == course_id, published_course_clause())
     )
     row = (await db.execute(stmt)).first()
@@ -151,7 +155,8 @@ async def get_course_instructor(db: AsyncSession, course_id: UUID) -> dict[str, 
     return {
         "user_id": row.user_id,
         "display_name": row.display_name,
-        "avatar_url": None,
+        "avatar_bucket": row.avatar_bucket,
+        "avatar_object_key": row.avatar_object_key,
         "headline": row.bio,
     }
 
@@ -509,6 +514,30 @@ async def get_visible_resource_storage_target(
             published_module_clause(),
             published_lesson_clause(),
             student_visible_resource_clause(),
+        )
+    )
+    row = (await db.execute(stmt)).one_or_none()
+    if row is None:
+        return None
+    return row.bucket, row.object_key
+
+
+async def get_published_course_thumbnail_storage_target(
+    db: AsyncSession, course_id: UUID
+) -> tuple[str, str] | None:
+    """Bucket + object_key for a published course's thumbnail image, or ``None``.
+
+    Joins ``courses.thumbnail_object_id -> storage_objects.id`` gated on the
+    published-course clause. Returns ``None`` when the course has no thumbnail
+    or is unpublished. The service maps ``None`` to no thumbnail_url (the SPA
+    falls back to the gradient banner).
+    """
+    stmt = (
+        select(StorageObject.bucket, StorageObject.object_key)
+        .join(Course, Course.thumbnail_object_id == StorageObject.id)
+        .where(
+            Course.id == course_id,
+            published_course_clause(),
         )
     )
     row = (await db.execute(stmt)).one_or_none()

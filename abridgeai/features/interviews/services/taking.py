@@ -161,6 +161,70 @@ async def _next_session_sequence(db: AsyncSession, session_id: UUID) -> int:
     return int(row.scalar_one()) + 1
 
 
+@dataclass(frozen=True)
+class RetakeStatus:
+    """Proactive retake context for the student-facing results screen (#7).
+
+    Computed from the SAME FR-5.3 rules that gate ``start_session`` — surfaced
+    on the finish/session responses so the UI can show "N attempts left" and a
+    cooldown countdown instead of only learning the ceiling reactively via a
+    429/409 when the student tries again.
+
+    * ``remaining_attempts`` — ``None`` when ``max_attempts`` is unset (unlimited).
+    * ``retake_available_at`` — ``None`` when no cooldown is active (retry now).
+    * ``can_retake`` — attempts remain AND no cooldown is currently blocking.
+    """
+
+    remaining_attempts: int | None
+    retake_available_at: datetime | None
+    can_retake: bool
+
+
+async def compute_retake_status(
+    db: AsyncSession,
+    *,
+    config_id: UUID,
+    student_id: UUID,
+) -> RetakeStatus:
+    """Read-time retake status (mirrors ``_enforce_retake_policy`` rules)."""
+    from abridgeai.features.interviews.models import InterviewConfig  # noqa: PLC0415
+
+    config = await db.get(InterviewConfig, config_id)
+    if config is None:
+        return RetakeStatus(remaining_attempts=None, retake_available_at=None, can_retake=True)
+
+    # Cooldown window — most recent terminal attempt + cooldown_hours.
+    retake_available_at: datetime | None = None
+    cooldown_hours = config.cooldown_hours
+    if cooldown_hours is not None and cooldown_hours > 0:
+        last_ended = await sessions_queries.get_last_terminal_ended_at(
+            db, student_id, config_id, _TERMINAL_SESSION_STATUSES
+        )
+        if last_ended is not None:
+            if last_ended.tzinfo is None:
+                last_ended = last_ended.replace(tzinfo=UTC)
+            candidate = last_ended + timedelta(hours=cooldown_hours)
+            if candidate > datetime.now(UTC):
+                retake_available_at = candidate
+
+    # Attempt ceiling — max_attempts minus terminal attempts used.
+    remaining_attempts: int | None = None
+    max_attempts = config.max_attempts
+    if max_attempts is not None and max_attempts > 0:
+        used = await sessions_queries.count_terminal_sessions(
+            db, student_id, config_id, _TERMINAL_SESSION_STATUSES
+        )
+        remaining_attempts = max(0, max_attempts - used)
+
+    has_attempts = remaining_attempts is None or remaining_attempts > 0
+    can_retake = has_attempts and retake_available_at is None
+    return RetakeStatus(
+        remaining_attempts=remaining_attempts,
+        retake_available_at=retake_available_at,
+        can_retake=can_retake,
+    )
+
+
 async def _enforce_retake_policy(
     db: AsyncSession,
     *,
@@ -236,6 +300,11 @@ async def start_session(
     rejects them with HTTP 409 "session is not a voice interview".
     """
     data = payload.model_dump(exclude_unset=True) if payload is not None else {}
+    # The client MAY name an input_mode, but the session's mode is a property of
+    # the interview config (``supported_modes``), not a per-request toggle — the
+    # AI's speak+write capability is fixed by the interview. ``requested`` is
+    # only used to reconcile a pre-existing session below; a NEW session derives
+    # its mode from the config's canonical ``supported_modes``.
     requested_input_mode = data.get("input_mode") or "text"
 
     # Thesis §4.3: the pass/fail verdict is judged per learning outcome. Starting
@@ -264,12 +333,19 @@ async def start_session(
     await _enforce_retake_policy(db, config_id=config_id, student_id=actor.user_id)
 
     attempt_number = await sessions_queries.get_session_attempt_number(db, actor.user_id, config_id)
+    # A new session runs at the config's canonical mode, not the client value.
+    from abridgeai.features.interviews.models import InterviewConfig  # noqa: PLC0415
+
+    new_config = await db.get(InterviewConfig, config_id)
+    session_input_mode = (
+        new_config.supported_modes if new_config is not None else requested_input_mode
+    )
     session = InterviewSession(
         interview_config_id=config_id,
         student_id=actor.user_id,
         attempt_number=attempt_number,
         status="in_progress",
-        input_mode=requested_input_mode,
+        input_mode=session_input_mode,
         onboarding_stage="identity_check",
         interview_language=normalize_language(language),
     )
@@ -297,38 +373,34 @@ async def start_session(
     return session
 
 
-_CONFIG_MODE_ALLOWS: dict[str, set[str]] = {
-    "text": {"text"},
-    "voice": {"voice"},
-    "hybrid": {"text", "voice", "hybrid"},
-}
-
-
 async def _maybe_upgrade_input_mode(
     db: AsyncSession,
     session: InterviewSession,
     config_id: UUID,
     requested: str,
 ) -> None:
-    """Promote ``session.input_mode`` to ``requested`` when permitted.
+    """Sync ``session.input_mode`` to the parent config's canonical mode.
 
-    No-op when the modes already match or when the parent config does
-    not allow the requested mode. Silent on mismatch by design — the
-    realtime-token endpoint is the right place to reject voice on a
-    text-only config; here we just sync the session to what the caller
-    asked for.
+    Interviews run at the mode the *config* declares (``supported_modes``),
+    NOT whatever the client asks for — the AI's speak+write capability is a
+    property of the interview, not a per-request toggle. So a session's mode
+    is reconciled to ``config.supported_modes``: a ``hybrid`` config always
+    yields a ``hybrid`` session (even if a stale row or client payload said
+    ``text``/``voice``), and a ``text`` config can never be flipped to voice.
+
+    ``requested`` is retained for signature compatibility but is deliberately
+    ignored — trusting it was the defect that let a client-supplied value
+    diverge the session from its config. No-op when already in sync.
     """
-    if session.input_mode == requested:
-        return
     from abridgeai.features.interviews.models import InterviewConfig  # noqa: PLC0415
 
     config = await db.get(InterviewConfig, config_id)
     if config is None:
         return
-    allowed = _CONFIG_MODE_ALLOWS.get(config.supported_modes, set())
-    if requested not in allowed:
+    canonical = config.supported_modes
+    if session.input_mode == canonical:
         return
-    session.input_mode = requested
+    session.input_mode = canonical
     await flush_or_conflict(db)
 
 
@@ -2076,6 +2148,8 @@ async def _asked_question_ids(db: AsyncSession, session_id: UUID) -> set[UUID]:
 
 
 __all__ = [
+    "RetakeStatus",
+    "compute_retake_status",
     "get_session_for_user",
     "get_user_sessions",
     "start_session",
