@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from abridgeai.features.access_control.models import UserRoleAssignment
 from abridgeai.features.courses.models import (
     Course,
+    CourseLearningOutcome,
     Lesson,
     LessonResource,
     Module,
@@ -25,6 +26,26 @@ from abridgeai.features.courses.models import (
 
 async def get_course(db: AsyncSession, course_id: UUID) -> Course | None:
     return await db.get(Course, course_id)
+
+
+async def list_course_outcomes(
+    db: AsyncSession, course_id: UUID
+) -> list[CourseLearningOutcome]:
+    """Course-level learning outcomes (non-deleted), ordered by position.
+
+    Backs the interview authoring seed: a freshly created interview config
+    copies these in as its starting rubric outcomes so the teacher doesn't
+    have to import them by hand.
+    """
+    stmt = (
+        select(CourseLearningOutcome)
+        .where(
+            CourseLearningOutcome.course_id == course_id,
+            CourseLearningOutcome.deleted_at.is_(None),
+        )
+        .order_by(CourseLearningOutcome.position)
+    )
+    return list((await db.execute(stmt)).scalars().all())
 
 
 async def get_lesson(db: AsyncSession, lesson_id: UUID) -> Lesson | None:

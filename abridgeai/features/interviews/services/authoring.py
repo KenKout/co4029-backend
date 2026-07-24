@@ -159,6 +159,27 @@ async def create_interview_config(
     )
     db.add(config)
     await flush_or_conflict(db)
+    # Seed the interview's rubric outcomes from the parent course's learning
+    # outcomes so a freshly created interview starts with the course LOs in
+    # place (no manual "import from course" needed). Course outcomes carry only
+    # text; interview outcomes also need a type + weight, so seeded rows get
+    # sensible defaults (knowledge / weight 3) the teacher can edit afterwards.
+    course_outcome_texts = await courses_public.list_course_outcome_texts(db, course_id)
+    for position, outcome_text in enumerate(course_outcome_texts, start=1):
+        text_clean = (outcome_text or "").strip()
+        if not text_clean:
+            continue
+        db.add(
+            InterviewOutcome(
+                interview_config_id=config.id,
+                position=position,
+                outcome_text=text_clean,
+                outcome_type="knowledge",
+                importance_weight=3,
+            )
+        )
+    if course_outcome_texts:
+        await flush_or_conflict(db)
     # Surface the draft on the course content tree immediately. The
     # ``/content`` reader renders one row per ``module_items`` entry, so without
     # this insert a freshly created draft is invisible until publish. The

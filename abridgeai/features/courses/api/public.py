@@ -43,6 +43,17 @@ async def get_course_by_id(db: AsyncSession, course_id: UUID) -> CourseDTO | Non
     return CourseDTO.model_validate(course) if course else None
 
 
+async def list_course_outcome_texts(db: AsyncSession, course_id: UUID) -> list[str]:
+    """Course-level learning-outcome statements, ordered by position.
+
+    Returns just the text (interview outcomes carry their own type/weight),
+    so a sibling feature can seed rubric outcomes without importing the
+    courses ORM model.
+    """
+    rows = await queries.list_course_outcomes(db, course_id)
+    return [row.outcome_text for row in rows]
+
+
 async def get_lesson_by_id(db: AsyncSession, lesson_id: UUID) -> LessonDTO | None:
     lesson = await queries.get_lesson(db, lesson_id)
     return LessonDTO.model_validate(lesson) if lesson else None
@@ -146,6 +157,7 @@ __all__ = [
     "get_published_lessons_for_course",
     "get_user_primary_org",
     "insert_module_item",
+    "list_course_outcome_texts",
     "list_lesson_ids_for_modules",
     "next_module_item_position",
     "require_lesson_authoring_access",
