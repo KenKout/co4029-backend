@@ -54,7 +54,7 @@ from abridgeai.features.quizzes.schemas.public import (
     QuizPublic,
     QuizQuestionPublic,
 )
-from abridgeai.features.quizzes.services.grader import grade_answer
+from abridgeai.features.quizzes.services.grader import grade_answer, needs_manual_grade
 from abridgeai.features.spaced_repetition.api.public import (
     CardReviewResult,
     record_card_review,
@@ -370,6 +370,19 @@ async def answer_attempt(
         t_actual_ms = getattr(payload, "response_time_ms", None)
     hint_used = bool(getattr(payload, "hint_used", False))
 
+    # Phase 4: flag open-response answers that need a human grader (code always;
+    # short_answer/fill_blank only when the exact-match auto-grade missed).
+    question_type_row = (
+        await db.execute(
+            select(QuizQuestion.question_type).where(QuizQuestion.id == question_id)
+        )
+    ).scalar_one_or_none()
+    needs_manual = (
+        needs_manual_grade(question_type_row, grade)
+        if question_type_row is not None
+        else False
+    )
+
     # Phase 1: pin the answer to the question's CURRENT revision (its highest
     # revision_no) so a later regrade can judge it against the exact snapshot
     # the student saw. NULL when the question has no revision rows yet.
@@ -408,6 +421,7 @@ async def answer_attempt(
         existing.t_actual_ms = t_actual_ms
         existing.points_awarded = grade.points_awarded
         existing.graded_revision_id = graded_revision_id
+        existing.needs_manual_grade = needs_manual
         answer = existing
     else:
         answer = QuizAttemptAnswer(
@@ -420,6 +434,7 @@ async def answer_attempt(
             t_actual_ms=t_actual_ms,
             points_awarded=grade.points_awarded,
             graded_revision_id=graded_revision_id,
+            needs_manual_grade=needs_manual,
         )
         db.add(answer)
 

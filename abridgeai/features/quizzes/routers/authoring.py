@@ -68,6 +68,9 @@ from abridgeai.features.quizzes.schemas import (
     QuizQuestionAuthoring,
     QuizQuestionBreakdown,
     QuizResultsRead,
+    ManualGradeIn,
+    ManualGradeRead,
+    NeedsGradingRow,
     RegradeRunRead,
     RegradeScopeIn,
     QuizResultsSummary,
@@ -1114,6 +1117,73 @@ async def commit_regrade_run(
     await db.commit()
     run = await _regrade.get_regrade_run(db, quiz_id=quiz_id, run_id=run_id)
     return _serialize_regrade_run(run)
+
+
+@router.get(
+    "/quizzes/{quiz_id}/needs-grading",
+    response_model=list[NeedsGradingRow],
+)
+async def list_needs_grading(
+    quiz_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_QUIZ)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> list[NeedsGradingRow]:
+    """Teacher grading queue: open-response answers awaiting a human mark."""
+    del current_user
+    from abridgeai.features.quizzes.services import (  # noqa: PLC0415
+        manual_grading as _manual,
+    )
+
+    rows = await _manual.list_needs_grading(db, quiz_id=quiz_id)
+    return [
+        NeedsGradingRow(
+            answer_id=answer.id,
+            attempt_id=attempt.id,
+            question_id=question.id,
+            student_id=attempt.student_id,
+            question_type=question.question_type,
+            prompt_text=question.prompt_text,
+            answer_text=answer.answer_text,
+            submitted_at=attempt.submitted_at,
+        )
+        for answer, question, attempt in rows
+    ]
+
+
+@router.patch(
+    "/quizzes/{quiz_id}/answers/{answer_id}/grade",
+    response_model=ManualGradeRead,
+)
+async def grade_answer_manually(
+    quiz_id: UUID,
+    answer_id: UUID,
+    body: ManualGradeIn,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_QUIZ)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> ManualGradeRead:
+    """Record a teacher mark + feedback on one open-response answer, recompute
+    the attempt score, and flip the attempt to graded when nothing else on it
+    still needs a human."""
+    from abridgeai.features.quizzes.services import (  # noqa: PLC0415
+        manual_grading as _manual,
+    )
+
+    try:
+        answer = await _manual.grade_answer_manually(
+            db,
+            quiz_id=quiz_id,
+            answer_id=answer_id,
+            score=body.score,
+            feedback=body.feedback,
+            grader_id=current_user.user_id,
+        )
+    except NotFoundError as exc:
+        raise _not_found("answer", answer_id) from exc
+    except AppError as exc:
+        raise _bad_request(str(exc)) from exc
+    await db.commit()
+    await db.refresh(answer)
+    return ManualGradeRead.model_validate(answer)
 
 
 __all__ = [

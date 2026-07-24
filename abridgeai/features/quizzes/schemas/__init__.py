@@ -49,6 +49,11 @@ from abridgeai.features.quizzes.schemas.public import (
     QuizQuestionOptionPublic,
     QuizQuestionPublic,
 )
+from abridgeai.features.quizzes.schemas.manual_grading import (
+    ManualGradeIn,
+    ManualGradeRead,
+    NeedsGradingRow,
+)
 from abridgeai.features.quizzes.schemas.regrade import (
     RegradeItemRead,
     RegradeRunRead,
@@ -119,6 +124,9 @@ __all__ = [
     "QuizResultsRead",
     "QuizResultsSummary",
     "QuizScoreBucket",
+    "ManualGradeIn",
+    "ManualGradeRead",
+    "NeedsGradingRow",
     "RegradeItemRead",
     "RegradeRunRead",
     "RegradeScopeIn",

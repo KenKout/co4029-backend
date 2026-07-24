@@ -179,4 +179,28 @@ def grade_answer_against_revision(
     return _ZERO  # code + unknown → 0 (unchanged policy)
 
 
-__all__ = ["GradeResult", "grade_answer", "grade_answer_against_revision"]
+_OPEN_RESPONSE_ON_MISS = {"short_answer", "fill_blank"}
+
+
+def needs_manual_grade(question_type: str, result: GradeResult) -> bool:
+    """Return True if this answer must be reviewed by a human (Phase 4).
+
+    Policy:
+      - code            -> always (no auto-grader exists; it always scores 0)
+      - short_answer    -> only when the auto-grade missed (exact-match failed)
+      - fill_blank      -> only when the auto-grade missed
+      - multiple_choice / true_false -> never (fully auto-graded)
+    """
+    if question_type == "code":
+        return True
+    if question_type in _OPEN_RESPONSE_ON_MISS:
+        return not result.is_correct
+    return False
+
+
+__all__ = [
+    "GradeResult",
+    "grade_answer",
+    "grade_answer_against_revision",
+    "needs_manual_grade",
+]
