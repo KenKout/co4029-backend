@@ -34,17 +34,24 @@ dependencies = [
     # LiveKit server SDK: token minting + room/agent dispatch for the voice
     # interview. Lightweight (no audio/ML deps) so the API/uvicorn image stays
     # lean; the heavy agent runtime lives in the `interview-agent` extra below.
-    "livekit-api>=1.1,<2",
+    # Pin >=1.2 (ships livekit-protocol>=1.1.21 with TC_DONE): livekit-agents
+    # 1.6.x imports agent_pb.TC_DONE at module load, so an older 1.1.x api/proto
+    # crash-loops the agent worker on import. Do NOT relax below 1.2.
+    "livekit-api>=1.2,<2",
 ]
 
 [project.optional-dependencies]
 # Voice-interview agent worker runtime (Phase 3). Pulls the LiveKit Agents
-# framework + OpenAI STT/TTS + silero VAD plugins. Installed only on the
-# agent-worker process (`uv sync --extra interview-agent`), never the API.
+# framework + Deepgram/OpenAI STT/TTS + silero VAD plugins. Installed only on
+# the agent-worker process (`uv sync --extra interview-agent`), never the API.
+# Pin >=1.6 (matches the api>=1.2 / protocol>=1.1.21 baseline above).
 interview-agent = [
-    "livekit-agents>=1.5,<2",
-    "livekit-plugins-openai>=1.5,<2",
-    "livekit-plugins-silero>=1.5,<2",
+    "livekit-agents>=1.6,<2",
+    "livekit-plugins-openai>=1.6,<2",
+    "livekit-plugins-silero>=1.6,<2",
+    # Deepgram STT (nova-2) + Aura-2 TTS for English voice interviews; Vietnamese
+    # falls back to the OpenAI-compatible gateway (Deepgram has no VI locale).
+    "livekit-plugins-deepgram>=1.6,<2",
 ]
 dev = [
     "pytest>=8.3",
