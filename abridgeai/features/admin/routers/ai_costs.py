@@ -127,7 +127,7 @@ class ModelEfficiencyOut(BaseModel):
     total_usd: float
     latency_p50_ms: int
     latency_p95_ms: int
-    usd_per_1k_tokens: float
+    usd_per_1m_tokens: float
 
 
 def _parse_since(raw: str | None, default_days: int) -> datetime:

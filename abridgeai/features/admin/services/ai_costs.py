@@ -243,7 +243,7 @@ async def by_model(
             "total_usd": _to_float(r.get("total_usd")),
             "latency_p50_ms": _to_int(r.get("latency_p50_ms")),
             "latency_p95_ms": _to_int(r.get("latency_p95_ms")),
-            "usd_per_1k_tokens": _to_float(r.get("usd_per_1k_tokens")),
+            "usd_per_1m_tokens": _to_float(r.get("usd_per_1m_tokens")),
         }
         for r in rows
     ]

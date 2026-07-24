@@ -2,7 +2,7 @@
 --
 -- One row per model with rolled-up spend, tokens, call count, latency
 -- percentiles (p50/p95 via percentile_cont), and the ACTUAL blended
--- cost-per-1k-tokens (total_usd / total_tokens * 1000). The last column lets
+-- cost-per-1M-tokens (total_usd / total_tokens * 1000000). The last column lets
 -- an operator spot models that are expensive per unit of work, independent of
 -- the admin-configured pricing table.
 --
@@ -36,9 +36,9 @@ SELECT
     )::bigint AS latency_p95_ms,
     CASE
         WHEN COALESCE(SUM(total_tokens), 0) > 0
-        THEN (SUM(estimated_cost_usd) / SUM(total_tokens) * 1000)::numeric(18, 6)
+        THEN (SUM(estimated_cost_usd) / SUM(total_tokens) * 1000000)::numeric(18, 6)
         ELSE 0
-    END AS usd_per_1k_tokens
+    END AS usd_per_1m_tokens
 FROM bounded
 GROUP BY model_name
 ORDER BY total_usd DESC, call_count DESC

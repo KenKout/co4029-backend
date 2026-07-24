@@ -42,8 +42,8 @@ _REQUIRE_WRITE = require_permission("system.administer")
 class ModelPricingOut(BaseModel):
     id: UUID
     model_name: str
-    input_usd_per_1k: float
-    output_usd_per_1k: float
+    input_usd_per_1m: float
+    output_usd_per_1m: float
     notes: str | None = None
     updated_by: UUID | None = None
     created_at: datetime
@@ -52,14 +52,14 @@ class ModelPricingOut(BaseModel):
 
 class ModelPricingCreate(BaseModel):
     model_name: str = Field(min_length=1, max_length=100)
-    input_usd_per_1k: float = Field(ge=0)
-    output_usd_per_1k: float = Field(ge=0)
+    input_usd_per_1m: float = Field(ge=0)
+    output_usd_per_1m: float = Field(ge=0)
     notes: str | None = Field(default=None, max_length=255)
 
 
 class ModelPricingUpdate(BaseModel):
-    input_usd_per_1k: float | None = Field(default=None, ge=0)
-    output_usd_per_1k: float | None = Field(default=None, ge=0)
+    input_usd_per_1m: float | None = Field(default=None, ge=0)
+    output_usd_per_1m: float | None = Field(default=None, ge=0)
     notes: str | None = Field(default=None, max_length=255)
 
 
@@ -82,8 +82,8 @@ async def create_pricing(
         row = await pricing_service.create_pricing(
             db,
             model_name=body.model_name,
-            input_usd_per_1k=Decimal(str(body.input_usd_per_1k)),
-            output_usd_per_1k=Decimal(str(body.output_usd_per_1k)),
+            input_usd_per_1m=Decimal(str(body.input_usd_per_1m)),
+            output_usd_per_1m=Decimal(str(body.output_usd_per_1m)),
             notes=body.notes,
             updated_by=user.user_id,
         )
@@ -103,11 +103,11 @@ async def update_pricing(
         row = await pricing_service.update_pricing(
             db,
             pricing_id=pricing_id,
-            input_usd_per_1k=(
-                Decimal(str(body.input_usd_per_1k)) if body.input_usd_per_1k is not None else None
+            input_usd_per_1m=(
+                Decimal(str(body.input_usd_per_1m)) if body.input_usd_per_1m is not None else None
             ),
-            output_usd_per_1k=(
-                Decimal(str(body.output_usd_per_1k)) if body.output_usd_per_1k is not None else None
+            output_usd_per_1m=(
+                Decimal(str(body.output_usd_per_1m)) if body.output_usd_per_1m is not None else None
             ),
             notes=body.notes,
             notes_provided="notes" in body.model_fields_set,

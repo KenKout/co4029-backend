@@ -670,4 +670,4 @@ async def test_by_model_efficiency_metrics(
     gpt4o = next(row for row in body if row["model_name"] == "gpt-4o")
     assert gpt4o["latency_p50_ms"] > 0
     assert gpt4o["latency_p95_ms"] >= gpt4o["latency_p50_ms"]
-    assert gpt4o["usd_per_1k_tokens"] > 0
+    assert gpt4o["usd_per_1m_tokens"] > 0
