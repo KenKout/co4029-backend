@@ -400,6 +400,27 @@ async def _finish_session(
         )
 
 
+async def _complete_onboarding(engine: AsyncEngine, session_id: uuid.UUID) -> None:
+    """Fast-forward a session past onboarding so the answer path is reachable.
+
+    The answer/step path gates on ``onboarding_stage == 'completed'`` (added in
+    the onboarding-ceremony slice). These service tests exercise the *answering*
+    mechanics, not onboarding, so they jump straight to the completed state —
+    the same terminal state ``onboarding_service.respond`` reaches after the
+    candidate confirms readiness (stage='completed' + assessment_started_at set).
+    """
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "UPDATE interview_sessions "
+                "SET onboarding_stage = 'completed', "
+                "    assessment_started_at = COALESCE(assessment_started_at, NOW()) "
+                "WHERE id = :id"
+            ),
+            {"id": session_id},
+        )
+
+
 @pytest.mark.asyncio
 async def test_start_session_cooldown_blocks_new_attempt(
     engine: AsyncEngine,
@@ -597,6 +618,9 @@ async def test_take_step_persists_answer_and_advances(
         started = await taking_service.start_session(
             session, seeded["config_id"], payload, _actor(scenario["student_id"])
         )
+    # The answer path gates on completed onboarding; this test exercises the
+    # answering mechanics, so fast-forward past setup.
+    await _complete_onboarding(engine, started.id)
 
     async with session_factory() as session, session.begin():
         result = await taking_service.take_session_step(
@@ -606,7 +630,10 @@ async def test_take_step_persists_answer_and_advances(
             _actor(scenario["student_id"]),
         )
 
-    assert result["followup_text"] is None
+    # On a plain advance the step now carries a persona-aware transition
+    # signpost (Natural Interview Transitions) rather than None — the meaningful
+    # assertion is that it's a next-question transition, not a probing follow-up.
+    assert result["transition_target"] == "next_question"
     assert result["is_finished"] is False
     assert result["next_question"] is not None
     assert result["next_question"].id == seeded["question_ids"][1]
@@ -655,6 +682,9 @@ async def test_take_step_returns_followup_when_shallow(
         started = await taking_service.start_session(
             session, seeded["config_id"], payload, _actor(scenario["student_id"])
         )
+    # The answer path gates on completed onboarding; this test exercises the
+    # follow-up mechanics, so fast-forward past setup.
+    await _complete_onboarding(engine, started.id)
 
     async with session_factory() as session, session.begin():
         result = await taking_service.take_session_step(

@@ -252,6 +252,27 @@ async def _seed_session(eng: AsyncEngine, user_id: UUID) -> UUID:
     return session_id
 
 
+async def _complete_onboarding(eng: AsyncEngine, session_id: UUID) -> None:
+    """Fast-forward a session past onboarding so the answer path is reachable.
+
+    The /respond path gates on ``onboarding_stage == 'completed'`` (added in the
+    onboarding-ceremony slice). E2E tests that exercise the *answering* endpoints
+    jump straight to the completed terminal state (the same state
+    ``onboarding_service.respond`` reaches on readiness confirmation:
+    stage='completed' + assessment_started_at set).
+    """
+    async with eng.begin() as conn:
+        await conn.execute(
+            text(
+                "UPDATE interview_sessions "
+                "SET onboarding_stage = 'completed', "
+                "    assessment_started_at = COALESCE(assessment_started_at, NOW()) "
+                "WHERE id = :id"
+            ),
+            {"id": session_id},
+        )
+
+
 @pytest_asyncio.fixture
 async def admin_bearer(engine: AsyncEngine, seeded_users: SeededUsers) -> AsyncIterator[str]:
     sid = await _seed_session(engine, seeded_users.admin_id)
@@ -675,11 +696,14 @@ def llm_mocks(scenario: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> dict
         outcomes: list[Any],
         questions: list[Any],
         answers: list[Any],
+        question_prompts: Any = None,
+        expected_question_ids: Any = None,
         config: Any = None,
         pipeline_run_id: UUID | None = None,
         gateway: Any = None,
     ) -> RubricScores:
-        del session, outcomes, questions, answers, config, gateway
+        del session, outcomes, questions, answers, question_prompts
+        del expected_question_ids, config, gateway
         captured["stages"].append({"stage": "evaluation"})
         # No audit row here — evaluation pipeline_run_id is None per T6.11
         # default; we mark the stage in `captured` for visibility.
@@ -732,10 +756,11 @@ def llm_mocks(scenario: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> dict
         outcomes: list[Any],
         questions: list[Any],
         answers: list[Any],
+        question_prompts: Any = None,
         pipeline_run_id: UUID | None = None,
         gateway: Any = None,
     ) -> OutcomeVerdicts:
-        del db, session, questions, answers, pipeline_run_id, gateway
+        del db, session, questions, answers, question_prompts, pipeline_run_id, gateway
         captured["stages"].append({"stage": "outcome_verdicts"})
         return build_outcome_verdicts(
             [
@@ -969,8 +994,13 @@ async def test_full_interview_lifecycle_generate_take_submit_evaluate(
     )
     assert start_resp.status_code == 201, start_resp.text
     session_id = UUID(start_resp.json()["session_id"])
-    first_question = start_resp.json()["first_question"]
-    assert first_question is not None
+    # Answering requires completed onboarding; the start response only reveals
+    # first_question once onboarding is done. This lifecycle test targets the
+    # answer→submit→evaluate path, so fast-forward past setup. The service
+    # resolves the current question from session_id, so the placeholder
+    # session_question_id below satisfies the schema.
+    await _complete_onboarding(engine, session_id)
+
 
     # 10. Student answers all three questions.
     for i in range(3):
@@ -1147,6 +1177,9 @@ async def test_audio_object_id_persisted_without_transcription(
     )
     assert start_resp.status_code == 201, start_resp.text
     session_id = UUID(start_resp.json()["session_id"])
+    # Answering requires completed onboarding; this test targets the audio
+    # persistence path, so fast-forward past setup.
+    await _complete_onboarding(engine, session_id)
 
     # Seed a fake storage_objects row — the FK target.
     audio_id = uuid.uuid4()
