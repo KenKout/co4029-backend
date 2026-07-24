@@ -56,6 +56,8 @@ from abridgeai.features.interviews.orchestrator.security import (
 from abridgeai.features.interviews.queries import authoring as authoring_queries
 from abridgeai.features.interviews.queries import sessions as sessions_queries
 from abridgeai.features.interviews.services import security as security_service
+from abridgeai.ai.models import GenerationRun
+from abridgeai.features.quizzes.api import public as quizzes_public
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -95,6 +97,13 @@ async def evaluate_and_generate_report(
     if session is None:
         raise NotFoundError(f"Interview session {session_id} not found")
 
+    # Parent generation_run for this evaluation so it surfaces on the admin
+    # processing dashboard and its LLM calls attribute to a pipeline run.
+    # Created + committed with status='running' BEFORE the stages so a later
+    # failure (and rollback) still leaves a visible 'failed' run row. Declared
+    # here so the except handler can stamp it even if creation itself raised.
+    eval_run_id: UUID | None = None
+
     try:
         outcomes = await authoring_queries.list_outcomes_for_config(db, session.interview_config_id)
         all_questions = await authoring_queries.list_questions_for_config(
@@ -122,6 +131,28 @@ async def evaluate_and_generate_report(
         if config is None:
             raise NotFoundError(f"Interview config {session.interview_config_id} not found")
 
+        # Create the parent generation_run (status='running') and commit it on
+        # its own so it is durably visible on the admin processing dashboard
+        # even if a stage below fails and rolls back the evaluation work.
+        eval_run = await quizzes_public.create_generation_run(
+            db,
+            kind="interview_evaluation",
+            source_scope_kind="module" if config.module_id is not None else "course",
+            course_id=config.course_id,
+            module_id=config.module_id,
+            requested_by=session.student_id,
+            config_json={
+                "interview_config_id": str(session.interview_config_id),
+                "interview_session_id": str(session_id),
+            },
+        )
+        eval_run_id = eval_run.id
+        run_row = await db.get(GenerationRun, eval_run_id)
+        if run_row is not None:
+            run_row.status = "running"
+            run_row.started_at = utcnow()
+        await db.commit()
+
         # Thesis §4.3 gate: per-outcome met/not-met verdicts decide pass/fail.
         outcome_verdicts = await evaluate_outcomes(
             db,
@@ -130,7 +161,7 @@ async def evaluate_and_generate_report(
             questions=questions,
             answers=candidate_answers,
             question_prompts=question_prompts,
-            pipeline_run_id=None,
+            pipeline_run_id=eval_run_id,
         )
         outcome_verdicts = _fail_unanswered_outcomes(
             outcome_verdicts,
@@ -148,7 +179,7 @@ async def evaluate_and_generate_report(
             answers=candidate_answers,
             question_prompts=question_prompts,
             expected_question_ids=expected_question_ids,
-            pipeline_run_id=None,
+            pipeline_run_id=eval_run_id,
         )
 
         min_outcomes_to_pass = getattr(config, "min_outcomes_to_pass", None)
@@ -165,7 +196,7 @@ async def evaluate_and_generate_report(
             quiz_attempts=quiz_attempts,
             course_id=course_id,
             module_id=module_id,
-            pipeline_run_id=None,
+            pipeline_run_id=eval_run_id,
         )
 
         await _persist_outcome_evaluations(db, session_id=session_id, verdicts=outcome_verdicts)
@@ -185,9 +216,26 @@ async def evaluate_and_generate_report(
             draft=report_draft,
         )
 
-        await db.commit()
+        # Mark the evaluation run completed now that all work has committed.
+        run_row = await db.get(GenerationRun, eval_run_id)
+        if run_row is not None:
+            run_row.status = "completed"
+            run_row.finished_at = utcnow()
+            await db.commit()
     except Exception as exc:
         await db.rollback()
+        # Stamp the evaluation run as failed so the dashboard shows the
+        # terminal state. This rides its own commit after the rollback above
+        # and never masks the original exception.
+        if eval_run_id is not None:
+            failed_run = await db.get(GenerationRun, eval_run_id)
+            if failed_run is not None:
+                failed_run.status = "failed"
+                failed_run.finished_at = utcnow()
+                failed_run.config_json = dict(failed_run.config_json or {}) | {
+                    "failure": {"message": str(exc)}
+                }
+                await db.commit()
         fresh = await db.get(InterviewSession, session_id)
         if fresh is not None:
             fresh.internal_summary_json = dict(fresh.internal_summary_json or {}) | {

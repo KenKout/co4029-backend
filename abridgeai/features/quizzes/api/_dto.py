@@ -40,7 +40,9 @@ from pydantic import BaseModel, ConfigDict
 # The api layer publishes these as ``Literal`` types so callers get
 # narrowed errors at static-check time when they pass an unsupported
 # kind.
-GenerationRunKind = Literal["quiz", "interview", "knowledge_graph", "material_index"]
+GenerationRunKind = Literal[
+    "quiz", "interview", "knowledge_graph", "material_index", "interview_evaluation"
+]
 GenerationRunSourceScopeKind = Literal["lesson", "module", "course"]
 GenerationRunStatus = Literal["pending", "running", "completed", "failed", "cancelled"]
 

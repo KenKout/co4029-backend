@@ -176,7 +176,8 @@ class GenerationRun(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "generation_runs"
     __table_args__ = (
         CheckConstraint(
-            "generation_type IN ('quiz', 'interview', 'knowledge_graph', 'material_index')",
+            "generation_type IN ('quiz', 'interview', 'knowledge_graph', "
+            "'material_index', 'interview_evaluation')",
             name="ck_generation_runs_type",
         ),
         CheckConstraint(
