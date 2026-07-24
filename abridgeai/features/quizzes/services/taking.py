@@ -322,6 +322,30 @@ async def start_attempt(
         {"question_id": qid, "due_at": due_at} for qid, due_at in cooldown_map.items()
     ]
 
+    # Phase 6: when the quiz enables shuffling, deterministically realize a
+    # per-attempt question/option order seeded by the attempt id, persist it to
+    # attempt.layout, and reorder the take payload. Resume/review re-read layout
+    # verbatim so the student always sees the same order.
+    if quiz.shuffle_questions or quiz.shuffle_options:
+        from abridgeai.features.quizzes.services.shuffle import (  # noqa: PLC0415
+            apply_layout,
+            build_layout,
+        )
+
+        options_by_question = {
+            q.id: [o.id for o in getattr(q, "options", []) or []] for q in available_questions
+        }
+        layout = build_layout(
+            attempt.id,
+            [q.id for q in available_questions],
+            options_by_question,
+            shuffle_questions=quiz.shuffle_questions,
+            shuffle_options=quiz.shuffle_options,
+        )
+        attempt.layout = layout
+        await flush_or_conflict(db)
+        available_questions = apply_layout(available_questions, layout)
+
     public_quiz = QuizPublic.model_validate(quiz)
     public_questions = [
         QuizQuestionPublic.model_validate(question) for question in available_questions
@@ -390,14 +414,10 @@ async def answer_attempt(
     # Phase 4: flag open-response answers that need a human grader (code always;
     # short_answer/fill_blank only when the exact-match auto-grade missed).
     question_type_row = (
-        await db.execute(
-            select(QuizQuestion.question_type).where(QuizQuestion.id == question_id)
-        )
+        await db.execute(select(QuizQuestion.question_type).where(QuizQuestion.id == question_id))
     ).scalar_one_or_none()
     needs_manual = (
-        needs_manual_grade(question_type_row, grade)
-        if question_type_row is not None
-        else False
+        needs_manual_grade(question_type_row, grade) if question_type_row is not None else False
     )
 
     # Phase 1: pin the answer to the question's CURRENT revision (its highest
@@ -542,26 +562,78 @@ async def submit_attempt(
     attempt = await _require_attempt(db, attempt_id)
     quiz = await _require_quiz(db, attempt.quiz_id)
 
+    # Phase 6: deadline enforcement at submit time. If the attempt is past its
+    # (grace-extended) deadline and the quiz is 'autoabandon', expire it with no
+    # grade; otherwise grade normally (autosubmit / graceperiod both grade what
+    # was answered). This makes a late submit correct even if the sweep never ran.
+    from abridgeai.features.quizzes.services import timing as _timing  # noqa: PLC0415
+
+    now = utcnow()
+    eff = _timing.resolve_effective_timing(quiz)
+    overdue = _timing.is_overdue(
+        attempt.started_at,
+        eff,
+        grace_period_seconds=(
+            quiz.grace_period_seconds if quiz.overdue_handling == "graceperiod" else None
+        ),
+        now=now,
+        due_at=quiz.due_at,
+        hard_due=False,
+    )
+    if overdue and quiz.overdue_handling == "autoabandon":
+        return await _expire_attempt(db, attempt, now=now)
+
+    return await _finalize_attempt(db, attempt, quiz, now=now)
+
+
+async def _finalize_attempt(
+    db: AsyncSession,
+    attempt: QuizAttempt,
+    quiz: Quiz,
+    *,
+    now: datetime | None = None,
+) -> QuizAttempt:
+    """Grade + close an in_progress attempt as 'submitted'.
+
+    Idempotent: returns unchanged if the attempt is not in_progress. Shared by
+    :func:`submit_attempt` and the Phase 6 overdue sweep so both use identical
+    scoring. Attaches response-only correct_count/total_questions.
+    """
+    now = now or utcnow()
+    if attempt.status != "in_progress":
+        return attempt
+
     score_points, score_percent, correct_count, question_count = await _recompute_attempt_score(
         db, attempt, quiz
     )
-
     attempt.status = "submitted"
-    attempt.submitted_at = utcnow()
-    attempt.time_taken_seconds = int((attempt.submitted_at - attempt.started_at).total_seconds())
+    attempt.submitted_at = now
+    attempt.time_taken_seconds = int((now - attempt.started_at).total_seconds())
     attempt.score_points = score_points
     attempt.score_percent = score_percent
     attempt.passed = score_percent >= quiz.passing_score_percent
     await flush_or_conflict(db)
     await db.refresh(attempt)
-    # correct_count / total_questions are response-only fields (not ORM
-    # columns) that QuizAttemptRead surfaces so the results page can show
-    # "N/total correct". Attach them as transient attributes after refresh so
-    # pydantic's from_attributes picks them up; without this they default to
-    # None and the UI renders "0/N correct" despite a correct score_percent.
-    # response-only (not ORM columns); dynamic attrs picked up by from_attributes
     setattr(attempt, "correct_count", correct_count)  # noqa: B010 -- dynamic, not column
     setattr(attempt, "total_questions", question_count)  # noqa: B010 -- dynamic, not column
+    return attempt
+
+
+async def _expire_attempt(
+    db: AsyncSession,
+    attempt: QuizAttempt,
+    *,
+    now: datetime | None = None,
+) -> QuizAttempt:
+    """Close an in_progress attempt as 'expired' with no grade (autoabandon)."""
+    now = now or utcnow()
+    if attempt.status != "in_progress":
+        return attempt
+    attempt.status = "expired"
+    attempt.submitted_at = now
+    attempt.time_taken_seconds = int((now - attempt.started_at).total_seconds())
+    await flush_or_conflict(db)
+    await db.refresh(attempt)
     return attempt
 
 

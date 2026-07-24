@@ -444,6 +444,9 @@ class QuizAttempt(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     score_percent: Mapped[Decimal | None] = mapped_column(Numeric(5, 2))
     passed: Mapped[bool | None] = mapped_column(Boolean)
     idempotency_key: Mapped[uuid.UUID | None] = mapped_column(PGUUID(as_uuid=True), unique=True)
+    # Phase 6 (migration 0050): deterministic per-attempt question/option order
+    # (shuffle). NULL = natural order. Re-read verbatim on resume/review.
+    layout: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
 
     quiz: Mapped[Quiz] = relationship(back_populates="attempts")
     answers: Mapped[list[QuizAttemptAnswer]] = relationship(
@@ -536,9 +539,7 @@ class QuizRegradeRun(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     attempts_affected: Mapped[int] = mapped_column(
         Integer, nullable=False, server_default=text("0")
     )
-    answers_changed: Mapped[int] = mapped_column(
-        Integer, nullable=False, server_default=text("0")
-    )
+    answers_changed: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
     requested_by: Mapped[uuid.UUID | None] = mapped_column(
         PGUUID(as_uuid=True),
         ForeignKey("users.id", ondelete="SET NULL"),
@@ -691,9 +692,7 @@ class QuizGrade(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         PGUUID(as_uuid=True),
         ForeignKey("quiz_attempts.id", ondelete="SET NULL"),
     )
-    attempts_counted: Mapped[int] = mapped_column(
-        Integer, nullable=False, server_default=text("0")
-    )
+    attempts_counted: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
     computed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
@@ -725,9 +724,7 @@ class QuizStatisticsCache(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 class QuestionCategory(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftDeleteMixin, Base):
     __tablename__ = "question_categories"
     __table_args__ = (
-        UniqueConstraint(
-            "context_key", "parent_id", "name", name="uq_question_categories_name"
-        ),
+        UniqueConstraint("context_key", "parent_id", "name", name="uq_question_categories_name"),
     )
 
     context_key: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
@@ -741,9 +738,7 @@ class QuestionCategory(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, Soft
 
 class QuestionTag(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
     __tablename__ = "question_tags"
-    __table_args__ = (
-        UniqueConstraint("context_key", "name", name="uq_question_tags_name"),
-    )
+    __table_args__ = (UniqueConstraint("context_key", "name", name="uq_question_tags_name"),)
 
     context_key: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
     name: Mapped[str] = mapped_column(String(100), nullable=False)
@@ -751,9 +746,7 @@ class QuestionTag(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
 
 class QuestionTagMap(CreatedAtMixin, Base):
     __tablename__ = "question_tag_map"
-    __table_args__ = (
-        UniqueConstraint("question_id", "tag_id", name="uq_question_tag_map"),
-    )
+    __table_args__ = (UniqueConstraint("question_id", "tag_id", name="uq_question_tag_map"),)
 
     question_id: Mapped[uuid.UUID] = mapped_column(
         PGUUID(as_uuid=True),

@@ -30,6 +30,7 @@ from abridgeai.features.materials.workers.cron import cleanup_orphaned_uploads_t
 from abridgeai.features.materials.workers.reaper import reconcile_orphaned_ingests_task
 from abridgeai.features.notifications.workers import JOBS as NOTIFICATION_JOBS
 from abridgeai.features.quizzes.workers import JOBS as QUIZ_JOBS
+from abridgeai.features.quizzes.workers.timing import sweep_overdue_attempts_task
 from abridgeai.features.spaced_repetition.workers import JOBS as SR_JOBS
 from abridgeai.features.spaced_repetition.workers import scan_due_cards_task
 
@@ -58,7 +59,7 @@ class WorkerSettings:
         + list(SR_JOBS)
     )
     max_jobs = 10
-    job_timeout = 1200 # Nam 23/07/2026: Increase timeout window for long pdf context
+    job_timeout = 1200  # Nam 23/07/2026: Increase timeout window for long pdf context
     keep_result_seconds = 3600
     max_tries = 3
     cron_jobs: list[CronJob] = [
@@ -74,6 +75,9 @@ class WorkerSettings:
         # FR-6.8 — nightly career readiness snapshots (one row per active
         # career enrollment) feeding manager aggregates + student history.
         cron(snapshot_career_readiness_task, hour={2}, minute=30),
+        # Phase 6 — finalize/expire overdue in-progress quiz attempts every minute
+        # so a timed quiz closes even if the student never hits submit.
+        cron(sweep_overdue_attempts_task, minute=set(range(0, 60))),
     ]
 
 
