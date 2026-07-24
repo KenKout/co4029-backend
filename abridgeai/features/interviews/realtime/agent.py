@@ -100,7 +100,7 @@ async def entrypoint(ctx: JobContext) -> None:
         opening_text=opening_text,
         language=language,
     )
-    session = build_agent_session(settings)
+    session = build_agent_session(settings, language=language)
     await session.start(agent, room=ctx.room)
 
 
