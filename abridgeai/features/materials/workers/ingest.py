@@ -43,6 +43,9 @@ from abridgeai.core.observability import (
 )
 from abridgeai.features.materials.ingestion import run_material_ingest
 from abridgeai.features.materials.models import LearningMaterialVersion
+from abridgeai.features.materials.services.completion_notify import (
+    notify_material_processing_outcome,
+)
 from abridgeai.infrastructure.neo4j import graph_client
 from abridgeai.infrastructure.s3 import download_to_temp
 from abridgeai.workers.actor import set_worker_actor
@@ -157,9 +160,20 @@ async def ingest_material_version_task(
                             llm_gateway=LLMGateway(),
                         )
                 await db.commit()
+                # Notify the initiating teacher that the material is ready.
+                # Best-effort + rides in its own commit so it can never disturb
+                # the ingest transaction above.
+                await notify_material_processing_outcome(
+                    db,
+                    recipient_user_id=actor_id,
+                    material_version_id=material_version_id,
+                    succeeded=True,
+                    arq_pool=ctx.get("redis"),
+                )
+                await db.commit()
             except (KeyboardInterrupt, SystemExit):
                 raise
-            except Exception:
+            except Exception as exc:
                 _logger.exception(
                     "materials_ingest_task_failed",
                     material_version_id=str(material_version_id),
@@ -168,6 +182,16 @@ async def ingest_material_version_task(
                 # Persist the pipeline's ``_capture_failure`` audit rows
                 # (processing_status='failed', error_message populated)
                 # before propagating to ARQ so the failure survives retry.
+                await db.commit()
+                # Notify the initiating teacher of the failure (best-effort).
+                await notify_material_processing_outcome(
+                    db,
+                    recipient_user_id=actor_id,
+                    material_version_id=material_version_id,
+                    succeeded=False,
+                    error_message=str(exc),
+                    arq_pool=ctx.get("redis"),
+                )
                 await db.commit()
                 raise
     finally:

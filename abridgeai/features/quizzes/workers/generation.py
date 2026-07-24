@@ -66,7 +66,9 @@ async def run_quiz_generation_task(
     try:
         async with sessionmaker() as db:
             try:
-                await generation_service.run_quiz_generation(db, generation_run_id)
+                await generation_service.run_quiz_generation(
+                    db, generation_run_id, arq_pool=ctx.get("redis")
+                )
             except (KeyboardInterrupt, SystemExit):
                 raise
             except Exception:

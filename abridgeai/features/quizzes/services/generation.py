@@ -67,6 +67,9 @@ from abridgeai.features.quizzes.ai.pipelines import (
     regenerate as regenerate_pipeline,
 )
 from abridgeai.features.quizzes.models import Quiz, QuizQuestion
+from abridgeai.features.quizzes.services.completion_notify import (
+    notify_quiz_generation_outcome,
+)
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -193,7 +196,12 @@ async def _precompute_coverage_inputs(
     return outlines, budget
 
 
-async def run_quiz_generation(db: AsyncSession, generation_run_id: UUID) -> None:
+async def run_quiz_generation(
+    db: AsyncSession,
+    generation_run_id: UUID,
+    *,
+    arq_pool: object | None = None,
+) -> None:
     """ARQ entrypoint: dispatch ``generation_run_id`` to the right pipeline.
 
     Marks the run ``running`` before invoking the pipeline. On any
@@ -201,11 +209,18 @@ async def run_quiz_generation(db: AsyncSession, generation_run_id: UUID) -> None
     row is re-fetched, ``status='failed'`` + the failure message are
     stamped on ``config_json``, the failure is committed, and the
     original exception is re-raised so the ARQ retry budget engages.
+
+    ``arq_pool`` (the worker's ``ctx['redis']``) is threaded through solely so
+    the completion/failure notification can enqueue an email; ``None`` in
+    sync/test paths simply skips the email fan-out.
     """
     run = await db.get(GenerationRun, generation_run_id)
     if run is None:
         raise NotFoundError("Generation run not found")
     run_id = run.id
+    # Captured for the completion notification (recipient + deep-link target).
+    run_requested_by = run.requested_by
+    run_course_id = run.course_id
 
     target_question_id = _config_uuid(run.config_json, "question_id")
     if target_question_id is not None:
@@ -270,6 +285,18 @@ async def run_quiz_generation(db: AsyncSession, generation_run_id: UUID) -> None
         run.status = "completed"
         run.finished_at = utcnow()
         await db.commit()
+        # Notify the initiating teacher (best-effort; rides its own commit and
+        # never disturbs the generation transaction above).
+        await notify_quiz_generation_outcome(
+            db,
+            recipient_user_id=run_requested_by,
+            quiz_id=quiz.id,
+            course_id=run_course_id,
+            quiz_title=quiz.title,
+            succeeded=True,
+            arq_pool=arq_pool,
+        )
+        await db.commit()
     except asyncio.CancelledError:
         # Worker shutdown / restart / job_timeout cancels the coroutine.
         # CancelledError is a BaseException (not Exception) so it bypasses the
@@ -290,6 +317,18 @@ async def run_quiz_generation(db: AsyncSession, generation_run_id: UUID) -> None
         run.status = "failed"
         run.config_json = dict(run.config_json or {}) | {"failure": {"message": str(exc)}}
         run.finished_at = utcnow()
+        await db.commit()
+        # Notify the initiating teacher of the failure (best-effort).
+        await notify_quiz_generation_outcome(
+            db,
+            recipient_user_id=run_requested_by,
+            quiz_id=quiz.id,
+            course_id=run_course_id,
+            quiz_title=quiz.title,
+            succeeded=False,
+            error_message=str(exc),
+            arq_pool=arq_pool,
+        )
         await db.commit()
         raise
 
