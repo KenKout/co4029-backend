@@ -71,6 +71,8 @@ from abridgeai.features.quizzes.schemas import (
     ManualGradeIn,
     ManualGradeRead,
     NeedsGradingRow,
+    QuizOverrideIn,
+    QuizOverrideRead,
     RegradeRunRead,
     RegradeScopeIn,
     QuizResultsSummary,
@@ -1184,6 +1186,93 @@ async def grade_answer_manually(
     await db.commit()
     await db.refresh(answer)
     return ManualGradeRead.model_validate(answer)
+
+
+@router.get(
+    "/quizzes/{quiz_id}/overrides",
+    response_model=list[QuizOverrideRead],
+)
+async def list_quiz_overrides(
+    quiz_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_QUIZ)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> list[QuizOverrideRead]:
+    """List all user/group overrides for a quiz (Phase 5)."""
+    del current_user
+    from abridgeai.features.quizzes.queries import overrides as _ov_q  # noqa: PLC0415
+
+    rows = await _ov_q.list_overrides(db, quiz_id)
+    return [QuizOverrideRead.model_validate(r) for r in rows]
+
+
+@router.post(
+    "/quizzes/{quiz_id}/overrides",
+    response_model=QuizOverrideRead,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_quiz_override(
+    quiz_id: UUID,
+    body: QuizOverrideIn,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_QUIZ)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> QuizOverrideRead:
+    """Create a per-user or per-group override for a quiz's timing/retake policy."""
+    del current_user
+    from abridgeai.features.quizzes.queries import overrides as _ov_q  # noqa: PLC0415
+
+    try:
+        row = await _ov_q.create_override(db, quiz_id, body.model_dump())
+        await db.flush()
+    except Exception as exc:  # noqa: BLE001
+        # A duplicate (quiz, scope, user/group) trips a unique constraint.
+        await db.rollback()
+        raise _conflict("an override for this target already exists") from exc
+    await db.commit()
+    await db.refresh(row)
+    return QuizOverrideRead.model_validate(row)
+
+
+@router.patch(
+    "/quizzes/{quiz_id}/overrides/{override_id}",
+    response_model=QuizOverrideRead,
+)
+async def update_quiz_override(
+    quiz_id: UUID,
+    override_id: UUID,
+    body: QuizOverrideIn,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_QUIZ)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> QuizOverrideRead:
+    """Update an existing override row."""
+    del current_user
+    from abridgeai.features.quizzes.queries import overrides as _ov_q  # noqa: PLC0415
+
+    row = await _ov_q.update_override(db, override_id, body.model_dump())
+    if row is None:
+        raise _not_found("override", override_id)
+    await db.commit()
+    await db.refresh(row)
+    return QuizOverrideRead.model_validate(row)
+
+
+@router.delete(
+    "/quizzes/{quiz_id}/overrides/{override_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def delete_quiz_override(
+    quiz_id: UUID,
+    override_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_QUIZ)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> None:
+    """Delete an override row (app-code delete, ondelete=NO ACTION convention)."""
+    del current_user
+    from abridgeai.features.quizzes.queries import overrides as _ov_q  # noqa: PLC0415
+
+    deleted = await _ov_q.delete_override(db, override_id)
+    if not deleted:
+        raise _not_found("override", override_id)
+    await db.commit()
 
 
 __all__ = [

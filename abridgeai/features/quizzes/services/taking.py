@@ -275,7 +275,24 @@ async def start_attempt(
     (→ 409) per the quiz's ``cooldown_hours`` / ``max_attempts`` /
     ``allow_retakes`` columns. Both exceptions propagate to the router.
     """
-    quiz = await published_queries.get_quiz_for_taking(db, quiz_id, actor.user_id)
+    # Phase 5: resolve this student's effective timing/retake policy (base quiz
+    # columns overridden by any user/group override) and feed it into the gate
+    # so an accommodation (extra attempts, extended window) is honoured. We load
+    # the published quiz first for resolution, then re-run the gate with the
+    # effective values.
+    from abridgeai.features.quizzes.services.overrides import (  # noqa: PLC0415
+        resolve_policy_for_student,
+    )
+
+    _quiz_for_policy = await published_queries.get_published_quiz(db, quiz_id)
+    effective = (
+        await resolve_policy_for_student(db, _quiz_for_policy, actor.user_id)
+        if _quiz_for_policy is not None
+        else None
+    )
+    quiz = await published_queries.get_quiz_for_taking(
+        db, quiz_id, actor.user_id, effective=effective
+    )
     if quiz is None:
         raise NotFoundError(f"Quiz {quiz_id} not found")
     questions = await _load_quiz_questions_for_taking(db, quiz_id)
