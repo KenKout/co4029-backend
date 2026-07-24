@@ -106,6 +106,45 @@ Chọn theo `acknowledgement_style` mà decision gán. Style `NONE` → không c
 
 ## PHẦN D — PROBE / FOLLOW-UP (đào sâu câu trả lời)
 
+### D0. KHI NÀO probe/follow-up diễn ra
+
+Probe là hành vi **giữa phỏng vấn**, khi học viên vừa **trả lời thật** một câu (KHÔNG
+phải yêu cầu như xin hint/lặp lại/skip). Nó chạy ở **rule 11** trong `decide_next_action`,
+nên chỉ kích hoạt sau khi vượt qua mọi cửa ưu tiên cao hơn.
+
+**Điều kiện bắt buộc (cả 3 phải đúng):**
+1. Bộ phân tích khuyến nghị một probe — `analysis.recommended_probe_type != NONE`
+   (câu trả lời mơ hồ / thiếu ví dụ / phủ mục tiêu một phần / có mâu thuẫn…).
+2. Chưa cạn quota follow-up — chưa đạt **2/câu** và chưa đạt **12/toàn phiên**.
+3. Thời gian chưa thấp — còn **> 20%** (`_LOW_TIME_FRACTION = 0.2`).
+
+Thiếu bất kỳ điều nào → KHÔNG probe, mà **advance** sang câu kế / **đóng** phiên.
+
+**Bị chặn trước (ưu tiên cao hơn probe) — nếu trúng thì probe không chạy:**
+- Rule 1–8: học viên đang *yêu cầu* (repeat / clarify / hint / more time / skip /
+  cannot-answer / off-topic / đòi kết thúc).
+- Rule 9: thời gian chạm ngưỡng đóng (≤ 10%) → wrap up.
+- Rule 10: hết quota follow-up → advance.
+
+**Ánh xạ tình huống → loại probe** (bộ phân tích chọn `ProbeType`):
+
+| Câu trả lời thế nào | ProbeType → action |
+|---|---|
+| Mơ hồ, chung chung | CLARIFICATION → clarify |
+| Thiếu ví dụ cụ thể | ASK_FOR_EXAMPLE |
+| Phủ một phần, cần đào lập luận | PROBE_REASONING → probe deeper |
+| Cần thử thách giả định | CHALLENGE_ASSUMPTION → challenge reasoning |
+| Cần bàn đánh đổi | EXPLORE_TRADEOFF |
+| Mâu thuẫn với ý trước | RESOLVE_CONTRADICTION |
+
+**Probe nâng cao (chạy SAU rule 11, chỉ khi bật feature + còn quota + còn giờ):**
+- 11.5 **Depth probe** — câu trả lời **mạnh**, phase CORE/DEEP_PROBE → EXTEND_ANSWER
+  (CORE) hoặc PROBE_EDGE_CASE (DEEP_PROBE): đào tìm "trần" năng lực thay vì advance.
+- 11.6 **Confident-but-wrong challenge** — trả lời **tự tin nhưng sai** → CHALLENGE_REASONING.
+- 11.7 **Rambling redirect** — trả lời **dài dòng, đúng chủ đề nhưng ít chất** → REDIRECT_TO_TOPIC.
+
+Mỗi probe **tiêu 1 quota follow-up** (giữ loop protection). Xem đầy đủ thứ tự ở Phần J.
+
 ### D1. Signpost dẫn vào probe (`_probe_signpost`)
 - **Hint (PROVIDE_NEUTRAL_HINT):** EN `Here's a small hint to guide you.` / VI `Đây là một gợi ý nhỏ để bạn định hướng.`
 - **Depth probe (EXTEND_ANSWER / PROBE_EDGE_CASE — sau câu trả lời TỐT):** EN `That's a strong answer — let's go further.` / VI `Đó là một câu trả lời tốt — chúng ta hãy đi xa hơn.`
