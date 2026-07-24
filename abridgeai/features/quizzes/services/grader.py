@@ -132,4 +132,51 @@ def _normalize_text(value: str) -> str:
     return " ".join(value.replace("-", " ").lower().split())
 
 
-__all__ = ["GradeResult", "grade_answer"]
+def grade_answer_against_revision(
+    revision_payload: dict,
+    *,
+    selected_option_key: str | None,
+    answer_text: str | None,
+) -> GradeResult:
+    """Grade an answer against a question-definition *snapshot* dict.
+
+    Unlike :func:`grade_answer` (which reads live DB rows), this grades against
+    a plain dict shaped like a ``QuizQuestionRevision.payload_json`` / live
+    snapshot — so a regrade can judge each stored answer against the CURRENT
+    question definition (Phase 1). MCQ/true_false grade by ``option_key`` (stable
+    across edits), not option UUID.
+    """
+    qtype = revision_payload.get("question_type")
+    if qtype in {"multiple_choice", "true_false"}:
+        if selected_option_key is None:
+            return _ZERO
+        for opt in revision_payload.get("options", []):
+            if opt.get("option_key") == selected_option_key:
+                return _ONE if opt.get("is_correct") else _ZERO
+        return _ZERO
+    if qtype == "short_answer":
+        expected = revision_payload.get("correct_answer")
+        if not expected or not answer_text:
+            return _ZERO
+        return (
+            _ONE
+            if _normalize_text(answer_text) == _normalize_text(str(expected))
+            else _ZERO
+        )
+    if qtype == "fill_blank":
+        expected = revision_payload.get("correct_answer")
+        submitted = _parse_fill_blank_submission(answer_text)
+        if not isinstance(expected, list) or len(expected) != len(submitted):
+            return _ZERO
+        return (
+            _ONE
+            if all(
+                _normalize_text(s) == _normalize_text(str(e))
+                for s, e in zip(submitted, expected, strict=True)
+            )
+            else _ZERO
+        )
+    return _ZERO  # code + unknown → 0 (unchanged policy)
+
+
+__all__ = ["GradeResult", "grade_answer", "grade_answer_against_revision"]

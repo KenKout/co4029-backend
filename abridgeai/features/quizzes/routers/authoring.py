@@ -68,6 +68,8 @@ from abridgeai.features.quizzes.schemas import (
     QuizQuestionAuthoring,
     QuizQuestionBreakdown,
     QuizResultsRead,
+    RegradeRunRead,
+    RegradeScopeIn,
     QuizResultsSummary,
     QuizScoreBucket,
 )
@@ -1009,6 +1011,109 @@ def _fill_outcome_positions(
         question.outcome_position = (  # type: ignore[attr-defined]
             positions.get(lo_id) if lo_id is not None else None
         )
+
+
+def _serialize_regrade_run(run: Any) -> RegradeRunRead:
+    """Project a QuizRegradeRun (+ loaded items) to the API DTO."""
+    from abridgeai.features.quizzes.schemas import RegradeItemRead  # noqa: PLC0415
+
+    return RegradeRunRead(
+        id=run.id,
+        quiz_id=run.quiz_id,
+        status=run.status,
+        attempts_affected=run.attempts_affected,
+        answers_changed=run.answers_changed,
+        created_at=run.created_at,
+        committed_at=run.committed_at,
+        items=[
+            RegradeItemRead(
+                attempt_id=it.attempt_id,
+                question_id=it.question_id,
+                old_is_correct=it.old_is_correct,
+                new_is_correct=it.new_is_correct,
+                old_points=it.old_points,
+                new_points=it.new_points,
+            )
+            for it in run.items
+        ],
+    )
+
+
+@router.post(
+    "/quizzes/{quiz_id}/regrade/dry-run",
+    response_model=RegradeRunRead,
+)
+async def regrade_dry_run(
+    quiz_id: UUID,
+    body: RegradeScopeIn,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_QUIZ)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> RegradeRunRead:
+    """Preview a regrade: compute per-answer deltas against the CURRENT question
+    definitions and persist a dry-run run. Does NOT mutate attempts."""
+    from abridgeai.features.quizzes.services import regrade as _regrade  # noqa: PLC0415
+
+    try:
+        run = await _regrade.compute_regrade(
+            db,
+            quiz_id=quiz_id,
+            attempt_ids=body.attempt_ids or None,
+            question_ids=body.question_ids or None,
+            requested_by=current_user.user_id,
+        )
+    except NotFoundError as exc:
+        raise _not_found("quiz", quiz_id) from exc
+    await db.commit()
+    run = await _regrade.get_regrade_run(db, quiz_id=quiz_id, run_id=run.id)
+    return _serialize_regrade_run(run)
+
+
+@router.get(
+    "/quizzes/{quiz_id}/regrade/runs/{run_id}",
+    response_model=RegradeRunRead,
+)
+async def get_regrade_run(
+    quiz_id: UUID,
+    run_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_QUIZ)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> RegradeRunRead:
+    """Read a regrade run (with its per-answer delta items)."""
+    del current_user
+    from abridgeai.features.quizzes.services import regrade as _regrade  # noqa: PLC0415
+
+    run = await _regrade.get_regrade_run(db, quiz_id=quiz_id, run_id=run_id)
+    if run is None:
+        raise _not_found("regrade run", run_id)
+    return _serialize_regrade_run(run)
+
+
+@router.post(
+    "/quizzes/{quiz_id}/regrade/runs/{run_id}/commit",
+    response_model=RegradeRunRead,
+)
+async def commit_regrade_run(
+    quiz_id: UUID,
+    run_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_QUIZ)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> RegradeRunRead:
+    """Commit a dry run: apply deltas to answers, recompute affected attempt
+    scores, mark the run committed. A committed run cannot be re-committed (409)."""
+    del current_user
+    from abridgeai.features.quizzes.services import regrade as _regrade  # noqa: PLC0415
+
+    try:
+        await _regrade.commit_regrade(db, quiz_id=quiz_id, run_id=run_id)
+    except NotFoundError as exc:
+        raise _not_found("regrade run", run_id) from exc
+    except AppError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=str(exc)
+        ) from exc
+    await db.commit()
+    run = await _regrade.get_regrade_run(db, quiz_id=quiz_id, run_id=run_id)
+    return _serialize_regrade_run(run)
 
 
 __all__ = [

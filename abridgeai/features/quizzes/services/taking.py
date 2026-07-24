@@ -31,6 +31,7 @@ from abridgeai.features.quizzes.models import (
     QuizAttemptAnswer,
     QuizQuestion,
     QuizQuestionOption,
+    QuizQuestionRevision,
 )
 from abridgeai.features.quizzes.queries import authoring as authoring_queries
 from abridgeai.features.quizzes.queries import published as published_queries
@@ -369,6 +370,18 @@ async def answer_attempt(
         t_actual_ms = getattr(payload, "response_time_ms", None)
     hint_used = bool(getattr(payload, "hint_used", False))
 
+    # Phase 1: pin the answer to the question's CURRENT revision (its highest
+    # revision_no) so a later regrade can judge it against the exact snapshot
+    # the student saw. NULL when the question has no revision rows yet.
+    graded_revision_id = (
+        await db.execute(
+            select(QuizQuestionRevision.id)
+            .where(QuizQuestionRevision.question_id == question_id)
+            .order_by(QuizQuestionRevision.revision_no.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+
     # Idempotent upsert: a student may re-save a question after changing
     # their answer (or after resuming an interrupted attempt), so key on
     # (attempt_id, question_id) rather than blindly INSERTing — a second
@@ -394,6 +407,7 @@ async def answer_attempt(
         existing.hint_used = hint_used
         existing.t_actual_ms = t_actual_ms
         existing.points_awarded = grade.points_awarded
+        existing.graded_revision_id = graded_revision_id
         answer = existing
     else:
         answer = QuizAttemptAnswer(
@@ -405,6 +419,7 @@ async def answer_attempt(
             hint_used=hint_used,
             t_actual_ms=t_actual_ms,
             points_awarded=grade.points_awarded,
+            graded_revision_id=graded_revision_id,
         )
         db.add(answer)
 
@@ -439,6 +454,46 @@ async def answer_attempt(
     return answer, review_result
 
 
+async def _recompute_attempt_score(
+    db: AsyncSession,
+    attempt: QuizAttempt,
+    quiz: Quiz,
+) -> tuple[Decimal, Decimal, int, int]:
+    """Recompute an attempt's headline numbers from its stored answers.
+
+    Shared by :func:`submit_attempt` (initial grading) and the regrade commit
+    path (Phase 1) so both use the identical denominator rule. Returns
+    ``(score_points, score_percent, correct_count, question_count)``. Does NOT
+    mutate the attempt — the caller assigns the fields it needs.
+
+    Denominator MUST match what the student was actually served: only approved
+    questions reach the taking surface, so counting all questions would divide
+    by a larger set than the student saw and silently deflate every score.
+    """
+    from sqlalchemy import func, select  # noqa: PLC0415
+
+    answers = (
+        (
+            await db.execute(
+                select(QuizAttemptAnswer).where(QuizAttemptAnswer.attempt_id == attempt.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    question_count_row = await db.execute(
+        select(func.count(QuizQuestion.id)).where(
+            QuizQuestion.quiz_id == quiz.id,
+            QuizQuestion.review_status == "approved",
+        )
+    )
+    question_count = int(question_count_row.scalar_one()) or len(answers) or 1
+    score_points = sum((answer.points_awarded for answer in answers), Decimal("0"))
+    score_percent = (score_points / Decimal(question_count)) * Decimal("100")
+    correct_count = sum(1 for answer in answers if answer.is_correct)
+    return score_points, score_percent, correct_count, question_count
+
+
 async def submit_attempt(
     db: AsyncSession,
     attempt_id: UUID,
@@ -455,33 +510,9 @@ async def submit_attempt(
     attempt = await _require_attempt(db, attempt_id)
     quiz = await _require_quiz(db, attempt.quiz_id)
 
-    from sqlalchemy import func, select  # noqa: PLC0415
-
-    answers = (
-        (
-            await db.execute(
-                select(QuizAttemptAnswer).where(QuizAttemptAnswer.attempt_id == attempt_id)
-            )
-        )
-        .scalars()
-        .all()
+    score_points, score_percent, correct_count, question_count = await _recompute_attempt_score(
+        db, attempt, quiz
     )
-    # Denominator MUST match what the student was actually served: only
-    # approved questions reach the taking surface (see
-    # _load_quiz_questions_for_taking), so counting all questions here would
-    # divide by a larger set than the student ever saw — silently deflating
-    # every score once a quiz is partially published (e.g. 15 approved of 30
-    # → a perfect attempt would read 50%). Filter to approved to stay honest.
-    question_count_row = await db.execute(
-        select(func.count(QuizQuestion.id)).where(
-            QuizQuestion.quiz_id == quiz.id,
-            QuizQuestion.review_status == "approved",
-        )
-    )
-    question_count = int(question_count_row.scalar_one()) or len(answers) or 1
-    score_points = sum((answer.points_awarded for answer in answers), Decimal("0"))
-    score_percent = (score_points / Decimal(question_count)) * Decimal("100")
-    correct_count = sum(1 for answer in answers if answer.is_correct)
 
     attempt.status = "submitted"
     attempt.submitted_at = utcnow()
