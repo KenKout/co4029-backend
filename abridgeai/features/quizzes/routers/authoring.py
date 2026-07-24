@@ -1476,6 +1476,83 @@ async def list_quiz_audit_events(
     return [_AuditEventRow.model_validate(r) for r in rows]
 
 
+class _ImportBody(BaseModel):
+    model_config = {"extra": "forbid"}
+    content: str
+    format: str = "gift"  # gift | xml
+
+
+@router.post("/quizzes/{quiz_id}/questions/import-file")
+async def import_questions_from_file(
+    quiz_id: UUID,
+    body: _ImportBody,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_QUIZ)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> dict[str, Any]:
+    """Import questions from a Moodle GIFT or XML file (Phase 11).
+
+    Additive + review-gated: imported questions land as ``pending``. A malformed
+    file → 422 with no writes; per-question issues are returned as warnings.
+    """
+    from abridgeai.features.quizzes.services import quiz_io as _io  # noqa: PLC0415
+
+    if body.format not in ("gift", "xml"):
+        raise _bad_request("format must be 'gift' or 'xml'")
+    try:
+        result = await _io.import_questions_from_file(
+            db,
+            quiz_id=quiz_id,
+            content=body.content,
+            fmt=body.format,
+            actor=current_user,
+        )
+    except ValueError as exc:
+        # Parser error (malformed file) — abort, nothing written.
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"reason": "malformed_import_file", "message": str(exc)},
+        ) from exc
+    except AppError as exc:
+        await db.rollback()
+        raise _bad_request(str(exc)) from exc
+    await db.commit()
+    return result
+
+
+@router.get("/quizzes/{quiz_id}/questions/export")
+async def export_quiz_questions(
+    quiz_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_QUIZ)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    format: str = "gift",
+) -> Response:
+    """Export a quiz's questions to GIFT or Moodle XML (teacher-only download)."""
+    del current_user
+    from datetime import datetime, timezone  # noqa: PLC0415
+
+    from abridgeai.features.quizzes.services import quiz_io as _io  # noqa: PLC0415
+
+    if format not in ("gift", "xml"):
+        raise _bad_request("format must be 'gift' or 'xml'")
+    try:
+        content = await _io.export_quiz_questions(db, quiz_id=quiz_id, fmt=format)
+    except AppError as exc:
+        raise _bad_request(str(exc)) from exc
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d")
+    ext = "txt" if format == "gift" else "xml"
+    media = "text/plain" if format == "gift" else "application/xml"
+    return Response(
+        content=content,
+        media_type=media,
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="quiz-{quiz_id}-questions-{stamp}.{ext}"'
+            )
+        },
+    )
+
+
 __all__ = [
     "get_arq_pool",
     "router",
