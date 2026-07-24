@@ -54,6 +54,10 @@ from abridgeai.features.quizzes.schemas.regrade import (
     RegradeRunRead,
     RegradeScopeIn,
 )
+from abridgeai.features.quizzes.schemas.review_options import (
+    ReviewOptions,
+    ReviewWindowFlags,
+)
 from abridgeai.features.quizzes.schemas.results import (
     QuizOptionDistribution,
     QuizPerStudentRow,
@@ -118,4 +122,6 @@ __all__ = [
     "RegradeItemRead",
     "RegradeRunRead",
     "RegradeScopeIn",
+    "ReviewOptions",
+    "ReviewWindowFlags",
 ]

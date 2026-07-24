@@ -98,6 +98,18 @@ def _coerce_patch_value(key: str, value: object) -> object:
     ``datetime.fromisoformat`` (Python < 3.11 compatibility, and harmless
     on newer). An unparseable string raises ``AppError`` → HTTP 400.
     """
+    # Phase 2: validate the review-visibility matrix through its schema so an
+    # invalid shape is rejected (→ 400) rather than written raw to the JSONB
+    # column. Store the normalised (defaults-filled) dict.
+    if key == "review_options" and value is not None:
+        from abridgeai.features.quizzes.schemas.review_options import (  # noqa: PLC0415
+            ReviewOptions,
+        )
+
+        try:
+            return ReviewOptions.model_validate(value).model_dump()
+        except Exception as exc:  # noqa: BLE001
+            raise AppError("review_options is not a valid review-visibility matrix") from exc
     if key not in _DATETIME_PATCH_KEYS or value is None:
         return value
     if isinstance(value, datetime):

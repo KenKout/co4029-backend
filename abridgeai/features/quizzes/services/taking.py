@@ -582,30 +582,64 @@ async def get_attempt_review(
         db, attempt.quiz_id
     )
 
+    # Phase 2: resolve the teacher-configured review-visibility flags for the
+    # active time-window (immediately_after / later_while_open / after_close) and
+    # mask the payload server-side so a hidden field never leaves the service.
+    from abridgeai.features.quizzes.schemas.attempt import (  # noqa: PLC0415
+        ReviewVisibilityFlags,
+    )
+    from abridgeai.features.quizzes.services.review_visibility import (  # noqa: PLC0415
+        resolve_review_visibility,
+    )
+
+    quiz = await _require_quiz(db, attempt.quiz_id)
+    vis = resolve_review_visibility(quiz, attempt, utcnow())
+
     review_questions: list[QuizAttemptReviewQuestion] = []
     for question, options in questions_with_options:
         ans = answers_by_question.get(question.id)
+        # Options carry is_correct; strip the correct-answer signal when hidden.
+        review_options = [QuizAttemptReviewOption.model_validate(opt) for opt in options]
+        if not vis.show_correct_answers:
+            for opt in review_options:
+                opt.is_correct = False
         review_questions.append(
             QuizAttemptReviewQuestion(
                 question_id=question.id,
                 position=question.position,
                 question_type=question.question_type,
                 prompt_text=question.prompt_text,
-                explanation=question.explanation,
+                explanation=question.explanation if vis.show_explanation else None,
                 hint_text=question.hint_text,
-                options=[QuizAttemptReviewOption.model_validate(opt) for opt in options],
+                options=review_options,
                 selected_option_id=ans.selected_option_id if ans else None,
                 answer_text=ans.answer_text if ans else None,
-                is_correct=ans.is_correct if ans else False,
-                points_awarded=ans.points_awarded if ans else Decimal("0"),
+                is_correct=(ans.is_correct if ans else False) if vis.show_correctness else False,
+                points_awarded=(ans.points_awarded if ans else Decimal("0"))
+                if vis.show_points
+                else Decimal("0"),
                 hint_used=ans.hint_used if ans else False,
                 t_actual_ms=ans.t_actual_ms if ans else None,
             )
         )
 
+    attempt_read = QuizAttemptRead.model_validate(attempt)
+    if not vis.show_score:
+        attempt_read.score_points = None
+        attempt_read.score_percent = None
+        attempt_read.passed = None
+        attempt_read.correct_count = None
+
     return QuizAttemptReviewRead(
-        attempt=QuizAttemptRead.model_validate(attempt),
+        attempt=attempt_read,
         questions=review_questions,
+        visibility=ReviewVisibilityFlags(
+            show_score=vis.show_score,
+            show_correctness=vis.show_correctness,
+            show_correct_answers=vis.show_correct_answers,
+            show_explanation=vis.show_explanation,
+            show_points=vis.show_points,
+        ),
     )
 
 
