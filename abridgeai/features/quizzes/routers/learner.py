@@ -135,7 +135,25 @@ async def get_published_quiz(
     quiz = await taking_service.get_published_quiz(db, quiz_id)
     if quiz is None:
         raise _not_found("quiz", quiz_id)
-    return QuizPublic.model_validate(quiz)
+    # Count-only signal: how many approved questions the student will face.
+    # Counts rows (matching the taking filter: approved + non-deleted) so no
+    # question text / options / is_correct is materialized here. See
+    # QuizPublic.question_count.
+    from sqlalchemy import func, select  # noqa: PLC0415
+
+    from abridgeai.features.quizzes.models import QuizQuestion  # noqa: PLC0415
+
+    question_count = (
+        await db.execute(
+            select(func.count(QuizQuestion.id)).where(
+                QuizQuestion.quiz_id == quiz_id,
+                QuizQuestion.review_status == "approved",
+                QuizQuestion.deleted_at.is_(None),
+            )
+        )
+    ).scalar_one()
+    payload = QuizPublic.model_validate(quiz)
+    return payload.model_copy(update={"question_count": int(question_count)})
 
 
 @router.post(

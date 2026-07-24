@@ -155,6 +155,13 @@ class QuizPublic(_ORMModel):
     available_from: datetime | None = None
     available_until: datetime | None = None
     due_at: datetime | None = None
+    # SAFE expectation-setting signal: how many approved questions the student
+    # will face. Exposes only the COUNT, never the question text / options /
+    # is_correct flags — those remain in QuizQuestionPublic and are served
+    # one-at-a-time via the taking payload. Mirrors the interview
+    # ``outcome_count`` pattern. Defaults to 0 so a bare model_validate (without
+    # the count wired) still validates.
+    question_count: int = 0
 
 
 class QuizForTakingPublic(_ORMModel):
