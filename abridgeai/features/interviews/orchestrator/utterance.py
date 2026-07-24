@@ -118,13 +118,18 @@ def _ack_text(persona: Persona, style: AcknowledgementStyle, lang: str) -> str:
 # "move on to the next question" signpost, persona-shaped in tone only. The
 # question text itself is appended separately (never duplicated here).
 _TRANSITION: dict[tuple[Persona, str], str] = {
-    (Persona.STRICT, "en"): "Thank you. Let's move on to the next question.",
-    (Persona.STRICT, "vi"): "Cảm ơn bạn. Chúng ta sang câu hỏi tiếp theo.",
-    (Persona.NEUTRAL, "en"): "Thank you. Now let's move on to the next question.",
-    (Persona.NEUTRAL, "vi"): "Cảm ơn bạn. Bây giờ chúng ta chuyển sang câu hỏi tiếp theo.",
-    (Persona.SUPPORTIVE, "en"): ("Thank you. Now let's move on to the next question together."),
+    # Deliberately NO leading "Thank you." here: the acknowledgement (_ACK)
+    # already opens with a thanks ("Thank you." / "Cảm ơn bạn."), and _combine
+    # concatenates ack + transition, which produced an audible/visible
+    # "Thank you. Thank you. Now let's move on…" double. The signpost keeps only
+    # the "move on" wording; the ack carries the thanks.
+    (Persona.STRICT, "en"): "Let's move on to the next question.",
+    (Persona.STRICT, "vi"): "Chúng ta sang câu hỏi tiếp theo.",
+    (Persona.NEUTRAL, "en"): "Now let's move on to the next question.",
+    (Persona.NEUTRAL, "vi"): "Bây giờ chúng ta chuyển sang câu hỏi tiếp theo.",
+    (Persona.SUPPORTIVE, "en"): ("Now let's move on to the next question together."),
     (Persona.SUPPORTIVE, "vi"): (
-        "Cảm ơn bạn. Bây giờ chúng ta cùng chuyển sang câu hỏi tiếp theo nhé."
+        "Bây giờ chúng ta cùng chuyển sang câu hỏi tiếp theo nhé."
     ),
 }
 
