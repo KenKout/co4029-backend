@@ -133,6 +133,10 @@ class InterviewConfigPublic(_ORMModel):
     title: str
     status: Literal["published"]
     persona: PersonaLiteral | None = None
+    # Deepgram Aura voice for English sessions (NULL = deployment default). Safe
+    # to expose: it only names the spoken voice, nothing gameable. Vietnamese
+    # sessions ignore it (browser voice), so the UI shows it for English only.
+    tts_voice: str | None = None
     supported_modes: SupportedModesLiteral
     time_limit_minutes: int | None = None
     max_attempts: int | None = None
