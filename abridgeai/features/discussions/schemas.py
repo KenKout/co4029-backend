@@ -58,6 +58,18 @@ class DiscussionTopicRead(_ORMModel):
     can_manage: bool = False
 
 
+class DiscussionTopicList(BaseModel):
+    """Envelope for the lesson topic list.
+
+    ``can_manage`` rides at the top level so the client knows whether to
+    show the teacher's "post a topic" affordance even when ``topics`` is
+    empty (a bare list can't carry that signal for zero rows).
+    """
+
+    can_manage: bool = False
+    topics: list[DiscussionTopicRead] = Field(default_factory=list)
+
+
 # ── Comments ──────────────────────────────────────────────────────────────
 
 
@@ -113,6 +125,7 @@ __all__ = [
     "DiscussionCommentRead",
     "DiscussionCommentUpdate",
     "DiscussionTopicCreate",
+    "DiscussionTopicList",
     "DiscussionTopicRead",
     "DiscussionTopicUpdate",
 ]

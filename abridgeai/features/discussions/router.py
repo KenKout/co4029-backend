@@ -34,6 +34,7 @@ from abridgeai.features.discussions.schemas import (
     DiscussionCommentRead,
     DiscussionCommentUpdate,
     DiscussionTopicCreate,
+    DiscussionTopicList,
     DiscussionTopicRead,
     DiscussionTopicUpdate,
 )
@@ -120,26 +121,34 @@ def _comment_read(
 
 @router.get(
     "/lessons/{lesson_id}/discussion/topics",
-    response_model=list[DiscussionTopicRead],
+    response_model=DiscussionTopicList,
 )
 async def list_lesson_topics(
     lesson_id: UUID,
     current_user: Annotated[CurrentUser, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
-) -> list[DiscussionTopicRead]:
-    """Topics on a lesson (enrolled students + course managers)."""
+) -> DiscussionTopicList:
+    """Topics on a lesson (enrolled students + course managers).
+
+    Returns an envelope so ``can_manage`` is available even when there are
+    zero topics — the client needs it to decide whether to show the
+    teacher's "post a topic" affordance.
+    """
     course_id = await _require_lesson_view(db, lesson_id, current_user)
     viewer_can_manage = await deps.can_manage(db, current_user, course_id)
     topics = await queries.list_topics_for_lesson(db, lesson_id)
     counts = await queries.comment_counts_for_topics(db, [t.id for t in topics])
-    return [
-        _topic_read(
-            t,
-            comment_count=counts.get(t.id, 0),
-            can_manage=viewer_can_manage,
-        )
-        for t in topics
-    ]
+    return DiscussionTopicList(
+        can_manage=viewer_can_manage,
+        topics=[
+            _topic_read(
+                t,
+                comment_count=counts.get(t.id, 0),
+                can_manage=viewer_can_manage,
+            )
+            for t in topics
+        ],
+    )
 
 
 @router.post(
