@@ -132,12 +132,17 @@ _TRANSITION: dict[tuple[Persona, str], str] = {
 # last question has been reached. This is a transition-only turn; the separate
 # goodbye/closing turn follows via the existing finish flow.
 _FINAL_QUESTION_TRANSITION: dict[tuple[Persona, str], str] = {
-    (Persona.STRICT, "en"): "Thank you. That was the final question.",
-    (Persona.STRICT, "vi"): "Cảm ơn bạn. Đó là câu hỏi cuối cùng.",
-    (Persona.NEUTRAL, "en"): "Thank you. That was the final question.",
-    (Persona.NEUTRAL, "vi"): "Cảm ơn bạn. Đó là câu hỏi cuối cùng.",
-    (Persona.SUPPORTIVE, "en"): "Thank you. That was the final question — well done.",
-    (Persona.SUPPORTIVE, "vi"): "Cảm ơn bạn. Đó là câu hỏi cuối cùng — bạn đã làm rất tốt.",
+    # Deliberately NO leading "Thank you." here: this final-question transition
+    # is always immediately followed by the closing turn, which itself opens
+    # with "Thank you." Keeping both produced an audible "Thank you… Thank you…"
+    # double. The closing keeps its thanks so the skip/timeout paths (which have
+    # no preceding transition) still thank the candidate.
+    (Persona.STRICT, "en"): "That was the final question.",
+    (Persona.STRICT, "vi"): "Đó là câu hỏi cuối cùng.",
+    (Persona.NEUTRAL, "en"): "That was the final question.",
+    (Persona.NEUTRAL, "vi"): "Đó là câu hỏi cuối cùng.",
+    (Persona.SUPPORTIVE, "en"): "That was the final question — well done.",
+    (Persona.SUPPORTIVE, "vi"): "Đó là câu hỏi cuối cùng — bạn đã làm rất tốt.",
 }
 
 
