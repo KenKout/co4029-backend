@@ -79,6 +79,7 @@ from abridgeai.features.courses.schemas import (
     ModuleItemReorder,
     ModuleItemUpdate,
     ModulePrerequisiteSet,
+    ModuleReorder,
     ModuleUpdate,
     OutlineSection,
     RosterStudentRead,
@@ -446,9 +447,7 @@ async def create_course_outcome(
 ) -> CourseLearningOutcomeAuthoring:
     """Append a learning outcome to a course (§LO-1)."""
     try:
-        outcome = await authoring_service.add_course_outcome(
-            db, course_id, payload, current_user
-        )
+        outcome = await authoring_service.add_course_outcome(db, course_id, payload, current_user)
     except NotFoundError as exc:
         raise _not_found(str(exc)) from exc
     except ConflictError as exc:
@@ -493,9 +492,7 @@ async def delete_course_outcome(
 ) -> None:
     """Soft-delete an outcome and compact positions to 1..N (§LO-2)."""
     try:
-        await authoring_service.delete_course_outcome(
-            db, course_id, outcome_id, current_user
-        )
+        await authoring_service.delete_course_outcome(db, course_id, outcome_id, current_user)
     except NotFoundError as exc:
         raise _not_found(str(exc)) from exc
     await db.commit()
@@ -541,6 +538,32 @@ async def reorder_module_items(
         raise _not_found(str(exc)) from exc
     await db.commit()
     return items
+
+
+@router.put(
+    "/courses/{course_id}/modules/reorder",
+    response_model=list[ModuleAuthoring],
+)
+async def reorder_modules(
+    course_id: UUID,
+    payload: ModuleReorder,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_COURSE_UPDATE)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> list[ModuleAuthoring]:
+    """Reorder ``Module`` rows under ``course_id``.
+
+    The service uses the ``_OFFSET=100_000`` two-phase swap to escape the
+    ``uq_modules_course_position`` unique constraint mid-update (mirrors
+    the module-items reorder endpoint above).
+    """
+    try:
+        modules = await authoring_service.reorder_modules(
+            db, course_id, payload.new_order, current_user
+        )
+    except NotFoundError as exc:
+        raise _not_found(str(exc)) from exc
+    await db.commit()
+    return modules
 
 
 @router.patch(

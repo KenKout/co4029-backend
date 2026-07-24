@@ -462,6 +462,43 @@ async def reorder_module_items(
     ]
 
 
+async def reorder_modules(
+    db: AsyncSession,
+    course_id: UUID,
+    module_ids: list[UUID],
+    actor: CurrentUser,
+) -> list[ModuleAuthoring]:
+    """Reorder ``Module`` rows under ``course_id``.
+
+    Two-phase swap pattern (mirrors :func:`reorder_module_items`):
+
+    1. Bump every target row to ``_OFFSET + i`` (escapes the
+       ``uq_modules_course_position`` unique constraint).
+    2. Re-assign final positions ``i + 1`` (1-indexed).
+
+    Modules not in ``module_ids`` keep their existing positions; callers
+    are expected to send the FULL ordered list.
+    """
+    del actor
+    modules_by_id: dict[UUID, Module] = {}
+    for idx, module_id in enumerate(module_ids):
+        module = await authoring_queries.get_module(db, module_id)
+        if module is None or module.course_id != course_id:
+            raise NotFoundError(f"Module {module_id} not found in course {course_id}")
+        module.position = _OFFSET + idx
+        modules_by_id[module_id] = module
+    await _flush_or_conflict(db)
+
+    for idx, module_id in enumerate(module_ids, start=1):
+        modules_by_id[module_id].position = idx
+    await _flush_or_conflict(db)
+
+    return [
+        ModuleAuthoring.model_validate(module)
+        for module in await authoring_queries.list_modules_for_authoring(db, course_id)
+    ]
+
+
 async def set_module_prerequisites(
     db: AsyncSession,
     module_id: UUID,
@@ -540,9 +577,7 @@ async def get_teacher_dashboard_stats(
     interview sessions awaiting evaluation. All aggregate queries are
     batched over the course-id set — no N+1.
     """
-    owned = await authoring_queries.list_courses_for_owner(
-        db, user.user_id, include_archived=False
-    )
+    owned = await authoring_queries.list_courses_for_owner(db, user.user_id, include_archived=False)
     assigned = await authoring_queries.list_courses_assigned_to_teacher(
         db, user.user_id, include_archived=False
     )
@@ -557,9 +592,10 @@ async def get_teacher_dashboard_stats(
         if course.status == "draft":
             draft_courses += 1
 
-    ungraded_quizzes, pending_interviews = (
-        await authoring_queries.count_pending_grading_for_courses(db, course_ids)
-    )
+    (
+        ungraded_quizzes,
+        pending_interviews,
+    ) = await authoring_queries.count_pending_grading_for_courses(db, course_ids)
     return TeacherDashboardStats(
         draft_courses=draft_courses,
         ungraded_quizzes=ungraded_quizzes,
@@ -597,9 +633,7 @@ async def upload_course_thumbnail(
     if len(data) == 0:
         raise ThumbnailUploadError("empty_thumbnail: the uploaded file is empty.")
     if len(data) > _THUMBNAIL_MAX_BYTES:
-        raise ThumbnailUploadError(
-            "thumbnail_too_large: images must be 5 MiB or smaller."
-        )
+        raise ThumbnailUploadError("thumbnail_too_large: images must be 5 MiB or smaller.")
 
     course = await _require_course(db, course_id)
 
@@ -860,11 +894,7 @@ async def _require_outcome(
     db: AsyncSession, course_id: UUID, outcome_id: UUID
 ) -> CourseLearningOutcome:
     outcome = await authoring_queries.get_course_outcome(db, outcome_id)
-    if (
-        outcome is None
-        or outcome.deleted_at is not None
-        or outcome.course_id != course_id
-    ):
+    if outcome is None or outcome.deleted_at is not None or outcome.course_id != course_id:
         raise NotFoundError(f"Course outcome {outcome_id} not found")
     return outcome
 
