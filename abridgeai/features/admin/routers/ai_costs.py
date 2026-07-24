@@ -30,8 +30,16 @@ _REQUIRE_READ = require_any_permission("ai.processing.read", "system.administer"
 
 class CostTotals(BaseModel):
     tokens: int
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cached_tokens: int = 0
     usd: float
     call_count: int
+
+
+class FailedSpend(BaseModel):
+    call_count: int = 0
+    usd: float = 0.0
 
 
 class RoleBreakdown(BaseModel):
@@ -54,6 +62,7 @@ class TimeBucket(BaseModel):
 
 class SummaryOut(BaseModel):
     totals: CostTotals
+    failed: FailedSpend = FailedSpend()
     by_role: list[RoleBreakdown]
     by_stage: list[StageBreakdown]
     buckets: list[TimeBucket]
@@ -91,10 +100,34 @@ class RecentCallOut(BaseModel):
     stage_name: str | None = None
     model: str | None = None
     tokens: int
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cached_tokens: int = 0
     usd: float
     latency_ms: int | None = None
+    status: str | None = None
     created_at: datetime
     pipeline_run_id: UUID | None = None
+
+
+class CategorySpendOut(BaseModel):
+    dimension_value: str
+    call_count: int
+    total_tokens: int
+    input_tokens: int
+    output_tokens: int
+    cached_tokens: int
+    total_usd: float
+
+
+class ModelEfficiencyOut(BaseModel):
+    model_name: str
+    call_count: int
+    total_tokens: int
+    total_usd: float
+    latency_p50_ms: int
+    latency_p95_ms: int
+    usd_per_1k_tokens: float
 
 
 def _parse_since(raw: str | None, default_days: int) -> datetime:
@@ -133,9 +166,29 @@ async def get_summary(
         str | None,
         Query(description="ISO date or datetime; defaults to NOW() - 30 days."),
     ] = None,
+    model: Annotated[
+        str | None, Query(description="Filter to one model_name.")
+    ] = None,
+    role: Annotated[str | None, Query(description="Filter to one role.")] = None,
+    operation: Annotated[
+        str | None,
+        Query(description="Filter to one operation (chat_completion|embedding)."),
+    ] = None,
+    call_status: Annotated[
+        str | None,
+        Query(alias="status", description="Filter to one call status."),
+    ] = None,
 ) -> SummaryOut:
     since_dt = _parse_since(since, default_days=30)
-    payload: dict[str, Any] = await ai_costs_service.summary(db, since=since_dt, period=period)
+    payload: dict[str, Any] = await ai_costs_service.summary(
+        db,
+        since=since_dt,
+        period=period,
+        model=model,
+        role=role,
+        operation=operation,
+        status=call_status,
+    )
     return SummaryOut.model_validate(payload)
 
 
@@ -172,6 +225,87 @@ async def get_by_pipeline(
     since_dt = _parse_since(since, default_days=30)
     rows = await ai_costs_service.by_pipeline(db, since=since_dt, top_n=top_n)
     return [PipelineSpendOut.model_validate(r) for r in rows]
+
+
+@router.get("/by-category", response_model=list[CategorySpendOut])
+async def get_by_category(
+    _user: Annotated[CurrentUser, Depends(_REQUIRE_READ)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    dimension: Annotated[
+        str,
+        Query(
+            description=(
+                "Grouping dimension: 'operation', 'role', 'tier', "
+                "'stage_name', 'model_name', or 'status'."
+            ),
+            pattern="^(operation|role|tier|stage_name|model_name|status)$",
+        ),
+    ] = "operation",
+    since: Annotated[
+        str | None,
+        Query(description="ISO date or datetime; defaults to NOW() - 30 days."),
+    ] = None,
+    top_n: Annotated[int, Query(ge=1, le=200)] = 20,
+    model: Annotated[
+        str | None, Query(description="Filter to one model_name.")
+    ] = None,
+    role: Annotated[str | None, Query(description="Filter to one role.")] = None,
+    operation: Annotated[
+        str | None,
+        Query(description="Filter to one operation (chat_completion|embedding)."),
+    ] = None,
+    call_status: Annotated[
+        str | None,
+        Query(alias="status", description="Filter to one call status."),
+    ] = None,
+) -> list[CategorySpendOut]:
+    since_dt = _parse_since(since, default_days=30)
+    rows = await ai_costs_service.by_category(
+        db,
+        dimension=dimension,
+        since=since_dt,
+        top_n=top_n,
+        model=model,
+        role=role,
+        operation=operation,
+        status=call_status,
+    )
+    return [CategorySpendOut.model_validate(r) for r in rows]
+
+
+@router.get("/by-model", response_model=list[ModelEfficiencyOut])
+async def get_by_model(
+    _user: Annotated[CurrentUser, Depends(_REQUIRE_READ)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    since: Annotated[
+        str | None,
+        Query(description="ISO date or datetime; defaults to NOW() - 30 days."),
+    ] = None,
+    top_n: Annotated[int, Query(ge=1, le=200)] = 20,
+    model: Annotated[
+        str | None, Query(description="Filter to one model_name.")
+    ] = None,
+    role: Annotated[str | None, Query(description="Filter to one role.")] = None,
+    operation: Annotated[
+        str | None,
+        Query(description="Filter to one operation (chat_completion|embedding)."),
+    ] = None,
+    call_status: Annotated[
+        str | None,
+        Query(alias="status", description="Filter to one call status."),
+    ] = None,
+) -> list[ModelEfficiencyOut]:
+    since_dt = _parse_since(since, default_days=30)
+    rows = await ai_costs_service.by_model(
+        db,
+        since=since_dt,
+        top_n=top_n,
+        model=model,
+        role=role,
+        operation=operation,
+        status=call_status,
+    )
+    return [ModelEfficiencyOut.model_validate(r) for r in rows]
 
 
 @router.get("/recent", response_model=list[RecentCallOut])

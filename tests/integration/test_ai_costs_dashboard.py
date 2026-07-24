@@ -519,6 +519,8 @@ async def test_no_hard_block_endpoint_exists() -> None:
         ("/admin/ai/costs/summary", ("GET",)),
         ("/admin/ai/costs/by-user", ("GET",)),
         ("/admin/ai/costs/by-pipeline", ("GET",)),
+        ("/admin/ai/costs/by-category", ("GET",)),
+        ("/admin/ai/costs/by-model", ("GET",)),
         ("/admin/ai/costs/recent", ("GET",)),
     }
     assert expected.issubset(methods)
@@ -543,3 +545,129 @@ async def test_invalid_period_rejected(
     finally:
         await _purge_sessions(engine, seeded_users.admin_id)
     assert resp.status_code == 422
+
+
+async def test_summary_exposes_token_splits_and_failed(
+    client: httpx.AsyncClient,
+    engine: AsyncEngine,
+    seeded_users: SeededUsers,
+    cost_seed: _Seed,
+) -> None:
+    del cost_seed
+    token, _ = await _bearer(engine, seeded_users.admin_id)
+    since = (datetime.now(tz=UTC) - timedelta(days=5)).date().isoformat()
+    try:
+        resp = await client.get(
+            f"/api/v1/admin/ai/costs/summary?period=day&since={quote(since)}",
+            headers=_auth(token),
+        )
+    finally:
+        await _purge_sessions(engine, seeded_users.admin_id)
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    totals = body["totals"]
+    # seed splits every row 50/50 into input/output; cached is unset (0)
+    assert totals["input_tokens"] > 0
+    assert totals["output_tokens"] > 0
+    assert totals["input_tokens"] + totals["output_tokens"] == totals["tokens"]
+    assert totals["cached_tokens"] == 0
+    # all seeded rows are status='success' -> no failed spend
+    assert body["failed"]["call_count"] == 0
+    assert body["failed"]["usd"] == 0.0
+
+
+async def test_by_category_groups_by_dimension(
+    client: httpx.AsyncClient,
+    engine: AsyncEngine,
+    seeded_users: SeededUsers,
+    cost_seed: _Seed,
+) -> None:
+    del cost_seed
+    token, _ = await _bearer(engine, seeded_users.admin_id)
+    since = (datetime.now(tz=UTC) - timedelta(days=5)).date().isoformat()
+    try:
+        resp = await client.get(
+            f"/api/v1/admin/ai/costs/by-category?dimension=role&since={quote(since)}",
+            headers=_auth(token),
+        )
+    finally:
+        await _purge_sessions(engine, seeded_users.admin_id)
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    values = {row["dimension_value"] for row in body}
+    assert "generator_main" in values
+    assert "extractor_kg" in values
+    # sorted by usd desc
+    usds = [row["total_usd"] for row in body]
+    assert usds == sorted(usds, reverse=True)
+    # token splits present per category
+    for row in body:
+        assert row["input_tokens"] + row["output_tokens"] <= row["total_tokens"] + 1
+
+
+async def test_by_category_invalid_dimension_rejected(
+    client: httpx.AsyncClient,
+    engine: AsyncEngine,
+    seeded_users: SeededUsers,
+) -> None:
+    token, _ = await _bearer(engine, seeded_users.admin_id)
+    try:
+        resp = await client.get(
+            "/api/v1/admin/ai/costs/by-category?dimension=drop_table",
+            headers=_auth(token),
+        )
+    finally:
+        await _purge_sessions(engine, seeded_users.admin_id)
+    assert resp.status_code == 422
+
+
+async def test_by_category_filter_narrows_results(
+    client: httpx.AsyncClient,
+    engine: AsyncEngine,
+    seeded_users: SeededUsers,
+    cost_seed: _Seed,
+) -> None:
+    del cost_seed
+    token, _ = await _bearer(engine, seeded_users.admin_id)
+    since = (datetime.now(tz=UTC) - timedelta(days=5)).date().isoformat()
+    try:
+        resp = await client.get(
+            f"/api/v1/admin/ai/costs/by-category?dimension=role"
+            f"&model=gpt-4o&since={quote(since)}",
+            headers=_auth(token),
+        )
+    finally:
+        await _purge_sessions(engine, seeded_users.admin_id)
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    # gpt-4o only appears on generator_main + extractor_kg rows, never validator/linker
+    values = {row["dimension_value"] for row in body}
+    assert "validator_main" not in values
+    assert "linker_kg" not in values
+
+
+async def test_by_model_efficiency_metrics(
+    client: httpx.AsyncClient,
+    engine: AsyncEngine,
+    seeded_users: SeededUsers,
+    cost_seed: _Seed,
+) -> None:
+    del cost_seed
+    token, _ = await _bearer(engine, seeded_users.admin_id)
+    since = (datetime.now(tz=UTC) - timedelta(days=5)).date().isoformat()
+    try:
+        resp = await client.get(
+            f"/api/v1/admin/ai/costs/by-model?since={quote(since)}",
+            headers=_auth(token),
+        )
+    finally:
+        await _purge_sessions(engine, seeded_users.admin_id)
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    models = {row["model_name"] for row in body}
+    assert "gpt-4o" in models
+    assert "gpt-4o-mini" in models
+    gpt4o = next(row for row in body if row["model_name"] == "gpt-4o")
+    assert gpt4o["latency_p50_ms"] > 0
+    assert gpt4o["latency_p95_ms"] >= gpt4o["latency_p50_ms"]
+    assert gpt4o["usd_per_1k_tokens"] > 0

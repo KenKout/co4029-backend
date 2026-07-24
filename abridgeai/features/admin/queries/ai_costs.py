@@ -20,15 +20,54 @@ _SQL_DIR = resources.files("abridgeai.features.admin.queries.sql")
 
 _VALID_PERIODS = frozenset({"day", "week", "month"})
 
+# Allowlist mapping a caller-facing dimension name -> the real, trusted column
+# expression substituted into by_category.sql. The column is NOT bindable
+# (Postgres cannot bind an identifier), so this dict is the ONLY sanctioned
+# source of column text — never interpolate raw caller input.
+_CATEGORY_DIMENSIONS: dict[str, str] = {
+    "operation": "amc.operation",
+    "role": "amc.role",
+    "tier": "amc.tier",
+    "stage_name": "amc.stage_name",
+    "model_name": "amc.model_name",
+    "status": "amc.status",
+}
+
+VALID_CATEGORY_DIMENSIONS = frozenset(_CATEGORY_DIMENSIONS)
+
 
 def _load(name: str) -> TextClause:
     return text(_SQL_DIR.joinpath(name).read_text(encoding="utf-8"))
+
+
+def _load_raw(name: str) -> str:
+    return _SQL_DIR.joinpath(name).read_text(encoding="utf-8")
 
 
 _SUMMARY_SQL = _load("ai_costs/summary.sql")
 _BY_USER_SQL = _load("ai_costs/by_user.sql")
 _BY_PIPELINE_SQL = _load("ai_costs/by_pipeline.sql")
 _RECENT_SQL = _load("ai_costs/recent.sql")
+_BY_MODEL_SQL = _load("ai_costs/by_model.sql")
+_BY_CATEGORY_TEMPLATE = _load_raw("ai_costs/by_category.sql")
+
+
+def _filter_binds(
+    *,
+    model: str | None = None,
+    role: str | None = None,
+    operation: str | None = None,
+    status: str | None = None,
+) -> dict[str, str | None]:
+    """Return the four optional NULL-safe filter binds shared by the
+    summary and by_category queries. A ``None`` value disables that filter
+    (``:f_x IS NULL OR col = :f_x`` short-circuits to TRUE)."""
+    return {
+        "f_model": model,
+        "f_role": role,
+        "f_operation": operation,
+        "f_status": status,
+    }
 
 
 async def summary(
@@ -36,10 +75,16 @@ async def summary(
     *,
     since: datetime,
     period: str,
+    model: str | None = None,
+    role: str | None = None,
+    operation: str | None = None,
+    status: str | None = None,
 ) -> dict[str, Any]:
     if period not in _VALID_PERIODS:
         raise ValueError(f"invalid period {period!r}; expected one of {sorted(_VALID_PERIODS)}")
-    row = (await db.execute(_SUMMARY_SQL, {"since": since, "period": period})).mappings().one()
+    params: dict[str, Any] = {"since": since, "period": period}
+    params.update(_filter_binds(model=model, role=role, operation=operation, status=status))
+    row = (await db.execute(_SUMMARY_SQL, params)).mappings().one()
     return dict(row)
 
 
@@ -60,6 +105,53 @@ async def by_pipeline(
     top_n: int,
 ) -> list[dict[str, Any]]:
     rows = (await db.execute(_BY_PIPELINE_SQL, {"since": since, "top_n": top_n})).mappings()
+    return [dict(r) for r in rows]
+
+
+async def by_category(
+    db: AsyncSession,
+    *,
+    dimension: str,
+    since: datetime,
+    top_n: int,
+    model: str | None = None,
+    role: str | None = None,
+    operation: str | None = None,
+    status: str | None = None,
+) -> list[dict[str, Any]]:
+    """Group spend by one caller-chosen dimension (operation/role/tier/etc).
+
+    ``dimension`` MUST be a key of :data:`_CATEGORY_DIMENSIONS`; the mapped
+    column expression is substituted into the SQL template. The value is never
+    taken from raw caller input — only from the trusted allowlist — so this is
+    injection-safe despite the string substitution.
+    """
+    column = _CATEGORY_DIMENSIONS.get(dimension)
+    if column is None:
+        raise ValueError(
+            f"invalid dimension {dimension!r}; expected one of {sorted(_CATEGORY_DIMENSIONS)}"
+        )
+    sql = text(_BY_CATEGORY_TEMPLATE.format(dimension_col=column))
+    params: dict[str, Any] = {"since": since, "top_n": top_n}
+    params.update(_filter_binds(model=model, role=role, operation=operation, status=status))
+    rows = (await db.execute(sql, params)).mappings()
+    return [dict(r) for r in rows]
+
+
+async def by_model(
+    db: AsyncSession,
+    *,
+    since: datetime,
+    top_n: int,
+    model: str | None = None,
+    role: str | None = None,
+    operation: str | None = None,
+    status: str | None = None,
+) -> list[dict[str, Any]]:
+    """Per-model efficiency: spend, tokens, latency p50/p95, blended $/1k."""
+    params: dict[str, Any] = {"since": since, "top_n": top_n}
+    params.update(_filter_binds(model=model, role=role, operation=operation, status=status))
+    rows = (await db.execute(_BY_MODEL_SQL, params)).mappings()
     return [dict(r) for r in rows]
 
 
@@ -113,6 +205,9 @@ async def daily_user_spend(
 
 
 __all__ = [
+    "VALID_CATEGORY_DIMENSIONS",
+    "by_category",
+    "by_model",
     "by_pipeline",
     "by_user",
     "daily_user_spend",

@@ -7,8 +7,12 @@ SELECT
     amc.stage_name AS stage_name,
     amc.model_name AS model,
     amc.total_tokens AS tokens,
+    amc.input_tokens AS input_tokens,
+    amc.output_tokens AS output_tokens,
+    amc.cached_input_tokens AS cached_tokens,
     amc.estimated_cost_usd AS usd,
     amc.latency_ms AS latency_ms,
+    amc.status AS status,
     amc.called_at AS called_at,
     amc.pipeline_run_id AS pipeline_run_id
 FROM ai_model_calls amc
