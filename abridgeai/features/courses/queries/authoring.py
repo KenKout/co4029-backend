@@ -243,7 +243,21 @@ async def list_modules_for_authoring(db: AsyncSession, course_id: UUID) -> list[
 
 
 async def list_lessons_for_authoring(db: AsyncSession, module_id: UUID) -> list[Lesson]:
-    stmt = select(Lesson).where(Lesson.module_id == module_id).order_by(Lesson.title)
+    """Lessons that are LIVE members of ``module_id``.
+
+    Membership is defined by a non-soft-deleted ``ModuleItem`` link, NOT by
+    ``Lesson.module_id`` alone. Deleting a module item soft-deletes only the
+    link (the lesson row survives, keeping its ``module_id``); joining through
+    ``ModuleItem`` lets the T0.7 ``with_loader_criteria`` soft-delete filter
+    drop lessons whose only link was removed — otherwise a deleted item keeps
+    reappearing in the quiz-generation source picker.
+    """
+    stmt = (
+        select(Lesson)
+        .join(ModuleItem, ModuleItem.lesson_id == Lesson.id)
+        .where(ModuleItem.module_id == module_id)
+        .order_by(Lesson.title)
+    )
     return list((await db.execute(stmt)).scalars().all())
 
 
