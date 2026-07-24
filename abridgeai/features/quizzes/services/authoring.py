@@ -198,28 +198,30 @@ def _normalize_question_type(raw: Any) -> str:  # noqa: ANN401 -- arbitrary DTO 
     return _LEGACY_TYPE_ALIASES.get(cleaned, cleaned)
 
 
-def _validate_question_options(question_type: str, options: list[Any]) -> None:
+def _validate_question_options(
+    question_type: str, options: list[Any], *, single_answer: bool = True
+) -> None:
     """Type-aware option validation for the manual authoring path.
 
     Mirrors the per-type shape rules enforced by the AI generation
     parser (``stages/generation/parsers.GeneratedQuestion``):
 
-    * ``multiple_choice`` — exactly 4 options keyed A-D, exactly 1 correct.
+    * ``multiple_choice`` — 2..10 options; single_answer → exactly 1 correct,
+      else ≥1 correct (Phase 7 multi-select).
     * ``true_false`` — exactly 2 options keyed T/F, exactly 1 correct.
-    * ``short_answer`` / ``fill_blank`` — no options at all (the
-      expected answer is carried on the question's
-      ``original_generated_payload``).
+    * ``short_answer`` / ``fill_blank`` / ``numerical`` — no options (the
+      expected answer is carried on the question's own columns / payload).
     """
     if question_type == "multiple_choice":
-        if len(options) != 4:
-            raise AppError("multiple_choice questions must have exactly four options")
-        keys = [str(option.option_key).strip().upper() for option in options]
-        if set(keys) != {"A", "B", "C", "D"}:
-            raise AppError("multiple_choice option keys must be A, B, C, D")
+        if len(options) < 2 or len(options) > 10:
+            raise AppError("multiple_choice questions need between 2 and 10 options")
         if any(not str(option.option_text).strip() for option in options):
             raise AppError("Question option text is required")
-        if sum(1 for option in options if option.is_correct) != 1:
-            raise AppError("multiple_choice questions must have exactly one correct option")
+        n_correct = sum(1 for option in options if option.is_correct)
+        if single_answer and n_correct != 1:
+            raise AppError("single-answer multiple_choice must have exactly one correct option")
+        if not single_answer and n_correct < 1:
+            raise AppError("multi-answer multiple_choice must have at least one correct option")
     elif question_type == "true_false":
         if len(options) != 2:
             raise AppError("true_false questions must have exactly two options")

@@ -60,6 +60,10 @@ QuestionTypeLiteral = Literal[
     "short_answer",
     "fill_blank",
     "code",
+    # Phase 7: expanded question types.
+    "numerical",
+    "matching",
+    "ordering",
 ]
 
 

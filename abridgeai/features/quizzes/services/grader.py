@@ -59,12 +59,110 @@ async def grade_answer(
 
     qtype = question.question_type
     if qtype in {"multiple_choice", "true_false"}:
+        # Phase 7: multi-select MCQ (single_answer=False) grades all-correct-and-
+        # no-incorrect against the JSON list of chosen option ids in answer_text;
+        # single-select keeps the legacy single selected_option_id path.
+        if not getattr(question, "single_answer", True):
+            return await _grade_multi_select(db, question.id, answer_text)
         return await _grade_by_option(db, selected_option_id)
     if qtype == "short_answer":
         return _grade_short_answer(question, answer_text)
     if qtype == "fill_blank":
         return _grade_fill_blank(question, answer_text)
+    if qtype == "numerical":
+        return _grade_numerical(question, answer_text)
+    if qtype == "matching":
+        return _grade_matching(question, answer_text)
+    if qtype == "ordering":
+        return _grade_ordering(question, answer_text)
     return _ZERO
+
+
+async def _grade_multi_select(
+    db: AsyncSession, question_id: UUID, answer_text: str | None
+) -> GradeResult:
+    """All-or-nothing multi-select: chosen set must equal the correct set."""
+    from sqlalchemy import select  # noqa: PLC0415
+
+    chosen = _parse_id_list(answer_text)
+    rows = (
+        await db.execute(
+            select(QuizQuestionOption.id, QuizQuestionOption.is_correct).where(
+                QuizQuestionOption.question_id == question_id
+            )
+        )
+    ).all()
+    if not rows:
+        return _ZERO
+    correct_ids = {str(oid) for oid, is_correct in rows if is_correct}
+    chosen_ids = {str(c) for c in chosen}
+    return _ONE if chosen_ids and chosen_ids == correct_ids else _ZERO
+
+
+def _grade_numerical(question: QuizQuestion, answer_text: str | None) -> GradeResult:
+    """Numeric answer within an accepted tolerance (|submitted - expected| <= tol)."""
+    expected = getattr(question, "numeric_answer", None)
+    if expected is None or not answer_text:
+        return _ZERO
+    try:
+        submitted = Decimal(str(answer_text).strip())
+    except (TypeError, ValueError, ArithmeticError):
+        return _ZERO
+    tol = getattr(question, "numeric_tolerance", None) or Decimal("0")
+    return _ONE if abs(submitted - expected) <= tol else _ZERO
+
+
+def _grade_matching(question: QuizQuestion, answer_text: str | None) -> GradeResult:
+    """All pairs must match. match_pairs = [{"left":..,"right":..}]; submission is
+    a JSON object {left: chosen_right}."""
+    pairs = getattr(question, "match_pairs", None)
+    if not isinstance(pairs, list) or not pairs or not answer_text:
+        return _ZERO
+    try:
+        submitted = json.loads(answer_text)
+    except (TypeError, ValueError):
+        return _ZERO
+    if not isinstance(submitted, dict):
+        return _ZERO
+    for pair in pairs:
+        left = str(pair.get("left"))
+        if _normalize_text(str(submitted.get(left, ""))) != _normalize_text(
+            str(pair.get("right", ""))
+        ):
+            return _ZERO
+    return _ONE
+
+
+def _grade_ordering(question: QuizQuestion, answer_text: str | None) -> GradeResult:
+    """Exact-sequence match. ordering_sequence is the correct ordered list; the
+    submission is a JSON array in the student's chosen order."""
+    expected = getattr(question, "ordering_sequence", None)
+    if not isinstance(expected, list) or not expected or not answer_text:
+        return _ZERO
+    try:
+        submitted = json.loads(answer_text)
+    except (TypeError, ValueError):
+        return _ZERO
+    if not isinstance(submitted, list) or len(submitted) != len(expected):
+        return _ZERO
+    return (
+        _ONE
+        if all(str(s) == str(e) for s, e in zip(submitted, expected, strict=True))
+        else _ZERO
+    )
+
+
+def _parse_id_list(answer_text: str | None) -> list[str]:
+    """Decode a JSON array of option ids (multi-select submission)."""
+    if not answer_text:
+        return []
+    try:
+        parsed = json.loads(answer_text)
+    except (TypeError, ValueError):
+        return [p.strip() for p in answer_text.split(",") if p.strip()]
+    if isinstance(parsed, list):
+        return [str(item) for item in parsed]
+    return []
 
 
 async def _grade_by_option(
