@@ -553,6 +553,9 @@ async def get_session(
     session = await taking_service.get_session_for_user(db, session_id, current_user.user_id)
     if session is None:
         raise _not_found("interview_session", session_id)
+    retake = await taking_service.compute_retake_status(
+        db, config_id=session.interview_config_id, student_id=current_user.user_id
+    )
     return InterviewSessionPublic(
         session_id=session.id,
         interview_config_id=session.interview_config_id,
@@ -568,6 +571,9 @@ async def get_session(
         current_question_index=None,
         time_remaining_seconds=await taking_service.session_time_remaining_seconds(db, session),
         pass_verdict=session.pass_verdict,
+        remaining_attempts=retake.remaining_attempts,
+        retake_available_at=retake.retake_available_at,
+        can_retake=retake.can_retake,
     )
 
 
@@ -737,6 +743,9 @@ async def finish_session(
     # the additive ceremony field self-healing for older terminal sessions that
     # predate persisted closing turns.
     await db.commit()
+    retake = await taking_service.compute_retake_status(
+        db, config_id=session.interview_config_id, student_id=current_user.user_id
+    )
     return InterviewSessionFinishResponse(
         session_id=session.id,
         status=session.status,
@@ -745,6 +754,9 @@ async def finish_session(
         rubric_scores=[],
         pass_verdict=session.pass_verdict,
         ended_at=session.ended_at,
+        remaining_attempts=retake.remaining_attempts,
+        retake_available_at=retake.retake_available_at,
+        can_retake=retake.can_retake,
     )
 
 

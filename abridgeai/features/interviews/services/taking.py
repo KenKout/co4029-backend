@@ -161,6 +161,70 @@ async def _next_session_sequence(db: AsyncSession, session_id: UUID) -> int:
     return int(row.scalar_one()) + 1
 
 
+@dataclass(frozen=True)
+class RetakeStatus:
+    """Proactive retake context for the student-facing results screen (#7).
+
+    Computed from the SAME FR-5.3 rules that gate ``start_session`` — surfaced
+    on the finish/session responses so the UI can show "N attempts left" and a
+    cooldown countdown instead of only learning the ceiling reactively via a
+    429/409 when the student tries again.
+
+    * ``remaining_attempts`` — ``None`` when ``max_attempts`` is unset (unlimited).
+    * ``retake_available_at`` — ``None`` when no cooldown is active (retry now).
+    * ``can_retake`` — attempts remain AND no cooldown is currently blocking.
+    """
+
+    remaining_attempts: int | None
+    retake_available_at: datetime | None
+    can_retake: bool
+
+
+async def compute_retake_status(
+    db: AsyncSession,
+    *,
+    config_id: UUID,
+    student_id: UUID,
+) -> RetakeStatus:
+    """Read-time retake status (mirrors ``_enforce_retake_policy`` rules)."""
+    from abridgeai.features.interviews.models import InterviewConfig  # noqa: PLC0415
+
+    config = await db.get(InterviewConfig, config_id)
+    if config is None:
+        return RetakeStatus(remaining_attempts=None, retake_available_at=None, can_retake=True)
+
+    # Cooldown window — most recent terminal attempt + cooldown_hours.
+    retake_available_at: datetime | None = None
+    cooldown_hours = config.cooldown_hours
+    if cooldown_hours is not None and cooldown_hours > 0:
+        last_ended = await sessions_queries.get_last_terminal_ended_at(
+            db, student_id, config_id, _TERMINAL_SESSION_STATUSES
+        )
+        if last_ended is not None:
+            if last_ended.tzinfo is None:
+                last_ended = last_ended.replace(tzinfo=UTC)
+            candidate = last_ended + timedelta(hours=cooldown_hours)
+            if candidate > datetime.now(UTC):
+                retake_available_at = candidate
+
+    # Attempt ceiling — max_attempts minus terminal attempts used.
+    remaining_attempts: int | None = None
+    max_attempts = config.max_attempts
+    if max_attempts is not None and max_attempts > 0:
+        used = await sessions_queries.count_terminal_sessions(
+            db, student_id, config_id, _TERMINAL_SESSION_STATUSES
+        )
+        remaining_attempts = max(0, max_attempts - used)
+
+    has_attempts = remaining_attempts is None or remaining_attempts > 0
+    can_retake = has_attempts and retake_available_at is None
+    return RetakeStatus(
+        remaining_attempts=remaining_attempts,
+        retake_available_at=retake_available_at,
+        can_retake=can_retake,
+    )
+
+
 async def _enforce_retake_policy(
     db: AsyncSession,
     *,
@@ -2076,6 +2140,8 @@ async def _asked_question_ids(db: AsyncSession, session_id: UUID) -> set[UUID]:
 
 
 __all__ = [
+    "RetakeStatus",
+    "compute_retake_status",
     "get_session_for_user",
     "get_user_sessions",
     "start_session",
