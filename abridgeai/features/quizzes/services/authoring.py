@@ -412,14 +412,29 @@ async def create_question(
     question_type = _normalize_question_type(payload.question_type)
     _validate_question_options(question_type, options_payload)
 
+    # Phase 3: sanitize rich content on write per each field's format
+    # discriminator (plain passes through; markdown/html are nh3-cleaned).
+    from abridgeai.features.quizzes.services.sanitize import (  # noqa: PLC0415
+        sanitize_rich_content,
+    )
+
+    prompt_format = getattr(payload, "prompt_format", "plain")
+    hint_format = getattr(payload, "hint_format", "plain")
+    explanation_format = getattr(payload, "explanation_format", "plain")
+
     next_position = await _next_question_position(db, quiz_id)
     question = QuizQuestion(
         quiz_id=quiz_id,
         position=next_position,
         question_type=question_type,
-        prompt_text=payload.prompt_text.strip(),
-        hint_text=getattr(payload, "hint_text", None),
-        explanation=getattr(payload, "explanation", None),
+        prompt_text=sanitize_rich_content(payload.prompt_text.strip(), fmt=prompt_format),
+        hint_text=sanitize_rich_content(getattr(payload, "hint_text", None), fmt=hint_format),
+        explanation=sanitize_rich_content(
+            getattr(payload, "explanation", None), fmt=explanation_format
+        ),
+        prompt_format=prompt_format,
+        hint_format=hint_format,
+        explanation_format=explanation_format,
         difficulty=getattr(payload, "difficulty", None),
         bloom_level=getattr(payload, "bloom_level", None),
         review_status=getattr(payload, "review_status", "pending"),

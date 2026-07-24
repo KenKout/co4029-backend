@@ -82,6 +82,8 @@ class QuizQuestionOptionPublic(_ORMModel):
     option_key: str
     option_text: str
     position: int
+    # Phase 3: render discriminator for option_text (plain | markdown | html).
+    option_format: str = "plain"
 
 
 class QuizQuestionPublic(_ORMModel):
@@ -109,6 +111,9 @@ class QuizQuestionPublic(_ORMModel):
     question_type: QuestionTypeLiteral
     prompt_text: str
     hint_text: str | None = None
+    # Phase 3: render discriminators (plain | markdown | html).
+    prompt_format: str = "plain"
+    hint_format: str = "plain"
     options: list[QuizQuestionOptionPublic] = []
 
     # Course learning outcome this question assesses (§LO-3). The FK is

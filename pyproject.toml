@@ -38,6 +38,7 @@ dependencies = [
     # 1.6.x imports agent_pb.TC_DONE at module load, so an older 1.1.x api/proto
     # crash-loops the agent worker on import. Do NOT relax below 1.2.
     "livekit-api>=1.2,<2",
+    "nh3>=0.3.6",
 ]
 
 [project.optional-dependencies]

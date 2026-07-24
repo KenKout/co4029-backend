@@ -85,6 +85,8 @@ class QuizQuestionAuthoring(QuizQuestionPublic):
 
     options: list[QuizQuestionOptionAuthoring] = []  # type: ignore[assignment]
     explanation: str | None = None
+    # Phase 3: render discriminator for explanation (plain | markdown | html).
+    explanation_format: str = "plain"
     difficulty: Literal["easy", "medium", "hard"] | None = None
     bloom_level: (
         Literal["remember", "understand", "apply", "analyze", "evaluate", "create"] | None
