@@ -217,6 +217,37 @@ Không bao giờ tiết lộ đáp án. Level clamp ở bậc cuối.
 
 Chỉ thêm MỘT lead-in, ưu tiên: **recovery > time_pressure > affect**.
 
+### H0. KHI NÀO mỗi lead-in trigger (user trả lời/hoàn cảnh thế nào)
+
+> ⚠️ Chỉ chỉnh **tông giọng** — action/reason/câu hỏi/probe/chấm điểm đã cố định
+> TRƯỚC khi lead-in được thêm. Đọc sai cảm xúc chỉ lệch tông, không đổi luồng/điểm.
+> Tất cả sau feature-flag: tắt → wording v1 (không lead-in).
+
+**Nhóm 1 — Affect** (`detect_affect`, đọc từ chính văn bản câu trả lời; first-match-wins):
+
+| Lead-in | User trả lời thế nào | Ngưỡng chính xác |
+|---|---|---|
+| rambling | Rất dài nhưng ít chất (không phải câu trả lời mạnh) | ≥ **60 từ** (`_RAMBLING_MIN_WORDS`) VÀ low-substance |
+| nervous | Nhiều từ ngập ngừng / lấp lửng | ≥ **2** marker hedge (`_hedge_hits`) |
+| terse | Cực ngắn, không ngập ngừng | ≤ **3 từ** (`_TERSE_MAX_WORDS`) VÀ 0 hedge |
+| (confident / neutral) | Câu trả lời mạnh / còn lại | KHÔNG có lead-in |
+
+Thứ tự đánh giá: rambling → nervous → terse → confident → neutral.
+
+**Marker hedge** (EN + VI, cần ≥ 2): `um/uh/er`, `not sure`, `i'm not sure`, `maybe`,
+`possibly`, `i think maybe`, `i guess`, `kind of`, `sort of`, và VI: `à/ừm/ờ`,
+`không chắc`, `có lẽ`, `chắc là`. Một "maybe" đơn lẻ KHÔNG đủ.
+
+**Nhóm 2 — Communication-polish** (`_comms_polish_signals`, đọc từ bối cảnh phiên):
+
+| Lead-in | Trigger khi | Ngưỡng |
+|---|---|---|
+| recovery | User trả lời **yếu liên tiếp** | ≥ **2** câu yếu liền nhau (`_COMMS_RECOVERY_WEAK_STREAK`) |
+| time_pressure | Phiên **sắp hết giờ** | còn ≤ **20%** thời gian (`_COMMS_TIME_PRESSURE_FRACTION`) |
+
+**Ưu tiên khi nhiều tín hiệu cùng đúng:** chỉ prepend 1 lead-in — **recovery > time_pressure > affect**.
+Vd vừa yếu 2 lần liên tiếp VÀ đang ngập ngừng → chỉ hiện recovery (không chồng tông).
+
 ### H1. Affect (`_AFFECT_LEAD_IN`)
 | Affect | EN | VI |
 |---|---|---|
