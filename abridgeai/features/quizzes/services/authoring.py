@@ -482,9 +482,28 @@ async def archive_quiz(db: AsyncSession, quiz_id: UUID, actor: CurrentUser) -> Q
 
 
 async def delete_quiz(db: AsyncSession, quiz_id: UUID, actor: CurrentUser) -> None:
-    """Soft-delete the quiz + cascade to questions / options / revisions."""
+    """Soft-delete the quiz + cascade to questions / options / revisions.
+
+    Also soft-deletes the ``module_items`` row that points at this quiz.
+    ``soft_delete_cascade`` walks ONETOMANY relationships only, and
+    ``module_items -> quizzes`` is MANYTOONE from the item side (``Quiz`` has no
+    ``items`` relationship), so the cascade cannot reach it. Left behind, the
+    orphaned item kept appearing in the course content tree with a ``quiz_id``
+    pointing at a deleted quiz — the UI rendered it, and clicking it 404'd.
+    """
     quiz = await _require_quiz(db, quiz_id)
     await soft_delete_cascade(db, quiz, actor_id=actor.user_id)
+
+    from sqlalchemy import update  # noqa: PLC0415
+
+    from abridgeai.features.courses.models import ModuleItem  # noqa: PLC0415
+
+    await db.execute(
+        update(ModuleItem)
+        .where(ModuleItem.quiz_id == quiz_id, ModuleItem.deleted_at.is_(None))
+        .values(deleted_at=utcnow(), deleted_by=actor.user_id)
+    )
+    await db.flush()
 
 
 async def create_question(

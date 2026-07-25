@@ -746,6 +746,14 @@ async def get_authoring_content(
                     "status": item.interview_config.status,
                 }
 
+            # An item whose target resolved to None points at a soft-deleted
+            # (or missing) lesson/quiz/interview. Emitting it anyway shipped a
+            # dangling ``quiz_id`` to the client, which rendered a clickable
+            # entry that 404'd on open. Skip it — a content item with no
+            # reachable target is not content.
+            if target is None:
+                continue
+
             items_out.append(
                 {
                     "id": item.id,
