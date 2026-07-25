@@ -87,6 +87,14 @@ class QuizQuestionAuthoring(QuizQuestionPublic):
     explanation: str | None = None
     # Phase 3: render discriminator for explanation (plain | markdown | html).
     explanation_format: str = "plain"
+    # Phase 7: raw type-specific answer fields. Teacher-only — these ARE the
+    # answer key, so they are declared here (authoring) but NEVER on the public
+    # schema. Declaring them makes the inherited no-leak validator's merge copy
+    # them through for teacher screens; the public projection still omits them.
+    numeric_answer: Decimal | None = None
+    numeric_tolerance: Decimal | None = None
+    match_pairs: list[dict[str, Any]] | None = None
+    ordering_sequence: list[Any] | None = None
     difficulty: Literal["easy", "medium", "hard"] | None = None
     bloom_level: (
         Literal["remember", "understand", "apply", "analyze", "evaluate", "create"] | None

@@ -412,7 +412,12 @@ async def create_question(
         raise AppError("Question text is required")
     options_payload = list(payload.options or [])
     question_type = _normalize_question_type(payload.question_type)
-    _validate_question_options(question_type, options_payload)
+    _single_answer = getattr(payload, "single_answer", None)
+    _validate_question_options(
+        question_type,
+        options_payload,
+        single_answer=True if _single_answer is None else bool(_single_answer),
+    )
 
     # Phase 3: sanitize rich content on write per each field's format
     # discriminator (plain passes through; markdown/html are nh3-cleaned).
@@ -449,6 +454,24 @@ async def create_question(
         ),
         reviewed_at=utcnow() if getattr(payload, "review_status", None) == "approved" else None,
     )
+    # Phase 7: persist type-specific answer fields when supplied. These are
+    # only meaningful for the expanded types; MCQ/T-F ignore them. Set only
+    # when present so MCQ creation keeps the server defaults (single_answer=True).
+    _single = getattr(payload, "single_answer", None)
+    if _single is not None:
+        question.single_answer = bool(_single)
+    _num_ans = getattr(payload, "numeric_answer", None)
+    if _num_ans is not None:
+        question.numeric_answer = _num_ans
+    _num_tol = getattr(payload, "numeric_tolerance", None)
+    if _num_tol is not None:
+        question.numeric_tolerance = _num_tol
+    _pairs = getattr(payload, "match_pairs", None)
+    if _pairs is not None:
+        question.match_pairs = _pairs
+    _seq = getattr(payload, "ordering_sequence", None)
+    if _seq is not None:
+        question.ordering_sequence = _seq
     db.add(question)
     await flush_or_conflict(db)
 
