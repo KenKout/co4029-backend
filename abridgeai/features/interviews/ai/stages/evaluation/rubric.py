@@ -77,6 +77,32 @@ output schema. Extra criteria beyond this cap are dropped (leading ones win).
 
 _MAX_CRITERION_NAME_CHARS = 64
 
+SUPPLEMENTARY_NOTES_KEY = "notes"
+"""Key inside ``supplementary_instructions`` JSON holding the teacher's prose.
+
+``supplementary_instructions`` serves two audiences from one column: structured
+authoring data (rubric, type mix, question count) and free prose guidance that
+is injected verbatim into the GENERATION prompt. Once the field holds JSON, the
+prose needs a home inside that JSON — otherwise the generation prompt receives
+a raw JSON blob instead of human instructions.
+"""
+
+
+def resolve_supplementary_notes(supplementary: str | None) -> str:
+    """Return ONLY the human-readable guidance from ``supplementary_instructions``.
+
+    Prose-only fields (the common case) are returned unchanged. When the field
+    holds a JSON object, the ``notes`` string is returned and the structured
+    keys (``evaluation_rubric``, ``rubric_weights``, ``question_count``) are
+    stripped — feeding those to the question-generation LLM as prose is noise at
+    best and confusing instructions at worst.
+    """
+    parsed = _try_parse_json_object(supplementary)
+    if parsed is None:
+        return (supplementary or "").strip()
+    notes = parsed.get(SUPPLEMENTARY_NOTES_KEY)
+    return notes.strip() if isinstance(notes, str) else ""
+
 
 @dataclass(frozen=True)
 class CriterionScore:
@@ -387,4 +413,6 @@ __all__ = [
     "build_criterion_score",
     "resolve_rubric",
     "resolve_rubric_definition",
+    "resolve_supplementary_notes",
+    "SUPPLEMENTARY_NOTES_KEY",
 ]

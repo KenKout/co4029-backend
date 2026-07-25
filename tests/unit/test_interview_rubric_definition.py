@@ -24,6 +24,7 @@ import pytest
 from abridgeai.features.interviews.ai.stages.evaluation.rubric import (
     DEFAULT_CRITERIA,
     resolve_rubric_definition,
+    resolve_supplementary_notes,
 )
 from abridgeai.features.interviews.ai.stages.generation.resolve import resolve_type_mix
 
@@ -191,3 +192,40 @@ def test_type_mix_only_config_still_grades_on_defaults() -> None:
 
     assert definition.criteria == DEFAULT_CRITERIA
     assert "technical" not in definition.criteria
+
+
+# ── Prose-notes extraction for the generation prompt ─────────────────────────
+
+
+def test_plain_prose_is_returned_unchanged() -> None:
+    """The common case: the field is free text, not JSON — return it verbatim."""
+    assert (
+        resolve_supplementary_notes("Focus on real-world scenarios, avoid rote recall.")
+        == "Focus on real-world scenarios, avoid rote recall."
+    )
+
+
+def test_none_and_blank_yield_empty_string() -> None:
+    assert resolve_supplementary_notes(None) == ""
+    assert resolve_supplementary_notes("   ") == ""
+
+
+def test_json_config_returns_only_the_notes_key() -> None:
+    """When the field holds JSON, only the human prose reaches the prompt."""
+    raw = _supplementary(
+        {
+            "notes": "Prioritise applied questions.",
+            "evaluation_rubric": {"criteria": [{"name": "depth", "weight": 2}]},
+            "rubric_weights": {"technical": 70, "behavioral": 30, "situational": 0},
+            "question_count": 8,
+        }
+    )
+
+    assert resolve_supplementary_notes(raw) == "Prioritise applied questions."
+
+
+def test_json_config_without_notes_yields_empty_string() -> None:
+    """Structured-only config must NOT leak its JSON blob into the prompt."""
+    raw = _supplementary({"evaluation_rubric": {"criteria": [{"name": "depth"}]}})
+
+    assert resolve_supplementary_notes(raw) == ""

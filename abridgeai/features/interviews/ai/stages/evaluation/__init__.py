@@ -38,6 +38,7 @@ from abridgeai.features.interviews.ai.stages.evaluation.rubric import (
     build_criterion_score,
     resolve_rubric,
     resolve_rubric_definition,
+    resolve_supplementary_notes,
 )
 
 __all__ = [
@@ -59,4 +60,5 @@ __all__ = [
     "parse_outcome_verdicts",
     "resolve_rubric",
     "resolve_rubric_definition",
+    "resolve_supplementary_notes",
 ]
