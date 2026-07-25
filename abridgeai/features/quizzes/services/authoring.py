@@ -749,6 +749,29 @@ async def delete_question(db: AsyncSession, question_id: UUID, actor: CurrentUse
     quiz_id = question.quiz_id
     quiz = await _require_quiz(db, quiz_id)
     _assert_quiz_editable(quiz)
+
+    # Serialize concurrent deletes on the SAME quiz.
+    #
+    # The repack below UPDATEs every surviving sibling. Two deletes running
+    # concurrently against one quiz each grab row locks on the same sibling set
+    # and interleave, so each ends up waiting on a row the other already holds:
+    #
+    #   DeadlockDetected: Process A waits for ShareLock on transaction of B;
+    #   B waits for ShareLock on transaction of A
+    #   CONTEXT: while locking tuple (...) in relation "quiz_questions"
+    #
+    # The client fires bulk deletes concurrently (Promise.allSettled), so this
+    # is a normal path, not an edge case. A transaction-scoped advisory lock
+    # keyed on the quiz makes same-quiz deletes queue instead of deadlocking,
+    # while deletes on DIFFERENT quizzes still run fully in parallel. It is
+    # released automatically at COMMIT/ROLLBACK — no unlock bookkeeping.
+    from sqlalchemy import text  # noqa: PLC0415
+
+    await db.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+        {"key": f"quiz_questions_repack:{quiz_id}"},
+    )
+
     await soft_delete_cascade(db, question, actor_id=actor.user_id)
     await db.flush()
 
