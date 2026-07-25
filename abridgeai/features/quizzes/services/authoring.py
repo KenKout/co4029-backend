@@ -145,6 +145,22 @@ async def _require_question(db: AsyncSession, question_id: UUID) -> QuizQuestion
     return question
 
 
+def _assert_quiz_editable(quiz: Quiz) -> None:
+    """Reject authoring edits on a published quiz.
+
+    Once a quiz is published, students can see and attempt it, so its
+    content and settings are frozen — editing questions/options/settings
+    under live attempts would corrupt grading and scoring. Callers must
+    archive (unpublish) the quiz first if they need to change it. Raised
+    as :class:`ConflictError` so the router maps to HTTP 409.
+    """
+    if quiz.status == "published":
+        raise ConflictError(
+            "quiz_published_readonly: a published quiz cannot be edited; "
+            "archive it first to make changes"
+        )
+
+
 async def _resolve_module_course(db: AsyncSession, module_id: UUID) -> UUID:
     """Look up ``modules.course_id`` via :mod:`courses.api.public`."""
     module = await courses_api.get_module_by_id(db, module_id)
@@ -364,6 +380,7 @@ async def update_quiz(
 ) -> Quiz:
     del actor
     quiz = await _require_quiz(db, quiz_id)
+    _assert_quiz_editable(quiz)
     _apply_patch(quiz, payload)
     await flush_or_conflict(db)
     await db.refresh(quiz)
@@ -407,7 +424,8 @@ async def create_question(
     actor: CurrentUser,
 ) -> QuizQuestion:
     """Create a single question; MCQ flavours are validated up front."""
-    await _require_quiz(db, quiz_id)
+    quiz = await _require_quiz(db, quiz_id)
+    _assert_quiz_editable(quiz)
     if not payload.prompt_text.strip():
         raise AppError("Question text is required")
     options_payload = list(payload.options or [])
@@ -507,6 +525,8 @@ async def update_question(
 ) -> QuizQuestion:
     """Patch fields + append a revision; option edits are MCQ-only."""
     question = await _require_question(db, question_id)
+    quiz = await _require_quiz(db, question.quiz_id)
+    _assert_quiz_editable(quiz)
     revision_no = await _next_revision_no(db, question_id)
     payload_json = payload.model_dump(exclude_unset=True, mode="json")
     db.add(
@@ -550,6 +570,7 @@ async def bulk_approve_questions(
     quiz = await db.get(Quiz, quiz_id)
     if quiz is None:
         raise NotFoundError(f"Quiz {quiz_id} not found")
+    _assert_quiz_editable(quiz)
     if not question_ids:
         return 0
     updated = 0
@@ -613,6 +634,8 @@ async def delete_question(db: AsyncSession, question_id: UUID, actor: CurrentUse
     """Soft-delete a question + repack sibling positions to stay 1..N."""
     question = await _require_question(db, question_id)
     quiz_id = question.quiz_id
+    quiz = await _require_quiz(db, quiz_id)
+    _assert_quiz_editable(quiz)
     await soft_delete_cascade(db, question, actor_id=actor.user_id)
     await db.flush()
 

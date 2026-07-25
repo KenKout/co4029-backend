@@ -988,10 +988,21 @@ async def test_update_quiz_persists_schedule_window(
     scenario: dict[str, uuid.UUID],
     engine: AsyncEngine,
 ) -> None:
-    """PATCH /teacher/quizzes/{id} accepts ISO window strings and echoes them back."""
-    quiz_id, _question_id, _opts = await _seed_published_quiz_with_question(
-        client, admin_bearer, engine, scenario, title="Schedule PATCH Quiz"
+    """PATCH /teacher/quizzes/{id} accepts ISO window strings on a DRAFT quiz.
+
+    A published quiz is frozen (see
+    test_update_published_quiz_is_rejected), so schedule edits are only
+    valid while the quiz is still a draft.
+    """
+    # Create a DRAFT quiz (do not publish) so the edit is allowed.
+    create_resp = await client.post(
+        f"/api/v1/teacher/courses/{scenario['course_id']}/quizzes",
+        json={"module_id": str(scenario["module_id"]), "title": "Schedule PATCH Quiz"},
+        headers=_auth(admin_bearer),
     )
+    assert create_resp.status_code == 201, create_resp.text
+    quiz_id = uuid.UUID(create_resp.json()["id"])
+
     open_ts = "2026-08-01T09:00:00+00:00"
     close_ts = "2026-08-08T09:00:00+00:00"
     due_ts = "2026-08-07T23:59:00+00:00"
@@ -1018,6 +1029,42 @@ async def test_update_quiz_persists_schedule_window(
     )
     assert clear_resp.status_code == 200, clear_resp.text
     assert clear_resp.json()["available_until"] is None
+
+
+async def test_update_published_quiz_is_rejected(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    scenario: dict[str, uuid.UUID],
+    engine: AsyncEngine,
+) -> None:
+    """A published quiz is frozen: PATCH must 409 (quiz_published_readonly).
+
+    Once students can see/attempt the quiz, its content and settings are
+    locked so live attempts can't be corrupted mid-flight.
+    """
+    # Create a draft quiz, then flip it to published directly in the DB so
+    # this test is independent of the publish-gate endpoint (which has its
+    # own approval preconditions exercised elsewhere).
+    create_resp = await client.post(
+        f"/api/v1/teacher/courses/{scenario['course_id']}/quizzes",
+        json={"module_id": str(scenario["module_id"]), "title": "Frozen Quiz"},
+        headers=_auth(admin_bearer),
+    )
+    assert create_resp.status_code == 201, create_resp.text
+    quiz_id = uuid.UUID(create_resp.json()["id"])
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("UPDATE quizzes SET status = 'published' WHERE id = :id"),
+            {"id": quiz_id},
+        )
+
+    resp = await client.patch(
+        f"/api/v1/teacher/quizzes/{quiz_id}",
+        json={"title": "Renamed after publish"},
+        headers=_auth(admin_bearer),
+    )
+    assert resp.status_code == 409, resp.text
+    assert "quiz_published_readonly" in resp.text
 
 
 # ---------------------------------------------------------------------------

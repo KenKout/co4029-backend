@@ -499,6 +499,8 @@ async def update_quiz(
         quiz = await authoring_service.update_quiz(db, quiz_id, _AttrShim(payload), current_user)
     except NotFoundError as exc:
         raise _not_found("quiz", quiz_id) from exc
+    except ConflictError as exc:
+        raise _conflict(str(exc)) from exc
     await db.commit()
     return QuizAuthoring.model_validate(quiz)
 
@@ -598,6 +600,8 @@ async def bulk_approve_questions(
         )
     except NotFoundError as exc:
         raise _not_found("quiz", quiz_id) from exc
+    except ConflictError as exc:
+        raise _conflict(str(exc)) from exc
     except AppError as exc:
         raise _bad_request(str(exc)) from exc
     await db.commit()
@@ -782,6 +786,8 @@ async def delete_question(
         await authoring_service.delete_question(db, question_id, current_user)
     except NotFoundError as exc:
         raise _not_found("quiz_question", question_id) from exc
+    except ConflictError as exc:
+        raise _conflict(str(exc)) from exc
     await db.commit()
 
 
