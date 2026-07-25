@@ -103,6 +103,11 @@ class GapReportAuthoringRead(GapReportRead):
     # criterion contributes to the total — resolved from the interview config.
     rubric_weights: dict[str, float] = {}
     raw_evaluation_json: dict[str, Any] = {}
+    # Tone-only persona-adherence audit (teacher-only diagnostic): did the AI
+    # interviewer hold the configured persona? Surfaced from
+    # ``internal_summary_json``; absent/empty when a session was never audited
+    # (no interviewer turns, LLM unavailable, or evaluated before this shipped).
+    persona_adherence: dict[str, Any] = {}
     teacher_summary: str | None = None
     source_quiz_attempt_id: UUID | None = None
     source_interview_session_id: UUID | None = None

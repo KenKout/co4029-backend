@@ -44,6 +44,13 @@ from abridgeai.features.interviews.ai.stages.gap_report import (
     GapReportDraft,
     generate_gap_report,
 )
+from abridgeai.features.interviews.ai.stages.persona_adherence import (
+    audit_persona_adherence,
+)
+from abridgeai.features.interviews.ai.stages.persona_adherence.parsers import (
+    PersonaAdherence,
+)
+from abridgeai.features.interviews.orchestrator.persona import profile_from
 from abridgeai.features.interviews.models import (
     GapReport,
     InterviewOutcomeEvaluation,
@@ -211,6 +218,19 @@ async def evaluate_and_generate_report(
             pipeline_run_id=eval_run_id,
         )
 
+        # Tone-only diagnostic (never gates pass/fail): did the AI interviewer
+        # hold the configured persona? Runs over the stored transcript. It is
+        # best-effort — audit_persona_adherence never raises, returning an
+        # unavailable() sentinel on no-turns / LLM failure — so a tone audit
+        # problem can never block a student's evaluation from completing.
+        transcript = await sessions_queries.list_session_messages(db, session_id)
+        persona_adherence = await audit_persona_adherence(
+            db,
+            persona=profile_from(getattr(config, "persona", None)),
+            messages=transcript,
+            pipeline_run_id=eval_run_id,
+        )
+
         await _persist_outcome_evaluations(db, session_id=session_id, verdicts=outcome_verdicts)
         _stamp_session_summary(
             session,
@@ -219,6 +239,7 @@ async def evaluate_and_generate_report(
             min_outcomes_to_pass=min_outcomes_to_pass,
             question_count=len(expected_question_ids),
             answered_question_count=len(answered_question_ids),
+            persona_adherence=persona_adherence,
         )
         await _persist_gap_report(
             db,
@@ -481,6 +502,7 @@ def _stamp_session_summary(
     min_outcomes_to_pass: int | None,
     question_count: int,
     answered_question_count: int,
+    persona_adherence: PersonaAdherence | None = None,
 ) -> None:
     summary: dict[str, Any] = dict(session.internal_summary_json or {})
     summary.pop("evaluation_failure", None)
@@ -493,6 +515,11 @@ def _stamp_session_summary(
     summary["questions_answered"] = answered_question_count
     summary["questions_unanswered"] = max(0, question_count - answered_question_count)
     summary["evaluated_at"] = utcnow().isoformat()
+    # Teacher-only tone diagnostic. Only stored when the audit produced
+    # something usable — an unavailable() sentinel (no interviewer turns / LLM
+    # down) is not persisted, so the teacher UI can tell "audited" from "not".
+    if persona_adherence is not None and persona_adherence.available:
+        summary["persona_adherence"] = persona_adherence.to_json()
     session.internal_summary_json = summary
     session.pass_verdict = _derive_pass_verdict(verdicts, min_outcomes_to_pass)
 

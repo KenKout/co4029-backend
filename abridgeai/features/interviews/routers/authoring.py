@@ -993,6 +993,7 @@ async def get_session_gap_report_authoring(
     interview_title: str | None = None
     score_summary: dict[str, Any] = {}
     rubric_weights: dict[str, float] = {}
+    persona_adherence: dict[str, Any] = {}
     session_row = await db.get(InterviewSession, session_id)
     if session_row is not None:
         config_row = await db.get(InterviewConfig, session_row.interview_config_id)
@@ -1014,6 +1015,11 @@ async def get_session_gap_report_authoring(
                 )
                 if key in summary_json
             }
+            # Tone-only persona-adherence audit (teacher-only). Absent for
+            # sessions evaluated before this shipped or never audited.
+            audit = summary_json.get("persona_adherence")
+            if isinstance(audit, dict):
+                persona_adherence = audit
         # Resolve the per-criterion rubric weights so the teacher sees each
         # criterion's contribution to the weighted total.
         if config_row is not None:
@@ -1050,6 +1056,7 @@ async def get_session_gap_report_authoring(
             "weaknesses": [str(w) for w in weaknesses] if isinstance(weaknesses, list) else [],
             "score_summary": score_summary,
             "rubric_weights": rubric_weights,
+            "persona_adherence": persona_adherence,
             "raw_evaluation_json": raw_evaluation_json,
             "teacher_summary": report.teacher_summary,
             "source_quiz_attempt_id": report.source_quiz_attempt_id,
