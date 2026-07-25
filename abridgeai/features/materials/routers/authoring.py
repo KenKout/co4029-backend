@@ -46,6 +46,8 @@ from abridgeai.features.courses.routers._deps import require_lesson_authoring_ac
 from abridgeai.features.materials.api import public as materials_api
 from abridgeai.features.materials.models import LearningMaterialVersion
 from abridgeai.features.materials.schemas import (
+    CuratedKGDraft,
+    CuratedKGDraftSave,
     LessonKnowledgeGraph,
     MaterialAuthoring,
     MaterialLinkExisting,
@@ -658,6 +660,76 @@ async def lesson_knowledge_graph(
     """
     del current_user
     return await authoring_service.get_lesson_knowledge_graph(db, lesson_id, limit=limit)
+
+
+@router.get(
+    "/lessons/{lesson_id}/curated-knowledge-graph",
+    response_model=CuratedKGDraft,
+)
+async def get_curated_knowledge_graph(
+    lesson_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_LESSON)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> CuratedKGDraft:
+    """Teacher's editable KG draft for a lesson.
+
+    On first open (no curated row yet) the draft is seeded from the AI
+    concept graph as an editable starting point (``seeded=True``); the seed
+    is not persisted until the teacher saves. Returns publish state so the UI
+    can show whether there are unpublished changes.
+    """
+    del current_user
+    return await authoring_service.get_or_seed_draft(db, lesson_id)
+
+
+@router.put(
+    "/lessons/{lesson_id}/curated-knowledge-graph",
+    response_model=CuratedKGDraft,
+)
+async def save_curated_knowledge_graph(
+    lesson_id: UUID,
+    payload: CuratedKGDraftSave,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_LESSON)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> CuratedKGDraft:
+    """Save the teacher's KG draft (upsert).
+
+    The payload is validated at the schema boundary (exactly one primary
+    node, unique node ids, edges reference real nodes), so a malformed graph
+    is rejected with 422 before it can be persisted. Does not affect the
+    published student view — publishing is a separate action.
+    """
+    result = await authoring_service.save_draft(
+        db, lesson_id, payload, actor_id=current_user.id
+    )
+    await db.commit()
+    return result
+
+
+@router.post(
+    "/lessons/{lesson_id}/curated-knowledge-graph/publish",
+    response_model=CuratedKGDraft,
+)
+async def publish_curated_knowledge_graph(
+    lesson_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_LESSON)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> CuratedKGDraft:
+    """Publish the current draft to the student reading-lesson view.
+
+    Snapshots ``draft_json`` into the published slot. 409 when there is no
+    saved draft with at least one node to publish.
+    """
+    try:
+        result = await authoring_service.publish(
+            db, lesson_id, actor_id=current_user.id
+        )
+    except authoring_service.CuratedKGEmptyError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=str(exc)
+        ) from exc
+    await db.commit()
+    return result
 
 
 @router.get("/materials/{material_id}", response_model=MaterialAuthoring)

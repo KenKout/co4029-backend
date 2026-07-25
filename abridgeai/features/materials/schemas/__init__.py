@@ -38,6 +38,15 @@ from abridgeai.features.materials.schemas.status import (
     ProcessingProgress,
     ProcessingStatusLiteral,
 )
+from abridgeai.features.materials.schemas.curated_kg import (
+    CuratedKGDraft,
+    CuratedKGDraftSave,
+    CuratedKGEdge,
+    CuratedKGGraph,
+    CuratedKGNode,
+    CuratedKGPublished,
+    CuratedKGRelation,
+)
 
 __all__ = [
     "MaterialAuthoring",
@@ -55,4 +64,11 @@ __all__ = [
     "LessonProcessingSummary",
     "ProcessingProgress",
     "ProcessingStatusLiteral",
+    "CuratedKGDraft",
+    "CuratedKGDraftSave",
+    "CuratedKGEdge",
+    "CuratedKGGraph",
+    "CuratedKGNode",
+    "CuratedKGPublished",
+    "CuratedKGRelation",
 ]

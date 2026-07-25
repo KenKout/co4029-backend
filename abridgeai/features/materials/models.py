@@ -320,9 +320,61 @@ class ChunkingEnrichmentCache(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
     output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
+class LessonKnowledgeGraphCurated(
+    UUIDPrimaryKeyMixin,
+    TimestampMixin,
+    AuditedByMixin,
+    SoftDeleteMixin,
+    Base,
+):
+    """Teacher-authored, publishable knowledge graph for one lesson.
+
+    Deliberately SEPARATE from the AI-generated concept graph in Neo4j
+    (which stays read-only, behind ``knowledge_graph_enabled``). This is
+    the graph the teacher curates (CRUD nodes / edges / node detail) and
+    publishes to the student reading-lesson view. See migration 0062.
+
+    Two JSON snapshots:
+
+    * ``draft_json`` — the working copy the teacher edits freely. Shape:
+      ``{"nodes": [{id,label,type,definition,weight}],
+         "edges": [{source,target,relation}]}``.
+    * ``published_json`` — snapshot students see. NULL until first publish;
+      re-publishing overwrites it with the current draft.
+
+    ``primary_node_id`` (the single required centre node) is a top-level
+    column, not buried in JSON, so the "exactly one primary" rule is
+    enforceable/queryable. ``published_primary_node_id`` captures the
+    primary at publish time (the draft's primary may drift before the next
+    publish).
+    """
+
+    __tablename__ = "lesson_knowledge_graphs"
+    __table_args__ = (
+        UniqueConstraint("lesson_id", name="uq_lesson_knowledge_graphs_lesson"),
+    )
+
+    lesson_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("lessons.id", ondelete="NO ACTION"),
+        nullable=False,
+        index=True,
+    )
+    draft_json: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    primary_node_id: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    published_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    published_primary_node_id: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    published_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+
 __all__ = [
     "ChunkingEnrichmentCache",
     "DocumentChunk",
     "LearningMaterial",
     "LearningMaterialVersion",
+    "LessonKnowledgeGraphCurated",
 ]

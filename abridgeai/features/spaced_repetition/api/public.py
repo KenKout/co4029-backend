@@ -37,13 +37,19 @@ from abridgeai.features.spaced_repetition.models import StudentCardState
 from abridgeai.features.spaced_repetition.queries.published import (
     review_compliance_rate as _review_compliance_rate,
 )
+from abridgeai.features.spaced_repetition.queries.unlock_sql import (
+    has_passing_interview_for_module,
+)
 from abridgeai.features.spaced_repetition.services import (
     CardFailedEvent,
     CardReviewResult,
     dispatch_remediation_for_card_failure,
     record_card_review,
 )
-from abridgeai.features.spaced_repetition.sm2 import check_lesson_unlock
+from abridgeai.features.spaced_repetition.sm2 import (
+    LessonUnlockStatus,
+    check_lesson_unlock,
+)
 
 from ._dto import CardStateDTO
 
@@ -94,5 +100,7 @@ __all__ = [
     "get_card_state",
     "get_compliance_rate",
     "get_due_card_count",
+    "has_passing_interview_for_module",
+    "LessonUnlockStatus",
     "record_card_review",
 ]

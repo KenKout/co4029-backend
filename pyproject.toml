@@ -250,6 +250,7 @@ ignore_imports = [
     "abridgeai.features.materials.services.authoring._reads -> sqlalchemy",
     "abridgeai.features.materials.services.authoring._upload -> sqlalchemy",
     "abridgeai.features.materials.services.authoring._versions -> sqlalchemy",
+    "abridgeai.features.materials.services.authoring._curated_kg -> sqlalchemy",
     "abridgeai.features.quizzes.services.authoring -> sqlalchemy",
     "abridgeai.features.quizzes.services.publish_gate -> sqlalchemy",
     "abridgeai.features.quizzes.services.taking -> sqlalchemy",
