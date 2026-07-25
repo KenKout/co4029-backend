@@ -462,15 +462,22 @@ async def list_published_course_tags(db: AsyncSession, course_id: UUID) -> list[
 async def list_published_course_outcomes(
     db: AsyncSession, course_id: UUID
 ) -> list[CourseLearningOutcome]:
-    """Course learning outcomes for a published course, ordered by position (§A12)."""
+    """Course learning outcomes for a published course (§A12).
+
+    Ordered by ``(parent_id, position)`` so siblings are contiguous; the
+    dotted ``L.O.x.y`` code and depth are derived by the service layer from
+    the parent chain. Soft-deleted rows are excluded — leaving them in would
+    both leak removed outcomes to learners and shift the derived codes.
+    """
     stmt = (
         select(CourseLearningOutcome)
         .join(Course, Course.id == CourseLearningOutcome.course_id)
         .where(
             Course.id == course_id,
+            CourseLearningOutcome.deleted_at.is_(None),
             published_course_clause(),
         )
-        .order_by(CourseLearningOutcome.position)
+        .order_by(CourseLearningOutcome.parent_id, CourseLearningOutcome.position)
     )
     return list((await db.execute(stmt)).scalars().all())
 

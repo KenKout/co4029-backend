@@ -18,6 +18,7 @@ from uuid import UUID
 
 from abridgeai.features.courses.queries import (
     CursorPage,
+    build_outcome_code_map,
     get_course_instructor,
     get_published_course_by_id,
     get_published_course_by_slug,
@@ -338,7 +339,20 @@ async def list_published_course_outcomes_for_learner(
     if course is None:
         return None
     outcomes = await list_published_course_outcomes(db, course_id)
-    return [CourseLearningOutcomePublic.model_validate(o) for o in outcomes]
+    # ``code``/``depth`` are projection-only, derived from the parent chain.
+    # Without stamping them the learner view falls back to raw ``position``,
+    # which is per-parent and therefore ambiguous across branches.
+    code_map = build_outcome_code_map(outcomes)
+    dtos: list[CourseLearningOutcomePublic] = []
+    for o in outcomes:
+        dto = CourseLearningOutcomePublic.model_validate(o)
+        dto.code, dto.depth = code_map.get(o.id, (str(o.position), 0))
+        dtos.append(dto)
+    # Tree order: dotted code compared segment-wise so 1.2 sorts before 1.10.
+    return sorted(
+        dtos,
+        key=lambda d: [int(p) for p in (d.code or "").split(".") if p.isdigit()],
+    )
 
 
 async def get_published_module_for_learner(
