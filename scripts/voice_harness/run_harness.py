@@ -65,6 +65,7 @@ from abridgeai.core.db import get_sessionmaker  # noqa: E402
 from abridgeai.features.interviews.services import real_time as rt_service  # noqa: E402
 from abridgeai.features.interviews.services.narration import synthesize_speech  # noqa: E402
 from scripts.voice_harness import audio_io  # noqa: E402
+from scripts.voice_harness import candidate  # noqa: E402
 from scripts.voice_harness.room_client import HarnessRoom  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
@@ -204,6 +205,9 @@ class ScenarioResult:
     livekit_cleanup_status: str = "not_attempted"
     audio_dir: str | None = None
     audio_kept: bool = False
+    # Synthetic candidate persona used to generate answers (Phase 5); None on
+    # the static --answers path so downstream consumers can tell them apart.
+    candidate_profile: str | None = None
     error: str | None = None
 
     def to_json(self) -> str:
@@ -739,6 +743,50 @@ def _security_failure_reason(result: ScenarioResult) -> str:
     )
 
 
+async def _generate_candidate_answers(
+    config_id: uuid.UUID,
+    *,
+    profile_key: str,
+    turns: int,
+    language: str,
+    settings: Any,  # noqa: ANN401
+) -> list[str]:
+    """Generate ``turns`` in-character student answers for a candidate profile.
+
+    Each answer is generated against one of the config's own approved question
+    prompts (cycled if there are fewer questions than turns), so the synthetic
+    student is answering the real material. Best-effort per turn:
+    ``candidate.generate_answer`` never raises — it falls back to a per-profile
+    static answer — so this always returns exactly ``turns`` non-empty strings.
+    """
+    profile = candidate.PROFILES[profile_key]
+    async with get_sessionmaker()() as db:
+        rows = (
+            await db.execute(
+                text(
+                    "SELECT prompt_text FROM interview_questions "
+                    "WHERE interview_config_id = :c ORDER BY position"
+                ),
+                {"c": config_id},
+            )
+        ).all()
+    prompts = [r.prompt_text for r in rows if r.prompt_text] or [
+        "Please answer the interviewer's question."
+    ]
+    answers: list[str] = []
+    for i in range(max(1, turns)):
+        question = prompts[i % len(prompts)]
+        answer = await candidate.generate_answer(
+            profile,
+            question=question,
+            language=language,
+            settings=settings,
+        )
+        answers.append(answer)
+        logger.info("  candidate turn %d (%s): %r", i + 1, profile_key, answer[:60])
+    return answers
+
+
 async def _drive_scenario(
     *,
     settings: Any,  # noqa: ANN401
@@ -835,6 +883,8 @@ async def run_scenario(
     scenario_timeout_s: float = DEFAULT_SCENARIO_TIMEOUT_S,
     require_adaptive: bool = False,
     require_security_blocks: int = 0,
+    candidate_profile: str | None = None,
+    candidate_turns: int = 3,
 ) -> ScenarioResult:
     """Run one live voice scenario end-to-end and return a machine-readable result.
 
@@ -845,6 +895,7 @@ async def run_scenario(
     """
     settings = get_settings()
     answers = answers or ["A fact table stores quantitative measurements for analysis."]
+    assert answers is not None  # narrows for the type checker; default above guarantees it
     adaptive_during = bool(getattr(settings, "adaptive_interviewer_enabled", False))
     result = ScenarioResult(
         ok=False,
@@ -891,6 +942,25 @@ async def run_scenario(
         result.session_id = str(session_uuid)
         room_name = rt_service.build_room_name(session_uuid)
         logger.info("voice session=%s (config=%s)", session_uuid, cfg_uuid)
+
+        # --candidate-profile: replace the static answers with in-character ones
+        # generated from the config's own question prompts. Best-effort — if
+        # generation fails per turn it falls back to a per-profile static answer
+        # inside candidate.generate_answer, so the run is never blocked.
+        if candidate_profile is not None:
+            answers = await _generate_candidate_answers(
+                cfg_uuid,
+                profile_key=candidate_profile,
+                turns=candidate_turns,
+                language=language,
+                settings=settings,
+            )
+            result.candidate_profile = candidate_profile
+            logger.info(
+                "candidate-profile=%s → generated %d in-character answer(s)",
+                candidate_profile,
+                len(answers),
+            )
 
         # Hard scenario timeout wraps the entire live interaction.
         await asyncio.wait_for(
@@ -1064,6 +1134,8 @@ async def run(args: argparse.Namespace) -> int:
         scenario_timeout_s=args.scenario_timeout,
         require_adaptive=args.require_adaptive,
         require_security_blocks=args.require_security_blocks,
+        candidate_profile=args.candidate_profile,
+        candidate_turns=args.candidate_turns,
     )
     _print_summary(result)
     if args.json:
@@ -1086,7 +1158,25 @@ def main() -> None:
         "--answers",
         nargs="+",
         default=["A fact table stores quantitative measurements for analysis."],
-        help="Student answer texts (each becomes one spoken turn)",
+        help="Student answer texts (each becomes one spoken turn). Ignored when "
+        "--candidate-profile is set (answers are generated in-character instead).",
+    )
+    p.add_argument(
+        "--candidate-profile",
+        choices=candidate.profile_names(),
+        default=None,
+        help="Generate in-character student answers with an LLM instead of using "
+        "the static --answers list. A profile is an ability×state sketch "
+        "(confident_strong / nervous_mid / rambling_mid / stuck_weak) that "
+        "exercises the hint ladder, affect detection, and rambling-redirect. "
+        "Leave unset to keep the static --answers path (the default).",
+    )
+    p.add_argument(
+        "--candidate-turns",
+        type=int,
+        default=3,
+        help="How many in-character answers to generate when --candidate-profile "
+        "is set (default 3). Ignored on the static --answers path.",
     )
     p.add_argument("--out", default="./voice-harness-out", help="Output dir for captured WAVs")
     p.add_argument("--agent-timeout", type=float, default=30.0, help="Seconds to wait for agent join")
