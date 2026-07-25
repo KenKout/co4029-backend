@@ -1018,11 +1018,18 @@ async def get_session_gap_report_authoring(
         # criterion's contribution to the weighted total.
         if config_row is not None:
             from abridgeai.features.interviews.ai.stages.evaluation.rubric import (  # noqa: PLC0415
-                resolve_rubric,
+                resolve_rubric_definition,
             )
 
-            config_json = getattr(config_row, "config_json", None)
-            rubric_weights = resolve_rubric(config_json if isinstance(config_json, dict) else None)
+            # Read the SAME source the grading stage reads
+            # (``supplementary_instructions``), so the weights a teacher sees
+            # here are the weights their session was actually graded with.
+            # This previously probed a non-existent ``config_json`` attribute,
+            # which always resolved to None and therefore always displayed the
+            # default equal weights regardless of the configured rubric.
+            rubric_weights = resolve_rubric_definition(
+                config_row.supplementary_instructions
+            ).weights
 
     # Qualitative per-criterion notes (criterion-tagged bullet phrases) already
     # live in report_json; surface them so the teacher sees the "why" per criterion.

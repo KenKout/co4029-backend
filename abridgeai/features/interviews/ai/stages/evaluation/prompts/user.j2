@@ -10,8 +10,11 @@ Candidate response:
 {{ response_text }}
 """
 
-Score the response against EACH of these rubric criteria (and ONLY these):
-{% for criterion in criteria %}- {{ criterion }}
+Score the response against EACH of these rubric criteria (and ONLY these).
+Where a criterion carries a definition, that definition is the teacher's
+authoritative meaning for it — score against the definition, not against your
+own reading of the criterion's name:
+{% for criterion in criteria %}- {{ criterion.name }}{% if criterion.description %}: {{ criterion.description }}{% endif %}
 {% endfor %}
 
-Return JSON in the exact shape from the system prompt. The "criterion" field of each entry MUST match one of the keys above verbatim.
+Return JSON in the exact shape from the system prompt. The "criterion" field of each entry MUST match one of the criterion NAMES above verbatim.

@@ -26,6 +26,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
+from abridgeai.ai.models import GenerationRun
 from abridgeai.core.db.conflict_mapper import flush_or_conflict
 from abridgeai.core.exceptions import NotFoundError
 from abridgeai.core.security import utcnow
@@ -35,7 +36,10 @@ from abridgeai.features.interviews.ai.stages.evaluation.outcome_verdicts import 
     OutcomeVerdicts,
     build_outcome_verdicts,
 )
-from abridgeai.features.interviews.ai.stages.evaluation.rubric import RubricScores
+from abridgeai.features.interviews.ai.stages.evaluation.rubric import (
+    RubricScores,
+    resolve_rubric_definition,
+)
 from abridgeai.features.interviews.ai.stages.gap_report import (
     GapReportDraft,
     generate_gap_report,
@@ -56,7 +60,6 @@ from abridgeai.features.interviews.orchestrator.security import (
 from abridgeai.features.interviews.queries import authoring as authoring_queries
 from abridgeai.features.interviews.queries import sessions as sessions_queries
 from abridgeai.features.interviews.services import security as security_service
-from abridgeai.ai.models import GenerationRun
 from abridgeai.features.quizzes.api import public as quizzes_public
 
 if TYPE_CHECKING:
@@ -171,12 +174,21 @@ async def evaluate_and_generate_report(
 
         # Rubric stays as a teacher-facing diagnostic feeding the Gap Report;
         # it no longer gates pass/fail (phase-03).
+        #
+        # Resolve the teacher's scoring rubric from the config's
+        # ``supplementary_instructions``. Before this was wired up, no caller
+        # passed a rubric at all, so EVERY session was silently graded against
+        # the four-criterion equal-weight default and a teacher-authored rubric
+        # had no effect. Malformed / prose-only fields still fall back to that
+        # default, so grading cannot break on a bad config.
+        rubric = resolve_rubric_definition(getattr(config, "supplementary_instructions", None))
         rubric_scores = await evaluate_session(
             db,
             session=session,
             outcomes=outcomes,
             questions=questions,
             answers=candidate_answers,
+            rubric=rubric,
             question_prompts=question_prompts,
             expected_question_ids=expected_question_ids,
             pipeline_run_id=eval_run_id,

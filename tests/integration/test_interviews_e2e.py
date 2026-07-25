@@ -699,6 +699,7 @@ def llm_mocks(scenario: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> dict
         question_prompts: Any = None,
         expected_question_ids: Any = None,
         config: Any = None,
+        rubric: Any = None,
         pipeline_run_id: UUID | None = None,
         gateway: Any = None,
     ) -> RubricScores:
@@ -1000,7 +1001,6 @@ async def test_full_interview_lifecycle_generate_take_submit_evaluate(
     # resolves the current question from session_id, so the placeholder
     # session_question_id below satisfies the schema.
     await _complete_onboarding(engine, session_id)
-
 
     # 10. Student answers all three questions.
     for i in range(3):

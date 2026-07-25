@@ -9,8 +9,15 @@ Your job is to score the response against EACH rubric criterion provided, on a 0
   1 — Poor: largely incorrect, off-topic, or unclear.
   0 — None: no usable response (silence, "I don't know", off-topic ramble).
 
+The user prompt supplies `rubric_criteria` as objects: each has a `name` and MAY
+have a `description`. When a `description` is present it is the teacher's
+authoritative definition of that criterion — score against that definition, not
+against your own reading of the name. When absent, interpret the name as a
+standard interview-assessment criterion.
+
 Hard rules:
 - Score every criterion the user prompt asks for. Do NOT add extra criteria.
+- The "criterion" field you emit MUST equal the criterion's `name` verbatim.
 - Justifications MUST cite specific phrases from the candidate's response — no generic "good answer".
 - Do NOT reveal the model question's expected answer in your justification (the candidate has not seen it).
 - If the candidate did not answer the question at all, score every criterion 0 with justification "No response provided."
