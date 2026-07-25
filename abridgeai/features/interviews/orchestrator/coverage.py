@@ -64,14 +64,30 @@ EVIDENCE_CONFIDENCE_MIN = 0.5
 # An answer is "strong" only when the analyzer is at least this confident.
 STRONG_CONFIDENCE_MIN = 0.65
 
+# Emergent (non-target) evidence bar. Evidence attributed to an outcome that was
+# NOT the current question's target is opportunistic: nobody asked about it, so a
+# hedged read is far likelier to be the analyzer over-reaching than a real
+# demonstration. Such evidence must clear this HIGHER bar to contribute coverage
+# points; below it the item is still recorded (traceability) but is worth 0.
+# Only consulted when the caller marks an item secondary (see
+# :func:`evidence_points`); target evidence keeps using
+# ``EVIDENCE_CONFIDENCE_MIN``.
+EMERGENT_EVIDENCE_CONFIDENCE_MIN = 0.75
 
-def evidence_points(evidence: OutcomeEvidence) -> int:
+
+def evidence_points(evidence: OutcomeEvidence, *, secondary: bool = False) -> int:
     """Coverage points a single evidence item is worth.
 
     Low-confidence evidence contributes 0 regardless of type, so a hedged or
     uncertain read never establishes provisional coverage on its own.
+
+    ``secondary=True`` marks *emergent* evidence — attributed to an outcome the
+    current question did not target. It must clear the stricter
+    ``EMERGENT_EVIDENCE_CONFIDENCE_MIN`` instead, so an unprompted attribution
+    needs to be a confident read before it counts toward coverage.
     """
-    if evidence.confidence < EVIDENCE_CONFIDENCE_MIN:
+    floor = EMERGENT_EVIDENCE_CONFIDENCE_MIN if secondary else EVIDENCE_CONFIDENCE_MIN
+    if evidence.confidence < floor:
         return 0
     return _COVERAGE_POINTS.get(evidence.evidence_type, 0)
 
@@ -102,6 +118,7 @@ def apply_evidence_to_coverage(
     evidence: OutcomeEvidence,
     *,
     now: str | None = None,
+    secondary: bool = False,
 ) -> None:
     """Fold one evidence item into an outcome's running coverage (in place).
 
@@ -110,9 +127,14 @@ def apply_evidence_to_coverage(
     ``status``, and appends the originating turn id. This is the single place
     the 2/1/0 weighting is applied so the REST, adaptive, and controlled-end
     paths can never drift apart. No DB, no save — the caller owns persistence.
+
+    ``secondary=True`` routes the item through the stricter emergent-evidence
+    confidence bar (see :func:`evidence_points`). The item is always counted in
+    ``evidence_count`` and its turn recorded, even when it earns 0 points, so a
+    rejected attribution stays auditable.
     """
     coverage.evidence_count += 1
-    coverage.coverage_points += evidence_points(evidence)
+    coverage.coverage_points += evidence_points(evidence, secondary=secondary)
     coverage.status = _coverage_status_for(coverage.coverage_points, had_evidence=True)
     if now is not None:
         coverage.last_updated_at = now
@@ -187,6 +209,7 @@ def is_confidently_wrong(analysis: AnswerAnalysis | None) -> bool:
 
 __all__ = [
     "COVERAGE_SUFFICIENT_POINTS",
+    "EMERGENT_EVIDENCE_CONFIDENCE_MIN",
     "EVIDENCE_CONFIDENCE_MIN",
     "STRONG_CONFIDENCE_MIN",
     "apply_evidence_to_coverage",

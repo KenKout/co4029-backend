@@ -156,13 +156,98 @@ def prior_claims_for(data: Any, outcome_id: str | None, *, enabled: bool) -> lis
     return list(cov.claims) if cov is not None else []
 
 
+async def other_outcomes_for_analysis(
+    db: AsyncSession,
+    config_id: UUID,
+    *,
+    target_outcome_id: str | None,
+    enabled: bool,
+) -> list[dict[str, str]]:
+    """The config's OTHER outcomes, for emergent-evidence analysis.
+
+    A candidate answering about one outcome frequently demonstrates another in
+    passing; showing the analyzer the rest of the config's outcomes lets that
+    evidence be credited instead of discarded. The target outcome is excluded
+    (it is already passed separately as the linked outcome).
+
+    Returns ``[]`` when the feature is disabled — i.e. v1 behaviour, where the
+    analyzer can only ever attribute evidence to the linked outcome.
+    """
+    if not enabled:
+        return []
+    outcomes = await list_outcomes(db, config_id)
+    return [
+        {"id": str(o.id), "text": o.outcome_text}
+        for o in outcomes
+        if target_outcome_id is None or str(o.id) != target_outcome_id
+    ]
+
+
+async def analyze_turn_answer(
+    db: AsyncSession,
+    *,
+    data: Any,  # noqa: ANN401 -- runtime state blob
+    session: Any,  # noqa: ANN401 -- InterviewSession ORM row
+    current_question: Any,  # noqa: ANN401 -- InterviewQuestion | None
+    question_text: str,
+    answer_text: str,
+    turn_id: str,
+    outcome_id: str | None,
+    cross_turn_enabled: bool,
+    emergent_evidence_enabled: bool,
+) -> Any:  # noqa: ANN401 -- AnswerAnalysis (import would be circular)
+    """Run the answer-analysis step for one academic turn.
+
+    Gathers the three pieces of context the analyzer needs — the linked
+    outcome's text, the candidate's prior claims about it (cross-turn
+    contradiction detection), and the config's other outcomes (emergent
+    evidence) — then delegates to ``analyze_answer``.
+
+    Extracted from ``adaptive.py`` to keep that module under its LOC budget;
+    behaviour is identical to the inline version.
+    """
+    from abridgeai.features.interviews.models import InterviewOutcome  # noqa: PLC0415
+    from abridgeai.features.interviews.orchestrator.analysis_logic import (  # noqa: PLC0415
+        analyze_answer,
+    )
+
+    outcome_text = None
+    if outcome_id is not None and current_question is not None:
+        oc = await db.get(InterviewOutcome, current_question.linked_outcome_id)
+        outcome_text = oc.outcome_text if oc is not None else None
+
+    prior_claims = prior_claims_for(data, outcome_id, enabled=cross_turn_enabled)
+    other_outcomes = await other_outcomes_for_analysis(
+        db,
+        session.interview_config_id,
+        target_outcome_id=outcome_id,
+        enabled=emergent_evidence_enabled,
+    )
+    return await analyze_answer(
+        db,
+        question_text=question_text,
+        student_answer=answer_text,
+        turn_id=turn_id,
+        outcome_id=outcome_id,
+        outcome_text=outcome_text,
+        # The author-wide blob may contain full rubric weights or unrelated
+        # hidden criteria. Runtime analysis gets only this question and its
+        # linked outcome.
+        supplementary_instructions=None,
+        prior_claims=prior_claims,
+        other_outcomes=other_outcomes,
+    )
+
+
 __all__ = [
+    "analyze_turn_answer",
     "confirmation_override",
     "list_outcomes",
     "list_questions",
     "load_candidates",
     "next_sequence",
     "no_gateway",
+    "other_outcomes_for_analysis",
     "persisted_question_ids",
     "prior_claims_for",
     "time_fraction_remaining",

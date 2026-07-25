@@ -91,6 +91,13 @@ class OutcomeEvidence:
     transcript_excerpt: str | None = None
     provisional_score: float | None = None
     confidence: float = 0.0
+    # Emergent evidence (SparkMe-inspired): True when this item was attributed
+    # to an outcome the current question did NOT target — the candidate
+    # demonstrated it in passing. Such items clear a HIGHER confidence bar
+    # before they contribute coverage points (see
+    # ``coverage.EMERGENT_EVIDENCE_CONFIDENCE_MIN``). Always False in v1 /
+    # when the emergent-evidence flag is off.
+    secondary: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
@@ -108,6 +115,7 @@ class OutcomeEvidence:
             transcript_excerpt=_opt_str(data.get("transcript_excerpt"), limit=1000),
             provisional_score=_opt_float(data.get("provisional_score")),
             confidence=_confidence(data.get("confidence")),
+            secondary=bool(data.get("secondary", False)),
         )
 
 

@@ -41,7 +41,6 @@ from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from abridgeai.features.interviews.models import (
-    InterviewOutcome,
     InterviewQuestion,
     InterviewSessionMessage,
     InterviewSessionQuestion,
@@ -50,7 +49,6 @@ from abridgeai.features.interviews.orchestrator import repository as state_repo
 from abridgeai.features.interviews.orchestrator import turn_perception, turn_state
 from abridgeai.features.interviews.orchestrator.affect import Affect, detect_affect
 from abridgeai.features.interviews.orchestrator.analysis import AnswerAnalysis
-from abridgeai.features.interviews.orchestrator.analysis_logic import analyze_answer
 from abridgeai.features.interviews.orchestrator.coverage import is_provisionally_sufficient
 from abridgeai.features.interviews.orchestrator.decision import (
     DEFAULT_MAX_TOTAL_FOLLOWUPS,
@@ -204,6 +202,7 @@ async def run_adaptive_turn(
     comms_polish_enabled: bool = False,
     frustration_deescalation_enabled: bool = False,
     question_deferral_enabled: bool = False,
+    emergent_evidence_enabled: bool = False,
 ) -> AdaptiveOutcome:
     """Run one adaptive turn. MUST be called inside a caller-owned savepoint.
 
@@ -254,27 +253,17 @@ async def run_adaptive_turn(
     analysis: AnswerAnalysis | None = None
     turn_id_placeholder = str(current_session_question.id)
     if intent.intent in (StudentIntent.ANSWER, StudentIntent.PARTIAL_ANSWER):
-        outcome_text = None
-        if outcome_id is not None:
-            oc = await db.get(InterviewOutcome, current_question.linked_outcome_id)  # type: ignore[union-attr]
-            outcome_text = oc.outcome_text if oc is not None else None
-        # Cross-turn memory (Slice 9, v2): the candidate's own prior claims about
-        # THIS outcome, so the analyzer can flag a cross-turn contradiction.
-        prior_claims = turn_perception.prior_claims_for(
-            data, outcome_id, enabled=cross_turn_enabled
-        )
-        analysis = await analyze_answer(
+        analysis = await turn_perception.analyze_turn_answer(
             db,
+            data=data,
+            session=session,
+            current_question=current_question,
             question_text=question_text,
-            student_answer=answer_text,
+            answer_text=answer_text,
             turn_id=turn_id_placeholder,
             outcome_id=outcome_id,
-            outcome_text=outcome_text,
-            # The author-wide blob may contain full rubric weights or unrelated
-            # hidden criteria. Runtime analysis gets only this question and its
-            # linked outcome.
-            supplementary_instructions=None,
-            prior_claims=prior_claims,
+            cross_turn_enabled=cross_turn_enabled,
+            emergent_evidence_enabled=emergent_evidence_enabled,
         )
 
     # 2b. Difficulty streaks (Slice 3). Fold THIS answer's quality into the

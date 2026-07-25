@@ -302,6 +302,16 @@ class Settings(BaseSettings):
     adaptive_v2_comms_polish_enabled: bool = False
     adaptive_v2_frustration_deescalation_enabled: bool = False
     adaptive_v2_question_deferral_enabled: bool = False
+    # Emergent outcome evidence (SparkMe-inspired). When enabled, answer
+    # analysis is shown EVERY outcome of the config (not just the one linked to
+    # the current question) and may attribute evidence to a non-target outcome:
+    # a candidate answering about LO1 often demonstrates LO3 in passing, and
+    # that evidence was previously discarded. Secondary (non-target) evidence is
+    # held to a HIGHER confidence bar than target evidence — see
+    # ``EMERGENT_EVIDENCE_CONFIDENCE_MIN`` in ``orchestrator.coverage`` — so a
+    # hedged read can never establish coverage on an outcome nobody asked about.
+    # Off → v1 behaviour: only the linked outcome is visible and attributable.
+    adaptive_v2_emergent_evidence_enabled: bool = False
 
     # Prompt-injection guard is operations-only. ``shadow`` is the safe rollout
     # default: assess and report without changing the learner experience.
@@ -346,6 +356,7 @@ class Settings(BaseSettings):
         "comms_polish": "adaptive_v2_comms_polish_enabled",
         "frustration_deescalation": "adaptive_v2_frustration_deescalation_enabled",
         "question_deferral": "adaptive_v2_question_deferral_enabled",
+        "emergent_evidence": "adaptive_v2_emergent_evidence_enabled",
     }
 
     def adaptive_v2_feature_enabled(self, input_mode: str, feature: str) -> bool:
