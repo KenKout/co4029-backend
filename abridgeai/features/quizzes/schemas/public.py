@@ -51,7 +51,7 @@ import random
 import uuid
 from datetime import datetime
 from decimal import Decimal
-from typing import Any, Literal
+from typing import Any, Literal, get_args
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, model_validator
@@ -67,6 +67,20 @@ QuestionTypeLiteral = Literal[
     "matching",
     "ordering",
 ]
+
+
+def _field_allows_none(field: Any) -> bool:  # noqa: ANN401  -- pydantic FieldInfo
+    """True when a model field's annotation permits ``None``.
+
+    Used by the no-leak merge below to tell ``hint_text: str | None`` (where a
+    source None is meaningful) apart from ``prompt_format: str = "plain"`` (where
+    a source None is just an unmaterialized server_default and must fall back to
+    the schema default).
+    """
+    annotation = field.annotation
+    if annotation is None or annotation is type(None):
+        return True
+    return type(None) in get_args(annotation)
 
 
 class _ORMModel(BaseModel):
@@ -239,8 +253,18 @@ class QuizQuestionPublic(_ORMModel):
             # blind ``getattr(..., None)`` would inject None into a required
             # list field and fail validation for any question loaded without it.
             value = getattr(data, name, _MISSING)
-            if value is not _MISSING:
-                merged[name] = value
+            if value is _MISSING:
+                continue
+            # Don't let a None from the source override a non-nullable field that
+            # has a schema default. Columns backed by a server_default (e.g.
+            # ``prompt_format``, ``single_answer``) read as None on a row that
+            # hasn't been flushed/refreshed yet; copying that None would fail
+            # validation even though the schema default is perfectly valid.
+            if value is None:
+                field = cls.model_fields[name]
+                if not field.is_required() and not _field_allows_none(field):
+                    continue
+            merged[name] = value
         return merged
 
 
