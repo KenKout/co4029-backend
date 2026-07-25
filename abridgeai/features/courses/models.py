@@ -140,6 +140,16 @@ class Course(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftDeleteMixi
     expected_completion_days: Mapped[int | None] = mapped_column(Integer)
     enrollment_cap: Mapped[int | None] = mapped_column(Integer)
 
+    # Teacher contact info shown on the student-facing course landing page.
+    # All nullable — a course shows no contact block until the teacher fills
+    # one in. contact_email is pre-filled client-side from the teacher's
+    # account email but stored as a plain editable column (a teacher may want
+    # a different public address than their login). See migration 0061.
+    contact_email: Mapped[str | None] = mapped_column(String(320))
+    contact_phone: Mapped[str | None] = mapped_column(String(50))
+    contact_website_url: Mapped[str | None] = mapped_column(String(500))
+    contact_social_url: Mapped[str | None] = mapped_column(String(500))
+
     modules: Mapped[list[Module]] = relationship(
         back_populates="course",
         cascade="save-update, merge, refresh-expire, expunge",

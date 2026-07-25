@@ -67,6 +67,11 @@ class CourseCreate(_StrictRequest):
     estimated_minutes: int | None = None
     expected_completion_days: int | None = None
     enrollment_cap: int | None = None
+    # Teacher contact info surfaced on the student landing page (all optional).
+    contact_email: str | None = Field(default=None, max_length=320)
+    contact_phone: str | None = Field(default=None, max_length=50)
+    contact_website_url: str | None = Field(default=None, max_length=500)
+    contact_social_url: str | None = Field(default=None, max_length=500)
 
 
 class CourseUpdate(_StrictRequest):
@@ -82,6 +87,26 @@ class CourseUpdate(_StrictRequest):
     estimated_minutes: int | None = None
     expected_completion_days: int | None = None
     enrollment_cap: int | None = None
+    # Teacher contact info surfaced on the student landing page. Empty string
+    # is normalised to None so clearing a field in the form actually blanks the
+    # column rather than storing "".
+    contact_email: str | None = Field(default=None, max_length=320)
+    contact_phone: str | None = Field(default=None, max_length=50)
+    contact_website_url: str | None = Field(default=None, max_length=500)
+    contact_social_url: str | None = Field(default=None, max_length=500)
+
+    @field_validator(
+        "contact_email",
+        "contact_phone",
+        "contact_website_url",
+        "contact_social_url",
+    )
+    @classmethod
+    def _blank_to_none(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        trimmed = value.strip()
+        return trimmed or None
 
 
 class ModuleCreate(_StrictRequest):

@@ -122,6 +122,12 @@ class CoursePublic(_ORMModel):
     # is set (the SPA falls back to the gradient banner). Not persisted — a
     # projection.
     thumbnail_url: str | None = None
+    # Teacher contact info shown on the landing page. All optional — the SPA
+    # renders a contact block only for the fields that are set.
+    contact_email: str | None = None
+    contact_phone: str | None = None
+    contact_website_url: str | None = None
+    contact_social_url: str | None = None
     tags: list[TagPublic] = []
     outcomes: list[CourseLearningOutcomePublic] = []
 
