@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING
 
 from abridgeai.ai.llm import LLMGateway, LLMRole
 from abridgeai.ai.prompts import render_prompt
+from abridgeai.features.interviews.orchestrator.persona import profile_from
 from abridgeai.features.interviews.orchestrator.utterance import (
     Persona,
     Utterance,
@@ -83,9 +84,19 @@ async def generate_utterance(
 
     try:
         system_prompt = render_prompt("prompts/utterance_system.j2", language=(language or "en"))
+        # Resolve the persona label to its trait profile and hand the phrasing
+        # model explicit tone numbers (warmth / directness / verbosity /
+        # formality / ack_frequency + opening_style) instead of a bare word it
+        # has to interpret. TONE ONLY — as_prompt_traits() carries no
+        # decision-bearing data (see persona.py), and the system prompt still
+        # forbids the model from changing difficulty, fairness, or the verbatim
+        # question. A fourth/custom persona flows through here with no code
+        # change: it is just a different set of trait numbers.
+        profile = profile_from(persona.value).clamped()
         user_prompt = json.dumps(
             {
                 "persona": persona.value,
+                "persona_traits": profile.as_prompt_traits(),
                 "language": language or "en",
                 "action": decision.action.value,
                 "approved_parts": {

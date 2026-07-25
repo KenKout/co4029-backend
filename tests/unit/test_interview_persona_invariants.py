@@ -154,3 +154,116 @@ def test_decision_is_identical_regardless_of_persona(inputs: DecisionInputs) -> 
     assert first.reason_code == again.reason_code
     assert first.should_advance_question == again.should_advance_question
     assert first.should_end_session == again.should_end_session
+
+
+# ── Selection boundary: persona is not an input to question selection ─────────
+
+
+def test_persona_is_not_a_selection_context_field() -> None:
+    """If persona ever becomes a SelectionContext field, this fails on purpose.
+
+    Question selection must be persona-blind by construction: which question a
+    candidate is asked cannot depend on the interviewer's tone. This mirrors the
+    DecisionInputs guard above for the adaptive selector.
+    """
+    from abridgeai.features.interviews.orchestrator.selection import SelectionContext
+
+    field_names = {f.name for f in dataclasses.fields(SelectionContext)}
+    for banned in ("persona", "warmth", "directness", "verbosity", "tone", "profile"):
+        assert banned not in field_names
+
+
+# ── Language boundary: the question/probe survives verbatim in every persona ──
+
+# The utterance layer may rephrase acknowledgement/transition per persona, but
+# the authoritative question text must appear UNCHANGED in what the candidate
+# sees — otherwise persona would be silently altering the assessed question.
+_VERBATIM_QUESTION = "Explain how a hash join differs from a nested loop join."
+
+
+@pytest.mark.parametrize("key", _PERSONA_KEYS)
+@pytest.mark.parametrize("lang", ["en", "vi"])
+def test_question_survives_verbatim_across_personas(key: str, lang: str) -> None:
+    from abridgeai.features.interviews.orchestrator.decision import (
+        InterviewerActionType,
+        InterviewerDecision,
+        ReasonCode,
+    )
+    from abridgeai.features.interviews.orchestrator.utterance import (
+        Persona,
+        build_fallback_utterance,
+    )
+
+    decision = InterviewerDecision(
+        action=InterviewerActionType.ASK_MAIN_QUESTION,
+        reason_code=ReasonCode.OUTCOME_NOT_COVERED,
+    )
+    utt = build_fallback_utterance(
+        decision,
+        persona=Persona(key),
+        language=lang,
+        question_text=_VERBATIM_QUESTION,
+    )
+    # The exact question text is present, unchanged, in both the dedicated field
+    # and the combined turn text — for every persona and language.
+    assert utt.question_or_probe == _VERBATIM_QUESTION
+    assert _VERBATIM_QUESTION in utt.ai_turn_text
+
+
+# ── Answer-leak boundary: no persona ever emits fabricated answer content ─────
+
+
+@pytest.mark.parametrize("key", _PERSONA_KEYS)
+@pytest.mark.parametrize("lang", ["en", "vi"])
+def test_no_persona_emits_content_beyond_the_given_question(key: str, lang: str) -> None:
+    """A probe with no supplied question text must fall back to a generic,
+    answer-safe prompt — never invent domain content. Across every persona the
+    deterministic probe stays a content-free "say more" style ask, so tone can
+    never smuggle in an expected answer.
+    """
+    from abridgeai.features.interviews.orchestrator.decision import (
+        InterviewerActionType,
+        InterviewerDecision,
+        ReasonCode,
+    )
+    from abridgeai.features.interviews.orchestrator.utterance import (
+        Persona,
+        build_fallback_utterance,
+    )
+
+    # A secret string that would only appear if the renderer fabricated content.
+    secret = "the answer is a bitmap index on the join key"
+    decision = InterviewerDecision(
+        action=InterviewerActionType.PROBE_DEEPER,
+        reason_code=ReasonCode.ANSWER_TOO_VAGUE,
+    )
+    utt = build_fallback_utterance(
+        decision,
+        persona=Persona(key),
+        language=lang,
+        question_text="",  # no question supplied → generic answer-safe probe
+    )
+    assert secret not in utt.ai_turn_text.lower()
+    # The generic probe is non-empty (the candidate still gets a prompt) but
+    # carries no supplied question text to leak.
+    assert utt.ai_turn_text.strip() != ""
+
+
+# ── The re-key preserved behaviour: warmth bands map personas correctly ───────
+
+
+def test_warmth_band_maps_presets_to_expected_bands() -> None:
+    """The table re-key is keyed on warmth band; assert each preset lands in the
+    band whose strings reproduce its old wording (strict=low, neutral=mid,
+    supportive=high). Locks the mapping the golden file depends on.
+    """
+    from abridgeai.features.interviews.orchestrator.utterance import (
+        WARMTH_HIGH,
+        WARMTH_LOW,
+        WARMTH_MID,
+        warmth_band,
+    )
+
+    assert warmth_band(PRESETS["strict"].warmth) == WARMTH_LOW
+    assert warmth_band(PRESETS["neutral"].warmth) == WARMTH_MID
+    assert warmth_band(PRESETS["supportive"].warmth) == WARMTH_HIGH

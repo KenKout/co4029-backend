@@ -1,0 +1,18 @@
+{
+  "hint|en|0": "Here's a small hint to guide you. A small hint: organize your answer around the main concepts in the question and how they relate.",
+  "hint|en|1": "Here's a small hint to guide you. A bigger hint: break the question into its parts and address each one in turn — start with the definition, then the 'why', then an example.",
+  "hint|en|2": "Here's a small hint to guide you. Let's approach it together: pick the single most central idea, state it plainly, then explain one consequence of it. You don't need the whole answer at once.",
+  "hint|en|3": "Here's a small hint to guide you. Let's approach it together: pick the single most central idea, state it plainly, then explain one consequence of it. You don't need the whole answer at once.",
+  "hint|vi|0": "Đây là một gợi ý nhỏ để bạn định hướng. Gợi ý nhỏ: hãy sắp xếp câu trả lời theo các khái niệm chính trong câu hỏi và mối quan hệ giữa chúng.",
+  "hint|vi|1": "Đây là một gợi ý nhỏ để bạn định hướng. Gợi ý rõ hơn: hãy chia câu hỏi thành các phần và trả lời lần lượt — bắt đầu từ định nghĩa, rồi đến 'tại sao', rồi một ví dụ.",
+  "hint|vi|2": "Đây là một gợi ý nhỏ để bạn định hướng. Chúng ta cùng tiếp cận nhé: chọn ý trọng tâm nhất, nêu rõ ràng, rồi giải thích một hệ quả của nó. Bạn không cần trả lời hết ngay.",
+  "hint|vi|3": "Đây là một gợi ý nhỏ để bạn định hướng. Chúng ta cùng tiếp cận nhé: chọn ý trọng tâm nhất, nêu rõ ràng, rồi giải thích một hệ quả của nó. Bạn không cần trả lời hết ngay.",
+  "reframe|en|0": "Of course. Let me rephrase the question. Let me put the question another way.",
+  "reframe|en|1": "Let me put it a different way. Let me put the question another way.",
+  "reframe|en|2": "Here's another way to think about what I'm asking. Let me put the question another way.",
+  "reframe|en|3": "Here's another way to think about what I'm asking. Let me put the question another way.",
+  "reframe|vi|0": "Tất nhiên. Để tôi diễn đạt lại câu hỏi. Để tôi diễn đạt câu hỏi theo cách khác.",
+  "reframe|vi|1": "Để tôi nói theo một cách khác. Để tôi diễn đạt câu hỏi theo cách khác.",
+  "reframe|vi|2": "Đây là một cách khác để hiểu câu hỏi của tôi. Để tôi diễn đạt câu hỏi theo cách khác.",
+  "reframe|vi|3": "Đây là một cách khác để hiểu câu hỏi của tôi. Để tôi diễn đạt câu hỏi theo cách khác."
+}
