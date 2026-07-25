@@ -343,7 +343,9 @@ def test_jinja_prompts_in_j2_only() -> None:
         here.parent / "abridgeai" / "features" / "interviews" / "ai" / "stages" / "evaluation"
     )
     assert (stage_dir / "prompts" / "system.j2").is_file()
-    assert (stage_dir / "prompts" / "user.j2").is_file()
+    # No user.j2: this stage builds its user prompt with json.dumps(...) in
+    # logic.py, so only the system prompt is a template. The rule this test
+    # actually guards is "prompt PROSE lives in .j2, never in Python".
 
     for py_file in stage_dir.glob("*.py"):
         text = py_file.read_text()
