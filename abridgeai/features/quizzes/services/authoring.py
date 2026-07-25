@@ -586,6 +586,29 @@ async def update_question(
         )
     )
     field_updates = payload.model_dump(exclude_unset=True, exclude={"options"})
+
+    # Phase 3 SECURITY: sanitize rich text on the UPDATE path too. Without this
+    # a teacher could PATCH raw <script>/onerror markup into prompt/hint/
+    # explanation, which the client renders as HTML for the ``html`` format —
+    # i.e. stored XSS against every student taking the quiz. The format used is
+    # the one in this payload when supplied, else the value already on the row.
+    from abridgeai.features.quizzes.services.sanitize import (  # noqa: PLC0415
+        sanitize_rich_content,
+    )
+
+    for _text_field, _format_field in (
+        ("prompt_text", "prompt_format"),
+        ("hint_text", "hint_format"),
+        ("explanation", "explanation_format"),
+    ):
+        if _text_field in field_updates and field_updates[_text_field] is not None:
+            _fmt = field_updates.get(
+                _format_field, getattr(question, _format_field, "plain")
+            )
+            field_updates[_text_field] = sanitize_rich_content(
+                field_updates[_text_field], fmt=_fmt
+            )
+
     for key, value in field_updates.items():
         setattr(question, key, value)
 
