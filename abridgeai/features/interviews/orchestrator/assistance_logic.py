@@ -100,6 +100,95 @@ def _fallback(
     return _fallback_clarification(question_text, language)
 
 
+# Verbs that make a question ASK FOR a definition/comparison of its subject.
+# When the requested term IS that subject, explaining it hands over the answer
+# (the "define X" → "explain X" leak). EN + VI.
+_DEFINITION_LEAD = (
+    r"compare(?:\s+and\s+contrast)?|contrast|define|describe|explain|discuss|"
+    r"what\s+(?:is|are)|state|list|outline|"
+    r"so\s+sánh|định\s+nghĩa|giải\s+thích|mô\s+tả|trình\s+bày|liệt\s+kê|nêu"
+)
+# Splits the subject blob off the trailing context ("... in a dimensional model",
+# "... trong mô hình ..."). Only the part BEFORE this is the graded subject.
+_SUBJECT_CONTEXT_SPLIT = re.compile(
+    r"\s+(?:in|within|for|under|trong|theo|trong\s+ngữ\s+cảnh)\s+",
+    flags=re.IGNORECASE,
+)
+# Splits a multi-part subject ("fact tables and factless fact tables").
+_SUBJECT_CONJ_SPLIT = re.compile(
+    r"\s+(?:and|versus|vs\.?|with|or|và|hoặc|với)\s+|\s*,\s*",
+    flags=re.IGNORECASE,
+)
+
+
+def _normalize(text: str) -> str:
+    return " ".join((text or "").casefold().split()).strip(" \t\r\n.,?!:;\"'“”‘’")
+
+
+def question_subjects(question_text: str) -> list[str]:
+    """The concept(s) a definition/comparison question asks the candidate to produce.
+
+    For "Compare and contrast fact tables and factless fact tables in a
+    dimensional model." this is ``["fact tables", "factless fact tables"]`` —
+    NOT "dimensional model", which is trailing context. Returns [] when the
+    question is not a define/compare/explain-style prompt, so a plain question
+    never triggers the guard.
+    """
+    normalized = _normalize(question_text)
+    if not normalized:
+        return []
+    match = re.match(rf"(?:{_DEFINITION_LEAD})\s+(.+)", normalized, flags=re.IGNORECASE)
+    if not match:
+        return []
+    subject_blob = _SUBJECT_CONTEXT_SPLIT.split(match.group(1), maxsplit=1)[0]
+    subjects: list[str] = []
+    for part in _SUBJECT_CONJ_SPLIT.split(subject_blob):
+        # Drop leading articles so "the fact table" ≈ "fact table".
+        cleaned = re.sub(r"^(?:the|a|an)\s+", "", _normalize(part))
+        if len(cleaned) > 1:
+            subjects.append(cleaned)
+    return subjects
+
+
+def term_is_question_subject(term: str, question_text: str) -> bool:
+    """True when explaining ``term`` would define the question's own subject.
+
+    Conservative by design (the leak it prevents — handing the candidate the
+    answer — is worse than occasionally redirecting a genuine vocabulary
+    question): a term that equals, contains, or is contained by any subject
+    phrase counts as the subject. Context terms that are not the subject
+    (e.g. "dimensional model" above) do not match and are still explained.
+    """
+    normalized_term = re.sub(r"^(?:the|a|an)\s+", "", _normalize(term))
+    if len(normalized_term) <= 1:
+        return False
+    for subject in question_subjects(question_text):
+        if normalized_term == subject or normalized_term in subject or subject in normalized_term:
+            return True
+    return False
+
+
+def _subject_redirect(language: str | None) -> str:
+    """Answer-safe reply when the requested term IS the question's subject.
+
+    Refuses to define it (that would be the answer) and points at structure
+    instead — the same scaffolding a hint gives, so the candidate is still
+    helped without being handed the concept.
+    """
+    if _is_vi(language):
+        return (
+            "Thuật ngữ đó chính là điều câu hỏi đang yêu cầu bạn định nghĩa, nên mình "
+            "không giải thích thay được. Bạn thử sắp xếp câu trả lời quanh: nó là gì, "
+            "dùng để làm gì, và nó liên hệ thế nào với khái niệm còn lại trong câu hỏi."
+        )
+    return (
+        "That term is exactly what the question asks you to define, so I can't "
+        "explain it for you — but you could organize your answer around what it "
+        "is, what it's used for, and how it relates to the other concept in the "
+        "question."
+    )
+
+
 def extract_question_term(request_text: str, question_text: str) -> str | None:
     """Return a bounded requested phrase only when it occurs in the question."""
     request = (request_text or "").strip()
@@ -227,6 +316,13 @@ async def generate_question_assistance(
             question_text=question_text,
             valid_term=False,
         )
+    # Semantic-leak guard: when the requested term IS the concept the question
+    # asks the candidate to define/compare, explaining it hands over the answer.
+    # Refuse-and-redirect BEFORE the LLM call (the model prompt can't see the
+    # whole question's intent, only the isolated term, so it can't catch this).
+    if action is SecurityAction.EXPLAIN_CURRENT_TERM and term is not None:
+        if term_is_question_subject(term, question_text):
+            return _subject_redirect(language)
 
     try:
         system_prompt = render_prompt(
@@ -267,4 +363,6 @@ __all__ = [
     "extract_question_term",
     "generate_question_assistance",
     "is_term_selection_reply",
+    "question_subjects",
+    "term_is_question_subject",
 ]
