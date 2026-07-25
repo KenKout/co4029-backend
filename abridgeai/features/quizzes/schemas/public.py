@@ -118,6 +118,10 @@ class QuizQuestionPublic(_ORMModel):
     # Phase 3: render discriminators (plain | markdown | html).
     prompt_format: str = "plain"
     hint_format: str = "plain"
+    # Phase 7: multi-select discriminator. True (default) = single-answer MCQ
+    # (radio); False = multi-select (checkboxes). Safe to expose — it reveals
+    # the input shape, not which options are correct.
+    single_answer: bool = True
     options: list[QuizQuestionOptionPublic] = []
 
     # Course learning outcome this question assesses (§LO-3). The FK is
