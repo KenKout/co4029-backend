@@ -21,6 +21,7 @@ from abridgeai.features.quizzes.models import (
     QuizQuestionOption,
     QuizQuestionRevision,
 )
+from abridgeai.features.quizzes.services.sanitize import sanitize_rich_content
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -37,6 +38,56 @@ class _RunLike(Protocol):
 
     requested_by: UUID | None
     config_json: dict[str, Any] | None
+
+
+_VALID_FORMATS = frozenset({"plain", "markdown", "html"})
+
+
+def _fmt(raw: object) -> str:
+    """Coerce a rich-format discriminator, failing safe to ``plain``.
+
+    The parser already normalises these, but the persistence stage also runs on
+    regeneration payloads assembled elsewhere, so re-validate at the write
+    boundary rather than trusting the caller.
+    """
+    if isinstance(raw, str) and raw.strip().lower() in _VALID_FORMATS:
+        return raw.strip().lower()
+    return "plain"
+
+
+def _apply_answer_fields(question: QuizQuestion, payload: dict[str, Any]) -> None:
+    """Copy Phase 7 type-specific answer fields from a generated payload.
+
+    Only fields present in ``payload`` are written, so a payload assembled by
+    an older caller (or for a type that doesn't use them) leaves the column
+    defaults intact. ``match_pairs``/``ordering_sequence`` land in JSONB
+    columns, so they must be plain JSON — the parser already produces plain
+    dicts/lists, and anything else is skipped rather than risking a
+    serialization failure at flush time.
+    """
+    single_answer = payload.get("single_answer")
+    if isinstance(single_answer, bool):
+        question.single_answer = single_answer
+
+    numeric_answer = payload.get("numeric_answer")
+    if numeric_answer is not None:
+        question.numeric_answer = numeric_answer
+
+    numeric_tolerance = payload.get("numeric_tolerance")
+    if numeric_tolerance is not None:
+        question.numeric_tolerance = numeric_tolerance
+
+    match_pairs = payload.get("match_pairs")
+    if isinstance(match_pairs, list) and match_pairs:
+        question.match_pairs = [
+            {"left": str(pair.get("left", "")), "right": str(pair.get("right", ""))}
+            for pair in match_pairs
+            if isinstance(pair, dict)
+        ]
+
+    ordering_sequence = payload.get("ordering_sequence")
+    if isinstance(ordering_sequence, list) and ordering_sequence:
+        question.ordering_sequence = [str(item) for item in ordering_sequence]
 
 
 def _structure_source_refs(
@@ -147,13 +198,25 @@ async def persist_questions(
             if target_outcome_ids
             else None
         )
+        prompt_fmt = _fmt(payload.get("prompt_format"))
+        hint_fmt = _fmt(payload.get("hint_format"))
+        explanation_fmt = _fmt(payload.get("explanation_format"))
         question = QuizQuestion(
             quiz_id=quiz.id,
             position=start_position + offset,
             question_type=payload["question_type"],
-            prompt_text=payload["prompt_text"],
-            hint_text=payload.get("hint_text"),
-            explanation=payload.get("explanation"),
+            # Phase 3 SECURITY: AI content goes through the same nh3 cleaning as
+            # the manual authoring path. Previously written raw — harmless while
+            # everything was ``plain``, but stored XSS the moment a prompt emits
+            # markdown/html, since the client renders those as HTML.
+            prompt_text=sanitize_rich_content(payload["prompt_text"], fmt=prompt_fmt),
+            hint_text=sanitize_rich_content(payload.get("hint_text"), fmt=hint_fmt),
+            explanation=sanitize_rich_content(
+                payload.get("explanation"), fmt=explanation_fmt
+            ),
+            prompt_format=prompt_fmt,
+            hint_format=hint_fmt,
+            explanation_format=explanation_fmt,
             difficulty=payload.get("difficulty"),
             bloom_level=payload.get("bloom_level"),
             review_status="pending",
@@ -162,6 +225,10 @@ async def persist_questions(
             source_refs=structured_refs,
             original_generated_payload=payload.get("original_generated_payload"),
         )
+        # Phase 7: persist the type-specific answer key. Without this a
+        # generated numerical/matching/ordering question would save with an
+        # empty answer and be permanently ungradeable.
+        _apply_answer_fields(question, payload)
         db.add(question)
         await db.flush()
 
@@ -199,10 +266,22 @@ async def replace_question_in_place(
     if chunks is not None:
         structured_refs = _structure_source_refs(structured_refs, chunks)
 
+    prompt_fmt = _fmt(payload.get("prompt_format"))
+    hint_fmt = _fmt(payload.get("hint_format"))
+    explanation_fmt = _fmt(payload.get("explanation_format"))
+
     question.question_type = payload["question_type"]
-    question.prompt_text = payload["prompt_text"]
-    question.hint_text = payload.get("hint_text")
-    question.explanation = payload.get("explanation")
+    # Phase 3 SECURITY: same nh3 cleaning as the create path above.
+    question.prompt_text = sanitize_rich_content(payload["prompt_text"], fmt=prompt_fmt)
+    question.hint_text = sanitize_rich_content(payload.get("hint_text"), fmt=hint_fmt)
+    question.explanation = sanitize_rich_content(
+        payload.get("explanation"), fmt=explanation_fmt
+    )
+    question.prompt_format = prompt_fmt
+    question.hint_format = hint_fmt
+    question.explanation_format = explanation_fmt
+    # Phase 7: same answer-key copy as the create path.
+    _apply_answer_fields(question, payload)
     question.difficulty = payload.get("difficulty")
     question.bloom_level = payload.get("bloom_level")
     question.review_status = "pending"

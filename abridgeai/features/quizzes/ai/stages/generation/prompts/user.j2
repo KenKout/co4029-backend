@@ -93,6 +93,57 @@ the template's ``question_type``):
       "bloom_level": "remember",
       "difficulty": "medium",
       "source_refs": ["chunk uuid"]
+    },
+    {
+      "position": 5,
+      "question_type": "numerical",
+      "question": "How many phases does the ETL process have?",
+      "numeric_answer": 3,
+      "numeric_tolerance": 0,
+      "explanation": "...",
+      "hint": "...",
+      "bloom_level": "remember",
+      "difficulty": "easy",
+      "source_refs": ["chunk uuid"]
+    },
+    {
+      "position": 6,
+      "question_type": "matching",
+      "question": "Match each ETL phase to what it does.",
+      "match_pairs": [
+        {"left": "Extract", "right": "Reads data from source systems"},
+        {"left": "Transform", "right": "Reshapes data to the target schema"},
+        {"left": "Load", "right": "Writes data into the warehouse"}
+      ],
+      "explanation": "...",
+      "hint": "...",
+      "bloom_level": "understand",
+      "difficulty": "medium",
+      "source_refs": ["chunk uuid"]
+    },
+    {
+      "position": 7,
+      "question_type": "ordering",
+      "question": "Arrange the ETL phases in the order they are performed.",
+      "ordering_sequence": ["Extract", "Transform", "Load"],
+      "explanation": "...",
+      "hint": "...",
+      "bloom_level": "understand",
+      "difficulty": "easy",
+      "source_refs": ["chunk uuid"]
+    },
+    {
+      "position": 8,
+      "question_type": "multiple_choice",
+      "single_answer": false,
+      "question": "Which of the following are characteristics of a data warehouse?",
+      "options": {"A": "Subject-oriented", "B": "Row-level locking", "C": "Time-variant", "D": "Optimised for OLTP writes"},
+      "correct_answer": ["A", "C"],
+      "explanation": "...",
+      "hint": "...",
+      "bloom_level": "understand",
+      "difficulty": "medium",
+      "source_refs": ["chunk uuid"]
     }
   ]
 }

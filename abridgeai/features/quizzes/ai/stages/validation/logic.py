@@ -156,6 +156,46 @@ def _question_for_review(question: dict[str, Any]) -> dict[str, Any]:
     elif isinstance(raw_options, dict):
         options = {str(k): str(v) for k, v in raw_options.items()}
 
+    # Phase 7: numerical / matching / ordering carry their answer on dedicated
+    # fields rather than option rows or ``correct_answer``. Flatten those into
+    # readable text so the validator can judge groundedness — otherwise it sees
+    # an empty answer and rejects every question of these types.
+    qtype = question.get("question_type", "multiple_choice")
+    if not correct:
+        if qtype == "numerical":
+            answer = question.get("numeric_answer")
+            if answer is not None:
+                tolerance = question.get("numeric_tolerance")
+                correct = (
+                    str(answer)
+                    if tolerance is None
+                    else f"{answer} (tolerance {tolerance})"
+                )
+        elif qtype == "matching":
+            pairs = question.get("match_pairs")
+            if isinstance(pairs, list):
+                correct = "; ".join(
+                    f"{pair.get('left')} -> {pair.get('right')}"
+                    for pair in pairs
+                    if isinstance(pair, dict)
+                )
+        elif qtype == "ordering":
+            items = question.get("ordering_sequence")
+            if isinstance(items, list):
+                correct = "; ".join(
+                    f"{index}. {item}" for index, item in enumerate(items, start=1)
+                )
+
+    # Multi-select MCQ: report every correct letter, not just the first found.
+    if qtype == "multiple_choice" and question.get("single_answer") is False:
+        multi_keys = sorted(
+            str(opt.get("option_key"))
+            for opt in (raw_options if isinstance(raw_options, list) else [])
+            if isinstance(opt, dict) and opt.get("is_correct")
+        )
+        if multi_keys:
+            correct = ", ".join(multi_keys)
+
     return {
         "question_type": question.get("question_type", "multiple_choice"),
         "prompt_text": question.get("prompt_text", ""),
