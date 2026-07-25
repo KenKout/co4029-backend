@@ -227,13 +227,20 @@ class QuizQuestionPublic(_ORMModel):
         if isinstance(data, dict):
             return {**data, **derived}
         merged: dict[str, Any] = {}
+        _MISSING = object()
         for name in cls.model_fields:
             if name in derived:
                 merged[name] = derived[name]
-            elif name in _DERIVED_FIELDS:
+                continue
+            if name in _DERIVED_FIELDS:
                 continue  # not computed → let the field default ([]) stand
-            else:
-                merged[name] = getattr(data, name, None)
+            # Only copy attributes the source actually HAS. ``QuizQuestion`` has
+            # no ``options`` ORM relationship (callers attach it manually), so a
+            # blind ``getattr(..., None)`` would inject None into a required
+            # list field and fail validation for any question loaded without it.
+            value = getattr(data, name, _MISSING)
+            if value is not _MISSING:
+                merged[name] = value
         return merged
 
 
