@@ -44,6 +44,7 @@ class LLMRole(str, Enum):  # noqa: UP042 - StrEnum changes value coercion; prese
     INTERVIEW_INTENT = "interview_intent"
     INTERVIEW_ANALYSIS = "interview_analysis"
     INTERVIEW_SECURITY = "interview_security"
+    INTERVIEW_PERSONA_ADHERENCE = "interview_persona_adherence"
 
 
 # Default role -> tier mapping. Embedding intentionally excluded — it has its
@@ -72,6 +73,11 @@ ROLE_TO_TIER: dict[LLMRole, Literal["small", "standard", "large"]] = {
     LLMRole.INTERVIEW_INTENT: "small",
     LLMRole.INTERVIEW_ANALYSIS: "standard",
     LLMRole.INTERVIEW_SECURITY: "small",
+    # Persona-adherence judge runs OFFLINE (post-session, over a stored
+    # transcript) — no student is waiting, so it is deliberately NOT in
+    # INTERACTIVE_LLM_ROLES. Standard tier: it needs to reason over a whole
+    # transcript but is a diagnostic, not a scoring gate.
+    LLMRole.INTERVIEW_PERSONA_ADHERENCE: "standard",
 }
 
 
