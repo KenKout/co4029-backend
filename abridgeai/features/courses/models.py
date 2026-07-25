@@ -192,14 +192,27 @@ class CourseLearningOutcome(
     UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftDeleteMixin, Base
 ):
     __tablename__ = "course_learning_outcomes"
-    __table_args__ = (
-        UniqueConstraint("course_id", "position", name="uq_course_learning_outcomes_position"),
-    )
+    # Position uniqueness is enforced at the DB level by a partial expression
+    # index over COALESCE(parent_id, course_id) (see migration 0059) so it is
+    # per-parent (siblings) rather than course-wide. Not expressible as a
+    # simple __table_args__ UniqueConstraint, hence no constraint here.
 
     course_id: Mapped[uuid.UUID] = mapped_column(
         PGUUID(as_uuid=True),
         ForeignKey("courses.id", ondelete="NO ACTION"),
         nullable=False,
+    )
+    # Self-referential parent for arbitrary-depth hierarchy (L.O.1 → L.O.1.1 →
+    # L.O.1.1.1 …). NULL = top-level. ``position`` is now the sibling order
+    # WITHIN a parent (top-level rows share parent_id IS NULL), so the display
+    # code is the dotted path of positions walking root→leaf, derived at read
+    # time and never stored. ON DELETE NO ACTION: we soft-delete and re-parent
+    # in the service layer, never hard-delete.
+    parent_id: Mapped[uuid.UUID | None] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("course_learning_outcomes.id", ondelete="NO ACTION"),
+        nullable=True,
+        index=True,
     )
     position: Mapped[int] = mapped_column(Integer, nullable=False)
     outcome_text: Mapped[str] = mapped_column(Text, nullable=False)

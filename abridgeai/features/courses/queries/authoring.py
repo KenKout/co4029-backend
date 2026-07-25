@@ -431,10 +431,12 @@ async def list_course_roster_with_progress(
 # Course learning outcomes (§LO-1/2) — teacher-side CRUD reads.
 # ---------------------------------------------------------------------------
 async def list_course_outcomes(db: AsyncSession, course_id: UUID) -> list[CourseLearningOutcome]:
-    """All (non-deleted) learning outcomes for a course, ordered by position.
+    """All (non-deleted) learning outcomes for a course.
 
-    The ``(L.O.x)`` display code is derived from this 1-based ``position``
-    at render time; the list order IS the code order.
+    Ordered by ``(parent_id, position)`` so siblings are contiguous. The
+    dotted ``L.O.x.y`` display code + depth are derived from the parent
+    chain at render time (see :func:`build_outcome_code_map`); the stored
+    ``position`` is the sibling order within each parent.
     """
     stmt = (
         select(CourseLearningOutcome)
@@ -442,7 +444,7 @@ async def list_course_outcomes(db: AsyncSession, course_id: UUID) -> list[Course
             CourseLearningOutcome.course_id == course_id,
             CourseLearningOutcome.deleted_at.is_(None),
         )
-        .order_by(CourseLearningOutcome.position)
+        .order_by(CourseLearningOutcome.parent_id, CourseLearningOutcome.position)
     )
     return list((await db.execute(stmt)).scalars().all())
 
@@ -453,34 +455,108 @@ async def get_course_outcome(
     return await db.get(CourseLearningOutcome, outcome_id)
 
 
-async def next_course_outcome_position(db: AsyncSession, course_id: UUID) -> int:
-    """Return ``MAX(position) + 1`` for a course's outcomes (1 when empty)."""
+async def next_course_outcome_position(
+    db: AsyncSession, course_id: UUID, parent_id: UUID | None = None
+) -> int:
+    """Return ``MAX(position) + 1`` among a parent's children (1 when empty).
+
+    Positions are per-parent: top-level rows (``parent_id IS NULL``) share
+    one sequence scoped to the course; each parent's children share their
+    own sequence. ``IS NOT DISTINCT FROM`` handles the NULL parent case in
+    a single predicate.
+    """
     stmt = select(func.coalesce(func.max(CourseLearningOutcome.position), 0)).where(
         CourseLearningOutcome.course_id == course_id,
+        CourseLearningOutcome.parent_id.is_not_distinct_from(parent_id),
         CourseLearningOutcome.deleted_at.is_(None),
     )
     return int((await db.execute(stmt)).scalar_one()) + 1
 
 
-async def reindex_course_outcomes(db: AsyncSession, course_id: UUID) -> None:
-    """Compact outcome positions to a contiguous 1..N chain (§LO-2).
+async def reindex_course_outcome_siblings(
+    db: AsyncSession, course_id: UUID, parent_id: UUID | None
+) -> None:
+    """Compact one parent's children to a contiguous 1..N chain (§LO-2).
 
-    Called after a delete so the ``L.O.x`` codes never gap. Uses the
-    ``_OFFSET`` two-phase shift to dodge the ``uq_course_learning_outcomes_position``
-    UNIQUE collision mid-update: first bump every row far out of the way,
-    then renumber 1..N in position order.
+    Called after a delete or move so sibling positions (and therefore the
+    dotted codes) never gap. Two-phase offset shift dodges the per-parent
+    ``uq_course_learning_outcomes_sibling_position`` UNIQUE collision
+    mid-update: bump every sibling far out of the way, flush, then
+    renumber 1..N in position order.
     """
-    outcomes = await list_course_outcomes(db, course_id)
-    if not outcomes:
+    stmt = (
+        select(CourseLearningOutcome)
+        .where(
+            CourseLearningOutcome.course_id == course_id,
+            CourseLearningOutcome.parent_id.is_not_distinct_from(parent_id),
+            CourseLearningOutcome.deleted_at.is_(None),
+        )
+        .order_by(CourseLearningOutcome.position)
+    )
+    siblings = list((await db.execute(stmt)).scalars().all())
+    if not siblings:
         return
-    # Phase 1: shift all rows out of the target range to avoid UNIQUE clashes.
-    for offset_idx, outcome in enumerate(outcomes, start=1):
+    for offset_idx, outcome in enumerate(siblings, start=1):
         outcome.position = 100_000 + offset_idx
     await db.flush()
-    # Phase 2: renumber contiguously in the original order.
-    for new_pos, outcome in enumerate(outcomes, start=1):
+    for new_pos, outcome in enumerate(siblings, start=1):
         outcome.position = new_pos
     await db.flush()
+
+
+def build_outcome_code_map(
+    outcomes: list[CourseLearningOutcome],
+) -> dict[UUID, tuple[str, int]]:
+    """Derive ``{outcome_id: (dotted_code, depth)}`` from a course's outcomes.
+
+    ``dotted_code`` is the position path root→leaf (e.g. ``"1.2.1"``,
+    rendered ``L.O.1.2.1``); ``depth`` is 0 for top-level. Pure function
+    over the full (non-deleted) outcome list — no DB access — so callers
+    resolve the whole tree in one pass. Orphaned rows (parent missing or
+    soft-deleted) are treated as top-level so they still get a code.
+    """
+    by_parent: dict[UUID | None, list[CourseLearningOutcome]] = {}
+    ids = {o.id for o in outcomes}
+    for o in outcomes:
+        parent = o.parent_id if o.parent_id in ids else None
+        by_parent.setdefault(parent, []).append(o)
+    for children in by_parent.values():
+        children.sort(key=lambda o: o.position)
+
+    code_map: dict[UUID, tuple[str, int]] = {}
+
+    def walk(parent: UUID | None, prefix: str, depth: int) -> None:
+        for idx, node in enumerate(by_parent.get(parent, []), start=1):
+            code = f"{prefix}{idx}" if not prefix else f"{prefix}.{idx}"
+            code_map[node.id] = (code, depth)
+            walk(node.id, code, depth + 1)
+
+    walk(None, "", 0)
+    return code_map
+
+
+def build_descendant_map(
+    outcomes: list[CourseLearningOutcome],
+) -> dict[UUID, set[UUID]]:
+    """Derive ``{outcome_id: {all descendant ids}}`` (excludes self).
+
+    Used for coverage rollup (a question on a child counts toward every
+    ancestor) and for cycle checks on re-parent. Pure function over the
+    full outcome list.
+    """
+    children: dict[UUID, list[UUID]] = {}
+    for o in outcomes:
+        if o.parent_id is not None:
+            children.setdefault(o.parent_id, []).append(o.id)
+
+    def collect(node: UUID) -> set[UUID]:
+        out: set[UUID] = set()
+        for child in children.get(node, []):
+            out.add(child)
+            out |= collect(child)
+        return out
+
+    return {o.id: collect(o.id) for o in outcomes}
 
 
 __all__ = [

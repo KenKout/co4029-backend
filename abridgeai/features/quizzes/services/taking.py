@@ -172,25 +172,41 @@ async def _load_quiz_questions_for_taking(db: AsyncSession, quiz_id: UUID) -> li
     # precedent as the cross-feature cooldown read below. Soft-deleted /
     # missing outcomes resolve to None → no prefix.
     outcome_ids = [q.learning_outcome_id for q in questions if q.learning_outcome_id]
-    positions: dict[UUID, int] = {}
+    positions: dict[UUID, tuple[int, str]] = {}
     if outcome_ids:
         from sqlalchemy import text as _text  # noqa: PLC0415
 
+        # Recursive CTE rebuilds the dotted code (L.O.1.2.1) by walking each
+        # outcome's parent chain, so the student-facing label matches the
+        # hierarchical teacher codes. position is the leaf's own sibling
+        # position (back-compat).
         rows = (
             await db.execute(
                 _text(
-                    "SELECT id, position FROM course_learning_outcomes "
-                    "WHERE id = ANY(:ids) AND deleted_at IS NULL"
+                    """
+                    WITH RECURSIVE coded AS (
+                        SELECT id, parent_id, position, position::text AS code
+                        FROM course_learning_outcomes
+                        WHERE parent_id IS NULL AND deleted_at IS NULL
+                        UNION ALL
+                        SELECT c.id, c.parent_id, c.position,
+                               coded.code || '.' || c.position::text
+                        FROM course_learning_outcomes c
+                        JOIN coded ON c.parent_id = coded.id
+                        WHERE c.deleted_at IS NULL
+                    )
+                    SELECT id, position, code FROM coded WHERE id = ANY(:ids)
+                    """
                 ),
                 {"ids": list(set(outcome_ids))},
             )
         ).all()
-        positions = {row[0]: row[1] for row in rows}
+        positions = {row[0]: (row[1], row[2]) for row in rows}
     for question in questions:
         lo_id = question.learning_outcome_id
-        question.outcome_position = (  # type: ignore[attr-defined]
-            positions.get(lo_id) if lo_id is not None else None
-        )
+        resolved = positions.get(lo_id) if lo_id is not None else None
+        question.outcome_position = resolved[0] if resolved else None  # type: ignore[attr-defined]
+        question.outcome_code = resolved[1] if resolved else None  # type: ignore[attr-defined]
     return list(questions)
 
 

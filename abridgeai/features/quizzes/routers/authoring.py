@@ -989,46 +989,64 @@ async def _attach_question_options(db: AsyncSession, question: QuizQuestion) -> 
 
 async def _resolve_outcome_positions(
     db: AsyncSession, outcome_ids: set[UUID]
-) -> dict[UUID, int]:
-    """Batch-resolve ``{outcome_id: live position}`` for the ``(L.O.x)`` code.
+) -> dict[UUID, tuple[int, str]]:
+    """Batch-resolve ``{outcome_id: (position, dotted_code)}`` for display.
 
     Read via raw SQL against ``course_learning_outcomes`` (rather than an ORM
     relationship) so the quizzes feature does not import the courses ORM —
     honours the T0.4 feature-independence contract, same pattern as
-    ``_resolve_student_names``. Soft-deleted outcomes are excluded, so a
-    question pointing at a deleted outcome resolves to no position (→ the
-    projection renders no prefix, i.e. "no outcome").
+    ``_resolve_student_names``. A recursive CTE rebuilds the dotted code
+    (``L.O.1.2.1``) by walking each row's parent chain; ``position`` is the
+    leaf's own sibling position (back-compat). Soft-deleted outcomes are
+    excluded, so a question pointing at a deleted outcome resolves to nothing
+    (→ the projection renders no prefix, i.e. "no outcome").
     """
     if not outcome_ids:
         return {}
     from sqlalchemy import text as _text  # noqa: PLC0415
 
+    # coded: walk root→node accumulating positions into a dotted code, then
+    # keep only the rows we were asked about. Restricting the recursion to a
+    # course would need the course_id; the id set is small and the CTE is
+    # course-agnostic, so we filter at the end instead.
     rows = (
         await db.execute(
             _text(
-                "SELECT id, position FROM course_learning_outcomes "
-                "WHERE id = ANY(:ids) AND deleted_at IS NULL"
+                """
+                WITH RECURSIVE coded AS (
+                    SELECT id, parent_id, position, position::text AS code
+                    FROM course_learning_outcomes
+                    WHERE parent_id IS NULL AND deleted_at IS NULL
+                    UNION ALL
+                    SELECT c.id, c.parent_id, c.position,
+                           coded.code || '.' || c.position::text
+                    FROM course_learning_outcomes c
+                    JOIN coded ON c.parent_id = coded.id
+                    WHERE c.deleted_at IS NULL
+                )
+                SELECT id, position, code FROM coded WHERE id = ANY(:ids)
+                """
             ),
             {"ids": list(outcome_ids)},
         )
     ).all()
-    return {row[0]: row[1] for row in rows}
+    return {row[0]: (row[1], row[2]) for row in rows}
 
 
 def _fill_outcome_positions(
-    questions: list[QuizQuestion], positions: dict[UUID, int]
+    questions: list[QuizQuestion], positions: dict[UUID, tuple[int, str]]
 ) -> None:
-    """Stamp ``outcome_position`` on each question from the resolved map.
+    """Stamp ``outcome_position`` + ``outcome_code`` from the resolved map.
 
-    ``outcome_position`` is a projection-only field (not an ORM column), so
-    setting it here lets ``QuizQuestionAuthoring.model_validate`` pick it up
-    via ``from_attributes``. Questions with no / deleted outcome stay ``None``.
+    Both are projection-only fields (not ORM columns), so setting them here
+    lets ``QuizQuestionAuthoring.model_validate`` pick them up via
+    ``from_attributes``. Questions with no / deleted outcome stay ``None``.
     """
     for question in questions:
         lo_id = question.learning_outcome_id
-        question.outcome_position = (  # type: ignore[attr-defined]
-            positions.get(lo_id) if lo_id is not None else None
-        )
+        resolved = positions.get(lo_id) if lo_id is not None else None
+        question.outcome_position = resolved[0] if resolved else None  # type: ignore[attr-defined]
+        question.outcome_code = resolved[1] if resolved else None  # type: ignore[attr-defined]
 
 
 def _serialize_regrade_run(run: Any) -> RegradeRunRead:

@@ -133,6 +133,12 @@ class QuizQuestionPublic(_ORMModel):
     # crossing the quizzes→courses feature boundary. Both NULL = no outcome.
     learning_outcome_id: UUID | None = None
     outcome_position: int | None = None
+    # Dotted display code of the assessed outcome (e.g. "1.2.1" → rendered
+    # "L.O.1.2.1"). Projection-only, filled alongside outcome_position from a
+    # batch lookup. Supersedes the flat outcome_position for display now that
+    # outcomes are hierarchical; outcome_position is kept for back-compat
+    # (top-level rows: code == str(position)).
+    outcome_code: str | None = None
 
     # Phase 7: multi-select discriminator. True (default) = single-answer MCQ
     # (radio); False = multi-select (checkboxes). Safe — reveals the input

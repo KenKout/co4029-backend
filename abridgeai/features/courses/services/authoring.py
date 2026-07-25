@@ -899,13 +899,53 @@ async def _require_outcome(
     return outcome
 
 
+def _project_outcomes(
+    outcomes: list[CourseLearningOutcome],
+) -> list[CourseLearningOutcomeAuthoring]:
+    """Validate ORM rows into authoring DTOs with derived code + depth.
+
+    The dotted ``L.O.x.y`` code and tree depth are projection-only, so we
+    compute them once over the whole list and stamp each DTO. Returned in
+    tree order (parent before children, siblings by position) so a client
+    can render the list top-to-bottom without re-sorting.
+    """
+    code_map = authoring_queries.build_outcome_code_map(outcomes)
+    dtos: dict[UUID, CourseLearningOutcomeAuthoring] = {}
+    for o in outcomes:
+        dto = CourseLearningOutcomeAuthoring.model_validate(o)
+        code, depth = code_map.get(o.id, (str(o.position), 0))
+        dto.code = code
+        dto.depth = depth
+        dtos[o.id] = dto
+    # Tree order: sort by the dotted code split into ints so 1.2 < 1.10.
+    def sort_key(dto: CourseLearningOutcomeAuthoring) -> list[int]:
+        return [int(part) for part in (dto.code or "").split(".") if part.isdigit()]
+
+    return sorted(dtos.values(), key=sort_key)
+
+
+def _project_one(
+    outcomes: list[CourseLearningOutcome], outcome_id: UUID
+) -> CourseLearningOutcomeAuthoring:
+    """Project the whole course tree, then return the one DTO we care about.
+
+    Single-outcome mutations (create/update) still need the full list to
+    derive the dotted code, since a code depends on the outcome's ancestor
+    chain and sibling positions.
+    """
+    for dto in _project_outcomes(outcomes):
+        if dto.id == outcome_id:
+            return dto
+    raise NotFoundError(f"Course outcome {outcome_id} not found")
+
+
 async def list_course_outcomes(
     db: AsyncSession, course_id: UUID
 ) -> list[CourseLearningOutcomeAuthoring]:
-    """All learning outcomes for a course, ordered by position (§LO-1)."""
+    """All learning outcomes for a course in tree order with codes (§LO-1)."""
     await _require_course(db, course_id)
     outcomes = await authoring_queries.list_course_outcomes(db, course_id)
-    return [CourseLearningOutcomeAuthoring.model_validate(o) for o in outcomes]
+    return _project_outcomes(outcomes)
 
 
 async def add_course_outcome(
@@ -914,23 +954,30 @@ async def add_course_outcome(
     payload: CourseLearningOutcomeCreate,
     actor: CurrentUser,
 ) -> CourseLearningOutcomeAuthoring:
-    """Append a new outcome at the next free position (§LO-1).
+    """Append a new outcome under its parent at the next free position (§LO-1).
 
-    ``position`` is server-assigned (MAX+1); the ``(L.O.x)`` code is
-    derived from it at display time and never stored.
+    ``parent_id`` (optional) nests the outcome; it must belong to the same
+    course. ``position`` is server-assigned (MAX+1 among the parent's
+    children); the dotted code is derived at display time and never stored.
     """
     del actor
     await _require_course(db, course_id)
-    next_pos = await authoring_queries.next_course_outcome_position(db, course_id)
+    if payload.parent_id is not None:
+        # Parent must exist in this course (guards cross-course nesting).
+        await _require_outcome(db, course_id, payload.parent_id)
+    next_pos = await authoring_queries.next_course_outcome_position(
+        db, course_id, payload.parent_id
+    )
     outcome = CourseLearningOutcome(
         course_id=course_id,
+        parent_id=payload.parent_id,
         position=next_pos,
         outcome_text=payload.outcome_text,
     )
     db.add(outcome)
     await _flush_or_conflict(db)
-    await db.refresh(outcome)
-    return CourseLearningOutcomeAuthoring.model_validate(outcome)
+    outcomes = await authoring_queries.list_course_outcomes(db, course_id)
+    return _project_one(outcomes, outcome.id)
 
 
 async def update_course_outcome(
@@ -940,30 +987,73 @@ async def update_course_outcome(
     payload: CourseLearningOutcomeUpdate,
     actor: CurrentUser,
 ) -> CourseLearningOutcomeAuthoring:
-    """Edit an outcome's text (§LO-2). Position/code are not client-editable."""
+    """Edit text and/or re-parent an outcome (§LO-2).
+
+    Re-parenting is guarded against cycles (an outcome may not become its
+    own descendant, nor its own parent). When the parent changes, the
+    outcome is appended to the new parent's children and both the old and
+    new sibling groups are re-indexed so positions/codes stay contiguous.
+    """
     del actor
     outcome = await _require_outcome(db, course_id, outcome_id)
-    _apply_patch(outcome, payload)
+    reparenting = "parent_id" in payload.model_fields_set
+    new_parent_id = payload.parent_id if reparenting else outcome.parent_id
+    old_parent_id = outcome.parent_id
+
+    if reparenting and new_parent_id != old_parent_id:
+        if new_parent_id is not None:
+            if new_parent_id == outcome_id:
+                raise AppError("An outcome cannot be its own parent")
+            await _require_outcome(db, course_id, new_parent_id)
+            # Cycle guard: the new parent must not be a descendant of this
+            # outcome (that would detach a subtree into a loop).
+            all_outcomes = await authoring_queries.list_course_outcomes(db, course_id)
+            descendants = authoring_queries.build_descendant_map(all_outcomes)
+            if new_parent_id in descendants.get(outcome_id, set()):
+                raise AppError("Cannot move an outcome under one of its own descendants")
+        outcome.parent_id = new_parent_id
+        outcome.position = await authoring_queries.next_course_outcome_position(
+            db, course_id, new_parent_id
+        )
+
+    if payload.outcome_text is not None:
+        outcome.outcome_text = payload.outcome_text
+
     await _flush_or_conflict(db)
-    await db.refresh(outcome)
-    return CourseLearningOutcomeAuthoring.model_validate(outcome)
+
+    if reparenting and new_parent_id != old_parent_id:
+        # Old siblings gapped by the move; compact them.
+        await authoring_queries.reindex_course_outcome_siblings(db, course_id, old_parent_id)
+        await _flush_or_conflict(db)
+
+    outcomes = await authoring_queries.list_course_outcomes(db, course_id)
+    return _project_one(outcomes, outcome_id)
 
 
 async def delete_course_outcome(
     db: AsyncSession, course_id: UUID, outcome_id: UUID, actor: CurrentUser
 ) -> None:
-    """Soft-delete an outcome, then compact positions to 1..N (§LO-2).
+    """Soft-delete an outcome + its whole subtree, then compact siblings (§LO-2).
 
-    The FK on ``quiz_questions.learning_outcome_id`` is ``ON DELETE SET
-    NULL``, but that fires only on a hard DELETE; we soft-delete here, so
-    questions keep pointing at the now-deleted outcome row. That's benign:
-    the projection layer treats a soft-deleted / missing outcome as "no
-    outcome" (NULL position → no ``(L.O.x)`` prefix). After removal the
-    surviving outcomes are re-indexed so the display codes never gap.
+    Deleting a parent removes its descendants too (soft-delete cascade over
+    the subtree) so no child is orphaned to a dangling parent. The FK on
+    ``quiz_questions.learning_outcome_id`` is ``ON DELETE SET NULL`` but
+    fires only on hard DELETE; we soft-delete, so questions keep pointing
+    at the now-deleted rows. That's benign: the projection layer treats a
+    soft-deleted / missing outcome as "no outcome". Surviving siblings of
+    the removed node are re-indexed so codes never gap.
     """
     outcome = await _require_outcome(db, course_id, outcome_id)
-    await soft_delete_cascade(db, outcome, actor_id=actor.user_id)
-    await authoring_queries.reindex_course_outcomes(db, course_id)
+    parent_id = outcome.parent_id
+    # Soft-delete the whole subtree (deepest first) so children aren't
+    # orphaned. Resolve the subtree from the current tree snapshot.
+    all_outcomes = await authoring_queries.list_course_outcomes(db, course_id)
+    descendants = authoring_queries.build_descendant_map(all_outcomes)
+    by_id = {o.id: o for o in all_outcomes}
+    to_delete = [outcome, *(by_id[d] for d in descendants.get(outcome_id, set()) if d in by_id)]
+    for node in to_delete:
+        await soft_delete_cascade(db, node, actor_id=actor.user_id)
+    await authoring_queries.reindex_course_outcome_siblings(db, course_id, parent_id)
 
 
 __all__ = [

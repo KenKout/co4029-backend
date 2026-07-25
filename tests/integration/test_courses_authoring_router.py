@@ -1446,3 +1446,89 @@ async def test_course_outcome_student_403(
         headers=auth,
     )
     assert resp.status_code == 403, resp.text
+
+
+async def test_course_outcome_hierarchy(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    scenario: dict[str, uuid.UUID | str],
+    engine: AsyncEngine,
+) -> None:
+    """Hierarchy (arbitrary depth): nest, dotted codes, re-parent, cycle guard,
+    and subtree delete.
+
+    Builds L.O.1 with children 1.1 and 1.2, and a grandchild 1.1.1; verifies
+    the derived dotted ``code`` + ``depth``; re-parents; rejects a cycle; and
+    confirms deleting a parent removes its whole subtree and compacts siblings.
+    """
+    course_a = scenario["course_a"]
+    auth = {"Authorization": f"Bearer {admin_bearer}"}
+    base = f"/api/v1/teacher/courses/{course_a}/outcomes"
+
+    # Two top-level outcomes.
+    lo1 = (await client.post(base, json={"outcome_text": "Root one"}, headers=auth)).json()
+    lo2 = (await client.post(base, json={"outcome_text": "Root two"}, headers=auth)).json()
+    assert lo1["code"] == "1" and lo1["depth"] == 0
+    assert lo2["code"] == "2" and lo2["depth"] == 0
+
+    # Two children under L.O.1, then a grandchild under the first child.
+    c1 = (
+        await client.post(
+            base, json={"outcome_text": "Child A", "parent_id": lo1["id"]}, headers=auth
+        )
+    ).json()
+    c2 = (
+        await client.post(
+            base, json={"outcome_text": "Child B", "parent_id": lo1["id"]}, headers=auth
+        )
+    ).json()
+    g1 = (
+        await client.post(
+            base, json={"outcome_text": "Grandchild", "parent_id": c1["id"]}, headers=auth
+        )
+    ).json()
+    assert c1["code"] == "1.1" and c1["depth"] == 1
+    assert c2["code"] == "1.2" and c2["depth"] == 1
+    assert g1["code"] == "1.1.1" and g1["depth"] == 2
+
+    # List is in tree order with codes.
+    listed = (await client.get(base, headers=auth)).json()
+    assert [(o["code"], o["outcome_text"]) for o in listed] == [
+        ("1", "Root one"),
+        ("1.1", "Child A"),
+        ("1.1.1", "Grandchild"),
+        ("1.2", "Child B"),
+        ("2", "Root two"),
+    ]
+
+    # Cycle guard: moving L.O.1 under its own grandchild must 4xx.
+    cycle = await client.patch(
+        f"{base}/{lo1['id']}", json={"parent_id": g1["id"]}, headers=auth
+    )
+    assert cycle.status_code == 400, cycle.text
+
+    # Re-parent Child B (1.2) to be a child of Root two → becomes 2.1.
+    moved = await client.patch(
+        f"{base}/{c2['id']}", json={"parent_id": lo2["id"]}, headers=auth
+    )
+    assert moved.status_code == 200, moved.text
+    after_move = {o["id"]: o for o in (await client.get(base, headers=auth)).json()}
+    assert after_move[c2["id"]]["code"] == "2.1"
+
+    # Delete L.O.1 → its subtree (Child A + Grandchild) goes too; Root two
+    # (and its new child) survive, and Root two compacts to code "1".
+    del_resp = await client.delete(f"{base}/{lo1['id']}", headers=auth)
+    assert del_resp.status_code == 204, del_resp.text
+    remaining = (await client.get(base, headers=auth)).json()
+    texts = {o["outcome_text"] for o in remaining}
+    assert texts == {"Root two", "Child B"}
+    by_text = {o["outcome_text"]: o for o in remaining}
+    assert by_text["Root two"]["code"] == "1"
+    assert by_text["Child B"]["code"] == "1.1"
+
+    # Cleanup (hard-delete; endpoint only soft-deletes).
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("DELETE FROM course_learning_outcomes WHERE course_id = :cid"),
+            {"cid": course_a},
+        )

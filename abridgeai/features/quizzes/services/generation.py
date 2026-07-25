@@ -109,21 +109,54 @@ def _config_uuid_list(config: dict[str, Any], key: str) -> list[UUID]:
 async def _resolve_outcome_texts(db: AsyncSession, config: dict[str, Any]) -> list[str]:
     """Resolve ``target_outcome_ids`` → ordered outcome text strings (§LO-3).
 
+    Coverage rollup: targeting a parent outcome implicitly targets its
+    whole subtree — a recursive CTE walks children so choosing L.O.1 pulls
+    in L.O.1.1, L.O.1.1.1, … The dotted display code is rebuilt from the
+    parent chain (``string_agg`` over the path) so labels match the
+    teacher-facing ``L.O.x.y`` codes.
+
     Raw SQL against ``course_learning_outcomes`` (quizzes must not import the
-    courses ORM — T0.4 feature-independence). Ordered by ``position`` so the
-    injected ``L.O.x`` labels line up with the teacher-facing codes.
-    Soft-deleted outcomes are excluded. Empty list when none targeted.
+    courses ORM — T0.4 feature-independence). Soft-deleted outcomes are
+    excluded from both the seed and the walk. Empty list when none targeted.
     """
     outcome_ids = _config_uuid_list(config, "target_outcome_ids")
     if not outcome_ids:
         return []
     from sqlalchemy import text as _text  # noqa: PLC0415
 
+    # subtree: seed = the targeted ids; recurse to every non-deleted child.
+    # code_path: walk root→node accumulating positions into a dotted string.
     rows = (
         await db.execute(
             _text(
-                "SELECT position, outcome_text FROM course_learning_outcomes "
-                "WHERE id = ANY(:ids) AND deleted_at IS NULL ORDER BY position"
+                """
+                WITH RECURSIVE subtree AS (
+                    SELECT id, parent_id, position, outcome_text
+                    FROM course_learning_outcomes
+                    WHERE id = ANY(:ids) AND deleted_at IS NULL
+                    UNION
+                    SELECT c.id, c.parent_id, c.position, c.outcome_text
+                    FROM course_learning_outcomes c
+                    JOIN subtree s ON c.parent_id = s.id
+                    WHERE c.deleted_at IS NULL
+                ),
+                coded AS (
+                    SELECT id, parent_id, position, outcome_text,
+                           position::text AS code
+                    FROM course_learning_outcomes
+                    WHERE parent_id IS NULL AND deleted_at IS NULL
+                    UNION ALL
+                    SELECT c.id, c.parent_id, c.position, c.outcome_text,
+                           coded.code || '.' || c.position::text
+                    FROM course_learning_outcomes c
+                    JOIN coded ON c.parent_id = coded.id
+                    WHERE c.deleted_at IS NULL
+                )
+                SELECT DISTINCT coded.code, coded.outcome_text
+                FROM coded
+                JOIN subtree ON subtree.id = coded.id
+                ORDER BY string_to_array(coded.code, '.')::int[]
+                """
             ),
             {"ids": outcome_ids},
         )

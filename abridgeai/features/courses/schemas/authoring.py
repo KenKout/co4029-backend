@@ -96,27 +96,39 @@ class CourseLearningOutcomeAuthoring(CourseLearningOutcomePublic):
 class CourseLearningOutcomeCreate(BaseModel):
     """Body for ``POST /teacher/courses/{course_id}/outcomes`` (§LO-1).
 
-    Only ``outcome_text`` is client-supplied. ``position`` is assigned
-    server-side (append at the end); the ``(L.O.x)`` code is derived from
-    that position at display time and is never stored.
+    ``outcome_text`` is required. ``parent_id`` is optional — omit (or
+    null) for a top-level outcome, or pass an existing outcome's id to
+    nest this one beneath it (arbitrary depth). ``position`` is assigned
+    server-side (append at the end of the parent's children); the dotted
+    ``L.O.x.y`` code is derived from the parent chain at display time and
+    is never stored.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     outcome_text: Annotated[str, Field(min_length=1, max_length=1000)]
+    parent_id: UUID | None = None
 
 
 class CourseLearningOutcomeUpdate(BaseModel):
     """Body for ``PATCH /teacher/courses/{course_id}/outcomes/{outcome_id}``.
 
-    Only the text is editable — position is managed by the server
-    (append on create, contiguous re-index on delete), and the code is
-    display-only, so neither is accepted from the client.
+    ``outcome_text`` edits the statement. ``parent_id`` re-parents the
+    outcome (move within the tree); pass null to promote it to top-level.
+    Position is managed by the server (append on create, contiguous
+    per-parent re-index on delete/move), and the code is display-only, so
+    neither is accepted from the client. Re-parenting is cycle-checked
+    server-side (an outcome may not become its own descendant).
+
+    ``parent_id`` uses a sentinel so "omitted" (leave parent unchanged) is
+    distinguishable from "explicitly null" (promote to top-level):
+    ``model_fields_set`` is consulted in the service layer.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     outcome_text: Annotated[str | None, Field(min_length=1, max_length=1000)] = None
+    parent_id: UUID | None = None
 
 
 class CourseAuthoring(CoursePublic):

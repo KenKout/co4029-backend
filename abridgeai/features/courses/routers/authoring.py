@@ -452,6 +452,8 @@ async def create_course_outcome(
         raise _not_found(str(exc)) from exc
     except ConflictError as exc:
         raise _conflict(str(exc)) from exc
+    except AppError as exc:
+        raise _bad_request(str(exc)) from exc
     await db.commit()
     return outcome
 
@@ -476,6 +478,8 @@ async def update_course_outcome(
         raise _not_found(str(exc)) from exc
     except ConflictError as exc:
         raise _conflict(str(exc)) from exc
+    except AppError as exc:
+        raise _bad_request(str(exc)) from exc
     await db.commit()
     return outcome
 
