@@ -723,10 +723,24 @@ async def _update_question_options(
         if new_is_correct is not None:
             option.is_correct = bool(new_is_correct)
 
-    if len(options) != 4:
-        raise AppError("MCQ questions must have exactly four options")
-    if sum(1 for option in options if option.is_correct) != 1:
-        raise AppError("MCQ questions must have exactly one correct option")
+    # Phase 7: mirror the create-path rules (``_validate_question_options``).
+    # This used to hardcode "exactly four options / exactly one correct", which
+    # rejected both multi-select MCQ (single_answer=False → >=1 correct) and the
+    # relaxed 2..10 option count. true_false stays strictly 2 options / 1 correct.
+    n_correct = sum(1 for option in options if option.is_correct)
+    if question.question_type == "true_false":
+        if len(options) != 2:
+            raise AppError("true_false questions must have exactly two options")
+        if n_correct != 1:
+            raise AppError("true_false questions must have exactly one correct option")
+        return
+    if len(options) < 2 or len(options) > 10:
+        raise AppError("multiple_choice questions need between 2 and 10 options")
+    if question.single_answer:
+        if n_correct != 1:
+            raise AppError("single-answer multiple_choice must have exactly one correct option")
+    elif n_correct < 1:
+        raise AppError("multi-answer multiple_choice must have at least one correct option")
 
 
 async def delete_question(db: AsyncSession, question_id: UUID, actor: CurrentUser) -> None:
