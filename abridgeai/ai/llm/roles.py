@@ -45,6 +45,10 @@ class LLMRole(str, Enum):  # noqa: UP042 - StrEnum changes value coercion; prese
     INTERVIEW_ANALYSIS = "interview_analysis"
     INTERVIEW_SECURITY = "interview_security"
     INTERVIEW_PERSONA_ADHERENCE = "interview_persona_adherence"
+    # Offline post-hoc quality judging (contingency / leading questions). Never
+    # runs in a live session — only from the quality CLI — but needs its own role
+    # so its spend is attributable and never mixed into live interview costs.
+    INTERVIEW_QUALITY_JUDGE = "interview_quality_judge"
 
 
 # Default role -> tier mapping. Embedding intentionally excluded — it has its
@@ -78,6 +82,11 @@ ROLE_TO_TIER: dict[LLMRole, Literal["small", "standard", "large"]] = {
     # INTERACTIVE_LLM_ROLES. Standard tier: it needs to reason over a whole
     # transcript but is a diagnostic, not a scoring gate.
     LLMRole.INTERVIEW_PERSONA_ADHERENCE: "standard",
+    # Post-hoc quality judges (contingency / leading questions) are offline
+    # diagnostics like persona adherence — nobody is waiting, so they stay out of
+    # INTERACTIVE_LLM_ROLES. Standard tier: judging one Q&A exchange needs real
+    # reading comprehension, but these never gate a grade.
+    LLMRole.INTERVIEW_QUALITY_JUDGE: "standard",
 }
 
 

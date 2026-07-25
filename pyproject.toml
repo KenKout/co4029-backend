@@ -141,6 +141,13 @@ max-complexity = 12
 # workstream. Legitimately writes to stdout (T20) and has long usage lines
 # (E501); imports the corpus loader from the tests tree via sys.path (E402).
 "scripts/security_replay.py" = ["T20", "E501", "E402", "I001"]
+# Interview quality report — a manual-trigger, read-only diagnostics CLI
+# (calibration / contingency / leading-question metrics over a finished
+# session). Prints a human report to stdout (T20), has long usage + rubric
+# lines (E501), imports after a sys.path insert (E402/I001), and its report
+# printer is a flat sequence of sections rather than genuinely complex logic
+# (C901).
+"scripts/interview_quality_report.py" = ["T20", "E501", "E402", "I001", "C901"]
 
 [tool.mypy]
 python_version = "3.12"
