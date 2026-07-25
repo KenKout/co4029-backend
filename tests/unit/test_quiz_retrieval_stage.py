@@ -16,7 +16,7 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -52,9 +52,28 @@ def fake_embedding_client() -> AsyncMock:
     return client
 
 
+@pytest.fixture
+def retrieval_settings():
+    """Settings with the hybrid-BM25 path OFF and no Voyage key.
+
+    These tests mock ``logic.vector_search`` to exercise the pure vector + MMR
+    path. The developer ``.env`` sets ``HYBRID_BM25_ENABLED=true``, which routes
+    retrieval through ``hybrid_search_for_anchor`` (a different module the mock
+    never touches), so without pinning the knob the mock is bypassed. Copy the
+    real settings and flip only the two knobs this path reads, leaving every
+    other field intact for ``rerank_pool``.
+    """
+    from abridgeai.core.config import get_settings
+
+    return get_settings().model_copy(
+        update={"hybrid_bm25_enabled": False, "voyage_api_key": None}
+    )
+
+
 @pytest.mark.asyncio
 async def test_retrieve_chunks_returns_diversified_results(
     fake_embedding_client: AsyncMock,
+    retrieval_settings,
 ) -> None:
     db = AsyncMock()
     quiz = _quiz_stub()
@@ -74,6 +93,7 @@ async def test_retrieve_chunks_returns_diversified_results(
             kg_context_enabled=False,
             embedding_client=fake_embedding_client,
             final_top_k=12,
+            settings=retrieval_settings,
         )
 
     assert anchors == ["alpha", "beta"]
@@ -86,6 +106,7 @@ async def test_retrieve_chunks_returns_diversified_results(
 @pytest.mark.asyncio
 async def test_retrieve_chunks_includes_kg_context_when_enabled(
     fake_embedding_client: AsyncMock,
+    retrieval_settings,
 ) -> None:
     db = AsyncMock()
     quiz = _quiz_stub()
@@ -111,6 +132,7 @@ async def test_retrieve_chunks_includes_kg_context_when_enabled(
             config=config,
             kg_context_enabled=True,
             embedding_client=fake_embedding_client,
+            settings=retrieval_settings,
         )
 
     mock_kg.assert_awaited_once()
@@ -121,23 +143,29 @@ async def test_retrieve_chunks_includes_kg_context_when_enabled(
 @pytest.mark.asyncio
 async def test_retrieve_chunks_skips_kg_when_disabled(
     fake_embedding_client: AsyncMock,
+    retrieval_settings,
 ) -> None:
     db = AsyncMock()
     quiz = _quiz_stub(title="Quiz Title")
-    lesson_id = uuid4()
-    config = {"source_lesson_ids": [str(lesson_id)]}
+    lesson_a = uuid4()
+    lesson_b = uuid4()
+    config = {"source_lesson_ids": [str(lesson_a), str(lesson_b)]}
 
-    from unittest.mock import MagicMock
-
-    titles_result = MagicMock()
-    titles_result.all.return_value = [("Lesson 1",), ("Lesson 2",)]
-    db.execute = AsyncMock(return_value=titles_result)
+    # The anchor builder now resolves each lesson title individually via
+    # ``courses_api.get_lesson_title`` (one call per source lesson id), not a
+    # single ``db.execute(...).all()`` query. Mock that helper per-lesson.
+    async def _fake_title(_db: object, lesson_id: UUID) -> str:
+        return {lesson_a: "Lesson 1", lesson_b: "Lesson 2"}[lesson_id]
 
     with (
         patch(
             "abridgeai.features.quizzes.ai.stages.retrieval.anchors.retrieve_kg_context_for_anchors",
             AsyncMock(),
         ) as mock_kg,
+        patch(
+            "abridgeai.features.quizzes.ai.stages.retrieval.anchors.courses_api.get_lesson_title",
+            AsyncMock(side_effect=_fake_title),
+        ),
         patch(
             "abridgeai.features.quizzes.ai.stages.retrieval.logic.vector_search",
             AsyncMock(return_value=[_chunk(0.1)]),
@@ -150,6 +178,7 @@ async def test_retrieve_chunks_skips_kg_when_disabled(
             config=config,
             kg_context_enabled=False,
             embedding_client=fake_embedding_client,
+            settings=retrieval_settings,
         )
 
     mock_kg.assert_not_awaited()
@@ -253,6 +282,7 @@ def test_no_god_file_in_retrieval_stage() -> None:
 @pytest.mark.asyncio
 async def test_retrieve_chunks_reorders_pool_when_rerank_client_injected(
     fake_embedding_client: AsyncMock,
+    retrieval_settings,
 ) -> None:
     """When a rerank client is passed, the post-MMR pool is reordered by
     Voyage scores and capped at ``final_top_k``."""
@@ -292,6 +322,7 @@ async def test_retrieve_chunks_reorders_pool_when_rerank_client_injected(
             embedding_client=fake_embedding_client,
             rerank_client=rerank_client,
             final_top_k=4,
+            settings=retrieval_settings,
         )
 
     assert rerank_client.rerank.await_count == 1
@@ -305,6 +336,7 @@ async def test_retrieve_chunks_reorders_pool_when_rerank_client_injected(
 @pytest.mark.asyncio
 async def test_retrieve_chunks_falls_back_when_rerank_raises(
     fake_embedding_client: AsyncMock,
+    retrieval_settings,
 ) -> None:
     """A provider error must not propagate — caller gets MMR-only top-K."""
     from abridgeai.ai.llm.errors import ProviderError
@@ -330,6 +362,7 @@ async def test_retrieve_chunks_falls_back_when_rerank_raises(
             embedding_client=fake_embedding_client,
             rerank_client=rerank_client,
             final_top_k=5,
+            settings=retrieval_settings,
         )
 
     assert rerank_client.rerank.await_count == 1
@@ -339,6 +372,7 @@ async def test_retrieve_chunks_falls_back_when_rerank_raises(
 @pytest.mark.asyncio
 async def test_retrieve_chunks_skips_rerank_when_no_key_no_client(
     fake_embedding_client: AsyncMock,
+    retrieval_settings,
 ) -> None:
     """Default settings have no Voyage key — MMR-only path runs."""
     db = AsyncMock()
@@ -358,6 +392,7 @@ async def test_retrieve_chunks_skips_rerank_when_no_key_no_client(
             kg_context_enabled=False,
             embedding_client=fake_embedding_client,
             final_top_k=6,
+            settings=retrieval_settings,
         )
 
     assert len(chunks) == 6

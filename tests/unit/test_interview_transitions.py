@@ -32,15 +32,18 @@ def _decision(
 
 
 @pytest.mark.parametrize("persona", list(Persona))
-def test_next_question_transition_is_thankful_and_signposts_move_on(persona: Persona) -> None:
+def test_next_question_transition_signposts_move_on(persona: Persona) -> None:
     en = transition_text(persona, "en")
     vi = transition_text(persona, "vi")
-    # EN: thanks + explicit next-question signpost, never the question itself.
-    assert en.lower().startswith("thank you")
+    # The transition is the "move on to the next question" signpost. It
+    # deliberately carries NO leading "Thank you." — the acknowledgement (_ACK)
+    # already opens with the thanks, and concatenating both produced a
+    # "Thank you. Thank you. Now let's move on…" double. So assert the signpost
+    # wording only, and assert the thanks is NOT duplicated here.
     assert "next question" in en.lower()
-    # VI: thanks + move-on signpost.
-    assert "cảm ơn" in vi.lower()
+    assert not en.lower().startswith("thank you")
     assert "câu hỏi tiếp theo" in vi.lower()
+    assert not vi.lower().startswith("cảm ơn")
 
 
 @pytest.mark.parametrize("persona", list(Persona))
@@ -53,7 +56,9 @@ def test_final_question_transition_matches_spec_wording(persona: Persona) -> Non
 
 def test_unknown_language_falls_back_to_english_neutral() -> None:
     assert transition_text(Persona.NEUTRAL, "fr") == transition_text(Persona.NEUTRAL, "en")
-    assert transition_text(Persona.STRICT, None).lower().startswith("thank you")
+    # The transition carries the move-on signpost (thanks lives on the ack), so
+    # the English fallback for an unknown language signposts the next question.
+    assert "next question" in transition_text(Persona.STRICT, None).lower()
 
 
 def test_transition_never_contains_a_question_mark() -> None:

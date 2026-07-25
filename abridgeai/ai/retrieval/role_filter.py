@@ -98,18 +98,22 @@ def split_by_role[T](
         else:
             body.append(chunk)
 
-    keep_deprioritized = max(1, limit // deprioritized_ratio)
-    body_quota = max(0, limit - keep_deprioritized)
+    # Cap deprioritized chunks at floor(limit / ratio), but never reserve more
+    # slots than there are deprioritized chunks to fill — otherwise an all-body
+    # pool would be capped below ``limit`` (body is the GOOD content and must be
+    # allowed to fill the whole pool when nothing needs deprioritizing).
+    cap = max(1, limit // deprioritized_ratio)
+    deprioritized_taken = deprioritized[:cap]
 
-    body_taken = body[:body_quota]
-    deprioritized_taken = deprioritized[:keep_deprioritized]
+    # Body fills every slot the (capped) deprioritized chunks did not claim.
+    body_taken = body[: limit - len(deprioritized_taken)]
 
-    # Backfill: if body is short, take extra deprioritized so the caller
-    # still gets ``limit`` candidates when the pool is large enough.
+    # Backfill: if body is short, take extra deprioritized beyond the cap so the
+    # caller still gets ``limit`` candidates when the pool is large enough.
     extra_quota = limit - len(body_taken) - len(deprioritized_taken)
     if extra_quota > 0:
         deprioritized_taken.extend(
-            deprioritized[keep_deprioritized : keep_deprioritized + extra_quota]
+            deprioritized[cap : cap + extra_quota]
         )
 
     return body_taken + deprioritized_taken
