@@ -166,6 +166,29 @@ _PUBLISHED_EDITABLE_FIELDS = frozenset(
 )
 
 
+def _as_plain_json(value: Any) -> Any:  # noqa: ANN401  -- mirrors arbitrary JSON payloads
+    """Coerce a payload value into plain JSON-serializable data.
+
+    Values destined for JSONB columns must be dicts/lists/scalars. Two callers
+    can hand us something richer:
+
+    * the authoring router's private ``_AttrShim``, which wraps nested dicts
+      (and lists of dicts) for attribute access — psycopg cannot serialize it;
+    * a real Pydantic model, once the DTO surface replaces the shim.
+
+    Both expose ``model_dump()``, so we prefer that and recurse through
+    containers. Anything already plain passes through untouched.
+    """
+    if isinstance(value, list):
+        return [_as_plain_json(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _as_plain_json(item) for key, item in value.items()}
+    dump = getattr(value, "model_dump", None)
+    if callable(dump):
+        return _as_plain_json(dump())
+    return value
+
+
 def _assert_quiz_editable(quiz: Quiz) -> None:
     """Reject ALL authoring edits on a published quiz (content paths).
 
@@ -522,6 +545,12 @@ async def create_question(
     # Phase 7: persist type-specific answer fields when supplied. These are
     # only meaningful for the expanded types; MCQ/T-F ignore them. Set only
     # when present so MCQ creation keeps the server defaults (single_answer=True).
+    #
+    # match_pairs / ordering_sequence land in JSONB columns, so they MUST be
+    # plain JSON data. The router hands us a shim that turns nested lists of
+    # dicts into attribute-access objects (handy for ``options``, fatal here —
+    # psycopg cannot json.dumps them). ``_as_plain_json`` unwraps that back to
+    # dicts/lists, and also handles real Pydantic models once DTOs land.
     _single = getattr(payload, "single_answer", None)
     if _single is not None:
         question.single_answer = bool(_single)
@@ -533,10 +562,10 @@ async def create_question(
         question.numeric_tolerance = _num_tol
     _pairs = getattr(payload, "match_pairs", None)
     if _pairs is not None:
-        question.match_pairs = _pairs
+        question.match_pairs = _as_plain_json(_pairs)
     _seq = getattr(payload, "ordering_sequence", None)
     if _seq is not None:
-        question.ordering_sequence = _seq
+        question.ordering_sequence = _as_plain_json(_seq)
     db.add(question)
     await flush_or_conflict(db)
 
