@@ -47,12 +47,14 @@ automatically.
 
 from __future__ import annotations
 
+import random
+import uuid
 from datetime import datetime
 from decimal import Decimal
-from typing import Literal
+from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, model_validator
 
 QuestionTypeLiteral = Literal[
     "multiple_choice",
@@ -131,6 +133,102 @@ class QuizQuestionPublic(_ORMModel):
     # crossing the quizzes→courses feature boundary. Both NULL = no outcome.
     learning_outcome_id: UUID | None = None
     outcome_position: int | None = None
+
+    # Phase 7: multi-select discriminator. True (default) = single-answer MCQ
+    # (radio); False = multi-select (checkboxes). Safe — reveals the input
+    # shape, not which options are correct.
+    single_answer: bool = True
+
+    # Phase 7 no-leak projections for matching / ordering. The raw answer keys
+    # (``match_pairs`` = [{left, right}], ``ordering_sequence`` = correct order)
+    # MUST NOT reach a learner. Instead we derive:
+    #   * ``match_prompts``  — the left column, in stem order (safe to show).
+    #   * ``match_choices``  — the right values, DETERMINISTICALLY SHUFFLED so
+    #     the pairing is not implied by position.
+    #   * ``ordering_items`` — the items, DETERMINISTICALLY SHUFFLED so the
+    #     correct sequence is never revealed.
+    # The shuffle is seeded by the question id → stable across polls (won't
+    # reshuffle mid-attempt) but not in answer order. Correctness is graded
+    # server-side against the hidden keys.
+    match_prompts: list[str] = []
+    match_choices: list[str] = []
+    ordering_items: list[str] = []
+
+    @model_validator(mode="before")
+    @classmethod
+    def _derive_no_leak_type_fields(cls, data: Any) -> Any:
+        """Build the shuffled matching/ordering projections from the ORM row.
+
+        Runs before field validation. Reads the answer-bearing columns off the
+        source object (ORM instance or dict) and injects only the safe derived
+        lists — the raw ``match_pairs`` / ``ordering_sequence`` are never copied
+        onto the schema, so they cannot serialize to the wire.
+        """
+
+        def _get(key: str) -> Any:
+            if isinstance(data, dict):
+                return data.get(key)
+            return getattr(data, key, None)
+
+        qid = _get("id")
+        seed = 0
+        if qid is not None:
+            try:
+                seed = int(uuid.UUID(str(qid)).hex, 16)
+            except (ValueError, AttributeError, TypeError):
+                seed = hash(str(qid))
+
+        derived: dict[str, list[str]] = {}
+
+        pairs = _get("match_pairs")
+        if isinstance(pairs, list) and pairs:
+            prompts = [str(p.get("left", "")) for p in pairs if isinstance(p, dict)]
+            answer_aligned = [
+                str(p.get("right", "")) for p in pairs if isinstance(p, dict)
+            ]
+            choices = list(answer_aligned)
+            rng = random.Random(seed ^ 0x9E3779B9)
+            # Reshuffle until the choice order no longer positionally aligns with
+            # the prompts (which would imply the pairing on small lists). Bounded.
+            for _ in range(8):
+                rng.shuffle(choices)
+                if choices != answer_aligned or len(choices) <= 1:
+                    break
+            derived["match_prompts"] = prompts
+            derived["match_choices"] = choices
+
+        sequence = _get("ordering_sequence")
+        if isinstance(sequence, list) and sequence:
+            items = [str(s) for s in sequence]
+            rng = random.Random(seed ^ 0x7F4A7C15)
+            # Guard against the shuffle accidentally reproducing the answer
+            # order on tiny lists — reshuffle until it differs (bounded).
+            for _ in range(8):
+                rng.shuffle(items)
+                if items != [str(s) for s in sequence] or len(items) <= 1:
+                    break
+            derived["ordering_items"] = items
+
+        if not derived:
+            return data
+
+        # Merge derived fields with the source. For an ORM object we build a
+        # dict of the declared fields so Pydantic still reads the rest. The
+        # three derived list fields are only injected when computed; otherwise
+        # we omit them so their schema default (``[]``) applies (a raw getattr
+        # would return None on the ORM row and break list validation).
+        _DERIVED_FIELDS = {"match_prompts", "match_choices", "ordering_items"}
+        if isinstance(data, dict):
+            return {**data, **derived}
+        merged: dict[str, Any] = {}
+        for name in cls.model_fields:
+            if name in derived:
+                merged[name] = derived[name]
+            elif name in _DERIVED_FIELDS:
+                continue  # not computed → let the field default ([]) stand
+            else:
+                merged[name] = getattr(data, name, None)
+        return merged
 
 
 class QuizPublic(_ORMModel):
