@@ -32,7 +32,22 @@ _LEGACY_TYPE_ALIASES: dict[str, str] = {
     "true/false": "true_false",
     "tf": "true_false",
 }
-_VALID_TYPES = frozenset({"multiple_choice", "true_false", "short_answer", "fill_blank"})
+_VALID_TYPES = frozenset(
+    {
+        "multiple_choice",
+        "true_false",
+        "short_answer",
+        "fill_blank",
+        # Phase 7 expanded types. This set MUST stay in lockstep with
+        # ``ai.stages.generation.coercions._VALID_TYPES`` and the request
+        # schema's ``QuestionType``: a type missing here is silently rewritten
+        # to ``multiple_choice`` below, so the teacher's requested types are
+        # discarded and every template comes back as an MCQ.
+        "numerical",
+        "matching",
+        "ordering",
+    }
+)
 
 
 class Template(BaseModel):

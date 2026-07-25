@@ -250,7 +250,8 @@ class QuizQuestion(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftDele
         UniqueConstraint("quiz_id", "position", name="uq_quiz_questions_position"),
         CheckConstraint(
             "question_type IN ('multiple_choice', 'true_false', "
-            "'short_answer', 'fill_blank', 'code')",
+            "'short_answer', 'fill_blank', 'code', "
+            "'numerical', 'matching', 'ordering')",
             name="ck_quiz_questions_question_type",
         ),
         CheckConstraint(
