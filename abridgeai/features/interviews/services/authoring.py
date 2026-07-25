@@ -50,6 +50,13 @@ _RUN_INTERVIEW_GENERATION_TASK = "run_interview_generation_task"
 
 def _apply_patch(model: object, payload: object) -> None:
     data = payload.model_dump(exclude_unset=True)  # type: ignore[attr-defined]
+    # The API exposes per-trait persona overrides as the nested ``persona_profile``
+    # object, but the ORM stores them in the ``persona_profile_json`` JSONB column.
+    # Translate the key so a PATCH carrying persona_profile persists correctly;
+    # an explicit null clears the overrides (back to the bare preset).
+    if "persona_profile" in data:
+        override = data.pop("persona_profile")
+        setattr(model, "persona_profile_json", override or None)
     for key, value in data.items():
         setattr(model, key, value)
 
@@ -142,6 +149,7 @@ async def create_interview_config(
         module_id=module_id,
         title=data["title"],
         persona=data.get("persona"),
+        persona_profile_json=(data.get("persona_profile") or None),
         supported_modes=data.get("supported_modes", "hybrid"),
         tts_voice=data.get("tts_voice"),
         time_limit_minutes=data.get("time_limit_minutes"),

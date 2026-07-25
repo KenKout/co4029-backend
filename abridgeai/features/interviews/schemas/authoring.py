@@ -107,6 +107,48 @@ TtsVoiceLiteral = Literal[
 # --------------------------------------------------------------------------- #
 
 
+OpeningStyleLiteral = Literal["brief", "standard", "comfort"]
+
+
+class PersonaProfileWrite(BaseModel):
+    """Optional per-trait persona overrides on a config (Phase 3).
+
+    Every field is optional so a teacher can nudge one dial (e.g. warmth) and
+    leave the rest to the ``persona`` preset. Traits are 0-4; the service merges
+    this over the preset and clamps, so an out-of-range or partial payload is
+    still safe. TONE ONLY — these never reach difficulty, selection, or scoring.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    warmth: int | None = Field(default=None, ge=0, le=4)
+    directness: int | None = Field(default=None, ge=0, le=4)
+    verbosity: int | None = Field(default=None, ge=0, le=4)
+    formality: int | None = Field(default=None, ge=0, le=4)
+    ack_frequency: int | None = Field(default=None, ge=0, le=4)
+    opening_style: OpeningStyleLiteral | None = None
+
+
+class PersonaProfileRead(BaseModel):
+    """The RESOLVED persona profile (preset merged with any overrides).
+
+    Teacher-only projection: what tone the interviewer will actually use. Never
+    exposed on a learner-facing schema (same rule as importance_weight), because
+    it reveals nothing a candidate needs and keeping it teacher-side avoids any
+    perception that tone affects grading.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    key: str
+    warmth: int
+    directness: int
+    verbosity: int
+    formality: int
+    ack_frequency: int
+    opening_style: OpeningStyleLiteral
+
+
 class InterviewConfigCreate(BaseModel):
     """Body for ``POST /teacher/interviews``."""
 
@@ -116,6 +158,8 @@ class InterviewConfigCreate(BaseModel):
     course_id: UUID
     module_id: UUID
     persona: PersonaLiteral | None = None
+    # Optional per-trait overrides layered on the persona preset (Phase 3).
+    persona_profile: PersonaProfileWrite | None = None
     supported_modes: SupportedModesLiteral = "hybrid"
     tts_voice: TtsVoiceLiteral | None = None
     time_limit_minutes: int | None = Field(default=None, ge=1)
@@ -143,6 +187,10 @@ class InterviewConfigUpdate(BaseModel):
 
     title: str | None = Field(default=None, max_length=255)
     persona: PersonaLiteral | None = None
+    # Optional per-trait overrides layered on the persona preset (Phase 3).
+    # NOTE: send an explicit empty object {} would clear nothing here; the
+    # router treats None as "unchanged" and a present object as "replace".
+    persona_profile: PersonaProfileWrite | None = None
     supported_modes: SupportedModesLiteral | None = None
     tts_voice: TtsVoiceLiteral | None = None
     time_limit_minutes: int | None = Field(default=None, ge=1)
@@ -170,6 +218,9 @@ class InterviewConfigAuthoring(InterviewConfigPublic):
 
     status: ConfigStatusLiteral  # type: ignore[assignment]
     supplementary_instructions: str | None = None
+    # Resolved persona profile (preset merged with persona_profile_json
+    # overrides) — teacher-only tone projection, never on a learner schema.
+    persona_profile_resolved: PersonaProfileRead | None = None
     tts_voice: TtsVoiceLiteral | None = None
     min_outcomes_to_pass: int | None = None
     security_response_policy: SecurityResponsePolicyLiteral = "warn_and_continue"
@@ -220,6 +271,23 @@ class InterviewConfigAuthoring(InterviewConfigPublic):
             )
         if getattr(data, "draft_question_count", None) is None:
             data.draft_question_count = sum(1 for q in questions if q.deleted_at is None)
+        # Resolve the effective persona profile (preset + any per-trait
+        # overrides) for the teacher projection. Best-effort: a bad override can
+        # never raise (profile_from_config is defensive) and a failure here just
+        # leaves the field None rather than 500-ing the authoring GET.
+        if getattr(data, "persona_profile_resolved", None) is None:
+            try:
+                from abridgeai.features.interviews.orchestrator.persona import (  # noqa: PLC0415
+                    profile_from_config,
+                )
+
+                resolved = profile_from_config(
+                    getattr(data, "persona", None),
+                    getattr(data, "persona_profile_json", None),
+                ).clamped()
+                data.persona_profile_resolved = resolved.as_prompt_traits()
+            except Exception:  # noqa: BLE001 — projection is best-effort
+                pass
         return data
 
 

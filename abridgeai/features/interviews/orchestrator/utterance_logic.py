@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING
 
 from abridgeai.ai.llm import LLMGateway, LLMRole
 from abridgeai.ai.prompts import render_prompt
-from abridgeai.features.interviews.orchestrator.persona import profile_from
+from abridgeai.features.interviews.orchestrator.persona import PersonaProfile, profile_from
 from abridgeai.features.interviews.orchestrator.utterance import (
     Persona,
     Utterance,
@@ -52,6 +52,7 @@ async def generate_utterance(
     persona: Persona,
     language: str | None,
     question_text: str | None = None,
+    persona_profile: object | None = None,
     use_llm: bool = True,
     affect: object | None = None,
     hint_level: int = 0,
@@ -92,7 +93,13 @@ async def generate_utterance(
         # forbids the model from changing difficulty, fairness, or the verbatim
         # question. A fourth/custom persona flows through here with no code
         # change: it is just a different set of trait numbers.
-        profile = profile_from(persona.value).clamped()
+        # A resolved override profile (teacher per-trait tuning, Phase 3) takes
+        # precedence; otherwise resolve the preset from the persona label. Both
+        # are clamped so an override can never push a trait out of range.
+        if isinstance(persona_profile, PersonaProfile):
+            profile = persona_profile.clamped()
+        else:
+            profile = profile_from(persona.value).clamped()
         user_prompt = json.dumps(
             {
                 "persona": persona.value,

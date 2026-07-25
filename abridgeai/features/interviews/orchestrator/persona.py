@@ -161,11 +161,66 @@ def profile_from(value: str | None) -> PersonaProfile:
     return PRESETS.get(key, PRESETS[_DEFAULT_KEY])
 
 
+# The trait fields that a teacher override may set. ``key`` and the legacy
+# label are NOT overridable here — the preset (via ``persona``) always decides
+# which deterministic fallback tables key on, so an override can only reshape
+# the LLM tone dials, never the scoring-adjacent selector.
+_OVERRIDABLE_TRAITS = ("warmth", "directness", "verbosity", "formality", "ack_frequency")
+
+
+def profile_from_config(
+    persona: str | None,
+    persona_profile_json: dict | None = None,
+) -> PersonaProfile:
+    """Resolve the effective persona profile for an interview config (Phase 3).
+
+    Resolution order:
+
+    1. ``persona_profile_json`` present → the ``persona`` preset merged with the
+       overrides. Only the known trait keys are read (unknown keys ignored), each
+       value must be int-coercible or it is skipped, and every result is clamped
+       to ``[TRAIT_MIN, TRAIT_MAX]``. ``opening_style`` may also be overridden
+       with a valid :class:`OpeningStyle` value; anything else is ignored.
+    2. ``persona`` only → the preset (:func:`profile_from`).
+    3. neither → the neutral preset.
+
+    The merge is defensive by construction: a malformed override can never raise
+    and never produce an out-of-range trait — worst case it is ignored and the
+    preset value stands. Persona is tone-only, so a bad override degrades to
+    "slightly different tone", never to a scoring or fairness change.
+    """
+    base = profile_from(persona)
+    if not isinstance(persona_profile_json, dict) or not persona_profile_json:
+        return base
+
+    updates: dict[str, object] = {}
+    for trait in _OVERRIDABLE_TRAITS:
+        if trait not in persona_profile_json:
+            continue
+        raw = persona_profile_json[trait]
+        try:
+            updates[trait] = _clamp(int(raw))
+        except (TypeError, ValueError):
+            continue  # non-numeric override → keep the preset value
+
+    raw_opening = persona_profile_json.get("opening_style")
+    if raw_opening is not None:
+        try:
+            updates["opening_style"] = OpeningStyle(raw_opening)
+        except ValueError:
+            pass  # unknown opening style → keep the preset value
+
+    if not updates:
+        return base
+    return replace(base, **updates)
+
+
 __all__ = [
     "TRAIT_MIN",
     "TRAIT_MAX",
     "OpeningStyle",
     "PersonaProfile",
     "PRESETS",
+    "profile_from_config",
     "profile_from",
 ]

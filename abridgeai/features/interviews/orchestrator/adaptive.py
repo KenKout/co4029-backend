@@ -403,6 +403,17 @@ async def run_adaptive_turn(
 
     # 6. Natural utterance (LLM phrasing + deterministic fallback).
     persona = persona_from(config.persona)
+    # Resolve any teacher per-trait overrides (Phase 3) layered on the preset,
+    # so the phrasing LLM speaks in the tuned tone. TONE ONLY — the persona enum
+    # above still keys the deterministic fallback tables and the decision path.
+    from abridgeai.features.interviews.orchestrator.persona import (  # noqa: PLC0415
+        profile_from_config,
+    )
+
+    resolved_persona_profile = profile_from_config(
+        config.persona,
+        getattr(config, "persona_profile_json", None),
+    )
     probe_or_question_text = (
         selected_orm.prompt_text
         if selected_orm is not None
@@ -427,6 +438,7 @@ async def run_adaptive_turn(
         persona=persona,
         language=language,
         question_text=probe_or_question_text,
+        persona_profile=resolved_persona_profile,
         use_llm=use_llm,
         affect=affect,
         hint_level=hint_level,

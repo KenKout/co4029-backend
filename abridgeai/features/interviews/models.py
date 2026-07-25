@@ -248,6 +248,13 @@ class InterviewConfig(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftD
     )
     time_limit_minutes: Mapped[int | None] = mapped_column(Integer)
     persona: Mapped[str | None] = mapped_column(String(20))
+    # Optional per-trait persona overrides (Phase 3). NULL = use the ``persona``
+    # preset as-is. When present, it is a partial dict of the PersonaProfile
+    # traits (warmth/directness/verbosity/formality/ack_frequency + optional
+    # opening_style) merged over the preset in ``profile_from``; unknown keys are
+    # ignored and values clamped to [0,4]. ``persona`` stays the preset selector,
+    # so this is purely additive tone-shaping and never reaches scoring.
+    persona_profile_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     # TTS voice for English narration/voice sessions: a Deepgram Aura-2 model id
     # (one voice per model, e.g. 'aura-2-thalia-en'). NULL = the deployment
     # default (settings.deepgram_tts_model_en). Vietnamese has no server TTS, so

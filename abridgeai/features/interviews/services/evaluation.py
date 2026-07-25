@@ -50,7 +50,7 @@ from abridgeai.features.interviews.ai.stages.persona_adherence import (
 from abridgeai.features.interviews.ai.stages.persona_adherence.parsers import (
     PersonaAdherence,
 )
-from abridgeai.features.interviews.orchestrator.persona import profile_from
+from abridgeai.features.interviews.orchestrator.persona import profile_from_config
 from abridgeai.features.interviews.models import (
     GapReport,
     InterviewOutcomeEvaluation,
@@ -226,7 +226,10 @@ async def evaluate_and_generate_report(
         transcript = await sessions_queries.list_session_messages(db, session_id)
         persona_adherence = await audit_persona_adherence(
             db,
-            persona=profile_from(getattr(config, "persona", None)),
+            persona=profile_from_config(
+                getattr(config, "persona", None),
+                getattr(config, "persona_profile_json", None),
+            ),
             messages=transcript,
             pipeline_run_id=eval_run_id,
         )
