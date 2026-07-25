@@ -243,6 +243,88 @@ async def test_uses_config_criteria_when_present() -> None:
 
 
 @pytest.mark.asyncio
+async def test_uses_rubric_definition_and_sends_descriptions_to_judge() -> None:
+    """The teacher-authored rubric (the path the service actually uses) wins.
+
+    Locks in the fix: the real caller passes ``rubric=`` (a RubricDefinition),
+    NOT ``config=``. This asserts the criteria come from the definition, the
+    weighted total honours its weights, and — critically — each criterion's
+    description reaches the judge's user prompt so the LLM grades against the
+    teacher's meaning rather than guessing from a bare key.
+    """
+    from abridgeai.features.interviews.ai.stages.evaluation.rubric import (
+        RubricDefinition,
+    )
+
+    session = _make_session()
+    q1 = uuid4()
+    questions = [_make_question(q1)]
+    answers = [_make_answer(q1, "Reasoned response.")]
+
+    rubric = RubricDefinition(
+        weights={"depth": 0.75, "clarity": 0.25},
+        descriptions={"depth": "Cites concrete trade-offs, not definitions."},
+    )
+    payload = _llm_payload({"depth": 4, "clarity": 2})
+    gateway = _gateway_returning([payload])
+
+    result = await evaluate_session(
+        AsyncMock(),
+        session=session,
+        outcomes=[],
+        questions=questions,
+        answers=answers,
+        rubric=rubric,
+        pipeline_run_id=uuid4(),
+        gateway=gateway,
+    )
+
+    assert set(result.aggregated.keys()) == {"depth", "clarity"}
+    expected = (4 * 0.75 + 2 * 0.25) * (100.0 / 5.0)
+    assert result.total_score == pytest.approx(expected, abs=0.05)
+
+    # The description must be embedded in the criteria payload sent to the judge.
+    sent_user_prompt = gateway.generate_json.await_args.kwargs["user_prompt"]
+    assert "Cites concrete trade-offs" in sent_user_prompt
+    # And it is attached to the right criterion, as a structured object.
+    sent = json.loads(sent_user_prompt)
+    depth_entry = next(c for c in sent["rubric_criteria"] if c["name"] == "depth")
+    assert depth_entry["description"] == "Cites concrete trade-offs, not definitions."
+    clarity_entry = next(c for c in sent["rubric_criteria"] if c["name"] == "clarity")
+    assert "description" not in clarity_entry
+
+
+@pytest.mark.asyncio
+async def test_rubric_definition_takes_precedence_over_config() -> None:
+    """When both are passed, ``rubric=`` wins over the legacy ``config=``."""
+    from abridgeai.features.interviews.ai.stages.evaluation.rubric import (
+        RubricDefinition,
+    )
+
+    session = _make_session()
+    q1 = uuid4()
+    questions = [_make_question(q1)]
+    answers = [_make_answer(q1, "Answer.")]
+
+    rubric = RubricDefinition(weights={"depth": 1.0}, descriptions={})
+    gateway = _gateway_returning([_llm_payload({"depth": 5})])
+
+    result = await evaluate_session(
+        AsyncMock(),
+        session=session,
+        outcomes=[],
+        questions=questions,
+        answers=answers,
+        rubric=rubric,
+        config={"rubric_weights": {"clarity": 1.0}},
+        pipeline_run_id=uuid4(),
+        gateway=gateway,
+    )
+
+    assert set(result.aggregated.keys()) == {"depth"}
+
+
+@pytest.mark.asyncio
 async def test_falls_back_to_default_4_criterion_equal_weight() -> None:
     weights = resolve_rubric(None)
     assert tuple(weights.keys()) == DEFAULT_CRITERIA
