@@ -700,7 +700,7 @@ async def save_curated_knowledge_graph(
     published student view — publishing is a separate action.
     """
     result = await authoring_service.save_draft(
-        db, lesson_id, payload, actor_id=current_user.id
+        db, lesson_id, payload, actor_id=current_user.user_id
     )
     await db.commit()
     return result
@@ -722,7 +722,7 @@ async def publish_curated_knowledge_graph(
     """
     try:
         result = await authoring_service.publish(
-            db, lesson_id, actor_id=current_user.id
+            db, lesson_id, actor_id=current_user.user_id
         )
     except authoring_service.CuratedKGEmptyError as exc:
         raise HTTPException(

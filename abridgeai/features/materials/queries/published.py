@@ -27,7 +27,24 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from abridgeai.features.materials.models import (
     LearningMaterial,
     LearningMaterialVersion,
+    LessonKnowledgeGraphCurated,
 )
+
+
+async def get_published_curated_kg(
+    db: AsyncSession, lesson_id: UUID
+) -> LessonKnowledgeGraphCurated | None:
+    """Return the curated KG row for a lesson IF it has a published snapshot.
+
+    Returns ``None`` when no curated graph exists or it has never been
+    published (``published_json IS NULL``) — the learner UI then hides the
+    knowledge-map panel. Soft-delete is filtered by the global listener.
+    """
+    stmt = select(LessonKnowledgeGraphCurated).where(
+        LessonKnowledgeGraphCurated.lesson_id == lesson_id,
+        LessonKnowledgeGraphCurated.published_json.isnot(None),
+    )
+    return (await db.execute(stmt)).scalar_one_or_none()
 
 
 async def list_visible_materials(db: AsyncSession, lesson_id: UUID) -> list[LearningMaterial]:

@@ -35,7 +35,15 @@ from abridgeai.features.materials.queries.chunks import (
     get_stream_target_for_material,
     list_chunks_preview,
 )
-from abridgeai.features.materials.queries.published import get_visible_material
+from abridgeai.features.materials.queries.published import (
+    get_published_curated_kg,
+    get_visible_material,
+)
+from abridgeai.features.materials.schemas.curated_kg import (
+    CuratedKGEdge,
+    CuratedKGNode,
+    CuratedKGPublished,
+)
 from abridgeai.features.materials.schemas.public import (
     MaterialPublic,
     MaterialStreamUrl,
@@ -152,8 +160,50 @@ async def list_visible_chunks_preview(
     return [ChunkPreview.model_validate(chunk) for chunk in chunks]
 
 
+async def get_published_kg_for_learner(
+    db: AsyncSession, lesson_id: UUID
+) -> CuratedKGPublished:
+    """Return the teacher-published curated KG for a lesson's reading view.
+
+    Returns ``published=False`` with empty lists when the teacher has never
+    published a knowledge graph for the lesson, so the student UI hides the
+    knowledge-map panel. Reads the published snapshot only — the teacher's
+    unpublished draft is never exposed to learners.
+    """
+    row = await get_published_curated_kg(db, lesson_id)
+    if row is None or row.published_json is None:
+        return CuratedKGPublished(lesson_id=lesson_id, published=False)
+
+    payload = row.published_json or {}
+    nodes: list[CuratedKGNode] = []
+    for raw in payload.get("nodes", []) or []:
+        try:
+            nodes.append(CuratedKGNode.model_validate(raw))
+        except Exception:  # noqa: BLE001 -- skip an unparseable node, keep the rest
+            continue
+    node_ids = {n.id for n in nodes}
+    edges: list[CuratedKGEdge] = []
+    for raw in payload.get("edges", []) or []:
+        try:
+            edge = CuratedKGEdge.model_validate(raw)
+        except Exception:  # noqa: BLE001
+            continue
+        if edge.source in node_ids and edge.target in node_ids:
+            edges.append(edge)
+
+    return CuratedKGPublished(
+        lesson_id=lesson_id,
+        published=True,
+        nodes=nodes,
+        edges=edges,
+        primary_node_id=row.published_primary_node_id,
+        published_at=row.published_at,
+    )
+
+
 __all__ = [
     "ChunkPreview",
+    "get_published_kg_for_learner",
     "get_stream_url_for_material",
     "get_visible_material_for_user",
     "list_visible_chunks_preview",

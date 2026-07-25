@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from abridgeai.core.db import get_db
 from abridgeai.core.security import CurrentUser, get_current_user
+from abridgeai.features.materials.schemas.curated_kg import CuratedKGPublished
 from abridgeai.features.materials.schemas.public import (
     MaterialPublic,
     MaterialStreamUrl,
@@ -134,6 +135,26 @@ async def get_material_chunks_preview(
     if chunks is None:
         raise _not_found(material_id)
     return chunks
+
+
+@router.get(
+    "/lessons/{lesson_id}/knowledge-graph",
+    response_model=CuratedKGPublished,
+)
+async def get_lesson_published_kg(
+    lesson_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> CuratedKGPublished:
+    """Teacher-published knowledge map for a lesson's reading view.
+
+    Returns ``published=False`` with empty lists when the teacher has never
+    published a graph (the SPA then hides the knowledge-map panel), so this
+    endpoint never 404s on an un-published lesson. Gated by the same
+    lesson-unlock check as the other learner material reads (FR-4.5).
+    """
+    await _ensure_owning_lesson_unlocked(db, current_user, lesson_id)
+    return await catalog_service.get_published_kg_for_learner(db, lesson_id)
 
 
 __all__ = ["router"]
