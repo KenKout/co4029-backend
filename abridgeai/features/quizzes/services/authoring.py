@@ -145,19 +145,62 @@ async def _require_question(db: AsyncSession, question_id: UUID) -> QuizQuestion
     return question
 
 
-def _assert_quiz_editable(quiz: Quiz) -> None:
-    """Reject authoring edits on a published quiz.
+# Settings that stay editable on a PUBLISHED quiz because changing them can't
+# corrupt or interrupt a student who is taking the quiz (or who already
+# finished): pure display copy, notification behaviour, and the scheduling
+# window (extend a deadline, open later). Everything NOT in this set —
+# scoring, timing, attempt limits, shuffle, mastery/SM-2 params, proctoring,
+# and the post-attempt review matrix — is frozen once published, since it
+# would change grading/presentation under live or completed attempts. A
+# whitelist (not a blacklist) is deliberate: any column added later is frozen
+# by default until someone explicitly vets it as student-safe.
+_PUBLISHED_EDITABLE_FIELDS = frozenset(
+    {
+        "title",
+        "description",
+        "available_from",
+        "available_until",
+        "due_at",
+        "reminders_enabled",
+    }
+)
 
-    Once a quiz is published, students can see and attempt it, so its
-    content and settings are frozen — editing questions/options/settings
-    under live attempts would corrupt grading and scoring. Callers must
-    archive (unpublish) the quiz first if they need to change it. Raised
-    as :class:`ConflictError` so the router maps to HTTP 409.
+
+def _assert_quiz_editable(quiz: Quiz) -> None:
+    """Reject ALL authoring edits on a published quiz (content paths).
+
+    Used by the question CRUD + bulk-approve paths: a published quiz's
+    questions/options are fully frozen, since students can already see and
+    attempt them and editing would corrupt grading. Raised as
+    :class:`ConflictError` so the router maps to HTTP 409. Quiz-settings
+    edits use the field-aware :func:`_assert_quiz_settings_editable` instead.
     """
     if quiz.status == "published":
         raise ConflictError(
-            "quiz_published_readonly: a published quiz cannot be edited; "
-            "archive it first to make changes"
+            "quiz_published_readonly: a published quiz's questions cannot be "
+            "edited; archive it first to make changes"
+        )
+
+
+def _assert_quiz_settings_editable(quiz: Quiz, changed_fields: set[str]) -> None:
+    """Field-aware freeze for quiz-settings PATCH on a published quiz.
+
+    Student-safe settings (see :data:`_PUBLISHED_EDITABLE_FIELDS`) stay
+    editable so teachers can still rename, tweak reminders, or extend the
+    schedule window on a live quiz. Touching any other setting — anything
+    that would change scoring/timing/attempts/presentation under a student
+    who is taking or has finished the quiz — is rejected with HTTP 409.
+    Draft quizzes are unrestricted.
+    """
+    if quiz.status != "published":
+        return
+    frozen = changed_fields - _PUBLISHED_EDITABLE_FIELDS
+    if frozen:
+        raise ConflictError(
+            "quiz_published_setting_locked: these settings are frozen on a "
+            "published quiz and would affect students mid-attempt or after "
+            f"finishing: {', '.join(sorted(frozen))}. Archive the quiz first "
+            "to change them."
         )
 
 
@@ -380,7 +423,11 @@ async def update_quiz(
 ) -> Quiz:
     del actor
     quiz = await _require_quiz(db, quiz_id)
-    _assert_quiz_editable(quiz)
+    # Field-aware freeze: on a published quiz only student-safe settings may
+    # change (title/description/schedule/reminders); everything else is locked
+    # so a student mid-attempt (or one who already finished) isn't disrupted.
+    changed_fields = set(payload.model_dump(exclude_unset=True).keys())
+    _assert_quiz_settings_editable(quiz, changed_fields)
     _apply_patch(quiz, payload)
     await flush_or_conflict(db)
     await db.refresh(quiz)
