@@ -66,11 +66,14 @@ class _RunState:
     id: UUID
     course_id: UUID | None
     config_json: dict[str, Any]
+    requested_by: UUID | None = None
 
 
 async def run_interview_generation(
     db: AsyncSession,
     generation_run_id: UUID,
+    *,
+    arq_pool: object | None = None,
 ) -> None:
     """Drive retrieval → generation (with backfill) → validation → persistence.
 
@@ -83,6 +86,14 @@ async def run_interview_generation(
     ``status='failed'`` + the failure message, commits, and re-raises so
     the ARQ retry budget engages.
     """
+    # Lazy import to avoid a circular import at module load: this pipeline is
+    # imported by ``services/__init__`` (via services.generation), and
+    # completion_notify lives under services — importing it at top level here
+    # would form services → pipeline → services during package init.
+    from abridgeai.features.interviews.services.completion_notify import (  # noqa: PLC0415
+        notify_interview_generation_outcome,
+    )
+
     run_dto = await quizzes_public.get_generation_run(db, generation_run_id)
     if run_dto is None:
         raise NotFoundError("Generation run not found")
@@ -90,6 +101,7 @@ async def run_interview_generation(
         id=run_dto.id,
         course_id=run_dto.course_id,
         config_json=dict(run_dto.config_json or {}),
+        requested_by=run_dto.requested_by,
     )
 
     config_id = _config_uuid(state.config_json, "interview_config_id")
@@ -184,6 +196,18 @@ async def run_interview_generation(
             config_json=state.config_json,
         )
         await db.commit()
+        # Notify the initiating teacher (best-effort; rides its own commit and
+        # never disturbs the generation transaction above).
+        await notify_interview_generation_outcome(
+            db,
+            recipient_user_id=state.requested_by,
+            course_id=state.course_id,
+            config_id=config.id,
+            interview_title=config.title,
+            succeeded=True,
+            arq_pool=arq_pool,
+        )
+        await db.commit()
     except Exception as exc:
         await db.rollback()
         fresh = await quizzes_public.get_generation_run(db, generation_run_id)
@@ -198,6 +222,18 @@ async def run_interview_generation(
             status="failed",
             finished_at=utcnow(),
             config_json=failure_config,
+        )
+        await db.commit()
+        # Notify the initiating teacher of the failure (best-effort).
+        await notify_interview_generation_outcome(
+            db,
+            recipient_user_id=state.requested_by,
+            course_id=state.course_id,
+            config_id=config.id,
+            interview_title=config.title,
+            succeeded=False,
+            error_message=str(exc),
+            arq_pool=arq_pool,
         )
         await db.commit()
         raise
