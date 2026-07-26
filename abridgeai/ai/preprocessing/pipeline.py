@@ -82,6 +82,8 @@ class PreprocessConfig:
     # Advisory threshold: exceeding it logs, it does not truncate. See
     # :func:`_run_ocr`.
     ocr_max_pages: int = 30
+    figure_page_max_words: int = 20
+    figure_area_min: float = 0.12
     llm_adjudication: bool = False
     llm_min_confidence: float = 0.8
 
@@ -187,7 +189,11 @@ def _run_deterministic_tiers(
 
     if config.blankness:
         for unit in units:
-            classify_emptiness(unit)
+            classify_emptiness(
+                unit,
+                figure_page_max_words=config.figure_page_max_words,
+                figure_area_min=config.figure_area_min,
+            )
 
     if config.running_marks:
         report.lines_stripped = strip_running_marks(units)
@@ -198,7 +204,11 @@ def _run_deterministic_tiers(
         # near-empty threshold and never reach the OCR tier. Now that the
         # boilerplate is gone the page reads as what it is: image-only.
         for unit in units:
-            classify_emptiness(unit)
+            classify_emptiness(
+                unit,
+                figure_page_max_words=config.figure_page_max_words,
+                figure_area_min=config.figure_area_min,
+            )
 
     is_deck = False
     if config.deck_detection and content.source_type in PAGED_SOURCE_TYPES:

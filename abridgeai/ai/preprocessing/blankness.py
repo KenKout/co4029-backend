@@ -64,8 +64,18 @@ _FIGURE_AREA_MIN = 0.12
 _VECTOR_FIGURE_MIN = 8
 
 
-def classify_emptiness(unit: PageUnit) -> None:
+def classify_emptiness(
+    unit: PageUnit,
+    *,
+    figure_page_max_words: int = _FIGURE_PAGE_MAX_WORDS,
+    figure_area_min: float = _FIGURE_AREA_MIN,
+) -> None:
     """Apply the ordered emptiness decision to ``unit`` in place.
+
+    The rule-2b thresholds are parameters rather than constants because they
+    are the ones that vary by corpus: a slide deck and a scanned textbook
+    disagree about how much text a figure page carries. Defaults preserve the
+    module constants, so callers that do not care are unaffected.
 
     Pages without ``facts`` (non-PDF sources: docx, html, transcripts) fall
     back to a text-only check — they have no geometry, and for those formats
@@ -152,8 +162,8 @@ def classify_emptiness(unit: PageUnit) -> None:
     #     bullet glyph sits near 1-2% of the page, a real figure at 12%+. Body
     #     slides are excluded by the word gate (a genuine bullet slide runs
     #     25+ words), so this only ever fires on pages whose text is a title.
-    if word_count < _FIGURE_PAGE_MAX_WORDS and (
-        facts.image_area_ratio >= _FIGURE_AREA_MIN
+    if word_count < figure_page_max_words and (
+        facts.image_area_ratio >= figure_area_min
         or facts.vector_count >= _VECTOR_FIGURE_MIN
     ):
         unit.needs_ocr = True

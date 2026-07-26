@@ -192,6 +192,7 @@ def config_from_settings(
     settings: Settings,
     *,
     mode: str = "full",
+    runtime: dict[str, bool | int | float] | None = None,
 ) -> PreprocessConfig:
     """Build the cascade config, honouring the per-material escape hatch.
 
@@ -218,14 +219,24 @@ def config_from_settings(
             ocr_enabled=False,
             llm_adjudication=False,
         )
+    # Admin-tunable knobs come from ``runtime`` (org row -> global row -> env
+    # -> default) and outrank the process-wide env Settings; the rest have no
+    # registry entry and stay on env alone.
+    runtime = runtime or {}
     return PreprocessConfig(
         enabled=settings.preprocess_enabled,
         dehyphenation=settings.preprocess_dehyphenation,
         running_marks=settings.preprocess_running_marks,
         page_roles=settings.preprocess_page_roles,
         deck_detection=settings.preprocess_deck_detection,
-        ocr_enabled=settings.preprocess_ocr_enabled,
-        ocr_max_pages=settings.preprocess_ocr_max_pages,
+        ocr_enabled=bool(
+            runtime.get("preprocess.ocr_enabled", settings.preprocess_ocr_enabled)
+        ),
+        ocr_max_pages=int(
+            runtime.get("preprocess.ocr_advisory_max_pages", settings.preprocess_ocr_max_pages)
+        ),
+        figure_page_max_words=int(runtime.get("preprocess.figure_page_max_words", 20)),
+        figure_area_min=float(runtime.get("preprocess.figure_area_min", 0.12)),
         llm_adjudication=settings.preprocess_llm_adjudication,
         llm_min_confidence=settings.preprocess_llm_min_confidence,
     )
@@ -243,6 +254,7 @@ async def run_preprocess_stage(
     material_version_id: UUID | None = None,
     course_id: UUID | None = None,
     mode: str = "full",
+    runtime: dict[str, bool | int | float] | None = None,
 ) -> tuple[ExtractedContent, PreprocessReport | None]:
     """Run the preprocessing cascade over freshly extracted content.
 
@@ -250,7 +262,7 @@ async def run_preprocess_stage(
     returned unchanged — preprocessing is a quality improvement, never a
     correctness dependency, so it must not be able to fail an ingest.
     """
-    config = config_from_settings(settings, mode=mode)
+    config = config_from_settings(settings, mode=mode, runtime=runtime)
     if not config.enabled:
         return extracted, None
 
@@ -267,7 +279,7 @@ async def run_preprocess_stage(
             source_path=source_path,
             db=db,
             gateway=llm_gateway,
-            dpi=settings.preprocess_ocr_dpi,
+            dpi=int((runtime or {}).get("preprocess.ocr_dpi", settings.preprocess_ocr_dpi)),
             pipeline_run_id=pipeline_run_id,
             parent_job_id=parent_job_id,
         )

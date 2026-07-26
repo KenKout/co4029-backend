@@ -71,6 +71,7 @@ from abridgeai.ai.models import ProcessingJob
 from abridgeai.ai.preprocessing.dedup import link_semantic_duplicates
 from abridgeai.core.config import get_settings
 from abridgeai.core.db import get_sessionmaker
+from abridgeai.core.runtime_settings import resolve_settings
 from abridgeai.features.materials.ingestion.preprocess import run_preprocess_stage
 from abridgeai.features.materials.ingestion.progress import clear_progress, publish_progress
 from abridgeai.features.materials.models import (
@@ -275,7 +276,16 @@ async def _run_chunking(
     pipeline_run_id: UUID,
     parent_job_id: UUID,
     document_title: str,
+    settings: dict[str, bool | int | float],
 ) -> list[RawChunk]:
+    """Chunk ``extracted`` using this organization's resolved settings.
+
+    ``settings`` is resolved by the caller rather than here so ``ai/chunking``
+    stays free of any settings lookup: the chunker takes plain kwargs, and the
+    feature layer decides what they are. That keeps the import-linter contract
+    (``ai`` must not reach into ``features``) intact and leaves the chunker
+    unit-testable without a database.
+    """
     source_type = extracted.source_type
     if source_type in _TIMESTAMP_SOURCES:
         return TimestampAwareChunker().chunk(extracted)
@@ -298,6 +308,14 @@ async def _run_chunking(
             db=db,
             cache=cache,
             document_title=document_title,
+            max_tokens=int(settings["chunking.max_tokens"]),
+            overlap_tokens=int(settings["chunking.overlap_tokens"]),
+            glue_threshold=float(settings["chunking.glue_threshold"]),
+            max_window_tokens=int(settings["chunking.max_window_tokens"]),
+            min_window_tokens=int(settings["chunking.min_window_tokens"]),
+            parallelism=int(settings["chunking.parallelism"]),
+            llm_boundary=bool(settings["chunking.llm_boundary_enabled"]),
+            llm_enrichment=bool(settings["chunking.llm_enrichment_enabled"]),
             pipeline_run_id=pipeline_run_id,
             parent_job_id=parent_job_id,
             session_factory=get_sessionmaker(),
@@ -534,6 +552,9 @@ async def _run_stages(
         await publish_progress(
             ctx.version.id, status="extracting", percent=20, stage_label=stage_label
         )
+        # Resolved once per document: org row -> global row -> env -> default.
+        runtime_settings = await resolve_settings(db, ctx.organization_id)
+
         extracted, _preprocess_report = await run_preprocess_stage(
             extracted,
             db=db,
@@ -545,6 +566,7 @@ async def _run_stages(
             material_version_id=ctx.version.id,
             course_id=ctx.course_id,
             mode=getattr(ctx.material, "preprocess_mode", "full") or "full",
+            runtime=runtime_settings,
         )
 
         stage_label = "chunking"
@@ -562,6 +584,7 @@ async def _run_stages(
             pipeline_run_id=pipeline_run_id,
             parent_job_id=job.id,
             document_title=ctx.material.title,
+            settings=runtime_settings,
         )
 
         stage_label = "embedding"
