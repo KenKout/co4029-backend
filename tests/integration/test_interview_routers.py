@@ -1865,3 +1865,152 @@ async def test_adaptive_readiness_reports_advisory_warnings_and_never_blocks(
     assert "questions_missing_difficulty" in codes
     # Rollout status is present for all three modes.
     assert set(body["rollout"]) == {"text", "hybrid", "voice"}
+
+
+# ── question-bank duplicate check (T#3) ─────────────────────────────────────
+
+
+async def _create_interview_config(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    scenario: dict[str, uuid.UUID],
+    title: str,
+) -> str:
+    resp = await client.post(
+        f"/api/v1/teacher/courses/{scenario['course_id']}/interview-configs",
+        json={
+            "title": title,
+            "course_id": str(scenario["course_id"]),
+            "module_id": str(scenario["module_id"]),
+            "supported_modes": "text",
+        },
+        headers=_auth(admin_bearer),
+    )
+    assert resp.status_code == 201, resp.text
+    return resp.json()["id"]
+
+
+async def test_check_duplicate_route_is_not_shadowed_by_question_id(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    scenario: dict[str, uuid.UUID],
+) -> None:
+    """``/questions/check-duplicate`` must resolve as a literal, not as {question_id}.
+
+    Declared after the {question_id} routes it would be swallowed as a UUID path
+    param and 422 on a path that looks entirely correct — a failure no unit test
+    can see.
+    """
+    config_id = await _create_interview_config(
+        client, admin_bearer, scenario, "Dedup Route"
+    )
+
+    resp = await client.post(
+        f"/api/v1/teacher/interview-configs/{config_id}/questions/check-duplicate",
+        json={"prompt_text": "What is a database index?"},
+        headers=_auth(admin_bearer),
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert set(resp.json()) == {
+        "enabled",
+        "is_duplicate",
+        "duplicate_of_id",
+        "duplicate_of_text",
+        "rationale",
+        "error",
+    }
+
+
+async def test_dedup_flag_off_reports_disabled_not_unique(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    scenario: dict[str, uuid.UUID],
+) -> None:
+    """With the flag off, say so — do not imply the question was verified unique."""
+    config_id = await _create_interview_config(
+        client, admin_bearer, scenario, "Dedup Off"
+    )
+
+    resp = await client.post(
+        f"/api/v1/teacher/interview-configs/{config_id}/questions/check-duplicate",
+        json={"prompt_text": "Explain normalisation."},
+        headers=_auth(admin_bearer),
+    )
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["enabled"] is False
+    assert body["is_duplicate"] is False
+    assert body["duplicate_of_id"] is None
+
+
+async def test_check_duplicate_unknown_config_is_404(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+) -> None:
+    resp = await client.post(
+        f"/api/v1/teacher/interview-configs/{uuid.uuid4()}/questions/check-duplicate",
+        json={"prompt_text": "Anything?"},
+        headers=_auth(admin_bearer),
+    )
+    assert resp.status_code == 404, resp.text
+
+
+async def test_check_duplicate_rejects_unknown_fields(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    scenario: dict[str, uuid.UUID],
+) -> None:
+    """extra='forbid': a mistyped field must fail loudly, not be ignored."""
+    config_id = await _create_interview_config(
+        client, admin_bearer, scenario, "Dedup Strict"
+    )
+
+    resp = await client.post(
+        f"/api/v1/teacher/interview-configs/{config_id}/questions/check-duplicate",
+        json={"prompt_text": "Q?", "promptText": "typo"},
+        headers=_auth(admin_bearer),
+    )
+    assert resp.status_code == 422, resp.text
+
+
+async def test_authoring_unaffected_when_dedup_disabled(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    scenario: dict[str, uuid.UUID],
+) -> None:
+    """The embedding hooks sit in create/update; with the flag off they are no-ops.
+
+    This is the regression that matters most: duplicate detection is an add-on and
+    must not alter the normal authoring path when nobody enabled it.
+    """
+    config_id = await _create_interview_config(
+        client, admin_bearer, scenario, "Dedup Create"
+    )
+
+    created = await client.post(
+        f"/api/v1/teacher/interview-configs/{config_id}/questions",
+        json={"prompt_text": "Original text?", "question_type": "conceptual"},
+        headers=_auth(admin_bearer),
+    )
+    assert created.status_code == 201, created.text
+    question_id = created.json()["id"]
+
+    # prompt_text change -> the re-embed branch (no-op while disabled).
+    changed = await client.patch(
+        f"/api/v1/teacher/interview-configs/{config_id}/questions/{question_id}",
+        json={"prompt_text": "Rewritten text?"},
+        headers=_auth(admin_bearer),
+    )
+    assert changed.status_code == 200, changed.text
+    assert changed.json()["prompt_text"] == "Rewritten text?"
+
+    # non-text change -> must skip re-embedding even once enabled.
+    other = await client.patch(
+        f"/api/v1/teacher/interview-configs/{config_id}/questions/{question_id}",
+        json={"difficulty": "senior"},
+        headers=_auth(admin_bearer),
+    )
+    assert other.status_code == 200, other.text
+    assert other.json()["difficulty"] == "senior"

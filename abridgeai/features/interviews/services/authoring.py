@@ -20,9 +20,14 @@ Locked task names (mirrored by T6.13 worker registration):
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
+from sqlalchemy import text
+
+from abridgeai.ai.llm.embeddings import EmbeddingClient
+from abridgeai.core.config import get_settings
 from abridgeai.core.db.conflict_mapper import (
     flush_or_conflict,
     register_conflict_mappings,
@@ -31,6 +36,11 @@ from abridgeai.core.db.recursive_delete import soft_delete_cascade
 from abridgeai.core.exceptions import AppError, NotFoundError
 from abridgeai.core.security import CurrentUser, utcnow
 from abridgeai.features.courses.api import public as courses_public
+from abridgeai.features.interviews.dedup import (
+    NOT_DUPLICATE,
+    check_duplicate,
+    embed_question,
+)
 from abridgeai.features.interviews.models import (
     InterviewConfig,
     InterviewOutcome,
@@ -46,6 +56,8 @@ if TYPE_CHECKING:
 
 
 _RUN_INTERVIEW_GENERATION_TASK = "run_interview_generation_task"
+
+logger = logging.getLogger(__name__)
 
 
 def _apply_patch(model: object, payload: object) -> None:
@@ -375,7 +387,75 @@ async def add_question(
     db.add(question)
     await flush_or_conflict(db)
     await db.refresh(question)
+    await _store_question_embedding(db, question)
     return question
+
+
+async def check_question_duplicate(
+    db: AsyncSession,
+    config_id: UUID,
+    *,
+    prompt_text: str,
+    exclude_question_id: UUID | None = None,
+) -> dict[str, Any]:
+    """Report whether ``prompt_text`` duplicates something already in the bank.
+
+    A read-only advisory check for the authoring UI: it never blocks or mutates
+    anything, so a teacher who disagrees with the verdict can still save. Returns
+    the verdict as a dict (see :class:`DuplicateVerdict`) plus ``enabled`` so the
+    caller can distinguish "feature off" from "nothing similar found".
+
+    Returns ``enabled: False`` without any provider call when
+    ``interview_dedup_enabled`` is off.
+    """
+    await _require_config(db, config_id)
+    settings = get_settings()
+    if not settings.interview_dedup_enabled:
+        return {"enabled": False, **NOT_DUPLICATE.to_dict()}
+
+    verdict, _embedding = await check_duplicate(
+        db,
+        config_id=config_id,
+        prompt_text=prompt_text,
+        embedding_client=EmbeddingClient(),
+        exclude_question_id=exclude_question_id,
+    )
+    return {"enabled": True, **verdict.to_dict()}
+
+
+async def _store_question_embedding(db: AsyncSession, question: InterviewQuestion) -> None:
+    """Best-effort: persist the question's vector so it can be matched later.
+
+    Skipped entirely when ``interview_dedup_enabled`` is off — no embedding spend
+    for a feature nobody turned on. Failures are swallowed: an embedding is an
+    optimisation for *future* duplicate checks, and losing one must never fail the
+    teacher's save. The row simply keeps ``embedding = NULL``, which the shortlist
+    treats as "unknown" rather than "dissimilar".
+    """
+    if not get_settings().interview_dedup_enabled:
+        return
+    try:
+        vector = await embed_question(
+            db, prompt_text=question.prompt_text, embedding_client=EmbeddingClient()
+        )
+        if not vector:
+            return
+        await db.execute(
+            text(
+                "UPDATE interview_questions SET embedding = CAST(:embedding AS halfvec) "
+                "WHERE id = :question_id"
+            ),
+            {
+                "embedding": "[" + ",".join(repr(float(v)) for v in vector) + "]",
+                "question_id": question.id,
+            },
+        )
+    except Exception:  # noqa: BLE001 — see docstring; never break a save
+        logger.warning(
+            "interview dedup: failed to embed question %s; leaving embedding NULL",
+            question.id,
+            exc_info=True,
+        )
 
 
 async def update_question(
@@ -387,12 +467,20 @@ async def update_question(
 ) -> InterviewQuestion:
     question = await _require_question(db, config_id, question_id)
     data = payload.model_dump(exclude_unset=True)
+    prompt_changed = (
+        "prompt_text" in data and (data["prompt_text"] or "") != question.prompt_text
+    )
     for key, value in data.items():
         setattr(question, key, value)
     question.reviewed_by = actor.user_id
     question.reviewed_at = utcnow()
     await flush_or_conflict(db)
     await db.refresh(question)
+    # Re-embed only when the text actually changed: a stale vector would make the
+    # bank match against wording the question no longer has, which is worse than
+    # having no vector at all. Edits to difficulty/outcome/status leave it alone.
+    if prompt_changed:
+        await _store_question_embedding(db, question)
     return question
 
 

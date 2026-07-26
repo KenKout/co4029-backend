@@ -343,6 +343,35 @@ class InterviewQuestionCreate(BaseModel):
     position: int | None = Field(default=None, ge=1)
 
 
+class InterviewQuestionDuplicateCheckRequest(BaseModel):
+    """Body for ``POST /teacher/interviews/{id}/questions/check-duplicate``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    prompt_text: str
+    exclude_question_id: UUID | None = None
+    """Set when editing an existing question, so it is not matched against itself."""
+
+
+class InterviewQuestionDuplicateCheck(BaseModel):
+    """Advisory duplicate verdict for a proposed question.
+
+    Purely informational — the teacher can save regardless. ``enabled`` is False
+    when ``interview_dedup_enabled`` is off, and ``error`` is non-empty when the
+    check could not run; in both cases ``is_duplicate`` is False, so a client must
+    read those before telling the teacher the question is unique.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool
+    is_duplicate: bool
+    duplicate_of_id: UUID | None = None
+    duplicate_of_text: str = ""
+    rationale: str = ""
+    error: str = ""
+
+
 class InterviewQuestionAuthoring(InterviewQuestionPublic):
     """Authoring projection of :class:`InterviewQuestion`.
 

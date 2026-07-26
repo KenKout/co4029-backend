@@ -70,6 +70,8 @@ from abridgeai.features.interviews.schemas import (
     InterviewQuestionBankItemRead,
     InterviewQuestionBankItemUpdate,
     InterviewQuestionCreate,
+    InterviewQuestionDuplicateCheck,
+    InterviewQuestionDuplicateCheckRequest,
     InterviewSessionPublic,
     InterviewSessionSummary,
     InterviewSessionTeacherRead,
@@ -588,6 +590,37 @@ async def create_question(
         raise _bad_request(str(exc)) from exc
     await db.commit()
     return InterviewQuestionAuthoring.model_validate(question)
+
+
+@router.post(
+    "/interview-configs/{config_id}/questions/check-duplicate",
+    response_model=InterviewQuestionDuplicateCheck,
+)
+async def check_question_duplicate(
+    config_id: UUID,
+    payload: InterviewQuestionDuplicateCheckRequest,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_CONFIG)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> InterviewQuestionDuplicateCheck:
+    """Advisory check: does this question already exist in the bank?
+
+    Read-only and non-blocking — the teacher can save either way. Declared BEFORE
+    the ``{question_id}`` routes below so the literal path segment is not captured
+    as a UUID path parameter.
+    """
+    del current_user  # authorisation handled by the dependency
+    try:
+        result = await authoring_service.check_question_duplicate(
+            db,
+            config_id,
+            prompt_text=payload.prompt_text,
+            exclude_question_id=payload.exclude_question_id,
+        )
+    except NotFoundError as exc:
+        raise _not_found("interview_config", config_id) from exc
+    except AppError as exc:
+        raise _bad_request(str(exc)) from exc
+    return InterviewQuestionDuplicateCheck.model_validate(result)
 
 
 @router.patch(
