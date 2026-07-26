@@ -218,12 +218,6 @@ class Settings(BaseSettings):
     # (wss://<project>.livekit.cloud). Voice mode is gated OFF by default so
     # existing deployments are unaffected until operators flip the flag AND
     # provide credentials. The key/secret are SecretStr (never logged).
-    # Question-bank duplicate detection (two-stage: pgvector shortlist -> LLM
-    # same-or-different verdict). OFF by default: it adds one embedding call plus
-    # at most one LLM call per authored question, and every deployment should opt
-    # into that cost knowingly. Fails open when enabled — see features/interviews/
-    # dedup/__init__.py — so a provider outage can never block a teacher's save.
-    interview_dedup_enabled: bool = False
     interview_voice_enabled: bool = False
     livekit_ws_url: str | None = None
     livekit_api_key: SecretStr | None = None
