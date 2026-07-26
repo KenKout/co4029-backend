@@ -159,6 +159,7 @@ from abridgeai.features.spaced_repetition.routers import (
 from abridgeai.features.spaced_repetition.routers import (
     teacher_router as spaced_repetition_teacher_router,
 )
+from abridgeai.infrastructure.neo4j_schema import ensure_graph_schema
 
 API_V1_PREFIX = "/api/v1"
 
@@ -217,6 +218,11 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     # Best-effort embedding provider probe (non-fatal — logs, never raises).
     await _probe_embedding_health()
+
+    # Idempotent Neo4j constraints + indexes. The graph ran without either
+    # until now, so every MERGE was a label scan and duplicate Concept nodes
+    # were possible under concurrent ingest. Non-fatal like the probe above.
+    await ensure_graph_schema()
 
     yield
 

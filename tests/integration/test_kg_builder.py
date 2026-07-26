@@ -30,6 +30,7 @@ class _Chunk:
 
 @dataclass
 class _Hierarchy:
+    organization_id: UUID
     course_id: UUID
     course_title: str
     module_id: UUID
@@ -167,6 +168,7 @@ def _make_chunk(
 
 def _make_hierarchy() -> _Hierarchy:
     return _Hierarchy(
+        organization_id=uuid4(),
         course_id=uuid4(),
         course_title="Algorithms",
         module_id=uuid4(),
@@ -200,7 +202,7 @@ def test_neo4j_client_is_slim() -> None:
 
 @pytest.mark.asyncio
 async def test_build_kg_disabled_returns_summary(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("KNOWLEDGE_GRAPH_ENABLED", raising=False)
+    monkeypatch.setenv("KNOWLEDGE_GRAPH_ENABLED", "false")
     get_settings.cache_clear()
 
     fake_client = _FakeKGClient()

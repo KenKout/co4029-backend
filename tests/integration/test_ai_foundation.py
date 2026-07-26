@@ -529,14 +529,20 @@ async def test_retrieve_kg_context_for_anchors_smoke(
             }
         )
 
-        ctx = await retrieve_kg_context_for_anchors(["Binary Search"], depth=2, client=client)
+        smoke_org_id = uuid.uuid4()
+        ctx = await retrieve_kg_context_for_anchors(
+            ["Binary Search"], org_id=smoke_org_id, depth=2, client=client
+        )
 
         assert isinstance(ctx, KGContext)
         assert ctx.enabled is True
         assert {c.name for c in ctx.concepts} == {"Binary Search", "Sorted Array"}
         assert len(ctx.prerequisites) == 1
         assert ctx.related == []
-        assert client.session().last_params == {"names": ["binary search"]}
+        assert client.session().last_params == {
+            "names": ["binary search"],
+            "org_id": str(smoke_org_id),
+        }
     finally:
         get_settings.cache_clear()
 

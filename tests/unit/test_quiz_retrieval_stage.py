@@ -117,9 +117,13 @@ async def test_retrieve_chunks_includes_kg_context_when_enabled(
 
     with (
         patch(
-            "abridgeai.features.quizzes.ai.stages.retrieval.anchors.retrieve_kg_context_for_anchors",
+            "abridgeai.features.quizzes.ai.stages.retrieval.anchors.retrieve_kg_context_for_lesson_ids",
             AsyncMock(return_value=kg),
         ) as mock_kg,
+        patch(
+            "abridgeai.features.quizzes.ai.stages.retrieval.anchors.organization_id_for_lessons",
+            AsyncMock(return_value=uuid4()),
+        ),
         patch(
             "abridgeai.features.quizzes.ai.stages.retrieval.logic.vector_search",
             AsyncMock(return_value=[_chunk(0.1)]),
@@ -159,7 +163,7 @@ async def test_retrieve_chunks_skips_kg_when_disabled(
 
     with (
         patch(
-            "abridgeai.features.quizzes.ai.stages.retrieval.anchors.retrieve_kg_context_for_anchors",
+            "abridgeai.features.quizzes.ai.stages.retrieval.anchors.retrieve_kg_context_for_lesson_ids",
             AsyncMock(),
         ) as mock_kg,
         patch(
@@ -195,7 +199,7 @@ async def test_build_query_anchors_focus_topics_take_precedence() -> None:
     }
 
     with patch(
-        "abridgeai.features.quizzes.ai.stages.retrieval.anchors.retrieve_kg_context_for_anchors",
+        "abridgeai.features.quizzes.ai.stages.retrieval.anchors.retrieve_kg_context_for_lesson_ids",
         AsyncMock(side_effect=AssertionError("must not be called when focus_topics set")),
     ):
         anchors = await build_query_anchors(db, quiz, config)

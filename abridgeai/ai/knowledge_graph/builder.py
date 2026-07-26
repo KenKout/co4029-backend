@@ -20,6 +20,7 @@ from neo4j import AsyncManagedTransaction
 from pydantic import BaseModel, Field, ValidationError, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from abridgeai.ai.knowledge_graph.pruning import prune_superseded_chunk_graph
 from abridgeai.ai.knowledge_graph.schemas import KGSummary
 from abridgeai.ai.llm.gateway import LLMGateway
 from abridgeai.ai.llm.roles import LLMRole
@@ -62,6 +63,12 @@ class HierarchyPayload(Protocol):
     stays free of feature-layer ORM imports.
     """
 
+    # Tenant scope. Every Concept node and every Concept lookup is keyed on
+    # this: without it a ``Concept {name_norm}`` MERGE is GLOBAL, so
+    # "Normalization" taught by org A and org B collapse into one node and a
+    # RELATED_TO traversal walks straight out of the caller's tenant into
+    # another customer's curriculum.
+    organization_id: UUID
     course_id: UUID
     course_title: str
     module_id: UUID
@@ -156,6 +163,7 @@ Return JSON in this shape:
 
 def _hierarchy_dict(hierarchy: HierarchyPayload) -> dict[str, str]:
     return {
+        "org_id": str(hierarchy.organization_id),
         "course_id": str(hierarchy.course_id),
         "course_title": hierarchy.course_title,
         "module_id": str(hierarchy.module_id),
@@ -265,22 +273,32 @@ async def _upsert_chunk_graph_tx(
     await tx.run(
         """
         MERGE (course:Course {id: $course_id})
-          SET course.title = $course_title
+          SET course.title = $course_title, course.org_id = $org_id
         MERGE (module:Module {id: $module_id})
-          SET module.title = $module_title
+          SET module.title = $module_title, module.org_id = $org_id
         MERGE (lesson:Lesson {id: $lesson_id})
-          SET lesson.title = $lesson_title
+          SET lesson.title = $lesson_title, lesson.org_id = $org_id
         MERGE (material:Material {id: $material_id})
-          SET material.title = $material_title, material.type = $material_type
+          SET material.title = $material_title,
+              material.type = $material_type,
+              material.org_id = $org_id
         MERGE (chunk:Chunk {id: $chunk_id})
-          SET chunk.index = $chunk_index, chunk.text_preview = $text_preview
+          SET chunk.index = $chunk_index,
+              chunk.text_preview = $text_preview,
+              chunk.org_id = $org_id,
+              chunk.material_version_id = $material_version_id
         MERGE (course)-[:CONTAINS_MODULE]->(module)
         MERGE (module)-[:CONTAINS_LESSON]->(lesson)
         MERGE (lesson)-[:HAS_MATERIAL]->(material)
         MERGE (material)-[:HAS_CHUNK]->(chunk)
         WITH chunk
         UNWIND $concepts AS concept_payload
-        MERGE (concept:Concept {name_norm: toLower(concept_payload.name)})
+        // Composite key: org_id FIRST. Keyed on name_norm alone this MERGE is
+        // global, and every tenant's "normalization"/"index"/"transaction"
+        // node is shared — which then makes RELATED_TO traversal a
+        // cross-customer read. The uniqueness constraint in
+        // ``ensure_graph_schema`` enforces the same pair.
+        MERGE (concept:Concept {org_id: $org_id, name_norm: toLower(concept_payload.name)})
           SET concept.name = concept_payload.name,
               concept.type = coalesce(concept_payload.type, 'Concept'),
               concept.definition = concept_payload.definition
@@ -294,8 +312,10 @@ async def _upsert_chunk_graph_tx(
     await tx.run(
         """
         UNWIND $relationships AS rel_payload
-        MATCH (source:Concept {name_norm: toLower(rel_payload.source)})
-        MATCH (target:Concept {name_norm: toLower(rel_payload.target)})
+        // Both endpoints scoped to the same tenant, so an extracted edge can
+        // never bridge two organizations' graphs.
+        MATCH (source:Concept {org_id: $org_id, name_norm: toLower(rel_payload.source)})
+        MATCH (target:Concept {org_id: $org_id, name_norm: toLower(rel_payload.target)})
         FOREACH (_ IN CASE WHEN rel_payload.relation = 'PREREQUISITE_OF' THEN [1] ELSE [] END |
           MERGE (source)-[rel:PREREQUISITE_OF]->(target)
             SET rel.relation = rel_payload.relation,
@@ -309,6 +329,7 @@ async def _upsert_chunk_graph_tx(
                 rel.confidence = rel_payload.confidence
         )
         """,
+        org_id=hierarchy["org_id"],
         relationships=relationships,
     )
 
@@ -352,6 +373,16 @@ async def build_knowledge_graph_for_material_version(
     concept_names: set[str] = set()
     relationship_keys: set[tuple[str, str, str]] = set()
 
+    # Drop the previous version's chunk subgraph BEFORE the resume scan, so
+    # the scan cannot match a stale preview and skip a chunk that now needs
+    # rebuilding. Chunks of THIS version survive, keeping resume intact.
+    await prune_superseded_chunk_graph(
+        kg_client,
+        material_id=hierarchy.material_id,
+        material_version_id=material_version_id,
+        org_id=hierarchy.organization_id,
+    )
+
     # Resume support: skip chunks already committed to Neo4j by an earlier
     # run that was killed mid-build (e.g. job_timeout). Each skipped chunk
     # avoids an LLM call, so a re-run fast-forwards through completed work
@@ -363,7 +394,8 @@ async def build_knowledge_graph_for_material_version(
     already_built = await _already_built_previews_by_index(kg_client, material_id)
     if already_built:
         logger.info(
-            "kg_build resuming: %d chunk(s) already built in Neo4j for material %s (%d total this run)",
+            "kg_build resuming: %d chunk(s) already in Neo4j for material %s "
+            "(%d total this run)",
             len(already_built),
             material_id,
             len(chunks),
@@ -410,6 +442,10 @@ async def build_knowledge_graph_for_material_version(
                 "chunk_id": str(chunk.id),
                 "chunk_index": chunk.chunk_index,
                 "text_preview": chunk.content[:300],
+                # Stamped so ``prune_material_version_graph`` can find this
+                # node again after ``_persist_chunks`` has thrown its Postgres
+                # row away and minted a fresh id on re-ingest.
+                "material_version_id": str(material_version_id),
             },
             concepts=concepts,
             relationships=relationships,

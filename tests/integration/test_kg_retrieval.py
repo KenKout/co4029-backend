@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -15,6 +15,10 @@ from abridgeai.ai.knowledge_graph import (
 )
 from abridgeai.ai.knowledge_graph import retrieval as retrieval_mod
 from abridgeai.core.config import get_settings
+
+# The retrieval API requires a tenant scope (keyword-only) so a new call
+# site cannot silently read another organization's graph.
+_ORG_ID = UUID('00000000-0000-0000-0000-0000000000aa')
 
 
 class _FakeResult:
@@ -186,6 +190,7 @@ async def test_retrieve_with_depth_returns_anchor_chain() -> None:
 
     context = await retrieve_kg_context_for_anchors(
         ["Python"],
+        org_id=_ORG_ID,
         depth=2,
         client=client,
     )
@@ -195,16 +200,16 @@ async def test_retrieve_with_depth_returns_anchor_chain() -> None:
     assert {c.name for c in context.concepts} == {"Python", "OOP", "Inheritance"}
     assert len(context.related) == 2
     assert context.prerequisites == []
-    assert client.session().last_params == {"names": ["python"]}
+    assert client.session().last_params == {"names": ["python"], "org_id": str(_ORG_ID)}
 
 
 @pytest.mark.asyncio
 async def test_retrieve_anchor_disabled_returns_empty_context(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.delenv("KNOWLEDGE_GRAPH_ENABLED", raising=False)
+    monkeypatch.setenv("KNOWLEDGE_GRAPH_ENABLED", "false")
     get_settings.cache_clear()
-    context = await retrieve_kg_context_for_anchors(["Python"])
+    context = await retrieve_kg_context_for_anchors(["Python"], org_id=_ORG_ID)
     assert context.is_empty
     assert context.enabled is False
 
@@ -212,7 +217,7 @@ async def test_retrieve_anchor_disabled_returns_empty_context(
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("_enable_kg")
 async def test_retrieve_anchor_empty_input_short_circuits() -> None:
-    context = await retrieve_kg_context_for_anchors([])
+    context = await retrieve_kg_context_for_anchors([], org_id=_ORG_ID)
     assert context.is_empty
     assert context.enabled is False
 
@@ -237,6 +242,7 @@ async def test_retrieve_anchor_caps_results() -> None:
     client = _FakeKGClient({"nodes": nodes, "edges": edges})
     context = await retrieve_kg_context_for_anchors(
         ["Concept-0"],
+        org_id=_ORG_ID,
         depth=2,
         client=client,
     )
