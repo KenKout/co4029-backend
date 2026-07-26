@@ -102,8 +102,11 @@ async def test_video_live_ffmpeg_pipeline(tmp_path: Path) -> None:
         ffmpeg_path=ffmpeg_bin,
         input_path=str(video_path),
         workdir=str(workdir),
-        fps=1.0,
+        scene_threshold=0.2,
+        max_frames=120,
     )
     audio_exists = await asyncio.to_thread(os.path.exists, outputs.audio_path)
     assert audio_exists
-    assert len(outputs.frame_paths) >= 1
+    # Scene-change extraction on the static 5s fixture falls back to sparse
+    # uniform sampling — at least the first frame is always captured.
+    assert len(outputs.frames) >= 1

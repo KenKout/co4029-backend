@@ -411,7 +411,14 @@ async def test_video_extractor_pipeline_orchestration(tmp_path: Any) -> None:
         with open(path, "wb") as fh:
             fh.write(b"")
 
-    async def fake_split(*, ffmpeg_path: str, input_path: str, workdir: str, fps: float) -> Any:
+    async def fake_split(
+        *,
+        ffmpeg_path: str,
+        input_path: str,
+        workdir: str,
+        scene_threshold: float,
+        max_frames: int,
+    ) -> Any:
         from abridgeai.ai.extraction.video import _FfmpegOutputs
 
         audio_path = f"{workdir}/audio.wav"
@@ -419,7 +426,11 @@ async def test_video_extractor_pipeline_orchestration(tmp_path: Any) -> None:
         for path in [audio_path, *frame_paths]:
             await asyncio.to_thread(_touch, path)
         fake_outputs_workdir["paths"] = frame_paths
-        return _FfmpegOutputs(audio_path=audio_path, frame_paths=frame_paths)
+        # Scene-detected frames carry their real pts timestamps.
+        return _FfmpegOutputs(
+            audio_path=audio_path,
+            frames=[(0.0, frame_paths[0]), (4.0, frame_paths[1])],
+        )
 
     extractor = VideoExtractor(
         settings=settings,
