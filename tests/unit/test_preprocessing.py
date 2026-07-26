@@ -191,21 +191,48 @@ class TestBlankness:
         assert unit.dropped is False
         assert unit.role == ROLE_DIVIDER
 
-    def test_second_pass_sees_page_stripped_of_boilerplate(self) -> None:
+    def test_titled_figure_reaches_ocr_without_waiting_for_stripping(self) -> None:
         """A diagram slide whose only text was a running header.
 
-        At extraction it measured enough words to clear the near-empty gate;
-        once the header is stripped it must read as image-only.
+        This used to need two passes: the header pushed the page over the
+        near-empty gate, so it read as "text present" until running-mark
+        stripping removed the header and the second pass reclassified it. Rule
+        2b settles it on the first pass off image/vector coverage instead —
+        which matters because the header is not always boilerplate the
+        stripper recognises. A real lecture deck carries per-section titles
+        ("The Steps of Decision Support") that appear once, survive stripping,
+        and used to take the whole figure down with them.
         """
         unit = _unit(
             1, "CS310 - Decision Support Systems", word_count=5, vector_count=8
         )
         classify_emptiness(unit)
-        assert unit.needs_ocr is False  # masked by the header
+        assert unit.needs_ocr is True
+        assert "titled_figure" in unit.noise_flags
 
-        unit.body = ""  # running-mark stripping removed it
+        # Idempotent: the second pass (post-stripping) keeps the first verdict.
+        unit.body = ""
         classify_emptiness(unit)
         assert unit.needs_ocr is True
+
+    def test_text_slide_with_a_small_logo_is_not_a_figure(self) -> None:
+        """Rule 2b must not drag ordinary bullet slides into the OCR tier.
+
+        Coverage is the discriminator: a decorative logo sits near 2% of the
+        page, a real diagram at 12%+.
+        """
+        unit = _unit(
+            1,
+            "Simon's decision-making process is a continuum ranging from highly "
+            "structured programmed decisions to highly unstructured ones",
+            word_count=25,
+            image_block_count=1,
+            image_area_ratio=0.02,
+            vector_count=4,
+        )
+        classify_emptiness(unit)
+        assert unit.needs_ocr is False
+        assert unit.dropped is False
 
 
 # --------------------------------------------------------------------------

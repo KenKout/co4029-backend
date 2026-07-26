@@ -122,6 +122,11 @@ class Settings(BaseSettings):
     llm_model_kg_extraction: str | None = None
     llm_model_stt: str | None = None
     llm_model_vision: str | None = None
+    # OCR quality is the ceiling on everything downstream for a slide deck — a
+    # cell read into the wrong row becomes a wrong proposition, a wrong
+    # embedding and a wrong graph edge. Overridable so the tier can be tuned
+    # per deployment without a code change.
+    llm_model_page_ocr: str | None = None
 
     # Derived field, populated by ``_populate_extra_headers`` from
     # ``llm_extra_headers_json``. Always a dict (possibly empty).

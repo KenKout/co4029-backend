@@ -110,3 +110,54 @@ def test_invalid_ratio_disables_cap() -> None:
     front = _make("front_matter", 8, "f")
     out = split_by_role(body + front, 5, deprioritized_ratio=0)
     assert len(out) == 5  # No cap — first 5 in input order.
+
+
+def test_semantic_role_outranks_the_rule_based_top_level() -> None:
+    """The LLM's label wins over the rule classifier's.
+
+    On a real lecture deck the closing "Summary" slide and the "Review
+    questions" slide both come out of the rule classifier as ``body`` while the
+    enrichment LLM labels them ``summary`` / ``review``. Reading only the top
+    level left exactly the two slides this filter exists to cap sitting in the
+    pool uncapped.
+    """
+    body = [
+        _Chunk(name=f"b{i}", metadata={"content_role": "body"}) for i in range(8)
+    ]
+    recap = [
+        _Chunk(
+            name="recap",
+            metadata={"content_role": "body", "semantic": {"content_role": "summary"}},
+        ),
+        _Chunk(
+            name="review",
+            metadata={"content_role": "body", "semantic": {"content_role": "review"}},
+        ),
+    ]
+    out = split_by_role(recap + body, 4)
+
+    # limit 4 -> cap of 1 deprioritized; the other recap slide is squeezed out
+    # by body content instead of displacing it.
+    assert sum(1 for c in out if c.name in {"recap", "review"}) == 1
+    assert sum(1 for c in out if c.name.startswith("b")) == 3
+
+
+def test_falls_back_to_top_level_when_semantic_is_absent_or_blank() -> None:
+    deprioritized = [
+        _Chunk(name="no-semantic", metadata={"content_role": "summary"}),
+        _Chunk(
+            name="blank-semantic",
+            metadata={"content_role": "review", "semantic": {"content_role": "  "}},
+        ),
+        _Chunk(
+            name="malformed-semantic",
+            metadata={"content_role": "front_matter", "semantic": "not-a-dict"},
+        ),
+    ]
+    # Body chunks present so the cap binds rather than the backfill path.
+    body = [_Chunk(name=f"b{i}", metadata={"content_role": "body"}) for i in range(8)]
+    out = split_by_role(deprioritized + body, 4)
+
+    # All three still resolve to a deprioritized role via the top-level
+    # fallback, so the cap of floor(4/4)=1 admits exactly one of them.
+    assert sum(1 for c in out if not c.name.startswith("b")) == 1

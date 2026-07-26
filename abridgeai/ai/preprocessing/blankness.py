@@ -11,8 +11,13 @@ So emptiness is an *ordered* decision, not a threshold:
 
 1. no words, no images, no vector drawings  -> genuinely blank, drop
 2. almost no words but real image coverage  -> route to OCR, never drop
+2b. a title's worth of words over a figure  -> route to OCR, never drop
 3. high replacement-char ratio              -> broken text layer, route to OCR
 4. a handful of words, no images            -> section divider, keep and tag
+
+Rule 2b exists because rule 2 alone loses the most common diagram slide in a
+lecture deck: the one that kept its running header. Nine words of title is
+enough to clear a near-empty gate and take a full-page figure down with it.
 
 Thresholds follow pymupdf4llm's page analysis: ``BAD_CHAR_THRESHOLD = 0.05``
 for a broken text layer, and a no-content-of-any-kind early return that
@@ -42,6 +47,21 @@ _BAD_CHAR_RATIO = 0.05
 # OCR. One or two paths is a decorative rule or a background box, so the floor
 # sits at 3 — below it the page is treated as blank.
 _VECTOR_DIAGRAM_MIN = 3
+
+# Rule 2b (figure slide that kept its title). A slide whose text is just a
+# running header plus a figure caption tops out around 12 words; the smallest
+# genuine bullet slide observed runs 25. 20 splits them with room on both
+# sides.
+_FIGURE_PAGE_MAX_WORDS = 20
+# Coverage floor for "this raster is the content, not decoration". Deliberately
+# below ``_IMAGE_AREA_MIN``: rule 2b has already established the page carries
+# no prose, so it can afford to trust a smaller figure than rule 2, which must
+# also defend against a text page with one big background image.
+_FIGURE_AREA_MIN = 0.12
+# Vector equivalent. Higher than ``_VECTOR_DIAGRAM_MIN`` because a page in this
+# band DOES have text, and text decorations (underlines, bullet rules, table
+# borders) contribute paths — 3 would fire on ordinary slides.
+_VECTOR_FIGURE_MIN = 8
 
 
 def classify_emptiness(unit: PageUnit) -> None:
@@ -113,6 +133,37 @@ def classify_emptiness(unit: PageUnit) -> None:
                 action=Action.ROUTE_OCR,
                 reason=ReasonCode.IMAGE_ONLY_NEEDS_OCR,
                 rule_name="image_only_page",
+                page_number=unit.page_number,
+                score=facts.image_area_ratio,
+            )
+        )
+        return
+
+    # 2b. Figure slide WITH a title. Rule 2 only sees pages that are near-empty
+    #     of words, which is the wrong shape for the most common diagram slide
+    #     in a lecture deck: a two-line running header ("A framework for
+    #     decision support" / "The Steps of Decision Support") plus one
+    #     full-bleed figure. That is 9-11 words — comfortably over the rule-2
+    #     gate — so the page used to pass straight through as "text present"
+    #     and the entire diagram was dropped on the floor, leaving a chunk that
+    #     is nothing but its own heading.
+    #
+    #     The discriminator is COVERAGE, not word count: a decorative logo or a
+    #     bullet glyph sits near 1-2% of the page, a real figure at 12%+. Body
+    #     slides are excluded by the word gate (a genuine bullet slide runs
+    #     25+ words), so this only ever fires on pages whose text is a title.
+    if word_count < _FIGURE_PAGE_MAX_WORDS and (
+        facts.image_area_ratio >= _FIGURE_AREA_MIN
+        or facts.vector_count >= _VECTOR_FIGURE_MIN
+    ):
+        unit.needs_ocr = True
+        unit.ocr_reason = ReasonCode.IMAGE_ONLY_NEEDS_OCR.value
+        unit.flag("titled_figure")
+        unit.record(
+            Decision(
+                action=Action.ROUTE_OCR,
+                reason=ReasonCode.IMAGE_ONLY_NEEDS_OCR,
+                rule_name="titled_figure_page",
                 page_number=unit.page_number,
                 score=facts.image_area_ratio,
             )

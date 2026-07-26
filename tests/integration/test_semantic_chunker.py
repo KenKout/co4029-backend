@@ -15,6 +15,7 @@ import pytest
 
 from abridgeai.ai.chunking import EnrichedChunk, SemanticChunker
 from abridgeai.ai.chunking._enrich import PROMPT_VERSION, content_hash
+from abridgeai.ai.chunking._llm_boundary import BOUNDARY_PROMPT_VERSION
 from abridgeai.ai.chunking.cache import ChunkingCache
 from abridgeai.ai.extraction import ExtractedContent
 
@@ -76,13 +77,24 @@ async def test_full_pipeline_with_cache_hit() -> None:
         "propositions": ["Decision making has phases."],
     }
 
+    # Stage B' shares this cache under its own prompt-version namespace, so the
+    # fake has to answer both. The point of the test is that a fully cached
+    # document costs zero LLM calls — that now covers the boundary decision as
+    # well as enrichment.
+    boundary_payload = {"groups": [[i] for i in range(len(pre))]}
+
+    def _cache_get(content_hash: str, prompt_version: str) -> dict[str, object]:
+        if prompt_version == BOUNDARY_PROMPT_VERSION:
+            return {"output_json": boundary_payload}
+        return {
+            "output_json": cached_payload,
+            "model_name": "test-model",
+            "input_tokens": 500,
+            "output_tokens": 100,
+        }
+
     mock_cache = AsyncMock(spec=ChunkingCache)
-    mock_cache.get.return_value = {
-        "output_json": cached_payload,
-        "model_name": "test-model",
-        "input_tokens": 500,
-        "output_tokens": 100,
-    }
+    mock_cache.get.side_effect = _cache_get
     mock_cache.put.return_value = None
 
     mock_gateway = AsyncMock()
@@ -180,7 +192,12 @@ async def test_full_pipeline_threads_pipeline_run_id() -> None:
 
     assert chunks
     assert mock_gateway.generate_json.await_count >= 1
+    # Stage B' (boundary) and Stage C (enrichment) both call the gateway; every
+    # call must carry the run id so cost rolls up per pipeline run.
+    stages = set()
     for call in mock_gateway.generate_json.await_args_list:
         kwargs = call.kwargs
         assert kwargs["pipeline_run_id"] == pipeline_run_id
-        assert kwargs["stage_name"] == "chunking_enrichment"
+        stages.add(kwargs["stage_name"])
+    assert stages <= {"chunk_boundary", "chunking_enrichment"}
+    assert "chunking_enrichment" in stages

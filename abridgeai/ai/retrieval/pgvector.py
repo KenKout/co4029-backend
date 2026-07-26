@@ -64,8 +64,11 @@ class ChunkWithDistance:
     bandwidth). ``metadata`` carries the JSONB ``document_chunks.metadata``
     column verbatim — downstream role-aware filters
     (:mod:`abridgeai.ai.retrieval.role_filter`) read
-    ``metadata['content_role']`` to deprioritize summary / review /
-    front_matter chunks during quiz generation.
+    ``metadata['semantic']['content_role']``, falling back to the
+    rule-based top-level ``metadata['content_role']``, to deprioritize
+    summary / review / front_matter chunks during quiz generation. The
+    whole JSONB blob is selected rather than the one key precisely so
+    that precedence can be resolved here.
     """
 
     chunk_id: UUID

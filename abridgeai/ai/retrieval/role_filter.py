@@ -122,16 +122,37 @@ def split_by_role[T](
 
 
 def _role_of(chunk: object) -> str:
-    """Read ``metadata['content_role']`` defensively, defaulting to body.
+    """Read the chunk's content role defensively, defaulting to body.
+
+    Prefers ``metadata['semantic']['content_role']`` (written by the
+    chunking enrichment LLM, which reads the slide and knows a recap from
+    a definition) over top-level ``metadata['content_role']`` (rule-based
+    classifier). The two disagree often enough to matter: on a real
+    lecture deck the closing "Summary" slide and the "Review questions"
+    slide both come out of the rule classifier as ``body`` while the LLM
+    labels them ``summary`` / ``review``. Reading only the top level left
+    exactly the two slides this module exists to cap sitting in the pool
+    uncapped, which is the failure described in the module docstring.
+
+    This mirrors ``features/quizzes/ai/outline.py::_chunk_role`` — the
+    same precedence, so a chunk cannot be ``review`` for quiz coverage
+    allocation and ``body`` for retrieval.
 
     Tolerates dataclass instances (any object with a ``metadata`` attr),
-    raw mappings, and missing/None metadata. Returns lowercase role
+    raw mappings, and missing/None metadata. Returns a lowercase role
     string; an unknown / malformed value is normalised to ``body`` so
     we never accidentally cap a chunk we can't classify.
     """
     md = getattr(chunk, "metadata", None)
     if not isinstance(md, dict):
         return "body"
+
+    semantic = md.get("semantic")
+    if isinstance(semantic, dict):
+        semantic_role = semantic.get("content_role")
+        if isinstance(semantic_role, str) and semantic_role.strip():
+            return semantic_role.strip().lower()
+
     raw = md.get("content_role")
     if not isinstance(raw, str):
         return "body"

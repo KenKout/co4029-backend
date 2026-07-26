@@ -19,6 +19,15 @@ from abridgeai.features.materials.schemas.authoring import (
     MaterialAuthoring,
     MaterialVersionAuthoring,
 )
+from abridgeai.features.materials.schemas.curated_kg import (
+    CuratedKGDraft,
+    CuratedKGDraftSave,
+    CuratedKGEdge,
+    CuratedKGGraph,
+    CuratedKGNode,
+    CuratedKGPublished,
+    CuratedKGRelation,
+)
 from abridgeai.features.materials.schemas.public import (
     MaterialPublic,
     MaterialStreamUrl,
@@ -37,15 +46,6 @@ from abridgeai.features.materials.schemas.status import (
     LessonProcessingSummary,
     ProcessingProgress,
     ProcessingStatusLiteral,
-)
-from abridgeai.features.materials.schemas.curated_kg import (
-    CuratedKGDraft,
-    CuratedKGDraftSave,
-    CuratedKGEdge,
-    CuratedKGGraph,
-    CuratedKGNode,
-    CuratedKGPublished,
-    CuratedKGRelation,
 )
 
 __all__ = [

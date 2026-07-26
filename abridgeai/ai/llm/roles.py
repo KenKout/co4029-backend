@@ -55,10 +55,20 @@ class LLMRole(str, Enum):  # noqa: UP042 - StrEnum changes value coercion; prese
     INTERVIEW_DEDUP = "interview_dedup"
     # Ingestion preprocessing. PAGE_OCR reads back an image-only PDF page via a
     # vision model; PAGE_CLASSIFICATION adjudicates the narrow band of pages the
-    # deterministic boilerplate rules could not settle. Both are batch/background
-    # (nobody is waiting) and both sit on the SMALL tier deliberately — OCR-ing a
-    # slide and labelling a cover page are not reasoning tasks, and at one call
-    # per page the tier choice is what keeps a 500-page course affordable.
+    # deterministic boilerplate rules could not settle. Both are
+    # batch/background — nobody is waiting.
+    #
+    # PAGE_OCR sits on STANDARD, not small. The claim that "OCR-ing a slide is
+    # not a reasoning task" holds for a page of prose and fails for the pages
+    # that actually get routed here, which are by definition the ones with no
+    # text layer: decision matrices, framework diagrams, case-study columns. On
+    # the small tier those came back with mangled tokens (``r:ontrol``,
+    # ``assura\ce``) and, worse, with table cells read in the wrong order — one
+    # 3x3 matrix had an entry migrate into the wrong cell, which does not look
+    # like an error downstream, it looks like course content. Reading a grid
+    # and keeping row/column association IS a reasoning task. The blast radius
+    # is bounded by ``preprocess_ocr_max_pages`` (30/document), so this trades
+    # a capped cost increase against silent corruption of the densest pages.
     PAGE_OCR = "page_ocr"
     PAGE_CLASSIFICATION = "page_classification"
     # Quarantined answer extraction. Sees a student's raw answer and the current
@@ -68,6 +78,13 @@ class LLMRole(str, Enum):  # noqa: UP042 - StrEnum changes value coercion; prese
     # into a handful of bounded claims is not a reasoning task, and it replaces
     # the intent call rather than adding to the per-turn budget.
     INTERVIEW_EXTRACTION = "interview_extraction"
+    # Chunk boundary decision (chunking Stage B'). Reads a list of window
+    # digests — never the full text — and returns which consecutive windows
+    # form one chunk. Batch/background. Small tier: judging "does this slide
+    # continue the previous one" from a title and an opening line is a
+    # comprehension task the lite models handle, and the volume is one call per
+    # multi-window topic group, not one per window.
+    CHUNK_BOUNDARY = "chunk_boundary"
 
 
 # Default role -> tier mapping. Embedding intentionally excluded — it has its
@@ -109,13 +126,19 @@ ROLE_TO_TIER: dict[LLMRole, Literal["small", "standard", "large"]] = {
     # A same-or-different judgement on two short texts; "standard" is ample and
     # keeps a per-question check affordable during bulk generation.
     LLMRole.INTERVIEW_DEDUP: "standard",
-    # Ingestion preprocessing — see the role docstrings. Small tier: these run
-    # once per page over a whole course, so tier choice dominates ingest cost.
-    LLMRole.PAGE_OCR: "small",
+    # Ingestion preprocessing — see the role docstrings. PAGE_OCR is standard
+    # tier because the pages it sees are the diagram/matrix ones a text
+    # extractor could not read at all; PAGE_CLASSIFICATION stays small because
+    # labelling a cover page really is a lookup. Both are capped per document
+    # (``preprocess_ocr_max_pages``), so neither scales with course size the
+    # way a per-chunk role does.
+    LLMRole.PAGE_OCR: "standard",
     LLMRole.PAGE_CLASSIFICATION: "small",
     # Quarantined extraction — see the role docstring. Small tier: it subsumes
     # the intent call, which was already small, and holds no protected content.
     LLMRole.INTERVIEW_EXTRACTION: "small",
+    # Boundary decision over window digests — see the role docstring.
+    LLMRole.CHUNK_BOUNDARY: "small",
 }
 
 
