@@ -277,3 +277,283 @@ def test_not_duplicate_singleton_is_a_clean_pass() -> None:
     assert isinstance(NOT_DUPLICATE, DuplicateVerdict)
     assert NOT_DUPLICATE.is_duplicate is False
     assert NOT_DUPLICATE.checked is True
+
+
+# ── batch embedding persistence (the AI-generated-bank regression) ────────────
+#
+# `interview_questions.embedding` was populated only by `add_question` /
+# `update_question`. The generation pipeline inserted rows directly, so every
+# AI-generated question kept `embedding = NULL`, and because the shortlist
+# filters on `embedding IS NOT NULL` those rows were invisible to the checker:
+# duplicate detection silently answered "not a duplicate" on any bank nobody had
+# hand-edited. These pin the shared helper the pipeline now calls.
+
+
+class _RecordingDb:
+    """Captures the UPDATE statements a caller issues."""
+
+    def __init__(self) -> None:
+        self.updates: list[dict[str, object]] = []
+
+    async def execute(self, sql: object, params: dict[str, object] | None = None) -> object:
+        self.updates.append({"sql": str(sql), "params": params or {}})
+
+        class _Result:
+            def all(self) -> list[object]:
+                return []
+
+        return _Result()
+
+
+class _FakeEmbeddingClient:
+    """Returns one deterministic vector per input and counts its calls."""
+
+    def __init__(self, *, fail: bool = False, dim: int = 3) -> None:
+        self.fail = fail
+        self.dim = dim
+        self.calls: list[list[str]] = []
+
+    async def embed(self, texts: list[str], **_kwargs: object) -> list[list[float]]:
+        self.calls.append(list(texts))
+        if self.fail:
+            raise RuntimeError("provider down")
+        return [[float(i)] * self.dim for i, _ in enumerate(texts)]
+
+
+@pytest.fixture
+def dedup_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Force the feature flag on regardless of the ambient .env."""
+    from abridgeai.features.interviews import dedup as dedup_mod
+
+    class _S:
+        interview_dedup_enabled = True
+
+    monkeypatch.setattr(dedup_mod, "get_settings", lambda: _S())
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("dedup_on")
+async def test_store_embeddings_uses_one_provider_call_for_the_whole_batch() -> None:
+    """A generation run of N questions must not cost N round trips."""
+    from abridgeai.features.interviews.dedup import store_question_embeddings
+
+    db = _RecordingDb()
+    client = _FakeEmbeddingClient()
+    ids = [uuid.uuid4() for _ in range(4)]
+
+    stored = await store_question_embeddings(
+        db,  # type: ignore[arg-type]
+        question_ids=ids,
+        prompt_texts=["q1", "q2", "q3", "q4"],
+        embedding_client=client,  # type: ignore[arg-type]
+    )
+
+    assert stored == 4
+    assert len(client.calls) == 1, "batched into a single embed() call"
+    assert client.calls[0] == ["q1", "q2", "q3", "q4"]
+    assert len(db.updates) == 4
+    assert {u["params"]["question_id"] for u in db.updates} == set(ids)  # type: ignore[index]
+    # pgvector text format, cast to the column's halfvec type.
+    assert str(db.updates[0]["params"]["embedding"]).startswith("[")  # type: ignore[index]
+    assert "CAST(:embedding AS halfvec)" in str(db.updates[0]["sql"])
+
+
+@pytest.mark.asyncio
+async def test_store_embeddings_is_a_noop_when_the_feature_is_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No embedding spend for a feature nobody turned on."""
+    from abridgeai.features.interviews import dedup as dedup_mod
+
+    class _S:
+        interview_dedup_enabled = False
+
+    monkeypatch.setattr(dedup_mod, "get_settings", lambda: _S())
+
+    db = _RecordingDb()
+    client = _FakeEmbeddingClient()
+    stored = await dedup_mod.store_question_embeddings(
+        db,  # type: ignore[arg-type]
+        question_ids=[uuid.uuid4()],
+        prompt_texts=["q"],
+        embedding_client=client,  # type: ignore[arg-type]
+    )
+    assert stored == 0
+    assert client.calls == []
+    assert db.updates == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("dedup_on")
+async def test_store_embeddings_fails_open_on_a_provider_error() -> None:
+    """A dead provider must not abort a completed generation run."""
+    from abridgeai.features.interviews.dedup import store_question_embeddings
+
+    db = _RecordingDb()
+    stored = await store_question_embeddings(
+        db,  # type: ignore[arg-type]
+        question_ids=[uuid.uuid4()],
+        prompt_texts=["q"],
+        embedding_client=_FakeEmbeddingClient(fail=True),  # type: ignore[arg-type]
+    )
+    assert stored == 0
+    assert db.updates == [], "no partial write when the embed call raised"
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("dedup_on")
+async def test_store_embeddings_skips_blank_prompts_without_calling_the_provider() -> None:
+    from abridgeai.features.interviews.dedup import store_question_embeddings
+
+    db = _RecordingDb()
+    client = _FakeEmbeddingClient()
+    keep = uuid.uuid4()
+
+    stored = await store_question_embeddings(
+        db,  # type: ignore[arg-type]
+        question_ids=[uuid.uuid4(), keep, uuid.uuid4()],
+        prompt_texts=["   ", "real question", ""],
+        embedding_client=client,  # type: ignore[arg-type]
+    )
+
+    assert stored == 1
+    assert client.calls == [["real question"]]
+    assert db.updates[0]["params"]["question_id"] == keep  # type: ignore[index]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("dedup_on")
+async def test_store_embeddings_rejects_mismatched_input_lengths() -> None:
+    """A zip() bug here would silently attach a vector to the wrong question."""
+    from abridgeai.features.interviews.dedup import store_question_embeddings
+
+    with pytest.raises(ValueError, match="same length"):
+        await store_question_embeddings(
+            _RecordingDb(),  # type: ignore[arg-type]
+            question_ids=[uuid.uuid4(), uuid.uuid4()],
+            prompt_texts=["only one"],
+            embedding_client=_FakeEmbeddingClient(),  # type: ignore[arg-type]
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("dedup_on")
+async def test_store_embeddings_does_nothing_for_an_empty_batch() -> None:
+    """A generation run that persisted zero questions must not call the provider."""
+    from abridgeai.features.interviews.dedup import store_question_embeddings
+
+    client = _FakeEmbeddingClient()
+    assert (
+        await store_question_embeddings(
+            _RecordingDb(),  # type: ignore[arg-type]
+            question_ids=[],
+            prompt_texts=[],
+            embedding_client=client,  # type: ignore[arg-type]
+        )
+        == 0
+    )
+    assert client.calls == []
+
+
+# ── the pipeline actually calls it ────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_generation_pipeline_embeds_the_questions_it_persists() -> None:
+    """The regression guard: `_persist_questions` must embed what it inserted.
+
+    Asserting on the helper alone would not have caught the original bug — the
+    helper did not exist and the pipeline simply never embedded. This pins the
+    call, the ids/prompts handed over, and that the run id is threaded through so
+    the embedding call lands under the run's `ai_pipeline_runs` parent.
+    """
+    from unittest.mock import AsyncMock, patch
+
+    from abridgeai.features.interviews.ai.pipelines import generation as gen
+
+    class _Draft:
+        def __init__(self, prompt: str) -> None:
+            self.prompt_text = prompt
+            self.linked_outcome_id = None
+            self.question_type = "conceptual"
+            self.difficulty = None
+            self.model_answer = ""
+            self.source_refs: list[object] = []
+
+    class _Config:
+        id = uuid.uuid4()
+        module_id = uuid.uuid4()
+
+    added: list[object] = []
+
+    class _Db:
+        def add(self, obj: object) -> None:
+            # Mimic the DB assigning a PK on flush.
+            obj.id = uuid.uuid4()  # type: ignore[attr-defined]
+            added.append(obj)
+
+        async def flush(self) -> None:
+            return None
+
+    run_id = uuid.uuid4()
+    drafts = [_Draft("first question"), _Draft("second question")]
+
+    with (
+        patch.object(gen, "next_question_position", AsyncMock(side_effect=[1, 2])),
+        patch.object(gen, "store_question_embeddings", AsyncMock(return_value=2)) as spy,
+    ):
+        await gen._persist_questions(
+            _Db(),  # type: ignore[arg-type]
+            config=_Config(),  # type: ignore[arg-type]
+            accepted=drafts,  # type: ignore[arg-type]
+            source_module_ids=["m1"],
+            pipeline_run_id=run_id,
+        )
+
+    assert len(added) == 2, "both drafts persisted"
+    spy.assert_awaited_once()
+    kwargs = spy.await_args.kwargs
+    assert kwargs["prompt_texts"] == ["first question", "second question"]
+    assert kwargs["question_ids"] == [obj.id for obj in added]
+    assert kwargs["pipeline_run_id"] == run_id
+
+
+@pytest.mark.asyncio
+async def test_generation_pipeline_survives_an_embedding_failure() -> None:
+    """A provider outage must not fail a run whose questions are otherwise fine."""
+    from unittest.mock import AsyncMock, patch
+
+    from abridgeai.features.interviews.ai.pipelines import generation as gen
+
+    class _Draft:
+        prompt_text = "q"
+        linked_outcome_id = None
+        question_type = "conceptual"
+        difficulty = None
+        model_answer = ""
+        source_refs: list[object] = []
+
+    class _Config:
+        id = uuid.uuid4()
+        module_id = uuid.uuid4()
+
+    class _Db:
+        def add(self, obj: object) -> None:
+            obj.id = uuid.uuid4()  # type: ignore[attr-defined]
+
+        async def flush(self) -> None:
+            return None
+
+    # store_question_embeddings swallows internally and returns 0; assert the
+    # pipeline treats that as a non-event rather than propagating.
+    with (
+        patch.object(gen, "next_question_position", AsyncMock(return_value=1)),
+        patch.object(gen, "store_question_embeddings", AsyncMock(return_value=0)),
+    ):
+        await gen._persist_questions(
+            _Db(),  # type: ignore[arg-type]
+            config=_Config(),  # type: ignore[arg-type]
+            accepted=[_Draft()],  # type: ignore[arg-type]
+            source_module_ids=[],
+            pipeline_run_id=uuid.uuid4(),
+        )

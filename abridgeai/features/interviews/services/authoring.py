@@ -24,8 +24,6 @@ import logging
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
-from sqlalchemy import text
-
 from abridgeai.ai.llm.embeddings import EmbeddingClient
 from abridgeai.core.config import get_settings
 from abridgeai.core.db.conflict_mapper import (
@@ -39,7 +37,7 @@ from abridgeai.features.courses.api import public as courses_public
 from abridgeai.features.interviews.dedup import (
     NOT_DUPLICATE,
     check_duplicate,
-    embed_question,
+    store_question_embeddings,
 )
 from abridgeai.features.interviews.models import (
     InterviewConfig,
@@ -426,36 +424,16 @@ async def check_question_duplicate(
 async def _store_question_embedding(db: AsyncSession, question: InterviewQuestion) -> None:
     """Best-effort: persist the question's vector so it can be matched later.
 
-    Skipped entirely when ``interview_dedup_enabled`` is off — no embedding spend
-    for a feature nobody turned on. Failures are swallowed: an embedding is an
-    optimisation for *future* duplicate checks, and losing one must never fail the
-    teacher's save. The row simply keeps ``embedding = NULL``, which the shortlist
-    treats as "unknown" rather than "dissimilar".
+    Thin single-row wrapper over :func:`dedup.store_question_embeddings`, which
+    owns the feature gate, the pgvector text formatting and the swallow-and-log
+    policy — the generation pipeline needs the batch form, and two copies of that
+    UPDATE is how the two paths drifted apart in the first place.
     """
-    if not get_settings().interview_dedup_enabled:
-        return
-    try:
-        vector = await embed_question(
-            db, prompt_text=question.prompt_text, embedding_client=EmbeddingClient()
-        )
-        if not vector:
-            return
-        await db.execute(
-            text(
-                "UPDATE interview_questions SET embedding = CAST(:embedding AS halfvec) "
-                "WHERE id = :question_id"
-            ),
-            {
-                "embedding": "[" + ",".join(repr(float(v)) for v in vector) + "]",
-                "question_id": question.id,
-            },
-        )
-    except Exception:  # noqa: BLE001 — see docstring; never break a save
-        logger.warning(
-            "interview dedup: failed to embed question %s; leaving embedding NULL",
-            question.id,
-            exc_info=True,
-        )
+    await store_question_embeddings(
+        db,
+        question_ids=[question.id],
+        prompt_texts=[question.prompt_text],
+    )
 
 
 async def update_question(
