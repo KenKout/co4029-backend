@@ -108,7 +108,14 @@ async def entrypoint(ctx: JobContext) -> None:
         opening_text=opening_text,
         language=language,
     )
-    session = build_agent_session(settings, language=language, voice=tts_voice)
+    voice_persona, voice_verbosity = await bridge.get_voice_persona(interview_session_id)
+    session = build_agent_session(
+        settings,
+        language=language,
+        voice=tts_voice,
+        persona=voice_persona,
+        verbosity=voice_verbosity,
+    )
     # Make transcript↔audio sync EXPLICIT (do not rely on SDK defaults). With
     # transcription_enabled + sync_transcription True, livekit-agents attaches a
     # TranscriptSynchronizer that paces the published transcript to the ACTUAL

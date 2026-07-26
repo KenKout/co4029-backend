@@ -49,6 +49,10 @@ EV_TTS_COMPLETED = "voice.tts_completed"
 EV_TURN_COMPLETED = "voice.turn_completed"
 EV_BARGE_IN = "voice.barge_in"
 EV_TTS_INTERRUPTED = "voice.tts_interrupted"
+# A short acknowledgement spoken while the brain is still deciding, so the
+# candidate is not left in dead air. Emitted only when it actually played, so
+# the rate doubles as a measure of how often turns are slow enough to need it.
+EV_THINKING_FILLER = "voice.thinking_filler"
 # Per-turn decision (emitted by the bridge)
 EV_DECISION = "voice.decision"
 EV_FALLBACK = "voice.fallback_activated"
@@ -81,6 +85,7 @@ ALL_EVENTS = frozenset(
         EV_TURN_COMPLETED,
         EV_BARGE_IN,
         EV_TTS_INTERRUPTED,
+        EV_THINKING_FILLER,
         EV_DECISION,
         EV_FALLBACK,
         EV_CLOSING_EMITTED,

@@ -48,6 +48,14 @@ _INSTRUCTIONS = (
 # hiccup); this bounds the wait, then shuts down regardless.
 _CLOSING_PLAYOUT_TIMEOUT_S = 30.0
 
+# How long the brain may think before the candidate hears an acknowledgement.
+# Below roughly this, silence still reads as a normal conversational beat and a
+# filler would only delay the real answer; above it, the pause starts to read as
+# the system having stalled.
+_THINKING_FILLER_DELAY_S = 0.8
+_THINKING_FILLER_EN = "Mm-hm."
+_THINKING_FILLER_VI = "Ừm."
+
 
 class InterviewAgent(Agent):
     """Speaks bank questions / follow-ups; routes answers to the text brain."""
@@ -89,6 +97,30 @@ class InterviewAgent(Agent):
         if self._first_question_text:
             await self.session.say(self._first_question_text, allow_interruptions=False)
 
+    async def _speak_thinking_filler(self, turn_id: str) -> None:
+        """Say one short acknowledgement if the decision is taking a while.
+
+        Cancelled by the caller as soon as the brain returns, so a fast turn
+        never hears it. The text is a standalone token rather than a disfluency
+        spliced into the answer: filled pauses raise perceived naturalness, but
+        disfluent text handed to a TTS engine measurably degrades its prosody,
+        so the two must not be conflated.
+        """
+        try:
+            await asyncio.sleep(_THINKING_FILLER_DELAY_S)
+            text = _THINKING_FILLER_VI if self._language.startswith("vi") else _THINKING_FILLER_EN
+            self.session.say(text, add_to_chat_ctx=False)
+            obs.emit(
+                obs.EV_THINKING_FILLER,
+                session_id=self._interview_session_id,
+                turn_id=turn_id,
+                language=self._language,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 -- cosmetic; must never break a turn
+            logger.debug("thinking filler failed (session=%s)", self._interview_session_id)
+
     async def on_user_turn_completed(self, turn_ctx: ChatContext, new_message: ChatMessage) -> None:
         """Route the transcribed answer to the text brain; speak the result.
 
@@ -113,6 +145,14 @@ class InterviewAgent(Agent):
             language=self._language,
         )
 
+        # Cover the brain's thinking time with a short acknowledgement rather
+        # than dead air. Scheduled, not spoken immediately: a fast turn should
+        # not pay for a filler it does not need, so the task only fires if the
+        # decision is still pending after _THINKING_FILLER_DELAY_S and is
+        # cancelled otherwise. Kept OUT of the chat context — it is a social
+        # signal, not interview content, and must not reach the transcript the
+        # evaluator reads.
+        filler_task = asyncio.create_task(self._speak_thinking_filler(turn_id))
         try:
             result = await bridge.handle_student_turn(
                 self._interview_session_id,
@@ -122,6 +162,7 @@ class InterviewAgent(Agent):
                 turn_id=turn_id,
             )
         except Exception as exc:
+            filler_task.cancel()
             logger.exception("interview turn failed (session=%s)", self._interview_session_id)
             obs.emit(
                 obs.EV_TURN_ERROR,
@@ -131,6 +172,8 @@ class InterviewAgent(Agent):
                 latency_ms=obs.latency_ms(turn_started),
             )
             raise StopResponse() from None
+
+        filler_task.cancel()
 
         # Latency from STT-final to the decision being ready to speak — the
         # honest "brain" turn latency (STT already done; excludes TTS playout).
@@ -238,8 +281,26 @@ def _is_english(language: str) -> bool:
     return not language.lower().startswith("vi")
 
 
+def speech_rate_from_verbosity(verbosity: int) -> float:
+    """Speaking-rate multiplier for a 0-4 verbosity dial.
+
+    Mirrors the frontend's ``wordsPerMinuteFromTraits`` (124 + 13·verbosity WPM)
+    expressed as a ratio against the mid dial, so the browser-narration voice
+    and the LiveKit voice pace the same persona alike. Clamped because the
+    provider treats speed as a hard multiplier and an extreme value is worse
+    than a flat one.
+    """
+    clamped = max(0, min(4, int(verbosity)))
+    return round((124 + clamped * 13) / (124 + 2 * 13), 2)
+
+
 def build_agent_session(
-    settings: Settings, *, language: str = "en", voice: str | None = None
+    settings: Settings,
+    *,
+    language: str = "en",
+    voice: str | None = None,
+    persona: str | None = None,
+    verbosity: int | None = None,
 ) -> AgentSession[None]:
     """Construct the STT→(brain)→TTS pipeline, language-aware.
 
@@ -281,11 +342,24 @@ def build_agent_session(
 
     # Non-English (Vietnamese) — Deepgram cannot serve this locale; use the
     # OpenAI-compatible gateway for both STT and TTS (same key/base_url).
+    #
+    # Persona is applied HERE and not on the Deepgram branch above by necessity,
+    # not by preference: the Deepgram plugin exposes no voice-independent knobs
+    # (its voice IS the model id, already chosen by the teacher), whereas the
+    # OpenAI-compatible TTS takes voice + speed. Before this, the Vietnamese
+    # path passed neither, so a strict and a supportive interviewer sounded
+    # identical in VI while differing in EN — a silent asymmetry between the two
+    # languages the platform actually serves.
     api_key = settings.llm_api_key or NOT_GIVEN
     base_url = settings.llm_base_url or NOT_GIVEN
     return AgentSession[None](
         stt=openai.STT(model=settings.whisper_model, api_key=api_key, base_url=base_url),
-        tts=openai.TTS(api_key=api_key, base_url=base_url),
+        tts=openai.TTS(
+            api_key=api_key,
+            base_url=base_url,
+            voice=narration.voice_for_persona(persona),
+            speed=speech_rate_from_verbosity(verbosity if verbosity is not None else 2),
+        ),
         vad=silero.VAD.load(),
     )
 

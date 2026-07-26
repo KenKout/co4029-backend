@@ -190,6 +190,32 @@ async def get_room_intro_text(session_id: UUID, *, language: str = "en") -> str 
         )
 
 
+async def get_voice_persona(session_id: UUID) -> tuple[str | None, int]:
+    """``(persona label, verbosity dial)`` for the session's config.
+
+    The realtime path never had access to persona: it read only ``tts_voice``,
+    so tone reached voice indirectly (through the phrasing layer) and not at all
+    in the audio itself on the Vietnamese branch. Returns the neutral default
+    when anything is missing, matching ``persona.profile_from``.
+    """
+    from abridgeai.features.interviews.models import (  # noqa: PLC0415
+        InterviewConfig,
+        InterviewSession,
+    )
+    from abridgeai.features.interviews.orchestrator.persona import (  # noqa: PLC0415
+        profile_from_config,
+    )
+
+    async with get_sessionmaker()() as db:
+        session = await db.get(InterviewSession, session_id)
+        if session is None:
+            return None, 2
+        config = await db.get(InterviewConfig, session.interview_config_id)
+        persona = getattr(config, "persona", None)
+        profile = profile_from_config(persona, getattr(config, "persona_profile_json", None))
+        return persona, profile.verbosity
+
+
 async def get_tts_voice(session_id: UUID) -> str | None:
     """Return the config's chosen Deepgram Aura voice for a voice session.
 
