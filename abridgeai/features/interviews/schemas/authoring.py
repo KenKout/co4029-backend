@@ -108,6 +108,17 @@ TtsVoiceLiteral = Literal[
 
 
 OpeningStyleLiteral = Literal["brief", "standard", "comfort"]
+# Which professional identity the interviewer presents as. Orthogonal to
+# ``persona`` (which is tone): a supportive engineering manager and a strict one
+# are both coherent. Kept out of the ``persona`` column so its three-value CHECK
+# constraint and preset invariants stay untouched.
+InterviewerRoleLiteral = Literal[
+    "generic_assistant",
+    "backend_tech_lead",
+    "staff_engineer",
+    "eng_manager",
+    "hr_screener",
+]
 
 
 class PersonaProfileWrite(BaseModel):
@@ -127,6 +138,10 @@ class PersonaProfileWrite(BaseModel):
     formality: int | None = Field(default=None, ge=0, le=4)
     ack_frequency: int | None = Field(default=None, ge=0, le=4)
     opening_style: OpeningStyleLiteral | None = None
+    # Rides in the same JSONB blob as the trait overrides — no migration, the
+    # precedent being ``opening_style``, which is likewise a non-numeric enum.
+    # Absent → the generic assistant, i.e. the pre-identity wording verbatim.
+    interviewer_role: InterviewerRoleLiteral | None = None
 
 
 class PersonaProfileRead(BaseModel):
@@ -147,6 +162,7 @@ class PersonaProfileRead(BaseModel):
     formality: int
     ack_frequency: int
     opening_style: OpeningStyleLiteral
+    interviewer_role: InterviewerRoleLiteral
 
 
 class InterviewConfigCreate(BaseModel):
@@ -277,15 +293,24 @@ class InterviewConfigAuthoring(InterviewConfigPublic):
         # leaves the field None rather than 500-ing the authoring GET.
         if getattr(data, "persona_profile_resolved", None) is None:
             try:
+                from abridgeai.features.interviews.orchestrator.interviewer_identity import (  # noqa: PLC0415
+                    identity_from_config,
+                )
                 from abridgeai.features.interviews.orchestrator.persona import (  # noqa: PLC0415
                     profile_from_config,
                 )
 
+                profile_json = getattr(data, "persona_profile_json", None)
                 resolved = profile_from_config(
                     getattr(data, "persona", None),
-                    getattr(data, "persona_profile_json", None),
+                    profile_json,
                 ).clamped()
-                data.persona_profile_resolved = resolved.as_prompt_traits()
+                # Identity is resolved separately from tone but projected on the
+                # same object, so the teacher UI reads one shape.
+                data.persona_profile_resolved = {
+                    **resolved.as_prompt_traits(),
+                    "interviewer_role": identity_from_config(profile_json).role.value,
+                }
             except Exception:  # noqa: BLE001 — projection is best-effort
                 pass
         return data

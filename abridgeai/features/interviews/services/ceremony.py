@@ -19,6 +19,12 @@ from abridgeai.features.interviews.models import (
     InterviewSession,
     InterviewSessionMessage,
 )
+from abridgeai.features.interviews.orchestrator import interviewer_identity
+from abridgeai.features.interviews.orchestrator.interviewer_identity import InterviewerIdentity
+from abridgeai.features.interviews.orchestrator.persona import (
+    OpeningStyle,
+    profile_from_config,
+)
 from abridgeai.features.interviews.orchestrator.utterance import Persona, persona_from
 
 CeremonyKind = Literal[
@@ -95,27 +101,109 @@ def opening_text(
     name: str | None,
     persona: str | None,
     language: str | None,
+    identity: InterviewerIdentity | None = None,
+    opening_style: OpeningStyle | None = None,
 ) -> str:
-    """Introduce the AI transparently, then ask only for candidate identity."""
+    """Introduce the AI transparently, then ask only for candidate identity.
+
+    ``identity`` gives the interviewer a name and professional title. It is
+    ADDITIVE to the AI disclosure, never a replacement: the candidate is always
+    told they are speaking to an AI interviewer. Presenting an AI as a human
+    would be a consent problem, and the research on AI-conducted interviews
+    finds that misleading candidates about the system's nature harms both
+    perceived procedural fairness and the honesty of their answers.
+
+    ``opening_style`` (a persona trait that was plumbed end-to-end but never
+    consumed until now) tunes the ceremony around that introduction: ``BRIEF``
+    drops the pleasantry, ``COMFORT`` adds one put-the-candidate-at-ease line.
+
+    Both only take effect for a NAMED identity. A config that has not opted into
+    an interviewer role returns exactly the pre-feature sentence, byte for byte,
+    so existing interviews are untouched until a teacher chooses a role.
+
+    ``persona`` remains unread here — tone is applied by the phrasing layer, not
+    by this deterministic ceremony text.
+    """
+    del persona  # tone is the phrasing layer's business, not the ceremony's
     lang = normalize_language(language)
     safe_title = _clean(title, limit=180) or ("buổi phỏng vấn" if lang == "vi" else "interview")
     safe_name = _clean(name, limit=60) or None
     address = _address(safe_name, lang)
+    who = identity or interviewer_identity.identity_from(None)
+    style = opening_style or OpeningStyle.STANDARD
 
     if lang == "vi":
         named = f" bạn{address}" if address else " bạn"
-        return (
-            f"Xin chào{address}. Rất vui được gặp bạn. Tôi là trợ lý phỏng vấn ảo của "
-            f"aBridgeAI và sẽ hướng dẫn buổi phỏng vấn kỹ thuật “{safe_title}” hôm nay. "
-            f"Trước tiên, bạn có thể xác nhận tôi đang trao đổi với{named} không?"
+        confirm = f"Trước tiên, bạn có thể xác nhận tôi đang trao đổi với{named} không?"
+        if not who.is_named():
+            return (
+                f"Xin chào{address}. Rất vui được gặp bạn. Tôi là trợ lý phỏng vấn ảo của "
+                f"aBridgeAI và sẽ hướng dẫn buổi phỏng vấn kỹ thuật “{safe_title}” hôm nay. "
+                f"{confirm}"
+            )
+        parts = [f"Xin chào{address}."]
+        if style is not OpeningStyle.BRIEF:
+            parts.append("Rất vui được gặp bạn.")
+        parts.append(
+            f"Tôi là {who.name}, {who.title(lang)}, và hôm nay tôi là người phỏng vấn AI "
+            f"của aBridgeAI cho buổi phỏng vấn kỹ thuật “{safe_title}”."
         )
+        if style is OpeningStyle.COMFORT:
+            parts.append(
+                "Bạn cứ thoải mái, không cần vội — hãy dành thời gian cho mỗi câu trả lời."
+            )
+        parts.append(confirm)
+        return " ".join(parts)
 
     named = f" {safe_name}" if safe_name else " you"
-    return (
-        f"Hi{address}. It’s nice to meet you. I’m aBridgeAI’s virtual interview "
-        f"assistant, and I’ll guide your “{safe_title}” technical course interview "
-        f"today. First, can you confirm that I’m speaking with{named}?"
+    confirm = f"First, can you confirm that I’m speaking with{named}?"
+    if not who.is_named():
+        return (
+            f"Hi{address}. It’s nice to meet you. I’m aBridgeAI’s virtual interview "
+            f"assistant, and I’ll guide your “{safe_title}” technical course interview "
+            f"today. {confirm}"
+        )
+    parts = [f"Hi{address}."]
+    if style is not OpeningStyle.BRIEF:
+        parts.append("It’s nice to meet you.")
+    parts.append(
+        f"I’m {who.name}, a {who.title(lang)} — and today I’m aBridgeAI’s AI interviewer "
+        f"for your “{safe_title}” technical course interview."
     )
+    if style is OpeningStyle.COMFORT:
+        parts.append("There’s no rush — take your time with each answer.")
+    parts.append(confirm)
+    return " ".join(parts)
+
+
+def room_intro_text(
+    *,
+    identity: InterviewerIdentity,
+    language: str | None,
+) -> str | None:
+    """One short line spoken as the voice channel opens, or ``None``.
+
+    Fixes a real gap: ``get_opening_text`` returns ``None`` once onboarding is
+    complete, and a realtime token is only minted once it IS complete, so the
+    first thing a voice candidate ever heard was a raw question from the bank
+    with no one introducing it.
+
+    Returns ``None`` for an unnamed identity, which keeps every existing voice
+    session byte-identical. This is deliberately NOT a second introduction —
+    onboarding already greeted the candidate over REST narration. It is the
+    "I'm here, let's start" beat a person gives when a call connects.
+
+    Deliberately not a persisted ceremony message: it carries no state, and
+    hearing it again after a reconnect is what a person would do anyway. That
+    also keeps ``ensure_ceremony_message``'s contract (always returns a message)
+    intact rather than bending it for an optional line.
+    """
+    if not identity.is_named():
+        return None
+    lang = normalize_language(language)
+    if lang == "vi":
+        return f"{identity.name} đây. Chúng ta bắt đầu nhé."
+    return f"{identity.name} here. Let's get started."
 
 
 def audio_check_text(*, language: str | None) -> str:
@@ -341,8 +429,18 @@ async def ensure_ceremony_message(
     name = session_address_name(session, profile)
     title = config.title if config is not None else "Interview"
     persona = config.persona if config is not None else None
+    persona_profile_json = getattr(config, "persona_profile_json", None) if config else None
     if kind in {"opening", "candidate_confirmation"}:
-        text = opening_text(title=title, name=name, persona=persona, language=language)
+        text = opening_text(
+            title=title,
+            name=name,
+            persona=persona,
+            language=language,
+            identity=interviewer_identity.identity_from_config(persona_profile_json),
+            # opening_style rides on the persona profile; resolving it here keeps
+            # the preset/override merge in one place (persona.profile_from_config).
+            opening_style=profile_from_config(persona, persona_profile_json).opening_style,
+        )
     elif kind == "audio_check":
         text = audio_check_text(language=language)
     elif kind == "language_check":

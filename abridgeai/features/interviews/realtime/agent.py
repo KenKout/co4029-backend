@@ -92,7 +92,14 @@ async def entrypoint(ctx: JobContext) -> None:
     first_question_text = await bridge.get_current_question_text(
         interview_session_id, language=language
     )
-    opening_text = await bridge.get_opening_text(interview_session_id, language=language)
+    # get_opening_text only yields a greeting while onboarding is still pending,
+    # which a realtime token forbids — so in practice it is always None and the
+    # room fell straight into question one. The room intro fills that beat for
+    # configs with a named interviewer; both are None otherwise, preserving the
+    # existing behaviour exactly.
+    opening_text = await bridge.get_opening_text(
+        interview_session_id, language=language
+    ) or await bridge.get_room_intro_text(interview_session_id, language=language)
     tts_voice = await bridge.get_tts_voice(interview_session_id)
     agent = InterviewAgent(
         interview_session_id=interview_session_id,
