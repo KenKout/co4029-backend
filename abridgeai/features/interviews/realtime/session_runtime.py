@@ -25,6 +25,7 @@ from livekit.agents import (
     ChatContext,
     ChatMessage,
     StopResponse,
+    TurnHandlingOptions,
     get_job_context,
 )
 from livekit.plugins import deepgram, openai, silero
@@ -55,6 +56,27 @@ _CLOSING_PLAYOUT_TIMEOUT_S = 30.0
 _THINKING_FILLER_DELAY_S = 0.8
 _THINKING_FILLER_EN = "Mm-hm."
 _THINKING_FILLER_VI = "Ừm."
+
+# Endpointing — how long the candidate may pause before we call their turn over.
+#
+# The SDK default is a FIXED 0.5s, tuned for assistants where a request is one
+# short sentence. An interview answer is not: candidates stop mid-thought to
+# recall a term or plan the next clause, and at 0.5s the interviewer talks over
+# them. Two independent studies of AI-run oral assessment name exactly this —
+# pacing and question stacking — as the dominant complaint.
+#
+# ``dynamic`` mode keeps an exponential moving average of THIS speaker's pause
+# lengths and moves the threshold inside [min, max], so a deliberate speaker is
+# given room without making a fast one wait. The floor is raised above the
+# default because the cost is asymmetric: half a second of extra silence is
+# barely noticed, while being cut off mid-answer during a graded assessment is
+# both stressful and unfair.
+#
+# That fairness point is not incidental. ASR endpointing is documented to cut
+# off disfluent and stuttered speech before it finishes, so this same knob is
+# the cheapest accessibility improvement available on a voice-first assessment.
+_ENDPOINTING_MIN_DELAY_S = 0.7
+_ENDPOINTING_MAX_DELAY_S = 4.0
 
 
 class InterviewAgent(Agent):
@@ -338,6 +360,7 @@ def build_agent_session(
                 base_url=tts_base,
             ),
             vad=silero.VAD.load(),
+            turn_handling=_turn_handling(),
         )
 
     # Non-English (Vietnamese) — Deepgram cannot serve this locale; use the
@@ -361,7 +384,32 @@ def build_agent_session(
             speed=speech_rate_from_verbosity(verbosity if verbosity is not None else 2),
         ),
         vad=silero.VAD.load(),
+        turn_handling=_turn_handling(),
     )
+
+
+def _turn_handling() -> TurnHandlingOptions:
+    """Turn-taking configuration shared by both language paths.
+
+    Only endpointing is set. Interruption handling is deliberately left to the
+    SDK's auto-detection: on the English path Deepgram reports word-aligned
+    transcripts, so it selects the ML interruption detector that distinguishes a
+    real interruption from a cough or an "mm-hm"; the Vietnamese path's STT does
+    not report alignment, so the same setting resolves to VAD. Naming
+    ``mode="adaptive"`` explicitly would not improve English and would make the
+    Vietnamese session log a warning and disable the feature.
+
+    ``resume_false_interruption`` is likewise untouched — it already defaults to
+    True with a 2s timeout, which is what makes a nervous candidate's cough stop
+    truncating the question they were being asked.
+    """
+    return {
+        "endpointing": {
+            "mode": "dynamic",
+            "min_delay": _ENDPOINTING_MIN_DELAY_S,
+            "max_delay": _ENDPOINTING_MAX_DELAY_S,
+        },
+    }
 
 
 __all__ = ["InterviewAgent", "build_agent_session"]
