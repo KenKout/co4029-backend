@@ -27,10 +27,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from abridgeai.core.db import get_db
 from abridgeai.core.exceptions import ConflictError, NotFoundError
 from abridgeai.core.security import CurrentUser
-from abridgeai.features.access_control.api import public as access_control_api
 from abridgeai.features.access_control.policies import (
     require_any_permission,
     require_course_permission,
+    require_org_access,
     require_permission,
 )
 from abridgeai.features.enrollments.queries import authoring as authoring_queries
@@ -234,14 +234,13 @@ async def _ensure_caller_in_code_org(
     code = await authoring_queries.get_invitation_code(db, code_id)
     if code is None:
         raise _not_found(f"Invitation code {code_id} not found")
-    if await access_control_api.is_user_member_of_org(
-        db, user_id=current_user.user_id, org_id=code.organization_id
-    ):
-        return
-    permissions = await access_control_api.get_active_permissions(db, current_user.user_id)
-    if any(p.code == "system.administer" for p in permissions):
-        return
-    raise _not_found(f"Invitation code {code_id} not found")
+    await require_org_access(
+        db,
+        current_user,
+        code.organization_id,
+        resource="invitation_code",
+        resource_id=code_id,
+    )
 
 
 @management_router.patch(

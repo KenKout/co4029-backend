@@ -44,6 +44,53 @@ if TYPE_CHECKING:
 
 
 # ---------------------------------------------------------------------------
+# Tenancy resolvers
+#
+# The routes for domains, units and memberships address the resource by its
+# OWN id, so there is no ``org_id`` in the path for the permission dependency
+# to scope against — and the flat permission set behind that dependency does
+# not distinguish an ``org_unit.manage`` granted in org B from a global one.
+# These resolve the owning organization so the router can call
+# ``require_org_access`` before touching anything. ``None`` means the resource
+# does not exist (or is soft-deleted); the router turns that into the same 404
+# a foreign-org caller gets, so the two are indistinguishable.
+# ---------------------------------------------------------------------------
+
+
+async def organization_ids_for_user(db: AsyncSession, user_id: UUID) -> list[UUID]:
+    """Organizations the user actively belongs to.
+
+    The visibility set for org list/search. An empty list is a real answer —
+    a user with no membership sees no organizations — and must not be confused
+    with ``None``, which means "unrestricted".
+    """
+    return await org_queries.organization_ids_for_user(db, user_id)
+
+
+async def organization_id_for_domain(db: AsyncSession, domain_id: UUID) -> UUID | None:
+    row = await org_queries.get_domain(db, domain_id)
+    if row is None or row.deleted_at is not None:
+        return None
+    return row.organization_id
+
+
+async def organization_id_for_unit(db: AsyncSession, unit_id: UUID) -> UUID | None:
+    row = await org_queries.get_unit(db, unit_id)
+    if row is None or row.deleted_at is not None:
+        return None
+    return row.organization_id
+
+
+async def organization_id_for_membership(
+    db: AsyncSession, membership_id: UUID
+) -> UUID | None:
+    row = await org_queries.get_membership(db, membership_id)
+    if row is None or row.deleted_at is not None:
+        return None
+    return row.organization_id
+
+
+# ---------------------------------------------------------------------------
 # Organizations
 # ---------------------------------------------------------------------------
 
@@ -55,6 +102,7 @@ async def list_organizations(
     status: str | None = None,
     limit: int = 100,
     cursor: str | None = None,
+    visible_to_ids: list[UUID] | None = None,
 ) -> CursorPage[Organization]:
     """Cursor-paginated organisation list ordered by ``(name ASC, id ASC)``.
 
@@ -78,6 +126,7 @@ async def list_organizations(
         limit=limit,
         after_name=after_name,
         after_id=after_id,
+        visible_to_ids=visible_to_ids,
     )
     next_cursor = (
         encode_composite_cursor(rows[-1].name, rows[-1].id)
@@ -97,9 +146,14 @@ async def search_organizations(
     sort_dir: str = "asc",
     page: int = 0,
     page_size: int = 25,
+    visible_to_ids: list[UUID] | None = None,
 ) -> Page[Organization]:
     """Offset page of organisations (server-side search + sort). Thin
-    delegate to the query layer, which owns the SQLAlchemy statement."""
+    delegate to the query layer, which owns the SQLAlchemy statement.
+
+    ``visible_to_ids=None`` is unrestricted and reserved for
+    ``system.administer``; see the query-layer docstring.
+    """
     return await org_queries.search_organizations(
         db,
         include_deleted=include_deleted,
@@ -109,6 +163,7 @@ async def search_organizations(
         sort_dir=sort_dir,
         page=page,
         page_size=page_size,
+        visible_to_ids=visible_to_ids,
     )
 
 

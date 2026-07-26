@@ -9,9 +9,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from abridgeai.core.db import get_db
 from abridgeai.core.exceptions import AppError, ConflictError, NotFoundError
 from abridgeai.core.security import CurrentUser
-from abridgeai.features.access_control.api import public as access_control_api
 from abridgeai.features.access_control.policies import (
     require_any_permission,
+    require_org_access,
     require_permission,
 )
 from abridgeai.features.career_paths.schemas import (
@@ -92,14 +92,13 @@ async def _ensure_caller_in_path_org(
     shape).
     """
     path = await authoring_service.get_career_path(db, career_path_id)
-    if await access_control_api.is_user_member_of_org(
-        db, user_id=current_user.user_id, org_id=path.organization_id
-    ):
-        return
-    permissions = await access_control_api.get_active_permissions(db, current_user.user_id)
-    if any(p.code == "system.administer" for p in permissions):
-        return
-    raise _not_found(f"Career path {career_path_id} not found")
+    await require_org_access(
+        db,
+        current_user,
+        path.organization_id,
+        resource="career_path",
+        resource_id=career_path_id,
+    )
 
 
 @management_router.post(
@@ -134,9 +133,14 @@ async def list_career_paths(
 
     ``organization_id`` is OPTIONAL: when omitted the caller's primary
     org is resolved from the bearer token, matching the contract used by
-    POST. An explicit value is honoured (so platform admins can list any
-    org); managers without scope and no override get a 400 instead of a
-    confusing empty list.
+    POST. Managers without a primary org and no override get a 400 instead
+    of a confusing empty list.
+
+    An explicit value is honoured only for an org the caller belongs to, or
+    for ``system.administer``. It used to be honoured unconditionally "so
+    platform admins can list any org" — but the guard on this route is a flat
+    permission check, so the same query parameter let a manager in any org
+    enumerate another org's career paths by passing its id.
     """
     if organization_id is None:
         from abridgeai.features.career_paths.queries.published import (  # noqa: PLC0415
@@ -149,6 +153,14 @@ async def list_career_paths(
                 f"User {current_user.user_id} has no primary organization; "
                 "pass ?organization_id=... to list paths for a specific org."
             )
+    else:
+        await require_org_access(
+            db,
+            current_user,
+            organization_id,
+            resource="organization",
+            resource_id=organization_id,
+        )
     return await authoring_service.list_career_paths_for_org(
         db, organization_id, include_archived=include_archived
     )

@@ -15,6 +15,9 @@ Five public functions:
   §A1 -- ownership is an additional allow on top of explicit grants).
 * :func:`require_org_unit_permission` -- org_unit-scoped check that
   walks the unit's ancestor chain in Python.
+* :func:`require_org_access` -- membership check for org-owned resources
+  that are NOT course-owned, where there is no course to re-resolve
+  scope against. Mandatory for those; see its docstring.
 * :func:`can_manage_course` -- bool helper for non-route call sites
   (cron jobs, bulk operations) -- never raises.
 
@@ -82,6 +85,76 @@ _ORG_UNIT_ANCESTORS_SQL = text(
     SELECT unit_id, organization_id FROM org_unit_tree
     """
 )
+
+
+_ORG_MEMBERSHIP_SQL = text(
+    """
+    SELECT 1
+    FROM organization_memberships
+    WHERE user_id = :user_id
+      AND organization_id = :organization_id
+      AND status = 'active'
+      AND deleted_at IS NULL
+    LIMIT 1
+    """
+)
+
+
+async def user_is_org_member(
+    db: AsyncSession,
+    *,
+    user_id: UUID,
+    organization_id: UUID,
+) -> bool:
+    """True iff the user holds an active, non-deleted membership in the org."""
+    row = (
+        await db.execute(
+            _ORG_MEMBERSHIP_SQL,
+            {"user_id": str(user_id), "organization_id": str(organization_id)},
+        )
+    ).first()
+    return row is not None
+
+
+async def require_org_access(
+    db: AsyncSession,
+    current_user: CurrentUser,
+    organization_id: UUID,
+    *,
+    resource: str,
+    resource_id: UUID,
+) -> None:
+    """Raise 404 unless the caller belongs to ``organization_id``.
+
+    The mandatory second half of authorising an **org-owned resource that is
+    not course-owned**. The permission dependencies above answer "does this
+    principal hold code X anywhere", because :func:`load_user_permissions`
+    flattens role assignments without regard to ``scope_kind`` — a role granted
+    at ``scope_kind='organization'`` for org B yields exactly the same codes as
+    a global grant. Course-owned resources are fine: they route through
+    :func:`require_course_permission`, which re-resolves scope against the
+    course's own organization. Anything org-owned but course-less has nothing
+    to re-resolve against, so it must call this after loading the resource.
+
+    ``system.administer`` passes — it is the platform-operator permission and
+    is only ever granted globally.
+
+    **404, not 403.** A 403 would confirm the resource exists, which turns any
+    id endpoint into an existence oracle across tenants: enumerate ids, read
+    the status code, learn which career paths or invitation codes another
+    organization owns. The not-found shape matches what the caller would see
+    for a genuinely absent id, so the two are indistinguishable.
+
+    Call it *inside* the handler's ``try`` block where one exists, so a missing
+    resource still maps to the router's own 404 shape.
+    """
+    if current_user.has_permission("system.administer"):
+        return
+    if await user_is_org_member(
+        db, user_id=current_user.user_id, organization_id=organization_id
+    ):
+        return
+    raise _not_found(resource, resource_id)
 
 
 def _permission_denied(
@@ -365,6 +438,8 @@ __all__ = [
     "can_manage_course",
     "require_any_permission",
     "require_course_permission",
+    "require_org_access",
     "require_org_unit_permission",
     "require_permission",
+    "user_is_org_member",
 ]

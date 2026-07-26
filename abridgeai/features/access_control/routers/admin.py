@@ -34,7 +34,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from abridgeai.core.db import get_db
 from abridgeai.core.exceptions import ForbiddenError, NotFoundError
 from abridgeai.core.security import CurrentUser
-from abridgeai.features.access_control.policies import require_any_permission
+from abridgeai.features.access_control.policies import (
+    require_any_permission,
+    require_org_access,
+)
 from abridgeai.features.access_control.schemas.admin import (
     GrantCreate,
     GrantRead,
@@ -221,9 +224,14 @@ async def revoke_user_grant(
 )
 async def list_org_memberships(
     org_id: UUID,
-    _user: Annotated[CurrentUser, Depends(_REQUIRE_ORG_MANAGE)],
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_ORG_MANAGE)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> list[MembershipRead]:
+    # Memberships carry student_code / employee_code — PII of another
+    # customer's staff and students if this is not scoped.
+    await require_org_access(
+        db, current_user, org_id, resource="organization", resource_id=org_id
+    )
     rows = await admin_service.list_organization_memberships(db, org_id)
     return [MembershipRead.model_validate(r) for r in rows]
 
@@ -236,9 +244,17 @@ async def list_org_memberships(
 async def add_org_membership(
     org_id: UUID,
     payload: MembershipCreate,
-    _user: Annotated[CurrentUser, Depends(_REQUIRE_ORG_MANAGE)],
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_ORG_MANAGE)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> MembershipRead:
+    # The most consequential org check in the codebase. Writing a membership
+    # into an arbitrary organization is not merely a cross-tenant write — it
+    # MANUFACTURES the membership that every other org check in this codebase
+    # relies on. Left open, a manager grants themselves entry to any tenant and
+    # every `require_org_access` guard then passes legitimately.
+    await require_org_access(
+        db, current_user, org_id, resource="organization", resource_id=org_id
+    )
     membership = await admin_service.add_organization_membership(
         db, organization_id=org_id, payload=payload
     )
