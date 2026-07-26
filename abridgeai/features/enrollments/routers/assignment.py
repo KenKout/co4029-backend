@@ -27,11 +27,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from abridgeai.core.db import get_db
 from abridgeai.core.exceptions import ConflictError, NotFoundError
 from abridgeai.core.security import CurrentUser
+from abridgeai.features.access_control.api import public as access_control_api
 from abridgeai.features.access_control.policies import (
     require_any_permission,
     require_course_permission,
     require_permission,
 )
+from abridgeai.features.enrollments.queries import authoring as authoring_queries
 from abridgeai.features.enrollments.schemas import (
     BulkEnrollRequest,
     BulkEnrollResult,
@@ -208,6 +210,40 @@ async def create_invitation_code(
     return result
 
 
+async def _ensure_caller_in_code_org(
+    db: AsyncSession, current_user: CurrentUser, code_id: UUID
+) -> None:
+    """Require the caller to belong to the invitation code's organization.
+
+    Unlike the course-scoped endpoints above, these two resolve a code by its
+    own id, so ``require_course_permission`` cannot be used — there is no
+    course in the path to scope against. ``_REQUIRE_INVITATION_CODE_MANAGE``
+    is a flat permission check, and the flat set ignores ``scope_kind`` (see
+    ``access_control/api/public.py::_ACTIVE_PERMISSIONS_SQL``), so a manager
+    granted ``course.enrollment.create`` within org B satisfies it while
+    editing org A's code.
+
+    That matters more here than the shape suggests: an invitation code is a
+    self-service enrolment credential. Editing another org's code — extending
+    its expiry, raising its use limit, or reactivating a revoked one — is a
+    way into that org's courses, and deleting one is a denial of enrolment.
+
+    404s rather than 403s on failure, matching the resource-not-found shape
+    used elsewhere so the endpoint does not confirm the code exists.
+    """
+    code = await authoring_queries.get_invitation_code(db, code_id)
+    if code is None:
+        raise _not_found(f"Invitation code {code_id} not found")
+    if await access_control_api.is_user_member_of_org(
+        db, user_id=current_user.user_id, org_id=code.organization_id
+    ):
+        return
+    permissions = await access_control_api.get_active_permissions(db, current_user.user_id)
+    if any(p.code == "system.administer" for p in permissions):
+        return
+    raise _not_found(f"Invitation code {code_id} not found")
+
+
 @management_router.patch(
     "/invitation-codes/{code_id}",
     response_model=InvitationCodeAuthoring,
@@ -219,6 +255,7 @@ async def update_invitation_code(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> InvitationCodeAuthoring:
     try:
+        await _ensure_caller_in_code_org(db, current_user, code_id)
         result = await manager_service.update_invitation_code(db, code_id, payload, current_user)
     except NotFoundError as exc:
         raise _not_found(str(exc)) from exc
@@ -236,6 +273,7 @@ async def delete_invitation_code(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> None:
     try:
+        await _ensure_caller_in_code_org(db, current_user, code_id)
         await manager_service.delete_invitation_code(db, code_id, current_user)
     except NotFoundError as exc:
         raise _not_found(str(exc)) from exc

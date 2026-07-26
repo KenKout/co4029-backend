@@ -66,9 +66,13 @@ class LLMRole(str, Enum):  # noqa: UP042 - StrEnum changes value coercion; prese
     # ``assura\ce``) and, worse, with table cells read in the wrong order — one
     # 3x3 matrix had an entry migrate into the wrong cell, which does not look
     # like an error downstream, it looks like course content. Reading a grid
-    # and keeping row/column association IS a reasoning task. The blast radius
-    # is bounded by ``preprocess_ocr_max_pages`` (30/document), so this trades
-    # a capped cost increase against silent corruption of the densest pages.
+    # and keeping row/column association IS a reasoning task, so this trades
+    # cost against silent corruption of the densest pages.
+    #
+    # Note the spend is NOT bounded per document: ``preprocess_ocr_max_pages``
+    # is advisory since truncating it meant dropping pages. A long scan will
+    # cost proportionally. ``LLM_MODEL_PAGE_OCR`` overrides the tier per
+    # deployment if that trade needs revisiting.
     PAGE_OCR = "page_ocr"
     PAGE_CLASSIFICATION = "page_classification"
     # Quarantined answer extraction. Sees a student's raw answer and the current
@@ -129,9 +133,7 @@ ROLE_TO_TIER: dict[LLMRole, Literal["small", "standard", "large"]] = {
     # Ingestion preprocessing — see the role docstrings. PAGE_OCR is standard
     # tier because the pages it sees are the diagram/matrix ones a text
     # extractor could not read at all; PAGE_CLASSIFICATION stays small because
-    # labelling a cover page really is a lookup. Both are capped per document
-    # (``preprocess_ocr_max_pages``), so neither scales with course size the
-    # way a per-chunk role does.
+    # labelling a cover page really is a lookup.
     LLMRole.PAGE_OCR: "standard",
     LLMRole.PAGE_CLASSIFICATION: "small",
     # Quarantined extraction — see the role docstring. Small tier: it subsumes

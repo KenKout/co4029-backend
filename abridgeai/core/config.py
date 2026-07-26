@@ -224,9 +224,9 @@ class Settings(BaseSettings):
     # letter page near ~1500px wide, which is the resolution band where OCR
     # accuracy plateaus; going higher mostly buys image tokens.
     preprocess_ocr_dpi: int = Field(default=150, ge=72, le=400)
-    # Hard cap per document. More image-only pages than this means the upload
-    # is a scan, and quietly running a per-page vision bill on it is worse
-    # than stopping and logging loudly.
+    # Advisory only — it logs, it does not truncate. This was a hard cap and
+    # the pages past it were dropped, which silently deleted content from long
+    # scans rather than merely costing less. Set to 0 to silence the warning.
     preprocess_ocr_max_pages: int = Field(default=30, ge=0)
     # LLM adjudication of the narrow band of pages the deterministic rules
     # could not settle (~5-15% of pages), batched 10 per call on the SMALL

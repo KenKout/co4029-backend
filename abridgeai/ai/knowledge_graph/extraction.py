@@ -23,6 +23,19 @@ from abridgeai.ai.llm.roles import LLMRole
 
 KG_BUILD_STAGE_NAME = "kg_build"
 
+# Bump whenever the extraction prompt, the response schema, or the
+# normalisation below changes in a way that would produce different concepts
+# from the same text.
+#
+# This is what makes the build's resume safe. Resume skips a chunk whose text
+# is unchanged, which is right for continuing a run killed by ``job_timeout``
+# and WRONG after a prompt change: the text is identical, so every chunk is
+# skipped and a "rebuild" silently returns the concepts the old prompt
+# produced. The version is stamped on each ``Chunk`` node and compared on
+# resume, so changing the prompt invalidates the graph automatically instead
+# of requiring someone to remember to clear Neo4j by hand.
+KG_EXTRACTION_VERSION = "kg-v2"
+
 KNOWLEDGE_GRAPH_SYSTEM_PROMPT = (
     "You extract concise course knowledge graphs from LMS source chunks.\n"
     "Return one JSON object with entities and relationships arrays.\n"

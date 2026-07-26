@@ -79,6 +79,8 @@ class PreprocessConfig:
     page_roles: bool = True
     deck_detection: bool = True
     ocr_enabled: bool = True
+    # Advisory threshold: exceeding it logs, it does not truncate. See
+    # :func:`_run_ocr`.
     ocr_max_pages: int = 30
     llm_adjudication: bool = False
     llm_min_confidence: float = 0.8
@@ -220,24 +222,32 @@ async def _run_ocr(
     *,
     max_pages: int,
 ) -> None:
-    """OCR the image-only pages the blankness tier routed here.
+    """OCR every image-only page the blankness tier routed here.
 
-    Hard-capped: a document with more pages needing OCR than the cap is a
-    scan, and silently running up a per-page vision bill on it is worse than
-    stopping and saying so.
+    ``max_pages`` no longer truncates. It used to: past the cap the remaining
+    pages were dropped with a warning, on the reasoning that a document
+    needing that much OCR is a scan and the vision bill should be stopped.
+    That trade was wrong in the one direction that matters — the pages routed
+    here are by definition the ones with no text layer, so truncating did not
+    degrade the document, it *deleted* the back half of it, and nothing
+    downstream could tell the difference between "page 40 had no content" and
+    "page 40 was over budget". A cost ceiling is not worth a silent hole in
+    the middle of a course.
+
+    The value is still logged when exceeded so an unusually OCR-heavy upload
+    is visible in the worker log rather than merely expensive.
     """
     targets = [u for u in units if u.needs_ocr and u.page_number is not None]
     if not targets:
         return
-    if len(targets) > max_pages:
+    if max_pages and len(targets) > max_pages:
         logger.warning(
-            "preprocess: %d pages need OCR but cap is %d; OCR-ing the first %d only. "
-            "This document is probably a scan — consider a dedicated OCR ingest.",
+            "preprocess: %d pages need OCR (advisory threshold %d). OCR-ing all of "
+            "them — this document is probably a scan, so expect the vision spend "
+            "to scale with its length.",
             len(targets),
             max_pages,
-            max_pages,
         )
-        targets = targets[:max_pages]
 
     for unit in targets:
         page_number = unit.page_number

@@ -71,13 +71,25 @@ def _bad_request(detail: str) -> HTTPException:
 async def _ensure_caller_in_path_org(
     db: AsyncSession, current_user: CurrentUser, career_path_id: UUID
 ) -> None:
-    """FR-2.6 — managers only see roster/readiness for paths in THEIR org.
+    """Require the caller to belong to the path's organization.
 
-    The permission deps above are permission-level (global scope); a
-    manager from org B with ``course.enrollment.read`` must not read
-    org A's student emails. Membership in the path's organization OR
-    ``system.administer`` passes; everything else 404s (no existence
-    leak — matches the resource-not-found shape).
+    Every ``require_permission`` dependency in this module resolves against
+    the caller's FLAT permission set, which is computed without regard to
+    ``scope_kind`` (see ``access_control/api/public.py::_ACTIVE_PERMISSIONS_SQL``).
+    A role granted to a manager at ``scope_kind='organization'`` for org B
+    therefore yields exactly the same permission codes as a global grant — so
+    the dependency alone cannot keep that manager out of org A's data. Only a
+    per-resource check can, and ``career_paths`` is org-owned.
+
+    This started life as an FR-2.6 guard on the two roster/readiness reads.
+    It applies to every endpoint that resolves a path by id: read, mutate,
+    publish, archive and enrol alike. Without it a manager in any org could
+    rename, re-order, publish or archive another org's career path and enrol
+    students into it.
+
+    Membership in the path's organization OR ``system.administer`` passes;
+    everything else 404s (no existence leak — matches the resource-not-found
+    shape).
     """
     path = await authoring_service.get_career_path(db, career_path_id)
     if await access_control_api.is_user_member_of_org(
@@ -151,8 +163,8 @@ async def get_career_path(
     current_user: Annotated[CurrentUser, Depends(_REQUIRE_PATH_MANAGE)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> CareerPathAuthoring:
-    del current_user
     try:
+        await _ensure_caller_in_path_org(db, current_user, career_path_id)
         return await authoring_service.get_career_path(db, career_path_id)
     except NotFoundError as exc:
         raise _not_found(str(exc)) from exc
@@ -169,6 +181,7 @@ async def update_career_path(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> CareerPathAuthoring:
     try:
+        await _ensure_caller_in_path_org(db, current_user, career_path_id)
         result = await authoring_service.update_career_path(
             db, career_path_id, payload, current_user
         )
@@ -189,8 +202,8 @@ async def list_career_path_courses(
     current_user: Annotated[CurrentUser, Depends(_REQUIRE_PATH_MANAGE)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> list[CareerPathCourseAuthoring]:
-    del current_user
     try:
+        await _ensure_caller_in_path_org(db, current_user, career_path_id)
         return await authoring_service.list_career_path_courses(db, career_path_id)
     except NotFoundError as exc:
         raise _not_found(str(exc)) from exc
@@ -208,6 +221,7 @@ async def add_course_to_path(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> CareerPathCourseAuthoring:
     try:
+        await _ensure_caller_in_path_org(db, current_user, career_path_id)
         result = await authoring_service.add_course_to_path(
             db,
             career_path_id,
@@ -235,6 +249,7 @@ async def reorder_courses_in_path(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> list[CareerPathCourseAuthoring]:
     try:
+        await _ensure_caller_in_path_org(db, current_user, career_path_id)
         result = await authoring_service.reorder_courses_in_path(
             db, career_path_id, payload.course_ids, current_user
         )
@@ -257,6 +272,7 @@ async def remove_course_from_path(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> None:
     try:
+        await _ensure_caller_in_path_org(db, current_user, career_path_id)
         await authoring_service.remove_course_from_path(db, career_path_id, course_id, current_user)
     except NotFoundError as exc:
         raise _not_found(str(exc)) from exc
@@ -275,6 +291,7 @@ async def enroll_student_in_path(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> StudentCareerEnrollmentAuthoring:
     try:
+        await _ensure_caller_in_path_org(db, current_user, career_path_id)
         result = await enrollment_service.enroll_student_in_path(
             db,
             career_path_id=career_path_id,
@@ -300,6 +317,7 @@ async def unenroll_student_from_path(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> None:
     try:
+        await _ensure_caller_in_path_org(db, current_user, career_path_id)
         await enrollment_service.unenroll_student(
             db,
             career_path_id=career_path_id,
@@ -321,6 +339,7 @@ async def publish_path(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> CareerPathAuthoring:
     try:
+        await _ensure_caller_in_path_org(db, current_user, career_path_id)
         result = await authoring_service.publish_path(db, career_path_id, current_user)
     except NotFoundError as exc:
         raise _not_found(str(exc)) from exc
@@ -340,6 +359,7 @@ async def archive_path(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> CareerPathAuthoring:
     try:
+        await _ensure_caller_in_path_org(db, current_user, career_path_id)
         result = await authoring_service.archive_path(db, career_path_id, current_user)
     except NotFoundError as exc:
         raise _not_found(str(exc)) from exc

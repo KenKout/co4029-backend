@@ -195,12 +195,32 @@ async def _load_context(
     )
 
 
+# A job in one of these states is over. Reusing its row for a new run buries
+# the previous run's outcome and mixes two runs' cost rows under one id.
+_TERMINAL_JOB_STATUSES = frozenset({"completed", "failed", "cancelled"})
+
+
 async def _ensure_processing_job(
     db: AsyncSession,
     material_version_id: UUID,
 ) -> ProcessingJob:
+    """Return the in-flight job for this version, or start a new one.
+
+    Only a job that has not finished is reused — that is the case this exists
+    for: an ARQ retry, or the reaper re-enqueueing an ingest whose worker died,
+    must attach to the row already tracking that attempt rather than opening a
+    second one.
+
+    A *finished* job is never reused. It used to be, and a reprocess then
+    inherited the original row: ``started_at`` stayed pinned to the first run
+    ever (it is only set ``or _utcnow()``), the previous run's outcome was
+    overwritten, and every ``ai_model_calls`` row from every reprocess
+    accumulated under one ``processing_job_id`` — so per-run cost could not be
+    read back, and "has my reprocess finished?" could not be answered from the
+    table at all.
+    """
     job = await get_latest_processing_job(db, material_version_id)
-    if job is None:
+    if job is None or job.status in _TERMINAL_JOB_STATUSES:
         job = ProcessingJob(
             entity_type="material_version",
             entity_id=material_version_id,

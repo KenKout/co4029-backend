@@ -152,6 +152,11 @@ max-complexity = 12
 # printer is a flat sequence of sections rather than genuinely complex logic
 # (C901).
 "scripts/interview_quality_report.py" = ["T20", "E501", "E402", "I001", "C901"]
+# AI cost backfill — a manual-trigger maintenance CLI run after a pricing rate
+# is added. Prints a per-model report to stdout (T20) and uses raw SQL by
+# design: it sweeps historical rows, so an ORM round-trip per row would be
+# both slower and less atomic than one UPDATE.
+"scripts/backfill_ai_call_costs.py" = ["T20", "E501"]
 
 [tool.mypy]
 python_version = "3.12"

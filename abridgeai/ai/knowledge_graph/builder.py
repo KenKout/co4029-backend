@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from abridgeai.ai.knowledge_graph.consolidate import consolidate_material_concepts
 from abridgeai.ai.knowledge_graph.extraction import (
     KG_BUILD_STAGE_NAME,
+    KG_EXTRACTION_VERSION,
     KNOWLEDGE_GRAPH_SYSTEM_PROMPT,
     EnrichedChunk,
     _extract_concepts_from_chunk,
@@ -154,6 +155,15 @@ async def _already_built_previews_by_index(
     different content at the same index rebuilds rather than reusing stale
     concepts.
 
+    Only nodes built by the CURRENT ``KG_EXTRACTION_VERSION`` are returned.
+    Text-equality alone made this function a trap: after a prompt change the
+    text is by definition unchanged, so every chunk matched, every chunk was
+    skipped, and a deliberate rebuild returned the old prompt's concepts while
+    reporting success. Filtering on the version means changing the prompt
+    invalidates the graph on the next run with no manual Neo4j surgery — and
+    nodes written before the property existed read as NULL, so they rebuild
+    once and are correct thereafter.
+
     Keyed by the stable ``material_id`` (``Material`` nodes persist across
     versions). Best-effort: on any Neo4j error returns an empty map (full
     rebuild — correct, just slower), never raises.
@@ -164,9 +174,11 @@ async def _already_built_previews_by_index(
                 """
                 MATCH (m:Material {id: $material_id})-[:HAS_CHUNK]->(c:Chunk)
                 WHERE c.index IS NOT NULL
+                  AND c.kg_extraction_version = $extraction_version
                 RETURN c.index AS idx, c.text_preview AS preview
                 """,
                 material_id=str(material_id),
+                extraction_version=KG_EXTRACTION_VERSION,
             )
             return {
                 int(record["idx"]): (record["preview"] or "")
@@ -256,7 +268,12 @@ async def _upsert_chunk_graph_tx(
           SET chunk.index = $chunk_index,
               chunk.text_preview = $text_preview,
               chunk.org_id = $org_id,
-              chunk.material_version_id = $material_version_id
+              chunk.material_version_id = $material_version_id,
+              // Stamped so the next run's resume scan can tell concepts built
+              // by THIS prompt from ones built by an older one. Without it,
+              // resume matches on unchanged text and a prompt change can never
+              // take effect.
+              chunk.kg_extraction_version = $kg_extraction_version
         MERGE (course)-[:CONTAINS_MODULE]->(module)
         MERGE (module)-[:CONTAINS_LESSON]->(lesson)
         MERGE (lesson)-[:HAS_MATERIAL]->(material)
@@ -426,6 +443,7 @@ async def build_knowledge_graph_for_material_version(
                 # node again after ``_persist_chunks`` has thrown its Postgres
                 # row away and minted a fresh id on re-ingest.
                 "material_version_id": str(material_version_id),
+                "kg_extraction_version": KG_EXTRACTION_VERSION,
             },
             concepts=concepts,
             relationships=relationships,
