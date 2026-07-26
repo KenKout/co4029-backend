@@ -126,6 +126,10 @@ async def count_pending_grading_for_courses(
             InterviewConfig.deleted_at.is_(None),
             InterviewSession.status.in_(("completed", "timed_out")),
             InterviewSession.pass_verdict.is_(None),
+            # Practice runs are ungraded by design, so their NULL verdict is not
+            # work waiting for the teacher. Without this they would pile up on
+            # the dashboard as permanently pending marking.
+            InterviewSession.session_mode != "practice",
         )
     )
     pending_interviews = int((await db.execute(interview_stmt)).scalar_one())
@@ -449,9 +453,7 @@ async def list_course_outcomes(db: AsyncSession, course_id: UUID) -> list[Course
     return list((await db.execute(stmt)).scalars().all())
 
 
-async def get_course_outcome(
-    db: AsyncSession, outcome_id: UUID
-) -> CourseLearningOutcome | None:
+async def get_course_outcome(db: AsyncSession, outcome_id: UUID) -> CourseLearningOutcome | None:
     return await db.get(CourseLearningOutcome, outcome_id)
 
 

@@ -30,6 +30,7 @@ from abridgeai.ai.models import GenerationRun
 from abridgeai.core.db.conflict_mapper import flush_or_conflict
 from abridgeai.core.exceptions import NotFoundError
 from abridgeai.core.security import utcnow
+from abridgeai.features.interviews import practice
 from abridgeai.features.interviews.ai.stages.evaluation import evaluate_outcomes, evaluate_session
 from abridgeai.features.interviews.ai.stages.evaluation.outcome_verdicts import (
     OutcomeVerdict,
@@ -50,7 +51,6 @@ from abridgeai.features.interviews.ai.stages.persona_adherence import (
 from abridgeai.features.interviews.ai.stages.persona_adherence.parsers import (
     PersonaAdherence,
 )
-from abridgeai.features.interviews.orchestrator.persona import profile_from_config
 from abridgeai.features.interviews.models import (
     GapReport,
     InterviewOutcomeEvaluation,
@@ -59,6 +59,7 @@ from abridgeai.features.interviews.models import (
     InterviewSessionMessage,
     InterviewSessionQuestion,
 )
+from abridgeai.features.interviews.orchestrator.persona import profile_from_config
 from abridgeai.features.interviews.orchestrator.security import (
     SecurityAction,
     SecurityAssessment,
@@ -107,6 +108,14 @@ async def evaluate_and_generate_report(
     if session is None:
         raise NotFoundError(f"Interview session {session_id} not found")
 
+    if practice.is_practice(session.session_mode):
+        # Defence in depth. The enqueue sites already skip practice, but this is
+        # the single function that writes ``pass_verdict`` — and a verdict on a
+        # rehearsal would unlock the SR lesson and quiz gates that read it. One
+        # missed enqueue anywhere must not be able to reach that write, so the
+        # refusal lives here too rather than only at the callers.
+        return
+
     # Parent generation_run for this evaluation so it surfaces on the admin
     # processing dashboard and its LLM calls attribute to a pipeline run.
     # Created + committed with status='running' BEFORE the stages so a later
@@ -116,8 +125,17 @@ async def evaluate_and_generate_report(
 
     try:
         outcomes = await authoring_queries.list_outcomes_for_config(db, session.interview_config_id)
+        # Partitioned by session mode, and this is the highest-consequence of the
+        # partition filters — it is not about leaking questions. This query takes
+        # every review state, and the questions it returns become
+        # ``expected_question_ids``: a question from the other partition would be
+        # counted as unanswered, inflate ``questions_total``, and hard-fail any
+        # outcome linked to it via ``_fail_unanswered_outcomes``. Unfiltered, the
+        # partition would corrupt real grades rather than merely reveal a bank.
         all_questions = await authoring_queries.list_questions_for_config(
-            db, session.interview_config_id
+            db,
+            session.interview_config_id,
+            practice_only=practice.partition_for_mode(session.session_mode),
         )
         candidate_answers = await _list_candidate_answers(db, session_id)
         snapshot = await sessions_queries.get_session_with_responses(db, session_id)
@@ -305,6 +323,97 @@ async def _list_candidate_answers(
         and getattr(m, "session_question_id", None) is not None
         and (getattr(m, "metadata_json", None) or {}).get("kind") != "onboarding"
     ]
+
+
+async def generate_practice_feedback(db: AsyncSession, session_id: UUID) -> None:
+    """Judge a practice run against the criteria, without grading it.
+
+    A deliberately separate function rather than a branch inside
+    :func:`evaluate_and_generate_report`. That function is the only writer of
+    ``pass_verdict``, and ``pass_verdict = TRUE`` is what opens the SR-lesson
+    and quiz gates — keeping the two apart makes "a rehearsal can never unlock
+    anything" a structural property instead of a conditional someone could
+    later invert. Each function refuses the other's mode outright.
+
+    What it runs, and what it deliberately does not:
+
+    * ``evaluate_outcomes`` — per-criterion met/not-met. This is the whole
+      point: the student saw those criteria before the run, so the feedback
+      that closes the loop is which ones they actually demonstrated.
+    * NOT ``evaluate_session`` — that produces numeric rubric scores, which
+      thesis §4.3 keeps away from students in any mode.
+    * NOT ``generate_gap_report`` — it writes a ``gap_reports`` row that the
+      results screen reads as a graded outcome, and it needs the learner-facing
+      output guard. A rehearsal should not manufacture either.
+    * NOT ``_derive_pass_verdict`` / ``_stamp_session_summary`` — no verdict,
+      no score, no ``questions_total`` that a teacher view would read as a
+      graded attempt.
+
+    Failures are recorded rather than raised. Unlike a real evaluation there is
+    no verdict anyone is blocked on, nothing downstream is gated on this, and
+    the recovery sweep skips practice — so there is nothing for a retry loop to
+    repair. But the failure IS stamped, because the alternative is a client that
+    cannot tell "still thinking" from "never coming" and spins forever.
+    """
+    session = await sessions_queries.get_session(db, session_id)
+    if session is None:
+        raise NotFoundError(f"Interview session {session_id} not found")
+    if not practice.is_practice(session.session_mode):
+        # The mirror of the refusal in evaluate_and_generate_report. A graded
+        # session reaching here would get outcome rows written without the
+        # verdict, score and gap report that make them meaningful.
+        return
+
+    try:
+        outcomes = await authoring_queries.list_outcomes_for_config(db, session.interview_config_id)
+        all_questions = await authoring_queries.list_questions_for_config(
+            db,
+            session.interview_config_id,
+            practice_only=True,
+        )
+        candidate_answers = await _list_candidate_answers(db, session_id)
+        snapshot = await sessions_queries.get_session_with_responses(db, session_id)
+        if snapshot is None:
+            raise NotFoundError(f"Interview session {session_id} not found")
+        _, session_questions, _ = snapshot
+        questions, question_prompts, _expected, answered_question_ids = (
+            _build_question_evaluation_context(all_questions, session_questions, candidate_answers)
+        )
+
+        verdicts = await evaluate_outcomes(
+            db,
+            session=session,
+            outcomes=outcomes,
+            questions=questions,
+            answers=candidate_answers,
+            question_prompts=question_prompts,
+            pipeline_run_id=None,
+        )
+        # Same honesty as the graded path: a criterion whose question was never
+        # answered was not demonstrated, whatever the judge inferred elsewhere.
+        verdicts = _fail_unanswered_outcomes(
+            verdicts,
+            questions=questions,
+            answered_question_ids=answered_question_ids,
+        )
+
+        await _persist_outcome_evaluations(db, session_id=session_id, verdicts=verdicts)
+        session.internal_summary_json = dict(session.internal_summary_json or {}) | {
+            "practice": {
+                "outcomes_met": verdicts.met_count,
+                "outcomes_total": verdicts.total,
+                "evaluated_at": utcnow().isoformat(),
+            }
+        }
+        await db.commit()
+    except Exception as exc:  # noqa: BLE001 -- see the docstring: recorded, not raised
+        await db.rollback()
+        fresh = await db.get(InterviewSession, session_id)
+        if fresh is not None:
+            fresh.internal_summary_json = dict(fresh.internal_summary_json or {}) | {
+                "practice": {"failed": True, "message": str(exc), "at": utcnow().isoformat()}
+            }
+            await db.commit()
 
 
 def _build_question_evaluation_context(

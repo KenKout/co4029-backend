@@ -48,14 +48,18 @@ def time_fraction_remaining(session: InterviewSession, config: InterviewConfig) 
 
 
 async def load_candidates(
-    db: AsyncSession, config_id: UUID
+    db: AsyncSession, config_id: UUID, *, session_mode: str | None = None
 ) -> tuple[list[CandidateQuestion], dict[str, InterviewQuestion]]:
     """Load approved questions as scorer candidates + an id→ORM lookup.
 
     The outcome importance weight is denormalised onto each candidate so the
     scorer stays pure. Questions with no linked outcome default to weight 1.
+
+    ``session_mode`` picks the bank partition. It has to be applied here rather
+    than in the scorer: ``SelectionContext`` exposes only ``asked``/``skipped``
+    exclusions, so there is nowhere downstream to drop a whole partition.
     """
-    questions = await list_questions(db, config_id)
+    questions = await list_questions(db, config_id, session_mode=session_mode)
     outcomes = await list_outcomes(db, config_id)
     weight_by_outcome = {str(o.id): int(o.importance_weight) for o in outcomes}
 
@@ -77,11 +81,17 @@ async def load_candidates(
     return candidates, orm_by_id
 
 
-async def list_questions(db: AsyncSession, config_id: UUID) -> list[InterviewQuestion]:
+async def list_questions(
+    db: AsyncSession, config_id: UUID, *, session_mode: str | None = None
+) -> list[InterviewQuestion]:
+    from abridgeai.features.interviews import practice
     from abridgeai.features.interviews.queries import authoring as authoring_queries
 
     return await authoring_queries.list_questions_for_config(
-        db, config_id, review_status="approved"
+        db,
+        config_id,
+        review_status="approved",
+        practice_only=practice.partition_for_mode(session_mode),
     )
 
 

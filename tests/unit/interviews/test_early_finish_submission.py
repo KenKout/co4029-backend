@@ -18,6 +18,7 @@ async def test_early_finish_without_answers_is_completed_and_enqueued() -> None:
         interview_config_id=uuid4(),
         student_id=uuid4(),
         status="in_progress",
+        session_mode="assessment",
         interview_language="en",
         ended_at=None,
     )

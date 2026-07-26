@@ -284,7 +284,9 @@ async def run_adaptive_turn(
     )
 
     # 3. Load candidate pool + compute selection context.
-    candidates, orm_by_id = await turn_perception.load_candidates(db, session.interview_config_id)
+    candidates, orm_by_id = await turn_perception.load_candidates(
+        db, session.interview_config_id, session_mode=session.session_mode
+    )
     asked = frozenset(data.asked_question_ids)
     skipped = frozenset(data.skipped_question_ids)
     # Weighted coverage points (Slice 2) — not the raw evidence count — drive

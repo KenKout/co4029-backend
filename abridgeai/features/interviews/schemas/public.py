@@ -53,7 +53,7 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 PersonaLiteral = Literal["strict", "neutral", "supportive"]
 SupportedModesLiteral = Literal["voice", "text", "hybrid"]
@@ -77,15 +77,86 @@ class InterviewOutcomePublic(_ORMModel):
     """Student-facing projection of one ``InterviewOutcome`` row.
 
     SECURITY INVARIANT: ``importance_weight`` MUST NOT appear here.
-    Retained for backwards schema compatibility. The learner taking endpoint
-    returns no outcomes because the complete outcome set is protected rubric
-    and coverage metadata.
+
+    The taking endpoint still returns no outcomes — the complete outcome set is
+    protected rubric and coverage metadata, and ``InterviewForTakingPublic``
+    exposes only the count. This DTO now has exactly one learner-facing use:
+    :class:`InterviewPracticeInfo`, where a teacher has explicitly opted into
+    showing the criteria for an ungraded rehearsal. Criterion TEXT is disclosed
+    there; ``importance_weight`` and ``min_outcomes_to_pass`` remain hidden
+    everywhere, because those are what make a rubric gameable.
     """
 
     id: UUID
     position: int
     outcome_text: str
     outcome_type: OutcomeTypeLiteral
+
+
+class InterviewPracticeInfo(BaseModel):
+    """Whether this student may rehearse, and what they are judged on.
+
+    Deliberately a standalone DTO on a standalone route rather than fields added
+    to :class:`InterviewForTakingPublic`, whose contract test asserts an exact
+    key set — the taking payload is the one place the learner contract is pinned
+    literally, and widening it is how that pin gets loosened by accident.
+
+    ``criteria`` is populated only when the teacher has enabled practice. That
+    coupling is intentional and is surfaced in the authoring UI: enabling a
+    rehearsal also means showing students the criterion text. It reduces
+    anxiety without exposing anything gameable — no weights, no pass threshold,
+    no model answers, and no question from either partition.
+
+    Note this changes what the API returns, not what the interviewer may say.
+    The output guard still blocks the AI from uttering rubric text, in practice
+    exactly as in assessment; the criteria are rendered by the client instead.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    available: bool
+    unavailable_reason: Literal["not_enabled", "no_practice_questions", "limit_reached"] | None = (
+        None
+    )
+    runs_remaining: int = 0
+    criteria: list[InterviewOutcomePublic] = Field(default_factory=list)
+
+
+class InterviewPracticeCriterionResult(BaseModel):
+    """One criterion, and whether the rehearsal demonstrated it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    outcome_id: UUID
+    outcome_text: str
+    met: bool
+
+
+class InterviewPracticeFeedback(BaseModel):
+    """Criterion-level result of a practice run. Never a grade.
+
+    Carries no verdict, no score and no numeric total — a rehearsal produces
+    none of those, and thesis §4.3 keeps rubric numbers away from students in
+    every mode.
+
+    It also deliberately omits the judge's ``evidence_excerpt``. That field is
+    LLM-authored prose, and every other LLM string on a learner path passes
+    through ``guard_student_output`` before it is shown. Rather than add a
+    seventh guarded surface for a nicety, this returns only the criterion text
+    the student already saw before the run plus a boolean — which is the
+    feedback that actually closes the loop, and introduces no new prose.
+
+    ``ready`` is False while the async judge is still running — the normal state
+    for the first few seconds after a run ends. ``failed`` distinguishes "never
+    coming" from "not yet": the feedback task does not retry, so without it a
+    client cannot tell the two apart and shows a spinner forever.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    ready: bool
+    failed: bool = False
+    criteria: list[InterviewPracticeCriterionResult] = Field(default_factory=list)
 
 
 class InterviewQuestionPublic(_ORMModel):
@@ -142,6 +213,12 @@ class InterviewConfigPublic(_ORMModel):
     max_attempts: int | None = None
     cooldown_hours: int | None = None
     lock_quiz_ef_until_pass: bool
+    # Whether the teacher offers an ungraded rehearsal. Safe to expose and
+    # necessary here: the lobby has to know whether to render the mode picker,
+    # and reading it off the config avoids a second request for the majority of
+    # interviews that do not offer practice. It says nothing about the
+    # assessment itself — no question, criterion, weight or threshold.
+    practice_mode_enabled: bool = False
     published_at: datetime | None = None
 
 
