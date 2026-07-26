@@ -11,7 +11,12 @@ from abridgeai.core.db import Base
 config = context.config
 
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # disable_existing_loggers defaults to True, which sets ``disabled = True``
+    # on every logger already created — so any process that runs migrations
+    # in-line (tests, a worker doing a startup upgrade) silently loses ALL
+    # application logging from modules imported before this point. The flag
+    # only suppresses; it configures nothing extra.
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 target_metadata = Base.metadata
 

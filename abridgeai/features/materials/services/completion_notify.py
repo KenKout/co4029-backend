@@ -138,6 +138,19 @@ async def notify_material_processing_outcome(
             material_version_id=str(material_version_id),
             succeeded=succeeded,
         )
+        # Swallowing the exception is not enough: if the failure happened at
+        # flush (e.g. the recipient user was deleted between upload and
+        # completion), the session is left in pending-rollback and the
+        # CALLER's next ``db.commit()`` raises — so a failed courtesy
+        # notification retro-failed an ingest that had already committed, and
+        # ARQ re-ran the whole pipeline. Roll back to leave the session clean.
+        try:
+            await db.rollback()
+        except Exception:  # noqa: BLE001 — a dead connection; caller's commit will surface it
+            _logger.exception(
+                "material_notify_rollback_failed",
+                material_version_id=str(material_version_id),
+            )
 
 
 __all__ = ["notify_material_processing_outcome"]

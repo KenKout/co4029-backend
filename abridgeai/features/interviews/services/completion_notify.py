@@ -98,6 +98,13 @@ async def notify_interview_generation_outcome(
             config_id=str(config_id),
             succeeded=succeeded,
         )
+        # Same discipline as materials' completion_notify: a failure at flush
+        # leaves the session pending-rollback and would retro-fail the
+        # caller's next commit. Roll back so best-effort really is.
+        try:
+            await db.rollback()
+        except Exception:  # noqa: BLE001 — dead connection; caller's commit surfaces it
+            _logger.exception("interview_gen_notify_rollback_failed", config_id=str(config_id))
 
 
 __all__ = ["notify_interview_generation_outcome"]

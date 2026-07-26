@@ -86,7 +86,23 @@ def upgrade() -> None:
     )
 
 
+def _in_values(values: tuple[str, ...]) -> str:
+    quoted = ", ".join("'" + v + "'" for v in values)
+    return "(" + quoted + ")"
+
+
 def downgrade() -> None:
+    # Rows carrying the categories this migration introduced would violate
+    # the narrower constraint being restored, aborting the whole downgrade.
+    # They cannot exist below this revision, so removing them IS the
+    # downgrade.
+    op.execute(
+        "DELETE FROM notifications WHERE category NOT IN " + _in_values(_NOTIF_OLD)
+    )
+    op.execute(
+        "DELETE FROM notification_preferences WHERE category NOT IN "
+        + _in_values(_PREF_OLD)
+    )
     op.drop_constraint(_NOTIF_CONSTRAINT, "notifications", type_="check")
     op.create_check_constraint(
         _NOTIF_CONSTRAINT, "notifications", _in_list(_NOTIF_OLD)

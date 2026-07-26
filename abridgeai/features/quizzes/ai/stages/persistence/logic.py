@@ -21,7 +21,6 @@ from abridgeai.features.quizzes.models import (
     QuizQuestionOption,
     QuizQuestionRevision,
 )
-from abridgeai.features.quizzes.services.sanitize import sanitize_rich_content
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -41,6 +40,20 @@ class _RunLike(Protocol):
 
 
 _VALID_FORMATS = frozenset({"plain", "markdown", "html"})
+
+
+def _sanitize_rich_content(value: str | None, *, fmt: str) -> str | None:
+    """Deferred import of ``services.sanitize``.
+
+    A module-level import here is circular: importing the ``services``
+    package eagerly imports ``generation`` -> ``ai.pipelines`` -> this
+    package. Production never noticed (services always loads first), but
+    any entry point that imports the persistence stage directly — tests,
+    scripts — blew up with 'partially initialized module'.
+    """
+    from abridgeai.features.quizzes.services.sanitize import sanitize_rich_content
+
+    return sanitize_rich_content(value, fmt=fmt)
 
 
 def _fmt(raw: object) -> str:
@@ -209,9 +222,9 @@ async def persist_questions(
             # the manual authoring path. Previously written raw — harmless while
             # everything was ``plain``, but stored XSS the moment a prompt emits
             # markdown/html, since the client renders those as HTML.
-            prompt_text=sanitize_rich_content(payload["prompt_text"], fmt=prompt_fmt),
-            hint_text=sanitize_rich_content(payload.get("hint_text"), fmt=hint_fmt),
-            explanation=sanitize_rich_content(
+            prompt_text=_sanitize_rich_content(payload["prompt_text"], fmt=prompt_fmt),
+            hint_text=_sanitize_rich_content(payload.get("hint_text"), fmt=hint_fmt),
+            explanation=_sanitize_rich_content(
                 payload.get("explanation"), fmt=explanation_fmt
             ),
             prompt_format=prompt_fmt,
@@ -272,9 +285,9 @@ async def replace_question_in_place(
 
     question.question_type = payload["question_type"]
     # Phase 3 SECURITY: same nh3 cleaning as the create path above.
-    question.prompt_text = sanitize_rich_content(payload["prompt_text"], fmt=prompt_fmt)
-    question.hint_text = sanitize_rich_content(payload.get("hint_text"), fmt=hint_fmt)
-    question.explanation = sanitize_rich_content(
+    question.prompt_text = _sanitize_rich_content(payload["prompt_text"], fmt=prompt_fmt)
+    question.hint_text = _sanitize_rich_content(payload.get("hint_text"), fmt=hint_fmt)
+    question.explanation = _sanitize_rich_content(
         payload.get("explanation"), fmt=explanation_fmt
     )
     question.prompt_format = prompt_fmt
