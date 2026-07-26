@@ -95,9 +95,19 @@ def _build_query(*, include_embeddings: bool) -> str:
         "  AND (CAST(:lesson_ids AS uuid[]) IS NULL "
         "       OR lesson_id = ANY(CAST(:lesson_ids AS uuid[]))) "
     )
+    # ``ai/preprocessing`` marks pages that can never carry an assessable fact
+    # (bare title pages, "Thank you / Questions?" slides, bibliographies).
+    # Filtering here rather than deleting at ingest keeps the decision
+    # reversible: flipping a threshold is a config change, not a re-index.
+    # COALESCE so the ~all rows written before preprocessing existed, which
+    # have no such key, keep matching.
+    excluded_filter = (
+        "  AND COALESCE((metadata->>'retrieval_excluded')::boolean, false) = false "
+    )
     return (
         select_clause
         + "WHERE embedding IS NOT NULL "
+        + excluded_filter
         + course_filter
         + lesson_filter
         + "ORDER BY embedding <=> CAST(:query_embedding AS halfvec) "

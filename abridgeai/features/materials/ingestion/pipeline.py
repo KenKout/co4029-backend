@@ -68,14 +68,16 @@ from abridgeai.ai.knowledge_graph import (
 )
 from abridgeai.ai.llm import EmbeddingClient, LLMGateway
 from abridgeai.ai.models import ProcessingJob
+from abridgeai.ai.preprocessing.dedup import link_semantic_duplicates
 from abridgeai.core.config import get_settings
 from abridgeai.core.db import get_sessionmaker
+from abridgeai.features.materials.ingestion.preprocess import run_preprocess_stage
+from abridgeai.features.materials.ingestion.progress import clear_progress, publish_progress
 from abridgeai.features.materials.models import (
     DocumentChunk,
     LearningMaterial,
     LearningMaterialVersion,
 )
-from abridgeai.features.materials.ingestion.progress import clear_progress, publish_progress
 from abridgeai.features.materials.queries.processing import get_latest_processing_job
 from abridgeai.infrastructure.s3 import download_to_temp
 
@@ -113,6 +115,7 @@ class _IngestContext:
     lesson_id: UUID
     module_id: UUID
     course_id: UUID
+    organization_id: UUID
     course_title: str
     module_title: str
     lesson_title: str
@@ -150,6 +153,7 @@ async def _load_context(
                     m.title          AS module_title,
                     m.course_id      AS course_id,
                     c.title          AS course_title,
+                    c.organization_id AS organization_id,
                     so.id            AS storage_object_id,
                     so.bucket        AS storage_bucket,
                     so.object_key    AS storage_object_key,
@@ -180,6 +184,7 @@ async def _load_context(
         lesson_id=row.lesson_id,
         module_id=row.module_id,
         course_id=row.course_id,
+        organization_id=row.organization_id,
         course_title=row.course_title or "",
         module_title=row.module_title or "",
         lesson_title=row.lesson_title or "",
@@ -285,8 +290,16 @@ def _build_chunk_metadata(
     raw: RawChunk,
     *,
     ctx: _IngestContext,
+    canonical_hash: str | None = None,
 ) -> dict[str, Any]:
     base = dict(raw.metadata or {})
+    if canonical_hash is not None:
+        # Near-duplicate of an earlier chunk (typically a recap slide). It is
+        # KEPT and stays retrievable — a recap is often phrased closest to how
+        # the exam question is worded, which makes it the best anchor even
+        # though it is a poor answer body. Retrieval collapses the pair at
+        # query time via this pointer.
+        base["canonical_chunk_hash"] = canonical_hash
     if isinstance(raw, EnrichedChunk) and raw.semantic_metadata:
         base["semantic"] = dict(raw.semantic_metadata)
     base.setdefault("source_type", ctx.material.material_type)
@@ -330,10 +343,18 @@ async def _persist_chunks(
     )
     await db.flush()
 
+    # Link near-duplicates to their first occurrence. Annotation only: nothing
+    # is dropped, so an over-eager threshold costs a redundant retrieval hit
+    # rather than a missing lecture slide.
+    duplicate_links = link_semantic_duplicates(embeddings)
+    hashes = [hashlib.sha256(c.content.encode("utf-8")).hexdigest() for c in raw_chunks]
+
     rows: list[DocumentChunk] = []
     zero_vector_indices: list[int] = []
-    for raw, embedding in zip(raw_chunks, embeddings, strict=True):
-        content_hash = hashlib.sha256(raw.content.encode("utf-8")).hexdigest()
+    for position, (raw, embedding) in enumerate(zip(raw_chunks, embeddings, strict=True)):
+        content_hash = hashes[position]
+        canonical_index = duplicate_links.get(position)
+        canonical_hash = hashes[canonical_index] if canonical_index is not None else None
         # Detect zero-vector embeddings (silent provider failure mode —
         # the LAN gateway has been observed returning all-zero arrays
         # on transient backend hiccups). Persisting these as NULL was
@@ -354,7 +375,9 @@ async def _persist_chunks(
                 chunk_index=raw.chunk_index,
                 chunk_type=ctx.material.material_type,
                 content=raw.content,
-                metadata_json=_build_chunk_metadata(raw, ctx=ctx),
+                metadata_json=_build_chunk_metadata(
+                    raw, ctx=ctx, canonical_hash=canonical_hash
+                ),
                 embedding=embedding,
                 content_hash=content_hash,
             )
@@ -391,6 +414,7 @@ class _Hierarchy:
     relationship import on Course / Module / Lesson.
     """
 
+    organization_id: UUID
     course_id: UUID
     course_title: str
     module_id: UUID
@@ -404,6 +428,7 @@ class _Hierarchy:
 
 def _hierarchy_from_context(ctx: _IngestContext) -> _Hierarchy:
     return _Hierarchy(
+        organization_id=ctx.organization_id,
         course_id=ctx.course_id,
         course_title=ctx.course_title,
         module_id=ctx.module_id,
@@ -476,6 +501,31 @@ async def _run_stages(
         )
 
         extracted = await _run_extraction(db, ctx, source_path=source_path, llm_gateway=llm_gateway)
+
+        # Stage 1b — preprocessing. Drops blank pages, strips running
+        # headers/footers and page numbers, tags cover/instructor/TOC/
+        # reference/closing pages, groups slide decks, normalizes unicode and
+        # de-hyphenates, and OCRs image-only pages. ``processing_status``
+        # deliberately stays "extracting": that column carries a 9-value CHECK
+        # constraint, and ``stage_label`` (free-form) is what the UI surfaces.
+        stage_label = "preprocessing"
+        job.progress_percent = 20
+        await db.flush()
+        await publish_progress(
+            ctx.version.id, status="extracting", percent=20, stage_label=stage_label
+        )
+        extracted, _preprocess_report = await run_preprocess_stage(
+            extracted,
+            db=db,
+            settings=settings,
+            source_path=source_path,
+            llm_gateway=llm_gateway,
+            pipeline_run_id=pipeline_run_id,
+            parent_job_id=job.id,
+            material_version_id=ctx.version.id,
+            course_id=ctx.course_id,
+            mode=getattr(ctx.material, "preprocess_mode", "full") or "full",
+        )
 
         stage_label = "chunking"
         ctx.version.processing_status = "chunking"

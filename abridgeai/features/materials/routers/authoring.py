@@ -57,6 +57,12 @@ from abridgeai.features.materials.schemas import (
     MaterialVersionAuthoring,
     ProcessingProgress,
 )
+from abridgeai.features.materials.schemas.preprocess import (
+    CourseFilterSummaryRow,
+    PreprocessModeRequest,
+    PreprocessReportView,
+    TeacherActionRequest,
+)
 from abridgeai.features.materials.schemas.public import MaterialStreamUrl
 from abridgeai.features.materials.schemas.status import LessonProcessingSummary
 from abridgeai.features.materials.services import authoring as authoring_service
@@ -65,6 +71,7 @@ from abridgeai.features.materials.services.authoring import (
     ConcurrentReprocessError,
     HeadVerificationError,
 )
+from abridgeai.features.materials.services.authoring import _preprocess as preprocess_service
 
 router = APIRouter(prefix="/teacher", tags=["materials-authoring"])
 upload_router = APIRouter(prefix="/materials", tags=["materials-authoring"])
@@ -926,6 +933,113 @@ async def delete_material(
                 },
             ) from exc
         raise
+
+
+# ---------------------------------------------------------------------------
+# Preprocessing report + teacher overrides
+# ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/materials/{material_id}/preprocess/report",
+    response_model=PreprocessReportView,
+)
+async def get_preprocess_report_endpoint(
+    material_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_MATERIAL)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> PreprocessReportView:
+    """What the noise filter did to this material's current version.
+
+    Per-page decisions with reason codes, scores and the exact removed text.
+    A teacher cannot sensibly override what they cannot see, so this is the
+    first stop when a page seems to be missing from quiz/interview coverage.
+    """
+    del current_user
+    try:
+        return await preprocess_service.get_preprocess_report(db, material_id)
+    except NotFoundError as exc:
+        raise _not_found("material", material_id) from exc
+
+
+@router.post(
+    "/materials/{material_id}/preprocess/quarantine/{quarantine_id}/action",
+    response_model=TeacherActionRequest,
+)
+async def quarantine_teacher_action(
+    material_id: UUID,
+    quarantine_id: UUID,
+    payload: TeacherActionRequest,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_MATERIAL)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> TeacherActionRequest:
+    """Restore or confirm one quarantined unit.
+
+    ``restore`` re-injects the unit on the NEXT reprocess (the decision is
+    persisted, never applied in place — rewriting embedded chunks live is the
+    re-index this design exists to avoid). ``confirm`` marks the filter's
+    call as correct, which feeds the precision audit.
+    """
+    try:
+        await preprocess_service.apply_teacher_action(
+            db,
+            material_id,
+            quarantine_id,
+            action=payload.action,
+            user_id=current_user.user_id,
+        )
+    except NotFoundError as exc:
+        raise _not_found("quarantine_unit", quarantine_id) from exc
+    await db.commit()
+    return payload
+
+
+@router.patch(
+    "/materials/{material_id}/preprocess/mode",
+    response_model=PreprocessModeRequest,
+)
+async def set_preprocess_mode_endpoint(
+    material_id: UUID,
+    payload: PreprocessModeRequest,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_MATERIAL)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> PreprocessModeRequest:
+    """Per-material cascade kill switch. Applies on the next reprocess.
+
+    ``normalize_only`` keeps the never-destructive fixes (unicode,
+    de-hyphenation) while disabling every filter — the right setting for an
+    unusual document the rules misread.
+    """
+    del current_user
+    try:
+        mode = await preprocess_service.set_preprocess_mode(db, material_id, mode=payload.mode)
+    except NotFoundError as exc:
+        raise _not_found("material", material_id) from exc
+    await db.commit()
+    return PreprocessModeRequest(mode=mode)
+
+
+@router.get(
+    "/courses/{course_id}/preprocess/summary",
+    response_model=list[CourseFilterSummaryRow],
+)
+async def course_preprocess_summary(
+    course_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> list[CourseFilterSummaryRow]:
+    """Per-reason filter counts across the course.
+
+    The precision audit: a reason code with many restores is a rule that is
+    eating real content and needs its threshold revisited.
+    """
+    course = await courses_api.get_course_by_id(db, course_id)
+    if course is None:
+        raise _not_found("course", course_id)
+    await _enforce_course_permission(
+        db, current_user, course_id, course.owner_user_id, _DEFAULT_AUTHORING_PERM
+    )
+    return await preprocess_service.get_course_filter_summary(db, course_id)
 
 
 __all__ = [

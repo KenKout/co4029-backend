@@ -61,6 +61,12 @@ _BULLET_HEAVY_MAX_BODY_CHARS = 800
 _FRONT_MATTER_PAGE_LIMIT = 3
 _FRONT_MATTER_BODY_MAX_CHARS = 600
 
+# ``section`` values that are positional markers rather than real headings.
+_PAGE_MARKER_HEADING_RE = re.compile(r"^(?:Page|Slide)\s+\d+$", re.IGNORECASE)
+# A slide title runs long; a whole paragraph matched as a "heading" would
+# make the boilerplate regexes fire on body prose.
+_HEADING_HINT_MAX_CHARS = 120
+
 
 def window_chunks(
     content: ExtractedContent,
@@ -76,21 +82,60 @@ def window_chunks(
         section_context=section_context,
     )
     raw = chunker.chunk(content)
+    page_roles = content.metadata.get("page_roles") or {}
 
     enriched: list[RawChunk] = []
     for ch in raw:
         section = str(ch.metadata.get("section") or "")
-        heading = section.rsplit(">", 1)[-1].strip() if section else ""
+        heading = _heading_hint(section, ch.content)
         page = ch.metadata.get("page") or ch.metadata.get("slide")
         page_int = page if isinstance(page, int) else None
         role = _content_role(heading, ch.content, page=page_int)
 
         new_md = dict(ch.metadata)
         new_md.setdefault("token_count", count_tokens(ch.content))
-        new_md["content_role"] = role
         new_md.setdefault("source_type", content.source_type)
+
+        # A page-level verdict from ``ai/preprocessing`` outranks the
+        # heuristic above: it saw the whole page (geometry, neighbours,
+        # document position) where this sees one windowed excerpt.
+        hint = page_roles.get(str(page_int)) if page_int is not None else None
+        if isinstance(hint, dict):
+            role = str(hint.get("role") or role)
+            if hint.get("retrieval_excluded"):
+                new_md["retrieval_excluded"] = True
+            for key in ("noise_flags", "topic_group_id", "slide_title"):
+                if hint.get(key) is not None:
+                    new_md[key] = hint[key]
+
+        new_md["content_role"] = role
         enriched.append(RawChunk(content=ch.content, chunk_index=ch.chunk_index, metadata=new_md))
     return enriched
+
+
+def _heading_hint(section: str, body: str) -> str:
+    """Return the text the role regexes should actually be matched against.
+
+    ``TokenAwareChunker`` sets ``section`` to a real markdown heading for
+    prose formats, but to the literal ``"Page 7"`` / ``"Slide 3"`` marker for
+    paged ones (``token_aware.py:158-165``). Matching ``_FRONT_MATTER_*`` /
+    ``_SUMMARY_*`` / ``_REVIEW_*`` against ``"Page 7"`` can never fire, which
+    silently disabled three of the four classifier paths for every PDF and
+    slide deck in the corpus — and left ``ai/retrieval/role_filter`` inert
+    because nothing was ever tagged anything but ``body``.
+
+    For those markers the page's own first non-empty line is the heading:
+    on a slide it IS the title, and in prose it is the section header the
+    page opens with.
+    """
+    heading = section.rsplit(">", 1)[-1].strip() if section else ""
+    if heading and not _PAGE_MARKER_HEADING_RE.match(heading):
+        return heading
+    for line in body.splitlines():
+        stripped = line.strip()
+        if stripped:
+            return stripped[:_HEADING_HINT_MAX_CHARS]
+    return heading
 
 
 def _content_role(

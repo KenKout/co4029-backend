@@ -31,7 +31,9 @@ type. Callers in the quiz / interview retrieval stages wire it in.
 
 # Roles that get capped. ``body`` is the only "teachable content" role;
 # everything else is administrivia or summary recap.
-_DEPRIORITIZED_ROLES: frozenset[str] = frozenset({"summary", "review", "front_matter"})
+_DEPRIORITIZED_ROLES: frozenset[str] = frozenset(
+    {"summary", "review", "front_matter", "reference", "divider"}
+)
 
 # Default cap ratio: keep at most floor(limit / N) deprioritized chunks.
 # Legacy used ``limit // 4``; we keep that constant so behaviour matches

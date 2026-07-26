@@ -64,6 +64,7 @@ from pgvector.sqlalchemy import (
 from sqlalchemy import (
     CheckConstraint,
     DateTime,
+    Float,
     ForeignKey,
     Integer,
     String,
@@ -134,6 +135,15 @@ class LearningMaterial(
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     material_type: Mapped[str] = mapped_column(String(20), nullable=False)
     ai_processing_enabled: Mapped[bool] = mapped_column(nullable=False, server_default=text("TRUE"))
+    # Per-material escape hatch for the preprocessing cascade.
+    #   full           - the whole cascade (default)
+    #   normalize_only - unicode + de-hyphenation only; these are never
+    #                    destructive, so this is the safe setting for an
+    #                    unusual document the filters misread
+    #   off            - raw extraction straight to chunking
+    preprocess_mode: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default=text("'full'")
+    )
     visible_to_students: Mapped[bool] = mapped_column(nullable=False, server_default=text("TRUE"))
     current_version_id: Mapped[uuid.UUID | None] = mapped_column(
         PGUUID(as_uuid=True),
@@ -371,10 +381,85 @@ class LessonKnowledgeGraphCurated(
     )
 
 
+# ---------------------------------------------------------------------------
+# MaterialPreprocessQuarantine — reversible noise filtering
+# ---------------------------------------------------------------------------
+
+
+class MaterialPreprocessQuarantine(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    """One unit the preprocessing cascade removed or de-prioritized.
+
+    Deliberately NOT rebuilt on re-ingest, unlike ``DocumentChunk``. This
+    table holds teacher decisions (``teacher_action``), and those must
+    outlive a reprocess — a teacher who restores a wrongly-dropped page
+    should not have to restore it again after every re-upload. The
+    preprocessing stage upserts on ``(material_version_id, unit_kind,
+    ordinal)`` and preserves the ``teacher_action*`` columns.
+
+    Line-level removals are aggregated per pattern per document: a footer
+    repeated on 300 pages is ONE row with ``occurrences=299``, not 300 rows.
+    """
+
+    __tablename__ = "material_preprocess_quarantine"
+    __table_args__ = (
+        UniqueConstraint(
+            "material_version_id",
+            "unit_kind",
+            "ordinal",
+            name="material_preprocess_quarantine_unit_key",
+        ),
+        CheckConstraint(
+            "unit_kind IN ('page', 'line', 'chunk')",
+            name="material_preprocess_quarantine_unit_kind_check",
+        ),
+        CheckConstraint(
+            "teacher_action IS NULL OR teacher_action IN ('restore', 'confirm')",
+            name="material_preprocess_quarantine_teacher_action_check",
+        ),
+    )
+
+    material_version_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("learning_material_versions.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    # Denormalized so a course-wide "what did the filter eat" query needs no
+    # joins — the same rationale as DocumentChunk's denormalized FKs (§C11).
+    course_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("courses.id", ondelete="NO ACTION"),
+        nullable=False,
+        index=True,
+    )
+    unit_kind: Mapped[str] = mapped_column(String(8), nullable=False)
+    page_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    occurrences: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("1")
+    )
+    rule_name: Mapped[str] = mapped_column(String(64), nullable=False)
+    reason_code: Mapped[str] = mapped_column(String(48), nullable=False, index=True)
+    action: Mapped[str] = mapped_column(String(24), nullable=False)
+    rule_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    detector_stage: Mapped[str] = mapped_column(String(16), nullable=False)
+    teacher_action: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    teacher_action_by: Mapped[uuid.UUID | None] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    teacher_action_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+
 __all__ = [
     "ChunkingEnrichmentCache",
     "DocumentChunk",
     "LearningMaterial",
     "LearningMaterialVersion",
     "LessonKnowledgeGraphCurated",
+    "MaterialPreprocessQuarantine",
 ]

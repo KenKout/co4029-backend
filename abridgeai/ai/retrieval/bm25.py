@@ -64,6 +64,13 @@ _SELECT_CLAUSE = (
 )
 _FILTERS = (
     "WHERE content_tsv @@ query "
+    # Must mirror the identical predicate in ``ai/retrieval/pgvector.py``.
+    # With ``hybrid_bm25_enabled`` the two arms are fused by RRF, so filtering
+    # only the vector arm would let every cover page, TOC, bibliography and
+    # "Thank you / Questions?" slide back in through the lexical side — and
+    # those are exactly the chunks BM25 scores highest, because a title page
+    # repeats the deck title verbatim and a TOC lists every section heading.
+    "  AND COALESCE((metadata->>'retrieval_excluded')::boolean, false) = false "
     "  AND (CAST(:course_id AS uuid) IS NULL "
     "       OR course_id = CAST(:course_id AS uuid)) "
     "  AND (CAST(:lesson_ids AS uuid[]) IS NULL "

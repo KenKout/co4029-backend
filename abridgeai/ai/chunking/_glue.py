@@ -186,6 +186,11 @@ def _merge(a: RawChunk, b: RawChunk, *, group_id: int) -> RawChunk:
     md["page_range"] = page_range
     md["content_role"] = _role_of(a)
     md["glue_group_id"] = group_id
+    # ``md`` starts as a copy of ``a``'s metadata, so absorbing a retrievable
+    # neighbour into an excluded window would inherit the exclusion and hide
+    # real content. Recompute across both.
+    md.pop("retrieval_excluded", None)
+    _carry_preprocess_metadata(md, [a, b])
     return RawChunk(content=merged_text, chunk_index=group_id, metadata=md)
 
 
@@ -203,7 +208,39 @@ def _finalize_window(members: list[RawChunk], *, group_id: int) -> RawChunk:
     section = members[0].metadata.get("section")
     if section:
         md["section"] = section
+    _carry_preprocess_metadata(md, members)
     return RawChunk(content=text, chunk_index=group_id, metadata=md)
+
+
+def _carry_preprocess_metadata(md: dict[str, Any], members: list[RawChunk]) -> None:
+    """Propagate ``ai/preprocessing`` annotations across a merged window.
+
+    This function builds its metadata dict from scratch rather than copying
+    the first member's, so anything not listed here is silently dropped —
+    which is how the preprocessing verdicts would vanish the moment two
+    chunks glued together.
+
+    ``retrieval_excluded`` propagates only when EVERY member is excluded.
+    Glue force-breaks on role change so mixed windows are rare, but where one
+    occurs the conservative direction is to keep the window retrievable:
+    hiding real content is a worse error than surfacing some filler, and the
+    ``role_filter`` cap already bounds the latter.
+    """
+    if members and all(m.metadata.get("retrieval_excluded") for m in members):
+        md["retrieval_excluded"] = True
+
+    flags: list[str] = []
+    for member in members:
+        for flag in member.metadata.get("noise_flags") or []:
+            if flag not in flags:
+                flags.append(flag)
+    if flags:
+        md["noise_flags"] = flags
+
+    for key in ("topic_group_id", "slide_title"):
+        value = members[0].metadata.get(key) if members else None
+        if value is not None:
+            md[key] = value
 
 
 def _single_member_window(chunk: RawChunk, *, group_id: int) -> RawChunk:

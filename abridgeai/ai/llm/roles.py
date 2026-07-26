@@ -53,6 +53,14 @@ class LLMRole(str, Enum):  # noqa: UP042 - StrEnum changes value coercion; prese
     # run with someone waiting (a teacher saving or generating questions), so it
     # belongs in INTERACTIVE_LLM_ROLES for the tighter timeout.
     INTERVIEW_DEDUP = "interview_dedup"
+    # Ingestion preprocessing. PAGE_OCR reads back an image-only PDF page via a
+    # vision model; PAGE_CLASSIFICATION adjudicates the narrow band of pages the
+    # deterministic boilerplate rules could not settle. Both are batch/background
+    # (nobody is waiting) and both sit on the SMALL tier deliberately — OCR-ing a
+    # slide and labelling a cover page are not reasoning tasks, and at one call
+    # per page the tier choice is what keeps a 500-page course affordable.
+    PAGE_OCR = "page_ocr"
+    PAGE_CLASSIFICATION = "page_classification"
     # Quarantined answer extraction. Sees a student's raw answer and the current
     # question and NOTHING else — no rubric, no outcomes, no model answer — so
     # that the rubric-bearing analysis call never has to hold untrusted text.
@@ -101,6 +109,10 @@ ROLE_TO_TIER: dict[LLMRole, Literal["small", "standard", "large"]] = {
     # A same-or-different judgement on two short texts; "standard" is ample and
     # keeps a per-question check affordable during bulk generation.
     LLMRole.INTERVIEW_DEDUP: "standard",
+    # Ingestion preprocessing — see the role docstrings. Small tier: these run
+    # once per page over a whole course, so tier choice dominates ingest cost.
+    LLMRole.PAGE_OCR: "small",
+    LLMRole.PAGE_CLASSIFICATION: "small",
     # Quarantined extraction — see the role docstring. Small tier: it subsumes
     # the intent call, which was already small, and holds no protected content.
     LLMRole.INTERVIEW_EXTRACTION: "small",

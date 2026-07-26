@@ -188,7 +188,47 @@ class Settings(BaseSettings):
     image_ocr_lang: str = "eng+vie"
     ffmpeg_path: str = "ffmpeg"
     whisper_model: str = "whisper-1"
+    # Legacy uniform sampling rate; kept for compatibility but no longer the
+    # primary path — frames are now taken at SCENE CHANGES (slide flips), so
+    # a 60-min lecture costs ~tens of vision calls instead of 3,600.
     video_frame_sample_fps: float = Field(default=1.0, gt=0, le=30)
+    # ffmpeg ``gt(scene,t)`` threshold. 0.2 catches slide transitions in
+    # screen recordings (hard cuts score ~0.4+, subtle slide fades ~0.2-0.3)
+    # without tripping on camera noise (~<0.1).
+    video_scene_threshold: float = Field(default=0.2, gt=0.0, le=1.0)
+    # Hard cap on frames sent to OCR per video — the vision-call budget.
+    video_max_frames: int = Field(default=120, ge=1, le=1000)
+
+    # --- Ingestion preprocessing (ai/preprocessing) -----------------------
+    # Noise filtering between extraction and chunking: blank/image-only pages,
+    # running headers/footers, page numbers, cover + instructor blocks, TOC,
+    # references, closing slides, slide-deck grouping, unicode + de-hyphenation.
+    # Nothing is hard-deleted — every drop is recorded with a reason code in
+    # ``version.extracted_metadata['preprocess']``, so a bad threshold is a
+    # config change rather than a re-index.
+    preprocess_enabled: bool = True
+    preprocess_dehyphenation: bool = True
+    preprocess_running_marks: bool = True
+    preprocess_page_roles: bool = True
+    preprocess_deck_detection: bool = True
+    # OCR for image-only pages via LLMRole.PAGE_OCR (SMALL tier — this is a
+    # deployment with no GPU, so the API path is the only path). Default ON:
+    # without it, a diagram slide with a four-word title indexes as nothing.
+    preprocess_ocr_enabled: bool = True
+    # Rendering DPI for the page image sent to the vision model. 150 keeps a
+    # letter page near ~1500px wide, which is the resolution band where OCR
+    # accuracy plateaus; going higher mostly buys image tokens.
+    preprocess_ocr_dpi: int = Field(default=150, ge=72, le=400)
+    # Hard cap per document. More image-only pages than this means the upload
+    # is a scan, and quietly running a per-page vision bill on it is worse
+    # than stopping and logging loudly.
+    preprocess_ocr_max_pages: int = Field(default=30, ge=0)
+    # LLM adjudication of the narrow band of pages the deterministic rules
+    # could not settle (~5-15% of pages), batched 10 per call on the SMALL
+    # tier. Rule-based classification beats an LLM on both accuracy and speed
+    # for the clear-cut cases, so this deliberately only sees the residue.
+    preprocess_llm_adjudication: bool = True
+    preprocess_llm_min_confidence: float = Field(default=0.8, ge=0.0, le=1.0)
 
     # Deepgram TTS for browser-played interview narration (REST path only).
     # When a key is present, ENGLISH narration is synthesized with Deepgram's
@@ -500,6 +540,27 @@ class Settings(BaseSettings):
                 "  export TEST_DATABASE_URL='postgresql+psycopg://abridgeai:...@localhost:5433/abridgeai_test'"
             )
         if test_url == self.database_url:
+            # Not necessarily a misconfiguration: tests legitimately build
+            # derived Settings from an already-swapped instance
+            # (``Settings(database_url=get_settings().database_url, ...)``),
+            # and by then database_url ALREADY equals test_database_url. That
+            # construction used to be rejected here, which broke every
+            # moto/S3 integration fixture. Equality where the shared value is
+            # a *different* URL from the raw DATABASE_URL env value means the
+            # swap has already happened — allow it. Equality with the raw env
+            # value is the original foot-gun (TEST_DATABASE_URL pointed at
+            # production) and still fails.
+            import os
+
+            raw_database_url = (os.environ.get("DATABASE_URL") or "").strip()
+            if not raw_database_url:
+                # Not exported in the shell — read the same .env file
+                # pydantic-settings sources it from.
+                from dotenv import dotenv_values
+
+                raw_database_url = (dotenv_values(".env").get("DATABASE_URL") or "").strip()
+            if raw_database_url and test_url != raw_database_url:
+                return self
             raise ValueError(
                 "TEST_DATABASE_URL is identical to DATABASE_URL. Use a "
                 "separate database — the test suite seeds disposable "
