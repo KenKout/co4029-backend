@@ -418,19 +418,32 @@ async def ensure_ceremony_message(
     kind: CeremonyKind,
     language: str | None,
     reason: FinishReason = "natural",
+    text_override: str | None = None,
 ) -> InterviewSessionMessage:
-    """Return the one persisted opening/closing message for a session."""
+    """Return the one persisted opening/closing message for a session.
+
+    ``text_override`` replaces the generated ceremony wording for a message that
+    does not exist yet. It exists because a ceremony beat is occasionally spoken
+    in a candidate-specific form — the preferred-name acknowledgement carries the
+    audio-check question itself — and the persisted row must hold the words the
+    candidate actually saw and heard. Anything the client is asked to narrate
+    must exist as a persisted AI message: the ``/narration`` output boundary
+    only synthesizes approved utterances, so an unpersisted line is silent.
+    """
     existing = await _existing_message(db, session.id, kind)
     if existing is not None:
         return existing
 
+    override = _clean(text_override, limit=1200)
     config = await db.get(InterviewConfig, session.interview_config_id)  # type: ignore[attr-defined]
     profile = await db.get(UserProfile, session.student_id)  # type: ignore[attr-defined]
     name = session_address_name(session, profile)
     title = config.title if config is not None else "Interview"
     persona = config.persona if config is not None else None
     persona_profile_json = getattr(config, "persona_profile_json", None) if config else None
-    if kind in {"opening", "candidate_confirmation"}:
+    if override:
+        text = override
+    elif kind in {"opening", "candidate_confirmation"}:
         text = opening_text(
             title=title,
             name=name,
@@ -474,6 +487,9 @@ async def ensure_ceremony_message(
             "ceremony_key": kind,
             "language": normalize_language(language),
             **({"finish_reason": reason} if kind == "closing" else {}),
+            # Audit signal: this row holds candidate-specific wording rather
+            # than the deterministic template for its kind.
+            **({"text_overridden": True} if override else {}),
         },
     )
     db.add(message)  # type: ignore[attr-defined]

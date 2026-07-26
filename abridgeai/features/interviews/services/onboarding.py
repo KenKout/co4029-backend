@@ -277,17 +277,20 @@ async def respond(  # noqa: C901 - explicit persisted state machine
         }.get(stage)
     if next_stage is not None:
         session.onboarding_stage = next_stage
+        # When the candidate just set their name, the acknowledgement already
+        # carries the audio-check question, so it BECOMES the audio-check
+        # ceremony row rather than being spoken alongside a generic one. It has
+        # to be persisted: the /narration output boundary only synthesizes text
+        # that exists as an approved AI message, so returning the ack without
+        # writing it left the candidate reading a line nobody ever spoke.
         message = await ensure_ceremony_message(
             db,
             session=session,
             kind=onboarding_ceremony_kind(next_stage),
             language=lang,
+            text_override=ack_text,
         )
-        # When the candidate just set their name, the acknowledgement already
-        # carries the audio-check question, so surface it instead of the
-        # generic audio-check ceremony text (the ceremony row still persists in
-        # the transcript for a consistent canonical record).
-        return OnboardingResult(session=session, ai_text=ack_text or message.content_text)
+        return OnboardingResult(session=session, ai_text=message.content_text)
 
     session.onboarding_stage = "completed"
     if session.assessment_started_at is None:
