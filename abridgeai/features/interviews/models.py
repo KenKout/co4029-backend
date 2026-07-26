@@ -173,6 +173,9 @@ import uuid
 from datetime import datetime
 from typing import Any
 
+from pgvector.sqlalchemy import (
+    HALFVEC,  # type: ignore[import-not-found,import-untyped,unused-ignore]
+)
 from sqlalchemy import (
     Boolean,
     CheckConstraint,
@@ -358,6 +361,17 @@ class InterviewQuestion(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, Sof
     question_type: Mapped[str] = mapped_column(String(30), nullable=False)
     prompt_text: Mapped[str] = mapped_column(Text, nullable=False)
     difficulty: Mapped[str | None] = mapped_column(String(20))
+    embedding: Mapped[list[float] | None] = mapped_column(
+        HALFVEC(3072),
+        nullable=True,
+    )
+    """Semantic vector of ``prompt_text``, for duplicate detection in the bank.
+
+    Same width and the same ``EmbeddingClient`` as ``document_chunks.embedding``
+    (see migration 0063). ``NULL`` means "not embedded yet" — such rows are skipped
+    by the duplicate shortlist rather than treated as dissimilar, so a missing
+    vector degrades detection instead of producing a wrong verdict.
+    """
     model_answer: Mapped[str | None] = mapped_column(Text)
     """Teacher-facing reference answer. Authoring aid only — never exposed
     to learners and never used to auto-grade (scoring stays rubric-based

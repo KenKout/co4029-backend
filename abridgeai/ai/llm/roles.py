@@ -49,6 +49,10 @@ class LLMRole(str, Enum):  # noqa: UP042 - StrEnum changes value coercion; prese
     # runs in a live session — only from the quality CLI — but needs its own role
     # so its spend is attributable and never mixed into live interview costs.
     INTERVIEW_QUALITY_JUDGE = "interview_quality_judge"
+    # Question-bank duplicate detection. Unlike the quality judge above, this DOES
+    # run with someone waiting (a teacher saving or generating questions), so it
+    # belongs in INTERACTIVE_LLM_ROLES for the tighter timeout.
+    INTERVIEW_DEDUP = "interview_dedup"
 
 
 # Default role -> tier mapping. Embedding intentionally excluded — it has its
@@ -87,6 +91,9 @@ ROLE_TO_TIER: dict[LLMRole, Literal["small", "standard", "large"]] = {
     # INTERACTIVE_LLM_ROLES. Standard tier: judging one Q&A exchange needs real
     # reading comprehension, but these never gate a grade.
     LLMRole.INTERVIEW_QUALITY_JUDGE: "standard",
+    # A same-or-different judgement on two short texts; "standard" is ample and
+    # keeps a per-question check affordable during bulk generation.
+    LLMRole.INTERVIEW_DEDUP: "standard",
 }
 
 
@@ -104,6 +111,7 @@ INTERACTIVE_LLM_ROLES: frozenset[LLMRole] = frozenset(
         LLMRole.VALIDATION,
         LLMRole.INTERVIEW_GENERATION,
         LLMRole.INTERVIEW_VALIDATION,
+        LLMRole.INTERVIEW_DEDUP,
         LLMRole.INTERVIEW_FOLLOWUP,
         LLMRole.INTERVIEW_INTENT,
         LLMRole.INTERVIEW_ANALYSIS,
