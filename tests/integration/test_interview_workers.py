@@ -115,7 +115,7 @@ async def test_run_interview_generation_task_sets_actor_context(
     actor_id = uuid.uuid4()
     seen: dict[str, UUID | None] = {"actor": None}
 
-    async def _capture(_db: Any, _run_id: UUID) -> None:
+    async def _capture(_db: Any, _run_id: UUID, **_kwargs: Any) -> None:
         seen["actor"] = current_actor_var.get()
 
     monkeypatch.setattr(gen_worker_mod.generation_service, "run_interview_generation", _capture)

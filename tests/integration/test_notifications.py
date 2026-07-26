@@ -444,7 +444,11 @@ async def test_other_user_cannot_read_my_notifications(
 
 @pytest.mark.asyncio
 async def test_arq_app_includes_notification_jobs() -> None:
-    function_names = {fn.__name__ for fn in WorkerSettings.functions}
+    # Entries are plain coroutines OR arq ``Function`` wrappers (used to
+    # attach a per-job timeout); the wrapper carries ``name``, not ``__name__``.
+    function_names = {
+        getattr(fn, "__name__", None) or fn.name for fn in WorkerSettings.functions
+    }
     assert "send_email_notification_task" in function_names
 
 

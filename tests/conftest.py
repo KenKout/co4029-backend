@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -10,6 +11,11 @@ import yaml
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
 
+# Side-effect import: completes the ORM registry so string-referenced
+# cross-feature relationships (ModuleItem -> "Quiz"/"InterviewConfig")
+# resolve even when a single test file is run in isolation.
+import abridgeai.core.db.all_models  # noqa: F401
+from tests.support.db_graph import hard_delete_graph as _hard_delete_graph
 from abridgeai.access_control.permissions.loader import load_catalog, load_role_seeds
 from abridgeai.core.config import get_settings
 from abridgeai.core.security import create_access_token
@@ -155,23 +161,36 @@ async def _purge(session: AsyncSession, users_data: dict, roles_data: dict) -> N
     # courses BEFORE deleting the courses themselves, else the course delete
     # trips a FK violation and every test sharing this session-scoped fixture
     # errors at setup.
-    await session.execute(
-        text(
-            "DELETE FROM document_chunks WHERE course_id = :cid "
-            "OR course_id IN (SELECT id FROM courses WHERE owner_user_id = ANY(:ids)) "
-            "OR course_id IN (SELECT id FROM courses WHERE organization_id = :org_id)"
-        ),
-        {"cid": course_id, "ids": user_ids, "org_id": org_id},
-    )
-    await session.execute(text("DELETE FROM courses WHERE id = :id"), {"id": course_id})
-    await session.execute(
-        text("DELETE FROM courses WHERE owner_user_id = ANY(:ids)"),
-        {"ids": user_ids},
-    )
-    # 4. Org unit, users, org.
-    await session.execute(text("DELETE FROM org_units WHERE id = :id"), {"id": org_unit_id})
-    await session.execute(text("DELETE FROM users WHERE id = ANY(:ids)"), {"ids": user_ids})
-    await session.execute(text("DELETE FROM organizations WHERE id = :id"), {"id": org_id})
+    # Every FK targeting courses is NO ACTION (T0.14), so leftovers from any
+    # crashed run sharing this database — enrollments, generation runs, whole
+    # module/quiz subtrees — block the course delete and error EVERY test
+    # using this session-scoped fixture at setup. The old fixed-list purge
+    # (document_chunks only, then + enrollments, then + generation_runs...)
+    # was whack-a-mole: each new FK into courses broke the suite again. This
+    # walks the real FK graph instead, so a new dependent table is handled
+    # the day its migration lands.
+    doomed_courses = [
+        str(row)
+        for row in (
+            await session.execute(
+                text(
+                    "SELECT id FROM courses WHERE id = :cid "
+                    "OR owner_user_id = ANY(:ids) OR organization_id = :org_id"
+                ),
+                {"cid": course_id, "ids": user_ids, "org_id": org_id},
+            )
+        ).scalars()
+    ]
+    if doomed_courses:
+        await _hard_delete_graph(session, "courses", doomed_courses)
+    # 4. Users, then the org (which owns org_units, career_paths and whatever
+    #    else a crashed run may have parked under it). Graph-deleted for the
+    #    same reason as courses above: leftovers from other suites (audit
+    #    rows, career paths) FK into these with NO ACTION and used to error
+    #    every seeded-fixture test at setup.
+    await _hard_delete_graph(session, "users", [str(u) for u in user_ids])
+    await _hard_delete_graph(session, "organizations", [str(org_id)])
+    del org_unit_id  # cleaned up as part of the organization subtree
     # Roles are now seeded permanently by migration 0004 and carry role_permissions
     # rows that block deletion. Tests bind to seeded role IDs via lookup_roles().
 
@@ -361,3 +380,25 @@ def manager_token(seeded_users: SeededUsers) -> str:
 @pytest.fixture
 def admin_token(seeded_users: SeededUsers) -> str:
     return _token(seeded_users.admin_id)
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def _reset_global_async_clients() -> AsyncIterator[None]:
+    """Reset process-wide async singletons around every test.
+
+    ``core.cache.client.get_cache`` lazily creates ONE Redis client for the
+    process. pytest-asyncio gives each test its own event loop, so a client
+    created on test A's loop is reused on test B's loop and redis-py raises
+    ``got Future attached to a different loop`` — which is why any file whose
+    pipeline touched ``publish_progress`` failed from the second async test
+    onward. Recreating the client per test is cheap (creation is lazy and
+    most tests never touch Redis at all).
+    """
+    from abridgeai.core.cache.client import close_cache, reset_cache_client_for_tests
+
+    reset_cache_client_for_tests()
+    yield
+    try:
+        await close_cache()
+    except Exception:  # noqa: BLE001 -- teardown must never mask the test result
+        reset_cache_client_for_tests()

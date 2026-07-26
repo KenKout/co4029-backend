@@ -26,6 +26,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock
 
 import httpx
+import pytest
 import pytest_asyncio
 from alembic import command
 from alembic.config import Config
@@ -1926,8 +1927,13 @@ async def test_dedup_flag_off_reports_disabled_not_unique(
     client: httpx.AsyncClient,
     admin_bearer: str,
     scenario: dict[str, uuid.UUID],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """With the flag off, say so — do not imply the question was verified unique."""
+    # Pin the flag: the developer's .env enables dedup, and this test is
+    # specifically about the DISABLED contract.
+    monkeypatch.setenv("INTERVIEW_DEDUP_ENABLED", "false")
+    get_settings.cache_clear()
     config_id = await _create_interview_config(
         client, admin_bearer, scenario, "Dedup Off"
     )

@@ -30,6 +30,8 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
+from tests.support.db_graph import hard_delete_graph
+
 import abridgeai.features.access_control.models  # noqa: F401  -- register users/orgs FK targets
 import abridgeai.features.courses.models  # noqa: F401  -- register courses/modules/lessons FK targets
 import abridgeai.features.identity.models  # noqa: F401  -- register users FK target
@@ -200,9 +202,12 @@ async def published_quiz(engine: AsyncEngine) -> AsyncIterator[dict]:
             text("DELETE FROM quiz_questions WHERE quiz_id = :q"),
             {"q": quiz_id},
         )
-        await conn.execute(text("DELETE FROM quizzes WHERE id = :id"), {"id": quiz_id})
+        # Graph-driven: grading leaves quiz_grades under this quiz.
+        await hard_delete_graph(conn, "quizzes", [str(quiz_id)])
         await conn.execute(text("DELETE FROM modules WHERE course_id = :c"), {"c": course_id})
-        await conn.execute(text("DELETE FROM courses WHERE id = :id"), {"id": course_id})
+        # Graph-driven: enrollment/grade rows other suites attach to this
+        # course block a bare delete (NO ACTION FKs).
+        await hard_delete_graph(conn, "courses", [str(course_id)])
         await conn.execute(
             text("DELETE FROM users WHERE id IN (:o, :s)"),
             {"o": owner_id, "s": student_id},
@@ -481,6 +486,4 @@ async def test_start_attempt_rejects_draft_quiz(
                 )
     finally:
         async with engine.begin() as conn:
-            await conn.execute(
-                text("DELETE FROM quizzes WHERE id = :id"), {"id": draft_quiz_id}
-            )
+            await hard_delete_graph(conn, "quizzes", [str(draft_quiz_id)])

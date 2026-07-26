@@ -32,12 +32,15 @@ from sqlalchemy.ext.asyncio import (
 import abridgeai.features.access_control.models  # noqa: F401  -- register FK targets
 import abridgeai.features.identity.models  # noqa: F401  -- register users FK target
 from abridgeai.core.config import get_settings
-from abridgeai.features.courses.routers._deps import (
-    _resolve_lesson_to_course,
-    _resolve_module_item_to_course,
-    _resolve_module_to_course,
-    _resolve_outcome_to_course,
-    _resolve_resource_to_course,
+# The ``_resolve_*`` helpers moved out of ``routers._deps`` into the public
+# ``queries.resolution`` module (dropping the underscore) when the deps
+# layer was split; the snapshot semantics are unchanged.
+from abridgeai.features.courses.queries.resolution import (
+    resolve_lesson_to_course,
+    resolve_module_item_to_course,
+    resolve_module_to_course,
+    resolve_outcome_to_course,
+    resolve_resource_to_course,
 )
 
 
@@ -255,7 +258,7 @@ async def test_module_walk_returns_course(
     session_factory: async_sessionmaker[AsyncSession], scenario: dict[str, uuid.UUID]
 ) -> None:
     async with session_factory() as session:
-        result = await _resolve_module_to_course(session, scenario["module_a1"])
+        result = await resolve_module_to_course(session, scenario["module_a1"])
     assert result is not None
     course_id, owner_user_id = result
     assert course_id == scenario["course_alpha"]
@@ -267,9 +270,9 @@ async def test_lesson_walk_returns_course(
     session_factory: async_sessionmaker[AsyncSession], scenario: dict[str, uuid.UUID]
 ) -> None:
     async with session_factory() as session:
-        a1 = await _resolve_lesson_to_course(session, scenario["lesson_a1"])
-        a2 = await _resolve_lesson_to_course(session, scenario["lesson_a2"])
-        b1 = await _resolve_lesson_to_course(session, scenario["lesson_b1"])
+        a1 = await resolve_lesson_to_course(session, scenario["lesson_a1"])
+        a2 = await resolve_lesson_to_course(session, scenario["lesson_a2"])
+        b1 = await resolve_lesson_to_course(session, scenario["lesson_b1"])
     assert a1 is not None
     assert a1[0] == scenario["course_alpha"]
     assert a1[1] == scenario["owner_alpha"]
@@ -285,7 +288,7 @@ async def test_resource_walk_returns_course(
     session_factory: async_sessionmaker[AsyncSession], scenario: dict[str, uuid.UUID]
 ) -> None:
     async with session_factory() as session:
-        result = await _resolve_resource_to_course(session, scenario["resource_a1"])
+        result = await resolve_resource_to_course(session, scenario["resource_a1"])
     assert result is not None
     assert result[0] == scenario["course_alpha"]
     assert result[1] == scenario["owner_alpha"]
@@ -296,7 +299,7 @@ async def test_module_item_walk_returns_course(
     session_factory: async_sessionmaker[AsyncSession], scenario: dict[str, uuid.UUID]
 ) -> None:
     async with session_factory() as session:
-        result = await _resolve_module_item_to_course(session, scenario["module_item_a1"])
+        result = await resolve_module_item_to_course(session, scenario["module_item_a1"])
     assert result is not None
     assert result[0] == scenario["course_alpha"]
     assert result[1] == scenario["owner_alpha"]
@@ -307,7 +310,7 @@ async def test_outcome_walk_returns_course(
     session_factory: async_sessionmaker[AsyncSession], scenario: dict[str, uuid.UUID]
 ) -> None:
     async with session_factory() as session:
-        result = await _resolve_outcome_to_course(session, scenario["outcome_a1"])
+        result = await resolve_outcome_to_course(session, scenario["outcome_a1"])
     assert result is not None
     assert result[0] == scenario["course_alpha"]
     assert result[1] == scenario["owner_alpha"]
@@ -324,7 +327,7 @@ async def test_softdeleted_lesson_excluded_by_loader_filter(
     return ``None`` even though the row physically exists.
     """
     async with session_factory() as session:
-        result = await _resolve_lesson_to_course(session, scenario["lesson_a3_softdel"])
+        result = await resolve_lesson_to_course(session, scenario["lesson_a3_softdel"])
     assert result is None
 
 
@@ -333,5 +336,5 @@ async def test_unknown_lesson_returns_none(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     async with session_factory() as session:
-        result = await _resolve_lesson_to_course(session, uuid.uuid4())
+        result = await resolve_lesson_to_course(session, uuid.uuid4())
     assert result is None

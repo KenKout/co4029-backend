@@ -717,6 +717,7 @@ async def test_kg_enabled_calls_builder(
         kg_client: Any,
         llm_gateway: Any,
         parent_job_id: UUID | None = None,
+        on_progress: Any = None,
     ) -> KGSummary:
         kg_calls.append(
             {

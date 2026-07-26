@@ -44,6 +44,8 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
+from tests.support.db_graph import hard_delete_graph
+
 import abridgeai.features.access_control.models  # noqa: F401  -- register users/orgs FK targets
 import abridgeai.features.identity.models  # noqa: F401  -- register users FK target
 import abridgeai.features.interviews.models  # noqa: F401  -- T6.1 registers interview_* tables
@@ -180,10 +182,19 @@ async def scenario(engine: AsyncEngine) -> AsyncIterator[dict]:
             text("DELETE FROM modules WHERE course_id = :c"),
             {"c": course_id},
         )
-        await conn.execute(
-            text("DELETE FROM courses WHERE organization_id = :o"),
-            {"o": org_id},
-        )
+        # Graph-driven: enrollments and publish artefacts other tests attach
+        # to org courses block a bare delete (NO ACTION FKs).
+        org_course_ids = [
+            str(v)
+            for v in (
+                await conn.execute(
+                    text("SELECT id FROM courses WHERE organization_id = :o"),
+                    {"o": org_id},
+                )
+            ).scalars()
+        ]
+        if org_course_ids:
+            await hard_delete_graph(conn, "courses", org_course_ids)
         await conn.execute(
             text("DELETE FROM user_role_assignments WHERE user_id = :id"),
             {"id": owner_id},

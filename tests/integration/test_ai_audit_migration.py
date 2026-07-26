@@ -50,7 +50,7 @@ def alembic_cfg() -> Config:
 
 @pytest_asyncio.fixture
 async def at_new_head(alembic_cfg: Config) -> None:
-    command.upgrade(alembic_cfg, NEW_HEAD)
+    command.upgrade(alembic_cfg, "head")  # never leave the shared DB below real head
     yield
 
 
@@ -232,7 +232,7 @@ async def test_round_trip_upgrade_downgrade_upgrade(
     assert "pipeline_stage" in cols_down
     assert COMPOSITE_INDEX_NAME not in indexes_down
 
-    command.upgrade(alembic_cfg, NEW_HEAD)
+    command.upgrade(alembic_cfg, "head")  # never leave the shared DB below real head
 
     cols_after = await _column_names(engine)
     indexes_after = await _index_names(engine)

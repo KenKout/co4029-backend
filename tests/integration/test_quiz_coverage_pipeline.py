@@ -155,6 +155,8 @@ def _install_default_stage_mocks(
     monkeypatch.setattr(coverage_pipeline, "discard_duplicates", dedup)
     monkeypatch.setattr(coverage_pipeline, "persist_questions", persist)
     monkeypatch.setattr(coverage_pipeline, "_load_chunks_by_id", load_chunks)
+    config_patch = AsyncMock()
+    monkeypatch.setattr(coverage_pipeline, "record_config_patch", config_patch)
     monkeypatch.setattr(coverage_pipeline, "get_sessionmaker", _fake_sessionmaker)
 
     return {
@@ -165,6 +167,7 @@ def _install_default_stage_mocks(
         "dedup": dedup,
         "persist": persist,
         "load_chunks": load_chunks,
+        "config_patch": config_patch,
     }
 
 
@@ -505,7 +508,7 @@ async def test_coverage_max_attempts_recorded_in_audit(
 ) -> None:
     """Resolved ``max_attempts`` should appear in the audit log so
     operators can verify the knob took effect."""
-    _install_default_stage_mocks(monkeypatch, section_count=2)
+    mocks = _install_default_stage_mocks(monkeypatch, section_count=2)
     inputs = _coverage_inputs(section_count=2)
     inputs["config"]["coverage_options"] = {"max_attempts": 4}
 
@@ -519,7 +522,12 @@ async def test_coverage_max_attempts_recorded_in_audit(
         budget=inputs["budget"],
     )
 
-    assert run.config_json["pipeline"]["generation"]["max_attempts"] == 4
+    # The pipeline no longer mutates ``run.config_json`` in place — the audit
+    # patch is written through ``record_config_patch`` in its own session.
+    patches = [call.args[1] for call in mocks["config_patch"].await_args_list]
+    completed = [p for p in patches if p.get("pipeline", {}).get("stage") == "completed"]
+    assert completed, f"no completed-stage config patch recorded: {patches}"
+    assert completed[-1]["pipeline"]["generation"]["max_attempts"] == 4
 
 
 def test_coverage_pipeline_module_is_under_soft_cap() -> None:

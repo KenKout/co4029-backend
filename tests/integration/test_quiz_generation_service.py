@@ -237,6 +237,13 @@ async def test_dispatch_coverage_mode_routes_to_coverage_pipeline(
     monkeypatch.setattr(
         generation_service.regenerate_pipeline, "run_question_regeneration", regen_mock
     )
+    # The service now precomputes outlines+budget (requires source_lesson_ids
+    # and real chunks) BEFORE dispatching; this test is about ROUTING only.
+    monkeypatch.setattr(
+        generation_service,
+        "_precompute_coverage_inputs",
+        AsyncMock(return_value=([], {})),
+    )
 
     run_id = await _seed_run(
         session_factory,

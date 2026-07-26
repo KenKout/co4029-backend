@@ -384,7 +384,10 @@ async def test_stream_url_returns_presigned_with_expiry(
     assert body["url"] == FAKE_URL
     expires_at = datetime.fromisoformat(body["expires_at"])
     delta = expires_at - before
-    assert timedelta(minutes=55) <= delta <= timedelta(minutes=65)
+    # The route stamps expiry from settings.s3_url_ttl_seconds; asserting a
+    # hardcoded hour silently depended on the developer's .env.
+    configured = timedelta(seconds=get_settings().s3_url_ttl_seconds)
+    assert configured - timedelta(minutes=5) <= delta <= configured + timedelta(minutes=5)
 
 
 async def test_stream_url_invisible_returns_404(

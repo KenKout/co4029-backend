@@ -31,6 +31,8 @@ from alembic.config import Config
 from conftest import SeededUsers
 from fastapi import FastAPI
 from sqlalchemy import Column, Table, text
+
+from tests.support.db_graph import hard_delete_graph
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -372,29 +374,31 @@ async def cards_due_scenario(
                 text("DELETE FROM student_card_state WHERE student_id = :s"),
                 {"s": student_id},
             )
-            await conn.execute(
-                text(
-                    "DELETE FROM quiz_questions WHERE quiz_id IN ("
-                    "SELECT id FROM quizzes WHERE course_id = :c)"
-                ),
-                {"c": course_id},
-            )
-            await conn.execute(
-                text(
-                    "DELETE FROM quiz_source_lessons WHERE quiz_id IN ("
-                    "SELECT id FROM quizzes WHERE course_id = :c)"
-                ),
-                {"c": course_id},
-            )
-            await conn.execute(text("DELETE FROM quizzes WHERE course_id = :c"), {"c": course_id})
-            await conn.execute(
-                text(
-                    "DELETE FROM lessons WHERE module_id IN ("
-                    "SELECT id FROM modules WHERE course_id = :c)"
-                ),
-                {"c": course_id},
-            )
-            await conn.execute(text("DELETE FROM modules WHERE course_id = :c"), {"c": course_id})
+            # Graph-driven purge: hand-rolled DELETE chains here kept missing
+            # sub-trees other files hang off the shared course (quiz attempts,
+            # grades) and errored every later test's setup with FK violations.
+            quiz_ids = [
+                str(v)
+                for v in (
+                    await conn.execute(
+                        text("SELECT id FROM quizzes WHERE course_id = :c"),
+                        {"c": course_id},
+                    )
+                ).scalars()
+            ]
+            if quiz_ids:
+                await hard_delete_graph(conn, "quizzes", quiz_ids)
+            module_ids = [
+                str(v)
+                for v in (
+                    await conn.execute(
+                        text("SELECT id FROM modules WHERE course_id = :c"),
+                        {"c": course_id},
+                    )
+                ).scalars()
+            ]
+            if module_ids:
+                await hard_delete_graph(conn, "modules", module_ids)
             await conn.execute(
                 text("DELETE FROM course_enrollments WHERE course_id = :c"),
                 {"c": course_id},
