@@ -53,6 +53,13 @@ class LLMRole(str, Enum):  # noqa: UP042 - StrEnum changes value coercion; prese
     # run with someone waiting (a teacher saving or generating questions), so it
     # belongs in INTERACTIVE_LLM_ROLES for the tighter timeout.
     INTERVIEW_DEDUP = "interview_dedup"
+    # Quarantined answer extraction. Sees a student's raw answer and the current
+    # question and NOTHING else — no rubric, no outcomes, no model answer — so
+    # that the rubric-bearing analysis call never has to hold untrusted text.
+    # Interactive (the student is waiting) and small tier: paraphrasing a turn
+    # into a handful of bounded claims is not a reasoning task, and it replaces
+    # the intent call rather than adding to the per-turn budget.
+    INTERVIEW_EXTRACTION = "interview_extraction"
 
 
 # Default role -> tier mapping. Embedding intentionally excluded — it has its
@@ -94,6 +101,9 @@ ROLE_TO_TIER: dict[LLMRole, Literal["small", "standard", "large"]] = {
     # A same-or-different judgement on two short texts; "standard" is ample and
     # keeps a per-question check affordable during bulk generation.
     LLMRole.INTERVIEW_DEDUP: "standard",
+    # Quarantined extraction — see the role docstring. Small tier: it subsumes
+    # the intent call, which was already small, and holds no protected content.
+    LLMRole.INTERVIEW_EXTRACTION: "small",
 }
 
 
@@ -116,6 +126,7 @@ INTERACTIVE_LLM_ROLES: frozenset[LLMRole] = frozenset(
         LLMRole.INTERVIEW_INTENT,
         LLMRole.INTERVIEW_ANALYSIS,
         LLMRole.INTERVIEW_SECURITY,
+        LLMRole.INTERVIEW_EXTRACTION,
     }
 )
 

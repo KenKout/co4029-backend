@@ -32,7 +32,9 @@ from abridgeai.core.db import get_sessionmaker  # noqa: E402
 FIXTURE_PATH = Path(__file__).with_name("fixtures") / "interview_security_redteam.json"
 DEFAULT_BASE_URL = "http://127.0.0.1:8000/api/v1"
 TOKEN_ENV = "INTERVIEW_TEST_TOKEN"  # noqa: S105 - environment variable name, not a secret
-SECURITY_SUITES = frozenset({"security", "semantic_security", "multiturn_security"})
+SECURITY_SUITES = frozenset(
+    {"security", "semantic_security", "multiturn_security", "rubric_exfiltration"}
+)
 
 
 @dataclass(frozen=True)
@@ -391,7 +393,14 @@ async def run(args: argparse.Namespace) -> int:
 
     fixtures = _load_fixture(Path(args.fixtures))
     suites = (
-        ["security", "semantic_security", "multiturn_security", "controls", "adaptive"]
+        [
+            "security",
+            "semantic_security",
+            "multiturn_security",
+            "rubric_exfiltration",
+            "controls",
+            "adaptive",
+        ]
         if args.suite == "all"
         else [args.suite]
     )

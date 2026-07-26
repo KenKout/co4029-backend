@@ -208,7 +208,7 @@ async def analyze_turn_answer(
     """
     from abridgeai.features.interviews.models import InterviewOutcome  # noqa: PLC0415
     from abridgeai.features.interviews.orchestrator.analysis_logic import (  # noqa: PLC0415
-        analyze_answer,
+        analyze_turn,
     )
 
     outcome_text = None
@@ -223,17 +223,17 @@ async def analyze_turn_answer(
         target_outcome_id=outcome_id,
         enabled=emergent_evidence_enabled,
     )
-    return await analyze_answer(
+
+    # Legacy vs split is decided centrally in ``analyze_turn`` so both runtime
+    # call sites (here and the separable-evidence path in taking.py) cannot
+    # drift apart on which mode they honour.
+    return await analyze_turn(
         db,
         question_text=question_text,
         student_answer=answer_text,
         turn_id=turn_id,
         outcome_id=outcome_id,
         outcome_text=outcome_text,
-        # The author-wide blob may contain full rubric weights or unrelated
-        # hidden criteria. Runtime analysis gets only this question and its
-        # linked outcome.
-        supplementary_instructions=None,
         prior_claims=prior_claims,
         other_outcomes=other_outcomes,
     )

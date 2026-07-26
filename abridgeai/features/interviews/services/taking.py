@@ -1107,7 +1107,7 @@ async def _record_separable_evidence(
         return
     from abridgeai.features.interviews.models import InterviewOutcome  # noqa: PLC0415
     from abridgeai.features.interviews.orchestrator.analysis_logic import (  # noqa: PLC0415
-        analyze_answer,
+        analyze_turn,
     )
     from abridgeai.features.interviews.orchestrator.coverage import (  # noqa: PLC0415
         apply_evidence_to_coverage,
@@ -1117,16 +1117,15 @@ async def _record_separable_evidence(
     )
 
     outcome = await db.get(InterviewOutcome, current_question.linked_outcome_id)
-    analysis = await analyze_answer(
+    # ``academic_text`` survived a turn the guard already flagged, so it is
+    # known-adversarial: the sharpest case for routing through analyze_turn.
+    analysis = await analyze_turn(
         db,
         question_text=current_question.prompt_text,
         student_answer=academic_text,
         turn_id=turn_id,
         outcome_id=str(current_question.linked_outcome_id),
         outcome_text=outcome.outcome_text if outcome is not None else None,
-        # Never place the complete authoring/rubric blob in a runtime model
-        # context. The current question and linked outcome are sufficient.
-        supplementary_instructions=None,
     )
     if analysis.confidence <= 0.0:
         return

@@ -328,6 +328,15 @@ class Settings(BaseSettings):
     # False means repeated attempts are flagged/warned but the session continues.
     interview_security_allow_session_termination: bool = False
 
+    # Split answer analysis into a quarantined extractor (sees the raw answer,
+    # holds no rubric) and a matcher (holds the rubric, sees only bounded,
+    # rules-screened claims). ``off`` keeps the single legacy call that mixes
+    # both. ``shadow`` runs the split alongside the legacy path, records the
+    # divergence, and still RETURNS the legacy result — so a regression in the
+    # split can never reach a learner during measurement. ``enforce`` returns
+    # the split result. Rollback is enforce -> shadow.
+    interview_analysis_split_mode: Literal["off", "shadow", "enforce"] = "off"
+
     def adaptive_enabled_for_mode(self, input_mode: str) -> bool:
         """Resolve whether the adaptive interviewer runs for an input mode.
 
