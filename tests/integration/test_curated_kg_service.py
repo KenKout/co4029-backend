@@ -232,3 +232,96 @@ async def test_publish_empty_raises(
     async with session_factory() as session:
         with pytest.raises(CuratedKGEmptyError):
             await publish(session, scenario["lesson_id"], actor_id=scenario["owner_id"])
+
+
+async def test_seeded_draft_is_not_publishable_until_saved(
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict,
+) -> None:
+    """Reproduces the 409 a teacher hit when publishing a fresh lesson.
+
+    ``get_or_seed_draft`` returns a NON-EMPTY graph (seeded from the AI KG, or a
+    single placeholder primary when there's no AI KG) while ``exists`` is False,
+    because the seed is deliberately not persisted. Publishing reads the
+    PERSISTED ``draft_json``, so publish-without-save raises even though the UI
+    was showing a perfectly good graph.
+
+    The frontend therefore has to save first — see ``handlePublishCurated`` in
+    material-hub.tsx, which is what "Save and publish" does.
+    """
+    lesson_id = scenario["lesson_id"]
+    owner_id = scenario["owner_id"]
+
+    # 1) First open: a usable graph exists in the response, but nothing is saved.
+    async with session_factory() as session:
+        seeded = await get_or_seed_draft(session, lesson_id)
+    assert seeded.exists is False
+    assert seeded.seeded is True
+    assert len(seeded.nodes) > 0, "seed must yield a publishable-looking graph"
+
+    # 2) Publishing right now fails — this is the exact 409 the teacher saw.
+    async with session_factory() as session:
+        with pytest.raises(CuratedKGEmptyError):
+            await publish(session, lesson_id, actor_id=owner_id)
+
+    # 3) Save the seeded graph, then publish: succeeds.
+    async with session_factory() as session:
+        saved = await save_draft(
+            session,
+            lesson_id,
+            CuratedKGDraftSave(nodes=seeded.nodes, edges=seeded.edges),
+            actor_id=owner_id,
+        )
+        await session.commit()
+    assert saved.exists is True
+
+    async with session_factory() as session:
+        published = await publish(session, lesson_id, actor_id=owner_id)
+        await session.commit()
+    assert published.is_published is True
+    assert published.has_unpublished_changes is False
+    assert {n.id for n in published.nodes} == {n.id for n in seeded.nodes}
+
+    # 4) Students can now see it.
+    async with session_factory() as session:
+        pub = await catalog_service.get_published_kg_for_learner(session, lesson_id)
+    assert pub.published is True
+    assert len(pub.nodes) == len(seeded.nodes)
+
+
+async def test_republish_after_edit_needs_no_extra_save(
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict,
+) -> None:
+    """Once a row exists, publish alone is enough — no 409.
+
+    This is the branch where the UI shows a plain "Publish" confirmation rather
+    than "Save and publish": the draft is already persisted, so publishing just
+    snapshots it.
+    """
+    lesson_id = scenario["lesson_id"]
+    owner_id = scenario["owner_id"]
+
+    async with session_factory() as session:
+        await save_draft(
+            session,
+            lesson_id,
+            CuratedKGDraftSave(
+                nodes=[CuratedKGNode(id="a", label="A", weight=10, is_primary=True)],
+                edges=[],
+            ),
+            actor_id=owner_id,
+        )
+        await session.commit()
+
+    async with session_factory() as session:
+        first = await publish(session, lesson_id, actor_id=owner_id)
+        await session.commit()
+    assert first.has_unpublished_changes is False
+
+    # Publishing again with no intervening edit is a harmless no-op re-snapshot.
+    async with session_factory() as session:
+        again = await publish(session, lesson_id, actor_id=owner_id)
+        await session.commit()
+    assert again.is_published is True
+    assert again.has_unpublished_changes is False
