@@ -68,6 +68,7 @@ _REQUIRE_COURSE_ENROLLMENT_CREATE = require_course_permission(
 _REQUIRE_COURSE_ENROLLMENT_REMOVE = require_course_permission(
     "course_id", "course.enrollment.remove", "system.administer"
 )
+_INVITATION_CODE_MANAGE_CODES = ("course.enrollment.create", "system.administer")
 _REQUIRE_INVITATION_CODE_MANAGE = require_permission("course.enrollment.create")
 _REQUIRE_TEACHER_ENROLLMENT_PATCH = require_any_permission(
     "course.enrollment.create",
@@ -240,6 +241,7 @@ async def _ensure_caller_in_code_org(
         code.organization_id,
         resource="invitation_code",
         resource_id=code_id,
+        permissions=_INVITATION_CODE_MANAGE_CODES,
     )
 
 

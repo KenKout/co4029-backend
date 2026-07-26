@@ -57,9 +57,10 @@ _REQUIRE_CATALOG = require_any_permission("system.administer", "audit.read")
 _REQUIRE_ASSIGN = require_any_permission(
     "user.role_assign", "user.role_assign.hod", "system.administer"
 )
-_REQUIRE_ORG_MANAGE = require_any_permission(
-    "org_unit.manage", "user.bulk_import", "system.administer"
-)
+# Shared by the dependency and the per-resource org check so the two cannot
+# drift: the first asks "held anywhere?", the second "held for THIS org?".
+_ORG_MEMBERSHIP_CODES = ("org_unit.manage", "user.bulk_import", "system.administer")
+_REQUIRE_ORG_MANAGE = require_any_permission(*_ORG_MEMBERSHIP_CODES)
 
 
 def _bad_request(detail: str) -> HTTPException:
@@ -230,7 +231,12 @@ async def list_org_memberships(
     # Memberships carry student_code / employee_code — PII of another
     # customer's staff and students if this is not scoped.
     await require_org_access(
-        db, current_user, org_id, resource="organization", resource_id=org_id
+        db,
+        current_user,
+        org_id,
+        resource="organization",
+        resource_id=org_id,
+        permissions=_ORG_MEMBERSHIP_CODES,
     )
     rows = await admin_service.list_organization_memberships(db, org_id)
     return [MembershipRead.model_validate(r) for r in rows]
@@ -253,7 +259,12 @@ async def add_org_membership(
     # relies on. Left open, a manager grants themselves entry to any tenant and
     # every `require_org_access` guard then passes legitimately.
     await require_org_access(
-        db, current_user, org_id, resource="organization", resource_id=org_id
+        db,
+        current_user,
+        org_id,
+        resource="organization",
+        resource_id=org_id,
+        permissions=_ORG_MEMBERSHIP_CODES,
     )
     membership = await admin_service.add_organization_membership(
         db, organization_id=org_id, payload=payload

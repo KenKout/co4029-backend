@@ -51,9 +51,10 @@ from abridgeai.features.access_control.services import (
 router = APIRouter(tags=["admin", "access_control", "organizations"])
 
 
-_REQUIRE_ORG_MANAGE = require_any_permission(
-    "org_unit.manage", "user.bulk_import", "system.administer"
-)
+# One tuple for both the dependency ("held anywhere?") and the per-resource
+# org check ("held HERE?"), so the two cannot drift.
+_ORG_MANAGE_CODES = ("org_unit.manage", "user.bulk_import", "system.administer")
+_REQUIRE_ORG_MANAGE = require_any_permission(*_ORG_MANAGE_CODES)
 
 
 def _bad_request(detail: str) -> HTTPException:
@@ -89,7 +90,12 @@ async def _require_access_to(
     if organization_id is None:
         raise _not_found(f"{resource} {resource_id} not found")
     await require_org_access(
-        db, current_user, organization_id, resource=resource, resource_id=resource_id
+        db,
+        current_user,
+        organization_id,
+        resource=resource,
+        resource_id=resource_id,
+        permissions=_ORG_MANAGE_CODES,
     )
 
 
@@ -213,7 +219,12 @@ async def get_organization_endpoint(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> OrganizationRead:
     await require_org_access(
-        db, current_user, org_id, resource="organization", resource_id=org_id
+        db,
+        current_user,
+        org_id,
+        resource="organization",
+        resource_id=org_id,
+        permissions=_ORG_MANAGE_CODES,
     )
     try:
         org = await org_service.get_organization(db, org_id)
@@ -233,7 +244,12 @@ async def patch_organization_endpoint(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> OrganizationRead:
     await require_org_access(
-        db, current_user, org_id, resource="organization", resource_id=org_id
+        db,
+        current_user,
+        org_id,
+        resource="organization",
+        resource_id=org_id,
+        permissions=_ORG_MANAGE_CODES,
     )
     try:
         org = await org_service.patch_organization(db, org_id, payload)
@@ -255,7 +271,12 @@ async def delete_organization_endpoint(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> None:
     await require_org_access(
-        db, current_user, org_id, resource="organization", resource_id=org_id
+        db,
+        current_user,
+        org_id,
+        resource="organization",
+        resource_id=org_id,
+        permissions=_ORG_MANAGE_CODES,
     )
     try:
         await org_service.delete_organization(
@@ -281,7 +302,12 @@ async def list_domains_endpoint(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> list[OrganizationDomainRead]:
     await require_org_access(
-        db, current_user, org_id, resource="organization", resource_id=org_id
+        db,
+        current_user,
+        org_id,
+        resource="organization",
+        resource_id=org_id,
+        permissions=_ORG_MANAGE_CODES,
     )
     try:
         rows = await org_service.list_domains(db, org_id)
@@ -302,7 +328,12 @@ async def create_domain_endpoint(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> OrganizationDomainRead:
     await require_org_access(
-        db, current_user, org_id, resource="organization", resource_id=org_id
+        db,
+        current_user,
+        org_id,
+        resource="organization",
+        resource_id=org_id,
+        permissions=_ORG_MANAGE_CODES,
     )
     try:
         dom = await org_service.create_domain(db, org_id, payload)
@@ -383,7 +414,12 @@ async def list_units_endpoint(
     only_roots: bool = False,
 ) -> list[OrgUnitRead]:
     await require_org_access(
-        db, current_user, org_id, resource="organization", resource_id=org_id
+        db,
+        current_user,
+        org_id,
+        resource="organization",
+        resource_id=org_id,
+        permissions=_ORG_MANAGE_CODES,
     )
     try:
         rows = await org_service.list_units(
@@ -406,7 +442,12 @@ async def create_unit_endpoint(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> OrgUnitRead:
     await require_org_access(
-        db, current_user, org_id, resource="organization", resource_id=org_id
+        db,
+        current_user,
+        org_id,
+        resource="organization",
+        resource_id=org_id,
+        permissions=_ORG_MANAGE_CODES,
     )
     try:
         unit = await org_service.create_unit(db, org_id, payload)

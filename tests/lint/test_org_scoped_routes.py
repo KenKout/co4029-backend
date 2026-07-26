@@ -180,3 +180,37 @@ def test_global_by_design_entries_still_exist() -> None:
         if handler not in names:
             stale.append(f"{rel}::{handler} (handler gone)")
     assert stale == [], f"Stale _GLOBAL_BY_DESIGN entries: {stale}"
+
+
+def test_every_org_check_resolves_permissions_not_just_membership() -> None:
+    """``require_org_access`` must be called WITH the route's permission codes.
+
+    Membership alone is the weaker question. It cannot separate a student of
+    org A from a manager of org B who also studies at A — and the flat set
+    behind the route dependency has already accepted that manager's code. The
+    ``permissions=`` fallback exists so an unconverted call site degrades to
+    the old behaviour instead of to nothing; this test stops one from being
+    added by accident.
+    """
+    unscoped: list[str] = []
+
+    for module in _iter_router_modules():
+        rel = module.relative_to(_BACKEND_ROOT / "abridgeai" / "features").as_posix()
+        tree = ast.parse(module.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
+            if name != "require_org_access":
+                continue
+            if not any(kw.arg == "permissions" for kw in node.keywords):
+                unscoped.append(f"{rel}:{node.lineno}")
+
+    assert unscoped == [], (
+        "require_org_access called without `permissions=` at:\n  "
+        + "\n  ".join(unscoped)
+        + "\n\nPass the same codes the route's dependency declares, so the check "
+        "resolves them against the owning organization instead of falling back "
+        "to bare membership."
+    )

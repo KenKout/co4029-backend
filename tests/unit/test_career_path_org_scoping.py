@@ -36,34 +36,52 @@ def _user(*, admin: bool = False) -> SimpleNamespace:
     )
 
 
-def _patched(member: bool) -> list:
+def _patched(granted_here: set[str] | None) -> list:
+    """``granted_here`` is what the caller holds FOR the path's organization."""
     return [
         patch.object(
             router.authoring_service,
             "get_career_path",
             new=AsyncMock(return_value=SimpleNamespace(id=_PATH, organization_id=_ORG)),
         ),
-        patch.object(policies, "user_is_org_member", new=AsyncMock(return_value=member)),
+        patch.object(
+            policies,
+            "load_org_permissions",
+            new=AsyncMock(return_value=granted_here or set()),
+        ),
     ]
 
 
 class TestEnsureCallerInPathOrg:
-    async def test_org_member_passes(self) -> None:
-        get_path, is_member = _patched(member=True)
-        with get_path, is_member:
+    async def test_permission_granted_for_this_org_passes(self) -> None:
+        get_path, granted = _patched({"course.update"})
+        with get_path, granted:
             await router._ensure_caller_in_path_org(AsyncMock(), _user(), _PATH)
 
     async def test_platform_admin_passes(self) -> None:
-        get_path, is_member = _patched(member=False)
-        with get_path, is_member:
+        get_path, granted = _patched(set())
+        with get_path, granted:
             await router._ensure_caller_in_path_org(AsyncMock(), _user(admin=True), _PATH)
 
-    async def test_cross_org_manager_gets_404(self) -> None:
-        get_path, is_member = _patched(member=False)
-        with get_path, is_member, pytest.raises(HTTPException) as exc_info:
+    async def test_permission_held_only_in_another_org_gets_404(self) -> None:
+        """The case bare membership could not catch.
+
+        The caller genuinely holds ``course.update`` — the route dependency
+        already let them through on it — but it was granted in a different
+        organization, so nothing is granted *here*.
+        """
+        get_path, granted = _patched(set())
+        with get_path, granted, pytest.raises(HTTPException) as exc_info:
             await router._ensure_caller_in_path_org(AsyncMock(), _user(), _PATH)
         # 404 not 403: a 403 would confirm the path exists, turning the id
         # endpoint into a cross-tenant existence oracle.
+        assert exc_info.value.status_code == 404
+
+    async def test_a_different_permission_here_does_not_authorise(self) -> None:
+        """Holding *some* permission in the org is not holding the right one."""
+        get_path, granted = _patched({"progress.read.cohort"})
+        with get_path, granted, pytest.raises(HTTPException) as exc_info:
+            await router._ensure_caller_in_path_org(AsyncMock(), _user(), _PATH)
         assert exc_info.value.status_code == 404
 
 
@@ -110,7 +128,7 @@ class TestEveryByIdRouteIsGated:
 
 
 class TestListHonoursOrgOverride:
-    async def test_explicit_organization_id_is_membership_checked(self) -> None:
+    async def test_explicit_organization_id_is_scope_checked(self) -> None:
         """``?organization_id=`` must not be a cross-tenant read.
 
         The parameter was honoured unconditionally "so platform admins can
@@ -118,7 +136,7 @@ class TestListHonoursOrgOverride:
         """
         other_org = uuid.uuid4()
         with (
-            patch.object(policies, "user_is_org_member", new=AsyncMock(return_value=False)),
+            patch.object(policies, "load_org_permissions", new=AsyncMock(return_value=set())),
             patch.object(
                 router.authoring_service,
                 "list_career_paths_for_org",
@@ -134,7 +152,7 @@ class TestListHonoursOrgOverride:
     async def test_admin_may_still_pass_any_org(self) -> None:
         listing = AsyncMock(return_value=[])
         with (
-            patch.object(policies, "user_is_org_member", new=AsyncMock(return_value=False)),
+            patch.object(policies, "load_org_permissions", new=AsyncMock(return_value=set())),
             patch.object(router.authoring_service, "list_career_paths_for_org", new=listing),
         ):
             await router.list_career_paths(

@@ -37,7 +37,9 @@ from abridgeai.features.admin.services import settings as settings_service
 router = APIRouter(tags=["admin", "settings"])
 
 _REQUIRE_GLOBAL_WRITE = require_permission("system.administer")
-_REQUIRE_ORG_SETTINGS = require_any_permission("org_unit.manage", "system.administer")
+# Shared by the dependency and the org check; see require_org_access.
+_ORG_SETTINGS_CODES = ("org_unit.manage", "system.administer")
+_REQUIRE_ORG_SETTINGS = require_any_permission(*_ORG_SETTINGS_CODES)
 
 
 class SettingOut(BaseModel):
@@ -138,7 +140,12 @@ async def list_org_settings(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> list[SettingOut]:
     await require_org_access(
-        db, current_user, org_id, resource="organization", resource_id=org_id
+        db,
+        current_user,
+        org_id,
+        resource="organization",
+        resource_id=org_id,
+        permissions=_ORG_SETTINGS_CODES,
     )
     return [_out(r) for r in await settings_service.list_settings(db, org_id)]
 
@@ -155,7 +162,12 @@ async def set_org_setting(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> SettingOut:
     await require_org_access(
-        db, current_user, org_id, resource="organization", resource_id=org_id
+        db,
+        current_user,
+        org_id,
+        resource="organization",
+        resource_id=org_id,
+        permissions=_ORG_SETTINGS_CODES,
     )
     try:
         row = await settings_service.set_setting(
@@ -183,7 +195,12 @@ async def clear_org_setting(
 ) -> SettingOut:
     """Drop this organization's override so the global default applies again."""
     await require_org_access(
-        db, current_user, org_id, resource="organization", resource_id=org_id
+        db,
+        current_user,
+        org_id,
+        resource="organization",
+        resource_id=org_id,
+        permissions=_ORG_SETTINGS_CODES,
     )
     try:
         row = await settings_service.clear_setting(

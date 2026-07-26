@@ -15,9 +15,10 @@ Five public functions:
   §A1 -- ownership is an additional allow on top of explicit grants).
 * :func:`require_org_unit_permission` -- org_unit-scoped check that
   walks the unit's ancestor chain in Python.
-* :func:`require_org_access` -- membership check for org-owned resources
-  that are NOT course-owned, where there is no course to re-resolve
-  scope against. Mandatory for those; see its docstring.
+* :func:`require_org_access` -- organization-scoped check for org-owned
+  resources that are NOT course-owned, where there is no course to
+  re-resolve scope against. Resolves the caller's permissions FOR that
+  organization via :func:`load_org_permissions`. Mandatory for those.
 * :func:`can_manage_course` -- bool helper for non-route call sites
   (cron jobs, bulk operations) -- never raises.
 
@@ -39,7 +40,7 @@ to move to ``features/courses/queries`` once the feature lands.
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from typing import Annotated
 from uuid import UUID
 
@@ -51,6 +52,7 @@ from abridgeai.core.db import get_db
 from abridgeai.core.security import CurrentUser, get_current_user
 from abridgeai.features.access_control.queries import (
     load_course_permissions,
+    load_org_permissions,
     load_user_permissions,
 )
 
@@ -123,21 +125,33 @@ async def require_org_access(
     *,
     resource: str,
     resource_id: UUID,
+    permissions: Sequence[str] = (),
 ) -> None:
-    """Raise 404 unless the caller belongs to ``organization_id``.
+    """Raise 404 unless the caller may act on ``organization_id``.
 
     The mandatory second half of authorising an **org-owned resource that is
-    not course-owned**. The permission dependencies above answer "does this
-    principal hold code X anywhere", because :func:`load_user_permissions`
-    flattens role assignments without regard to ``scope_kind`` — a role granted
-    at ``scope_kind='organization'`` for org B yields exactly the same codes as
-    a global grant. Course-owned resources are fine: they route through
-    :func:`require_course_permission`, which re-resolves scope against the
-    course's own organization. Anything org-owned but course-less has nothing
-    to re-resolve against, so it must call this after loading the resource.
+    not course-owned**. The permission dependencies above answer only "does
+    this principal hold code X anywhere", because :func:`load_user_permissions`
+    flattens role assignments without regard to ``scope_kind``. Course-owned
+    resources are fine — they route through :func:`require_course_permission`,
+    which re-resolves scope against the course's own organization. Anything
+    org-owned but course-less has nothing to re-resolve against, so it must
+    call this after loading the resource.
 
-    ``system.administer`` passes — it is the platform-operator permission and
-    is only ever granted globally.
+    Pass ``permissions`` — the same codes the route's dependency checks — and
+    the question becomes *"was one of these granted FOR this organization?"*,
+    resolved through :func:`load_org_permissions`. That is the correct check
+    and what every call site should use.
+
+    Omit them and it falls back to bare organization membership, which is
+    necessary but NOT sufficient. Membership cannot separate a student of org A
+    from a manager of org B who also happens to study at A — and the flat set
+    behind the dependency has already accepted that manager's ``course.update``.
+    The fallback exists so an unconverted call site degrades to the previous
+    behaviour rather than to nothing.
+
+    ``system.administer`` passes either way — it is the platform-operator
+    permission and is only ever granted globally.
 
     **404, not 403.** A 403 would confirm the resource exists, which turns any
     id endpoint into an existence oracle across tenants: enumerate ids, read
@@ -150,6 +164,13 @@ async def require_org_access(
     """
     if current_user.has_permission("system.administer"):
         return
+
+    if permissions:
+        granted = await load_org_permissions(db, current_user.user_id, organization_id)
+        if any(code in granted for code in permissions):
+            return
+        raise _not_found(resource, resource_id)
+
     if await user_is_org_member(
         db, user_id=current_user.user_id, organization_id=organization_id
     ):
