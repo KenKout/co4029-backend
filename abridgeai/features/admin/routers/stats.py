@@ -70,6 +70,8 @@ class DashboardOut(BaseModel):
     job_failure_rate_pct: float
     jobs_failed_7d: int
     jobs_total_7d: int
+    jobs_failed_prev_7d: int
+    jobs_total_prev_7d: int
     queue_depth: int
     failed_ai_calls_30d: int
     # cost snapshot
@@ -87,6 +89,10 @@ class DashboardOut(BaseModel):
     quiz_sessions_completed_7d: int
     interview_sessions_7d: int
     interview_pass_rate_pct: float
+    # Sample size behind the pass rate — a low rate over a couple of students is
+    # a testing artifact, not a platform signal.
+    interview_evaluated_7d: int
+    interview_students_7d: int
     materials_ingested_7d: int
     # needs attention (checklist)
     materials_stuck_processing: int

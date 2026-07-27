@@ -82,6 +82,21 @@ SELECT
         WHERE pj.created_at >= CAST(:now AS timestamptz) - INTERVAL '7 days'
           AND pj.created_at < CAST(:now AS timestamptz)
     ) AS jobs_total_7d,
+    -- Prior 7d window, so the UI can show whether the failure rate is
+    -- improving or actively degrading rather than just its current level.
+    (
+        SELECT COUNT(*)
+        FROM processing_jobs pj
+        WHERE pj.status = 'failed'
+          AND pj.created_at >= CAST(:now AS timestamptz) - INTERVAL '14 days'
+          AND pj.created_at < CAST(:now AS timestamptz) - INTERVAL '7 days'
+    ) AS jobs_failed_prev_7d,
+    (
+        SELECT COUNT(*)
+        FROM processing_jobs pj
+        WHERE pj.created_at >= CAST(:now AS timestamptz) - INTERVAL '14 days'
+          AND pj.created_at < CAST(:now AS timestamptz) - INTERVAL '7 days'
+    ) AS jobs_total_prev_7d,
     (
         SELECT COUNT(*)
         FROM processing_jobs pj
@@ -199,6 +214,32 @@ SELECT
           AND (CAST(:organization_id AS uuid) IS NULL
                OR c.organization_id = CAST(:organization_id AS uuid))
     ) AS interview_pass_rate_pct,
+    -- Sample size behind the pass rate. A low rate over a handful of sessions
+    -- from one or two students is a testing artifact, not a platform signal;
+    -- the UI needs these to decide whether to raise an alarm or caption it.
+    (
+        SELECT COUNT(*)
+        FROM interview_sessions isx
+        JOIN interview_configs ic
+          ON ic.id = isx.interview_config_id AND ic.deleted_at IS NULL
+        JOIN courses c ON c.id = ic.course_id AND c.deleted_at IS NULL
+        WHERE isx.pass_verdict IS NOT NULL
+          AND isx.started_at >= CAST(:now AS timestamptz) - INTERVAL '7 days'
+          AND isx.started_at < CAST(:now AS timestamptz)
+          AND (CAST(:organization_id AS uuid) IS NULL
+               OR c.organization_id = CAST(:organization_id AS uuid))
+    ) AS interview_evaluated_7d,
+    (
+        SELECT COUNT(DISTINCT isx.student_id)
+        FROM interview_sessions isx
+        JOIN interview_configs ic
+          ON ic.id = isx.interview_config_id AND ic.deleted_at IS NULL
+        JOIN courses c ON c.id = ic.course_id AND c.deleted_at IS NULL
+        WHERE isx.started_at >= CAST(:now AS timestamptz) - INTERVAL '7 days'
+          AND isx.started_at < CAST(:now AS timestamptz)
+          AND (CAST(:organization_id AS uuid) IS NULL
+               OR c.organization_id = CAST(:organization_id AS uuid))
+    ) AS interview_students_7d,
     (
         SELECT COUNT(*)
         FROM learning_materials lm
