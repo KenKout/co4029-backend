@@ -22,6 +22,10 @@ from typing import TYPE_CHECKING
 
 from abridgeai.ai.llm import LLMGateway, LLMRole
 from abridgeai.ai.prompts import render_prompt
+from abridgeai.features.interviews.orchestrator.interviewer_identity import (
+    InterviewerIdentity,
+    as_prompt_identity,
+)
 from abridgeai.features.interviews.orchestrator.persona import PersonaProfile, profile_from
 from abridgeai.features.interviews.orchestrator.utterance import (
     Persona,
@@ -53,6 +57,7 @@ async def generate_utterance(
     language: str | None,
     question_text: str | None = None,
     persona_profile: object | None = None,
+    identity: object | None = None,
     use_llm: bool = True,
     affect: object | None = None,
     hint_level: int = 0,
@@ -100,20 +105,27 @@ async def generate_utterance(
             profile = persona_profile.clamped()
         else:
             profile = profile_from(persona.value).clamped()
-        user_prompt = json.dumps(
-            {
-                "persona": persona.value,
-                "persona_traits": profile.as_prompt_traits(),
-                "language": language or "en",
-                "action": decision.action.value,
-                "approved_parts": {
-                    "acknowledgement": fallback.acknowledgement,
-                    "transition": fallback.transition,
-                    "question_or_probe": fallback.question_or_probe,
-                },
+        # Interviewer IDENTITY (who is speaking) rides alongside the tone traits.
+        # Separate axis from persona: a supportive tech lead and a strict tech
+        # lead are both coherent. as_prompt_identity() carries only name / title
+        # / register — presentational strings, nothing decision-bearing (guarded
+        # by tests/unit/test_interviewer_identity.py). Absent identity → the key
+        # is omitted entirely so an unnamed config's prompt is byte-identical to
+        # what it was before identity existed.
+        prompt_payload: dict[str, object] = {
+            "persona": persona.value,
+            "persona_traits": profile.as_prompt_traits(),
+            "language": language or "en",
+            "action": decision.action.value,
+            "approved_parts": {
+                "acknowledgement": fallback.acknowledgement,
+                "transition": fallback.transition,
+                "question_or_probe": fallback.question_or_probe,
             },
-            ensure_ascii=False,
-        )
+        }
+        if isinstance(identity, InterviewerIdentity) and identity.is_named():
+            prompt_payload["interviewer"] = as_prompt_identity(identity, language)
+        user_prompt = json.dumps(prompt_payload, ensure_ascii=False)
         gateway = gateway or LLMGateway()
         async with db.begin_nested():
             llm_result = await gateway.generate_json(

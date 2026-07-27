@@ -28,6 +28,10 @@ from abridgeai.features.interviews.ai.stages.persona_adherence.parsers import (
     parse_persona_adherence,
     unavailable,
 )
+from abridgeai.features.interviews.orchestrator.interviewer_identity import (
+    InterviewerIdentity,
+    as_prompt_identity,
+)
 
 if TYPE_CHECKING:
     from uuid import UUID
@@ -50,6 +54,8 @@ async def audit_persona_adherence(
     *,
     persona: PersonaProfile,
     messages: Sequence[InterviewSessionMessage],
+    identity: InterviewerIdentity | None = None,
+    language: str | None = None,
     pipeline_run_id: UUID | None = None,
     gateway: LLMGateway | None = None,
 ) -> PersonaAdherence:
@@ -59,6 +65,12 @@ async def audit_persona_adherence(
     to judge or the LLM produces nothing usable — the caller can then tell
     "audited, clean" apart from "no audit". Tone-only: the persona traits are the
     sole yardstick; correctness, difficulty, and question quality are ignored.
+
+    ``identity`` is the interviewer the session was configured with. Passing it
+    is what stops the judge misreading a role's register as tone drift: an
+    implementation-minded tech lead and a reasoning-oriented staff engineer word
+    the same approved parts differently BY DESIGN. Omitted / unnamed → the judge
+    sees no declared identity, i.e. today's behaviour.
     """
     turns = _interviewer_turns(messages)
     if not turns:
@@ -66,13 +78,13 @@ async def audit_persona_adherence(
 
     gateway = gateway or LLMGateway()
     system_prompt = render_prompt("prompts/system.j2")
-    user_prompt = json.dumps(
-        {
-            "declared_persona": persona.clamped().as_prompt_traits(),
-            "interviewer_turns": turns,
-        },
-        ensure_ascii=False,
-    )
+    payload: dict[str, Any] = {
+        "declared_persona": persona.clamped().as_prompt_traits(),
+        "interviewer_turns": turns,
+    }
+    if identity is not None and identity.is_named():
+        payload["declared_interviewer"] = as_prompt_identity(identity, language)
+    user_prompt = json.dumps(payload, ensure_ascii=False)
 
     try:
         llm_result = await gateway.generate_json(

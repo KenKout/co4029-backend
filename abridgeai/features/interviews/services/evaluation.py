@@ -59,6 +59,9 @@ from abridgeai.features.interviews.models import (
     InterviewSessionMessage,
     InterviewSessionQuestion,
 )
+from abridgeai.features.interviews.orchestrator.interviewer_identity import (
+    identity_from_config,
+)
 from abridgeai.features.interviews.orchestrator.persona import profile_from_config
 from abridgeai.features.interviews.orchestrator.security import (
     SecurityAction,
@@ -249,6 +252,11 @@ async def evaluate_and_generate_report(
                 getattr(config, "persona_profile_json", None),
             ),
             messages=transcript,
+            # The judge must know WHICH interviewer was declared, or it reads a
+            # role's register (concrete vs. trade-off-oriented wording) as tone
+            # drift and flags a config that behaved exactly as intended.
+            identity=identity_from_config(getattr(config, "persona_profile_json", None)),
+            language=getattr(session, "interview_language", None),
             pipeline_run_id=eval_run_id,
         )
 

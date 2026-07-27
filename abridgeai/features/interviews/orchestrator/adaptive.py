@@ -405,6 +405,14 @@ async def run_adaptive_turn(
         config.persona,
         getattr(config, "persona_profile_json", None),
     )
+    # Interviewer identity (who is speaking) — orthogonal to tone, resolved from
+    # the same JSONB blob. Defaults to the unnamed generic assistant, in which
+    # case the phrasing prompt omits it and wording is unchanged.
+    from abridgeai.features.interviews.orchestrator.interviewer_identity import (  # noqa: PLC0415
+        identity_from_config,
+    )
+
+    resolved_identity = identity_from_config(getattr(config, "persona_profile_json", None))
     probe_or_question_text = (
         selected_orm.prompt_text
         if selected_orm is not None
@@ -430,6 +438,7 @@ async def run_adaptive_turn(
         language=language,
         question_text=probe_or_question_text,
         persona_profile=resolved_persona_profile,
+        identity=resolved_identity,
         use_llm=use_llm,
         affect=affect,
         hint_level=hint_level,
