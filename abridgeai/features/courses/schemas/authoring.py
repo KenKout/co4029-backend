@@ -179,6 +179,11 @@ class TeacherDashboardStats(BaseModel):
     quiz attempts; ``pending_interviews`` = interview sessions awaiting
     evaluation. All are \"needs attention\" signals that deep-link into the
     relevant page.
+
+    The review-queue block surfaces the human-in-the-loop backlog for
+    AI-generated content, and the retention block summarises the spaced-
+    repetition health of the caller's students. Every field is an aggregate
+    over the same authorable course-id set, batched in the query layer.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -186,6 +191,35 @@ class TeacherDashboardStats(BaseModel):
     draft_courses: int = 0
     ungraded_quizzes: int = 0
     pending_interviews: int = 0
+    #: ``{course_id: pending_review_count}`` for AI-generated quiz + interview
+    #: questions still awaiting review. Courses with nothing pending are omitted,
+    #: so consumers treat a missing key as zero. Drives the pending-review dot on
+    #: the dashboard's course cards — the totals say work exists, this says where.
+    pending_review_by_course: dict[UUID, int] = Field(default_factory=dict)
+
+    # --- Human-in-the-loop review queue -------------------------------
+    # Quiz questions still at review_status='pending' (AI-generated cards
+    # awaiting teacher approval).
+    quiz_cards_pending_review: int = 0
+    # Interview questions still at review_status='pending'.
+    interview_questions_pending_review: int = 0
+    # Published quizzes that carry APPROVED questions with no usable
+    # expected_response_time_ms (NULL or <= 0). SM-2 grading needs t_exp,
+    # so these are published-but-uncalibrated.
+    published_quizzes_missing_texp: int = 0
+    # Material versions whose ingestion pipeline completed but whose lesson
+    # has not been used to generate a quiz yet — ready for quiz generation.
+    materials_ready_for_quiz_gen: int = 0
+
+    # --- Spaced-repetition retention signal ---------------------------
+    # Students whose AVERAGE easiness factor across in-scope cards is below
+    # the 2.0 struggling threshold.
+    students_below_ef_threshold: int = 0
+    # Mean easiness factor across in-scope cards, rounded to 2dp. 0.0 when
+    # the caller's courses have no card state yet.
+    avg_retention_ef: float = 0.0
+    # In-scope cards whose due_at is already in the past.
+    cards_overdue: int = 0
 
 
 class ModuleAuthoring(ModulePublic):

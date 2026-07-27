@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 from importlib import resources
-from typing import Any
+from typing import Any, NamedTuple
 from uuid import UUID
 
-from sqlalchemy import delete, func, select, text, true
+from sqlalchemy import delete, func, or_, select, text, true
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import InstrumentedAttribute, selectinload
 from sqlalchemy.sql.elements import ColumnElement
@@ -135,6 +135,271 @@ async def count_pending_grading_for_courses(
     pending_interviews = int((await db.execute(interview_stmt)).scalar_one())
 
     return (ungraded_quizzes, pending_interviews)
+
+
+async def count_pending_review_by_course(
+    db: AsyncSession, course_ids: list[UUID]
+) -> dict[UUID, int]:
+    """Per-course count of AI-generated items awaiting teacher review.
+
+    Returns ``{course_id: pending_count}`` covering quiz questions AND interview
+    questions still in ``review_status='pending'``. Courses with nothing pending
+    are omitted, so the caller can treat a missing key as zero.
+
+    Powers the pending-review dot on the dashboard's course cards: the aggregate
+    total tells a teacher that work exists, this tells them *where*, without
+    opening each course. Two GROUP BY queries — no per-course round trip.
+    """
+    from abridgeai.features.interviews.models import (
+        InterviewConfig,
+        InterviewQuestion,
+    )
+    from abridgeai.features.quizzes.models import Quiz, QuizQuestion
+
+    if not course_ids:
+        return {}
+
+    counts: dict[UUID, int] = {}
+
+    quiz_stmt = (
+        select(Quiz.course_id, func.count())
+        .select_from(QuizQuestion)
+        .join(Quiz, Quiz.id == QuizQuestion.quiz_id)
+        .where(
+            Quiz.course_id.in_(course_ids),
+            Quiz.deleted_at.is_(None),
+            QuizQuestion.deleted_at.is_(None),
+            QuizQuestion.review_status == "pending",
+        )
+        .group_by(Quiz.course_id)
+    )
+    for course_id, count in (await db.execute(quiz_stmt)).all():
+        counts[course_id] = counts.get(course_id, 0) + int(count)
+
+    interview_stmt = (
+        select(InterviewConfig.course_id, func.count())
+        .select_from(InterviewQuestion)
+        .join(
+            InterviewConfig,
+            InterviewConfig.id == InterviewQuestion.interview_config_id,
+        )
+        .where(
+            InterviewConfig.course_id.in_(course_ids),
+            InterviewConfig.deleted_at.is_(None),
+            InterviewQuestion.deleted_at.is_(None),
+            InterviewQuestion.review_status == "pending",
+        )
+        .group_by(InterviewConfig.course_id)
+    )
+    for course_id, count in (await db.execute(interview_stmt)).all():
+        counts[course_id] = counts.get(course_id, 0) + int(count)
+
+    return counts
+
+
+class TeacherReviewQueueCounts(NamedTuple):
+    """Batched dashboard aggregates for the review queue + retention block.
+
+    Returned by :func:`count_review_queue_and_retention_for_courses` so the
+    service layer stays free of positional-tuple guesswork.
+    """
+
+    quiz_cards_pending_review: int
+    interview_questions_pending_review: int
+    published_quizzes_missing_texp: int
+    materials_ready_for_quiz_gen: int
+    students_below_ef_threshold: int
+    avg_retention_ef: float
+    cards_overdue: int
+
+
+_EF_STRUGGLING_THRESHOLD = 2.0
+"""Average easiness factor below which a student counts as struggling.
+
+Mirrors ``lessons.ef_min_unlock``'s default (2.0) — the same SM-2 easiness
+level the unlock rule treats as "not yet retained".
+"""
+
+
+async def count_review_queue_and_retention_for_courses(
+    db: AsyncSession, course_ids: list[UUID]
+) -> TeacherReviewQueueCounts:
+    """Human-in-the-loop review backlog + spaced-repetition retention signal.
+
+    All seven aggregates are summed across ``course_ids`` in five grouped
+    queries — O(1) round-trips regardless of course count, same no-N+1
+    property as :func:`count_pending_grading_for_courses`.
+
+    Review queue:
+
+    * quiz_cards_pending_review = ``quiz_questions.review_status='pending'``
+      whose quiz belongs to an in-scope course (AI-generated cards awaiting
+      teacher approval).
+    * interview_questions_pending_review = the interview-side equivalent,
+      scoped through ``interview_configs.course_id``.
+    * published_quizzes_missing_texp = DISTINCT published quizzes holding at
+      least one ``approved`` question with no usable
+      ``expected_response_time_ms`` (NULL or ``<= 0``). SM-2 grading needs
+      ``t_exp``, so these are live-but-uncalibrated quizzes.
+    * materials_ready_for_quiz_gen = material versions whose ingestion
+      finished (a ``full_pipeline`` ``processing_jobs`` row with
+      ``status='completed'`` on ``entity_type='material_version'`` — the
+      status does NOT live on ``learning_materials``) whose lesson has not
+      yet been used as a quiz source (no ``quiz_source_lessons`` row).
+
+    Retention (spaced repetition), scoped through
+    ``student_card_state.question_id -> quiz_questions -> quizzes ->
+    modules -> courses``:
+
+    * students_below_ef_threshold = DISTINCT students whose AVERAGE ``ef``
+      over in-scope cards is below 2.0.
+    * avg_retention_ef = mean ``ef`` over in-scope cards, 2dp, 0.0 when the
+      caller has no cards.
+    * cards_overdue = in-scope cards with ``due_at < now()``.
+
+    Soft-deleted questions / quizzes / modules / materials are excluded
+    throughout, matching :func:`count_pending_grading_for_courses`.
+    """
+    # Local imports keep the cross-feature model dependency out of module
+    # load order (quizzes / interviews / materials / spaced_repetition import
+    # courses, not the other way around). Read-only JOINs only.
+    from abridgeai.ai.models import ProcessingJob
+    from abridgeai.features.interviews.models import InterviewConfig, InterviewQuestion
+    from abridgeai.features.materials.models import LearningMaterial, LearningMaterialVersion
+    from abridgeai.features.quizzes.models import Quiz, QuizQuestion, QuizSourceLesson
+    from abridgeai.features.spaced_repetition.models import StudentCardState
+
+    if not course_ids:
+        return TeacherReviewQueueCounts(0, 0, 0, 0, 0, 0.0, 0)
+
+    pending_cards_stmt = (
+        select(func.count())
+        .select_from(QuizQuestion)
+        .join(Quiz, Quiz.id == QuizQuestion.quiz_id)
+        .where(
+            Quiz.course_id.in_(course_ids),
+            Quiz.deleted_at.is_(None),
+            QuizQuestion.deleted_at.is_(None),
+            QuizQuestion.review_status == "pending",
+        )
+    )
+    quiz_cards_pending_review = int((await db.execute(pending_cards_stmt)).scalar_one())
+
+    pending_interview_q_stmt = (
+        select(func.count())
+        .select_from(InterviewQuestion)
+        .join(InterviewConfig, InterviewConfig.id == InterviewQuestion.interview_config_id)
+        .where(
+            InterviewConfig.course_id.in_(course_ids),
+            InterviewConfig.deleted_at.is_(None),
+            InterviewQuestion.deleted_at.is_(None),
+            InterviewQuestion.review_status == "pending",
+        )
+    )
+    interview_questions_pending_review = int(
+        (await db.execute(pending_interview_q_stmt)).scalar_one()
+    )
+
+    missing_texp_stmt = (
+        select(func.count(func.distinct(Quiz.id)))
+        .select_from(Quiz)
+        .join(QuizQuestion, QuizQuestion.quiz_id == Quiz.id)
+        .where(
+            Quiz.course_id.in_(course_ids),
+            Quiz.deleted_at.is_(None),
+            Quiz.status == "published",
+            QuizQuestion.deleted_at.is_(None),
+            QuizQuestion.review_status == "approved",
+            or_(
+                QuizQuestion.expected_response_time_ms.is_(None),
+                QuizQuestion.expected_response_time_ms <= 0,
+            ),
+        )
+    )
+    published_quizzes_missing_texp = int((await db.execute(missing_texp_stmt)).scalar_one())
+
+    # A lesson is "already covered" once any live quiz names it as a source.
+    # quizzes.module_id alone is too coarse (a module-wide quiz would mask
+    # every other lesson in that module), so the anti-join runs on the
+    # lesson-level quiz_source_lessons link table.
+    lesson_has_quiz = (
+        select(QuizSourceLesson.lesson_id)
+        .join(Quiz, Quiz.id == QuizSourceLesson.quiz_id)
+        .where(
+            QuizSourceLesson.lesson_id == Lesson.id,
+            Quiz.deleted_at.is_(None),
+        )
+        .exists()
+    )
+    ready_materials_stmt = (
+        select(func.count(func.distinct(LearningMaterialVersion.id)))
+        .select_from(LearningMaterialVersion)
+        .join(LearningMaterial, LearningMaterial.id == LearningMaterialVersion.material_id)
+        .join(Lesson, Lesson.id == LearningMaterial.lesson_id)
+        .join(Module, Module.id == Lesson.module_id)
+        .join(
+            ProcessingJob,
+            (ProcessingJob.entity_id == LearningMaterialVersion.id)
+            & (ProcessingJob.entity_type == "material_version")
+            & (ProcessingJob.job_type == "full_pipeline")
+            & (ProcessingJob.status == "completed"),
+        )
+        .where(
+            Module.course_id.in_(course_ids),
+            Module.deleted_at.is_(None),
+            Lesson.deleted_at.is_(None),
+            LearningMaterial.deleted_at.is_(None),
+            LearningMaterialVersion.deleted_at.is_(None),
+            ~lesson_has_quiz,
+        )
+    )
+    materials_ready_for_quiz_gen = int((await db.execute(ready_materials_stmt)).scalar_one())
+
+    # student_card_state.question_id -> quiz_questions -> quizzes ->
+    # modules -> courses. quizzes carries a denormalized course_id too, but
+    # the module hop is the authoritative containment path, so both are
+    # asserted (they agree in the schema's data).
+    card_scope = (
+        select(StudentCardState)
+        .join(QuizQuestion, QuizQuestion.id == StudentCardState.question_id)
+        .join(Quiz, Quiz.id == QuizQuestion.quiz_id)
+        .join(Module, Module.id == Quiz.module_id)
+        .where(
+            Module.course_id.in_(course_ids),
+            Module.deleted_at.is_(None),
+            Quiz.deleted_at.is_(None),
+            QuizQuestion.deleted_at.is_(None),
+        )
+    )
+
+    card_totals_stmt = card_scope.with_only_columns(
+        func.count(),
+        func.round(func.avg(StudentCardState.ef), 2),
+        func.count().filter(StudentCardState.due_at < func.now()),
+    )
+    card_count, avg_ef, cards_overdue = (await db.execute(card_totals_stmt)).one()
+
+    below_threshold_stmt = (
+        select(func.count())
+        .select_from(
+            card_scope.with_only_columns(StudentCardState.student_id)
+            .group_by(StudentCardState.student_id)
+            .having(func.avg(StudentCardState.ef) < _EF_STRUGGLING_THRESHOLD)
+            .subquery()
+        )
+    )
+    students_below_ef_threshold = int((await db.execute(below_threshold_stmt)).scalar_one())
+
+    return TeacherReviewQueueCounts(
+        quiz_cards_pending_review=quiz_cards_pending_review,
+        interview_questions_pending_review=interview_questions_pending_review,
+        published_quizzes_missing_texp=published_quizzes_missing_texp,
+        materials_ready_for_quiz_gen=materials_ready_for_quiz_gen,
+        students_below_ef_threshold=students_below_ef_threshold,
+        # avg() is NULL when the caller's courses hold no cards at all.
+        avg_retention_ef=float(avg_ef) if card_count and avg_ef is not None else 0.0,
+        cards_overdue=int(cards_overdue),
+    )
 
 
 async def list_courses_for_owner(

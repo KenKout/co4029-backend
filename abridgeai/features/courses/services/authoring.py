@@ -576,6 +576,12 @@ async def get_teacher_dashboard_stats(
     clickable widgets: courses in draft, ungraded quiz attempts, and
     interview sessions awaiting evaluation. All aggregate queries are
     batched over the course-id set — no N+1.
+
+    Also returns the human-in-the-loop review backlog (pending quiz cards /
+    interview questions, published quizzes missing an expected response
+    time, ingested materials with no quiz yet) and the spaced-repetition
+    retention signal (students below the EF threshold, mean EF, overdue
+    cards) — same batched-over-course-ids property.
     """
     owned = await authoring_queries.list_courses_for_owner(db, user.user_id, include_archived=False)
     assigned = await authoring_queries.list_courses_assigned_to_teacher(
@@ -596,10 +602,22 @@ async def get_teacher_dashboard_stats(
         ungraded_quizzes,
         pending_interviews,
     ) = await authoring_queries.count_pending_grading_for_courses(db, course_ids)
+    pending_review_by_course = await authoring_queries.count_pending_review_by_course(
+        db, course_ids
+    )
+    review = await authoring_queries.count_review_queue_and_retention_for_courses(db, course_ids)
     return TeacherDashboardStats(
         draft_courses=draft_courses,
         ungraded_quizzes=ungraded_quizzes,
         pending_interviews=pending_interviews,
+        pending_review_by_course=pending_review_by_course,
+        quiz_cards_pending_review=review.quiz_cards_pending_review,
+        interview_questions_pending_review=review.interview_questions_pending_review,
+        published_quizzes_missing_texp=review.published_quizzes_missing_texp,
+        materials_ready_for_quiz_gen=review.materials_ready_for_quiz_gen,
+        students_below_ef_threshold=review.students_below_ef_threshold,
+        avg_retention_ef=review.avg_retention_ef,
+        cards_overdue=review.cards_overdue,
     )
 
 
