@@ -22,6 +22,7 @@ _OVERVIEW_SQL = _load("stats/overview.sql")
 _ACTIVE_USERS_SQL = _load("stats/active_users.sql")
 _CONTENT_SQL = _load("stats/content.sql")
 _HEALTH_SQL = _load("stats/health.sql")
+_DASHBOARD_SQL = _load("stats/dashboard.sql")
 
 
 async def overview_counts(db: AsyncSession, *, organization_id: UUID | None) -> dict[str, int]:
@@ -75,9 +76,60 @@ async def health_snapshot(db: AsyncSession, *, since: datetime) -> dict[str, int
     }
 
 
+async def operator_dashboard(
+    db: AsyncSession, *, organization_id: UUID | None, now: datetime
+) -> dict[str, Any]:
+    """One-row operator dashboard rollup (see ``sql/stats/dashboard.sql``).
+
+    ``job_failure_rate_pct`` is derived here rather than in SQL so the
+    zero-jobs case is a single explicit branch.
+    """
+    row = (
+        (
+            await db.execute(
+                _DASHBOARD_SQL,
+                {"organization_id": organization_id, "now": now},
+            )
+        )
+        .mappings()
+        .one()
+    )
+    jobs_failed = int(row["jobs_failed_7d"] or 0)
+    jobs_total = int(row["jobs_total_7d"] or 0)
+    failure_rate = round(100.0 * jobs_failed / jobs_total, 2) if jobs_total else 0.0
+    return {
+        "job_failure_rate_pct": failure_rate,
+        "jobs_failed_7d": jobs_failed,
+        "jobs_total_7d": jobs_total,
+        "queue_depth": int(row["queue_depth"] or 0),
+        "failed_ai_calls_30d": int(row["failed_ai_calls_30d"] or 0),
+        "spend_7d_usd": float(row["spend_7d_usd"] or 0),
+        "spend_prev_7d_usd": float(row["spend_prev_7d_usd"] or 0),
+        "projected_month_end_usd": float(row["projected_month_end_usd"] or 0),
+        "top_cost_driver": row["top_cost_driver"],
+        "top_cost_driver_usd": float(row["top_cost_driver_usd"] or 0),
+        "slowest_model": row["slowest_model"],
+        "slowest_model_p95_ms": int(row["slowest_model_p95_ms"] or 0),
+        "active_users_today": int(row["active_users_today"] or 0),
+        "active_users_7d": int(row["active_users_7d"] or 0),
+        "total_users": int(row["total_users"] or 0),
+        "quiz_sessions_completed_7d": int(row["quiz_sessions_completed_7d"] or 0),
+        "interview_sessions_7d": int(row["interview_sessions_7d"] or 0),
+        "interview_pass_rate_pct": float(row["interview_pass_rate_pct"] or 0),
+        "materials_ingested_7d": int(row["materials_ingested_7d"] or 0),
+        "materials_stuck_processing": int(row["materials_stuck_processing"] or 0),
+        "published_quizzes_missing_texp": int(row["published_quizzes_missing_texp"] or 0),
+        "interview_configs_no_reviewed_questions": int(
+            row["interview_configs_no_reviewed_questions"] or 0
+        ),
+        "orgs_inactive_30d": int(row["orgs_inactive_30d"] or 0),
+    }
+
+
 __all__ = [
     "active_users",
     "content_breakdown",
     "health_snapshot",
+    "operator_dashboard",
     "overview_counts",
 ]

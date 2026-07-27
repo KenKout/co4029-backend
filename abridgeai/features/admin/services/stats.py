@@ -46,4 +46,24 @@ async def health(db: AsyncSession, *, since: datetime) -> dict[str, int]:
     return await stats_queries.health_snapshot(db, since=since)
 
 
-__all__ = ["active_users", "content_breakdown", "health", "overview"]
+async def operator_dashboard(
+    db: AsyncSession,
+    *,
+    organization_id: UUID | None,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Single-response operator metrics rollup for the admin dashboard."""
+    return await stats_queries.operator_dashboard(
+        db,
+        organization_id=organization_id,
+        now=now or datetime.now(tz=UTC),
+    )
+
+
+__all__ = [
+    "active_users",
+    "content_breakdown",
+    "health",
+    "operator_dashboard",
+    "overview",
+]

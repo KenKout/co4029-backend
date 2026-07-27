@@ -299,6 +299,98 @@ async def test_manager_org_scoped_stats(
     assert admin_resp.json()["total_courses"] > body["total_courses"]
 
 
+_DASHBOARD_INT_FIELDS = (
+    "jobs_failed_7d",
+    "jobs_total_7d",
+    "queue_depth",
+    "failed_ai_calls_30d",
+    "active_users_today",
+    "active_users_7d",
+    "total_users",
+    "quiz_sessions_completed_7d",
+    "interview_sessions_7d",
+    "materials_ingested_7d",
+    "materials_stuck_processing",
+    "published_quizzes_missing_texp",
+    "interview_configs_no_reviewed_questions",
+    "orgs_inactive_30d",
+)
+_DASHBOARD_FLOAT_FIELDS = (
+    "job_failure_rate_pct",
+    "spend_7d_usd",
+    "spend_prev_7d_usd",
+    "projected_month_end_usd",
+    "top_cost_driver_usd",
+    "interview_pass_rate_pct",
+)
+
+
+async def test_admin_dashboard(
+    client: httpx.AsyncClient,
+    engine: AsyncEngine,
+    seeded_users: SeededUsers,
+    extra_org: dict[str, uuid.UUID],
+) -> None:
+    del extra_org
+    token, _ = await _bearer(engine, seeded_users.admin_id)
+    try:
+        resp = await client.get("/api/v1/admin/stats/dashboard", headers=_auth(token))
+    finally:
+        await _purge_sessions(engine, seeded_users.admin_id)
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    for field in _DASHBOARD_INT_FIELDS:
+        assert isinstance(body[field], int), field
+        assert body[field] >= 0, field
+    for field in _DASHBOARD_FLOAT_FIELDS:
+        assert isinstance(body[field], int | float), field
+        assert body[field] >= 0, field
+    assert body["top_cost_driver"] is None or isinstance(body["top_cost_driver"], str)
+    assert body["slowest_model"] is None or isinstance(body["slowest_model"], str)
+    assert isinstance(body["slowest_model_p95_ms"], int)
+    # rate is a percentage derived from the two job counters
+    assert 0.0 <= body["job_failure_rate_pct"] <= 100.0
+    assert 0.0 <= body["interview_pass_rate_pct"] <= 100.0
+    assert body["jobs_failed_7d"] <= body["jobs_total_7d"]
+
+
+async def test_manager_dashboard_is_org_scoped(
+    client: httpx.AsyncClient,
+    engine: AsyncEngine,
+    seeded_users: SeededUsers,
+    extra_org: dict[str, uuid.UUID],
+    manager_membership: None,
+) -> None:
+    del manager_membership, extra_org
+    token, _ = await _bearer(engine, seeded_users.manager_id)
+    try:
+        resp = await client.get("/api/v1/admin/stats/dashboard", headers=_auth(token))
+    finally:
+        await _purge_sessions(engine, seeded_users.manager_id)
+    assert resp.status_code == 200, resp.text
+    scoped_users = resp.json()["total_users"]
+
+    admin_token, _ = await _bearer(engine, seeded_users.admin_id)
+    try:
+        admin_resp = await client.get("/api/v1/admin/stats/dashboard", headers=_auth(admin_token))
+    finally:
+        await _purge_sessions(engine, seeded_users.admin_id)
+    assert admin_resp.status_code == 200, admin_resp.text
+    # org-scoped caller must never see more users than the global view
+    assert scoped_users <= admin_resp.json()["total_users"]
+
+
+async def test_dashboard_student_token_403(
+    client: httpx.AsyncClient, engine: AsyncEngine, seeded_users: SeededUsers
+) -> None:
+    token, _ = await _bearer(engine, seeded_users.student_id)
+    try:
+        resp = await client.get("/api/v1/admin/stats/dashboard", headers=_auth(token))
+    finally:
+        await _purge_sessions(engine, seeded_users.student_id)
+    assert resp.status_code == 403, resp.text
+
+
 async def test_student_token_403(
     client: httpx.AsyncClient, engine: AsyncEngine, seeded_users: SeededUsers
 ) -> None:
@@ -678,6 +770,7 @@ def test_router_metadata() -> None:
         "/admin/stats/active-users",
         "/admin/stats/content",
         "/admin/stats/health",
+        "/admin/stats/dashboard",
     }
     actual = {route.path for route in stats_router.routes}  # type: ignore[attr-defined]
     assert expected.issubset(actual)

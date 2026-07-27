@@ -1,6 +1,6 @@
 """Stats router -- ``/admin/stats`` (T7.5).
 
-All four endpoints require ``system.stats.read`` OR ``system.administer``.
+All endpoints require ``system.stats.read`` OR ``system.administer``.
 Org-scoping is resolved via :func:`resolve_admin_scope`.
 
 * ``/overview`` and ``/content`` are bounded scans (top-level COUNT(*) over
@@ -8,6 +8,8 @@ Org-scoping is resolved via :func:`resolve_admin_scope`.
 * ``/active-users`` uses fixed 24h / 7d / 30d windows.
 * ``/health`` requires ``since`` to keep the failed-jobs / failed-AI-calls
   scans bounded.
+* ``/dashboard`` is the operator rollup: fixed 1h / 24h / 7d / 14d / 30d and
+  month-to-date windows, all evaluated server-side against ``now``.
 """
 
 from __future__ import annotations
@@ -56,6 +58,43 @@ class ContentOut(BaseModel):
     processing_jobs_by_status: list[dict[str, Any]]
 
 
+class DashboardOut(BaseModel):
+    """Operator dashboard rollup.
+
+    ``processing_jobs`` and ``ai_model_calls`` carry no organization edge in
+    the schema, so the job / cost / latency fields are always global even for
+    an org-scoped caller (documented in ``sql/stats/dashboard.sql``).
+    """
+
+    # needs action
+    job_failure_rate_pct: float
+    jobs_failed_7d: int
+    jobs_total_7d: int
+    queue_depth: int
+    failed_ai_calls_30d: int
+    # cost snapshot
+    spend_7d_usd: float
+    spend_prev_7d_usd: float
+    projected_month_end_usd: float
+    top_cost_driver: str | None
+    top_cost_driver_usd: float
+    slowest_model: str | None
+    slowest_model_p95_ms: int
+    # activity
+    active_users_today: int
+    active_users_7d: int
+    total_users: int
+    quiz_sessions_completed_7d: int
+    interview_sessions_7d: int
+    interview_pass_rate_pct: float
+    materials_ingested_7d: int
+    # needs attention (checklist)
+    materials_stuck_processing: int
+    published_quizzes_missing_texp: int
+    interview_configs_no_reviewed_questions: int
+    orgs_inactive_30d: int
+
+
 @router.get("/overview", response_model=OverviewOut)
 async def get_overview(
     user: Annotated[CurrentUser, Depends(_REQUIRE_STATS)],
@@ -98,6 +137,16 @@ async def get_health(
     del user
     snapshot = await stats_service.health(db, since=since)
     return HealthOut(**snapshot)
+
+
+@router.get("/dashboard", response_model=DashboardOut)
+async def get_dashboard(
+    user: Annotated[CurrentUser, Depends(_REQUIRE_STATS)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> DashboardOut:
+    org_id = await resolve_admin_scope(db, user)
+    metrics = await stats_service.operator_dashboard(db, organization_id=org_id)
+    return DashboardOut(**metrics)
 
 
 __all__ = ["router"]
