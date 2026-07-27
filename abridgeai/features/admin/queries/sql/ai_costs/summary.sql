@@ -64,13 +64,33 @@ by_stage AS (
     ORDER BY usd DESC, stage_name ASC
 ),
 buckets AS (
+    -- Gap-filled series. Grouping the rows alone omitted zero-spend days
+    -- entirely, so the x-axis jumped (e.g. Jun 28 -> Jul 12), compressing the
+    -- timeline and making later spikes look sharper than they were. Generate
+    -- every bucket in range and LEFT JOIN the aggregates so quiet days plot as
+    -- an explicit 0.
     SELECT
-        date_trunc(:period, called_at) AS bucket_start_ts,
-        COALESCE(SUM(total_tokens), 0)::bigint AS tokens,
-        COALESCE(SUM(estimated_cost_usd), 0)::numeric(18, 6) AS usd
-    FROM bounded
-    GROUP BY date_trunc(:period, called_at)
-    ORDER BY bucket_start_ts ASC
+        gs.bucket_start_ts,
+        COALESCE(agg.tokens, 0)::bigint AS tokens,
+        COALESCE(agg.usd, 0)::numeric(18, 6) AS usd
+    FROM generate_series(
+        date_trunc(:period, CAST(:since AS timestamptz)),
+        date_trunc(:period, NOW()),
+        CASE :period
+            WHEN 'week' THEN INTERVAL '1 week'
+            WHEN 'month' THEN INTERVAL '1 month'
+            ELSE INTERVAL '1 day'
+        END
+    ) AS gs(bucket_start_ts)
+    LEFT JOIN (
+        SELECT
+            date_trunc(:period, called_at) AS bucket_start_ts,
+            COALESCE(SUM(total_tokens), 0)::bigint AS tokens,
+            COALESCE(SUM(estimated_cost_usd), 0)::numeric(18, 6) AS usd
+        FROM bounded
+        GROUP BY date_trunc(:period, called_at)
+    ) AS agg ON agg.bucket_start_ts = gs.bucket_start_ts
+    ORDER BY gs.bucket_start_ts ASC
 )
 SELECT
     (SELECT total_tokens FROM totals) AS total_tokens,
