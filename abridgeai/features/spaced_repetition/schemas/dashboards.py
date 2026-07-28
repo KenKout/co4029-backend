@@ -112,6 +112,39 @@ class StudentSrDetailRead(BaseModel):
     recent_reviews: list[StudentSrDetailReviewRead] = Field(default_factory=list)
 
 
+class StudentDashboardSummaryRead(BaseModel):
+    """Cross-course SR rollup for the student dashboard landing tiles.
+
+    The per-lesson and per-course SR endpoints already existed, but the student
+    dashboard had no aggregate to show, so its Quizzes/Interviews tiles were
+    hardcoded to "—". These are the headline numbers the thesis defines for the
+    learner: R-hat retention, lesson maturity, and how close the next locked
+    lesson is to opening.
+
+    Every value is scoped to the calling student's ACTIVE enrolments.
+    """
+
+    #: Mean R-hat across accessible (unlocked) lessons, 0-1.
+    avg_kr_estimate: float = 0.0
+    #: False when there are no accessible lessons to average, so the UI can show
+    #: "no data yet" instead of a misleading 0% retention. A student whose every
+    #: lesson is still locked has no retention to report — that is not 0%.
+    has_retention_data: bool = False
+    lessons_mature: int = 0
+    lessons_learning: int = 0
+    lessons_locked: int = 0
+    lessons_total: int = 0
+    #: Uses the same joins/filters as ``GET /me/cards-due`` so the dashboard and
+    #: that page can never disagree.
+    cards_due_now: int = 0
+    cards_total: int = 0
+    #: Nearest locked lesson and how far the EF gate has progressed toward
+    #: tau_unlock, from LessonUnlockStatus.current_ratio / required_ratio.
+    next_unlock_lesson_id: UUID | None = None
+    next_unlock_lesson_title: str | None = None
+    next_unlock_progress_pct: float = 0.0
+
+
 __all__ = [
     "AtRiskStudentRead",
     "CardStudentResultRead",
@@ -122,6 +155,7 @@ __all__ = [
     "HistogramBucket",
     "LessonOverviewItem",
     "LessonStatus",
+    "StudentDashboardSummaryRead",
     "StudentLessonSummaryRead",
     "StudentSrDetailLessonRead",
     "StudentSrDetailRead",

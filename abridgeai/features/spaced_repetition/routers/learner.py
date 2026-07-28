@@ -48,6 +48,7 @@ from abridgeai.features.spaced_repetition.schemas.dashboards import (
     CardsDuePage,
     LessonOverviewItem,
     LessonStatus,
+    StudentDashboardSummaryRead,
     StudentLessonSummaryRead,
 )
 from abridgeai.features.spaced_repetition.sm2.lesson_unlock import (
@@ -285,6 +286,135 @@ async def get_my_course_sr_overview(
             )
         )
     return items
+
+
+@router.get(
+    "/me/sr-dashboard-summary",
+    response_model=StudentDashboardSummaryRead,
+)
+async def get_my_sr_dashboard_summary(
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> StudentDashboardSummaryRead:
+    """Cross-course SR rollup for the student dashboard landing tiles.
+
+    Aggregates the per-lesson metrics that already existed (``R-hat`` retention
+    and the unlock gate) across every course the caller is actively enrolled in.
+    The dashboard previously had no such aggregate, so its headline tiles were
+    hardcoded to "—" — the thesis metrics were computed but never surfaced where
+    a student would see them.
+
+    Reuses :func:`knowledge_retention_estimate` and :func:`check_lesson_unlock`
+    rather than reimplementing the maths, so these numbers agree with the
+    per-lesson and per-course endpoints by construction. ``cards_due_now`` uses
+    the same predicate as ``GET /me/cards-due``.
+
+    ``next_unlock_*`` reports the locked lesson closest to opening, using the
+    EF gate's own ``current_ratio`` / ``required_ratio`` (i.e. progress toward
+    ``tau_unlock``) — no invented formula.
+    """
+    student_id = current_user.user_id
+
+    # Active enrolments only. A dropped or completed enrolment shouldn't drag the
+    # student's headline retention around.
+    course_rows = (
+        await db.execute(
+            text(
+                """
+                SELECT ce.course_id
+                FROM course_enrollments ce
+                JOIN courses c ON c.id = ce.course_id AND c.deleted_at IS NULL
+                WHERE ce.student_id = CAST(:student_id AS uuid)
+                  AND ce.status = 'active'
+                """
+            ),
+            {"student_id": str(student_id)},
+        )
+    ).all()
+    course_ids = [row[0] for row in course_rows]
+    if not course_ids:
+        return StudentDashboardSummaryRead()
+
+    kr_values: list[float] = []
+    mature = learning = locked = 0
+    cards_due_now = 0
+    cards_total = 0
+    best_locked: tuple[float, UUID, str] | None = None
+
+    for course_id in course_ids:
+        tree = await get_published_lessons_for_course(db, course_id)
+        for lesson in tree or []:
+            lesson_uuid = lesson.id
+            unlock = await check_lesson_unlock(db, student_id=student_id, lesson_id=lesson_uuid)
+            kr = await knowledge_retention_estimate(db, user_id=student_id, lesson_id=lesson_uuid)
+
+            # Count this lesson's tracked cards FIRST — the retention gate below
+            # depends on it.
+            lesson_cards = 0
+            question_ids = await get_quiz_question_id_set_by_lesson(db, lesson_uuid)
+            if question_ids:
+                counts = (
+                    await db.execute(
+                        select(
+                            func.count(StudentCardState.question_id),
+                            func.count(StudentCardState.question_id).filter(
+                                StudentCardState.due_at.is_not(None),
+                                StudentCardState.due_at <= func.now(),
+                            ),
+                        ).where(
+                            StudentCardState.student_id == student_id,
+                            StudentCardState.question_id.in_(question_ids),
+                        )
+                    )
+                ).one()
+                lesson_cards = int(counts[0] or 0)
+                cards_total += lesson_cards
+                cards_due_now += int(counts[1] or 0)
+
+            # Retention is averaged over lessons where the student actually has
+            # tracked cards, regardless of lock state. Two traps here, both found
+            # against real data:
+            #   * Averaging only *unlocked* lessons picked up empty lessons (0
+            #     cards bypass the EF gate, so they unlock trivially) and reported
+            #     a confident 0.0, while excluding the locked lessons that held
+            #     the real retention signal.
+            #   * ``unlock.total_cards`` is NOT the lesson's card count — it is
+            #     the EF gate's own working set, and reads 0 for an already
+            #     unlocked lesson. Gating on it hid retention for every unlocked
+            #     lesson. Use the card count computed above instead.
+            # A locked lesson with reviewed cards has a perfectly real R-hat, and
+            # it is the most informative number on the dashboard.
+            if lesson_cards > 0:
+                kr_values.append(kr)
+
+            if not unlock.eligible:
+                locked += 1
+                # Progress toward the EF gate. required_ratio is tau_unlock; a
+                # lesson with no gate cards can't be ranked this way, so skip it.
+                if unlock.required_ratio > 0:
+                    pct = min(100.0, 100.0 * unlock.current_ratio / unlock.required_ratio)
+                    if best_locked is None or pct > best_locked[0]:
+                        best_locked = (pct, lesson_uuid, lesson.title)
+            elif kr >= _MATURE_KR_THRESHOLD:
+                mature += 1
+            elif kr >= _LEARNING_KR_THRESHOLD:
+                learning += 1
+
+    avg_kr = round(sum(kr_values) / len(kr_values), 3) if kr_values else 0.0
+
+    return StudentDashboardSummaryRead(
+        avg_kr_estimate=avg_kr,
+        has_retention_data=bool(kr_values),
+        lessons_mature=mature,
+        lessons_learning=learning,
+        lessons_locked=locked,
+        lessons_total=mature + learning + locked,
+        cards_due_now=cards_due_now,
+        cards_total=cards_total,
+        next_unlock_lesson_id=best_locked[1] if best_locked else None,
+        next_unlock_lesson_title=best_locked[2] if best_locked else None,
+        next_unlock_progress_pct=round(best_locked[0], 1) if best_locked else 0.0,
+    )
 
 
 __all__ = ["router"]

@@ -31,8 +31,6 @@ from alembic.config import Config
 from conftest import SeededUsers
 from fastapi import FastAPI
 from sqlalchemy import Column, Table, text
-
-from tests.support.db_graph import hard_delete_graph
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -48,6 +46,7 @@ from abridgeai.core.config import get_settings
 from abridgeai.core.db import Base, get_db
 from abridgeai.core.security import create_access_token, generate_token, hash_secret
 from abridgeai.features.spaced_repetition.routers import learner_router, teacher_router
+from tests.support.db_graph import hard_delete_graph
 
 for _stub_name in ("interview_configs",):
     if _stub_name not in Base.metadata.tables:
@@ -447,6 +446,70 @@ async def test_cards_due_returns_paginated(
     seen_qids = {item["question_id"] for item in body1["items"] + body2["items"]}
     expected_qids = {str(q) for q in cards_due_scenario["qa"] + cards_due_scenario["qb"]}
     assert seen_qids == expected_qids
+
+
+async def test_dashboard_summary_agrees_with_cards_due(
+    client: httpx.AsyncClient,
+    student_bearer: str,
+    cards_due_scenario: dict[str, Any],
+) -> None:
+    """The dashboard tile and the cards-due page must report the same number.
+
+    These previously came from different queries with different predicates, which
+    is how the notification ended up disagreeing with the page (a forward 1-hour
+    window vs due_at <= NOW()). Asserting equality here pins them together.
+    """
+    del cards_due_scenario
+    headers = {"Authorization": f"Bearer {student_bearer}"}
+
+    summary = await client.get("/api/v1/me/sr-dashboard-summary", headers=headers)
+    assert summary.status_code == 200, summary.text
+    body = summary.json()
+
+    # limit is capped at 100 by the endpoint; the scenario seeds 25 cards.
+    page = await client.get("/api/v1/me/cards-due?limit=100", headers=headers)
+    assert page.status_code == 200, page.text
+    page_count = len(page.json()["items"])
+
+    assert body["cards_due_now"] == page_count, (
+        "dashboard cards_due_now must match the cards-due page exactly"
+    )
+    assert body["cards_due_now"] > 0, "scenario should seed due cards"
+
+
+async def test_dashboard_summary_reports_retention_and_unlock(
+    client: httpx.AsyncClient,
+    student_bearer: str,
+    cards_due_scenario: dict[str, Any],
+) -> None:
+    """Shape check on the thesis metrics the student dashboard surfaces."""
+    del cards_due_scenario
+    headers = {"Authorization": f"Bearer {student_bearer}"}
+    response = await client.get("/api/v1/me/sr-dashboard-summary", headers=headers)
+    assert response.status_code == 200, response.text
+    body = response.json()
+
+    # R-hat is a probability.
+    assert 0.0 <= body["avg_kr_estimate"] <= 1.0
+    # has_retention_data distinguishes "no cards tracked yet" from a real 0%, so
+    # the UI can show an em-dash rather than alarming the student with 0%.
+    assert isinstance(body["has_retention_data"], bool)
+    assert body["has_retention_data"] is True, "scenario seeds cards, so there is data"
+
+    # Lesson buckets are consistent with the total.
+    assert (
+        body["lessons_mature"] + body["lessons_learning"] + body["lessons_locked"]
+        == body["lessons_total"]
+    )
+    # Unlock progress is a percentage.
+    assert 0.0 <= body["next_unlock_progress_pct"] <= 100.0
+    if body["next_unlock_lesson_title"] is None:
+        assert body["next_unlock_progress_pct"] == 0.0
+
+
+async def test_dashboard_summary_requires_auth(client: httpx.AsyncClient) -> None:
+    response = await client.get("/api/v1/me/sr-dashboard-summary")
+    assert response.status_code in (401, 403)
 
 
 async def test_cards_due_filtered_by_lesson_id(
