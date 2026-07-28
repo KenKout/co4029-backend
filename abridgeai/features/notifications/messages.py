@@ -43,12 +43,51 @@ def due_cards_title(*, due_count: int, locale: str | None) -> str:
     return f"You have {due_count} card{plural} due"
 
 
-def due_cards_body(*, locale: str | None) -> str:
-    """Body for the due-cards notification."""
+def due_cards_body(
+    *,
+    lesson_counts: list[tuple[str, int]] | None = None,
+    due_count: int = 0,
+    locale: str | None = None,
+) -> str:
+    """Body for the due-cards notification, naming the lessons involved.
+
+    ``lesson_counts`` is ``[(lesson_title, card_count), ...]`` ordered with the
+    largest backlog first (see ``scan_due_cards._dispatch_for_student``).
+
+    A bare "review them now" body threw away the per-lesson structure that SM-2
+    scheduling actually produces: a student enrolled in several courses could not
+    tell which one needed attention without clicking through. Naming up to two
+    lessons keeps the line readable while making it actionable.
+
+    Falls back to the generic wording when no titles could be resolved (e.g. a
+    lesson was deleted between the scan and the dispatch), so the notification
+    still sends rather than rendering an empty body.
+    """
     lang = _norm(locale)
+    counts = lesson_counts or []
+
+    if not counts:
+        if lang == "vi":
+            return "Hãy ôn tập ngay để ghi nhớ kiến thức lâu hơn."
+        return "Review them now to keep your knowledge fresh."
+
+    # Name at most two lessons; summarise any remainder as a count so the body
+    # stays one short line regardless of how many lessons are involved.
+    head = counts[:2]
+    rest = len(counts) - len(head)
+
     if lang == "vi":
-        return "Hãy ôn tập ngay để ghi nhớ kiến thức lâu hơn."
-    return "Review them now to keep your knowledge fresh."
+        parts = [f"{title} ({count} thẻ)" for title, count in head]
+        joined = ", ".join(parts)
+        if rest > 0:
+            joined += f" và {rest} bài học khác"
+        return f"Cần ôn tập: {joined}."
+
+    parts = [f"{title} ({count} card{'s' if count != 1 else ''})" for title, count in head]
+    joined = ", ".join(parts)
+    if rest > 0:
+        joined += f", and {rest} more lesson{'s' if rest != 1 else ''}"
+    return f"Due for review: {joined}."
 
 
 # ── Spaced-repetition: remediation on card failure (remediation service) ──────

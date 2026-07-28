@@ -150,6 +150,8 @@ async def _seed_quiz_root(engine: AsyncEngine) -> tuple[UUID, UUID, UUID, UUID, 
     course_id = uuid.uuid4()
     module_id = uuid.uuid4()
     quiz_id = uuid.uuid4()
+    lesson_id = uuid.uuid4()
+    lesson_title = "Scheduling Basics"
     async with engine.begin() as conn:
         await conn.execute(
             text("INSERT INTO organizations (id, slug, name) VALUES (:id, :slug, :name)"),
@@ -185,6 +187,28 @@ async def _seed_quiz_root(engine: AsyncEngine) -> tuple[UUID, UUID, UUID, UUID, 
                 "VALUES (:id, :course, :m, 'Q', 'published')"
             ),
             {"id": quiz_id, "course": course_id, "m": module_id},
+        )
+        # A lesson linked via quiz_source_lessons. The due-cards scan reaches a
+        # lesson through that join table (there is no lessons FK on quizzes), and
+        # needs the title to name what is due in the notification body.
+        await conn.execute(
+            text(
+                "INSERT INTO lessons (id, module_id, slug, title, status) "
+                "VALUES (:id, :m, :slug, :title, 'published')"
+            ),
+            {
+                "id": lesson_id,
+                "m": module_id,
+                "slug": f"lesson-{lesson_id.hex[:8]}",
+                "title": lesson_title,
+            },
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO quiz_source_lessons (quiz_id, lesson_id) "
+                "VALUES (:q, :l)"
+            ),
+            {"q": quiz_id, "l": lesson_id},
         )
     return org_id, course_id, module_id, quiz_id, owner_id
 
@@ -229,7 +253,8 @@ async def test_scan_due_cards_dispatches_for_due_students(
 ) -> None:
     org_id, course_id, module_id, quiz_id, owner_id = await _seed_quiz_root(engine)
     student_ids: list[UUID] = []
-    due_at = datetime.now(tz=UTC) + timedelta(minutes=30)
+    # Overdue: the scan reminds on cards whose due_at has passed.
+    due_at = datetime.now(tz=UTC) - timedelta(minutes=30)
     pos = 0
     for _ in range(5):
         student_id = uuid.uuid4()
@@ -275,7 +300,8 @@ async def test_scan_due_cards_singular_title_when_one_card(
 ) -> None:
     org_id, course_id, module_id, quiz_id, owner_id = await _seed_quiz_root(engine)
     student_id = uuid.uuid4()
-    due_at = datetime.now(tz=UTC) + timedelta(minutes=15)
+    # Overdue: the scan reminds on cards whose due_at has passed.
+    due_at = datetime.now(tz=UTC) - timedelta(minutes=15)
     await _seed_card(
         engine,
         student_id=student_id,
@@ -339,21 +365,26 @@ async def test_scan_due_cards_skips_students_with_no_due_cards(
 
 
 @pytest.mark.asyncio
-async def test_scan_due_cards_respects_hour_window(
+async def test_scan_due_cards_notifies_overdue_not_future(
     engine: AsyncEngine,
     session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Overdue cards must notify; cards not yet due must not.
+
+    This replaces an earlier test that asserted the opposite — it pinned a
+    forward-looking one-hour window (due_at BETWEEN now AND now+1h), which meant
+    a student with a real backlog was never reminded, and the count disagreed
+    with every read surface (all of which use due_at <= NOW()).
+    """
     org_id, course_id, module_id, quiz_id, owner_id = await _seed_quiz_root(engine)
-    in_window = datetime.now(tz=UTC) + timedelta(minutes=45)
-    out_of_window = datetime.now(tz=UTC) + timedelta(hours=2)
-    in_window_student = uuid.uuid4()
-    out_of_window_student = uuid.uuid4()
+    overdue_student = uuid.uuid4()
+    future_student = uuid.uuid4()
     await _seed_card(
         engine,
-        student_id=in_window_student,
+        student_id=overdue_student,
         question_id=uuid.uuid4(),
-        due_at=in_window,
+        due_at=datetime.now(tz=UTC) - timedelta(days=3),
         quiz_id=quiz_id,
         position=1,
         org_id=org_id,
@@ -363,9 +394,9 @@ async def test_scan_due_cards_respects_hour_window(
     )
     await _seed_card(
         engine,
-        student_id=out_of_window_student,
+        student_id=future_student,
         question_id=uuid.uuid4(),
-        due_at=out_of_window,
+        due_at=datetime.now(tz=UTC) + timedelta(hours=2),
         quiz_id=quiz_id,
         position=2,
         org_id=org_id,
@@ -383,9 +414,59 @@ async def test_scan_due_cards_respects_hour_window(
 
     await scan_due_cards_task(ctx={}, actor_id=owner_id)
 
-    assert send_mock.await_count == 1
-    notified = send_mock.await_args_list[0].kwargs["recipient_user_id"]
-    assert notified == in_window_student
+    notified = {c.kwargs["recipient_user_id"] for c in send_mock.await_args_list}
+    assert overdue_student in notified, "a student with overdue cards must be reminded"
+    assert future_student not in notified, "cards not yet due must not trigger a reminder"
+
+
+@pytest.mark.asyncio
+async def test_scan_due_cards_body_names_the_lesson(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The body must name the lesson, not just give a cross-course total.
+
+    A flat "N cards due" discards the per-lesson structure SM-2 scheduling
+    produces; a student in several courses can't tell which one needs work.
+    """
+    org_id, course_id, module_id, quiz_id, owner_id = await _seed_quiz_root(engine)
+    student_id = uuid.uuid4()
+    for i in range(3):
+        await _seed_card(
+            engine,
+            student_id=student_id,
+            question_id=uuid.uuid4(),
+            due_at=datetime.now(tz=UTC) - timedelta(hours=i + 1),
+            quiz_id=quiz_id,
+            position=i + 1,
+            org_id=org_id,
+            course_id=course_id,
+            module_id=module_id,
+            owner_id=owner_id,
+            # The user row is created by the first card only; _seed_card would
+            # otherwise violate users_pkey on the repeat inserts.
+            create_user=(i == 0),
+        )
+
+    send_mock = AsyncMock(return_value=None)
+    monkeypatch.setattr(
+        "abridgeai.features.notifications.services.dispatch.send_notification",
+        send_mock,
+    )
+    monkeypatch.setattr(worker_mod, "get_sessionmaker", _make_sessionmaker_factory(session_factory))
+
+    await scan_due_cards_task(ctx={}, actor_id=owner_id)
+
+    call = next(
+        c for c in send_mock.await_args_list if c.kwargs["recipient_user_id"] == student_id
+    )
+    assert "3" in call.kwargs["title"]
+    # The seeded lesson title must appear, with its card count.
+    assert "Scheduling Basics" in call.kwargs["body"]
+    assert "3 cards" in call.kwargs["body"]
+    # Single-lesson backlog deep-links straight to that lesson's review queue.
+    assert "/study/cards-due?lesson=" in call.kwargs["action_url"]
 
 
 @pytest.mark.asyncio
@@ -400,7 +481,7 @@ async def test_scan_due_cards_actor_propagates(
         engine,
         student_id=student_id,
         question_id=uuid.uuid4(),
-        due_at=datetime.now(tz=UTC) + timedelta(minutes=20),
+        due_at=datetime.now(tz=UTC) - timedelta(minutes=20),
         quiz_id=quiz_id,
         position=1,
         org_id=org_id,
@@ -437,7 +518,7 @@ async def test_scan_due_cards_clears_actor_on_failure(
         engine,
         student_id=uuid.uuid4(),
         question_id=uuid.uuid4(),
-        due_at=datetime.now(tz=UTC) + timedelta(minutes=20),
+        due_at=datetime.now(tz=UTC) - timedelta(minutes=20),
         quiz_id=quiz_id,
         position=1,
         org_id=org_id,
