@@ -70,6 +70,7 @@ _CARDS_DUE_SQL = text(
         qq.quiz_id,
         qsl.lesson_id,
         l.title AS lesson_title,
+        c.slug AS course_slug,
         scs.due_at,
         scs.last_q,
         scs.ef
@@ -78,6 +79,8 @@ _CARDS_DUE_SQL = text(
     JOIN quizzes q ON q.id = qq.quiz_id
     JOIN quiz_source_lessons qsl ON qsl.quiz_id = q.id
     JOIN lessons l ON l.id = qsl.lesson_id
+    JOIN modules m ON m.id = l.module_id
+    JOIN courses c ON c.id = m.course_id
     WHERE scs.student_id = CAST(:student_id AS uuid)
       AND scs.due_at IS NOT NULL
       AND scs.due_at <= NOW()
@@ -146,9 +149,10 @@ async def _load_cards_due(
             quiz_id=row[1] if isinstance(row[1], UUID) else UUID(str(row[1])),
             lesson_id=row[2] if isinstance(row[2], UUID) else UUID(str(row[2])),
             lesson_title=str(row[3]),
-            due_at=row[4],
-            last_q=int(row[5]) if row[5] is not None else None,
-            ef=float(row[6]),
+            course_slug=str(row[4]),
+            due_at=row[5],
+            last_q=int(row[6]) if row[6] is not None else None,
+            ef=float(row[7]),
         )
         for row in rows
     ]

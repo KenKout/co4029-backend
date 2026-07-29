@@ -16,6 +16,7 @@ class CardsDueItem(BaseModel):
     quiz_id: UUID
     lesson_id: UUID
     lesson_title: str
+    course_slug: str
     due_at: datetime
     last_q: int | None = None
     ef: float
