@@ -506,7 +506,30 @@ async def delete_quiz(db: AsyncSession, quiz_id: UUID, actor: CurrentUser) -> No
     pointing at a deleted quiz — the UI rendered it, and clicking it 404'd.
     """
     quiz = await _require_quiz(db, quiz_id)
+
+    # Collect this quiz's question ids BEFORE the cascade so we can purge their
+    # SM-2 card state. student_card_state is keyed on question_id and, being
+    # cross-feature, is invisible to soft_delete_cascade (it walks ONETOMANY
+    # SoftDelete children only, and SR's state table is neither). Left behind,
+    # those rows become perpetually-"due" cards no student can review.
+    from sqlalchemy import select as _select  # noqa: PLC0415
+
+    from abridgeai.features.spaced_repetition.api.public import (  # noqa: PLC0415
+        purge_card_state_for_questions,
+    )
+
+    question_ids = list(
+        (
+            await db.execute(
+                _select(QuizQuestion.id).where(QuizQuestion.quiz_id == quiz_id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+
     await soft_delete_cascade(db, quiz, actor_id=actor.user_id)
+    await purge_card_state_for_questions(db, question_ids)
 
     from sqlalchemy import update  # noqa: PLC0415
 
@@ -806,6 +829,14 @@ async def delete_question(db: AsyncSession, question_id: UUID, actor: CurrentUse
     )
 
     await soft_delete_cascade(db, question, actor_id=actor.user_id)
+
+    # Purge the question's SM-2 card state (cross-feature; the cascade cannot
+    # reach it). Otherwise the deleted question's cards stay perpetually "due".
+    from abridgeai.features.spaced_repetition.api.public import (  # noqa: PLC0415
+        purge_card_state_for_questions,
+    )
+
+    await purge_card_state_for_questions(db, [question_id])
     await db.flush()
 
     from sqlalchemy import select  # noqa: PLC0415
