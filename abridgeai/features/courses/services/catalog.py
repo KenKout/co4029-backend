@@ -89,6 +89,58 @@ async def resolve_user_primary_organization_id(db: AsyncSession, user_id: UUID) 
     return await get_user_primary_organization_id(db, user_id)
 
 
+async def user_can_access_org_resource(
+    db: AsyncSession,
+    *,
+    user_id: UUID,
+    resource_org_id: UUID | None,
+) -> bool:
+    """True iff the caller may read a resource owned by ``resource_org_id``.
+
+    Tenancy gate for the by-id learner catalog reads. Organizations do NOT
+    share courses or quizzes: a learner may only reach content owned by an
+    organization they actively belong to. ``resource_org_id is None`` (resource
+    missing / soft-deleted) is treated as no-access so the router 404s
+    identically to a genuinely absent id — the caller cannot distinguish
+    "wrong tenant" from "does not exist", so ids are not an existence oracle
+    across tenants.
+
+    A platform admin (``scope_kind='global'``) has no primary org membership
+    and would resolve to ``None``; such callers reach content through the admin
+    surfaces, not the learner catalog, so they are intentionally NOT special-
+    cased here (the learner routes are for enrolled learners).
+    """
+    if resource_org_id is None:
+        return False
+    from abridgeai.features.access_control.api.public import (  # noqa: PLC0415
+        is_user_member_of_org,
+    )
+
+    return await is_user_member_of_org(db, user_id=user_id, org_id=resource_org_id)
+
+
+async def organization_id_for_course_resource(
+    db: AsyncSession, *, kind: str, resource_id: UUID
+) -> UUID | None:
+    """Resolve any learner-addressable resource id to its owning org.
+
+    ``kind`` is one of ``course`` / ``module`` / ``lesson`` / ``resource``.
+    Returns ``None`` when the row is missing or soft-deleted.
+    """
+    from abridgeai.features.courses.queries import resolution  # noqa: PLC0415
+
+    resolvers = {
+        "course": resolution.organization_id_for_course,
+        "module": resolution.organization_id_for_module,
+        "lesson": resolution.organization_id_for_lesson,
+        "resource": resolution.organization_id_for_resource,
+    }
+    resolver = resolvers.get(kind)
+    if resolver is None:  # pragma: no cover - programming error
+        raise ValueError(f"unknown resource kind {kind!r}")
+    return await resolver(db, resource_id)
+
+
 async def list_published_courses_for_user(
     db: AsyncSession,
     user_id: UUID,

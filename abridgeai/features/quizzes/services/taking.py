@@ -426,6 +426,25 @@ async def start_attempt(
     )
     if quiz is None:
         raise NotFoundError(f"Quiz {quiz_id} not found")
+
+    # Tenancy gate: organizations do not share quizzes. A student may only
+    # attempt a quiz whose course belongs to an organization they actively
+    # belong to. Resolve the quiz's course -> organization via the courses
+    # public API and the caller's membership via the access-control public API
+    # (both cross-feature reads through the sanctioned surfaces). Raise the same
+    # NotFoundError as a missing quiz so the endpoint cannot be used to probe
+    # which quiz ids exist in another tenant.
+    from abridgeai.features.access_control.api.public import (  # noqa: PLC0415
+        is_user_member_of_org,
+    )
+    from abridgeai.features.courses.api import public as courses_api  # noqa: PLC0415
+
+    course = await courses_api.get_course_by_id(db, quiz.course_id)
+    if course is None or not await is_user_member_of_org(
+        db, user_id=actor.user_id, org_id=course.organization_id
+    ):
+        raise NotFoundError(f"Quiz {quiz_id} not found")
+
     questions = await _load_quiz_questions_for_taking(db, quiz_id)
 
     cooldown_map = await _load_cooldown_map(

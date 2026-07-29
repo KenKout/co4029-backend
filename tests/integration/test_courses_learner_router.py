@@ -575,6 +575,130 @@ async def test_cursor_pagination_round_trip(
             await conn.execute(text("DELETE FROM courses WHERE id = ANY(:ids)"), {"ids": extra})
 
 
+async def test_cross_org_reads_404(
+    client: httpx.AsyncClient,
+    student_bearer: str,
+    scenario: dict,
+    engine: AsyncEngine,
+) -> None:
+    """Organizations do not share courses: by-id reads of a FOREIGN org's
+    published content return 404 for a member of a different org.
+
+    The student belongs to ``seeded_users.organization_id``. We seed a fully
+    published course tree under a brand-new organization the student is NOT a
+    member of, then assert every by-id learner read 404s — the same not-found
+    shape a missing id returns, so ids are not a cross-tenant existence oracle.
+    """
+    other_org = uuid.uuid4()
+    other_owner = uuid.uuid4()
+    course = uuid.uuid4()
+    module = uuid.uuid4()
+    lesson = uuid.uuid4()
+    resource = uuid.uuid4()
+    storage_obj = uuid.uuid4()
+    suffix = other_org.hex[:8]
+
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("INSERT INTO organizations (id, slug, name) VALUES (:id, :slug, :name)"),
+            {"id": other_org, "slug": f"other-org-{suffix}", "name": "Other Org"},
+        )
+        await conn.execute(
+            text("INSERT INTO users (id, primary_email) VALUES (:id, :email)"),
+            {"id": other_owner, "email": f"other-owner-{suffix}@test.local"},
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO courses (id, organization_id, owner_user_id, slug, title, status) "
+                "VALUES (:id, :org, :owner, :slug, 'Foreign Course', 'published')"
+            ),
+            {"id": course, "org": other_org, "owner": other_owner, "slug": f"foreign-{suffix}"},
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO course_learning_outcomes (course_id, position, outcome_text) "
+                "VALUES (:c, 1, 'Foreign LO')"
+            ),
+            {"c": course},
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO modules (id, course_id, title, position, status) "
+                "VALUES (:id, :c, 'Foreign Module', 1, 'published')"
+            ),
+            {"id": module, "c": course},
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO lessons (id, module_id, slug, title, status) "
+                "VALUES (:id, :m, 'foreign-lesson', 'Foreign Lesson', 'published')"
+            ),
+            {"id": lesson, "m": module},
+        )
+        await conn.execute(
+            text("INSERT INTO storage_objects (id, bucket, object_key) VALUES (:id, :b, :k)"),
+            {"id": storage_obj, "b": "test-bucket", "k": f"foreign/{suffix}.pdf"},
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO lesson_resources "
+                "(id, lesson_id, title, resource_type, position, "
+                "visible_to_students, storage_object_id) "
+                "VALUES (:id, :l, 'Foreign Res', 'pdf', 1, TRUE, :s)"
+            ),
+            {"id": resource, "l": lesson, "s": storage_obj},
+        )
+
+    auth = {"Authorization": f"Bearer {student_bearer}"}
+    try:
+        endpoints = [
+            f"/api/v1/courses/{course}",
+            f"/api/v1/courses/{course}/content",
+            f"/api/v1/courses/{course}/tags",
+            f"/api/v1/courses/{course}/outcomes",
+            f"/api/v1/courses/{course}/modules",
+            f"/api/v1/modules/{module}",
+            f"/api/v1/modules/{module}/items",
+            f"/api/v1/modules/{module}/lessons",
+            f"/api/v1/lessons/{lesson}",
+            f"/api/v1/lessons/{lesson}/resources",
+            f"/api/v1/lesson-resources/{resource}/download-url",
+        ]
+        for url in endpoints:
+            resp = await client.get(url, headers=auth)
+            assert resp.status_code == 404, f"{url} -> {resp.status_code} (expected 404)"
+    finally:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("DELETE FROM lesson_resources WHERE id = :id"), {"id": resource}
+            )
+            await conn.execute(
+                text("DELETE FROM storage_objects WHERE id = :id"), {"id": storage_obj}
+            )
+            await conn.execute(text("DELETE FROM lessons WHERE id = :id"), {"id": lesson})
+            await conn.execute(text("DELETE FROM modules WHERE id = :id"), {"id": module})
+            await conn.execute(
+                text("DELETE FROM course_learning_outcomes WHERE course_id = :c"), {"c": course}
+            )
+            await conn.execute(text("DELETE FROM courses WHERE id = :id"), {"id": course})
+            await conn.execute(text("DELETE FROM users WHERE id = :id"), {"id": other_owner})
+            await conn.execute(text("DELETE FROM organizations WHERE id = :id"), {"id": other_org})
+
+
+async def test_same_org_by_id_reads_still_work(
+    client: httpx.AsyncClient,
+    student_bearer: str,
+    scenario: dict,
+) -> None:
+    """The tenancy gate does not break same-org reads: a member reads their
+    own org's published course by id."""
+    auth = {"Authorization": f"Bearer {student_bearer}"}
+    resp = await client.get(f"/api/v1/courses/{scenario['pub_course']}", headers=auth)
+    assert resp.status_code == 200, resp.text
+    content = await client.get(f"/api/v1/courses/{scenario['pub_course']}/content", headers=auth)
+    assert content.status_code == 200, content.text
+
+
 def test_no_authoring_imports_in_learner() -> None:
     learner_path = (
         Path(__file__).resolve().parent.parent.parent
