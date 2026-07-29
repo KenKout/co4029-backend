@@ -322,6 +322,31 @@ async def _load_cooldown_map(
     return {row[0]: row[1] for row in result.all()}
 
 
+def _renumber_display_positions(questions: list[QuizQuestionPublic]) -> None:
+    """Rewrite ``position`` on the take-payload DTOs to their display slot.
+
+    The student-facing ``position`` must encode the order the student should
+    SEE the questions in (1..N), not the authored order. This matters for
+    shuffled attempts: :func:`apply_layout` reorders the list but leaves the
+    original authored ``position`` on each row, and the SPA defensively
+    re-sorts questions AND options by ``position`` before rendering
+    (course-quiz.tsx, QuestionRenderer.tsx). Without this renumber those sorts
+    would restore the authored order and silently undo the shuffle — leaking
+    the canonical sequence and defeating the anti-cheat feature.
+
+    Mutates the passed DTOs in place. Safe because these are detached Pydantic
+    projections built for this one response, never the session-tracked ORM
+    rows (rewriting the ORM ``position`` would corrupt the stored order on
+    flush). Options are renumbered within each question in their already-
+    ordered (post-layout) sequence. Grading is keyed by question_id/option_id,
+    so it is unaffected by any of this.
+    """
+    for q_index, question in enumerate(questions, start=1):
+        question.position = q_index
+        for o_index, option in enumerate(question.options, start=1):
+            option.position = o_index
+
+
 async def start_attempt(
     db: AsyncSession,
     quiz_id: UUID,
@@ -456,6 +481,9 @@ async def start_attempt(
     public_questions = [
         QuizQuestionPublic.model_validate(question) for question in available_questions
     ]
+    # Encode the display order (1..N) into position so the SPA's defensive
+    # position-sorts render the shuffled order rather than undoing it.
+    _renumber_display_positions(public_questions)
     take_payload = QuizForTakingPublic(quiz=public_quiz, questions=public_questions)
     progress = QuizAttemptProgressRead.model_validate(
         {
@@ -905,9 +933,19 @@ async def get_attempt_progress(
     # subset keyed by question_id.
     quiz = await _require_quiz(db, attempt.quiz_id)
     questions = await _load_quiz_questions_for_taking(db, attempt.quiz_id)
+    # Re-apply the per-attempt shuffle layout persisted at start time so a
+    # resume (refresh / re-open) shows the SAME shuffled order the student saw,
+    # not the authored order. Without this the resume payload leaks the
+    # canonical sequence and disagrees with the order answers were given in.
+    if attempt.layout:
+        from abridgeai.features.quizzes.services.shuffle import apply_layout  # noqa: PLC0415
+
+        questions = apply_layout(questions, attempt.layout)
+    public_questions = [QuizQuestionPublic.model_validate(q) for q in questions]
+    _renumber_display_positions(public_questions)
     take_payload = QuizForTakingPublic(
         quiz=QuizPublic.model_validate(quiz),
-        questions=[QuizQuestionPublic.model_validate(q) for q in questions],
+        questions=public_questions,
     )
 
     return QuizAttemptProgressRead.model_validate(

@@ -487,3 +487,92 @@ async def test_start_attempt_rejects_draft_quiz(
     finally:
         async with engine.begin() as conn:
             await hard_delete_graph(conn, "quizzes", [str(draft_quiz_id)])
+
+
+@pytest.mark.asyncio
+async def test_shuffled_take_payload_reflects_layout_and_survives_position_sort(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    published_quiz: dict,
+) -> None:
+    """A shuffled attempt's take payload must present the SHUFFLED order.
+
+    Regression for the anti-cheat leak: apply_layout reorders the questions
+    but the SPA re-sorts by ``position``. The take payload must therefore
+    carry sequential display positions (1..N) matching the persisted layout
+    order, so sorting by position preserves the shuffle instead of restoring
+    the authored order. Verified for both the start payload and the resume
+    (get_attempt_progress) payload.
+    """
+    quiz_id = published_quiz["quiz_id"]
+    student_id = published_quiz["student_id"]
+    # Turn shuffle on and add enough questions that a shuffle is near-certain
+    # to differ from authored order (10 questions → 1/10! chance of identity).
+    extra_ids = [uuid.uuid4() for _ in range(9)]
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("UPDATE quizzes SET shuffle_questions = TRUE WHERE id = :id"),
+            {"id": quiz_id},
+        )
+        for i, qid in enumerate(extra_ids, start=2):
+            await conn.execute(
+                text(
+                    "INSERT INTO quiz_questions "
+                    "(id, quiz_id, position, question_type, prompt_text, review_status, "
+                    "expected_response_time_ms) "
+                    "VALUES (:id, :quiz, :pos, 'multiple_choice', :prompt, 'approved', 30000)"
+                ),
+                {"id": qid, "quiz": quiz_id, "pos": i, "prompt": f"Q{i}?"},
+            )
+
+    try:
+        async with session_factory() as session, session.begin():
+            attempt, payload = await taking_service.start_attempt(
+                session, quiz_id, _actor(student_id)
+            )
+            attempt_id = attempt.id
+            layout = attempt.layout
+            start_qids = [str(q.id) for q in payload.take.questions]
+            start_positions = [q.position for q in payload.take.questions]
+
+        # Positions are sequential 1..N (display slots), NOT the authored order.
+        assert start_positions == list(range(1, len(start_qids) + 1))
+        # The take payload order matches the persisted layout question_order.
+        assert layout is not None
+        assert start_qids == layout["question_order"]
+        # Sorting by position (as the SPA does) preserves the shuffled order.
+        by_position = sorted(
+            payload.take.questions, key=lambda q: q.position
+        )
+        assert [str(q.id) for q in by_position] == start_qids
+
+        # Resume must reproduce the SAME shuffled order (re-reads layout).
+        async with session_factory() as session, session.begin():
+            resume = await taking_service.get_attempt_progress(
+                session, attempt_id=attempt_id, actor=_actor(student_id)
+            )
+        assert resume is not None
+        resume_qids = [str(q.id) for q in resume.take.questions]
+        resume_positions = [q.position for q in resume.take.questions]
+        assert resume_qids == start_qids
+        assert resume_positions == list(range(1, len(resume_qids) + 1))
+    finally:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text(
+                    "DELETE FROM quiz_attempt_answers WHERE attempt_id IN "
+                    "(SELECT id FROM quiz_attempts WHERE quiz_id = :q)"
+                ),
+                {"q": quiz_id},
+            )
+            await conn.execute(
+                text("DELETE FROM quiz_attempts WHERE quiz_id = :q"), {"q": quiz_id}
+            )
+            await conn.execute(
+                text("DELETE FROM quiz_questions WHERE id = ANY(:ids)"),
+                {"ids": extra_ids},
+            )
+            await conn.execute(
+                text("UPDATE quizzes SET shuffle_questions = FALSE WHERE id = :id"),
+                {"id": quiz_id},
+            )
