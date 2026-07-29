@@ -528,6 +528,8 @@ async def delete_course_outcome(
         await authoring_service.delete_course_outcome(db, course_id, outcome_id, current_user)
     except NotFoundError as exc:
         raise _not_found(str(exc)) from exc
+    except ConflictError as exc:
+        raise _conflict(str(exc)) from exc
     await db.commit()
 
 

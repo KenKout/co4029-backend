@@ -38,7 +38,7 @@ from abridgeai.core.db.conflict_mapper import (
     register_conflict_mappings,
 )
 from abridgeai.core.db.recursive_delete import soft_delete_cascade
-from abridgeai.core.exceptions import AppError, NotFoundError
+from abridgeai.core.exceptions import AppError, ConflictError, NotFoundError
 from abridgeai.core.security import CurrentUser
 from abridgeai.features.courses.models import (
     Course,
@@ -238,6 +238,21 @@ async def update_course(
 ) -> CourseAuthoring:
     del actor
     course = await _require_course(db, course_id)
+    # Publishing is a one-way door: a published course can never be reverted
+    # to draft. Its learning outcomes double as the graded assessment scale,
+    # so re-opening it for edits would move the goalposts under enrolled
+    # students. (archived is a separate terminal state; only draft->published
+    # and ->archived transitions are allowed.)
+    new_status = payload.status
+    if (
+        new_status is not None
+        and new_status != course.status
+        and course.status == "published"
+        and new_status == "draft"
+    ):
+        raise ConflictError(
+            f"Course {course_id} is published and cannot be reverted to draft."
+        )
     _apply_patch(course, payload)
     await _flush_or_conflict(db)
     await db.refresh(course)
@@ -1133,6 +1148,22 @@ async def _require_outcome(
     return outcome
 
 
+def _assert_outcomes_editable(course: Course) -> None:
+    """Learning outcomes are editable only while the course is a draft.
+
+    Once a course is published its outcomes are frozen: they double as the
+    graded assessment scale, so changing/removing them after students have
+    started would silently move the goalposts. Archived courses are likewise
+    read-only. Callers pass the already-loaded course row so this stays a
+    pure guard (→ HTTP 409 via ConflictError at the router).
+    """
+    if course.status != "draft":
+        raise ConflictError(
+            "Learning outcomes can only be edited while the course is an "
+            f"unpublished draft (course {course.id} is {course.status})."
+        )
+
+
 def _project_outcomes(
     outcomes: list[CourseLearningOutcome],
 ) -> list[CourseLearningOutcomeAuthoring]:
@@ -1195,7 +1226,8 @@ async def add_course_outcome(
     children); the dotted code is derived at display time and never stored.
     """
     del actor
-    await _require_course(db, course_id)
+    course = await _require_course(db, course_id)
+    _assert_outcomes_editable(course)
     if payload.parent_id is not None:
         # Parent must exist in this course (guards cross-course nesting).
         await _require_outcome(db, course_id, payload.parent_id)
@@ -1229,6 +1261,8 @@ async def update_course_outcome(
     new sibling groups are re-indexed so positions/codes stay contiguous.
     """
     del actor
+    course = await _require_course(db, course_id)
+    _assert_outcomes_editable(course)
     outcome = await _require_outcome(db, course_id, outcome_id)
     reparenting = "parent_id" in payload.model_fields_set
     new_parent_id = payload.parent_id if reparenting else outcome.parent_id
@@ -1277,6 +1311,8 @@ async def delete_course_outcome(
     soft-deleted / missing outcome as "no outcome". Surviving siblings of
     the removed node are re-indexed so codes never gap.
     """
+    course = await _require_course(db, course_id)
+    _assert_outcomes_editable(course)
     outcome = await _require_outcome(db, course_id, outcome_id)
     parent_id = outcome.parent_id
     # Soft-delete the whole subtree (deepest first) so children aren't

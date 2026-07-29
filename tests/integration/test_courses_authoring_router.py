@@ -1532,3 +1532,63 @@ async def test_course_outcome_hierarchy(
             text("DELETE FROM course_learning_outcomes WHERE course_id = :cid"),
             {"cid": course_a},
         )
+
+
+@pytest.mark.asyncio
+async def test_course_outcomes_frozen_once_published(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    scenario: dict[str, uuid.UUID | str],
+    engine: AsyncEngine,
+) -> None:
+    """LOs are editable only while the course is a draft.
+
+    Outcomes double as the graded assessment scale, so once a course is
+    published they are frozen: create/update/delete each return 409. And a
+    published course can never be reverted to draft (also 409) — publishing is
+    a one-way door. Edits are allowed again... never, by design.
+    """
+    course_a = scenario["course_a"]
+    auth = {"Authorization": f"Bearer {admin_bearer}"}
+    base = f"/api/v1/teacher/courses/{course_a}/outcomes"
+
+    # While DRAFT: create one outcome (allowed) so we have an id to edit/delete.
+    created = await client.post(base, json={"outcome_text": "Understand X"}, headers=auth)
+    assert created.status_code == 201, created.text
+    outcome_id = created.json()["id"]
+
+    # Publish the course (draft -> published).
+    pub = await client.post(f"/api/v1/teacher/courses/{course_a}/publish", headers=auth)
+    assert pub.status_code == 200, pub.text
+    assert pub.json()["status"] == "published"
+
+    # Now every LO write is frozen with 409.
+    add_after = await client.post(base, json={"outcome_text": "Apply Y"}, headers=auth)
+    assert add_after.status_code == 409, add_after.text
+
+    edit_after = await client.patch(
+        f"{base}/{outcome_id}", json={"outcome_text": "revised"}, headers=auth
+    )
+    assert edit_after.status_code == 409, edit_after.text
+
+    del_after = await client.delete(f"{base}/{outcome_id}", headers=auth)
+    assert del_after.status_code == 409, del_after.text
+
+    # The single outcome is untouched (still one, original text).
+    listed = (await client.get(base, headers=auth)).json()
+    assert [o["outcome_text"] for o in listed] == ["Understand X"]
+
+    # A published course can never be reverted to draft.
+    revert = await client.patch(
+        f"/api/v1/teacher/courses/{course_a}", json={"status": "draft"}, headers=auth
+    )
+    assert revert.status_code == 409, revert.text
+    still = (await client.get(f"/api/v1/teacher/courses/{course_a}", headers=auth)).json()
+    assert still["status"] == "published"
+
+    # Cleanup (hard-delete; endpoint only soft-deletes).
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("DELETE FROM course_learning_outcomes WHERE course_id = :cid"),
+            {"cid": course_a},
+        )
