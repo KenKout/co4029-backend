@@ -67,6 +67,29 @@ class QuestionWithQuizDTO(BaseModel):
     initial_ef: Decimal | None = None
 
 
+class GradeReviewResultDTO(BaseModel):
+    """Outcome of grading one card-review answer (cross-feature).
+
+    Returned by :func:`quizzes.api.public.grade_review_answer` to the SR review
+    loop. Carries the correctness signal the SM-2 scheduler needs plus the
+    feedback the learner sees after answering (correct option / answer text +
+    explanation). Feedback fields are only meaningful post-submit, so this DTO
+    is never part of the pre-answer question payload.
+    """
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    is_correct: bool
+    #: Ids of the option(s) that were correct (MCQ/true_false). Empty for
+    #: free-text types.
+    correct_option_ids: list[UUID] = []
+    #: Canonical answer rendered as text for free-text / non-option types
+    #: (short_answer, fill_blank, numerical, matching, ordering). None for MCQ.
+    correct_answer_text: str | None = None
+    #: Teacher explanation for the question, if any (already sanitized).
+    explanation: str | None = None
+
+
 class AttemptScoreDTO(BaseModel):
     """Subset of ``QuizAttempt`` used by interviews evaluation.
 
@@ -119,5 +142,6 @@ __all__ = [
     "GenerationRunKind",
     "GenerationRunSourceScopeKind",
     "GenerationRunStatus",
+    "GradeReviewResultDTO",
     "QuestionWithQuizDTO",
 ]

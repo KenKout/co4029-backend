@@ -31,13 +31,23 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from abridgeai.core.cache.client import RedisFallbackError, get_cache
 from abridgeai.core.cache.keys import CARDS_DUE
 from abridgeai.core.db import get_db
+from abridgeai.core.exceptions import NotFoundError
 from abridgeai.core.pagination.cursor import (
     decode_cursor,
     encode_cursor,
 )
 from abridgeai.core.security import CurrentUser, get_current_user
 from abridgeai.features.courses.api.public import get_published_lessons_for_course
-from abridgeai.features.quizzes.api.public import get_quiz_question_id_set_by_lesson
+from abridgeai.features.quizzes.api.public import (
+    get_quiz_question_id_set_by_lesson,
+    get_review_question_payloads,
+    grade_review_answer,
+)
+from abridgeai.features.spaced_repetition.api.public import (
+    dispatch_remediation_for_card_failure,
+    get_due_card_count,
+    record_card_review,
+)
 from abridgeai.features.spaced_repetition.models import StudentCardState
 from abridgeai.features.spaced_repetition.queries import (
     knowledge_retention_estimate,
@@ -50,6 +60,12 @@ from abridgeai.features.spaced_repetition.schemas.dashboards import (
     LessonStatus,
     StudentDashboardSummaryRead,
     StudentLessonSummaryRead,
+)
+from abridgeai.features.spaced_repetition.schemas.review import (
+    ReviewCard,
+    ReviewQueue,
+    ReviewSubmitRequest,
+    ReviewSubmitResult,
 )
 from abridgeai.features.spaced_repetition.sm2.lesson_unlock import (
     check_lesson_unlock,
@@ -71,6 +87,7 @@ _CARDS_DUE_SQL = text(
         qsl.lesson_id,
         l.title AS lesson_title,
         c.slug AS course_slug,
+        c.title AS course_title,
         scs.due_at,
         scs.last_q,
         scs.ef
@@ -150,9 +167,10 @@ async def _load_cards_due(
             lesson_id=row[2] if isinstance(row[2], UUID) else UUID(str(row[2])),
             lesson_title=str(row[3]),
             course_slug=str(row[4]),
-            due_at=row[5],
-            last_q=int(row[6]) if row[6] is not None else None,
-            ef=float(row[7]),
+            course_title=str(row[5]),
+            due_at=row[6],
+            last_q=int(row[7]) if row[7] is not None else None,
+            ef=float(row[8]),
         )
         for row in rows
     ]
@@ -217,6 +235,133 @@ async def list_my_cards_due(
             extra={"event": "cache_set_failed", "key": cache_key, "err": repr(exc)},
         )
     return page
+
+
+@router.get("/me/review/queue", response_model=ReviewQueue)
+async def get_review_queue(
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    lesson_id: Annotated[UUID | None, Query()] = None,
+    limit: Annotated[int, Query(ge=1, le=50)] = 20,
+) -> ReviewQueue:
+    """Due cards + their (no-leak) question payloads, ready to answer.
+
+    This is the *resolve* surface: previously a due card had no direct way to be
+    cleared (SM-2 only fired on the first answer of a fresh quiz attempt), so a
+    backlog was permanently stuck. Here the student gets the same
+    ``QuizQuestionPublic`` payload the quiz-taking screen uses — fetched via the
+    quizzes public API so ``is_correct`` never leaks — and answers each card via
+    ``POST /me/review/{question_id}``.
+
+    Cards are drawn from the exact same query as ``/me/cards-due`` (so the queue
+    and the dashboard count can never disagree), joined to their question
+    payloads. Questions that no longer resolve to an approved payload (edited to
+    draft after becoming due) are dropped from the queue.
+    """
+    page = await _load_cards_due(
+        db,
+        student_id=current_user.user_id,
+        lesson_id=lesson_id,
+        cursor=None,
+        limit=limit,
+    )
+    payloads = await get_review_question_payloads(db, [c.question_id for c in page.items])
+    payload_by_qid = {p.id: p for p in payloads}
+    cards: list[ReviewCard] = []
+    for item in page.items:
+        question = payload_by_qid.get(item.question_id)
+        if question is None:  # question no longer approved/served — skip
+            continue
+        cards.append(
+            ReviewCard(
+                question_id=item.question_id,
+                quiz_id=item.quiz_id,
+                lesson_id=item.lesson_id,
+                lesson_title=item.lesson_title,
+                course_slug=item.course_slug,
+                course_title=item.course_title,
+                due_at=item.due_at,
+                ef=item.ef,
+                last_q=item.last_q,
+                question=question,
+            )
+        )
+    total_due = await get_due_card_count(db, current_user.user_id)
+    return ReviewQueue(items=cards, total_due=total_due)
+
+
+@router.post("/me/review/{question_id}", response_model=ReviewSubmitResult)
+async def submit_review(
+    question_id: UUID,
+    payload: ReviewSubmitRequest,
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> ReviewSubmitResult:
+    """Grade one review answer and reschedule the card via SM-2.
+
+    The write path the old system lacked. Grading reuses the canonical quiz
+    grader (``grade_review_answer``); the SM-2 update reuses
+    ``record_card_review`` — the exact same engine as answering inside a quiz —
+    so a passing answer (q>=3) advances the card and a failing one resets it to
+    a 1-day interval + cooldown. ``quiz_attempt_id`` is ``None`` because a review
+    is not tied to a quiz attempt. A q==0 failure still fires remediation
+    (after commit), matching the quiz flow.
+
+    404 if the question does not resolve (deleted / never existed).
+    """
+    grade = await grade_review_answer(
+        db,
+        question_id=question_id,
+        selected_option_id=payload.selected_option_id,
+        answer_text=payload.answer_text,
+    )
+    if grade is None:
+        raise _not_found("quiz_question", question_id)
+
+    try:
+        review = await record_card_review(
+            db,
+            student_id=current_user.user_id,
+            question_id=question_id,
+            quiz_attempt_id=None,
+            t_actual_ms=payload.t_actual_ms,
+            correct=grade.is_correct,
+            hint_used=payload.hint_used,
+        )
+    except (NotFoundError, ValueError) as exc:
+        # No T_exp (draft question) or missing question — cannot schedule.
+        raise _not_found("quiz_question", question_id) from exc
+    await db.commit()
+
+    # Fire remediation for a hard failure (q==0), after commit — same
+    # caller-dispatches-after-commit contract as the quiz answer flow.
+    for event in review.pending_events:
+        try:
+            await dispatch_remediation_for_card_failure(
+                db,
+                student_id=event.student_id,
+                question_id=event.question_id,
+                quiz_attempt_id=event.quiz_attempt_id,
+            )
+        except Exception:  # noqa: BLE001 — side-effect must not fail the review
+            logger.exception(
+                "review_remediation_dispatch_failed",
+                extra={"question_id": str(question_id)},
+            )
+
+    remaining_due = await get_due_card_count(db, current_user.user_id)
+    return ReviewSubmitResult(
+        question_id=question_id,
+        correct=grade.is_correct,
+        q=review.q,
+        passing=review.passing,
+        due_at=review.due_at,
+        interval_days=review.interval_after,
+        remaining_due=remaining_due,
+        correct_option_ids=grade.correct_option_ids,
+        correct_answer_text=grade.correct_answer_text,
+        explanation=grade.explanation,
+    )
 
 
 @router.get(

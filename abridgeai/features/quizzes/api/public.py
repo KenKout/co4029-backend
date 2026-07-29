@@ -42,6 +42,7 @@ Surface
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
@@ -53,6 +54,7 @@ from abridgeai.features.quizzes.api._dto import (
     GenerationRunDTO,
     GenerationRunKind,
     GenerationRunSourceScopeKind,
+    GradeReviewResultDTO,
     QuestionWithQuizDTO,
 )
 from abridgeai.features.quizzes.models import (
@@ -62,6 +64,7 @@ from abridgeai.features.quizzes.models import (
     QuizQuestionOption,
     QuizSourceLesson,
 )
+from abridgeai.features.quizzes.schemas.public import QuizQuestionPublic
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -222,6 +225,126 @@ async def get_generation_run(
     if run is None:
         return None
     return GenerationRunDTO.model_validate(run)
+
+
+async def get_review_question_payloads(
+    db: AsyncSession,
+    question_ids: Sequence[UUID],
+) -> list[QuizQuestionPublic]:
+    """Return no-leak student-facing payloads for the given questions.
+
+    The cross-feature entrypoint powering the SR review loop: SR hands us the
+    ids of a student's due cards and gets back the same ``QuizQuestionPublic``
+    projection the quiz-taking surface uses — prompt, options (WITHOUT
+    ``is_correct``), and the derived matching/ordering shuffles — so a learner
+    can re-answer the card without the answer leaking. Only approved,
+    non-deleted questions are returned; unknown/soft-deleted ids are silently
+    dropped. Result order follows ``question_ids`` (the caller's due-order),
+    with any missing ids skipped.
+    """
+    if not question_ids:
+        return []
+    id_list = list(question_ids)
+    q_stmt = select(QuizQuestion).where(
+        QuizQuestion.id.in_(id_list),
+        QuizQuestion.review_status == "approved",
+    )
+    questions = {q.id: q for q in (await db.execute(q_stmt)).scalars().all()}
+    if not questions:
+        return []
+    opt_stmt = (
+        select(QuizQuestionOption)
+        .where(QuizQuestionOption.question_id.in_(list(questions.keys())))
+        .order_by(QuizQuestionOption.question_id, QuizQuestionOption.position)
+    )
+    options_by_q: dict[UUID, list[QuizQuestionOption]] = {}
+    for opt in (await db.execute(opt_stmt)).scalars().all():
+        options_by_q.setdefault(opt.question_id, []).append(opt)
+    payloads: list[QuizQuestionPublic] = []
+    for qid in id_list:  # preserve caller's due-order
+        question = questions.get(qid)
+        if question is None:
+            continue
+        question.options = options_by_q.get(qid, [])  # type: ignore[attr-defined]
+        payloads.append(QuizQuestionPublic.model_validate(question))
+    return payloads
+
+
+async def grade_review_answer(
+    db: AsyncSession,
+    *,
+    question_id: UUID,
+    selected_option_id: UUID | None,
+    answer_text: str | None,
+) -> GradeReviewResultDTO | None:
+    """Grade one review answer and return correctness + post-answer feedback.
+
+    Reuses the canonical :func:`grade_answer` so review grading is byte-for-byte
+    identical to quiz grading. Also assembles the feedback the learner sees
+    after answering: the correct option id(s) / canonical answer text and the
+    teacher explanation. Returns ``None`` if the question does not exist (or is
+    soft-deleted), so the SR caller can 404.
+    """
+    from abridgeai.features.quizzes.services.grader import grade_answer  # noqa: PLC0415
+
+    question = await db.get(QuizQuestion, question_id)
+    if question is None:
+        return None
+    grade = await grade_answer(
+        db,
+        question_id=question_id,
+        selected_option_id=selected_option_id,
+        answer_text=answer_text,
+    )
+    correct_option_ids: list[UUID] = []
+    correct_answer_text: str | None = None
+    qtype = question.question_type
+    if qtype in {"multiple_choice", "true_false"}:
+        opt_rows = (
+            await db.execute(
+                select(QuizQuestionOption.id).where(
+                    QuizQuestionOption.question_id == question_id,
+                    QuizQuestionOption.is_correct.is_(True),
+                )
+            )
+        ).scalars().all()
+        correct_option_ids = list(opt_rows)
+    else:
+        correct_answer_text = _canonical_answer_text(question)
+    return GradeReviewResultDTO(
+        is_correct=grade.is_correct,
+        correct_option_ids=correct_option_ids,
+        correct_answer_text=correct_answer_text,
+        explanation=question.explanation,
+    )
+
+
+def _canonical_answer_text(question: QuizQuestion) -> str | None:
+    """Render a question's canonical answer as display text for feedback.
+
+    Pulls from the type-specific answer columns / generated payload. Best-effort
+    — returns ``None`` when no canonical answer is stored (e.g. ``code``).
+    """
+    qtype = question.question_type
+    if qtype in {"short_answer", "fill_blank"}:
+        payload = question.original_generated_payload or {}
+        answer = payload.get("correct_answer")
+        if isinstance(answer, list):
+            return ", ".join(str(a) for a in answer)
+        return str(answer) if answer else None
+    if qtype == "numerical":
+        num = getattr(question, "numeric_answer", None)
+        return str(num) if num is not None else None
+    if qtype == "ordering":
+        seq = getattr(question, "ordering_sequence", None)
+        return " → ".join(str(s) for s in seq) if isinstance(seq, list) and seq else None
+    if qtype == "matching":
+        pairs = getattr(question, "match_pairs", None)
+        if isinstance(pairs, list) and pairs:
+            return "; ".join(
+                f"{p.get('left')} → {p.get('right')}" for p in pairs if isinstance(p, dict)
+            )
+    return None
 
 
 async def deep_clone_quiz(
@@ -405,12 +528,16 @@ __all__ = [
     "GenerationRunDTO",
     "GenerationRunKind",
     "GenerationRunSourceScopeKind",
+    "GradeReviewResultDTO",
     "QuestionWithQuizDTO",
+    "QuizQuestionPublic",
     "create_generation_run",
     "deep_clone_quiz",
     "get_attempt_score",
     "get_generation_run",
     "get_question_with_quiz_context",
     "get_quiz_question_id_set_by_lesson",
+    "get_review_question_payloads",
     "get_t_exp_for_question",
+    "grade_review_answer",
 ]
