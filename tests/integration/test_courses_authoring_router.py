@@ -1448,6 +1448,151 @@ async def test_course_outcome_student_403(
     assert resp.status_code == 403, resp.text
 
 
+@pytest.mark.asyncio
+async def test_course_outcome_teacher_403_lo_manage_split(
+    client: httpx.AsyncClient,
+    teacher_bearer: str,
+    scenario: dict[str, uuid.UUID | str],
+    engine: AsyncEngine,
+) -> None:
+    """Teacher (course.update, NOT learning_outcome.manage) cannot author LOs.
+
+    The §LO split: learning outcomes are manager-owned. The teacher holds a
+    course-scoped ``teacher`` role on course_a (so ``course.update`` for
+    content), but LO create/edit/delete now require ``learning_outcome.manage``
+    — which the teacher lacks — so all three writes return 403. This is the
+    regression guard for the split.
+    """
+    course_a = scenario["course_a"]
+    auth = {"Authorization": f"Bearer {teacher_bearer}"}
+    base = f"/api/v1/teacher/courses/{course_a}/outcomes"
+
+    # Seed one LO directly so PATCH/DELETE have a target (bypass the API since
+    # the whole point is that the teacher can't create one).
+    outcome_id = uuid.uuid4()
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO course_learning_outcomes "
+                "(id, course_id, outcome_text, position, created_at, updated_at) "
+                "VALUES (:id, :cid, 'Seeded LO', 1, NOW(), NOW())"
+            ),
+            {"id": outcome_id, "cid": course_a},
+        )
+
+    try:
+        create = await client.post(base, json={"outcome_text": "Teacher LO"}, headers=auth)
+        assert create.status_code == 403, create.text
+
+        patch = await client.patch(
+            f"{base}/{outcome_id}", json={"outcome_text": "edited"}, headers=auth
+        )
+        assert patch.status_code == 403, patch.text
+
+        delete = await client.delete(f"{base}/{outcome_id}", headers=auth)
+        assert delete.status_code == 403, delete.text
+
+        # The teacher CAN still read the LOs (content alignment needs it).
+        listing = await client.get(base, headers=auth)
+        assert listing.status_code == 200, listing.text
+    finally:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("DELETE FROM course_learning_outcomes WHERE course_id = :cid"),
+                {"cid": course_a},
+            )
+
+
+@pytest.mark.asyncio
+async def test_course_outcome_manager_can_author(
+    client: httpx.AsyncClient,
+    manager_bearer: str,
+    scenario: dict[str, uuid.UUID | str],
+    engine: AsyncEngine,
+) -> None:
+    """Manager (org-scoped learning_outcome.manage) can fully author LOs.
+
+    Exercised on course_a, which the manager does NOT own (admin owns it) — so
+    this proves authorisation flows through the ``learning_outcome.manage``
+    grant, not ownership.
+    """
+    course_a = scenario["course_a"]
+    auth = {"Authorization": f"Bearer {manager_bearer}"}
+    base = f"/api/v1/teacher/courses/{course_a}/outcomes"
+
+    try:
+        create = await client.post(base, json={"outcome_text": "Manager LO"}, headers=auth)
+        assert create.status_code == 201, create.text
+        outcome_id = create.json()["id"]
+
+        patch = await client.patch(
+            f"{base}/{outcome_id}", json={"outcome_text": "Manager LO v2"}, headers=auth
+        )
+        assert patch.status_code == 200, patch.text
+        assert patch.json()["outcome_text"] == "Manager LO v2"
+
+        delete = await client.delete(f"{base}/{outcome_id}", headers=auth)
+        assert delete.status_code == 204, delete.text
+    finally:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("DELETE FROM course_learning_outcomes WHERE course_id = :cid"),
+                {"cid": course_a},
+            )
+
+
+@pytest.mark.asyncio
+async def test_course_outcome_owner_teacher_cannot_bypass(
+    client: httpx.AsyncClient,
+    teacher_bearer: str,
+    seeded_users: SeededUsers,
+    engine: AsyncEngine,
+) -> None:
+    """A teacher who OWNS a course still cannot author its LOs.
+
+    The owner short-circuit is disabled for LO endpoints (allow_owner=False), so
+    even course ownership does not confer LO authoring — only the manager's
+    ``learning_outcome.manage`` grant does. This is the interaction that a naive
+    'just regate the endpoint' fix would miss.
+    """
+    owned_course = uuid.uuid4()
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO courses (id, organization_id, owner_user_id, slug, title, status) "
+                "VALUES (:id, :org, :owner, :slug, 'Teacher Owned', 'draft')"
+            ),
+            {
+                "id": owned_course,
+                "org": seeded_users.organization_id,
+                "owner": seeded_users.teacher_id,
+                "slug": f"teacher-owned-{owned_course.hex[:8]}",
+            },
+        )
+
+    auth = {"Authorization": f"Bearer {teacher_bearer}"}
+    base = f"/api/v1/teacher/courses/{owned_course}/outcomes"
+    try:
+        # Sanity: the teacher CAN edit the course itself (course.update via
+        # ownership), proving the 403 below is specifically the LO gate.
+        meta = await client.patch(
+            f"/api/v1/teacher/courses/{owned_course}",
+            json={"title": "Renamed by owner"},
+            headers=auth,
+        )
+        assert meta.status_code == 200, meta.text
+
+        create = await client.post(base, json={"outcome_text": "Owner LO"}, headers=auth)
+        assert create.status_code == 403, create.text
+    finally:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("DELETE FROM course_learning_outcomes WHERE course_id = :cid"),
+                {"cid": owned_course},
+            )
+            await conn.execute(text("DELETE FROM courses WHERE id = :id"), {"id": owned_course})
+
+
 async def test_course_outcome_hierarchy(
     client: httpx.AsyncClient,
     admin_bearer: str,

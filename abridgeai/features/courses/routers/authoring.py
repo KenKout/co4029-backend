@@ -102,6 +102,12 @@ _REQUIRE_AUTHORING_LIST = require_any_permission("course.read.draft", "course.cr
 _REQUIRE_COURSE_UPDATE = require_course_permission("course_id", "course.update")
 _REQUIRE_COURSE_PUBLISH = require_course_permission("course_id", "course.publish")
 _REQUIRE_COURSE_DELETE = require_course_permission("course_id", "course.delete")
+# Learning outcomes are manager-owned (§LO split): gate on learning_outcome.manage
+# and disable the owner short-circuit so a course-owning teacher (who holds
+# course.update but NOT learning_outcome.manage) cannot author LOs.
+_REQUIRE_OUTCOME_CREATE = require_course_permission(
+    "course_id", "learning_outcome.manage", allow_owner=False
+)
 _REQUIRE_MODULE = require_module_authoring_access()
 _REQUIRE_MODULE_ITEM = require_module_item_authoring_access()
 _REQUIRE_LESSON = require_lesson_authoring_access()
@@ -471,7 +477,7 @@ async def list_course_outcomes(
 async def create_course_outcome(
     course_id: UUID,
     payload: CourseLearningOutcomeCreate,
-    current_user: Annotated[CurrentUser, Depends(_REQUIRE_COURSE_UPDATE)],
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_OUTCOME_CREATE)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> CourseLearningOutcomeAuthoring:
     """Append a learning outcome to a course (§LO-1)."""

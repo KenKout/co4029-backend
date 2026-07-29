@@ -69,9 +69,18 @@ async def _check_course_permission(
     course_id: UUID,
     owner_user_id: UUID,
     codes: tuple[str, ...],
+    *,
+    allow_owner: bool = True,
 ) -> CurrentUser:
-    """Owner short-circuit + per-code ``can_manage_course`` lookup -- mirror of T1.11 policy."""
-    if owner_user_id == current_user.user_id:
+    """Owner short-circuit + per-code ``can_manage_course`` lookup -- mirror of T1.11 policy.
+
+    ``allow_owner=False`` disables the ownership short-circuit so ONLY an
+    explicit grant of one of ``codes`` passes. Used by learning-outcome
+    authoring, which is manager-owned: a teacher who owns the course holds
+    ``course.update`` but not ``learning_outcome.manage``, and the owner
+    short-circuit would otherwise let them bypass the LO gate entirely.
+    """
+    if allow_owner and owner_user_id == current_user.user_id:
         return current_user
 
     for code in codes:
@@ -178,8 +187,13 @@ def require_outcome_authoring_access(
     """Walks ``outcome_id -> course`` and enforces course perms.
 
     The path parameter MUST be named ``outcome_id``.
+
+    Learning-outcome authoring is manager-owned (``learning_outcome.manage``),
+    so this dependency disables the owner short-circuit: a teacher who owns the
+    course must NOT edit its LOs on the strength of ownership alone. Only an
+    explicit ``learning_outcome.manage`` grant (manager/admin) passes.
     """
-    codes = perm_codes or _DEFAULT_AUTHORING_PERMS
+    codes = perm_codes or ("learning_outcome.manage",)
 
     async def dependency(
         outcome_id: UUID,
@@ -190,7 +204,9 @@ def require_outcome_authoring_access(
         if resolved is None:
             raise _not_found("course_outcome", outcome_id)
         course_id, owner_user_id = resolved
-        return await _check_course_permission(db, current_user, course_id, owner_user_id, codes)
+        return await _check_course_permission(
+            db, current_user, course_id, owner_user_id, codes, allow_owner=False
+        )
 
     return dependency
 

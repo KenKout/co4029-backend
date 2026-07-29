@@ -46,6 +46,7 @@ roles:
       - course.enrollment.read
       - course.enrollment.create
       - course.enrollment.remove
+      - learning_outcome.manage
       - user.read
       - user.bulk_import
       - user.role_assign

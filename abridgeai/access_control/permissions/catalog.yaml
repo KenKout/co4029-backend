@@ -30,6 +30,9 @@ permissions:
   - code: course.enrollment.remove
     description: Remove enrollments from a course
     category: course
+  - code: learning_outcome.manage
+    description: Create, edit, or delete a course's learning outcomes (manager-owned)
+    category: course
   - code: lesson.manage
     description: Create, update, reorder, or delete lessons (module items)
     category: lesson

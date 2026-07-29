@@ -266,6 +266,7 @@ def _resolve_path_uuid(request: Request, param_name: str, resource: str) -> UUID
 def require_course_permission(
     course_id_param: str,
     *perm_codes: str,
+    allow_owner: bool = True,
 ) -> PermissionDependency:
     """Build a FastAPI dependency that enforces course-scoped permissions.
 
@@ -273,13 +274,21 @@ def require_course_permission(
     UUID (typically ``"course_id"``). At request time the dependency:
 
     1. Loads the course's owner / organization / org_unit context.
-    2. Returns immediately if the principal IS the course owner -- ownership
-       is an additional allow on top of explicit permissions (Reconciliation
-       §A1). This saves a DB roundtrip on the hot path (teacher editing own
-       course).
+    2. Returns immediately if the principal IS the course owner AND
+       ``allow_owner`` is set -- ownership is an additional allow on top of
+       explicit permissions (Reconciliation §A1). This saves a DB roundtrip on
+       the hot path (teacher editing own course).
     3. Otherwise calls :func:`load_course_permissions` to resolve all four
        ``scope_kind`` values against the course context, and asserts that the
        intersection with ``perm_codes`` is non-empty.
+
+    ``allow_owner=False`` disables the ownership short-circuit, so ONLY an
+    explicit permission grant passes. Use it for operations that must stay with
+    a role even on a course the caller owns -- e.g. learning-outcome authoring
+    is manager-owned, so a teacher who owns the course still must NOT edit its
+    LOs (they hold ``course.update`` for content but not ``learning_outcome
+    .manage``). Without this flag the owner short-circuit would let the owning
+    teacher bypass the LO gate entirely.
 
     Missing course -> HTTP 404. Missing permission -> HTTP 403 with the
     required codes and course id in the detail body.
@@ -302,7 +311,7 @@ def require_course_permission(
             raise _not_found("course", course_id)
 
         owner_user_id, _organization_id, _org_unit_id = row
-        if owner_user_id == current_user.user_id:
+        if allow_owner and owner_user_id == current_user.user_id:
             return current_user
 
         course_perms = await load_course_permissions(db, current_user.user_id, course_id)
