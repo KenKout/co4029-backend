@@ -792,6 +792,40 @@ async def delete_question(
 
 
 @router.post(
+    "/quizzes/{quiz_id}/questions/{question_id}/duplicate",
+    response_model=QuizQuestionAuthoring,
+    status_code=status.HTTP_201_CREATED,
+)
+async def duplicate_question(
+    quiz_id: UUID,
+    question_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_QUESTION)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> QuizQuestionAuthoring:
+    """Clone a question in place at the end of its own quiz.
+
+    The copy is always ``review_status='pending'`` (unpublished) regardless of
+    the source's state, so a duplicate re-enters the review queue rather than
+    inheriting approval it was never granted.
+    """
+    del quiz_id
+    try:
+        clone = await question_bank_service.duplicate_question(
+            db, question_id=question_id, actor=current_user
+        )
+    except NotFoundError as exc:
+        raise _not_found("quiz_question", question_id) from exc
+    except AppError as exc:
+        raise _bad_request(str(exc)) from exc
+    await db.commit()
+    await _attach_question_options(db, clone)
+    if clone.learning_outcome_id:
+        positions = await _resolve_outcome_positions(db, {clone.learning_outcome_id})
+        _fill_outcome_positions([clone], positions)
+    return QuizQuestionAuthoring.model_validate(clone)
+
+
+@router.post(
     "/quizzes/{quiz_id}/questions/{question_id}/regenerate",
     response_model=QuizGenerationRunRead,
     status_code=status.HTTP_202_ACCEPTED,

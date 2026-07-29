@@ -314,4 +314,102 @@ async def _next_position(db: AsyncSession, quiz_id: UUID) -> int:
     return int((await db.execute(stmt)).scalar_one())
 
 
-__all__ = ["import_questions", "list_bank_entries"]
+async def duplicate_question(
+    db: AsyncSession,
+    *,
+    question_id: UUID,
+    actor: CurrentUser,
+) -> QuizQuestion:
+    """Clone a single question **in place** within its own quiz.
+
+    Unlike :func:`import_questions` (which copies *bank* questions into a
+    *different* target quiz), this is the per-question "Duplicate" action in
+    the editor: the copy lands at the end of the same quiz's question list.
+
+    The clone gets:
+
+    * a new ``id`` (autogen)
+    * ``position`` appended after the current last question
+    * ``review_status='pending'`` with ``reviewed_by`` / ``reviewed_at`` /
+      ``published_at`` cleared — a duplicate is unvetted content and must
+      re-enter the review queue, never inherit the source's approval.
+    * ``imported_from_question_id`` pointing back at the source
+    * every option cloned (new ids, same key/text/is_correct/position and the
+      Phase-3/7/8 extras: formats, grade_fraction, feedback).
+
+    Runtime rows (attempts, answers, revisions) are intentionally NOT copied.
+    """
+    source = (
+        await db.execute(
+            select(QuizQuestion)
+            .where(QuizQuestion.id == question_id)
+            .where(QuizQuestion.deleted_at.is_(None))
+        )
+    ).scalar_one_or_none()
+    if source is None:
+        raise NotFoundError(f"Question {question_id} not found")
+
+    options = (await _load_options_for_questions(db, [source.id])).get(source.id, [])
+
+    clone = QuizQuestion(
+        quiz_id=source.quiz_id,
+        learning_outcome_id=source.learning_outcome_id,
+        position=await _next_position(db, source.quiz_id),
+        question_type=source.question_type,
+        prompt_text=source.prompt_text,
+        hint_text=source.hint_text,
+        explanation=source.explanation,
+        difficulty=source.difficulty,
+        bloom_level=source.bloom_level,
+        review_status="pending",
+        expected_response_time_ms=source.expected_response_time_ms,
+        expected_ef_ceiling=source.expected_ef_ceiling,
+        source_refs=list(source.source_refs or []),
+        original_generated_payload=(
+            dict(source.original_generated_payload)
+            if source.original_generated_payload
+            else None
+        ),
+        imported_from_question_id=source.id,
+        prompt_format=source.prompt_format,
+        hint_format=source.hint_format,
+        explanation_format=source.explanation_format,
+        single_answer=source.single_answer,
+        answer_numbering=source.answer_numbering,
+        numeric_answer=source.numeric_answer,
+        numeric_tolerance=source.numeric_tolerance,
+        match_pairs=(list(source.match_pairs) if source.match_pairs is not None else None),
+        ordering_sequence=(
+            list(source.ordering_sequence) if source.ordering_sequence is not None else None
+        ),
+        category_id=source.category_id,
+        created_by=actor.user_id,
+        updated_by=actor.user_id,
+    )
+    db.add(clone)
+    await db.flush()  # populate clone.id for option FK
+
+    for option in options:
+        db.add(
+            QuizQuestionOption(
+                question_id=clone.id,
+                option_key=option.option_key,
+                option_text=option.option_text,
+                is_correct=option.is_correct,
+                position=option.position,
+                option_format=option.option_format,
+                grade_fraction=option.grade_fraction,
+                feedback_text=option.feedback_text,
+                feedback_format=option.feedback_format,
+                created_by=actor.user_id,
+                updated_by=actor.user_id,
+            )
+        )
+    await db.flush()
+
+    cloned_options = (await _load_options_for_questions(db, [clone.id])).get(clone.id, [])
+    setattr(clone, "options", cloned_options)  # noqa: B010 -- dynamic, not a column
+    return clone
+
+
+__all__ = ["duplicate_question", "import_questions", "list_bank_entries"]

@@ -59,6 +59,7 @@ from abridgeai.features.quizzes.models import (
     Quiz,
     QuizAttempt,
     QuizQuestion,
+    QuizQuestionOption,
     QuizSourceLesson,
 )
 
@@ -223,6 +224,182 @@ async def get_generation_run(
     return GenerationRunDTO.model_validate(run)
 
 
+async def deep_clone_quiz(
+    db: AsyncSession,
+    *,
+    source_quiz_id: UUID,
+    target_module_id: UUID,
+    actor_id: UUID,
+    title_suffix: str = "",
+) -> UUID:
+    """Deep-clone a quiz (and every authoring child) into ``target_module_id``.
+
+    Cross-feature entry point for the courses module/item duplicate flow. The
+    caller (courses authoring) cannot import quizzes models directly under the
+    feature-independence contract, so the whole quiz subtree is cloned here.
+
+    What is copied:
+
+    * the :class:`Quiz` row itself, always forced to ``status='draft'`` with
+      ``published_at`` cleared — a duplicate must never inherit a published
+      state (matches the user requirement: duplicated data is always
+      unpublished).
+    * every non-deleted :class:`QuizQuestion`, each forced to
+      ``review_status='pending'`` (reviewed/published fields cleared) with its
+      full option set (:class:`QuizQuestionOption`).
+    * ``quiz_source_lessons`` link rows (pure attribution, no runtime state).
+
+    What is intentionally NOT copied: attempts, answers, grades, overrides,
+    regrade runs, statistics — all runtime rows keyed on the source quiz.
+
+    Returns the new quiz id. Flushes but does not commit; the caller owns the
+    surrounding transaction.
+    """
+    source = (
+        await db.execute(select(Quiz).where(Quiz.id == source_quiz_id))
+    ).scalar_one_or_none()
+    if source is None:
+        raise ValueError(f"Quiz {source_quiz_id} not found")
+
+    clone = Quiz(
+        course_id=source.course_id,
+        module_id=target_module_id,
+        title=f"{source.title}{title_suffix}",
+        description=source.description,
+        status="draft",
+        time_limit_seconds=source.time_limit_seconds,
+        passing_score_percent=source.passing_score_percent,
+        grading_method=source.grading_method,
+        allow_retakes=source.allow_retakes,
+        max_attempts=source.max_attempts,
+        cooldown_hours=source.cooldown_hours,
+        shuffle_questions=source.shuffle_questions,
+        shuffle_options=source.shuffle_options,
+        show_hints=source.show_hints,
+        initial_ef=source.initial_ef,
+        min_ef_for_unlock=source.min_ef_for_unlock,
+        coverage_threshold=source.coverage_threshold,
+        reminders_enabled=source.reminders_enabled,
+        generation_instructions=source.generation_instructions,
+        published_at=None,
+        available_from=source.available_from,
+        available_until=source.available_until,
+        due_at=source.due_at,
+        review_options=dict(source.review_options or {}),
+        overdue_handling=source.overdue_handling,
+        grace_period_seconds=source.grace_period_seconds,
+        require_password=source.require_password,
+        require_subnet=source.require_subnet,
+        browser_security=source.browser_security,
+        delay1_seconds=source.delay1_seconds,
+        delay2_seconds=source.delay2_seconds,
+        created_by=actor_id,
+        updated_by=actor_id,
+    )
+    db.add(clone)
+    await db.flush()
+
+    questions = (
+        (
+            await db.execute(
+                select(QuizQuestion)
+                .where(QuizQuestion.quiz_id == source_quiz_id)
+                .where(QuizQuestion.deleted_at.is_(None))
+                .order_by(QuizQuestion.position)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    q_ids = [q.id for q in questions]
+    options_by_q: dict[UUID, list[QuizQuestionOption]] = {}
+    if q_ids:
+        opt_rows = (
+            (
+                await db.execute(
+                    select(QuizQuestionOption)
+                    .where(QuizQuestionOption.question_id.in_(q_ids))
+                    .where(QuizQuestionOption.deleted_at.is_(None))
+                    .order_by(QuizQuestionOption.position)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        for opt in opt_rows:
+            options_by_q.setdefault(opt.question_id, []).append(opt)
+
+    for src_q in questions:
+        q_clone = QuizQuestion(
+            quiz_id=clone.id,
+            learning_outcome_id=src_q.learning_outcome_id,
+            position=src_q.position,
+            question_type=src_q.question_type,
+            prompt_text=src_q.prompt_text,
+            hint_text=src_q.hint_text,
+            explanation=src_q.explanation,
+            difficulty=src_q.difficulty,
+            bloom_level=src_q.bloom_level,
+            review_status="pending",
+            expected_response_time_ms=src_q.expected_response_time_ms,
+            expected_ef_ceiling=src_q.expected_ef_ceiling,
+            source_refs=list(src_q.source_refs or []),
+            original_generated_payload=(
+                dict(src_q.original_generated_payload)
+                if src_q.original_generated_payload
+                else None
+            ),
+            imported_from_question_id=src_q.id,
+            prompt_format=src_q.prompt_format,
+            hint_format=src_q.hint_format,
+            explanation_format=src_q.explanation_format,
+            single_answer=src_q.single_answer,
+            answer_numbering=src_q.answer_numbering,
+            numeric_answer=src_q.numeric_answer,
+            numeric_tolerance=src_q.numeric_tolerance,
+            match_pairs=(list(src_q.match_pairs) if src_q.match_pairs is not None else None),
+            ordering_sequence=(
+                list(src_q.ordering_sequence) if src_q.ordering_sequence is not None else None
+            ),
+            category_id=src_q.category_id,
+            created_by=actor_id,
+            updated_by=actor_id,
+        )
+        db.add(q_clone)
+        await db.flush()
+        for opt in options_by_q.get(src_q.id, []):
+            db.add(
+                QuizQuestionOption(
+                    question_id=q_clone.id,
+                    option_key=opt.option_key,
+                    option_text=opt.option_text,
+                    is_correct=opt.is_correct,
+                    position=opt.position,
+                    option_format=opt.option_format,
+                    grade_fraction=opt.grade_fraction,
+                    feedback_text=opt.feedback_text,
+                    feedback_format=opt.feedback_format,
+                    created_by=actor_id,
+                    updated_by=actor_id,
+                )
+            )
+
+    src_links = (
+        (
+            await db.execute(
+                select(QuizSourceLesson).where(QuizSourceLesson.quiz_id == source_quiz_id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    for link in src_links:
+        db.add(QuizSourceLesson(quiz_id=clone.id, lesson_id=link.lesson_id))
+
+    await db.flush()
+    return clone.id
+
+
 __all__ = [
     "AttemptScoreDTO",
     "GenerationRunDTO",
@@ -230,6 +407,7 @@ __all__ = [
     "GenerationRunSourceScopeKind",
     "QuestionWithQuizDTO",
     "create_generation_run",
+    "deep_clone_quiz",
     "get_attempt_score",
     "get_generation_run",
     "get_question_with_quiz_context",

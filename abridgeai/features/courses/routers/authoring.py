@@ -412,6 +412,35 @@ async def update_module(
     return module
 
 
+@router.post(
+    "/modules/{module_id}/duplicate",
+    response_model=ModuleAuthoring,
+    status_code=status.HTTP_201_CREATED,
+)
+async def duplicate_module(
+    module_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_MODULE)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> ModuleAuthoring:
+    """Deep-clone a whole module: the module + every item + every target.
+
+    Creates a new ``status='draft'`` module at the end of the course, with each
+    item's lesson/quiz/interview target deep-cloned into it (all unpublished /
+    pending). The copy is fully independent — no rows shared with the source.
+    Module prerequisites are not carried over.
+    """
+    try:
+        module = await authoring_service.duplicate_module(db, module_id, current_user)
+    except NotFoundError as exc:
+        raise _not_found(str(exc)) from exc
+    except ConflictError as exc:
+        raise _conflict(str(exc)) from exc
+    except AppError as exc:
+        raise _bad_request(str(exc)) from exc
+    await db.commit()
+    return module
+
+
 # ---------------------------------------------------------------------------
 # Course learning outcomes (§LO-1/2) — teacher CRUD. Positions are
 # server-managed (append on create, contiguous re-index on delete); the
@@ -610,6 +639,34 @@ async def delete_module_item(
     except NotFoundError as exc:
         raise _not_found(str(exc)) from exc
     await db.commit()
+
+
+@router.post(
+    "/module-items/{module_item_id}/duplicate",
+    response_model=ModuleItemAuthoring,
+    status_code=status.HTTP_201_CREATED,
+)
+async def duplicate_module_item(
+    module_item_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_MODULE_ITEM)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> ModuleItemAuthoring:
+    """Deep-clone a module item (lesson / quiz / interview) into its own module.
+
+    The polymorphic target is fully copied as an independent draft and the new
+    pin is appended at the end of the module. Duplicated content is always
+    unpublished (``status='draft'``, questions ``review_status='pending'``).
+    """
+    try:
+        item = await authoring_service.duplicate_module_item(db, module_item_id, current_user)
+    except NotFoundError as exc:
+        raise _not_found(str(exc)) from exc
+    except ConflictError as exc:
+        raise _conflict(str(exc)) from exc
+    except AppError as exc:
+        raise _bad_request(str(exc)) from exc
+    await db.commit()
+    return item
 
 
 @router.get(

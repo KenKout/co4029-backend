@@ -639,6 +639,19 @@ async def list_module_items(db: AsyncSession, module_id: UUID) -> list[ModuleIte
     return list((await db.execute(stmt)).scalars().all())
 
 
+async def next_module_position(db: AsyncSession, course_id: UUID) -> int:
+    """Return ``MAX(position) + 1`` for ``modules`` under ``course_id``.
+
+    Mirrors :func:`next_module_item_position`. Returns 1 for an empty course.
+    Ignores soft-deleted modules so a fresh clone lands after the live tail.
+    """
+    stmt = select(func.coalesce(func.max(Module.position), 0)).where(
+        Module.course_id == course_id,
+        Module.deleted_at.is_(None),
+    )
+    return int((await db.execute(stmt)).scalar_one()) + 1
+
+
 async def list_module_prerequisites(db: AsyncSession, module_id: UUID) -> list[UUID]:
     """Return the list of prerequisite module ids for ``module_id``."""
     stmt = select(ModulePrerequisite.prerequisite_module_id).where(

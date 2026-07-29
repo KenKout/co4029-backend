@@ -77,6 +77,8 @@ from abridgeai.features.courses.schemas import (
     TeacherDashboardStats,
 )
 from abridgeai.features.identity.models import StorageObject
+from abridgeai.features.interviews.api import public as interviews_public
+from abridgeai.features.quizzes.api import public as quizzes_public
 from abridgeai.infrastructure.s3 import create_stream_url, put_object_bytes
 
 
@@ -422,6 +424,212 @@ async def delete_module_item(db: AsyncSession, item_id: UUID, actor: CurrentUser
     """
     item = await _require_module_item(db, item_id)
     await soft_delete_cascade(db, item, actor_id=actor.user_id)
+
+
+# --- Duplicate (deep clone) ------------------------------------------------
+#
+# Duplicated content is ALWAYS unpublished: modules/lessons land in
+# ``status='draft'``; cloned quiz/interview subtrees are forced to draft +
+# ``review_status='pending'`` inside their feature's ``deep_clone_*`` helper.
+# A teacher must explicitly re-publish a copy — a duplicate never inherits the
+# source's published/approved state.
+
+_DUP_SUFFIX = " (Copy)"
+
+
+async def _deep_clone_lesson(
+    db: AsyncSession,
+    *,
+    source_lesson: Lesson,
+    target_module_id: UUID,
+    actor: CurrentUser,
+) -> UUID:
+    """Clone a lesson (+ its resources) into ``target_module_id`` as draft.
+
+    Slug must stay unique per module. When cloning inside the SAME module we
+    append a short uuid fragment to dodge ``uq_lessons_module_slug``; across
+    modules the original slug is free to reuse.
+
+    Resource rows are copied by reference to the same ``storage_object_id`` —
+    the underlying S3 object is shared, not re-uploaded (a duplicated lesson
+    points at the same files, which is the desired behaviour and avoids a
+    storage blow-up).
+    """
+    slug = source_lesson.slug
+    if source_lesson.module_id == target_module_id:
+        slug = f"{slug}-copy-{uuid4().hex[:8]}"
+
+    lesson_clone = Lesson(
+        module_id=target_module_id,
+        slug=slug,
+        title=f"{source_lesson.title}{_DUP_SUFFIX}",
+        summary=source_lesson.summary,
+        notes_markdown=source_lesson.notes_markdown,
+        primary_material_id=source_lesson.primary_material_id,
+        lesson_type=source_lesson.lesson_type,
+        difficulty=source_lesson.difficulty,
+        estimated_minutes=source_lesson.estimated_minutes,
+        status="draft",
+        ef_min_unlock=source_lesson.ef_min_unlock,
+        tau_unlock=source_lesson.tau_unlock,
+        requires_interview_pass=source_lesson.requires_interview_pass,
+        unlock_rule_json=dict(source_lesson.unlock_rule_json or {}),
+        created_by=actor.user_id,
+        updated_by=actor.user_id,
+    )
+    db.add(lesson_clone)
+    await _flush_or_conflict(db)
+
+    resources = await authoring_queries.list_all_lesson_resources(db, source_lesson.id)
+    for res in resources:
+        db.add(
+            LessonResource(
+                lesson_id=lesson_clone.id,
+                title=res.title,
+                resource_type=res.resource_type,
+                storage_object_id=res.storage_object_id,
+                position=res.position,
+                visible_to_students=res.visible_to_students,
+                created_by=actor.user_id,
+                updated_by=actor.user_id,
+            )
+        )
+    await _flush_or_conflict(db)
+    return lesson_clone.id
+
+
+async def _clone_item_target(
+    db: AsyncSession,
+    *,
+    source_item: ModuleItem,
+    target_module_id: UUID,
+    actor: CurrentUser,
+) -> tuple[str, dict[str, UUID]]:
+    """Deep-clone the polymorphic target a module item points at.
+
+    Returns ``(item_type, fk_kwargs)`` where ``fk_kwargs`` binds exactly one of
+    ``lesson_id`` / ``quiz_id`` / ``interview_config_id`` — ready to splat into
+    a new :class:`ModuleItem`. Cross-feature quiz/interview cloning goes through
+    the respective ``api.public`` (feature-independence contract).
+    """
+    if source_item.item_type == "lesson":
+        source_lesson = await _require_lesson(db, source_item.lesson_id)
+        new_lesson_id = await _deep_clone_lesson(
+            db,
+            source_lesson=source_lesson,
+            target_module_id=target_module_id,
+            actor=actor,
+        )
+        return "lesson", {"lesson_id": new_lesson_id}
+
+    if source_item.item_type == "quiz":
+        new_quiz_id = await quizzes_public.deep_clone_quiz(
+            db,
+            source_quiz_id=source_item.quiz_id,
+            target_module_id=target_module_id,
+            actor_id=actor.user_id,
+            title_suffix=_DUP_SUFFIX,
+        )
+        return "quiz", {"quiz_id": new_quiz_id}
+
+    if source_item.item_type == "interview":
+        new_config_id = await interviews_public.deep_clone_interview_config(
+            db,
+            source_config_id=source_item.interview_config_id,
+            target_module_id=target_module_id,
+            actor_id=actor.user_id,
+            title_suffix=_DUP_SUFFIX,
+        )
+        return "interview", {"interview_config_id": new_config_id}
+
+    raise AppError(f"Unknown module item type: {source_item.item_type!r}")
+
+
+async def duplicate_module_item(
+    db: AsyncSession,
+    item_id: UUID,
+    actor: CurrentUser,
+) -> ModuleItemAuthoring:
+    """Deep-clone a single module item into the SAME module, appended at the end.
+
+    The item's polymorphic target (lesson / quiz / interview) is fully cloned as
+    an independent draft; the new pin appends after the current last item.
+    """
+    source_item = await _require_module_item(db, item_id)
+    item_type, fk_kwargs = await _clone_item_target(
+        db,
+        source_item=source_item,
+        target_module_id=source_item.module_id,
+        actor=actor,
+    )
+    next_pos = await authoring_queries.next_module_item_position(db, source_item.module_id)
+    new_item = ModuleItem(
+        module_id=source_item.module_id,
+        item_type=item_type,
+        position=next_pos,
+        unlock_rule_json=dict(source_item.unlock_rule_json or {}),
+        **fk_kwargs,
+    )
+    db.add(new_item)
+    await _flush_or_conflict(db)
+    await db.refresh(new_item)
+    return ModuleItemAuthoring.model_validate(new_item)
+
+
+async def duplicate_module(
+    db: AsyncSession,
+    module_id: UUID,
+    actor: CurrentUser,
+) -> ModuleAuthoring:
+    """Deep-clone a whole module: the module row + every item + every target.
+
+    The new module is created as ``status='draft'`` at the end of its course's
+    module order. Each of the source module's items is cloned in position
+    order, and each item's lesson/quiz/interview target is deep-cloned into the
+    NEW module so the copy is fully self-contained (no shared child rows with
+    the original). Module prerequisites are intentionally NOT copied — they
+    reference sibling modules by id and a fresh draft starts with none.
+    """
+    source_module = await _require_module(db, module_id)
+
+    next_module_pos = await authoring_queries.next_module_position(db, source_module.course_id)
+    module_clone = Module(
+        course_id=source_module.course_id,
+        title=f"{source_module.title}{_DUP_SUFFIX}",
+        description=source_module.description,
+        position=next_module_pos,
+        status="draft",
+        estimated_minutes=source_module.estimated_minutes,
+        requires_all_lessons_unlocked=source_module.requires_all_lessons_unlocked,
+        created_by=actor.user_id,
+        updated_by=actor.user_id,
+    )
+    db.add(module_clone)
+    await _flush_or_conflict(db)
+
+    source_items = await authoring_queries.list_module_items(db, source_module.id)
+    for position, source_item in enumerate(source_items, start=1):
+        if source_item.deleted_at is not None:
+            continue
+        item_type, fk_kwargs = await _clone_item_target(
+            db,
+            source_item=source_item,
+            target_module_id=module_clone.id,
+            actor=actor,
+        )
+        db.add(
+            ModuleItem(
+                module_id=module_clone.id,
+                item_type=item_type,
+                position=position,
+                unlock_rule_json=dict(source_item.unlock_rule_json or {}),
+                **fk_kwargs,
+            )
+        )
+        await _flush_or_conflict(db)
+
+    await db.refresh(module_clone)
+    return ModuleAuthoring.model_validate(module_clone)
 
 
 async def reorder_module_items(
