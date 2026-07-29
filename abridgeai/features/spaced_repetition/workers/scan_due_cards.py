@@ -6,10 +6,17 @@ whose card review window opens within the next hour and creates one
 
 Notification fatigue policy
 ---------------------------
-The plan caps cron frequency at hourly (per §7.5.8) -- more frequent
-scans would generate spam-grade notification volume because cards
-naturally bunch into the same hour bucket. The hourly window aligns
-with the SM-2 minimum-interval floor.
+The scan runs hourly (per §7.5.8) so newly-due cards surface within an hour.
+On its own that would re-notify a standing backlog every hour — a student who
+is behind would be pinged 24×/day. Two guards prevent that:
+
+* Per-student cooldown. A student who already received a
+  ``spaced_repetition`` notification within
+  ``notifications.sr_reminder_cooldown_hours`` (admin-configurable, default
+  24h) is skipped this run. The hourly scan stays responsive to *new*
+  backlog while nobody is reminded more than once per window.
+* ``Quiz.reminders_enabled`` gate. Only cards from quizzes with reminders
+  turned on generate pings; the flag was previously ignored.
 
 In-app channel only
 -------------------
@@ -38,7 +45,7 @@ always resolve.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
@@ -97,10 +104,12 @@ async def scan_due_cards_task(
 
 
 async def _run(db: AsyncSession) -> None:
-    # Cross-feature: quizzes/courses models are imported INSIDE the function to
-    # stay within the ``Features-are-independent`` import-linter contract,
-    # matching the convention already used by _dispatch_for_student below.
+    # Cross-feature: quizzes/courses/notifications models are imported INSIDE
+    # the function to stay within the ``Features-are-independent`` import-linter
+    # contract, matching the convention used by _dispatch_for_student below.
+    from abridgeai.core.runtime_settings import resolve_setting
     from abridgeai.features.courses.models import Lesson
+    from abridgeai.features.notifications.models import Notification
     from abridgeai.features.quizzes.models import Quiz, QuizQuestion, QuizSourceLesson
 
     started_at = datetime.now(tz=UTC)
@@ -122,6 +131,11 @@ async def _run(db: AsyncSession) -> None:
     # quiz reaches a lesson via quiz_source_lessons — there is no lesson_id
     # column on quizzes.
     #
+    # reminders_enabled gate: a card only earns a reminder if the quiz it came
+    # from has reminders turned on (Quiz.reminders_enabled, default FALSE).
+    # Teachers who left reminders off never generate pings for their quizzes —
+    # previously this flag was defined but ignored, so every quiz notified.
+    #
     # Grouping by lesson carries lesson identity through so the notification can
     # name what is due; the old flat count discarded the per-lesson structure
     # that SM-2 scheduling actually produces.
@@ -139,6 +153,7 @@ async def _run(db: AsyncSession) -> None:
         .where(
             StudentCardState.due_at.is_not(None),
             StudentCardState.due_at <= started_at,
+            Quiz.reminders_enabled.is_(True),
             QuizQuestion.deleted_at.is_(None),
             Quiz.deleted_at.is_(None),
             Lesson.deleted_at.is_(None),
@@ -160,8 +175,34 @@ async def _run(db: AsyncSession) -> None:
         count: int = int(row.due_count)
         by_student.setdefault(student_id, []).append((lesson_id, count))
 
+    if not by_student:
+        _logger.info("sr.scan_due_cards.completed", students_notified=0, duration_ms=0)
+        return
+
+    # Notification-fatigue cooldown (admin-configurable). The scan runs hourly
+    # so new backlog surfaces promptly, but a student who already received an
+    # SR reminder within the cooldown window is skipped this run — otherwise a
+    # standing backlog re-pings them every single hour, which is the spam this
+    # guards against. Resolved at the global (deployment) scope: the worker is
+    # not org-bound, and this is an operational fatigue knob rather than a
+    # per-tenant policy.
+    cooldown_hours = int(await resolve_setting(db, "notifications.sr_reminder_cooldown_hours"))
+    cutoff = started_at - timedelta(hours=cooldown_hours)
+    recent_stmt = select(Notification.user_id.distinct()).where(
+        Notification.category == "spaced_repetition",
+        Notification.user_id.in_(list(by_student.keys())),
+        Notification.created_at >= cutoff,
+    )
+    recently_notified: set[UUID] = {
+        row[0] for row in (await db.execute(recent_stmt)).all()
+    }
+
     dispatched = 0
+    skipped_cooldown = 0
     for student_id, lesson_counts in by_student.items():
+        if student_id in recently_notified:
+            skipped_cooldown += 1
+            continue
         await _dispatch_for_student(db, student_id=student_id, lesson_counts=lesson_counts)
         dispatched += 1
 
@@ -169,6 +210,8 @@ async def _run(db: AsyncSession) -> None:
     _logger.info(
         "sr.scan_due_cards.completed",
         students_notified=dispatched,
+        students_skipped_cooldown=skipped_cooldown,
+        cooldown_hours=cooldown_hours,
         duration_ms=duration_ms,
     )
 

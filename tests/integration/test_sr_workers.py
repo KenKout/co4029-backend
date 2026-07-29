@@ -183,8 +183,8 @@ async def _seed_quiz_root(engine: AsyncEngine) -> tuple[UUID, UUID, UUID, UUID, 
         )
         await conn.execute(
             text(
-                "INSERT INTO quizzes (id, course_id, module_id, title, status) "
-                "VALUES (:id, :course, :m, 'Q', 'published')"
+                "INSERT INTO quizzes (id, course_id, module_id, title, status, reminders_enabled) "
+                "VALUES (:id, :course, :m, 'Q', 'published', TRUE)"
             ),
             {"id": quiz_id, "course": course_id, "m": module_id},
         )
@@ -537,3 +537,120 @@ async def test_scan_due_cards_clears_actor_on_failure(
         await scan_due_cards_task(ctx={}, actor_id=owner_id)
 
     assert current_actor_var.get() is None
+
+
+@pytest.mark.asyncio
+async def test_scan_due_cards_skips_quiz_with_reminders_disabled(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A due card whose quiz has reminders_enabled=FALSE generates no ping.
+
+    The flag is teacher-controlled per quiz; leaving it off must suppress
+    reminders entirely for that quiz's cards.
+    """
+    org_id, course_id, module_id, quiz_id, owner_id = await _seed_quiz_root(engine)
+    # Turn reminders OFF on the seeded quiz.
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("UPDATE quizzes SET reminders_enabled = FALSE WHERE id = :id"),
+            {"id": quiz_id},
+        )
+    await _seed_card(
+        engine,
+        student_id=uuid.uuid4(),
+        question_id=uuid.uuid4(),
+        due_at=datetime.now(tz=UTC) - timedelta(minutes=30),
+        quiz_id=quiz_id,
+        position=1,
+        org_id=org_id,
+        course_id=course_id,
+        module_id=module_id,
+        owner_id=owner_id,
+    )
+
+    send_mock = AsyncMock(return_value=None)
+    monkeypatch.setattr(
+        "abridgeai.features.notifications.services.dispatch.send_notification",
+        send_mock,
+    )
+    monkeypatch.setattr(worker_mod, "get_sessionmaker", _make_sessionmaker_factory(session_factory))
+
+    await scan_due_cards_task(ctx={}, actor_id=owner_id)
+
+    assert send_mock.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_scan_due_cards_cooldown_skips_recently_notified(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A student reminded inside the cooldown window is skipped this run.
+
+    Two students both have the same overdue backlog. One already got a
+    ``spaced_repetition`` notification an hour ago (inside the default 24h
+    cooldown); the other's last reminder was three days ago (outside it).
+    Only the second is notified — this is the anti-spam guard.
+    """
+    org_id, course_id, module_id, quiz_id, owner_id = await _seed_quiz_root(engine)
+    recent_student = uuid.uuid4()
+    stale_student = uuid.uuid4()
+    due_at = datetime.now(tz=UTC) - timedelta(hours=2)
+    for pos, student_id in enumerate((recent_student, stale_student), start=1):
+        await _seed_card(
+            engine,
+            student_id=student_id,
+            question_id=uuid.uuid4(),
+            due_at=due_at,
+            quiz_id=quiz_id,
+            position=pos,
+            org_id=org_id,
+            course_id=course_id,
+            module_id=module_id,
+            owner_id=owner_id,
+        )
+
+    # recent_student got a reminder 1h ago (inside cooldown); stale_student's
+    # last reminder was 3 days ago (outside the default 24h window).
+    now = datetime.now(tz=UTC)
+    notif_ids = [uuid.uuid4(), uuid.uuid4()]
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO notifications "
+                "(id, user_id, category, title, body, delivery_status, created_at) "
+                "VALUES (:id, :uid, 'spaced_repetition', 'prev', 'prev', 'sent', :created)"
+            ),
+            {"id": notif_ids[0], "uid": recent_student, "created": now - timedelta(hours=1)},
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO notifications "
+                "(id, user_id, category, title, body, delivery_status, created_at) "
+                "VALUES (:id, :uid, 'spaced_repetition', 'prev', 'prev', 'sent', :created)"
+            ),
+            {"id": notif_ids[1], "uid": stale_student, "created": now - timedelta(days=3)},
+        )
+
+    send_mock = AsyncMock(return_value=None)
+    monkeypatch.setattr(
+        "abridgeai.features.notifications.services.dispatch.send_notification",
+        send_mock,
+    )
+    monkeypatch.setattr(worker_mod, "get_sessionmaker", _make_sessionmaker_factory(session_factory))
+
+    try:
+        await scan_due_cards_task(ctx={}, actor_id=owner_id)
+
+        notified = {c.kwargs["recipient_user_id"] for c in send_mock.await_args_list}
+        assert notified == {stale_student}
+        assert recent_student not in notified
+    finally:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("DELETE FROM notifications WHERE id = ANY(:ids)"),
+                {"ids": notif_ids},
+            )

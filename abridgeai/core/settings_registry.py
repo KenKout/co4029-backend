@@ -39,7 +39,9 @@ from typing import Any, Literal
 SettingType = Literal["bool", "int", "float"]
 
 # Groups drive the section headings in the admin UI.
-SettingGroup = Literal["chunking", "preprocessing", "knowledge_graph", "retrieval"]
+SettingGroup = Literal[
+    "chunking", "preprocessing", "knowledge_graph", "retrieval", "notifications"
+]
 
 
 @dataclass(frozen=True)
@@ -312,6 +314,24 @@ _SPECS: tuple[SettingSpec, ...] = (
         description=(
             "At most floor(limit / N) summary, review or front-matter chunks "
             "reach the generator. Lower values admit more of them."
+        ),
+    ),
+    # -- notifications ----------------------------------------------------
+    SettingSpec(
+        key="notifications.sr_reminder_cooldown_hours",
+        group="notifications",
+        type="int",
+        default=24,
+        minimum=1,
+        maximum=168,
+        env_var="SR_REMINDER_COOLDOWN_HOURS",
+        label="Spaced-repetition reminder cooldown (hours)",
+        description=(
+            "Minimum gap between spaced-repetition due-card reminders for the "
+            "same student. The scan still runs hourly to catch new backlog "
+            "promptly, but a student who already got a reminder inside this "
+            "window is skipped — so at the default of 24 they get at most one "
+            "review reminder per day no matter how many cards are overdue."
         ),
     ),
 )

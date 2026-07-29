@@ -366,6 +366,10 @@ ignore_imports = [
     # rationale as the dispatch carve-outs above; no public API exists.
     "abridgeai.features.spaced_repetition.workers.scan_due_cards -> abridgeai.features.notifications.messages",
     "abridgeai.features.spaced_repetition.services.remediation -> abridgeai.features.notifications.messages",
+    # Cooldown dedup reads the notifications table directly (read-only ORM
+    # query for the last SR reminder per student). Same side-effect-channel
+    # rationale as the dispatch/messages carve-outs above.
+    "abridgeai.features.spaced_repetition.workers.scan_due_cards -> abridgeai.features.notifications.models",
     # Courses queries JOIN cross-feature models for ORM-hydrated reads.
     # These are read-only JOINs (no writes to foreign tables); the ORM
     # approach replaces raw SQL that previously bypassed the linter.
