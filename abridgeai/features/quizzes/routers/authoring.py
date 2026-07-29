@@ -501,6 +501,8 @@ async def update_quiz(
         raise _not_found("quiz", quiz_id) from exc
     except ConflictError as exc:
         raise _conflict(str(exc)) from exc
+    except AppError as exc:
+        raise _bad_request(str(exc)) from exc
     await db.commit()
     return QuizAuthoring.model_validate(quiz)
 

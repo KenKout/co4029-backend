@@ -110,6 +110,20 @@ def _coerce_patch_value(key: str, value: object) -> object:
             return ReviewOptions.model_validate(value).model_dump()
         except Exception as exc:  # noqa: BLE001
             raise AppError("review_options is not a valid review-visibility matrix") from exc
+    # ``browser_security`` is a string enum column ('none' | 'securewindow')
+    # guarded by a CHECK constraint, but the client models it as a boolean
+    # toggle and the loose-dict PATCH body delivers a bool. Map the toggle to
+    # the enum here so a raw ``false``/``true`` can't reach the column and trip
+    # ``ck_quizzes_browser_security`` (→ 500). Already-valid strings pass
+    # through; anything else is a 400 rather than a DB error.
+    if key == "browser_security":
+        if isinstance(value, bool):
+            return "securewindow" if value else "none"
+        if value is None:
+            return "none"
+        if isinstance(value, str) and value in {"none", "securewindow"}:
+            return value
+        raise AppError("browser_security must be one of: none, securewindow")
     if key not in _DATETIME_PATCH_KEYS or value is None:
         return value
     if isinstance(value, datetime):

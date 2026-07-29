@@ -1040,6 +1040,65 @@ async def test_update_quiz_persists_schedule_window(
     assert clear_resp.json()["available_until"] is None
 
 
+async def test_update_quiz_browser_security_boolean_coerced(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    scenario: dict[str, uuid.UUID],
+    engine: AsyncEngine,
+) -> None:
+    """PATCH accepts the client's boolean ``browser_security`` toggle.
+
+    The column is a string enum ('none' | 'securewindow') guarded by
+    ``ck_quizzes_browser_security``. The Settings tab models the field as a
+    boolean toggle and sends a raw bool; the service must map it to the enum
+    so it can't reach the column and trip the CHECK constraint (which
+    previously surfaced as a 500).
+    """
+    create_resp = await client.post(
+        f"/api/v1/teacher/courses/{scenario['course_id']}/quizzes",
+        json={"module_id": str(scenario["module_id"]), "title": "Browser-Security PATCH Quiz"},
+        headers=_auth(admin_bearer),
+    )
+    assert create_resp.status_code == 201, create_resp.text
+    quiz_id = uuid.UUID(create_resp.json()["id"])
+
+    # true -> 'securewindow'
+    on_resp = await client.patch(
+        f"/api/v1/teacher/quizzes/{quiz_id}",
+        json={"browser_security": True},
+        headers=_auth(admin_bearer),
+    )
+    assert on_resp.status_code == 200, on_resp.text
+    async with engine.connect() as conn:
+        stored = await conn.scalar(
+            text("SELECT browser_security FROM quizzes WHERE id = :id"),
+            {"id": str(quiz_id)},
+        )
+    assert stored == "securewindow"
+
+    # false -> 'none'
+    off_resp = await client.patch(
+        f"/api/v1/teacher/quizzes/{quiz_id}",
+        json={"browser_security": False},
+        headers=_auth(admin_bearer),
+    )
+    assert off_resp.status_code == 200, off_resp.text
+    async with engine.connect() as conn:
+        stored = await conn.scalar(
+            text("SELECT browser_security FROM quizzes WHERE id = :id"),
+            {"id": str(quiz_id)},
+        )
+    assert stored == "none"
+
+    # A bogus string is a clean 400, not a 500 from the CHECK constraint.
+    bad_resp = await client.patch(
+        f"/api/v1/teacher/quizzes/{quiz_id}",
+        json={"browser_security": "lockdown"},
+        headers=_auth(admin_bearer),
+    )
+    assert bad_resp.status_code == 400, bad_resp.text
+
+
 async def test_published_quiz_allows_student_safe_settings(
     client: httpx.AsyncClient,
     admin_bearer: str,
