@@ -76,20 +76,23 @@ async def search_users(
     search: Annotated[str | None, Query(max_length=200)] = None,
     user_status: Annotated[str | None, Query(alias="status")] = None,
     role: Annotated[str | None, Query(max_length=50)] = None,
+    organization: Annotated[UUID | None, Query()] = None,
     sort: Annotated[str | None, Query()] = None,
     sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
     page: Annotated[int, Query(ge=0)] = 0,
     page_size: Annotated[int, Query(ge=1, le=200)] = 25,
 ) -> PageResponse[UserRead]:
     """Page-numbered admin user list with server-side search (email /
-    display name), optional ``status`` / ``role`` filters, and whitelisted
-    sort (``email`` / ``status`` / ``created_at``). ``role`` filters to users
-    holding that role code at any scope."""
+    display name), optional ``status`` / ``role`` / ``organization`` filters,
+    and whitelisted sort (``email`` / ``status`` / ``created_at``). ``role``
+    filters to users holding that role code at any scope; ``organization``
+    filters to members of that org."""
     result = await admin_service.search_users(
         db,
         status=user_status,
         search=search,
         role=role,
+        organization=organization,
         sort=sort,
         sort_dir=sort_dir,
         page=page,

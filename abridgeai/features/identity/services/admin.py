@@ -87,6 +87,7 @@ async def search_users(
     status: str | None = None,
     search: str | None = None,
     role: str | None = None,
+    organization: UUID | None = None,
     sort: str | None = None,
     sort_dir: str = "asc",
     page: int = 0,
@@ -94,18 +95,28 @@ async def search_users(
 ) -> Page[UserRead]:
     """Offset page of users (server-side search + whitelisted sort) as
     ``UserRead``. Delegates the SQLAlchemy statement to the query layer, then
-    batch-loads profiles + role codes for the page.
+    batch-loads profiles, role codes, and primary orgs for the page.
 
-    ``role`` filters to users holding that role code at any scope. The id set
-    is resolved via ``access_control.api.public`` (feature independence) and
-    passed to the query as an allowlist; an empty set short-circuits to an
-    empty page without hitting the DB again.
+    ``role`` / ``organization`` filter to users holding that role code (any
+    scope) / belonging to that org. Both id sets are resolved via
+    ``access_control.api.public`` (feature independence) and intersected into
+    a single allowlist passed to the query; an empty intersection
+    short-circuits to an empty page.
     """
-    restrict_ids: list[UUID] | None = None
+    restrict_sets: list[set[UUID]] = []
     if role:
-        restrict_ids = await access_control_api.list_user_ids_with_role(db, role)
-        if not restrict_ids:
+        restrict_sets.append(set(await access_control_api.list_user_ids_with_role(db, role)))
+    if organization:
+        restrict_sets.append(
+            set(await access_control_api.list_user_ids_in_org(db, organization))
+        )
+
+    restrict_ids: list[UUID] | None = None
+    if restrict_sets:
+        intersection = set.intersection(*restrict_sets)
+        if not intersection:
             return Page(items=[], total=0, page=page, page_size=page_size, total_pages=0)
+        restrict_ids = list(intersection)
 
     result = await user_queries.search_users(
         db,
@@ -122,12 +133,19 @@ async def search_users(
         p.user_id: p for p in await user_queries.list_profiles(db, user_ids)
     }
     role_map = await access_control_api.get_role_codes_for_users(db, user_ids)
-    items = [
-        serialize_user(u, profiles.get(u.id)).model_copy(
-            update={"roles": role_map.get(u.id, [])}
+    org_map = await access_control_api.get_primary_orgs_for_users(db, user_ids)
+    items = []
+    for u in result.items:
+        org = org_map.get(u.id)
+        items.append(
+            serialize_user(u, profiles.get(u.id)).model_copy(
+                update={
+                    "roles": role_map.get(u.id, []),
+                    "organization_id": org.id if org else None,
+                    "organization_name": org.name if org else None,
+                }
+            )
         )
-        for u in result.items
-    ]
     return Page(
         items=items,
         total=result.total,

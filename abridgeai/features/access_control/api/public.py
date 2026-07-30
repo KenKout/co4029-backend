@@ -347,6 +347,57 @@ async def list_user_ids_with_role(
     return list((await db.execute(stmt)).scalars().all())
 
 
+async def get_primary_orgs_for_users(
+    db: AsyncSession, user_ids: Sequence[UUID]
+) -> dict[UUID, OrgDTO]:
+    """Batch-resolve each user's primary organization (one query for the page).
+
+    Backs the admin user-list "Organization" column. Primary = the most recent
+    active, non-deleted membership (matches :func:`get_user_primary_org`).
+    Users with no active membership are absent from the dict.
+    """
+    if not user_ids:
+        return {}
+    om = OrganizationMembership
+    # DISTINCT ON picks the newest active membership per user in one pass.
+    stmt = (
+        select(om.user_id, Organization)
+        .join(Organization, Organization.id == om.organization_id)
+        .where(
+            om.user_id.in_(list(user_ids)),
+            om.status == "active",
+            om.deleted_at.is_(None),
+            Organization.deleted_at.is_(None),
+        )
+        .order_by(om.user_id, om.created_at.desc().nullslast())
+        .distinct(om.user_id)
+    )
+    result: dict[UUID, OrgDTO] = {}
+    for user_id, org in (await db.execute(stmt)).all():
+        if user_id not in result:
+            result[user_id] = OrgDTO.model_validate(org, from_attributes=True)
+    return result
+
+
+async def list_user_ids_in_org(db: AsyncSession, org_id: UUID) -> list[UUID]:
+    """User ids with an active, non-deleted membership in ``org_id``.
+
+    Backs the admin user-list organization filter (identity search intersects
+    its result with this id set).
+    """
+    om = OrganizationMembership
+    stmt = (
+        select(om.user_id)
+        .where(
+            om.organization_id == org_id,
+            om.status == "active",
+            om.deleted_at.is_(None),
+        )
+        .distinct()
+    )
+    return list((await db.execute(stmt)).scalars().all())
+
+
 __all__ = [
     "OrgDTO",
     "OrgUnitDTO",
@@ -358,9 +409,11 @@ __all__ = [
     "get_org_unit_ancestors",
     "get_role_assignments_for_user",
     "get_role_codes_for_users",
+    "get_primary_orgs_for_users",
     "grant_default_student_access",
     "get_user_primary_org",
     "is_user_member_of_org",
+    "list_user_ids_in_org",
     "list_user_ids_with_role",
     "require_any_permission",
     "require_course_permission",
