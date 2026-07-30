@@ -152,6 +152,13 @@ max-complexity = 12
 # printer is a flat sequence of sections rather than genuinely complex logic
 # (C901).
 "scripts/interview_quality_report.py" = ["T20", "E501", "E402", "I001", "C901"]
+# Fabricated-grade cleanup — a manual-trigger, one-off remediation CLI for the
+# rows written before submit_session stopped grading runs that never reached the
+# assessment. Prints a per-session plan to stdout (T20), imports after a
+# sys.path insert (E402/I001), and uses raw SQL by design: it is a bulk sweep of
+# historical rows, so one DELETE/UPDATE per table is both atomic and clearer
+# than an ORM round-trip per row.
+"scripts/cleanup_fabricated_interview_grades.py" = ["T20", "E501", "E402", "I001"]
 # AI cost backfill — a manual-trigger maintenance CLI run after a pricing rate
 # is added. Prints a per-model report to stdout (T20) and uses raw SQL by
 # design: it sweeps historical rows, so an ORM round-trip per row would be
