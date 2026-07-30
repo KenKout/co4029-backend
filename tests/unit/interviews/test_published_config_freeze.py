@@ -18,9 +18,9 @@ import pytest
 
 from abridgeai.core.exceptions import ConflictError
 from abridgeai.features.interviews.schemas import InterviewConfigUpdate
-from abridgeai.features.interviews.services.authoring import (
-    _PUBLISHED_EDITABLE_CONFIG_FIELDS,
-    _assert_config_settings_editable,
+from abridgeai.features.interviews.services.published_freeze import (
+    PUBLISHED_EDITABLE_CONFIG_FIELDS,
+    assert_config_settings_editable,
 )
 
 # Settings read by taking.py / orchestrator / evaluation.py during a run or its
@@ -53,7 +53,7 @@ def _config(status: str) -> SimpleNamespace:
 
 
 def _assert_editable(status: str, changed: set[str]) -> None:
-    _assert_config_settings_editable(_config(status), changed)  # type: ignore[arg-type]
+    assert_config_settings_editable(_config(status), changed)  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize("field", FROZEN_FIELDS)
@@ -66,7 +66,7 @@ def test_conduct_and_grading_settings_are_frozen_once_published(field: str) -> N
     assert field in message
 
 
-@pytest.mark.parametrize("field", sorted(_PUBLISHED_EDITABLE_CONFIG_FIELDS))
+@pytest.mark.parametrize("field", sorted(PUBLISHED_EDITABLE_CONFIG_FIELDS))
 def test_student_safe_settings_stay_editable_after_publish(field: str) -> None:
     _assert_editable("published", {field})
 
@@ -100,12 +100,12 @@ def test_a_new_field_is_frozen_by_default() -> None:
     ``InterviewConfigUpdate``. Decide deliberately:
 
     * it cannot affect a live or graded attempt -> add it to
-      ``_PUBLISHED_EDITABLE_CONFIG_FIELDS`` and to the allow-list below;
+      ``PUBLISHED_EDITABLE_CONFIG_FIELDS`` and to the allow-list below;
     * otherwise -> add it to ``FROZEN_FIELDS`` above so the freeze is asserted.
 
     Do NOT just widen the whitelist to make this pass.
     """
-    known = set(FROZEN_FIELDS) | _PUBLISHED_EDITABLE_CONFIG_FIELDS
+    known = set(FROZEN_FIELDS) | PUBLISHED_EDITABLE_CONFIG_FIELDS
     patchable = set(InterviewConfigUpdate.model_fields.keys())
     unclassified = patchable - known
     assert not unclassified, (
@@ -117,4 +117,4 @@ def test_a_new_field_is_frozen_by_default() -> None:
 def test_the_whitelist_only_contains_real_patchable_fields() -> None:
     """A typo in the whitelist would silently freeze a field meant to be editable."""
     patchable = set(InterviewConfigUpdate.model_fields.keys())
-    assert patchable >= _PUBLISHED_EDITABLE_CONFIG_FIELDS
+    assert patchable >= PUBLISHED_EDITABLE_CONFIG_FIELDS

@@ -2157,19 +2157,15 @@ async def submit_session(
 ) -> InterviewSession:
     """Persist the final ceremony, terminalize the session, and enqueue evaluation.
 
-    Natural and explicit early completion are ``completed`` and graded, and
-    unanswered questions correctly receive zero in the evaluation stage — a
-    candidate who reaches the assessment and skips questions HAS been assessed.
+    Natural and explicit early completion are ``completed`` and graded; unanswered
+    questions score zero, because reaching the assessment and skipping questions
+    still counts as having been assessed.
 
-    But a session that never reached the assessment at all (still in onboarding:
-    identity check / audio check / readiness) has nothing to grade. Grading it
-    fabricated outcome verdicts and a ``pass_verdict`` from a transcript that
-    contains only onboarding chatter, and it consumed one of the student's
-    attempts. Those runs terminalize as ``abandoned`` and are never enqueued,
-    matching what the stale-session sweep already does.
-
-    A deadline completion is ``timed_out`` when answers exist, or ``abandoned``
-    when there is no gradeable transcript. Commits inline so the worker sees
+    A run that never left onboarding (identity / audio check / readiness) has
+    nothing to grade — grading one fabricated verdicts from onboarding chatter and
+    burned an attempt. Those terminalize as ``abandoned`` and are never enqueued,
+    matching the stale-session sweep. A deadline completion is ``timed_out`` when
+    answers exist, ``abandoned`` otherwise. Commits inline so the worker sees
     terminal state before dequeueing.
     """
     session = await _require_session(db, session_id)
@@ -2212,11 +2208,9 @@ async def submit_session(
         reason=reason,
     )
     # A run that never reached the assessment has no gradeable transcript, no
-    # matter HOW it ended. Previously only the timed_out branch checked this, so
-    # a candidate who quit during onboarding and hit submit was marked
-    # ``completed`` and graded: 14 such sessions in production carry outcome
-    # verdicts and a ``pass_verdict`` derived from onboarding chatter alone (9 of
-    # them with zero student messages of any kind), each having burned an attempt.
+    # matter HOW it ended (previously only the timed_out branch checked, so an
+    # onboarding quit + submit was marked ``completed`` and graded: 14 production
+    # sessions carry verdicts derived from onboarding chatter alone).
     never_reached_assessment = session.assessment_started_at is None
     session.status = (
         "abandoned"
@@ -2233,10 +2227,9 @@ async def submit_session(
     # instead, which writes no ``pass_verdict`` — that NULL is safe only because
     # ``session_mode`` keeps the stalled-evaluation sweep from reading it as
     # "stranded", and only because the two tasks are separate functions.
-    # Reaching the assessment is the line, not answering. A candidate who got to
-    # the questions and skipped them HAS been assessed and must still be graded
-    # (unanswered questions score zero) — only a run that never left onboarding
-    # is ungradeable.
+    # Reaching the assessment is the line, not answering: a candidate who got to
+    # the questions and skipped them HAS been assessed and is still graded
+    # (unanswered questions score zero).
     has_content = not never_reached_assessment and (user_message_count > 0 or reason != "timed_out")
     if arq_pool is not None and has_content:
         if practice.is_practice(session.session_mode):
