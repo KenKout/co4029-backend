@@ -139,6 +139,14 @@ async def get_user_primary_org(db: AsyncSession, user_id: UUID) -> OrgDTO | None
     return OrgDTO(id=org_id) if org_id is not None else None
 
 
+# Cross-feature notification helpers. Re-exported from courses.services.notify
+# so the enrollments feature (which enrolls students into courses) can emit the
+# "enrolled in a published course" notification through the blessed public
+# surface instead of importing a courses service directly.
+from abridgeai.features.courses.services.notify import (  # noqa: E402
+    notify_student_enrolled,
+)
+
 __all__ = [
     "ContentTreeDTO",
     "ContentTreeItemDTO",
@@ -160,6 +168,7 @@ __all__ = [
     "list_course_outcome_texts",
     "list_lesson_ids_for_modules",
     "next_module_item_position",
+    "notify_student_enrolled",
     "require_lesson_authoring_access",
     "walk_resource_to_course",
 ]

@@ -51,6 +51,16 @@ management_router = APIRouter(prefix="/management", tags=["enrollments-assignmen
 teacher_router = APIRouter(prefix="/teacher", tags=["enrollments-assignment"])
 
 
+async def get_arq_pool() -> object | None:
+    """ARQ Redis pool dependency (email dispatch for enrolment notifications).
+
+    Returns ``None`` until the app factory overrides it; the notification path
+    accepts ``None`` and writes the in-app row without enqueuing email. Mirrors
+    the identical dependency in the materials / quizzes / courses routers.
+    """
+    return None
+
+
 class CSVImportPayload(BaseModel):
     csv_text: str | None = None
     csv_base64: str | None = None
@@ -114,8 +124,11 @@ async def manager_bulk_enroll(
     payload: BulkEnrollRequest,
     current_user: Annotated[CurrentUser, Depends(_REQUIRE_COURSE_ENROLLMENT_CREATE)],
     db: Annotated[AsyncSession, Depends(get_db)],
+    arq_pool: Annotated[object | None, Depends(get_arq_pool)],
 ) -> BulkEnrollResult:
-    result = await manager_service.bulk_enroll_students(db, course_id, payload, current_user)
+    result = await manager_service.bulk_enroll_students(
+        db, course_id, payload, current_user, arq_pool=arq_pool
+    )
     await db.commit()
     return result
 
@@ -163,6 +176,7 @@ async def manager_csv_import(
     payload: CSVImportPayload,
     current_user: Annotated[CurrentUser, Depends(_REQUIRE_COURSE_ENROLLMENT_CREATE)],
     db: Annotated[AsyncSession, Depends(get_db)],
+    arq_pool: Annotated[object | None, Depends(get_arq_pool)],
 ) -> CSVImportResult:
     csv_text = _decode_csv_text(payload)
     try:
@@ -170,7 +184,9 @@ async def manager_csv_import(
     except csv.Error as exc:
         raise _bad_request(f"invalid_csv: {exc.__class__.__name__}") from exc
 
-    result = await manager_service.bulk_import_students_from_csv(db, course_id, rows, current_user)
+    result = await manager_service.bulk_import_students_from_csv(
+        db, course_id, rows, current_user, arq_pool=arq_pool
+    )
     await db.commit()
     return result
 

@@ -144,8 +144,99 @@ def remediation_body(*, resource_links: list[tuple[str, str]], locale: str | Non
     return "\n".join(lines)
 
 
+# ── Course assignment / publish (courses + enrollments features) ──────────────
+
+
+def course_teacher_assigned_title(*, course_title: str, locale: str | None) -> str:
+    """Title: a teacher was assigned to a (published) course."""
+    lang = _norm(locale)
+    if lang == "vi":
+        return f"Bạn được phân công dạy: {course_title}"[:255]
+    return f"You've been assigned to teach: {course_title}"[:255]
+
+
+def course_teacher_assigned_body(*, course_title: str, locale: str | None) -> str:
+    lang = _norm(locale)
+    if lang == "vi":
+        return (
+            f'Bạn đã được phân công làm giảng viên cho khoá học "{course_title}". '
+            "Mở khoá học để bắt đầu quản lý nội dung."
+        )
+    return (
+        f'You have been assigned as a teacher for "{course_title}". '
+        "Open the course to start managing its content."
+    )
+
+
+def course_enrolled_title(*, course_title: str, locale: str | None) -> str:
+    """Title: a student was enrolled in a (published) course."""
+    lang = _norm(locale)
+    if lang == "vi":
+        return f"Bạn đã được ghi danh vào: {course_title}"[:255]
+    return f"You're enrolled in: {course_title}"[:255]
+
+
+def course_enrolled_body(*, course_title: str, locale: str | None) -> str:
+    lang = _norm(locale)
+    if lang == "vi":
+        return (
+            f'Bạn đã được ghi danh vào khoá học "{course_title}". '
+            "Mở khoá học để bắt đầu học."
+        )
+    return f'You have been enrolled in "{course_title}". Open the course to start learning.'
+
+
+def course_published_teacher_title(*, course_title: str, locale: str | None) -> str:
+    """Title: a course you teach was published."""
+    lang = _norm(locale)
+    if lang == "vi":
+        return f"Khoá học đã xuất bản: {course_title}"[:255]
+    return f"Course published: {course_title}"[:255]
+
+
+def course_published_teacher_body(*, course_title: str, locale: str | None) -> str:
+    lang = _norm(locale)
+    if lang == "vi":
+        return (
+            f'Khoá học bạn phụ trách "{course_title}" đã được xuất bản và hiện '
+            "đã hiển thị với học viên."
+        )
+    return (
+        f'The course you teach, "{course_title}", is now published and visible to learners.'
+    )
+
+
+def course_published_student_title(*, course_title: str, locale: str | None) -> str:
+    """Title: a course you're enrolled in was published."""
+    lang = _norm(locale)
+    if lang == "vi":
+        return f"Khoá học đã sẵn sàng: {course_title}"[:255]
+    return f"Course now available: {course_title}"[:255]
+
+
+def course_published_student_body(*, course_title: str, locale: str | None) -> str:
+    lang = _norm(locale)
+    if lang == "vi":
+        return (
+            f'Khoá học "{course_title}" bạn đã ghi danh đã được xuất bản. '
+            "Mở khoá học để bắt đầu học."
+        )
+    return (
+        f'The course you\'re enrolled in, "{course_title}", is now published. '
+        "Open it to start learning."
+    )
+
+
 __all__ = [
     "Locale",
+    "course_enrolled_body",
+    "course_enrolled_title",
+    "course_published_student_body",
+    "course_published_student_title",
+    "course_published_teacher_body",
+    "course_published_teacher_title",
+    "course_teacher_assigned_body",
+    "course_teacher_assigned_title",
     "due_cards_body",
     "due_cards_title",
     "remediation_body",

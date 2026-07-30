@@ -266,15 +266,54 @@ async def publish_course(db: AsyncSession, course_id: UUID, actor: CurrentUser) 
     For T3.5 the gate is intentionally minimal (status transition only)
     so the API surface is stable; tighter gates will land alongside
     quizzes / interviews when those features can publish independently.
+
+    On an actual transition INTO ``published`` (not a re-publish), everyone
+    already attached to the course is notified with a deep-link: assigned
+    teachers and actively-enrolled students. This back-fills the notifications
+    that assignment/enrolment skipped while the course was still a draft.
+    Notification failures never roll back the publish.
     """
     del actor
     course = await _require_course(db, course_id)
     if course.status == "archived":
         raise AppError(f"Cannot publish archived course {course_id}")
+    was_published = course.status == "published"
     course.status = "published"
     await db.flush()
     await db.refresh(course)
+
+    if not was_published:
+        await _notify_course_published(db, course)
+
     return CourseAuthoring.model_validate(course)
+
+
+async def _notify_course_published(db: AsyncSession, course: Course) -> None:
+    """Notify attached teachers + enrolled students that ``course`` published.
+
+    Lazy imports keep the module-load graph acyclic (enrollments.api.public →
+    enrollments.services.manager → courses.api.public would otherwise close a
+    cycle at import time). All dispatch is best-effort inside ``notify``.
+    """
+    from abridgeai.features.courses.queries import assignment as assignment_queries
+    from abridgeai.features.courses.services import notify
+    from abridgeai.features.enrollments.api import public as enrollments_api
+
+    teacher_rows = await assignment_queries.list_teachers_for_course(db, course.id)
+    teacher_ids = [row["user_id"] for row in teacher_rows]
+    student_ids = await enrollments_api.list_active_student_ids(db, course_id=course.id)
+
+    if not teacher_ids and not student_ids:
+        return
+
+    await notify.notify_course_published(
+        db,
+        course_id=course.id,
+        course_title=course.title,
+        course_slug=course.slug,
+        teacher_user_ids=teacher_ids,
+        student_user_ids=student_ids,
+    )
 
 
 async def archive_course(db: AsyncSession, course_id: UUID, actor: CurrentUser) -> CourseAuthoring:
