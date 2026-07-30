@@ -69,6 +69,33 @@ class MaxAttemptsReached(Exception):  # noqa: N818  # spec-mandated name (T5.3 �
         self.max_attempts = max_attempts
 
 
+class QuizPasswordRequired(Exception):  # noqa: N818  # matches sibling gate exceptions
+    """A quiz password is configured and none (or an empty one) was submitted.
+
+    Service layer maps to HTTP 403 (Phase 12).
+    """
+
+    def __init__(self, *, quiz_id: UUID) -> None:
+        super().__init__(f"Quiz {quiz_id} requires a password")
+        self.quiz_id = quiz_id
+
+
+class QuizPasswordIncorrect(Exception):  # noqa: N818  # matches sibling gate exceptions
+    """A quiz password was submitted but did not match. Service maps to HTTP 403."""
+
+    def __init__(self, *, quiz_id: UUID) -> None:
+        super().__init__(f"Quiz {quiz_id} password incorrect")
+        self.quiz_id = quiz_id
+
+
+class QuizSubnetBlocked(Exception):  # noqa: N818  # matches sibling gate exceptions
+    """Client IP is not within the quiz's allowed subnet(s). Service maps to HTTP 403."""
+
+    def __init__(self, *, quiz_id: UUID) -> None:
+        super().__init__(f"Quiz {quiz_id} blocked for client subnet")
+        self.quiz_id = quiz_id
+
+
 class QuizNotYetOpen(Exception):  # noqa: N818  # matches CooldownActive/MaxAttemptsReached naming
     """Student tried to start before ``Quiz.available_from``.
 
@@ -123,6 +150,30 @@ def _assert_within_schedule_window(quiz: Quiz) -> None:
             available_until = available_until.replace(tzinfo=UTC)
         if now > available_until:
             raise QuizClosed(quiz_id=quiz.id, available_until=available_until)
+
+
+def _assert_within_schedule_window_values(
+    quiz_id: UUID,
+    available_from: datetime | None,
+    available_until: datetime | None,
+) -> None:
+    """Value-based schedule gate (Phase 5).
+
+    Same hard open/close semantics as :func:`_assert_within_schedule_window`,
+    but takes resolved (possibly override-adjusted) values rather than reading
+    the quiz columns, so per-student overrides shift the window.
+    """
+    now = datetime.now(UTC)
+    if available_from is not None:
+        if available_from.tzinfo is None:
+            available_from = available_from.replace(tzinfo=UTC)
+        if now < available_from:
+            raise QuizNotYetOpen(quiz_id=quiz_id, available_from=available_from)
+    if available_until is not None:
+        if available_until.tzinfo is None:
+            available_until = available_until.replace(tzinfo=UTC)
+        if now > available_until:
+            raise QuizClosed(quiz_id=quiz_id, available_until=available_until)
 
 
 def _published_clause() -> tuple[Any, ...]:
@@ -184,6 +235,10 @@ async def get_quiz_for_taking(
     db: AsyncSession,
     quiz_id: UUID,
     user_id: UUID,
+    effective: object | None = None,
+    *,
+    password: str | None = None,
+    client_ip: str | None = None,
 ) -> Quiz | None:
     """Validate and return a published quiz for a student to take.
 
@@ -205,12 +260,60 @@ async def get_quiz_for_taking(
     if quiz is None:
         return None
 
-    _assert_within_schedule_window(quiz)
+    # Phase 5: an EffectivePolicy (from override resolution) may override the
+    # quiz's base timing/retake columns for THIS student. When absent, the base
+    # quiz columns are used (unchanged cohort-wide behaviour).
+    eff_available_from = getattr(effective, "available_from", None) if effective else None
+    eff_available_until = getattr(effective, "available_until", None) if effective else None
+    eff_cooldown_hours = (
+        getattr(effective, "cooldown_hours", None) if effective else None
+    )
+    eff_max_attempts = getattr(effective, "max_attempts", None) if effective else None
+    eff_allow_retakes = getattr(effective, "allow_retakes", None) if effective else None
+    if eff_available_from is None:
+        eff_available_from = quiz.available_from
+    if eff_available_until is None:
+        eff_available_until = quiz.available_until
+    if eff_cooldown_hours is None:
+        eff_cooldown_hours = quiz.cooldown_hours
+    if eff_max_attempts is None:
+        eff_max_attempts = quiz.max_attempts
+    if eff_allow_retakes is None:
+        eff_allow_retakes = quiz.allow_retakes
+
+    _assert_within_schedule_window_values(
+        quiz.id, eff_available_from, eff_available_until
+    )
+
+    # Phase 12: access rules. Subnet allowlist first (fail closed), then password.
+    # These are quiz-level (not overridable). Both raise gate exceptions the
+    # service maps to HTTP 403.
+    require_subnet = getattr(quiz, "require_subnet", None)
+    if require_subnet:
+        from abridgeai.features.quizzes.queries.access_rules import (  # noqa: PLC0415
+            ip_in_allowlist,
+            parse_subnet_allowlist,
+        )
+
+        allowlist = parse_subnet_allowlist(require_subnet)
+        if allowlist and not ip_in_allowlist(client_ip, allowlist):
+            raise QuizSubnetBlocked(quiz_id=quiz.id)
+
+    require_password = getattr(quiz, "require_password", None)
+    if require_password:
+        from abridgeai.features.quizzes.queries.access_rules import (  # noqa: PLC0415
+            password_matches,
+        )
+
+        if not password:
+            raise QuizPasswordRequired(quiz_id=quiz.id)
+        if not password_matches(require_password, password):
+            raise QuizPasswordIncorrect(quiz_id=quiz.id)
 
     # ------------------------------------------------------------------
     # Cooldown gate — most-recent submitted_at + cooldown_hours > now ?
     # ------------------------------------------------------------------
-    if quiz.cooldown_hours is not None and quiz.cooldown_hours > 0:
+    if eff_cooldown_hours is not None and eff_cooldown_hours > 0:
         last_submit_stmt = select(func.max(QuizAttempt.submitted_at)).where(
             QuizAttempt.quiz_id == quiz_id,
             QuizAttempt.student_id == user_id,
@@ -231,7 +334,7 @@ async def get_quiz_for_taking(
     # Max-attempts gate — count student attempts (any status counts;
     # in_progress + abandoned consume an attempt slot just like submitted).
     # ------------------------------------------------------------------
-    effective_max = 1 if not quiz.allow_retakes else quiz.max_attempts
+    effective_max = 1 if not eff_allow_retakes else eff_max_attempts
     if effective_max is not None and effective_max > 0:
         attempts_stmt = select(func.count(QuizAttempt.id)).where(
             QuizAttempt.quiz_id == quiz_id,

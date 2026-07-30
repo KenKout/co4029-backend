@@ -21,6 +21,11 @@ from livekit import (
     rtc,  # type: ignore[attr-defined]  # rtc is a lazy submodule; livekit ships no stubs
 )
 from livekit.agents import JobContext, RoomOutputOptions, WorkerOptions, cli
+from livekit.agents.voice.background_audio import (
+    AudioConfig,
+    BackgroundAudioPlayer,
+    BuiltinAudioClip,
+)
 
 from abridgeai.core.config import get_settings
 from abridgeai.features.interviews.realtime import observability as obs
@@ -92,7 +97,14 @@ async def entrypoint(ctx: JobContext) -> None:
     first_question_text = await bridge.get_current_question_text(
         interview_session_id, language=language
     )
-    opening_text = await bridge.get_opening_text(interview_session_id, language=language)
+    # get_opening_text only yields a greeting while onboarding is still pending,
+    # which a realtime token forbids — so in practice it is always None and the
+    # room fell straight into question one. The room intro fills that beat for
+    # configs with a named interviewer; both are None otherwise, preserving the
+    # existing behaviour exactly.
+    opening_text = await bridge.get_opening_text(
+        interview_session_id, language=language
+    ) or await bridge.get_room_intro_text(interview_session_id, language=language)
     tts_voice = await bridge.get_tts_voice(interview_session_id)
     agent = InterviewAgent(
         interview_session_id=interview_session_id,
@@ -101,7 +113,14 @@ async def entrypoint(ctx: JobContext) -> None:
         opening_text=opening_text,
         language=language,
     )
-    session = build_agent_session(settings, language=language, voice=tts_voice)
+    voice_persona, voice_verbosity = await bridge.get_voice_persona(interview_session_id)
+    session = build_agent_session(
+        settings,
+        language=language,
+        voice=tts_voice,
+        persona=voice_persona,
+        verbosity=voice_verbosity,
+    )
     # Make transcript↔audio sync EXPLICIT (do not rely on SDK defaults). With
     # transcription_enabled + sync_transcription True, livekit-agents attaches a
     # TranscriptSynchronizer that paces the published transcript to the ACTUAL
@@ -117,6 +136,29 @@ async def entrypoint(ctx: JobContext) -> None:
             transcription_speed_factor=1.0,
         ),
     )
+
+    # Quiet room tone under the interview. Perfect silence between turns reads
+    # as a dropped call, and candidates report AI interviews feeling like
+    # "structured software" rather than a conversation; a low room floor is the
+    # cheapest cue that someone is on the other end.
+    #
+    # Ambient only. The SDK also offers a `thinking_sound` (keyboard typing —
+    # the interviewer taking notes) but it fires on the agent entering the
+    # "thinking" state, which only the SDK's own LLM reply pipeline sets. This
+    # agent deliberately has no LLM plugin and raises StopResponse, so that
+    # state is never entered and the sound would never play. Driving it would
+    # mean calling a private setter; the spoken filler in session_runtime covers
+    # the same gap through a supported path.
+    #
+    # Volume is low on purpose: for an anxious candidate, added noise is a
+    # stressor, not atmosphere.
+    background = BackgroundAudioPlayer(
+        ambient_sound=AudioConfig(BuiltinAudioClip.OFFICE_AMBIENCE, volume=0.3),
+    )
+    try:
+        await background.start(room=ctx.room, agent_session=session)
+    except Exception:  # noqa: BLE001 -- ambience is cosmetic; never fail a session for it
+        logger.warning("background ambience failed to start (session=%s)", interview_session_id)
 
 
 def run() -> None:

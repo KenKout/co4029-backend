@@ -403,6 +403,58 @@ async def test_summary_aggregation_correct(
     assert len(body["buckets"]) >= 3
 
 
+async def test_summary_buckets_include_zero_spend_days(
+    client: httpx.AsyncClient,
+    engine: AsyncEngine,
+    seeded_users: SeededUsers,
+    cost_seed: _Seed,
+) -> None:
+    """The daily series must be gap-filled, not just the days that had calls.
+
+    Grouping the rows alone omitted quiet days entirely, so the chart's x-axis
+    jumped (observed: Jun 28 -> Jul 12 on the dev DB). That compresses the
+    timeline and exaggerates later spikes. Every day in [since, today] must be
+    present, with zero-spend days plotted as an explicit 0.
+    """
+    del cost_seed
+    token, _ = await _bearer(engine, seeded_users.admin_id)
+    days = 20
+    since_date = (datetime.now(tz=UTC) - timedelta(days=days)).date()
+    try:
+        resp = await client.get(
+            f"/api/v1/admin/ai/costs/summary"
+            f"?period=day&since={quote(since_date.isoformat())}",
+            headers=_auth(token),
+        )
+    finally:
+        await _purge_sessions(engine, seeded_users.admin_id)
+    assert resp.status_code == 200, resp.text
+    buckets = resp.json()["buckets"]
+
+    # One bucket per day inclusive of both ends.
+    assert len(buckets) == days + 1, (
+        f"expected {days + 1} contiguous daily buckets, got {len(buckets)}"
+    )
+
+    # Contiguous: no date gaps anywhere in the series.
+    dates = [
+        datetime.fromisoformat(b["bucket_start_ts"]).date() for b in buckets
+    ]
+    assert dates == sorted(dates)
+    # NOTE: no strict=True here — dates[1:] is deliberately one shorter, which is
+    # the point of pairing consecutive elements.
+    for earlier, later in zip(dates, dates[1:]):  # noqa: B905
+        assert (later - earlier).days == 1, f"gap between {earlier} and {later}"
+
+    # The seed only touches a few recent days, so quiet days must exist and be 0
+    # rather than absent.
+    zero_days = [b for b in buckets if float(b["usd"]) == 0.0]
+    assert zero_days, "expected at least one explicit zero-spend bucket"
+    for b in zero_days:
+        assert float(b["usd"]) == 0.0
+        assert int(b["tokens"]) == 0
+
+
 async def test_summary_default_period_30_days(
     client: httpx.AsyncClient,
     engine: AsyncEngine,

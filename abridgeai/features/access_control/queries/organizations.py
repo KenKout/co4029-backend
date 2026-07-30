@@ -47,12 +47,15 @@ async def list_organizations(
     limit: int = 100,
     after_name: str | None = None,
     after_id: UUID | None = None,
+    visible_to_ids: list[UUID] | None = None,
 ) -> list[Organization]:
     stmt = select(Organization)
     if not include_deleted:
         stmt = stmt.where(Organization.deleted_at.is_(None))
     if status is not None:
         stmt = stmt.where(Organization.status == status)
+    if visible_to_ids is not None:
+        stmt = stmt.where(Organization.id.in_(visible_to_ids))
     if after_name is not None and after_id is not None:
         stmt = stmt.where(
             tuple_(Organization.name, Organization.id) > (after_name, after_id)
@@ -72,14 +75,25 @@ async def search_organizations(
     sort_dir: str = "asc",
     page: int = 0,
     page_size: int = 25,
+    visible_to_ids: list[UUID] | None = None,
 ) -> Page[Organization]:
     """Offset page of organisations with server-side search (name/slug) +
-    whitelisted sort. Backs the page-numbered admin table."""
+    whitelisted sort. Backs the page-numbered admin table.
+
+    ``visible_to_ids`` restricts the result to those organizations. ``None``
+    means unrestricted and is reserved for ``system.administer`` — every other
+    caller passes the set it belongs to, because the permission guarding this
+    route is a flat check that cannot tell an ``org_unit.manage`` granted in
+    one tenant from a global one. Filtering in the query rather than the
+    router keeps ``total`` and the cursor consistent with what is returned.
+    """
     stmt = select(Organization)
     if not include_deleted:
         stmt = stmt.where(Organization.deleted_at.is_(None))
     if status is not None:
         stmt = stmt.where(Organization.status == status)
+    if visible_to_ids is not None:
+        stmt = stmt.where(Organization.id.in_(visible_to_ids))
     return await paginate(
         db,
         stmt,
@@ -103,6 +117,7 @@ async def count_organizations(
     *,
     include_deleted: bool = False,
     status: str | None = None,
+    visible_to_ids: list[UUID] | None = None,
 ) -> int:
     from sqlalchemy import func
 
@@ -111,8 +126,22 @@ async def count_organizations(
         stmt = stmt.where(Organization.deleted_at.is_(None))
     if status is not None:
         stmt = stmt.where(Organization.status == status)
+    if visible_to_ids is not None:
+        stmt = stmt.where(Organization.id.in_(visible_to_ids))
     result = await db.execute(stmt)
     return int(result.scalar_one())
+
+
+async def organization_ids_for_user(db: AsyncSession, user_id: UUID) -> list[UUID]:
+    """Ids of organizations the user has an active membership in."""
+    result = await db.execute(
+        select(OrganizationMembership.organization_id).where(
+            OrganizationMembership.user_id == user_id,
+            OrganizationMembership.status == "active",
+            OrganizationMembership.deleted_at.is_(None),
+        )
+    )
+    return list(result.scalars().all())
 
 
 async def get_organization(db: AsyncSession, organization_id: UUID) -> Organization | None:

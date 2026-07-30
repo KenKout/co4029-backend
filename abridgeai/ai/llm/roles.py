@@ -44,6 +44,51 @@ class LLMRole(str, Enum):  # noqa: UP042 - StrEnum changes value coercion; prese
     INTERVIEW_INTENT = "interview_intent"
     INTERVIEW_ANALYSIS = "interview_analysis"
     INTERVIEW_SECURITY = "interview_security"
+    INTERVIEW_PERSONA_ADHERENCE = "interview_persona_adherence"
+    # Offline post-hoc quality judging (contingency / leading questions). Never
+    # runs in a live session — only from the quality CLI — but needs its own role
+    # so its spend is attributable and never mixed into live interview costs.
+    INTERVIEW_QUALITY_JUDGE = "interview_quality_judge"
+    # Question-bank duplicate detection. Unlike the quality judge above, this DOES
+    # run with someone waiting (a teacher saving or generating questions), so it
+    # belongs in INTERACTIVE_LLM_ROLES for the tighter timeout.
+    INTERVIEW_DEDUP = "interview_dedup"
+    # Ingestion preprocessing. PAGE_OCR reads back an image-only PDF page via a
+    # vision model; PAGE_CLASSIFICATION adjudicates the narrow band of pages the
+    # deterministic boilerplate rules could not settle. Both are
+    # batch/background — nobody is waiting.
+    #
+    # PAGE_OCR sits on STANDARD, not small. The claim that "OCR-ing a slide is
+    # not a reasoning task" holds for a page of prose and fails for the pages
+    # that actually get routed here, which are by definition the ones with no
+    # text layer: decision matrices, framework diagrams, case-study columns. On
+    # the small tier those came back with mangled tokens (``r:ontrol``,
+    # ``assura\ce``) and, worse, with table cells read in the wrong order — one
+    # 3x3 matrix had an entry migrate into the wrong cell, which does not look
+    # like an error downstream, it looks like course content. Reading a grid
+    # and keeping row/column association IS a reasoning task, so this trades
+    # cost against silent corruption of the densest pages.
+    #
+    # Note the spend is NOT bounded per document: ``preprocess_ocr_max_pages``
+    # is advisory since truncating it meant dropping pages. A long scan will
+    # cost proportionally. ``LLM_MODEL_PAGE_OCR`` overrides the tier per
+    # deployment if that trade needs revisiting.
+    PAGE_OCR = "page_ocr"
+    PAGE_CLASSIFICATION = "page_classification"
+    # Quarantined answer extraction. Sees a student's raw answer and the current
+    # question and NOTHING else — no rubric, no outcomes, no model answer — so
+    # that the rubric-bearing analysis call never has to hold untrusted text.
+    # Interactive (the student is waiting) and small tier: paraphrasing a turn
+    # into a handful of bounded claims is not a reasoning task, and it replaces
+    # the intent call rather than adding to the per-turn budget.
+    INTERVIEW_EXTRACTION = "interview_extraction"
+    # Chunk boundary decision (chunking Stage B'). Reads a list of window
+    # digests — never the full text — and returns which consecutive windows
+    # form one chunk. Batch/background. Small tier: judging "does this slide
+    # continue the previous one" from a title and an opening line is a
+    # comprehension task the lite models handle, and the volume is one call per
+    # multi-window topic group, not one per window.
+    CHUNK_BOUNDARY = "chunk_boundary"
 
 
 # Default role -> tier mapping. Embedding intentionally excluded — it has its
@@ -72,6 +117,30 @@ ROLE_TO_TIER: dict[LLMRole, Literal["small", "standard", "large"]] = {
     LLMRole.INTERVIEW_INTENT: "small",
     LLMRole.INTERVIEW_ANALYSIS: "standard",
     LLMRole.INTERVIEW_SECURITY: "small",
+    # Persona-adherence judge runs OFFLINE (post-session, over a stored
+    # transcript) — no student is waiting, so it is deliberately NOT in
+    # INTERACTIVE_LLM_ROLES. Standard tier: it needs to reason over a whole
+    # transcript but is a diagnostic, not a scoring gate.
+    LLMRole.INTERVIEW_PERSONA_ADHERENCE: "standard",
+    # Post-hoc quality judges (contingency / leading questions) are offline
+    # diagnostics like persona adherence — nobody is waiting, so they stay out of
+    # INTERACTIVE_LLM_ROLES. Standard tier: judging one Q&A exchange needs real
+    # reading comprehension, but these never gate a grade.
+    LLMRole.INTERVIEW_QUALITY_JUDGE: "standard",
+    # A same-or-different judgement on two short texts; "standard" is ample and
+    # keeps a per-question check affordable during bulk generation.
+    LLMRole.INTERVIEW_DEDUP: "standard",
+    # Ingestion preprocessing — see the role docstrings. PAGE_OCR is standard
+    # tier because the pages it sees are the diagram/matrix ones a text
+    # extractor could not read at all; PAGE_CLASSIFICATION stays small because
+    # labelling a cover page really is a lookup.
+    LLMRole.PAGE_OCR: "standard",
+    LLMRole.PAGE_CLASSIFICATION: "small",
+    # Quarantined extraction — see the role docstring. Small tier: it subsumes
+    # the intent call, which was already small, and holds no protected content.
+    LLMRole.INTERVIEW_EXTRACTION: "small",
+    # Boundary decision over window digests — see the role docstring.
+    LLMRole.CHUNK_BOUNDARY: "small",
 }
 
 
@@ -89,10 +158,12 @@ INTERACTIVE_LLM_ROLES: frozenset[LLMRole] = frozenset(
         LLMRole.VALIDATION,
         LLMRole.INTERVIEW_GENERATION,
         LLMRole.INTERVIEW_VALIDATION,
+        LLMRole.INTERVIEW_DEDUP,
         LLMRole.INTERVIEW_FOLLOWUP,
         LLMRole.INTERVIEW_INTENT,
         LLMRole.INTERVIEW_ANALYSIS,
         LLMRole.INTERVIEW_SECURITY,
+        LLMRole.INTERVIEW_EXTRACTION,
     }
 )
 

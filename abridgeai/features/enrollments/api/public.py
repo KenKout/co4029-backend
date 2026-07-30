@@ -86,9 +86,24 @@ async def ensure_course_enrollment(
     )
 
 
+async def list_active_student_ids(db: AsyncSession, *, course_id: UUID) -> list[UUID]:
+    """Return the user ids of all students with an ``active`` enrollment.
+
+    Cross-feature read used by the courses publish flow to notify everyone
+    currently enrolled when a course goes live. ``dropped`` / ``completed`` /
+    ``waitlisted`` rows are excluded.
+    """
+    stmt = select(Enrollment.student_id).where(
+        Enrollment.course_id == course_id,
+        Enrollment.status == "active",
+    )
+    return list((await db.execute(stmt)).scalars().all())
+
+
 __all__ = [
     "EnrollmentDTO",
     "ensure_course_enrollment",
     "get_course_enrollment",
     "is_user_enrolled",
+    "list_active_student_ids",
 ]

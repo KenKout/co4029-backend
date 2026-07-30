@@ -28,7 +28,7 @@ TURN_GAP ?= 9
 REPLY_WAIT ?= 12
 SCENARIO_TIMEOUT ?= 240
 
-.PHONY: test lint typecheck interview-security-unit interview-security-integration interview-security-gateway interview-security-session voice-harness voice-harness-en voice-harness-vi voice-dynamic-en voice-dynamic-vi voice-security-en voice-security-vi voice-security voice-harness-clean voice-live-test voice-signoff-report
+.PHONY: test lint typecheck interview-security-unit interview-security-integration interview-security-gateway interview-security-session analysis-isolation-report analysis-isolation-diff voice-harness voice-harness-en voice-harness-vi voice-dynamic-en voice-dynamic-vi voice-security-en voice-security-vi voice-security voice-harness-clean voice-live-test voice-signoff-report
 
 test:
 	INTERVIEW_VOICE_ENABLED=$${INTERVIEW_VOICE_ENABLED:-false} $(PY) -m pytest
@@ -57,6 +57,16 @@ interview-security-integration:
 	  tests/integration/test_interview_adaptive_step.py \
 	  -k "security or repeat_or_clarification" \
 	  -o addopts="" -p no:cov -q
+
+## Offline, free: how much of an attack payload can still reach the prompt that
+## carries the rubric. Structural numbers are definitional; the verbatim-echo
+## rate is the honest residual. Refresh the baseline with --baseline when a
+## change is intended.
+analysis-isolation-report:
+	$(PY) scripts/analysis_isolation_report.py --report
+
+analysis-isolation-diff:
+	$(PY) scripts/analysis_isolation_report.py --diff docs/analysis-isolation-baseline.json
 
 ## PAID real-gateway semantic-classifier check. No interview session is used.
 interview-security-gateway:

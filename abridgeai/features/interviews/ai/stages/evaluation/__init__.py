@@ -29,21 +29,27 @@ from abridgeai.features.interviews.ai.stages.evaluation.parsers_outcome_verdicts
 )
 from abridgeai.features.interviews.ai.stages.evaluation.rubric import (
     DEFAULT_CRITERIA,
+    SUPPLEMENTARY_RUBRIC_KEY,
     CriterionScore,
     ResponseEvaluation,
+    RubricDefinition,
     RubricScores,
     aggregate_rubric_scores,
     build_criterion_score,
     resolve_rubric,
+    resolve_rubric_definition,
+    resolve_supplementary_notes,
 )
 
 __all__ = [
     "DEFAULT_CRITERIA",
     "EVALUATION_STAGE_NAME",
+    "SUPPLEMENTARY_RUBRIC_KEY",
     "CriterionScore",
     "OutcomeVerdict",
     "OutcomeVerdicts",
     "ResponseEvaluation",
+    "RubricDefinition",
     "RubricScores",
     "aggregate_rubric_scores",
     "build_criterion_score",
@@ -53,4 +59,6 @@ __all__ = [
     "parse_evaluation_response",
     "parse_outcome_verdicts",
     "resolve_rubric",
+    "resolve_rubric_definition",
+    "resolve_supplementary_notes",
 ]

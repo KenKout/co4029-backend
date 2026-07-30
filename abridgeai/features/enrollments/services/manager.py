@@ -10,6 +10,7 @@ from abridgeai.core.db.conflict_mapper import (
 )
 from abridgeai.core.db.recursive_delete import soft_delete_cascade
 from abridgeai.core.exceptions import ConflictError, NotFoundError
+from abridgeai.features.courses.api import public as courses_api
 from abridgeai.features.enrollments.models import Enrollment, InvitationCode
 from abridgeai.features.enrollments.queries import authoring as authoring_queries
 from abridgeai.features.enrollments.schemas import (
@@ -140,6 +141,36 @@ async def _create_enrollment(
     return enrollment
 
 
+async def _notify_enrolled_if_published(
+    db: AsyncSession,
+    *,
+    course_id: UUID,
+    student_ids: list[UUID],
+    arq_pool: object | None,
+) -> None:
+    """Notify newly-enrolled students, but only if the course is published.
+
+    Enrolling into a draft is not yet actionable (the student can't open a
+    course they can't see); they are notified when the course publishes. Best-
+    effort: a course lookup miss or empty list is simply a no-op. Individual
+    send failures are swallowed inside ``notify_student_enrolled``.
+    """
+    if not student_ids:
+        return
+    course = await courses_api.get_course_by_id(db, course_id)
+    if course is None or course.status != "published":
+        return
+    for student_id in student_ids:
+        await courses_api.notify_student_enrolled(
+            db,
+            student_user_id=student_id,
+            course_id=course_id,
+            course_title=course.title,
+            course_slug=course.slug,
+            arq_pool=arq_pool,
+        )
+
+
 async def ensure_enrollment(
     db: AsyncSession,
     *,
@@ -184,6 +215,8 @@ async def bulk_enroll_students(
     course_id: UUID,
     payload: BulkEnrollRequest,
     actor: CurrentUser,
+    *,
+    arq_pool: object | None = None,
 ) -> BulkEnrollResult:
     """Manager-side: enroll many students in one call.
 
@@ -191,6 +224,9 @@ async def bulk_enroll_students(
     ``already_enrolled``. Email lookups that miss are reported with
     reason ``user_not_found``. The transaction is left open for the
     router to commit.
+
+    Newly-enrolled students are notified with a deep-link to the course when
+    the course is published (best-effort; never blocks the enrolment).
     """
     candidate_ids, failures = await _resolve_user_ids(db, payload)
     enrolled: list[UUID] = []
@@ -215,6 +251,10 @@ async def bulk_enroll_students(
             source="manager_bulk",
         )
         enrolled.append(user_id)
+
+    await _notify_enrolled_if_published(
+        db, course_id=course_id, student_ids=enrolled, arq_pool=arq_pool
+    )
 
     return BulkEnrollResult(enrolled=enrolled, failures=failures)
 
@@ -276,6 +316,8 @@ async def bulk_import_students_from_csv(
     course_id: UUID,
     rows: list[dict[str, Any]],
     actor: CurrentUser,
+    *,
+    arq_pool: object | None = None,
 ) -> CSVImportResult:
     """Parse CSV-like rows, create users for new emails, enroll all.
 
@@ -341,6 +383,10 @@ async def bulk_import_students_from_csv(
                 source="admin_bulk",
             )
         enrolled.append(user_id)
+
+    await _notify_enrolled_if_published(
+        db, course_id=course_id, student_ids=enrolled, arq_pool=arq_pool
+    )
 
     return CSVImportResult(enrolled=enrolled, created_users=created_users, failures=failures)
 

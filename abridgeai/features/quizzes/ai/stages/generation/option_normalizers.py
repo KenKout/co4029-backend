@@ -24,6 +24,10 @@ def normalize_options(
         return _normalize_true_false_options(options_raw, correct)
     if question_type == "fill_blank":
         return _normalize_fill_blank_options(options_raw, correct)
+    # short_answer / numerical / matching / ordering carry their answer on the
+    # question's own columns, not option rows. Returning [] here also means an
+    # LLM that wrongly emits ``options`` for these types has them discarded
+    # (their validators additionally reject a non-empty option list).
     return []
 
 
@@ -116,11 +120,32 @@ def _coerce_fill_blank_option(raw: Any) -> str:  # noqa: ANN401 -- raw LLM JSON
     return ""
 
 
+def _coerce_correct_keys(correct: Any) -> set[str]:  # noqa: ANN401 -- raw LLM JSON
+    """Return the set of option letters marked correct.
+
+    Phase 7 multi-select: ``correct_answer`` may be a single letter ("B"), a
+    list of letters (["A", "C"]), or a comma/slash-separated string ("A, C").
+    Normalising to a set lets the same code path serve single- and multi-select.
+    """
+    tokens: list[str] = []
+    if isinstance(correct, str):
+        cleaned = correct.strip()
+        for sep in (",", "/", ";", "|"):
+            if sep in cleaned:
+                tokens = cleaned.split(sep)
+                break
+        else:
+            tokens = [cleaned]
+    elif isinstance(correct, (list, tuple, set)):
+        tokens = [str(item) for item in correct]
+    return {token.strip().upper() for token in tokens if token and token.strip()}
+
+
 def _normalize_mcq_options(
     options_raw: Any,  # noqa: ANN401 -- raw LLM JSON
     correct: Any,  # noqa: ANN401 -- raw LLM JSON
 ) -> list[dict[str, Any]]:
-    correct_key = correct.strip().upper() if isinstance(correct, str) else None
+    correct_keys = _coerce_correct_keys(correct)
     if isinstance(options_raw, dict):
         cleaned = {
             str(key).strip().upper(): str(value).strip()
@@ -131,7 +156,7 @@ def _normalize_mcq_options(
             {
                 "option_key": key,
                 "option_text": cleaned.get(key, ""),
-                "is_correct": key == correct_key,
+                "is_correct": key in correct_keys,
                 "position": pos,
             }
             for pos, key in enumerate(["A", "B", "C", "D"], start=1)

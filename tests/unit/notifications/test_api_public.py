@@ -19,4 +19,9 @@ def test_email_task_name_is_true_alias() -> None:
 def test_module_exports() -> None:
     from abridgeai.features.notifications.api import public
 
-    assert {"send_notification", "EMAIL_NOTIFICATION_TASK_NAME"} == set(public.__all__)
+    # The dispatch primitives are always exported; the course_* entries are the
+    # localized message builders re-exported so cross-feature producers render
+    # copy through the public surface (not notifications.messages directly).
+    assert {"send_notification", "EMAIL_NOTIFICATION_TASK_NAME"} <= set(public.__all__)
+    for name in ("send_notification", "EMAIL_NOTIFICATION_TASK_NAME"):
+        assert hasattr(public, name)

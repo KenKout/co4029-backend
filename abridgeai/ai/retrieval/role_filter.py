@@ -31,7 +31,9 @@ type. Callers in the quiz / interview retrieval stages wire it in.
 
 # Roles that get capped. ``body`` is the only "teachable content" role;
 # everything else is administrivia or summary recap.
-_DEPRIORITIZED_ROLES: frozenset[str] = frozenset({"summary", "review", "front_matter"})
+_DEPRIORITIZED_ROLES: frozenset[str] = frozenset(
+    {"summary", "review", "front_matter", "reference", "divider"}
+)
 
 # Default cap ratio: keep at most floor(limit / N) deprioritized chunks.
 # Legacy used ``limit // 4``; we keep that constant so behaviour matches
@@ -98,34 +100,59 @@ def split_by_role[T](
         else:
             body.append(chunk)
 
-    keep_deprioritized = max(1, limit // deprioritized_ratio)
-    body_quota = max(0, limit - keep_deprioritized)
+    # Cap deprioritized chunks at floor(limit / ratio), but never reserve more
+    # slots than there are deprioritized chunks to fill — otherwise an all-body
+    # pool would be capped below ``limit`` (body is the GOOD content and must be
+    # allowed to fill the whole pool when nothing needs deprioritizing).
+    cap = max(1, limit // deprioritized_ratio)
+    deprioritized_taken = deprioritized[:cap]
 
-    body_taken = body[:body_quota]
-    deprioritized_taken = deprioritized[:keep_deprioritized]
+    # Body fills every slot the (capped) deprioritized chunks did not claim.
+    body_taken = body[: limit - len(deprioritized_taken)]
 
-    # Backfill: if body is short, take extra deprioritized so the caller
-    # still gets ``limit`` candidates when the pool is large enough.
+    # Backfill: if body is short, take extra deprioritized beyond the cap so the
+    # caller still gets ``limit`` candidates when the pool is large enough.
     extra_quota = limit - len(body_taken) - len(deprioritized_taken)
     if extra_quota > 0:
         deprioritized_taken.extend(
-            deprioritized[keep_deprioritized : keep_deprioritized + extra_quota]
+            deprioritized[cap : cap + extra_quota]
         )
 
     return body_taken + deprioritized_taken
 
 
 def _role_of(chunk: object) -> str:
-    """Read ``metadata['content_role']`` defensively, defaulting to body.
+    """Read the chunk's content role defensively, defaulting to body.
+
+    Prefers ``metadata['semantic']['content_role']`` (written by the
+    chunking enrichment LLM, which reads the slide and knows a recap from
+    a definition) over top-level ``metadata['content_role']`` (rule-based
+    classifier). The two disagree often enough to matter: on a real
+    lecture deck the closing "Summary" slide and the "Review questions"
+    slide both come out of the rule classifier as ``body`` while the LLM
+    labels them ``summary`` / ``review``. Reading only the top level left
+    exactly the two slides this module exists to cap sitting in the pool
+    uncapped, which is the failure described in the module docstring.
+
+    This mirrors ``features/quizzes/ai/outline.py::_chunk_role`` — the
+    same precedence, so a chunk cannot be ``review`` for quiz coverage
+    allocation and ``body`` for retrieval.
 
     Tolerates dataclass instances (any object with a ``metadata`` attr),
-    raw mappings, and missing/None metadata. Returns lowercase role
+    raw mappings, and missing/None metadata. Returns a lowercase role
     string; an unknown / malformed value is normalised to ``body`` so
     we never accidentally cap a chunk we can't classify.
     """
     md = getattr(chunk, "metadata", None)
     if not isinstance(md, dict):
         return "body"
+
+    semantic = md.get("semantic")
+    if isinstance(semantic, dict):
+        semantic_role = semantic.get("content_role")
+        if isinstance(semantic_role, str) and semantic_role.strip():
+            return semantic_role.strip().lower()
+
     raw = md.get("content_role")
     if not isinstance(raw, str):
         return "body"

@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import (
 
 from abridgeai.core.config import get_settings
 from abridgeai.features.courses.queries import (
-    get_course_content_authoring,
+    get_course_with_content_tree,
     get_course_for_authoring,
     list_all_lesson_resources,
     list_courses_for_owner,
@@ -233,17 +233,19 @@ async def test_get_course_content_authoring_returns_drafts(
     session_factory: async_sessionmaker[AsyncSession],
     fixture_data: dict,
 ) -> None:
+    # ``get_course_content_authoring`` became ``get_course_with_content_tree``
+    # in the ORM content-tree refactor: it now returns a hydrated Course
+    # (modules -> items -> lesson/quiz/interview) instead of a dict tree.
     async with session_factory() as session:
-        tree = await get_course_content_authoring(
-            session, fixture_data["pub_course"]
-        )
-    assert tree is not None
-    item_ids = {item["id"] for item in tree["items"]}
-    assert str(fixture_data["item_published"]) in item_ids
-    assert str(fixture_data["item_draft_target"]) in item_ids
-    lesson_statuses = {
-        item["lesson"]["status"] for item in tree["items"] if item.get("lesson")
-    }
+        course = await get_course_with_content_tree(session, fixture_data["pub_course"])
+        assert course is not None
+        items = [item for module in course.modules for item in module.items]
+        item_ids = {str(item.id) for item in items}
+        assert str(fixture_data["item_published"]) in item_ids
+        assert str(fixture_data["item_draft_target"]) in item_ids
+        lesson_statuses = {
+            item.lesson.status for item in items if item.lesson is not None
+        }
     assert "draft" in lesson_statuses
     assert "published" in lesson_statuses
 
@@ -268,15 +270,15 @@ async def test_authoring_content_archived_flag_filters_archived_course(
     fixture_data: dict,
 ) -> None:
     async with session_factory() as session:
-        excluded = await get_course_content_authoring(
+        excluded = await get_course_with_content_tree(
             session, fixture_data["archived_course"], include_archived=False
         )
-        included = await get_course_content_authoring(
+        included = await get_course_with_content_tree(
             session, fixture_data["archived_course"], include_archived=True
         )
-    assert excluded is None
-    assert included is not None
-    assert included["course"]["status"] == "archived"
+        assert excluded is None
+        assert included is not None
+        assert included.status == "archived"
 
 
 async def test_list_courses_for_owner_excludes_other_owners(

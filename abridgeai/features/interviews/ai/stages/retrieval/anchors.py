@@ -35,11 +35,10 @@ from sqlalchemy import bindparam, text
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 
+from abridgeai.ai.knowledge_graph.retrieval import retrieve_kg_context_for_lesson_ids
 from abridgeai.ai.knowledge_graph.schemas import Concept
-from abridgeai.ai.retrieval import (
-    ChunkWithDistance,
-    retrieve_kg_context_for_anchors,
-)
+from abridgeai.ai.knowledge_graph.tenancy import organization_id_for_lessons
+from abridgeai.ai.retrieval import ChunkWithDistance
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -78,11 +77,17 @@ async def build_interview_anchors(
     kg_concepts: list[Concept] = []
     if kg_context_enabled and lesson_ids:
         try:
-            kg = await retrieve_kg_context_for_anchors(
-                [str(lid) for lid in lesson_ids],
-                depth=2,
-            )
-            kg_concepts = list(kg.concepts)
+            # See the matching note in the quiz anchor builder: the previous
+            # call passed lesson UUIDs where concept NAMES were expected, so
+            # this lookup never matched and the interview ran vector-only.
+            org_id = await organization_id_for_lessons(db, lesson_ids)
+            if org_id is not None:
+                kg = await retrieve_kg_context_for_lesson_ids(
+                    lesson_ids,
+                    org_id=org_id,
+                    depth=2,
+                )
+                kg_concepts = list(kg.concepts)
         except Exception as exc:  # pragma: no cover - graceful degrade
             logger.warning("KG anchor lookup failed for interview: %s", exc)
             kg_concepts = []

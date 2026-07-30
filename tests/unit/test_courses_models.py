@@ -187,11 +187,22 @@ def test_course_tag_minimal_shape_per_baseline() -> None:
     )
 
 
-def test_course_learning_outcome_unique_constraint() -> None:
+def test_course_learning_outcome_position_uniqueness_is_db_partial_index() -> None:
+    # Migration 0059 (LO hierarchy) replaced the course-wide
+    # ``uq_course_learning_outcomes_position`` UNIQUE constraint with a partial
+    # expression index over COALESCE(parent_id, course_id) so uniqueness is
+    # per-parent (siblings), not per-course. That is NOT expressible as a simple
+    # ``UniqueConstraint`` in ``__table_args__``, so the model intentionally
+    # declares none — the guarantee lives in the migration DDL. Assert the model
+    # reflects that: no course-wide position UNIQUE constraint remains, and the
+    # self-referential ``parent_id`` is indexed (the hierarchy access path).
     constraint_names = {
         getattr(c, "name", None) for c in CourseLearningOutcome.__table__.constraints
     }
-    assert "uq_course_learning_outcomes_position" in constraint_names
+    assert "uq_course_learning_outcomes_position" not in constraint_names
+
+    parent_id_col = CourseLearningOutcome.__table__.c.parent_id
+    assert parent_id_col.index is True
 
 
 def test_career_course_item_not_in_courses_models() -> None:

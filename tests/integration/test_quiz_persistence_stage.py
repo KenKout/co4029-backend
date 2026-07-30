@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from uuid import UUID
 
@@ -53,6 +53,10 @@ register_audit_listener()
 @dataclass
 class _Run:
     requested_by: UUID | None
+    # The persistence stage reads outcome-targeting config from the run row
+    # (``_parse_target_outcome_ids(run.config_json)``); an absent attribute is
+    # an AttributeError, not "no targeting", so the stub must carry it.
+    config_json: dict = field(default_factory=dict)
 
 
 def _async_url(database_url: str) -> str:

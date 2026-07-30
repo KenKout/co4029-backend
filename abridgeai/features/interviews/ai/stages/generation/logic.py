@@ -36,6 +36,9 @@ from uuid import UUID
 
 from abridgeai.ai.llm import LLMGateway, LLMRole
 from abridgeai.ai.prompts import render_prompt
+from abridgeai.features.interviews.ai.stages.evaluation.rubric import (
+    resolve_supplementary_notes,
+)
 from abridgeai.features.interviews.ai.stages.generation.parsers import (
     InterviewQuestionDraft,
     parse_generation_response,
@@ -118,7 +121,11 @@ async def generate_interview_questions(
         technical_pct=type_mix["technical"],
         behavioral_pct=type_mix["behavioral"],
         situational_pct=type_mix["situational"],
-        supplementary_instructions=(config.supplementary_instructions or "").strip(),
+        # Only the prose part: when the field holds structured JSON (rubric,
+        # type mix, question count) the raw blob must NOT reach the prompt.
+        supplementary_instructions=resolve_supplementary_notes(
+            config.supplementary_instructions
+        ),
         outcomes=_outcomes_for_prompt(outcomes),
         chunks_block=_render_chunks(context),
         avoid_prompts=list(avoid_prompts or []),

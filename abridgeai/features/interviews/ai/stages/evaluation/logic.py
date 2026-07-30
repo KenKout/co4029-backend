@@ -41,6 +41,7 @@ from abridgeai.features.interviews.ai.stages.evaluation.parsers_outcome_verdicts
 )
 from abridgeai.features.interviews.ai.stages.evaluation.rubric import (
     ResponseEvaluation,
+    RubricDefinition,
     RubricScores,
     aggregate_rubric_scores,
     build_criterion_score,
@@ -170,6 +171,7 @@ async def evaluate_session(
     questions: Sequence[InterviewQuestion],
     answers: Sequence[InterviewSessionMessage],
     config: Mapping[str, Any] | None = None,
+    rubric: RubricDefinition | None = None,
     question_prompts: Mapping[UUID, str] | None = None,
     expected_question_ids: Sequence[UUID] | None = None,
     pipeline_run_id: UUID | None = None,
@@ -216,7 +218,14 @@ async def evaluate_session(
         persists this; the stage does not write to the DB itself.
     """
 
-    rubric_weights = resolve_rubric(config)
+    # A resolved RubricDefinition (teacher-authored) wins; otherwise fall back
+    # to the legacy mapping form so existing direct callers keep working.
+    if rubric is not None:
+        rubric_weights = rubric.weights
+        criterion_descriptions = rubric.descriptions
+    else:
+        rubric_weights = resolve_rubric(config)
+        criterion_descriptions = {}
     expected_criteria = tuple(rubric_weights.keys())
 
     if not expected_criteria:
@@ -250,12 +259,23 @@ async def evaluate_session(
         question_prompt = prompts_by_question.get(question_id, "")
         response_text = "\n\n".join(response_parts)
 
+        # Criteria are sent as {name, description?} objects so a teacher-authored
+        # definition reaches the judge. A bare key like "communication" otherwise
+        # leaves the judge guessing what the teacher meant by it.
+        criteria_payload: list[dict[str, str]] = []
+        for criterion in expected_criteria:
+            entry: dict[str, str] = {"name": criterion}
+            description = criterion_descriptions.get(criterion)
+            if description:
+                entry["description"] = description
+            criteria_payload.append(entry)
+
         user_prompt = json.dumps(
             {
                 "question": question_prompt,
                 "outcomes": outcome_views,
                 "candidate_response": response_text,
-                "rubric_criteria": list(expected_criteria),
+                "rubric_criteria": criteria_payload,
             },
             ensure_ascii=False,
         )

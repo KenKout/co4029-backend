@@ -62,6 +62,8 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
+from tests.support.db_graph import hard_delete_graph
+
 import abridgeai.features.access_control.models  # noqa: F401  -- register FK targets
 import abridgeai.features.courses.models  # noqa: F401  -- register modules / lessons
 import abridgeai.features.identity.models  # noqa: F401  -- register users
@@ -341,7 +343,18 @@ async def scenario(
         await conn.execute(
             text("DELETE FROM generation_runs WHERE module_id = :m"), {"m": module_id}
         )
-        await conn.execute(text("DELETE FROM quizzes WHERE module_id = :m"), {"m": module_id})
+        # Graph-driven: submit/score tests leave quiz_grades / grade_items
+        # under these quizzes; a bare delete trips NO ACTION FKs.
+        e2e_quiz_ids = [
+            str(v)
+            for v in (
+                await conn.execute(
+                    text("SELECT id FROM quizzes WHERE module_id = :m"), {"m": module_id}
+                )
+            ).scalars()
+        ]
+        if e2e_quiz_ids:
+            await hard_delete_graph(conn, "quizzes", e2e_quiz_ids)
         await conn.execute(
             text("DELETE FROM document_chunks WHERE lesson_id = :l"), {"l": lesson_id}
         )

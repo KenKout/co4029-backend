@@ -98,6 +98,32 @@ def _coerce_patch_value(key: str, value: object) -> object:
     ``datetime.fromisoformat`` (Python < 3.11 compatibility, and harmless
     on newer). An unparseable string raises ``AppError`` → HTTP 400.
     """
+    # Phase 2: validate the review-visibility matrix through its schema so an
+    # invalid shape is rejected (→ 400) rather than written raw to the JSONB
+    # column. Store the normalised (defaults-filled) dict.
+    if key == "review_options" and value is not None:
+        from abridgeai.features.quizzes.schemas.review_options import (  # noqa: PLC0415
+            ReviewOptions,
+        )
+
+        try:
+            return ReviewOptions.model_validate(value).model_dump()
+        except Exception as exc:  # noqa: BLE001
+            raise AppError("review_options is not a valid review-visibility matrix") from exc
+    # ``browser_security`` is a string enum column ('none' | 'securewindow')
+    # guarded by a CHECK constraint, but the client models it as a boolean
+    # toggle and the loose-dict PATCH body delivers a bool. Map the toggle to
+    # the enum here so a raw ``false``/``true`` can't reach the column and trip
+    # ``ck_quizzes_browser_security`` (→ 500). Already-valid strings pass
+    # through; anything else is a 400 rather than a DB error.
+    if key == "browser_security":
+        if isinstance(value, bool):
+            return "securewindow" if value else "none"
+        if value is None:
+            return "none"
+        if isinstance(value, str) and value in {"none", "securewindow"}:
+            return value
+        raise AppError("browser_security must be one of: none, securewindow")
     if key not in _DATETIME_PATCH_KEYS or value is None:
         return value
     if isinstance(value, datetime):
@@ -131,6 +157,88 @@ async def _require_question(db: AsyncSession, question_id: UUID) -> QuizQuestion
     if question is None:
         raise NotFoundError(f"Question {question_id} not found")
     return question
+
+
+# Settings that stay editable on a PUBLISHED quiz because changing them can't
+# corrupt or interrupt a student who is taking the quiz (or who already
+# finished): pure display copy, notification behaviour, and the scheduling
+# window (extend a deadline, open later). Everything NOT in this set —
+# scoring, timing, attempt limits, shuffle, mastery/SM-2 params, proctoring,
+# and the post-attempt review matrix — is frozen once published, since it
+# would change grading/presentation under live or completed attempts. A
+# whitelist (not a blacklist) is deliberate: any column added later is frozen
+# by default until someone explicitly vets it as student-safe.
+_PUBLISHED_EDITABLE_FIELDS = frozenset(
+    {
+        "title",
+        "description",
+        "available_from",
+        "available_until",
+        "due_at",
+        "reminders_enabled",
+    }
+)
+
+
+def _as_plain_json(value: Any) -> Any:  # noqa: ANN401  -- mirrors arbitrary JSON payloads
+    """Coerce a payload value into plain JSON-serializable data.
+
+    Values destined for JSONB columns must be dicts/lists/scalars. Two callers
+    can hand us something richer:
+
+    * the authoring router's private ``_AttrShim``, which wraps nested dicts
+      (and lists of dicts) for attribute access — psycopg cannot serialize it;
+    * a real Pydantic model, once the DTO surface replaces the shim.
+
+    Both expose ``model_dump()``, so we prefer that and recurse through
+    containers. Anything already plain passes through untouched.
+    """
+    if isinstance(value, list):
+        return [_as_plain_json(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _as_plain_json(item) for key, item in value.items()}
+    dump = getattr(value, "model_dump", None)
+    if callable(dump):
+        return _as_plain_json(dump())
+    return value
+
+
+def _assert_quiz_editable(quiz: Quiz) -> None:
+    """Reject ALL authoring edits on a published quiz (content paths).
+
+    Used by the question CRUD + bulk-approve paths: a published quiz's
+    questions/options are fully frozen, since students can already see and
+    attempt them and editing would corrupt grading. Raised as
+    :class:`ConflictError` so the router maps to HTTP 409. Quiz-settings
+    edits use the field-aware :func:`_assert_quiz_settings_editable` instead.
+    """
+    if quiz.status == "published":
+        raise ConflictError(
+            "quiz_published_readonly: a published quiz's questions cannot be "
+            "edited; archive it first to make changes"
+        )
+
+
+def _assert_quiz_settings_editable(quiz: Quiz, changed_fields: set[str]) -> None:
+    """Field-aware freeze for quiz-settings PATCH on a published quiz.
+
+    Student-safe settings (see :data:`_PUBLISHED_EDITABLE_FIELDS`) stay
+    editable so teachers can still rename, tweak reminders, or extend the
+    schedule window on a live quiz. Touching any other setting — anything
+    that would change scoring/timing/attempts/presentation under a student
+    who is taking or has finished the quiz — is rejected with HTTP 409.
+    Draft quizzes are unrestricted.
+    """
+    if quiz.status != "published":
+        return
+    frozen = changed_fields - _PUBLISHED_EDITABLE_FIELDS
+    if frozen:
+        raise ConflictError(
+            "quiz_published_setting_locked: these settings are frozen on a "
+            "published quiz and would affect students mid-attempt or after "
+            f"finishing: {', '.join(sorted(frozen))}. Archive the quiz first "
+            "to change them."
+        )
 
 
 async def _resolve_module_course(db: AsyncSession, module_id: UUID) -> UUID:
@@ -186,28 +294,30 @@ def _normalize_question_type(raw: Any) -> str:  # noqa: ANN401 -- arbitrary DTO 
     return _LEGACY_TYPE_ALIASES.get(cleaned, cleaned)
 
 
-def _validate_question_options(question_type: str, options: list[Any]) -> None:
+def _validate_question_options(
+    question_type: str, options: list[Any], *, single_answer: bool = True
+) -> None:
     """Type-aware option validation for the manual authoring path.
 
     Mirrors the per-type shape rules enforced by the AI generation
     parser (``stages/generation/parsers.GeneratedQuestion``):
 
-    * ``multiple_choice`` — exactly 4 options keyed A-D, exactly 1 correct.
+    * ``multiple_choice`` — 2..10 options; single_answer → exactly 1 correct,
+      else ≥1 correct (Phase 7 multi-select).
     * ``true_false`` — exactly 2 options keyed T/F, exactly 1 correct.
-    * ``short_answer`` / ``fill_blank`` — no options at all (the
-      expected answer is carried on the question's
-      ``original_generated_payload``).
+    * ``short_answer`` / ``fill_blank`` / ``numerical`` — no options (the
+      expected answer is carried on the question's own columns / payload).
     """
     if question_type == "multiple_choice":
-        if len(options) != 4:
-            raise AppError("multiple_choice questions must have exactly four options")
-        keys = [str(option.option_key).strip().upper() for option in options]
-        if set(keys) != {"A", "B", "C", "D"}:
-            raise AppError("multiple_choice option keys must be A, B, C, D")
+        if len(options) < 2 or len(options) > 10:
+            raise AppError("multiple_choice questions need between 2 and 10 options")
         if any(not str(option.option_text).strip() for option in options):
             raise AppError("Question option text is required")
-        if sum(1 for option in options if option.is_correct) != 1:
-            raise AppError("multiple_choice questions must have exactly one correct option")
+        n_correct = sum(1 for option in options if option.is_correct)
+        if single_answer and n_correct != 1:
+            raise AppError("single-answer multiple_choice must have exactly one correct option")
+        if not single_answer and n_correct < 1:
+            raise AppError("multi-answer multiple_choice must have at least one correct option")
     elif question_type == "true_false":
         if len(options) != 2:
             raise AppError("true_false questions must have exactly two options")
@@ -350,6 +460,11 @@ async def update_quiz(
 ) -> Quiz:
     del actor
     quiz = await _require_quiz(db, quiz_id)
+    # Field-aware freeze: on a published quiz only student-safe settings may
+    # change (title/description/schedule/reminders); everything else is locked
+    # so a student mid-attempt (or one who already finished) isn't disrupted.
+    changed_fields = set(payload.model_dump(exclude_unset=True).keys())
+    _assert_quiz_settings_editable(quiz, changed_fields)
     _apply_patch(quiz, payload)
     await flush_or_conflict(db)
     await db.refresh(quiz)
@@ -381,9 +496,51 @@ async def archive_quiz(db: AsyncSession, quiz_id: UUID, actor: CurrentUser) -> Q
 
 
 async def delete_quiz(db: AsyncSession, quiz_id: UUID, actor: CurrentUser) -> None:
-    """Soft-delete the quiz + cascade to questions / options / revisions."""
+    """Soft-delete the quiz + cascade to questions / options / revisions.
+
+    Also soft-deletes the ``module_items`` row that points at this quiz.
+    ``soft_delete_cascade`` walks ONETOMANY relationships only, and
+    ``module_items -> quizzes`` is MANYTOONE from the item side (``Quiz`` has no
+    ``items`` relationship), so the cascade cannot reach it. Left behind, the
+    orphaned item kept appearing in the course content tree with a ``quiz_id``
+    pointing at a deleted quiz — the UI rendered it, and clicking it 404'd.
+    """
     quiz = await _require_quiz(db, quiz_id)
+
+    # Collect this quiz's question ids BEFORE the cascade so we can purge their
+    # SM-2 card state. student_card_state is keyed on question_id and, being
+    # cross-feature, is invisible to soft_delete_cascade (it walks ONETOMANY
+    # SoftDelete children only, and SR's state table is neither). Left behind,
+    # those rows become perpetually-"due" cards no student can review.
+    from sqlalchemy import select as _select  # noqa: PLC0415
+
+    from abridgeai.features.spaced_repetition.api.public import (  # noqa: PLC0415
+        purge_card_state_for_questions,
+    )
+
+    question_ids = list(
+        (
+            await db.execute(
+                _select(QuizQuestion.id).where(QuizQuestion.quiz_id == quiz_id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+
     await soft_delete_cascade(db, quiz, actor_id=actor.user_id)
+    await purge_card_state_for_questions(db, question_ids)
+
+    from sqlalchemy import update  # noqa: PLC0415
+
+    from abridgeai.features.courses.models import ModuleItem  # noqa: PLC0415
+
+    await db.execute(
+        update(ModuleItem)
+        .where(ModuleItem.quiz_id == quiz_id, ModuleItem.deleted_at.is_(None))
+        .values(deleted_at=utcnow(), deleted_by=actor.user_id)
+    )
+    await db.flush()
 
 
 async def create_question(
@@ -393,21 +550,42 @@ async def create_question(
     actor: CurrentUser,
 ) -> QuizQuestion:
     """Create a single question; MCQ flavours are validated up front."""
-    await _require_quiz(db, quiz_id)
+    quiz = await _require_quiz(db, quiz_id)
+    _assert_quiz_editable(quiz)
     if not payload.prompt_text.strip():
         raise AppError("Question text is required")
     options_payload = list(payload.options or [])
     question_type = _normalize_question_type(payload.question_type)
-    _validate_question_options(question_type, options_payload)
+    _single_answer = getattr(payload, "single_answer", None)
+    _validate_question_options(
+        question_type,
+        options_payload,
+        single_answer=True if _single_answer is None else bool(_single_answer),
+    )
+
+    # Phase 3: sanitize rich content on write per each field's format
+    # discriminator (plain passes through; markdown/html are nh3-cleaned).
+    from abridgeai.features.quizzes.services.sanitize import (  # noqa: PLC0415
+        sanitize_rich_content,
+    )
+
+    prompt_format = getattr(payload, "prompt_format", "plain")
+    hint_format = getattr(payload, "hint_format", "plain")
+    explanation_format = getattr(payload, "explanation_format", "plain")
 
     next_position = await _next_question_position(db, quiz_id)
     question = QuizQuestion(
         quiz_id=quiz_id,
         position=next_position,
         question_type=question_type,
-        prompt_text=payload.prompt_text.strip(),
-        hint_text=getattr(payload, "hint_text", None),
-        explanation=getattr(payload, "explanation", None),
+        prompt_text=sanitize_rich_content(payload.prompt_text.strip(), fmt=prompt_format),
+        hint_text=sanitize_rich_content(getattr(payload, "hint_text", None), fmt=hint_format),
+        explanation=sanitize_rich_content(
+            getattr(payload, "explanation", None), fmt=explanation_format
+        ),
+        prompt_format=prompt_format,
+        hint_format=hint_format,
+        explanation_format=explanation_format,
         difficulty=getattr(payload, "difficulty", None),
         bloom_level=getattr(payload, "bloom_level", None),
         review_status=getattr(payload, "review_status", "pending"),
@@ -420,6 +598,30 @@ async def create_question(
         ),
         reviewed_at=utcnow() if getattr(payload, "review_status", None) == "approved" else None,
     )
+    # Phase 7: persist type-specific answer fields when supplied. These are
+    # only meaningful for the expanded types; MCQ/T-F ignore them. Set only
+    # when present so MCQ creation keeps the server defaults (single_answer=True).
+    #
+    # match_pairs / ordering_sequence land in JSONB columns, so they MUST be
+    # plain JSON data. The router hands us a shim that turns nested lists of
+    # dicts into attribute-access objects (handy for ``options``, fatal here —
+    # psycopg cannot json.dumps them). ``_as_plain_json`` unwraps that back to
+    # dicts/lists, and also handles real Pydantic models once DTOs land.
+    _single = getattr(payload, "single_answer", None)
+    if _single is not None:
+        question.single_answer = bool(_single)
+    _num_ans = getattr(payload, "numeric_answer", None)
+    if _num_ans is not None:
+        question.numeric_answer = _num_ans
+    _num_tol = getattr(payload, "numeric_tolerance", None)
+    if _num_tol is not None:
+        question.numeric_tolerance = _num_tol
+    _pairs = getattr(payload, "match_pairs", None)
+    if _pairs is not None:
+        question.match_pairs = _as_plain_json(_pairs)
+    _seq = getattr(payload, "ordering_sequence", None)
+    if _seq is not None:
+        question.ordering_sequence = _as_plain_json(_seq)
     db.add(question)
     await flush_or_conflict(db)
 
@@ -455,6 +657,8 @@ async def update_question(
 ) -> QuizQuestion:
     """Patch fields + append a revision; option edits are MCQ-only."""
     question = await _require_question(db, question_id)
+    quiz = await _require_quiz(db, question.quiz_id)
+    _assert_quiz_editable(quiz)
     revision_no = await _next_revision_no(db, question_id)
     payload_json = payload.model_dump(exclude_unset=True, mode="json")
     db.add(
@@ -467,6 +671,29 @@ async def update_question(
         )
     )
     field_updates = payload.model_dump(exclude_unset=True, exclude={"options"})
+
+    # Phase 3 SECURITY: sanitize rich text on the UPDATE path too. Without this
+    # a teacher could PATCH raw <script>/onerror markup into prompt/hint/
+    # explanation, which the client renders as HTML for the ``html`` format —
+    # i.e. stored XSS against every student taking the quiz. The format used is
+    # the one in this payload when supplied, else the value already on the row.
+    from abridgeai.features.quizzes.services.sanitize import (  # noqa: PLC0415
+        sanitize_rich_content,
+    )
+
+    for _text_field, _format_field in (
+        ("prompt_text", "prompt_format"),
+        ("hint_text", "hint_format"),
+        ("explanation", "explanation_format"),
+    ):
+        if _text_field in field_updates and field_updates[_text_field] is not None:
+            _fmt = field_updates.get(
+                _format_field, getattr(question, _format_field, "plain")
+            )
+            field_updates[_text_field] = sanitize_rich_content(
+                field_updates[_text_field], fmt=_fmt
+            )
+
     for key, value in field_updates.items():
         setattr(question, key, value)
 
@@ -498,6 +725,7 @@ async def bulk_approve_questions(
     quiz = await db.get(Quiz, quiz_id)
     if quiz is None:
         raise NotFoundError(f"Quiz {quiz_id} not found")
+    _assert_quiz_editable(quiz)
     if not question_ids:
         return 0
     updated = 0
@@ -551,17 +779,64 @@ async def _update_question_options(
         if new_is_correct is not None:
             option.is_correct = bool(new_is_correct)
 
-    if len(options) != 4:
-        raise AppError("MCQ questions must have exactly four options")
-    if sum(1 for option in options if option.is_correct) != 1:
-        raise AppError("MCQ questions must have exactly one correct option")
+    # Phase 7: mirror the create-path rules (``_validate_question_options``).
+    # This used to hardcode "exactly four options / exactly one correct", which
+    # rejected both multi-select MCQ (single_answer=False → >=1 correct) and the
+    # relaxed 2..10 option count. true_false stays strictly 2 options / 1 correct.
+    n_correct = sum(1 for option in options if option.is_correct)
+    if question.question_type == "true_false":
+        if len(options) != 2:
+            raise AppError("true_false questions must have exactly two options")
+        if n_correct != 1:
+            raise AppError("true_false questions must have exactly one correct option")
+        return
+    if len(options) < 2 or len(options) > 10:
+        raise AppError("multiple_choice questions need between 2 and 10 options")
+    if question.single_answer:
+        if n_correct != 1:
+            raise AppError("single-answer multiple_choice must have exactly one correct option")
+    elif n_correct < 1:
+        raise AppError("multi-answer multiple_choice must have at least one correct option")
 
 
 async def delete_question(db: AsyncSession, question_id: UUID, actor: CurrentUser) -> None:
     """Soft-delete a question + repack sibling positions to stay 1..N."""
     question = await _require_question(db, question_id)
     quiz_id = question.quiz_id
+    quiz = await _require_quiz(db, quiz_id)
+    _assert_quiz_editable(quiz)
+
+    # Serialize concurrent deletes on the SAME quiz.
+    #
+    # The repack below UPDATEs every surviving sibling. Two deletes running
+    # concurrently against one quiz each grab row locks on the same sibling set
+    # and interleave, so each ends up waiting on a row the other already holds:
+    #
+    #   DeadlockDetected: Process A waits for ShareLock on transaction of B;
+    #   B waits for ShareLock on transaction of A
+    #   CONTEXT: while locking tuple (...) in relation "quiz_questions"
+    #
+    # The client fires bulk deletes concurrently (Promise.allSettled), so this
+    # is a normal path, not an edge case. A transaction-scoped advisory lock
+    # keyed on the quiz makes same-quiz deletes queue instead of deadlocking,
+    # while deletes on DIFFERENT quizzes still run fully in parallel. It is
+    # released automatically at COMMIT/ROLLBACK — no unlock bookkeeping.
+    from sqlalchemy import text  # noqa: PLC0415
+
+    await db.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+        {"key": f"quiz_questions_repack:{quiz_id}"},
+    )
+
     await soft_delete_cascade(db, question, actor_id=actor.user_id)
+
+    # Purge the question's SM-2 card state (cross-feature; the cascade cannot
+    # reach it). Otherwise the deleted question's cards stay perpetually "due".
+    from abridgeai.features.spaced_repetition.api.public import (  # noqa: PLC0415
+        purge_card_state_for_questions,
+    )
+
+    await purge_card_state_for_questions(db, [question_id])
     await db.flush()
 
     from sqlalchemy import select  # noqa: PLC0415

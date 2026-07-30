@@ -365,3 +365,64 @@ async def test_import_rejects_cross_course_sources(
                 source_question_ids=[bank_fixture.other_course_question_id],
                 actor=bank_fixture.actor,
             )
+
+
+async def test_duplicate_question_clones_in_place_as_pending(
+    session_factory: async_sessionmaker[AsyncSession],
+    bank_fixture: BankFixture,
+) -> None:
+    """duplicate_question copies a question into its OWN quiz, forced pending.
+
+    Distinct from import_questions (which targets a different quiz): the clone
+    stays in the source quiz, appends after the last position, resets review
+    state to ``pending``, and copies the option set with fresh ids.
+    """
+    async with session_factory() as session:
+        clone = await bank_service.duplicate_question(
+            session,
+            question_id=bank_fixture.approved_question_id,
+            actor=bank_fixture.actor,
+        )
+        await session.commit()
+        clone_id = clone.id
+        clone_row = (
+            await session.execute(select(QuizQuestion).where(QuizQuestion.id == clone_id))
+        ).scalar_one()
+        clone_opts = (
+            (
+                await session.execute(
+                    select(QuizQuestionOption).where(QuizQuestionOption.question_id == clone_id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+    assert clone_id != bank_fixture.approved_question_id
+    # Same quiz — this is an in-place duplicate, not a cross-quiz import.
+    assert clone_row.quiz_id == bank_fixture.source_quiz_id
+    assert clone_row.imported_from_question_id == bank_fixture.approved_question_id
+    # Always unpublished/unvetted regardless of the source's approved state.
+    assert clone_row.review_status == "pending"
+    assert clone_row.reviewed_by is None
+    assert clone_row.reviewed_at is None
+    assert clone_row.published_at is None
+    # Options copied with fresh ids.
+    assert {opt.option_key for opt in clone_opts} == {"A", "B"}
+    assert all(opt.question_id == clone_id for opt in clone_opts)
+
+
+async def test_duplicate_question_missing_raises_not_found(
+    session_factory: async_sessionmaker[AsyncSession],
+    bank_fixture: BankFixture,
+) -> None:
+    """Duplicating a non-existent question raises NotFoundError."""
+    from abridgeai.core.exceptions import NotFoundError
+
+    async with session_factory() as session:
+        with pytest.raises(NotFoundError):
+            await bank_service.duplicate_question(
+                session,
+                question_id=uuid.uuid4(),
+                actor=bank_fixture.actor,
+            )

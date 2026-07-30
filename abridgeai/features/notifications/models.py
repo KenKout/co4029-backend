@@ -57,6 +57,7 @@ NOTIFICATION_CATEGORIES = (
     # Teacher-facing async-job outcomes (each covers success + failure).
     "material_processing",
     "quiz_generation",
+    "interview_generation",
 )
 """Categories accepted by the ``notifications`` CHECK constraint."""
 
@@ -80,7 +81,7 @@ class Notification(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         CheckConstraint(
             "category IN ('spaced_repetition', 'lesson_unlock', "
             "'interview_result', 'course_announcement', 'system', "
-            "'material_processing', 'quiz_generation')",
+            "'material_processing', 'quiz_generation', 'interview_generation')",
             name="ck_notifications_category",
         ),
         CheckConstraint(
@@ -131,7 +132,7 @@ class NotificationPreference(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             "category IN ('course_updates', 'ai_recommendations', "
             "'spaced_repetition', 'lesson_unlock', 'interview_result', "
             "'course_announcement', 'system', "
-            "'material_processing', 'quiz_generation')",
+            "'material_processing', 'quiz_generation', 'interview_generation')",
             name="ck_notification_preferences_category",
         ),
         CheckConstraint(

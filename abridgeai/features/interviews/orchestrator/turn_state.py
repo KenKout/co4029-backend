@@ -119,7 +119,7 @@ def apply_state_updates(  # noqa: C901 -- explicit action branches are auditable
             if cov is None:
                 cov = OutcomeCoverageState(outcome_id=ev.outcome_id)
                 data.outcome_coverage[ev.outcome_id] = cov
-            apply_evidence_to_coverage(cov, ev, now=now)
+            apply_evidence_to_coverage(cov, ev, now=now, secondary=ev.secondary)
 
         # Cross-turn memory (Slice 9, v2). Record a short claim summary for each
         # outcome that got evidence this turn, so a LATER turn's analysis can be

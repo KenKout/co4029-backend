@@ -17,6 +17,8 @@ from abridgeai.features.courses.queries.assignment import (
     revoke_teacher_assignment,
 )
 from abridgeai.features.courses.queries.authoring import (
+    build_descendant_map,
+    build_outcome_code_map,
     course_slug_exists,
     get_authoring_resource_storage_target,
     get_course_for_authoring,
@@ -37,7 +39,7 @@ from abridgeai.features.courses.queries.authoring import (
     list_modules_for_authoring,
     next_course_outcome_position,
     next_module_item_position,
-    reindex_course_outcomes,
+    reindex_course_outcome_siblings,
     replace_module_prerequisites,
 )
 from abridgeai.features.courses.queries.published import (
@@ -110,7 +112,9 @@ __all__ = [
     "list_visible_module_items",
     "next_course_outcome_position",
     "next_module_item_position",
-    "reindex_course_outcomes",
+    "reindex_course_outcome_siblings",
+    "build_descendant_map",
+    "build_outcome_code_map",
     "replace_module_prerequisites",
     "restore_soft_deleted_course",
     "revoke_teacher_assignment",

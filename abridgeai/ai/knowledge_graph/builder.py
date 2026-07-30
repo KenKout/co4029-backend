@@ -1,8 +1,10 @@
 """Knowledge graph builder.
 
-Per-chunk LLM extraction + Neo4j upsert. Lives above ``infrastructure/neo4j``
-(which now exposes only driver lifecycle) so all Cypher writes for the
-ingestion path are centralised here.
+Neo4j upsert + per-material orchestration of the KG build. Lives above
+``infrastructure/neo4j`` (which now exposes only driver lifecycle) so all
+Cypher writes for the ingestion path are centralised here. The LLM extraction
+itself — prompts, response schema, payload normalisation — lives in
+``extraction.py``.
 
 Public entry point: :func:`build_knowledge_graph_for_material_version`. The
 material/lesson/module/course rows must already be loaded so we can build
@@ -12,47 +14,80 @@ the hierarchy payload that anchors every chunk in Neo4j.
 from __future__ import annotations
 
 import logging
-from collections.abc import Awaitable, Callable
-from typing import Any, Literal, Protocol
+from collections.abc import Awaitable, Callable, Iterable
+from typing import Any, Protocol
 from uuid import UUID
 
 from neo4j import AsyncManagedTransaction
-from pydantic import BaseModel, Field, ValidationError, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from abridgeai.ai.knowledge_graph.consolidate import consolidate_material_concepts
+from abridgeai.ai.knowledge_graph.extraction import (
+    KG_BUILD_STAGE_NAME,
+    KG_EXTRACTION_VERSION,
+    KNOWLEDGE_GRAPH_SYSTEM_PROMPT,
+    EnrichedChunk,
+    _extract_concepts_from_chunk,
+)
+from abridgeai.ai.knowledge_graph.pruning import prune_superseded_chunk_graph
 from abridgeai.ai.knowledge_graph.schemas import KGSummary
 from abridgeai.ai.llm.gateway import LLMGateway
-from abridgeai.ai.llm.roles import LLMRole
 from abridgeai.core.config import get_settings
 from abridgeai.infrastructure.neo4j import KnowledgeGraphClient
 
 logger = logging.getLogger(__name__)
 
 
-KG_BUILD_STAGE_NAME = "kg_build"
+class _ConceptVocabulary:
+    """Running list of concept names already extracted from this material.
 
-KNOWLEDGE_GRAPH_SYSTEM_PROMPT = (
-    "You extract concise course knowledge graphs from LMS source chunks.\n"
-    "Return one JSON object with entities and relationships arrays.\n"
-    "Use only concepts supported by the source text.\n"
-    "Prefer durable learning concepts over generic words.\n"
-    "Relationships must use RELATED_TO or PREREQUISITE_OF.\n"
-)
+    Fed back into every subsequent extraction prompt. Extraction is one
+    isolated LLM call per chunk, so without this a concept introduced on slide
+    11 and reused on slide 27 gets coined twice under two spellings and the two
+    never link — which is how a 34-chunk deck lands as 20 disconnected
+    components.
 
-
-class EnrichedChunk(Protocol):
-    """Forward-compatible structural type for a chunk awaiting KG extraction.
-
-    T2.8 will land the concrete ``EnrichedChunk`` dataclass under
-    ``ai/chunking``; until then we accept anything that quacks with the four
-    fields the KG builder reads. The legacy ORM ``DocumentChunk`` already
-    matches.
+    Insertion-ordered so :meth:`recent_first` can hand the prompt the terms
+    from the section currently being read, which are the ones the next chunk is
+    most likely to reuse and so must survive the prompt's vocabulary cap.
+    Deduped case-insensitively; the first spelling seen is the one offered back.
     """
 
-    id: UUID
-    chunk_index: int
-    content: str
-    material_version_id: UUID
+    def __init__(self) -> None:
+        self._names: list[str] = []
+        self._seen: set[str] = set()
+
+    def remember(self, name: str) -> None:
+        cleaned = name.strip()
+        key = cleaned.lower()
+        if key and key not in self._seen:
+            self._seen.add(key)
+            self._names.append(cleaned)
+
+    def remember_all(self, names: Iterable[str]) -> None:
+        for name in names:
+            self.remember(name)
+
+    def recent_first(self) -> list[str]:
+        return list(reversed(self._names))
+
+
+async def _emit_progress(
+    on_progress: Callable[[int, int], Awaitable[None]] | None,
+    done: int,
+    total: int,
+) -> None:
+    """Fire the caller's progress callback, swallowing its failures.
+
+    Progress reporting is cosmetic; a caller whose callback raises must not
+    take the whole KG build down with it.
+    """
+    if on_progress is None:
+        return
+    try:
+        await on_progress(done, total)
+    except Exception:  # noqa: BLE001 -- progress must never fail the build
+        logger.debug("kg_build on_progress callback failed", exc_info=True)
 
 
 class HierarchyPayload(Protocol):
@@ -62,6 +97,12 @@ class HierarchyPayload(Protocol):
     stays free of feature-layer ORM imports.
     """
 
+    # Tenant scope. Every Concept node and every Concept lookup is keyed on
+    # this: without it a ``Concept {name_norm}`` MERGE is GLOBAL, so
+    # "Normalization" taught by org A and org B collapse into one node and a
+    # RELATED_TO traversal walks straight out of the caller's tenant into
+    # another customer's curriculum.
+    organization_id: UUID
     course_id: UUID
     course_title: str
     module_id: UUID
@@ -73,89 +114,10 @@ class HierarchyPayload(Protocol):
     material_type: str
 
 
-class _GeneratedConcept(BaseModel):
-    name: str = Field(min_length=1, max_length=120)
-    type: str = Field(default="Concept", max_length=60)
-    definition: str | None = Field(default=None, max_length=500)
-    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
-
-    @field_validator("name", "type", "definition", mode="before")
-    @classmethod
-    def _strip_text(cls, value: object) -> object:
-        if isinstance(value, str):
-            return value.strip()
-        return value
-
-
-class _GeneratedRelationship(BaseModel):
-    source: str = Field(min_length=1, max_length=120)
-    target: str = Field(min_length=1, max_length=120)
-    relation: Literal["RELATED_TO", "PREREQUISITE_OF"] = "RELATED_TO"
-    evidence: str | None = Field(default=None, max_length=500)
-    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
-
-    @field_validator("source", "target", "evidence", mode="before")
-    @classmethod
-    def _strip_text(cls, value: object) -> object:
-        if isinstance(value, str):
-            return value.strip()
-        return value
-
-
-class _GeneratedKnowledgeGraph(BaseModel):
-    entities: list[_GeneratedConcept] = Field(default_factory=list)
-    relationships: list[_GeneratedRelationship] = Field(default_factory=list)
-
-
-def _normalize_kg_payload(
-    payload: dict[str, Any] | list[Any],
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    if not isinstance(payload, dict):
-        return [], []
-    try:
-        generated = _GeneratedKnowledgeGraph.model_validate(payload)
-    except (TypeError, ValidationError):
-        return [], []
-
-    concept_names = {concept.name.lower() for concept in generated.entities}
-    relationships = [
-        rel.model_dump()
-        for rel in generated.relationships
-        if rel.source.lower() in concept_names and rel.target.lower() in concept_names
-    ]
-    return [concept.model_dump() for concept in generated.entities], relationships
-
-
-def _build_user_prompt(chunk: EnrichedChunk) -> str:
-    excerpt = chunk.content[:1800]
-    return f"""Source chunks:
-[{chunk.id}] {excerpt}
-
-Return JSON in this shape:
-{{
-  "entities": [
-    {{
-      "name": "Binary Search",
-      "type": "Concept",
-      "definition": "A search algorithm for sorted collections.",
-      "confidence": 0.92
-    }}
-  ],
-  "relationships": [
-    {{
-      "source": "Sorted Array",
-      "target": "Binary Search",
-      "relation": "PREREQUISITE_OF",
-      "evidence": "Binary search requires sorted input.",
-      "confidence": 0.88
-    }}
-  ]
-}}
-"""
-
 
 def _hierarchy_dict(hierarchy: HierarchyPayload) -> dict[str, str]:
     return {
+        "org_id": str(hierarchy.organization_id),
         "course_id": str(hierarchy.course_id),
         "course_title": hierarchy.course_title,
         "module_id": str(hierarchy.module_id),
@@ -193,6 +155,15 @@ async def _already_built_previews_by_index(
     different content at the same index rebuilds rather than reusing stale
     concepts.
 
+    Only nodes built by the CURRENT ``KG_EXTRACTION_VERSION`` are returned.
+    Text-equality alone made this function a trap: after a prompt change the
+    text is by definition unchanged, so every chunk matched, every chunk was
+    skipped, and a deliberate rebuild returned the old prompt's concepts while
+    reporting success. Filtering on the version means changing the prompt
+    invalidates the graph on the next run with no manual Neo4j surgery — and
+    nodes written before the property existed read as NULL, so they rebuild
+    once and are correct thereafter.
+
     Keyed by the stable ``material_id`` (``Material`` nodes persist across
     versions). Best-effort: on any Neo4j error returns an empty map (full
     rebuild — correct, just slower), never raises.
@@ -203,9 +174,11 @@ async def _already_built_previews_by_index(
                 """
                 MATCH (m:Material {id: $material_id})-[:HAS_CHUNK]->(c:Chunk)
                 WHERE c.index IS NOT NULL
+                  AND c.kg_extraction_version = $extraction_version
                 RETURN c.index AS idx, c.text_preview AS preview
                 """,
                 material_id=str(material_id),
+                extraction_version=KG_EXTRACTION_VERSION,
             )
             return {
                 int(record["idx"]): (record["preview"] or "")
@@ -217,24 +190,41 @@ async def _already_built_previews_by_index(
         return {}
 
 
-async def _extract_concepts_from_chunk(
-    chunk: EnrichedChunk,
+async def _existing_concept_names(
+    client: KnowledgeGraphClient,
     *,
-    db: AsyncSession,
-    llm_gateway: LLMGateway,
-    pipeline_run_id: UUID | None,
-    parent_job_id: UUID | None,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    result = await llm_gateway.generate_json(
-        role=LLMRole.KG_EXTRACTION,
-        system_prompt=KNOWLEDGE_GRAPH_SYSTEM_PROMPT,
-        user_prompt=_build_user_prompt(chunk),
-        db=db,
-        stage_name=KG_BUILD_STAGE_NAME,
-        pipeline_run_id=pipeline_run_id,
-        parent_job_id=parent_job_id,
-    )
-    return _normalize_kg_payload(result.content_json)
+    material_id: UUID,
+    org_id: UUID,
+) -> list[str]:
+    """Concept names already attached to this material's chunks, newest first.
+
+    Only used to reseed the prompt vocabulary on a resumed build. Ordered by
+    descending chunk index so the terms nearest the resume point come first
+    and survive ``_KNOWN_CONCEPT_LIMIT``.
+
+    Best-effort like the resume scan itself: on any Neo4j error returns an
+    empty list, which costs some cross-chunk linking on that one run but never
+    fails the build.
+    """
+    try:
+        async with client.session() as session:
+            result = await session.run(
+                """
+                MATCH (m:Material {id: $material_id})-[:HAS_CHUNK]->(c:Chunk)
+                      -[:MENTIONS_CONCEPT]->(k:Concept {org_id: $org_id})
+                RETURN k.name AS name, max(c.index) AS last_index
+                ORDER BY last_index DESC
+                """,
+                material_id=str(material_id),
+                org_id=str(org_id),
+            )
+            return [
+                str(record["name"]) async for record in result if record["name"]
+            ]
+    except Exception:  # noqa: BLE001 -- vocabulary reseed is an optimisation
+        logger.warning("kg_build vocabulary reseed failed", exc_info=True)
+        return []
+
 
 
 async def upsert_chunk_graph(
@@ -265,22 +255,37 @@ async def _upsert_chunk_graph_tx(
     await tx.run(
         """
         MERGE (course:Course {id: $course_id})
-          SET course.title = $course_title
+          SET course.title = $course_title, course.org_id = $org_id
         MERGE (module:Module {id: $module_id})
-          SET module.title = $module_title
+          SET module.title = $module_title, module.org_id = $org_id
         MERGE (lesson:Lesson {id: $lesson_id})
-          SET lesson.title = $lesson_title
+          SET lesson.title = $lesson_title, lesson.org_id = $org_id
         MERGE (material:Material {id: $material_id})
-          SET material.title = $material_title, material.type = $material_type
+          SET material.title = $material_title,
+              material.type = $material_type,
+              material.org_id = $org_id
         MERGE (chunk:Chunk {id: $chunk_id})
-          SET chunk.index = $chunk_index, chunk.text_preview = $text_preview
+          SET chunk.index = $chunk_index,
+              chunk.text_preview = $text_preview,
+              chunk.org_id = $org_id,
+              chunk.material_version_id = $material_version_id,
+              // Stamped so the next run's resume scan can tell concepts built
+              // by THIS prompt from ones built by an older one. Without it,
+              // resume matches on unchanged text and a prompt change can never
+              // take effect.
+              chunk.kg_extraction_version = $kg_extraction_version
         MERGE (course)-[:CONTAINS_MODULE]->(module)
         MERGE (module)-[:CONTAINS_LESSON]->(lesson)
         MERGE (lesson)-[:HAS_MATERIAL]->(material)
         MERGE (material)-[:HAS_CHUNK]->(chunk)
         WITH chunk
         UNWIND $concepts AS concept_payload
-        MERGE (concept:Concept {name_norm: toLower(concept_payload.name)})
+        // Composite key: org_id FIRST. Keyed on name_norm alone this MERGE is
+        // global, and every tenant's "normalization"/"index"/"transaction"
+        // node is shared — which then makes RELATED_TO traversal a
+        // cross-customer read. The uniqueness constraint in
+        // ``ensure_graph_schema`` enforces the same pair.
+        MERGE (concept:Concept {org_id: $org_id, name_norm: toLower(concept_payload.name)})
           SET concept.name = concept_payload.name,
               concept.type = coalesce(concept_payload.type, 'Concept'),
               concept.definition = concept_payload.definition
@@ -294,8 +299,10 @@ async def _upsert_chunk_graph_tx(
     await tx.run(
         """
         UNWIND $relationships AS rel_payload
-        MATCH (source:Concept {name_norm: toLower(rel_payload.source)})
-        MATCH (target:Concept {name_norm: toLower(rel_payload.target)})
+        // Both endpoints scoped to the same tenant, so an extracted edge can
+        // never bridge two organizations' graphs.
+        MATCH (source:Concept {org_id: $org_id, name_norm: toLower(rel_payload.source)})
+        MATCH (target:Concept {org_id: $org_id, name_norm: toLower(rel_payload.target)})
         FOREACH (_ IN CASE WHEN rel_payload.relation = 'PREREQUISITE_OF' THEN [1] ELSE [] END |
           MERGE (source)-[rel:PREREQUISITE_OF]->(target)
             SET rel.relation = rel_payload.relation,
@@ -309,6 +316,7 @@ async def _upsert_chunk_graph_tx(
                 rel.confidence = rel_payload.confidence
         )
         """,
+        org_id=hierarchy["org_id"],
         relationships=relationships,
     )
 
@@ -352,6 +360,18 @@ async def build_knowledge_graph_for_material_version(
     concept_names: set[str] = set()
     relationship_keys: set[tuple[str, str, str]] = set()
 
+    vocabulary = _ConceptVocabulary()
+
+    # Drop the previous version's chunk subgraph BEFORE the resume scan, so
+    # the scan cannot match a stale preview and skip a chunk that now needs
+    # rebuilding. Chunks of THIS version survive, keeping resume intact.
+    await prune_superseded_chunk_graph(
+        kg_client,
+        material_id=hierarchy.material_id,
+        material_version_id=material_version_id,
+        org_id=hierarchy.organization_id,
+    )
+
     # Resume support: skip chunks already committed to Neo4j by an earlier
     # run that was killed mid-build (e.g. job_timeout). Each skipped chunk
     # avoids an LLM call, so a re-run fast-forwards through completed work
@@ -363,10 +383,22 @@ async def build_knowledge_graph_for_material_version(
     already_built = await _already_built_previews_by_index(kg_client, material_id)
     if already_built:
         logger.info(
-            "kg_build resuming: %d chunk(s) already built in Neo4j for material %s (%d total this run)",
+            "kg_build resuming: %d chunk(s) already in Neo4j for material %s "
+            "(%d total this run)",
             len(already_built),
             material_id,
             len(chunks),
+        )
+        # Seed the vocabulary from what the killed run already committed.
+        # Without this a resumed build starts with an empty known-concept list
+        # and re-coins variants of terms it established before the timeout —
+        # the resume optimisation would otherwise cost graph connectivity.
+        vocabulary.remember_all(
+            await _existing_concept_names(
+                kg_client,
+                material_id=material_id,
+                org_id=hierarchy.organization_id,
+            )
         )
 
     total = len(chunks)
@@ -389,11 +421,7 @@ async def build_knowledge_graph_for_material_version(
         prior_preview = already_built.get(chunk.chunk_index)
         if prior_preview is not None and prior_preview == chunk.content[:300]:
             resumed += 1
-            if on_progress is not None:
-                try:
-                    await on_progress(done, total)
-                except Exception:  # noqa: BLE001 -- progress must never fail the build
-                    logger.debug("kg_build on_progress callback failed", exc_info=True)
+            await _emit_progress(on_progress, done, total)
             continue
 
         concepts, relationships = await _extract_concepts_from_chunk(
@@ -402,6 +430,7 @@ async def build_knowledge_graph_for_material_version(
             llm_gateway=llm_gateway,
             pipeline_run_id=pipeline_run_id,
             parent_job_id=parent_job_id,
+            known_concepts=vocabulary.recent_first(),
         )
         await upsert_chunk_graph(
             kg_client,
@@ -410,23 +439,39 @@ async def build_knowledge_graph_for_material_version(
                 "chunk_id": str(chunk.id),
                 "chunk_index": chunk.chunk_index,
                 "text_preview": chunk.content[:300],
+                # Stamped so ``prune_material_version_graph`` can find this
+                # node again after ``_persist_chunks`` has thrown its Postgres
+                # row away and minted a fresh id on re-ingest.
+                "material_version_id": str(material_version_id),
+                "kg_extraction_version": KG_EXTRACTION_VERSION,
             },
             concepts=concepts,
             relationships=relationships,
         )
         concept_names.update(concept["name"].lower() for concept in concepts)
+        vocabulary.remember_all(concept["name"] for concept in concepts)
         relationship_keys.update(
             (rel["source"].lower(), rel["target"].lower(), rel["relation"]) for rel in relationships
         )
 
-        if on_progress is not None:
-            try:
-                await on_progress(done, total)
-            except Exception:  # noqa: BLE001 -- progress must never fail the build
-                logger.debug("kg_build on_progress callback failed", exc_info=True)
+        await _emit_progress(on_progress, done, total)
+
+    # Fold duplicate spellings into one node now that every chunk has been
+    # seen. This runs last on purpose: mid-build it would merge against a
+    # partial graph and pick a canonical node by mention counts that are still
+    # climbing, and a resumed run would merge the same material twice under
+    # different winners.
+    merged = await consolidate_material_concepts(
+        kg_client,
+        material_id=material_id,
+        org_id=hierarchy.organization_id,
+    )
 
     return KGSummary(
-        concept_count=len(concept_names),
+        # ``concept_names`` counts distinct spellings *extracted*; consolidation
+        # then removes the ones that were the same concept twice. Report what
+        # the graph actually holds, not what the LLM emitted.
+        concept_count=max(len(concept_names) - merged, 0),
         relationship_count=len(relationship_keys),
         enabled=True,
     )

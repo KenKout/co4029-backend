@@ -68,14 +68,17 @@ from abridgeai.ai.knowledge_graph import (
 )
 from abridgeai.ai.llm import EmbeddingClient, LLMGateway
 from abridgeai.ai.models import ProcessingJob
+from abridgeai.ai.preprocessing.dedup import link_semantic_duplicates
 from abridgeai.core.config import get_settings
 from abridgeai.core.db import get_sessionmaker
+from abridgeai.core.runtime_settings import resolve_settings
+from abridgeai.features.materials.ingestion.preprocess import run_preprocess_stage
+from abridgeai.features.materials.ingestion.progress import clear_progress, publish_progress
 from abridgeai.features.materials.models import (
     DocumentChunk,
     LearningMaterial,
     LearningMaterialVersion,
 )
-from abridgeai.features.materials.ingestion.progress import clear_progress, publish_progress
 from abridgeai.features.materials.queries.processing import get_latest_processing_job
 from abridgeai.infrastructure.s3 import download_to_temp
 
@@ -113,6 +116,7 @@ class _IngestContext:
     lesson_id: UUID
     module_id: UUID
     course_id: UUID
+    organization_id: UUID
     course_title: str
     module_title: str
     lesson_title: str
@@ -150,6 +154,7 @@ async def _load_context(
                     m.title          AS module_title,
                     m.course_id      AS course_id,
                     c.title          AS course_title,
+                    c.organization_id AS organization_id,
                     so.id            AS storage_object_id,
                     so.bucket        AS storage_bucket,
                     so.object_key    AS storage_object_key,
@@ -180,6 +185,7 @@ async def _load_context(
         lesson_id=row.lesson_id,
         module_id=row.module_id,
         course_id=row.course_id,
+        organization_id=row.organization_id,
         course_title=row.course_title or "",
         module_title=row.module_title or "",
         lesson_title=row.lesson_title or "",
@@ -190,12 +196,32 @@ async def _load_context(
     )
 
 
+# A job in one of these states is over. Reusing its row for a new run buries
+# the previous run's outcome and mixes two runs' cost rows under one id.
+_TERMINAL_JOB_STATUSES = frozenset({"completed", "failed", "cancelled"})
+
+
 async def _ensure_processing_job(
     db: AsyncSession,
     material_version_id: UUID,
 ) -> ProcessingJob:
+    """Return the in-flight job for this version, or start a new one.
+
+    Only a job that has not finished is reused — that is the case this exists
+    for: an ARQ retry, or the reaper re-enqueueing an ingest whose worker died,
+    must attach to the row already tracking that attempt rather than opening a
+    second one.
+
+    A *finished* job is never reused. It used to be, and a reprocess then
+    inherited the original row: ``started_at`` stayed pinned to the first run
+    ever (it is only set ``or _utcnow()``), the previous run's outcome was
+    overwritten, and every ``ai_model_calls`` row from every reprocess
+    accumulated under one ``processing_job_id`` — so per-run cost could not be
+    read back, and "has my reprocess finished?" could not be answered from the
+    table at all.
+    """
     job = await get_latest_processing_job(db, material_version_id)
-    if job is None:
+    if job is None or job.status in _TERMINAL_JOB_STATUSES:
         job = ProcessingJob(
             entity_type="material_version",
             entity_id=material_version_id,
@@ -250,7 +276,16 @@ async def _run_chunking(
     pipeline_run_id: UUID,
     parent_job_id: UUID,
     document_title: str,
+    settings: dict[str, bool | int | float],
 ) -> list[RawChunk]:
+    """Chunk ``extracted`` using this organization's resolved settings.
+
+    ``settings`` is resolved by the caller rather than here so ``ai/chunking``
+    stays free of any settings lookup: the chunker takes plain kwargs, and the
+    feature layer decides what they are. That keeps the import-linter contract
+    (``ai`` must not reach into ``features``) intact and leaves the chunker
+    unit-testable without a database.
+    """
     source_type = extracted.source_type
     if source_type in _TIMESTAMP_SOURCES:
         return TimestampAwareChunker().chunk(extracted)
@@ -273,6 +308,14 @@ async def _run_chunking(
             db=db,
             cache=cache,
             document_title=document_title,
+            max_tokens=int(settings["chunking.max_tokens"]),
+            overlap_tokens=int(settings["chunking.overlap_tokens"]),
+            glue_threshold=float(settings["chunking.glue_threshold"]),
+            max_window_tokens=int(settings["chunking.max_window_tokens"]),
+            min_window_tokens=int(settings["chunking.min_window_tokens"]),
+            parallelism=int(settings["chunking.parallelism"]),
+            llm_boundary=bool(settings["chunking.llm_boundary_enabled"]),
+            llm_enrichment=bool(settings["chunking.llm_enrichment_enabled"]),
             pipeline_run_id=pipeline_run_id,
             parent_job_id=parent_job_id,
             session_factory=get_sessionmaker(),
@@ -285,8 +328,16 @@ def _build_chunk_metadata(
     raw: RawChunk,
     *,
     ctx: _IngestContext,
+    canonical_hash: str | None = None,
 ) -> dict[str, Any]:
     base = dict(raw.metadata or {})
+    if canonical_hash is not None:
+        # Near-duplicate of an earlier chunk (typically a recap slide). It is
+        # KEPT and stays retrievable — a recap is often phrased closest to how
+        # the exam question is worded, which makes it the best anchor even
+        # though it is a poor answer body. Retrieval collapses the pair at
+        # query time via this pointer.
+        base["canonical_chunk_hash"] = canonical_hash
     if isinstance(raw, EnrichedChunk) and raw.semantic_metadata:
         base["semantic"] = dict(raw.semantic_metadata)
     base.setdefault("source_type", ctx.material.material_type)
@@ -330,10 +381,18 @@ async def _persist_chunks(
     )
     await db.flush()
 
+    # Link near-duplicates to their first occurrence. Annotation only: nothing
+    # is dropped, so an over-eager threshold costs a redundant retrieval hit
+    # rather than a missing lecture slide.
+    duplicate_links = link_semantic_duplicates(embeddings)
+    hashes = [hashlib.sha256(c.content.encode("utf-8")).hexdigest() for c in raw_chunks]
+
     rows: list[DocumentChunk] = []
     zero_vector_indices: list[int] = []
-    for raw, embedding in zip(raw_chunks, embeddings, strict=True):
-        content_hash = hashlib.sha256(raw.content.encode("utf-8")).hexdigest()
+    for position, (raw, embedding) in enumerate(zip(raw_chunks, embeddings, strict=True)):
+        content_hash = hashes[position]
+        canonical_index = duplicate_links.get(position)
+        canonical_hash = hashes[canonical_index] if canonical_index is not None else None
         # Detect zero-vector embeddings (silent provider failure mode —
         # the LAN gateway has been observed returning all-zero arrays
         # on transient backend hiccups). Persisting these as NULL was
@@ -354,7 +413,9 @@ async def _persist_chunks(
                 chunk_index=raw.chunk_index,
                 chunk_type=ctx.material.material_type,
                 content=raw.content,
-                metadata_json=_build_chunk_metadata(raw, ctx=ctx),
+                metadata_json=_build_chunk_metadata(
+                    raw, ctx=ctx, canonical_hash=canonical_hash
+                ),
                 embedding=embedding,
                 content_hash=content_hash,
             )
@@ -391,6 +452,7 @@ class _Hierarchy:
     relationship import on Course / Module / Lesson.
     """
 
+    organization_id: UUID
     course_id: UUID
     course_title: str
     module_id: UUID
@@ -404,6 +466,7 @@ class _Hierarchy:
 
 def _hierarchy_from_context(ctx: _IngestContext) -> _Hierarchy:
     return _Hierarchy(
+        organization_id=ctx.organization_id,
         course_id=ctx.course_id,
         course_title=ctx.course_title,
         module_id=ctx.module_id,
@@ -477,6 +540,35 @@ async def _run_stages(
 
         extracted = await _run_extraction(db, ctx, source_path=source_path, llm_gateway=llm_gateway)
 
+        # Stage 1b — preprocessing. Drops blank pages, strips running
+        # headers/footers and page numbers, tags cover/instructor/TOC/
+        # reference/closing pages, groups slide decks, normalizes unicode and
+        # de-hyphenates, and OCRs image-only pages. ``processing_status``
+        # deliberately stays "extracting": that column carries a 9-value CHECK
+        # constraint, and ``stage_label`` (free-form) is what the UI surfaces.
+        stage_label = "preprocessing"
+        job.progress_percent = 20
+        await db.flush()
+        await publish_progress(
+            ctx.version.id, status="extracting", percent=20, stage_label=stage_label
+        )
+        # Resolved once per document: org row -> global row -> env -> default.
+        runtime_settings = await resolve_settings(db, ctx.organization_id)
+
+        extracted, _preprocess_report = await run_preprocess_stage(
+            extracted,
+            db=db,
+            settings=settings,
+            source_path=source_path,
+            llm_gateway=llm_gateway,
+            pipeline_run_id=pipeline_run_id,
+            parent_job_id=job.id,
+            material_version_id=ctx.version.id,
+            course_id=ctx.course_id,
+            mode=getattr(ctx.material, "preprocess_mode", "full") or "full",
+            runtime=runtime_settings,
+        )
+
         stage_label = "chunking"
         ctx.version.processing_status = "chunking"
         job.progress_percent = 30
@@ -492,6 +584,7 @@ async def _run_stages(
             pipeline_run_id=pipeline_run_id,
             parent_job_id=job.id,
             document_title=ctx.material.title,
+            settings=runtime_settings,
         )
 
         stage_label = "embedding"

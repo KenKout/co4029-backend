@@ -22,53 +22,60 @@ downstream of this module sees the DB vocabulary.
   (one per blank, in order) carried in ``original_generated_payload``.
   The grader matches the student's drag-drop slots positionally.
 
-Option-list shaping for ``multiple_choice`` and ``true_false`` lives in
-the sibling ``option_normalizers`` module.
+**Module layout** — this file grew past the 250-LOC god-file budget, so its
+concerns now live in sibling modules and this file is the hub:
+
+* ``coercions`` — the type/format ``Literal`` vocabulary + defensive
+  raw-LLM-JSON coercion helpers.
+* ``option_normalizers`` — option-list shaping for ``multiple_choice`` /
+  ``true_false``.
+* ``shape_validators`` — per-type shape enforcement invoked by
+  ``GeneratedQuestion._check_shape``.
+* ``prepare`` — turn one raw LLM entry into the validated-schema input dict.
+* ``review`` — reshape a normalised question into the validation-stage input.
+
+This module keeps the two Pydantic schemas + ``parse_generation_response`` (they
+bind the pieces together) and re-exports the public names below, so existing
+imports of ``...generation.parsers`` keep working unchanged.
 """
 
 from __future__ import annotations
 
-import string
-from typing import Any, Literal
+from decimal import Decimal
+from typing import Any
 
 from pydantic import BaseModel, Field, ValidationError, model_validator
 
-from abridgeai.features.quizzes.ai.stages.generation.option_normalizers import (
-    coerce_fill_blank_answer,
-    normalize_options,
+from abridgeai.features.quizzes.ai.stages.generation.coercions import (
+    BloomLevel,
+    Difficulty,
+    QuizQuestionType,
+    RichFormat,
+    _coerce_decimal,
+    _coerce_match_pairs,
+    _coerce_ordering_sequence,
+    _normalize_format,
+    _normalize_question_type,
+)
+from abridgeai.features.quizzes.ai.stages.generation.prepare import (
+    _coerce_single_answer,
+    _extract_question_list,
+    _prepare_question,
+)
+from abridgeai.features.quizzes.ai.stages.generation.review import (
+    _render_answer_for_review,
+    normalize_question_text,
+    question_for_review,
 )
 from abridgeai.features.quizzes.ai.stages.generation.shape_validators import (
     validate_fill_blank,
+    validate_matching,
     validate_multiple_choice,
+    validate_numerical,
+    validate_ordering,
     validate_short_answer,
     validate_true_false,
 )
-
-QuizQuestionType = Literal[
-    "multiple_choice", "true_false", "short_answer", "fill_blank"
-]
-BloomLevel = Literal["remember", "understand", "apply", "analyze", "evaluate", "create"]
-Difficulty = Literal["easy", "medium", "hard"]
-
-# Legacy alias map. The pipeline used "mcq" historically; the DB CHECK
-# always wanted "multiple_choice". Normalise at the parser boundary so
-# every downstream consumer sees the DB vocabulary.
-_LEGACY_TYPE_ALIASES: dict[str, str] = {
-    "mcq": "multiple_choice",
-    "fill_in_the_blank": "fill_blank",
-    "true/false": "true_false",
-    "tf": "true_false",
-}
-
-_VALID_TYPES = frozenset({"multiple_choice", "true_false", "short_answer", "fill_blank"})
-
-
-def _normalize_question_type(raw: Any) -> str:  # noqa: ANN401 -- raw LLM JSON
-    """Map legacy or LLM-drifted aliases onto DB vocabulary."""
-    if not isinstance(raw, str):
-        return "multiple_choice"
-    cleaned = raw.strip().lower()
-    return _LEGACY_TYPE_ALIASES.get(cleaned, cleaned)
 
 
 class GeneratedQuestionOption(BaseModel):
@@ -88,10 +95,34 @@ class GeneratedQuestion(BaseModel):
     explanation: str = Field(min_length=1)
     difficulty: Difficulty = "medium"
     bloom_level: BloomLevel = "understand"
+    # Phase 3 rich-content discriminators. Default ``plain`` so existing
+    # prompts/behaviour are unchanged; the persistence stage sanitizes each
+    # field according to its own format before writing.
+    prompt_format: RichFormat = "plain"
+    hint_format: RichFormat = "plain"
+    explanation_format: RichFormat = "plain"
     expected_response_ms: int = Field(default=60000, ge=0)
     source_refs_json: list[str] = Field(default_factory=list)
     original_generated_payload: dict[str, Any] = Field(default_factory=dict)
     options: list[GeneratedQuestionOption] = Field(default_factory=list)
+
+    # --- Phase 7 type-specific answer fields ------------------------------
+    # Only meaningful for their own type; every other type leaves them unset.
+    # These map 1:1 onto the ``quiz_questions`` columns the grader reads.
+    single_answer: bool = True
+    """``multiple_choice`` only. False → multi-select (>=1 correct option)."""
+
+    numeric_answer: Decimal | None = None
+    """``numerical`` only. The expected value."""
+
+    numeric_tolerance: Decimal | None = None
+    """``numerical`` only. Accepted absolute deviation (``>= 0``)."""
+
+    match_pairs: list[dict[str, str]] | None = None
+    """``matching`` only. ``[{"left": .., "right": ..}]`` — the answer key."""
+
+    ordering_sequence: list[str] | None = None
+    """``ordering`` only. Items in their CORRECT order (shuffled for students)."""
 
     @model_validator(mode="after")
     def _check_shape(self) -> GeneratedQuestion:
@@ -103,6 +134,12 @@ class GeneratedQuestion(BaseModel):
             validate_fill_blank(self)
         elif self.question_type == "short_answer":
             validate_short_answer(self)
+        elif self.question_type == "numerical":
+            validate_numerical(self)
+        elif self.question_type == "matching":
+            validate_matching(self)
+        elif self.question_type == "ordering":
+            validate_ordering(self)
         return self
 
 
@@ -121,128 +158,24 @@ def parse_generation_response(payload: Any) -> list[GeneratedQuestion]:  # noqa:
     return out
 
 
-def question_for_review(question: GeneratedQuestion | dict[str, Any]) -> dict[str, Any]:
-    """Reshape one question into the validation-stage (T5.7) input dict.
-
-    The validator needs to see the question_type so it can apply the
-    right shape rules per type. For non-MCQ questions we surface the
-    expected answer text/list so the validator can judge groundedness.
-    """
-    data: dict[str, Any]
-    if isinstance(question, dict):
-        data = question
-    elif hasattr(question, "model_dump"):
-        data = question.model_dump()
-    else:
-        # Fallback for duck-typed candidate objects used in tests — read
-        # their attributes directly.
-        data = {
-            "prompt_text": getattr(question, "prompt_text", None),
-            "question_type": getattr(question, "question_type", None),
-            "options": getattr(question, "options", None),
-            "explanation": getattr(question, "explanation", None),
-            "bloom_level": getattr(question, "bloom_level", None),
-            "difficulty": getattr(question, "difficulty", None),
-            "source_refs": getattr(question, "source_refs", None),
-            "original_generated_payload": getattr(
-                question, "original_generated_payload", None
-            ),
-        }
-    options = data.get("options") or []
-    options_dict: dict[str, str] = {}
-    correct: str | None = None
-    if isinstance(options, list):
-        for opt in options:
-            key = opt.get("option_key") if isinstance(opt, dict) else None
-            if isinstance(key, str):
-                options_dict[key] = opt.get("option_text", "")
-                if opt.get("is_correct"):
-                    correct = key
-    payload = data.get("original_generated_payload") or {}
-    qtype = data.get("question_type")
-    if qtype in {"short_answer", "fill_blank"}:
-        correct_text = payload.get("correct_answer")
-    elif qtype == "true_false":
-        # Map the canonical option keys ("T"/"F") to the literal strings
-        # the validator's system prompt expects ("True"/"False").
-        if correct == "T":
-            correct_text = "True"
-        elif correct == "F":
-            correct_text = "False"
-        else:
-            correct_text = correct
-    else:
-        correct_text = correct
-    return {
-        "prompt_text": data.get("prompt_text"),
-        "question_type": data.get("question_type"),
-        "options": options_dict,
-        "correct_answer": correct_text,
-        "explanation": data.get("explanation"),
-        "bloom_level": data.get("bloom_level"),
-        "difficulty": data.get("difficulty"),
-    }
-
-
-def normalize_question_text(text: str) -> str:
-    """Lowercase + strip punctuation/whitespace for dedup keys."""
-    translator = str.maketrans("", "", string.punctuation)
-    return " ".join(text.lower().translate(translator).split())
-
-
-def _extract_question_list(payload: Any) -> list[Any]:  # noqa: ANN401 -- raw LLM JSON
-    if isinstance(payload, dict):
-        questions = payload.get("questions")
-        return questions if isinstance(questions, list) else []
-    return payload if isinstance(payload, list) else []
-
-
-def _prepare_question(entry: Any, *, default_position: int) -> dict[str, Any] | None:  # noqa: ANN401 -- raw LLM JSON
-    if not isinstance(entry, dict):
-        return None
-    raw_question = entry.get("question") or entry.get("prompt_text")
-    if not isinstance(raw_question, str) or not raw_question.strip():
-        return None
-
-    question_type = _normalize_question_type(entry.get("question_type"))
-    if question_type not in _VALID_TYPES:
-        return None
-    correct_raw = entry.get("correct_answer") or entry.get("correct")
-    options = normalize_options(entry.get("options"), correct_raw, question_type)
-
-    canonical_payload = dict(entry)
-    canonical_payload["question_type"] = question_type
-    if question_type == "fill_blank":
-        canonical_payload["correct_answer"] = coerce_fill_blank_answer(correct_raw)
-    elif question_type == "short_answer":
-        canonical_payload["correct_answer"] = (
-            correct_raw.strip() if isinstance(correct_raw, str) else ""
-        )
-
-    source_refs = entry.get("source_refs") or entry.get("source_chunk_ids") or []
-    if not isinstance(source_refs, list):
-        source_refs = []
-
-    return {
-        "position": int(entry.get("position") or default_position),
-        "question_type": question_type,
-        "prompt_text": raw_question.strip(),
-        "hint_text": entry.get("hint") or entry.get("hint_text"),
-        "explanation": (entry.get("explanation") or "").strip() or "(no explanation)",
-        "difficulty": entry.get("difficulty") or "medium",
-        "bloom_level": entry.get("bloom_level") or "understand",
-        "expected_response_ms": int(entry.get("expected_response_ms") or 60000),
-        "source_refs_json": [str(ref) for ref in source_refs],
-        "original_generated_payload": canonical_payload,
-        "options": options,
-    }
-
-
 __all__ = [
+    # Schemas + entry point owned by this module.
     "GeneratedQuestion",
     "GeneratedQuestionOption",
-    "QuizQuestionType",
-    "normalize_question_text",
     "parse_generation_response",
+    # Re-exported from coercions (type vocabulary + coercers) so existing
+    # ``...generation.parsers`` imports keep resolving unchanged.
+    "QuizQuestionType",
+    "_coerce_decimal",
+    "_coerce_match_pairs",
+    "_coerce_ordering_sequence",
+    "_normalize_format",
+    "_normalize_question_type",
+    # Re-exported from prepare / review.
+    "_coerce_single_answer",
+    "_extract_question_list",
+    "_prepare_question",
+    "_render_answer_for_review",
+    "normalize_question_text",
     "question_for_review",
 ]

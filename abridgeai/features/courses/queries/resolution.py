@@ -85,7 +85,58 @@ async def resolve_outcome_to_course(db: AsyncSession, outcome_id: UUID) -> tuple
     return (await db.execute(stmt)).tuples().first()
 
 
+# ---------------------------------------------------------------------------
+# Resource -> owning organization_id (tenancy scoping for learner reads).
+#
+# The learner catalog endpoints address courses / modules / lessons / resources
+# by id under a bare ``get_current_user`` (students hold no course permission),
+# so ``require_course_permission`` cannot gate them. Without an organization
+# check a student in org A could read org B's published content by id. These
+# resolvers return the owning ``organization_id`` (or ``None`` when the row is
+# missing / soft-deleted) so the router can 404 a cross-tenant read.
+# ---------------------------------------------------------------------------
+
+
+async def organization_id_for_course(db: AsyncSession, course_id: UUID) -> UUID | None:
+    stmt = select(Course.organization_id).where(Course.id == course_id)
+    return (await db.execute(stmt)).scalar_one_or_none()
+
+
+async def organization_id_for_module(db: AsyncSession, module_id: UUID) -> UUID | None:
+    stmt = (
+        select(Course.organization_id)
+        .join(Module, Module.course_id == Course.id)
+        .where(Module.id == module_id)
+    )
+    return (await db.execute(stmt)).scalar_one_or_none()
+
+
+async def organization_id_for_lesson(db: AsyncSession, lesson_id: UUID) -> UUID | None:
+    stmt = (
+        select(Course.organization_id)
+        .join(Module, Module.course_id == Course.id)
+        .join(Lesson, Lesson.module_id == Module.id)
+        .where(Lesson.id == lesson_id)
+    )
+    return (await db.execute(stmt)).scalar_one_or_none()
+
+
+async def organization_id_for_resource(db: AsyncSession, resource_id: UUID) -> UUID | None:
+    stmt = (
+        select(Course.organization_id)
+        .join(Module, Module.course_id == Course.id)
+        .join(Lesson, Lesson.module_id == Module.id)
+        .join(LessonResource, LessonResource.lesson_id == Lesson.id)
+        .where(LessonResource.id == resource_id)
+    )
+    return (await db.execute(stmt)).scalar_one_or_none()
+
+
 __all__ = [
+    "organization_id_for_course",
+    "organization_id_for_lesson",
+    "organization_id_for_module",
+    "organization_id_for_resource",
     "resolve_lesson_to_course",
     "resolve_module_item_to_course",
     "resolve_module_to_course",

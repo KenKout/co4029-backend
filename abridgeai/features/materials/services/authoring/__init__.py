@@ -58,6 +58,13 @@ from abridgeai.features.materials.services.authoring._common import (
     UploadCompleteResponse,
     resolve_course_id_for_material,
 )
+from abridgeai.features.materials.services.authoring._curated_kg import (
+    CuratedKGEmptyError,
+    get_or_seed_draft,
+    get_published,
+    publish,
+    save_draft,
+)
 from abridgeai.features.materials.services.authoring._reads import (
     get_authoring_material,
     get_authoring_stream_url,
@@ -88,7 +95,12 @@ from abridgeai.features.materials.services.authoring._versions import (
 __all__ = [
     "CompletedPartIn",
     "ConcurrentReprocessError",
+    "CuratedKGEmptyError",
     "HeadVerificationError",
+    "get_or_seed_draft",
+    "get_published",
+    "publish",
+    "save_draft",
     "MaterialUploadInitResponse",
     "MultipartPartsResponse",
     "ReprocessResponse",

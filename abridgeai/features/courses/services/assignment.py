@@ -28,6 +28,7 @@ from abridgeai.features.courses.queries import (
     authoring as authoring_queries,
 )
 from abridgeai.features.courses.schemas import CourseAuthoring, InstructorRead
+from abridgeai.features.courses.services import notify
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -38,6 +39,8 @@ async def assign_teacher_to_course(
     course_id: UUID,
     user_id: UUID,
     actor: CurrentUser,
+    *,
+    arq_pool: object | None = None,
 ) -> dict[str, Any]:
     """Create (or no-op return) a ``role=teacher, scope=course`` assignment.
 
@@ -45,6 +48,11 @@ async def assign_teacher_to_course(
     existing row is returned unchanged. Otherwise a new row is INSERT-ed
     with ``role_id`` resolved from the seeded T1.12 catalog,
     ``scope_kind='course'``, and ``granted_by=actor.user_id``.
+
+    When the course is already **published**, the newly-assigned teacher is
+    notified (in-app + email) with a deep-link to the course. A no-op re-assign
+    does not re-notify. Draft courses do not notify here — the teacher is told
+    when the course publishes (see :func:`publish_course`).
     """
     course = await authoring_queries.get_course_for_authoring(db, course_id)
     if course is None:
@@ -75,6 +83,18 @@ async def assign_teacher_to_course(
         course_id=course_id,
         granted_by=actor.user_id,
     )
+
+    # Notify only for published courses: a teacher can't act on a draft they
+    # can't yet see. Never let a notification failure roll back the assignment.
+    if course.status == "published":
+        await notify.notify_teacher_assigned(
+            db,
+            teacher_user_id=user_id,
+            course_id=course_id,
+            course_title=course.title,
+            arq_pool=arq_pool,
+        )
+
     return {
         "id": new_id,
         "course_id": course_id,

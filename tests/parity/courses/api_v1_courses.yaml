@@ -14,6 +14,11 @@ allow_extra_fields:
   - "$.items[*].instructor"
   - "$.items[*].outcomes"
   - "$.items[*].tags"
+  - "$.items[*].thumbnail_url"
+  - "$.items[*].contact_email"
+  - "$.items[*].contact_phone"
+  - "$.items[*].contact_website_url"
+  - "$.items[*].contact_social_url"
 strict_match_fields: []
 behavior:
   status_code: null

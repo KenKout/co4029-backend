@@ -49,6 +49,36 @@ from abridgeai.features.quizzes.schemas.public import (
     QuizQuestionOptionPublic,
     QuizQuestionPublic,
 )
+from abridgeai.features.quizzes.schemas.feedback import (
+    FeedbackBandIn,
+    FeedbackBandRead,
+    OverallFeedbackRead,
+    QuizGradeRow,
+)
+from abridgeai.features.quizzes.schemas.reports import (
+    ResponsesReportRead,
+    ResponsesReportRow,
+    StatisticsReportRead,
+    StatisticsReportRow,
+)
+from abridgeai.features.quizzes.schemas.manual_grading import (
+    ManualGradeIn,
+    ManualGradeRead,
+    NeedsGradingRow,
+)
+from abridgeai.features.quizzes.schemas.overrides import (
+    QuizOverrideIn,
+    QuizOverrideRead,
+)
+from abridgeai.features.quizzes.schemas.regrade import (
+    RegradeItemRead,
+    RegradeRunRead,
+    RegradeScopeIn,
+)
+from abridgeai.features.quizzes.schemas.review_options import (
+    ReviewOptions,
+    ReviewWindowFlags,
+)
 from abridgeai.features.quizzes.schemas.results import (
     QuizOptionDistribution,
     QuizPerStudentRow,
@@ -110,4 +140,22 @@ __all__ = [
     "QuizResultsRead",
     "QuizResultsSummary",
     "QuizScoreBucket",
+    "FeedbackBandIn",
+    "FeedbackBandRead",
+    "ManualGradeIn",
+    "ManualGradeRead",
+    "NeedsGradingRow",
+    "OverallFeedbackRead",
+    "QuizGradeRow",
+    "QuizOverrideIn",
+    "QuizOverrideRead",
+    "RegradeItemRead",
+    "RegradeRunRead",
+    "RegradeScopeIn",
+    "ResponsesReportRead",
+    "ResponsesReportRow",
+    "StatisticsReportRead",
+    "StatisticsReportRow",
+    "ReviewOptions",
+    "ReviewWindowFlags",
 ]

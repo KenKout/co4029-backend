@@ -37,6 +37,7 @@ from uuid import UUID
 from sqlalchemy import text
 
 from abridgeai.ai.knowledge_graph.retrieval import retrieve_kg_context_for_anchors
+from abridgeai.ai.knowledge_graph.tenancy import organization_id_for_course
 from abridgeai.core.observability import get_logger
 from abridgeai.features.notifications.services.dispatch import send_notification
 from abridgeai.infrastructure.neo4j import (
@@ -210,17 +211,29 @@ async def _concepts_for_chunks(chunk_ids: list[UUID]) -> list[str]:
     return [str(record["name"]) for record in records if record.get("name")]
 
 
-async def _chunks_for_concepts(concept_names: list[str], *, exclude: set[str]) -> list[UUID]:
+async def _chunks_for_concepts(
+    concept_names: list[str],
+    *,
+    exclude: set[str],
+    org_id: UUID,
+) -> list[UUID]:
     """Neo4j: concept names → chunk UUIDs that mention any of them.
 
     Excludes the original seed chunks so we surface *related* material,
     not the same one the student just flunked.
+
+    ``org_id`` scopes both hops. Concept names are generic ("normalization",
+    "recursion"), so an unscoped match walks into other tenants' chunks. The
+    downstream Postgres join does filter by course, but relying on that means
+    the leak is one refactor away — and until then this query reads and
+    discards another customer's graph on every card failure.
     """
     if not concept_names:
         return []
     query = """
-        MATCH (chunk:Chunk)-[:MENTIONS_CONCEPT]->(concept:Concept)
+        MATCH (chunk:Chunk {org_id: $org_id})-[:MENTIONS_CONCEPT]->(concept:Concept)
         WHERE toLower(concept.name) IN $names
+          AND concept.org_id = $org_id
           AND NOT chunk.id IN $exclude
         RETURN DISTINCT chunk.id AS chunk_id
     """
@@ -231,6 +244,7 @@ async def _chunks_for_concepts(concept_names: list[str], *, exclude: set[str]) -
                 query,
                 names=lowered,
                 exclude=list(exclude),
+                org_id=str(org_id),
             )
             records = [dict(record) async for record in result]
     except KnowledgeGraphDisabledError:
@@ -440,7 +454,18 @@ async def dispatch_remediation_for_card_failure(
         )
         return
 
-    kg_context = await retrieve_kg_context_for_anchors(seed_concepts, depth=2)
+    org_id = await organization_id_for_course(db, course_id)
+    if org_id is None:
+        _logger.debug(
+            "remediation_skipped_no_org",
+            question_id=str(question_id),
+            course_id=str(course_id),
+        )
+        return
+
+    kg_context = await retrieve_kg_context_for_anchors(
+        seed_concepts, org_id=org_id, depth=2
+    )
     related_names = [c.name for c in kg_context.concepts if c.name]
     if not related_names:
         _logger.debug(
@@ -450,7 +475,9 @@ async def dispatch_remediation_for_card_failure(
         return
 
     seed_chunk_str = {str(cid) for cid in seed_chunk_ids}
-    related_chunk_ids = await _chunks_for_concepts(related_names, exclude=seed_chunk_str)
+    related_chunk_ids = await _chunks_for_concepts(
+        related_names, exclude=seed_chunk_str, org_id=org_id
+    )
     if not related_chunk_ids:
         _logger.debug(
             "remediation_skipped_no_related_chunks",

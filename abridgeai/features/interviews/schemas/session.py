@@ -57,6 +57,7 @@ SessionStatusLiteral = Literal[
 ]
 InterviewFinishReasonLiteral = Literal["natural", "ended_early", "timed_out"]
 InterviewLanguageLiteral = Literal["en", "vi"]
+SessionModeLiteral = Literal["assessment", "practice"]
 InterviewTurnActionLiteral = Literal[
     "answer",
     "repeat",
@@ -127,6 +128,17 @@ class InterviewSessionStartRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     input_mode: InputModeLiteral
+    session_mode: SessionModeLiteral = "assessment"
+    """Practice or graded. Defaults to graded so an omitted field can never
+    produce an ungraded run.
+
+    Unlike ``input_mode`` — which the service overrides with the config's
+    canonical ``supported_modes`` — this value is honoured: the teacher decides
+    whether practice is offered, the student decides whether to use it. A
+    practice request the interview cannot serve is rejected rather than
+    downgraded, because silently grading someone who asked to rehearse is the
+    worst available outcome.
+    """
     idempotency_key: UUID | None = None
 
 
@@ -147,6 +159,7 @@ class InterviewSessionStartResponse(BaseModel):
     question_count_remaining: int | None = None
     onboarding_stage: InterviewOnboardingStageLiteral = "completed"
     interview_language: InterviewLanguageLiteral = "en"
+    session_mode: SessionModeLiteral = "assessment"
     assessment_started_at: datetime | None = None
     history: list[InterviewSessionHistoryTurn] = Field(default_factory=list)
 
@@ -171,6 +184,7 @@ class InterviewSessionPublic(BaseModel):
     course_id: UUID | None = None
     status: SessionStatusLiteral
     input_mode: InputModeLiteral
+    session_mode: SessionModeLiteral = "assessment"
     attempt_number: int
     started_at: datetime
     assessment_started_at: datetime | None = None

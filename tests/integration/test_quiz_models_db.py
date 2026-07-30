@@ -56,7 +56,7 @@ def alembic_cfg() -> Config:
 
 @pytest_asyncio.fixture
 async def at_new_head(alembic_cfg: Config) -> None:
-    command.upgrade(alembic_cfg, NEW_HEAD)
+    command.upgrade(alembic_cfg, "head")  # never leave the shared DB below real head
     yield
 
 
@@ -215,7 +215,7 @@ async def test_migration_round_trip(
     alembic_cfg: Config,
     engine: AsyncEngine,
 ) -> None:
-    command.upgrade(alembic_cfg, NEW_HEAD)
+    command.upgrade(alembic_cfg, "head")  # never leave the shared DB below real head
     command.downgrade(alembic_cfg, PRIOR_HEAD)
 
     async with engine.connect() as conn:
@@ -234,7 +234,7 @@ async def test_migration_round_trip(
     assert "expected_response_time_ms" not in cols_at_prior
     assert "source_refs" not in cols_at_prior
 
-    command.upgrade(alembic_cfg, NEW_HEAD)
+    command.upgrade(alembic_cfg, "head")  # never leave the shared DB below real head
 
     async with engine.connect() as conn:
         result = await conn.execute(

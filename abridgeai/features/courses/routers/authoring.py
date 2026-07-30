@@ -102,6 +102,12 @@ _REQUIRE_AUTHORING_LIST = require_any_permission("course.read.draft", "course.cr
 _REQUIRE_COURSE_UPDATE = require_course_permission("course_id", "course.update")
 _REQUIRE_COURSE_PUBLISH = require_course_permission("course_id", "course.publish")
 _REQUIRE_COURSE_DELETE = require_course_permission("course_id", "course.delete")
+# Learning outcomes are manager-owned (§LO split): gate on learning_outcome.manage
+# and disable the owner short-circuit so a course-owning teacher (who holds
+# course.update but NOT learning_outcome.manage) cannot author LOs.
+_REQUIRE_OUTCOME_CREATE = require_course_permission(
+    "course_id", "learning_outcome.manage", allow_owner=False
+)
 _REQUIRE_MODULE = require_module_authoring_access()
 _REQUIRE_MODULE_ITEM = require_module_item_authoring_access()
 _REQUIRE_LESSON = require_lesson_authoring_access()
@@ -412,6 +418,35 @@ async def update_module(
     return module
 
 
+@router.post(
+    "/modules/{module_id}/duplicate",
+    response_model=ModuleAuthoring,
+    status_code=status.HTTP_201_CREATED,
+)
+async def duplicate_module(
+    module_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_MODULE)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> ModuleAuthoring:
+    """Deep-clone a whole module: the module + every item + every target.
+
+    Creates a new ``status='draft'`` module at the end of the course, with each
+    item's lesson/quiz/interview target deep-cloned into it (all unpublished /
+    pending). The copy is fully independent — no rows shared with the source.
+    Module prerequisites are not carried over.
+    """
+    try:
+        module = await authoring_service.duplicate_module(db, module_id, current_user)
+    except NotFoundError as exc:
+        raise _not_found(str(exc)) from exc
+    except ConflictError as exc:
+        raise _conflict(str(exc)) from exc
+    except AppError as exc:
+        raise _bad_request(str(exc)) from exc
+    await db.commit()
+    return module
+
+
 # ---------------------------------------------------------------------------
 # Course learning outcomes (§LO-1/2) — teacher CRUD. Positions are
 # server-managed (append on create, contiguous re-index on delete); the
@@ -442,7 +477,7 @@ async def list_course_outcomes(
 async def create_course_outcome(
     course_id: UUID,
     payload: CourseLearningOutcomeCreate,
-    current_user: Annotated[CurrentUser, Depends(_REQUIRE_COURSE_UPDATE)],
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_OUTCOME_CREATE)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> CourseLearningOutcomeAuthoring:
     """Append a learning outcome to a course (§LO-1)."""
@@ -452,6 +487,8 @@ async def create_course_outcome(
         raise _not_found(str(exc)) from exc
     except ConflictError as exc:
         raise _conflict(str(exc)) from exc
+    except AppError as exc:
+        raise _bad_request(str(exc)) from exc
     await db.commit()
     return outcome
 
@@ -476,6 +513,8 @@ async def update_course_outcome(
         raise _not_found(str(exc)) from exc
     except ConflictError as exc:
         raise _conflict(str(exc)) from exc
+    except AppError as exc:
+        raise _bad_request(str(exc)) from exc
     await db.commit()
     return outcome
 
@@ -495,6 +534,8 @@ async def delete_course_outcome(
         await authoring_service.delete_course_outcome(db, course_id, outcome_id, current_user)
     except NotFoundError as exc:
         raise _not_found(str(exc)) from exc
+    except ConflictError as exc:
+        raise _conflict(str(exc)) from exc
     await db.commit()
 
 
@@ -606,6 +647,34 @@ async def delete_module_item(
     except NotFoundError as exc:
         raise _not_found(str(exc)) from exc
     await db.commit()
+
+
+@router.post(
+    "/module-items/{module_item_id}/duplicate",
+    response_model=ModuleItemAuthoring,
+    status_code=status.HTTP_201_CREATED,
+)
+async def duplicate_module_item(
+    module_item_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_MODULE_ITEM)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> ModuleItemAuthoring:
+    """Deep-clone a module item (lesson / quiz / interview) into its own module.
+
+    The polymorphic target is fully copied as an independent draft and the new
+    pin is appended at the end of the module. Duplicated content is always
+    unpublished (``status='draft'``, questions ``review_status='pending'``).
+    """
+    try:
+        item = await authoring_service.duplicate_module_item(db, module_item_id, current_user)
+    except NotFoundError as exc:
+        raise _not_found(str(exc)) from exc
+    except ConflictError as exc:
+        raise _conflict(str(exc)) from exc
+    except AppError as exc:
+        raise _bad_request(str(exc)) from exc
+    await db.commit()
+    return item
 
 
 @router.get(

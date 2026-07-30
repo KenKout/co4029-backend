@@ -68,13 +68,23 @@ async def fetch_google_profile(code: str, settings: Settings | None = None) -> G
                 "redirect_uri": settings.google_redirect_uri,
             },
         )
-        token_response.raise_for_status()
+        # A bare raise_for_status() leaks httpx.HTTPStatusError, which no
+        # layer above maps — so an expired or already-used code (the everyday
+        # double-click case) surfaced to the user as a 500 instead of a clean
+        # 400. Map it to AppError, carrying Google's own error_description.
+        if token_response.is_error:
+            try:
+                detail = token_response.json().get("error_description") or "token exchange failed"
+            except ValueError:
+                detail = "token exchange failed"
+            raise AppError(f"Google sign-in failed: {detail}")
         access_token = token_response.json()["access_token"]
         userinfo_response = await client.get(
             "https://openidconnect.googleapis.com/v1/userinfo",
             headers={"Authorization": f"Bearer {access_token}"},
         )
-        userinfo_response.raise_for_status()
+        if userinfo_response.is_error:
+            raise AppError("Google sign-in failed: could not fetch the user profile")
 
     payload = userinfo_response.json()
     email = payload.get("email")

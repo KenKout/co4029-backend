@@ -28,7 +28,7 @@ _NOW = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
 _LIFECYCLE = "abridgeai.features.interviews.services.lifecycle"
 
 
-def _make_session(*, started_at: datetime):
+def _make_session(*, started_at: datetime, session_mode: str = "assessment"):
     """Minimal stand-in for an InterviewSession ORM row the sweep mutates."""
     return SimpleNamespace(
         id=uuid4(),
@@ -36,6 +36,7 @@ def _make_session(*, started_at: datetime):
         started_at=started_at,
         assessment_started_at=started_at,
         status="in_progress",
+        session_mode=session_mode,
         ended_at=None,
     )
 

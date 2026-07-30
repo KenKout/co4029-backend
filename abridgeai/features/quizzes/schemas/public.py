@@ -47,12 +47,14 @@ automatically.
 
 from __future__ import annotations
 
+import random
+import uuid
 from datetime import datetime
 from decimal import Decimal
-from typing import Literal
+from typing import Any, Literal, get_args
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, model_validator
 
 QuestionTypeLiteral = Literal[
     "multiple_choice",
@@ -60,7 +62,25 @@ QuestionTypeLiteral = Literal[
     "short_answer",
     "fill_blank",
     "code",
+    # Phase 7: expanded question types.
+    "numerical",
+    "matching",
+    "ordering",
 ]
+
+
+def _field_allows_none(field: Any) -> bool:  # noqa: ANN401  -- pydantic FieldInfo
+    """True when a model field's annotation permits ``None``.
+
+    Used by the no-leak merge below to tell ``hint_text: str | None`` (where a
+    source None is meaningful) apart from ``prompt_format: str = "plain"`` (where
+    a source None is just an unmaterialized server_default and must fall back to
+    the schema default).
+    """
+    annotation = field.annotation
+    if annotation is None or annotation is type(None):
+        return True
+    return type(None) in get_args(annotation)
 
 
 class _ORMModel(BaseModel):
@@ -82,6 +102,8 @@ class QuizQuestionOptionPublic(_ORMModel):
     option_key: str
     option_text: str
     position: int
+    # Phase 3: render discriminator for option_text (plain | markdown | html).
+    option_format: str = "plain"
 
 
 class QuizQuestionPublic(_ORMModel):
@@ -109,6 +131,13 @@ class QuizQuestionPublic(_ORMModel):
     question_type: QuestionTypeLiteral
     prompt_text: str
     hint_text: str | None = None
+    # Phase 3: render discriminators (plain | markdown | html).
+    prompt_format: str = "plain"
+    hint_format: str = "plain"
+    # Phase 7: multi-select discriminator. True (default) = single-answer MCQ
+    # (radio); False = multi-select (checkboxes). Safe to expose — it reveals
+    # the input shape, not which options are correct.
+    single_answer: bool = True
     options: list[QuizQuestionOptionPublic] = []
 
     # Course learning outcome this question assesses (§LO-3). The FK is
@@ -118,6 +147,125 @@ class QuizQuestionPublic(_ORMModel):
     # crossing the quizzes→courses feature boundary. Both NULL = no outcome.
     learning_outcome_id: UUID | None = None
     outcome_position: int | None = None
+    # Dotted display code of the assessed outcome (e.g. "1.2.1" → rendered
+    # "L.O.1.2.1"). Projection-only, filled alongside outcome_position from a
+    # batch lookup. Supersedes the flat outcome_position for display now that
+    # outcomes are hierarchical; outcome_position is kept for back-compat
+    # (top-level rows: code == str(position)).
+    outcome_code: str | None = None
+
+    # Phase 7: multi-select discriminator. True (default) = single-answer MCQ
+    # (radio); False = multi-select (checkboxes). Safe — reveals the input
+    # shape, not which options are correct.
+    single_answer: bool = True
+
+    # Phase 7 no-leak projections for matching / ordering. The raw answer keys
+    # (``match_pairs`` = [{left, right}], ``ordering_sequence`` = correct order)
+    # MUST NOT reach a learner. Instead we derive:
+    #   * ``match_prompts``  — the left column, in stem order (safe to show).
+    #   * ``match_choices``  — the right values, DETERMINISTICALLY SHUFFLED so
+    #     the pairing is not implied by position.
+    #   * ``ordering_items`` — the items, DETERMINISTICALLY SHUFFLED so the
+    #     correct sequence is never revealed.
+    # The shuffle is seeded by the question id → stable across polls (won't
+    # reshuffle mid-attempt) but not in answer order. Correctness is graded
+    # server-side against the hidden keys.
+    match_prompts: list[str] = []
+    match_choices: list[str] = []
+    ordering_items: list[str] = []
+
+    @model_validator(mode="before")
+    @classmethod
+    def _derive_no_leak_type_fields(cls, data: Any) -> Any:
+        """Build the shuffled matching/ordering projections from the ORM row.
+
+        Runs before field validation. Reads the answer-bearing columns off the
+        source object (ORM instance or dict) and injects only the safe derived
+        lists — the raw ``match_pairs`` / ``ordering_sequence`` are never copied
+        onto the schema, so they cannot serialize to the wire.
+        """
+
+        def _get(key: str) -> Any:
+            if isinstance(data, dict):
+                return data.get(key)
+            return getattr(data, key, None)
+
+        qid = _get("id")
+        seed = 0
+        if qid is not None:
+            try:
+                seed = int(uuid.UUID(str(qid)).hex, 16)
+            except (ValueError, AttributeError, TypeError):
+                seed = hash(str(qid))
+
+        derived: dict[str, list[str]] = {}
+
+        pairs = _get("match_pairs")
+        if isinstance(pairs, list) and pairs:
+            prompts = [str(p.get("left", "")) for p in pairs if isinstance(p, dict)]
+            answer_aligned = [
+                str(p.get("right", "")) for p in pairs if isinstance(p, dict)
+            ]
+            choices = list(answer_aligned)
+            rng = random.Random(seed ^ 0x9E3779B9)
+            # Reshuffle until the choice order no longer positionally aligns with
+            # the prompts (which would imply the pairing on small lists). Bounded.
+            for _ in range(8):
+                rng.shuffle(choices)
+                if choices != answer_aligned or len(choices) <= 1:
+                    break
+            derived["match_prompts"] = prompts
+            derived["match_choices"] = choices
+
+        sequence = _get("ordering_sequence")
+        if isinstance(sequence, list) and sequence:
+            items = [str(s) for s in sequence]
+            rng = random.Random(seed ^ 0x7F4A7C15)
+            # Guard against the shuffle accidentally reproducing the answer
+            # order on tiny lists — reshuffle until it differs (bounded).
+            for _ in range(8):
+                rng.shuffle(items)
+                if items != [str(s) for s in sequence] or len(items) <= 1:
+                    break
+            derived["ordering_items"] = items
+
+        if not derived:
+            return data
+
+        # Merge derived fields with the source. For an ORM object we build a
+        # dict of the declared fields so Pydantic still reads the rest. The
+        # three derived list fields are only injected when computed; otherwise
+        # we omit them so their schema default (``[]``) applies (a raw getattr
+        # would return None on the ORM row and break list validation).
+        _DERIVED_FIELDS = {"match_prompts", "match_choices", "ordering_items"}
+        if isinstance(data, dict):
+            return {**data, **derived}
+        merged: dict[str, Any] = {}
+        _MISSING = object()
+        for name in cls.model_fields:
+            if name in derived:
+                merged[name] = derived[name]
+                continue
+            if name in _DERIVED_FIELDS:
+                continue  # not computed → let the field default ([]) stand
+            # Only copy attributes the source actually HAS. ``QuizQuestion`` has
+            # no ``options`` ORM relationship (callers attach it manually), so a
+            # blind ``getattr(..., None)`` would inject None into a required
+            # list field and fail validation for any question loaded without it.
+            value = getattr(data, name, _MISSING)
+            if value is _MISSING:
+                continue
+            # Don't let a None from the source override a non-nullable field that
+            # has a schema default. Columns backed by a server_default (e.g.
+            # ``prompt_format``, ``single_answer``) read as None on a row that
+            # hasn't been flushed/refreshed yet; copying that None would fail
+            # validation even though the schema default is perfectly valid.
+            if value is None:
+                field = cls.model_fields[name]
+                if not field.is_required() and not _field_allows_none(field):
+                    continue
+            merged[name] = value
+        return merged
 
 
 class QuizPublic(_ORMModel):

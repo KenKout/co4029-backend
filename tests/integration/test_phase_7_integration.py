@@ -515,6 +515,12 @@ async def test_career_path_lifecycle(
             text("DELETE FROM career_paths WHERE id = :p"),
             {"p": path_id},
         )
+        # Career enrollment auto-enrolls the student into member courses;
+        # those rows FK the courses (NO ACTION) and must go first.
+        await conn.execute(
+            text("DELETE FROM course_enrollments WHERE course_id = ANY(:ids)"),
+            {"ids": [course_a, course_b]},
+        )
         await conn.execute(
             text("DELETE FROM courses WHERE id = ANY(:ids)"),
             {"ids": [course_a, course_b]},

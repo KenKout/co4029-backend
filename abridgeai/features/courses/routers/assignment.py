@@ -49,6 +49,18 @@ from abridgeai.features.courses.services import assignment as assignment_service
 
 router = APIRouter(prefix="/dept", tags=["courses-assignment"])
 
+
+async def get_arq_pool() -> object | None:
+    """ARQ Redis pool dependency (email dispatch).
+
+    Returns ``None`` until the app factory overrides it with a real
+    ``ArqRedis`` pool; the notification path accepts ``None`` and simply skips
+    the email enqueue (in-app notification is still written). Mirrors the
+    identical dependency in the materials / quizzes / interviews routers.
+    """
+    return None
+
+
 _REQUIRE_STAFFING = require_any_permission(
     "course.assign_teacher", "user.role_assign", "system.administer"
 )
@@ -127,16 +139,20 @@ async def assign_teacher(
     payload: AssignTeacherRequest,
     current_user: Annotated[CurrentUser, Depends(_REQUIRE_COURSE_STAFFING)],
     db: Annotated[AsyncSession, Depends(get_db)],
+    arq_pool: Annotated[object | None, Depends(get_arq_pool)],
 ) -> TeacherAssignmentCreated:
     """Create (or no-op return) a ``role=teacher, scope=course`` assignment.
 
     The course-scoped permission dep ensures HOD scope auto-matches the
     course's org_unit; an HOD on Dept-X cannot assign teachers to a
     course in Dept-Y (plan §4467).
+
+    When the course is already published, the teacher is notified with a
+    deep-link to the course (see ``assignment_service.assign_teacher_to_course``).
     """
     try:
         result = await assignment_service.assign_teacher_to_course(
-            db, course_id, payload.user_id, current_user
+            db, course_id, payload.user_id, current_user, arq_pool=arq_pool
         )
     except NotFoundError as exc:
         raise _not_found(str(exc)) from exc

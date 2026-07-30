@@ -69,8 +69,28 @@ GenerationMode = Literal["topic", "coverage"]
   single synthetic section until the outline porter (Phase 3) lands.
 """
 
-QuestionType = Literal["multiple_choice", "true_false", "short_answer", "fill_blank", "code"]
-"""Mirrors the ``quiz_questions.question_type`` CHECK constraint.
+QuestionType = Literal[
+    "multiple_choice",
+    "true_false",
+    "short_answer",
+    "fill_blank",
+    "numerical",
+    "matching",
+    "ordering",
+]
+"""Question types the AI GENERATION pipeline can actually produce.
+
+This MUST stay in lockstep with the generation stage's parser —
+``ai.stages.generation.parsers.QuizQuestionType`` — because a type accepted
+here but rejected there produces a "successful" run that silently generates
+nothing for those slots. ``tests/unit/quizzes/test_generation_type_contracts.py``
+pins the two vocabularies as equal.
+
+It is deliberately NARROWER than the ``quiz_questions.question_type`` CHECK
+constraint, which additionally allows ``code``. ``code`` was removed here for
+exactly the mismatch described above; ``code`` questions remain valid in the DB
+(Moodle ``essay`` import maps onto them, and the grader routes them to manual
+grading) — they just cannot be AI-generated.
 
 Legacy used the ``"mcq"`` alias; the new DB standardised on
 ``"multiple_choice"`` (migration 0001). Frontend MUST send the new value.

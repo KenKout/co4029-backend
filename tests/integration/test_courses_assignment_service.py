@@ -273,3 +273,79 @@ async def test_list_courses_in_dept_returns_org_unit_courses(
     async with session_factory() as session:
         rows = await assignment_service.list_courses_in_dept(session, scenario["org_unit_id"])
     assert any(course.id == scenario["course_id"] for course in rows)
+
+
+async def test_assign_teacher_to_draft_course_does_not_notify(
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict,
+) -> None:
+    """The scenario course is a draft — assigning must NOT create a notification.
+
+    A teacher can't act on a course they can't yet see; they're told when it
+    publishes.
+    """
+    async with session_factory() as session:
+        actor = _actor(scenario["actor_id"])
+        await assignment_service.assign_teacher_to_course(
+            session, scenario["course_id"], scenario["teacher_id"], actor
+        )
+        await session.commit()
+
+        count = (
+            await session.execute(
+                text(
+                    "SELECT count(*) FROM notifications "
+                    "WHERE user_id = :u AND category = 'course_announcement'"
+                ),
+                {"u": scenario["teacher_id"]},
+            )
+        ).scalar_one()
+    assert count == 0
+
+
+async def test_assign_teacher_to_published_course_notifies(
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict,
+    engine: AsyncEngine,
+) -> None:
+    """Assigning a teacher to a PUBLISHED course creates a course_announcement
+    notification deep-linking to the teacher course workspace."""
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("UPDATE courses SET status = 'published' WHERE id = :id"),
+            {"id": scenario["course_id"]},
+        )
+
+    try:
+        async with session_factory() as session:
+            actor = _actor(scenario["actor_id"])
+            await assignment_service.assign_teacher_to_course(
+                session, scenario["course_id"], scenario["teacher_id"], actor
+            )
+            await session.commit()
+
+            row = (
+                (
+                    await session.execute(
+                        text(
+                            "SELECT category, entity_type, entity_id, action_url "
+                            "FROM notifications WHERE user_id = :u "
+                            "AND category = 'course_announcement'"
+                        ),
+                        {"u": scenario["teacher_id"]},
+                    )
+                )
+                .mappings()
+                .all()
+            )
+        assert len(row) == 1
+        assert row[0]["entity_type"] == "course"
+        assert str(row[0]["entity_id"]) == str(scenario["course_id"])
+        assert row[0]["action_url"] == f"/teacher/courses/{scenario['course_id']}"
+    finally:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("DELETE FROM notifications WHERE user_id = :u"),
+                {"u": scenario["teacher_id"]},
+            )
+

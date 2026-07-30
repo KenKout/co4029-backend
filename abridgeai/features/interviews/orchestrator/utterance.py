@@ -48,6 +48,43 @@ def persona_from(value: str | None) -> Persona:
         return Persona.NEUTRAL
 
 
+# ── Warmth band: the tone axis the deterministic tables actually key on ───────
+# The persona label no longer keys the phrasing tables directly. Instead every
+# persona resolves to a WARMTH BAND (low / mid / high), and the tables are keyed
+# by band. This is the whole point of the trait refactor: a fourth persona (or a
+# teacher-tuned trait profile) reuses an EXISTING band instead of duplicating
+# every table row. The three built-in personas map 1:1 onto the three bands, so
+# the rendered strings are byte-identical to before (locked by the golden file).
+WARMTH_LOW = "low"
+WARMTH_MID = "mid"
+WARMTH_HIGH = "high"
+
+# Trait scale is 0-4 (see persona.py). Bands: 0-1 = low (cold/sparse),
+# 2 = mid (balanced), 3-4 = high (warm). Chosen so the preset warmth values
+# (strict=0, neutral=2, supportive=4) land in low/mid/high respectively.
+def warmth_band(warmth: int) -> str:
+    """Map a 0-4 warmth trait onto the low/mid/high band the tables key on."""
+    if warmth <= 1:
+        return WARMTH_LOW
+    if warmth == 2:
+        return WARMTH_MID
+    return WARMTH_HIGH
+
+
+# Warmth value for each built-in persona. Kept in lockstep with persona.py's
+# PRESETS (strict=0, neutral=2, supportive=4) but defined locally so this module
+# has no import dependency on persona.py (which imports FROM here).
+_PERSONA_WARMTH: dict[Persona, int] = {
+    Persona.STRICT: 0,
+    Persona.NEUTRAL: 2,
+    Persona.SUPPORTIVE: 4,
+}
+
+
+def _band_for_persona(persona: Persona) -> str:
+    return warmth_band(_PERSONA_WARMTH.get(persona, 2))
+
+
 def _lang(language: str | None) -> str:
     """Normalize a language tag to 'vi' or 'en' (default en)."""
     if language and language.strip().lower().startswith("vi"):
@@ -77,35 +114,36 @@ class Utterance:
 # ── Acknowledgement snippets by persona + style + language ───────────────────
 # Neutral acknowledgements only — never declare correctness when uncertain
 # (requirement #8). Supportive is warmer; strict is sparse.
-_ACK: dict[tuple[Persona, AcknowledgementStyle, str], str] = {
+_ACK: dict[tuple[str, AcknowledgementStyle, str], str] = {
     # neutral style
-    (Persona.STRICT, AcknowledgementStyle.NEUTRAL, "en"): "Noted.",
-    (Persona.STRICT, AcknowledgementStyle.NEUTRAL, "vi"): "Đã ghi nhận.",
-    (Persona.NEUTRAL, AcknowledgementStyle.NEUTRAL, "en"): "Thank you.",
-    (Persona.NEUTRAL, AcknowledgementStyle.NEUTRAL, "vi"): "Cảm ơn bạn.",
-    (Persona.SUPPORTIVE, AcknowledgementStyle.NEUTRAL, "en"): "Thanks for sharing that.",
-    (Persona.SUPPORTIVE, AcknowledgementStyle.NEUTRAL, "vi"): "Cảm ơn bạn đã chia sẻ.",
+    (WARMTH_LOW, AcknowledgementStyle.NEUTRAL, "en"): "Noted.",
+    (WARMTH_LOW, AcknowledgementStyle.NEUTRAL, "vi"): "Đã ghi nhận.",
+    (WARMTH_MID, AcknowledgementStyle.NEUTRAL, "en"): "Thank you.",
+    (WARMTH_MID, AcknowledgementStyle.NEUTRAL, "vi"): "Cảm ơn bạn.",
+    (WARMTH_HIGH, AcknowledgementStyle.NEUTRAL, "en"): "Thanks for sharing that.",
+    (WARMTH_HIGH, AcknowledgementStyle.NEUTRAL, "vi"): "Cảm ơn bạn đã chia sẻ.",
     # positive style (still not declaring correctness)
-    (Persona.STRICT, AcknowledgementStyle.POSITIVE, "en"): "Good.",
-    (Persona.STRICT, AcknowledgementStyle.POSITIVE, "vi"): "Tốt.",
-    (Persona.NEUTRAL, AcknowledgementStyle.POSITIVE, "en"): "That's helpful.",
-    (Persona.NEUTRAL, AcknowledgementStyle.POSITIVE, "vi"): "Điều đó hữu ích.",
-    (Persona.SUPPORTIVE, AcknowledgementStyle.POSITIVE, "en"): "That's a solid start, well done.",
-    (Persona.SUPPORTIVE, AcknowledgementStyle.POSITIVE, "vi"): "Một khởi đầu tốt, làm tốt lắm.",
+    (WARMTH_LOW, AcknowledgementStyle.POSITIVE, "en"): "Good.",
+    (WARMTH_LOW, AcknowledgementStyle.POSITIVE, "vi"): "Tốt.",
+    (WARMTH_MID, AcknowledgementStyle.POSITIVE, "en"): "That's helpful.",
+    (WARMTH_MID, AcknowledgementStyle.POSITIVE, "vi"): "Điều đó hữu ích.",
+    (WARMTH_HIGH, AcknowledgementStyle.POSITIVE, "en"): "That's a solid start, well done.",
+    (WARMTH_HIGH, AcknowledgementStyle.POSITIVE, "vi"): "Một khởi đầu tốt, làm tốt lắm.",
     # corrective style (neutral, non-shaming)
-    (Persona.STRICT, AcknowledgementStyle.CORRECTIVE, "en"): "I understand your reasoning.",
-    (Persona.STRICT, AcknowledgementStyle.CORRECTIVE, "vi"): "Tôi hiểu lập luận của bạn.",
-    (Persona.NEUTRAL, AcknowledgementStyle.CORRECTIVE, "en"): "I understand your reasoning.",
-    (Persona.NEUTRAL, AcknowledgementStyle.CORRECTIVE, "vi"): "Tôi hiểu cách bạn nghĩ.",
-    (Persona.SUPPORTIVE, AcknowledgementStyle.CORRECTIVE, "en"): "I see your direction.",
-    (Persona.SUPPORTIVE, AcknowledgementStyle.CORRECTIVE, "vi"): "Tôi thấy hướng bạn đang đi.",
+    (WARMTH_LOW, AcknowledgementStyle.CORRECTIVE, "en"): "I understand your reasoning.",
+    (WARMTH_LOW, AcknowledgementStyle.CORRECTIVE, "vi"): "Tôi hiểu lập luận của bạn.",
+    (WARMTH_MID, AcknowledgementStyle.CORRECTIVE, "en"): "I understand your reasoning.",
+    (WARMTH_MID, AcknowledgementStyle.CORRECTIVE, "vi"): "Tôi hiểu cách bạn nghĩ.",
+    (WARMTH_HIGH, AcknowledgementStyle.CORRECTIVE, "en"): "I see your direction.",
+    (WARMTH_HIGH, AcknowledgementStyle.CORRECTIVE, "vi"): "Tôi thấy hướng bạn đang đi.",
 }
 
 
 def _ack_text(persona: Persona, style: AcknowledgementStyle, lang: str) -> str:
     if style is AcknowledgementStyle.NONE:
         return ""
-    return _ACK.get((persona, style, lang), _ACK.get((Persona.NEUTRAL, style, "en"), ""))
+    band = _band_for_persona(persona)
+    return _ACK.get((band, style, lang), _ACK.get((WARMTH_MID, style, "en"), ""))
 
 
 # ── Transition / action phrasing by action + persona + language ──────────────
@@ -117,27 +155,37 @@ def _ack_text(persona: Persona, style: AcknowledgementStyle, lang: str) -> str:
 # wording (Natural Interview Transitions spec): a brief thanks + an explicit
 # "move on to the next question" signpost, persona-shaped in tone only. The
 # question text itself is appended separately (never duplicated here).
-_TRANSITION: dict[tuple[Persona, str], str] = {
-    (Persona.STRICT, "en"): "Thank you. Let's move on to the next question.",
-    (Persona.STRICT, "vi"): "Cảm ơn bạn. Chúng ta sang câu hỏi tiếp theo.",
-    (Persona.NEUTRAL, "en"): "Thank you. Now let's move on to the next question.",
-    (Persona.NEUTRAL, "vi"): "Cảm ơn bạn. Bây giờ chúng ta chuyển sang câu hỏi tiếp theo.",
-    (Persona.SUPPORTIVE, "en"): ("Thank you. Now let's move on to the next question together."),
-    (Persona.SUPPORTIVE, "vi"): (
-        "Cảm ơn bạn. Bây giờ chúng ta cùng chuyển sang câu hỏi tiếp theo nhé."
+_TRANSITION: dict[tuple[str, str], str] = {
+    # Deliberately NO leading "Thank you." here: the acknowledgement (_ACK)
+    # already opens with a thanks ("Thank you." / "Cảm ơn bạn."), and _combine
+    # concatenates ack + transition, which produced an audible/visible
+    # "Thank you. Thank you. Now let's move on…" double. The signpost keeps only
+    # the "move on" wording; the ack carries the thanks.
+    (WARMTH_LOW, "en"): "Let's move on to the next question.",
+    (WARMTH_LOW, "vi"): "Chúng ta sang câu hỏi tiếp theo.",
+    (WARMTH_MID, "en"): "Now let's move on to the next question.",
+    (WARMTH_MID, "vi"): "Bây giờ chúng ta chuyển sang câu hỏi tiếp theo.",
+    (WARMTH_HIGH, "en"): ("Now let's move on to the next question together."),
+    (WARMTH_HIGH, "vi"): (
+        "Bây giờ chúng ta cùng chuyển sang câu hỏi tiếp theo nhé."
     ),
 }
 
 # Final-question transition (spec §ending): a short acknowledgment that the
 # last question has been reached. This is a transition-only turn; the separate
 # goodbye/closing turn follows via the existing finish flow.
-_FINAL_QUESTION_TRANSITION: dict[tuple[Persona, str], str] = {
-    (Persona.STRICT, "en"): "Thank you. That was the final question.",
-    (Persona.STRICT, "vi"): "Cảm ơn bạn. Đó là câu hỏi cuối cùng.",
-    (Persona.NEUTRAL, "en"): "Thank you. That was the final question.",
-    (Persona.NEUTRAL, "vi"): "Cảm ơn bạn. Đó là câu hỏi cuối cùng.",
-    (Persona.SUPPORTIVE, "en"): "Thank you. That was the final question — well done.",
-    (Persona.SUPPORTIVE, "vi"): "Cảm ơn bạn. Đó là câu hỏi cuối cùng — bạn đã làm rất tốt.",
+_FINAL_QUESTION_TRANSITION: dict[tuple[str, str], str] = {
+    # Deliberately NO leading "Thank you." here: this final-question transition
+    # is always immediately followed by the closing turn, which itself opens
+    # with "Thank you." Keeping both produced an audible "Thank you… Thank you…"
+    # double. The closing keeps its thanks so the skip/timeout paths (which have
+    # no preceding transition) still thank the candidate.
+    (WARMTH_LOW, "en"): "That was the final question.",
+    (WARMTH_LOW, "vi"): "Đó là câu hỏi cuối cùng.",
+    (WARMTH_MID, "en"): "That was the final question.",
+    (WARMTH_MID, "vi"): "Đó là câu hỏi cuối cùng.",
+    (WARMTH_HIGH, "en"): "That was the final question — well done.",
+    (WARMTH_HIGH, "vi"): "Đó là câu hỏi cuối cùng — bạn đã làm rất tốt.",
 }
 
 
@@ -149,8 +197,9 @@ def transition_text(persona: Persona, language: str | None, *, final: bool = Fal
     deterministic path and transcript persistence so wording stays identical.
     """
     lang = _lang(language)
+    band = _band_for_persona(persona)
     table = _FINAL_QUESTION_TRANSITION if final else _TRANSITION
-    return table.get((persona, lang), table[(Persona.NEUTRAL, "en")])
+    return table.get((band, lang), table[(WARMTH_MID, "en")])
 
 
 def _fallback_parts(  # noqa: C901, PLR0911 -- flat per-action dispatch; readability > splitting
@@ -180,7 +229,9 @@ def _fallback_parts(  # noqa: C901, PLR0911 -- flat per-action dispatch; readabi
         InterviewerActionType.TRANSITION_TOPIC,
         InterviewerActionType.SKIP_QUESTION,
     ):
-        transition = _TRANSITION.get((persona, lang), _TRANSITION[(Persona.NEUTRAL, "en")])
+        transition = _TRANSITION.get(
+            (_band_for_persona(persona), lang), _TRANSITION[(WARMTH_MID, "en")]
+        )
         return ack, transition, q
 
     if action in (
@@ -375,14 +426,15 @@ def _probe_signpost(action: InterviewerActionType, persona: Persona, lang: str) 
         return table[lang]
     # Follow-up / deeper probing: neutral lead-in, never affirms correctness.
     followup = {
-        (Persona.STRICT, "en"): "Let's dig into that.",
-        (Persona.STRICT, "vi"): "Chúng ta hãy đi sâu hơn.",
-        (Persona.NEUTRAL, "en"): "Let me follow up on that.",
-        (Persona.NEUTRAL, "vi"): "Tôi muốn hỏi thêm về điều đó.",
-        (Persona.SUPPORTIVE, "en"): "Thanks — let me follow up on that.",
-        (Persona.SUPPORTIVE, "vi"): "Cảm ơn bạn — tôi muốn hỏi thêm một chút.",
+        (WARMTH_LOW, "en"): "Let's dig into that.",
+        (WARMTH_LOW, "vi"): "Chúng ta hãy đi sâu hơn.",
+        (WARMTH_MID, "en"): "Let me follow up on that.",
+        (WARMTH_MID, "vi"): "Tôi muốn hỏi thêm về điều đó.",
+        (WARMTH_HIGH, "en"): "Thanks — let me follow up on that.",
+        (WARMTH_HIGH, "vi"): "Cảm ơn bạn — tôi muốn hỏi thêm một chút.",
     }
-    return followup.get((persona, lang), followup[(Persona.NEUTRAL, "en")])
+    band = _band_for_persona(persona)
+    return followup.get((band, lang), followup[(WARMTH_MID, "en")])
 
 
 def _generic_probe(action: InterviewerActionType, persona: Persona, lang: str) -> str:

@@ -49,6 +49,8 @@ class QuizAttemptStart(BaseModel):
 
     quiz_id: UUID
     idempotency_key: UUID | None = None
+    # Phase 12: submitted when the quiz has an access password configured.
+    password: str | None = None
 
 
 class QuizAttemptSubmitAnswer(BaseModel):
@@ -147,6 +149,22 @@ class QuizAttemptReviewQuestion(BaseModel):
     t_actual_ms: int | None = None
 
 
+class ReviewVisibilityFlags(BaseModel):
+    """Phase 2: resolved per-window review-visibility flags echoed to the client.
+
+    The service masks the payload server-side (correct answers / explanation /
+    score are stripped when a flag is False), and also echoes the flags so the
+    FE can hide the corresponding UI affordances. Defaults all-true to preserve
+    today's always-on behaviour.
+    """
+
+    show_score: bool = True
+    show_correctness: bool = True
+    show_correct_answers: bool = True
+    show_explanation: bool = True
+    show_points: bool = True
+
+
 class QuizAttemptReviewRead(BaseModel):
     """Full review payload — attempt summary + per-question breakdown."""
 
@@ -154,6 +172,12 @@ class QuizAttemptReviewRead(BaseModel):
 
     attempt: QuizAttemptRead
     questions: list[QuizAttemptReviewQuestion]
+    # Phase 2: teacher-configurable visibility for the active review window.
+    visibility: ReviewVisibilityFlags = ReviewVisibilityFlags()
+    # Phase 8: the matched overall grade-band feedback for this score (or None).
+    # Only populated when the Phase 2 score visibility is on.
+    overall_feedback_text: str | None = None
+    overall_feedback_format: str | None = None
 
 
 class QuizAttemptIntegrityEvent(BaseModel):

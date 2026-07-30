@@ -28,10 +28,14 @@ from arq.connections import ArqRedis, RedisSettings
 from abridgeai.core.config import get_settings
 from abridgeai.core.db import get_sessionmaker
 from abridgeai.core.security import CurrentUser
+from abridgeai.features.interviews.orchestrator.interviewer_identity import (
+    identity_from_config,
+)
 from abridgeai.features.interviews.realtime import observability as obs
 from abridgeai.features.interviews.services.ceremony import (
     ensure_ceremony_message,
     onboarding_ceremony_kind,
+    room_intro_text,
 )
 from abridgeai.features.interviews.services.taking import submit_session, take_session_step
 
@@ -155,6 +159,61 @@ async def get_opening_text(session_id: UUID, *, language: str = "en") -> str | N
         )
         await db.commit()
         return message.content_text
+
+
+async def get_room_intro_text(session_id: UUID, *, language: str = "en") -> str | None:
+    """Short line spoken as the voice channel opens, or ``None``.
+
+    Unlike :func:`get_opening_text` this deliberately does NOT short-circuit on
+    ``onboarding_stage == "completed"``. That short-circuit, combined with
+    ``/realtime-token`` refusing to mint a token until onboarding IS complete,
+    is why the opening branch in ``InterviewAgent.on_enter`` never ran in
+    production and a voice candidate's first experience was a bank question
+    with nobody introducing it.
+
+    ``None`` whenever the config has not opted into a named interviewer, so
+    existing voice sessions are unchanged.
+    """
+    from abridgeai.features.interviews.models import (  # noqa: PLC0415
+        InterviewConfig,
+        InterviewSession,
+    )
+
+    async with get_sessionmaker()() as db:
+        session = await db.get(InterviewSession, session_id)
+        if session is None:
+            return None
+        config = await db.get(InterviewConfig, session.interview_config_id)
+        return room_intro_text(
+            identity=identity_from_config(getattr(config, "persona_profile_json", None)),
+            language=getattr(session, "interview_language", language),
+        )
+
+
+async def get_voice_persona(session_id: UUID) -> tuple[str | None, int]:
+    """``(persona label, verbosity dial)`` for the session's config.
+
+    The realtime path never had access to persona: it read only ``tts_voice``,
+    so tone reached voice indirectly (through the phrasing layer) and not at all
+    in the audio itself on the Vietnamese branch. Returns the neutral default
+    when anything is missing, matching ``persona.profile_from``.
+    """
+    from abridgeai.features.interviews.models import (  # noqa: PLC0415
+        InterviewConfig,
+        InterviewSession,
+    )
+    from abridgeai.features.interviews.orchestrator.persona import (  # noqa: PLC0415
+        profile_from_config,
+    )
+
+    async with get_sessionmaker()() as db:
+        session = await db.get(InterviewSession, session_id)
+        if session is None:
+            return None, 2
+        config = await db.get(InterviewConfig, session.interview_config_id)
+        persona = getattr(config, "persona", None)
+        profile = profile_from_config(persona, getattr(config, "persona_profile_json", None))
+        return persona, profile.verbosity
 
 
 async def get_tts_voice(session_id: UUID) -> str | None:

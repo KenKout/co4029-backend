@@ -31,6 +31,7 @@ from abridgeai.features.quizzes.models import (
     QuizAttemptAnswer,
     QuizQuestion,
     QuizQuestionOption,
+    QuizQuestionRevision,
 )
 from abridgeai.features.quizzes.queries import authoring as authoring_queries
 from abridgeai.features.quizzes.queries import published as published_queries
@@ -39,6 +40,9 @@ from abridgeai.features.quizzes.queries.published import (
     MaxAttemptsReached,
     QuizClosed,  # noqa: F401  -- re-exported for the learner router (see __all__)
     QuizNotYetOpen,  # noqa: F401  -- re-exported for the learner router (see __all__)
+    QuizPasswordIncorrect,  # noqa: F401  -- re-exported for the learner router
+    QuizPasswordRequired,  # noqa: F401  -- re-exported for the learner router
+    QuizSubnetBlocked,  # noqa: F401  -- re-exported for the learner router
 )
 from abridgeai.features.quizzes.schemas.attempt import (
     QuizAttemptProgressAnswer,
@@ -53,7 +57,7 @@ from abridgeai.features.quizzes.schemas.public import (
     QuizPublic,
     QuizQuestionPublic,
 )
-from abridgeai.features.quizzes.services.grader import grade_answer
+from abridgeai.features.quizzes.services.grader import grade_answer, needs_manual_grade
 from abridgeai.features.spaced_repetition.api.public import (
     CardReviewResult,
     record_card_review,
@@ -87,6 +91,83 @@ class AllCardsInCooldownError(AppError):
         super().__init__("All cards in cooldown")
         self.retry_available_at = retry_available_at
         self.cards_due_at = cards_due_at
+
+
+class InterviewPassRequiredError(AppError):
+    """FR-5.3: the quiz's module gates its spaced-repetition unlock behind a
+    passed interview the student has not yet passed.
+
+    Raised by :func:`_ensure_interview_pass_lock` when the quiz belongs to a
+    module carrying a published interview config with
+    ``lock_quiz_ef_until_pass = TRUE`` and the student has no completed+passed
+    interview session for that module. The router maps this to HTTP 403 with an
+    ``interview_pass_required`` payload so the client can deep-link the pending
+    interview. Carries the blocking module + interview config ids for that.
+    """
+
+    def __init__(self, module_id: UUID, interview_config_id: UUID) -> None:
+        super().__init__(
+            f"Interview pass required for module {module_id} "
+            f"(interview config {interview_config_id}) before this quiz"
+        )
+        self.module_id = module_id
+        self.interview_config_id = interview_config_id
+
+
+async def _ensure_interview_pass_lock(
+    db: AsyncSession, *, quiz_id: UUID, student_id: UUID
+) -> None:
+    """FR-5.3 server-side gate: block a quiz attempt when the quiz's module has a
+    published interview with ``lock_quiz_ef_until_pass`` the student hasn't passed.
+
+    Resolution:
+
+    1. Emergency off-switch — when ``settings.lesson_gating_enforced`` is False
+       the gate is a no-op and never touches the DB.
+    2. Look up a *locking* interview config for the quiz's module: published,
+       ``lock_quiz_ef_until_pass = TRUE``, not soft-deleted. None found → no gate.
+    3. Otherwise the student must have a completed+passed interview session for
+       that module (:func:`has_passing_interview_for_module`); if not, raise
+       :class:`InterviewPassRequiredError`.
+
+    ``get_settings`` and the SR public helper are imported lazily so the unit
+    test's ``patch`` on the source module attributes takes effect at call time
+    (a module-top ``from ... import`` would bind an unpatched reference).
+    """
+    from abridgeai.core.config import get_settings  # noqa: PLC0415
+
+    if not get_settings().lesson_gating_enforced:
+        return
+
+    from sqlalchemy import text  # noqa: PLC0415
+
+    result = await db.execute(
+        text(
+            "SELECT c.id, c.module_id "
+            "FROM interview_configs c "
+            "JOIN quizzes q ON q.module_id = c.module_id "
+            "WHERE q.id = :quiz_id "
+            "AND c.status = 'published' "
+            "AND c.lock_quiz_ef_until_pass = TRUE "
+            "AND c.deleted_at IS NULL "
+            "AND q.deleted_at IS NULL "
+            "LIMIT 1"
+        ),
+        {"quiz_id": str(quiz_id)},
+    )
+    row = result.first()
+    if row is None:
+        return  # no locking interview config for this module → no gate
+
+    interview_config_id, module_id = row[0], row[1]
+
+    from abridgeai.features.spaced_repetition.api import public as sr_public  # noqa: PLC0415
+
+    passed = await sr_public.has_passing_interview_for_module(
+        db, student_id=student_id, module_id=module_id
+    )
+    if not passed:
+        raise InterviewPassRequiredError(module_id, interview_config_id)
 
 
 async def get_published_quiz(db: AsyncSession, quiz_id: UUID) -> Quiz | None:
@@ -168,25 +249,41 @@ async def _load_quiz_questions_for_taking(db: AsyncSession, quiz_id: UUID) -> li
     # precedent as the cross-feature cooldown read below. Soft-deleted /
     # missing outcomes resolve to None → no prefix.
     outcome_ids = [q.learning_outcome_id for q in questions if q.learning_outcome_id]
-    positions: dict[UUID, int] = {}
+    positions: dict[UUID, tuple[int, str]] = {}
     if outcome_ids:
         from sqlalchemy import text as _text  # noqa: PLC0415
 
+        # Recursive CTE rebuilds the dotted code (L.O.1.2.1) by walking each
+        # outcome's parent chain, so the student-facing label matches the
+        # hierarchical teacher codes. position is the leaf's own sibling
+        # position (back-compat).
         rows = (
             await db.execute(
                 _text(
-                    "SELECT id, position FROM course_learning_outcomes "
-                    "WHERE id = ANY(:ids) AND deleted_at IS NULL"
+                    """
+                    WITH RECURSIVE coded AS (
+                        SELECT id, parent_id, position, position::text AS code
+                        FROM course_learning_outcomes
+                        WHERE parent_id IS NULL AND deleted_at IS NULL
+                        UNION ALL
+                        SELECT c.id, c.parent_id, c.position,
+                               coded.code || '.' || c.position::text
+                        FROM course_learning_outcomes c
+                        JOIN coded ON c.parent_id = coded.id
+                        WHERE c.deleted_at IS NULL
+                    )
+                    SELECT id, position, code FROM coded WHERE id = ANY(:ids)
+                    """
                 ),
                 {"ids": list(set(outcome_ids))},
             )
         ).all()
-        positions = {row[0]: row[1] for row in rows}
+        positions = {row[0]: (row[1], row[2]) for row in rows}
     for question in questions:
         lo_id = question.learning_outcome_id
-        question.outcome_position = (  # type: ignore[attr-defined]
-            positions.get(lo_id) if lo_id is not None else None
-        )
+        resolved = positions.get(lo_id) if lo_id is not None else None
+        question.outcome_position = resolved[0] if resolved else None  # type: ignore[attr-defined]
+        question.outcome_code = resolved[1] if resolved else None  # type: ignore[attr-defined]
     return list(questions)
 
 
@@ -225,12 +322,39 @@ async def _load_cooldown_map(
     return {row[0]: row[1] for row in result.all()}
 
 
+def _renumber_display_positions(questions: list[QuizQuestionPublic]) -> None:
+    """Rewrite ``position`` on the take-payload DTOs to their display slot.
+
+    The student-facing ``position`` must encode the order the student should
+    SEE the questions in (1..N), not the authored order. This matters for
+    shuffled attempts: :func:`apply_layout` reorders the list but leaves the
+    original authored ``position`` on each row, and the SPA defensively
+    re-sorts questions AND options by ``position`` before rendering
+    (course-quiz.tsx, QuestionRenderer.tsx). Without this renumber those sorts
+    would restore the authored order and silently undo the shuffle — leaking
+    the canonical sequence and defeating the anti-cheat feature.
+
+    Mutates the passed DTOs in place. Safe because these are detached Pydantic
+    projections built for this one response, never the session-tracked ORM
+    rows (rewriting the ORM ``position`` would corrupt the stored order on
+    flush). Options are renumbered within each question in their already-
+    ordered (post-layout) sequence. Grading is keyed by question_id/option_id,
+    so it is unaffected by any of this.
+    """
+    for q_index, question in enumerate(questions, start=1):
+        question.position = q_index
+        for o_index, option in enumerate(question.options, start=1):
+            option.position = o_index
+
+
 async def start_attempt(
     db: AsyncSession,
     quiz_id: UUID,
     actor: CurrentUser,
     *,
     idempotency_key: UUID | None = None,
+    password: str | None = None,
+    client_ip: str | None = None,
 ) -> tuple[QuizAttempt, QuizAttemptProgressRead]:
     """Create a :class:`QuizAttempt` and return the no-leak take payload.
 
@@ -274,9 +398,53 @@ async def start_attempt(
     (→ 409) per the quiz's ``cooldown_hours`` / ``max_attempts`` /
     ``allow_retakes`` columns. Both exceptions propagate to the router.
     """
-    quiz = await published_queries.get_quiz_for_taking(db, quiz_id, actor.user_id)
+    # FR-5.3 interview-pass gate: fail fast before creating any attempt state
+    # when the quiz's module gates its unlock behind a passed interview the
+    # student hasn't passed. No-op when the emergency switch is off or the module
+    # carries no locking interview config. Raises InterviewPassRequiredError
+    # (router → HTTP 403) so the client can deep-link the pending interview.
+    await _ensure_interview_pass_lock(db, quiz_id=quiz_id, student_id=actor.user_id)
+
+    # Phase 5: resolve this student's effective timing/retake policy (base quiz
+    # columns overridden by any user/group override) and feed it into the gate
+    # so an accommodation (extra attempts, extended window) is honoured. We load
+    # the published quiz first for resolution, then re-run the gate with the
+    # effective values.
+    from abridgeai.features.quizzes.services.overrides import (  # noqa: PLC0415
+        resolve_policy_for_student,
+    )
+
+    _quiz_for_policy = await published_queries.get_published_quiz(db, quiz_id)
+    effective = (
+        await resolve_policy_for_student(db, _quiz_for_policy, actor.user_id)
+        if _quiz_for_policy is not None
+        else None
+    )
+    quiz = await published_queries.get_quiz_for_taking(
+        db, quiz_id, actor.user_id, effective=effective,
+        password=password, client_ip=client_ip,
+    )
     if quiz is None:
         raise NotFoundError(f"Quiz {quiz_id} not found")
+
+    # Tenancy gate: organizations do not share quizzes. A student may only
+    # attempt a quiz whose course belongs to an organization they actively
+    # belong to. Resolve the quiz's course -> organization via the courses
+    # public API and the caller's membership via the access-control public API
+    # (both cross-feature reads through the sanctioned surfaces). Raise the same
+    # NotFoundError as a missing quiz so the endpoint cannot be used to probe
+    # which quiz ids exist in another tenant.
+    from abridgeai.features.access_control.api.public import (  # noqa: PLC0415
+        is_user_member_of_org,
+    )
+    from abridgeai.features.courses.api import public as courses_api  # noqa: PLC0415
+
+    course = await courses_api.get_course_by_id(db, quiz.course_id)
+    if course is None or not await is_user_member_of_org(
+        db, user_id=actor.user_id, org_id=course.organization_id
+    ):
+        raise NotFoundError(f"Quiz {quiz_id} not found")
+
     questions = await _load_quiz_questions_for_taking(db, quiz_id)
 
     cooldown_map = await _load_cooldown_map(
@@ -304,10 +472,37 @@ async def start_attempt(
         {"question_id": qid, "due_at": due_at} for qid, due_at in cooldown_map.items()
     ]
 
+    # Phase 6: when the quiz enables shuffling, deterministically realize a
+    # per-attempt question/option order seeded by the attempt id, persist it to
+    # attempt.layout, and reorder the take payload. Resume/review re-read layout
+    # verbatim so the student always sees the same order.
+    if quiz.shuffle_questions or quiz.shuffle_options:
+        from abridgeai.features.quizzes.services.shuffle import (  # noqa: PLC0415
+            apply_layout,
+            build_layout,
+        )
+
+        options_by_question = {
+            q.id: [o.id for o in getattr(q, "options", []) or []] for q in available_questions
+        }
+        layout = build_layout(
+            attempt.id,
+            [q.id for q in available_questions],
+            options_by_question,
+            shuffle_questions=quiz.shuffle_questions,
+            shuffle_options=quiz.shuffle_options,
+        )
+        attempt.layout = layout
+        await flush_or_conflict(db)
+        available_questions = apply_layout(available_questions, layout)
+
     public_quiz = QuizPublic.model_validate(quiz)
     public_questions = [
         QuizQuestionPublic.model_validate(question) for question in available_questions
     ]
+    # Encode the display order (1..N) into position so the SPA's defensive
+    # position-sorts render the shuffled order rather than undoing it.
+    _renumber_display_positions(public_questions)
     take_payload = QuizForTakingPublic(quiz=public_quiz, questions=public_questions)
     progress = QuizAttemptProgressRead.model_validate(
         {
@@ -369,6 +564,27 @@ async def answer_attempt(
         t_actual_ms = getattr(payload, "response_time_ms", None)
     hint_used = bool(getattr(payload, "hint_used", False))
 
+    # Phase 4: flag open-response answers that need a human grader (code always;
+    # short_answer/fill_blank only when the exact-match auto-grade missed).
+    question_type_row = (
+        await db.execute(select(QuizQuestion.question_type).where(QuizQuestion.id == question_id))
+    ).scalar_one_or_none()
+    needs_manual = (
+        needs_manual_grade(question_type_row, grade) if question_type_row is not None else False
+    )
+
+    # Phase 1: pin the answer to the question's CURRENT revision (its highest
+    # revision_no) so a later regrade can judge it against the exact snapshot
+    # the student saw. NULL when the question has no revision rows yet.
+    graded_revision_id = (
+        await db.execute(
+            select(QuizQuestionRevision.id)
+            .where(QuizQuestionRevision.question_id == question_id)
+            .order_by(QuizQuestionRevision.revision_no.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+
     # Idempotent upsert: a student may re-save a question after changing
     # their answer (or after resuming an interrupted attempt), so key on
     # (attempt_id, question_id) rather than blindly INSERTing — a second
@@ -394,6 +610,8 @@ async def answer_attempt(
         existing.hint_used = hint_used
         existing.t_actual_ms = t_actual_ms
         existing.points_awarded = grade.points_awarded
+        existing.graded_revision_id = graded_revision_id
+        existing.needs_manual_grade = needs_manual
         answer = existing
     else:
         answer = QuizAttemptAnswer(
@@ -405,6 +623,8 @@ async def answer_attempt(
             hint_used=hint_used,
             t_actual_ms=t_actual_ms,
             points_awarded=grade.points_awarded,
+            graded_revision_id=graded_revision_id,
+            needs_manual_grade=needs_manual,
         )
         db.add(answer)
 
@@ -439,6 +659,46 @@ async def answer_attempt(
     return answer, review_result
 
 
+async def _recompute_attempt_score(
+    db: AsyncSession,
+    attempt: QuizAttempt,
+    quiz: Quiz,
+) -> tuple[Decimal, Decimal, int, int]:
+    """Recompute an attempt's headline numbers from its stored answers.
+
+    Shared by :func:`submit_attempt` (initial grading) and the regrade commit
+    path (Phase 1) so both use the identical denominator rule. Returns
+    ``(score_points, score_percent, correct_count, question_count)``. Does NOT
+    mutate the attempt — the caller assigns the fields it needs.
+
+    Denominator MUST match what the student was actually served: only approved
+    questions reach the taking surface, so counting all questions would divide
+    by a larger set than the student saw and silently deflate every score.
+    """
+    from sqlalchemy import func, select  # noqa: PLC0415
+
+    answers = (
+        (
+            await db.execute(
+                select(QuizAttemptAnswer).where(QuizAttemptAnswer.attempt_id == attempt.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    question_count_row = await db.execute(
+        select(func.count(QuizQuestion.id)).where(
+            QuizQuestion.quiz_id == quiz.id,
+            QuizQuestion.review_status == "approved",
+        )
+    )
+    question_count = int(question_count_row.scalar_one()) or len(answers) or 1
+    score_points = sum((answer.points_awarded for answer in answers), Decimal("0"))
+    score_percent = (score_points / Decimal(question_count)) * Decimal("100")
+    correct_count = sum(1 for answer in answers if answer.is_correct)
+    return score_points, score_percent, correct_count, question_count
+
+
 async def submit_attempt(
     db: AsyncSession,
     attempt_id: UUID,
@@ -455,50 +715,85 @@ async def submit_attempt(
     attempt = await _require_attempt(db, attempt_id)
     quiz = await _require_quiz(db, attempt.quiz_id)
 
-    from sqlalchemy import func, select  # noqa: PLC0415
+    # Phase 6: deadline enforcement at submit time. If the attempt is past its
+    # (grace-extended) deadline and the quiz is 'autoabandon', expire it with no
+    # grade; otherwise grade normally (autosubmit / graceperiod both grade what
+    # was answered). This makes a late submit correct even if the sweep never ran.
+    from abridgeai.features.quizzes.services import timing as _timing  # noqa: PLC0415
 
-    answers = (
-        (
-            await db.execute(
-                select(QuizAttemptAnswer).where(QuizAttemptAnswer.attempt_id == attempt_id)
-            )
-        )
-        .scalars()
-        .all()
+    now = utcnow()
+    eff = _timing.resolve_effective_timing(quiz)
+    overdue = _timing.is_overdue(
+        attempt.started_at,
+        eff,
+        grace_period_seconds=(
+            quiz.grace_period_seconds if quiz.overdue_handling == "graceperiod" else None
+        ),
+        now=now,
+        due_at=quiz.due_at,
+        hard_due=False,
     )
-    # Denominator MUST match what the student was actually served: only
-    # approved questions reach the taking surface (see
-    # _load_quiz_questions_for_taking), so counting all questions here would
-    # divide by a larger set than the student ever saw — silently deflating
-    # every score once a quiz is partially published (e.g. 15 approved of 30
-    # → a perfect attempt would read 50%). Filter to approved to stay honest.
-    question_count_row = await db.execute(
-        select(func.count(QuizQuestion.id)).where(
-            QuizQuestion.quiz_id == quiz.id,
-            QuizQuestion.review_status == "approved",
-        )
-    )
-    question_count = int(question_count_row.scalar_one()) or len(answers) or 1
-    score_points = sum((answer.points_awarded for answer in answers), Decimal("0"))
-    score_percent = (score_points / Decimal(question_count)) * Decimal("100")
-    correct_count = sum(1 for answer in answers if answer.is_correct)
+    if overdue and quiz.overdue_handling == "autoabandon":
+        return await _expire_attempt(db, attempt, now=now)
 
+    return await _finalize_attempt(db, attempt, quiz, now=now)
+
+
+async def _finalize_attempt(
+    db: AsyncSession,
+    attempt: QuizAttempt,
+    quiz: Quiz,
+    *,
+    now: datetime | None = None,
+) -> QuizAttempt:
+    """Grade + close an in_progress attempt as 'submitted'.
+
+    Idempotent: returns unchanged if the attempt is not in_progress. Shared by
+    :func:`submit_attempt` and the Phase 6 overdue sweep so both use identical
+    scoring. Attaches response-only correct_count/total_questions.
+    """
+    now = now or utcnow()
+    if attempt.status != "in_progress":
+        return attempt
+
+    score_points, score_percent, correct_count, question_count = await _recompute_attempt_score(
+        db, attempt, quiz
+    )
     attempt.status = "submitted"
-    attempt.submitted_at = utcnow()
-    attempt.time_taken_seconds = int((attempt.submitted_at - attempt.started_at).total_seconds())
+    attempt.submitted_at = now
+    attempt.time_taken_seconds = int((now - attempt.started_at).total_seconds())
     attempt.score_points = score_points
     attempt.score_percent = score_percent
     attempt.passed = score_percent >= quiz.passing_score_percent
     await flush_or_conflict(db)
+    # Phase 9: refresh the student's materialised grade-of-record from all their
+    # completed attempts (grading_method-aware). Participates in this transaction.
+    from abridgeai.features.quizzes.services.gradebook import (  # noqa: PLC0415
+        recompute_final_grade,
+    )
+
+    await recompute_final_grade(db, quiz, attempt.student_id)
     await db.refresh(attempt)
-    # correct_count / total_questions are response-only fields (not ORM
-    # columns) that QuizAttemptRead surfaces so the results page can show
-    # "N/total correct". Attach them as transient attributes after refresh so
-    # pydantic's from_attributes picks them up; without this they default to
-    # None and the UI renders "0/N correct" despite a correct score_percent.
-    # response-only (not ORM columns); dynamic attrs picked up by from_attributes
     setattr(attempt, "correct_count", correct_count)  # noqa: B010 -- dynamic, not column
     setattr(attempt, "total_questions", question_count)  # noqa: B010 -- dynamic, not column
+    return attempt
+
+
+async def _expire_attempt(
+    db: AsyncSession,
+    attempt: QuizAttempt,
+    *,
+    now: datetime | None = None,
+) -> QuizAttempt:
+    """Close an in_progress attempt as 'expired' with no grade (autoabandon)."""
+    now = now or utcnow()
+    if attempt.status != "in_progress":
+        return attempt
+    attempt.status = "expired"
+    attempt.submitted_at = now
+    attempt.time_taken_seconds = int((now - attempt.started_at).total_seconds())
+    await flush_or_conflict(db)
+    await db.refresh(attempt)
     return attempt
 
 
@@ -551,30 +846,80 @@ async def get_attempt_review(
         db, attempt.quiz_id
     )
 
+    # Phase 2: resolve the teacher-configured review-visibility flags for the
+    # active time-window (immediately_after / later_while_open / after_close) and
+    # mask the payload server-side so a hidden field never leaves the service.
+    from abridgeai.features.quizzes.schemas.attempt import (  # noqa: PLC0415
+        ReviewVisibilityFlags,
+    )
+    from abridgeai.features.quizzes.services.review_visibility import (  # noqa: PLC0415
+        resolve_review_visibility,
+    )
+
+    quiz = await _require_quiz(db, attempt.quiz_id)
+    vis = resolve_review_visibility(quiz, attempt, utcnow())
+
     review_questions: list[QuizAttemptReviewQuestion] = []
     for question, options in questions_with_options:
         ans = answers_by_question.get(question.id)
+        # Options carry is_correct; strip the correct-answer signal when hidden.
+        review_options = [QuizAttemptReviewOption.model_validate(opt) for opt in options]
+        if not vis.show_correct_answers:
+            for opt in review_options:
+                opt.is_correct = False
         review_questions.append(
             QuizAttemptReviewQuestion(
                 question_id=question.id,
                 position=question.position,
                 question_type=question.question_type,
                 prompt_text=question.prompt_text,
-                explanation=question.explanation,
+                explanation=question.explanation if vis.show_explanation else None,
                 hint_text=question.hint_text,
-                options=[QuizAttemptReviewOption.model_validate(opt) for opt in options],
+                options=review_options,
                 selected_option_id=ans.selected_option_id if ans else None,
                 answer_text=ans.answer_text if ans else None,
-                is_correct=ans.is_correct if ans else False,
-                points_awarded=ans.points_awarded if ans else Decimal("0"),
+                is_correct=(ans.is_correct if ans else False) if vis.show_correctness else False,
+                points_awarded=(ans.points_awarded if ans else Decimal("0"))
+                if vis.show_points
+                else Decimal("0"),
                 hint_used=ans.hint_used if ans else False,
                 t_actual_ms=ans.t_actual_ms if ans else None,
             )
         )
 
+    attempt_read = QuizAttemptRead.model_validate(attempt)
+    if not vis.show_score:
+        attempt_read.score_points = None
+        attempt_read.score_percent = None
+        attempt_read.passed = None
+        attempt_read.correct_count = None
+
+    # Phase 8: attach the matched overall grade-band feedback, but only when the
+    # score is visible (feedback is a review-time disclosure like the score).
+    overall_text: str | None = None
+    overall_format: str | None = None
+    if vis.show_score:
+        from abridgeai.features.quizzes.services import feedback as _fb  # noqa: PLC0415
+
+        band = await _fb.select_overall_feedback(
+            db, quiz_id=attempt.quiz_id, score_percent=attempt.score_percent
+        )
+        if band is not None:
+            overall_text = band.feedback_text
+            overall_format = band.feedback_format
+
     return QuizAttemptReviewRead(
-        attempt=QuizAttemptRead.model_validate(attempt),
+        attempt=attempt_read,
         questions=review_questions,
+        visibility=ReviewVisibilityFlags(
+            show_score=vis.show_score,
+            show_correctness=vis.show_correctness,
+            show_correct_answers=vis.show_correct_answers,
+            show_explanation=vis.show_explanation,
+            show_points=vis.show_points,
+        ),
+        overall_feedback_text=overall_text,
+        overall_feedback_format=overall_format,
     )
 
 
@@ -607,9 +952,19 @@ async def get_attempt_progress(
     # subset keyed by question_id.
     quiz = await _require_quiz(db, attempt.quiz_id)
     questions = await _load_quiz_questions_for_taking(db, attempt.quiz_id)
+    # Re-apply the per-attempt shuffle layout persisted at start time so a
+    # resume (refresh / re-open) shows the SAME shuffled order the student saw,
+    # not the authored order. Without this the resume payload leaks the
+    # canonical sequence and disagrees with the order answers were given in.
+    if attempt.layout:
+        from abridgeai.features.quizzes.services.shuffle import apply_layout  # noqa: PLC0415
+
+        questions = apply_layout(questions, attempt.layout)
+    public_questions = [QuizQuestionPublic.model_validate(q) for q in questions]
+    _renumber_display_positions(public_questions)
     take_payload = QuizForTakingPublic(
         quiz=QuizPublic.model_validate(quiz),
-        questions=[QuizQuestionPublic.model_validate(q) for q in questions],
+        questions=public_questions,
     )
 
     return QuizAttemptProgressRead.model_validate(
@@ -639,6 +994,9 @@ __all__ = [
     "MaxAttemptsReached",
     "QuizClosed",
     "QuizNotYetOpen",
+    "QuizPasswordIncorrect",
+    "QuizPasswordRequired",
+    "QuizSubnetBlocked",
     "answer_attempt",
     "get_attempt_history",
     "get_attempt_progress",

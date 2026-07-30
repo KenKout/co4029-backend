@@ -1446,3 +1446,294 @@ async def test_course_outcome_student_403(
         headers=auth,
     )
     assert resp.status_code == 403, resp.text
+
+
+@pytest.mark.asyncio
+async def test_course_outcome_teacher_403_lo_manage_split(
+    client: httpx.AsyncClient,
+    teacher_bearer: str,
+    scenario: dict[str, uuid.UUID | str],
+    engine: AsyncEngine,
+) -> None:
+    """Teacher (course.update, NOT learning_outcome.manage) cannot author LOs.
+
+    The §LO split: learning outcomes are manager-owned. The teacher holds a
+    course-scoped ``teacher`` role on course_a (so ``course.update`` for
+    content), but LO create/edit/delete now require ``learning_outcome.manage``
+    — which the teacher lacks — so all three writes return 403. This is the
+    regression guard for the split.
+    """
+    course_a = scenario["course_a"]
+    auth = {"Authorization": f"Bearer {teacher_bearer}"}
+    base = f"/api/v1/teacher/courses/{course_a}/outcomes"
+
+    # Seed one LO directly so PATCH/DELETE have a target (bypass the API since
+    # the whole point is that the teacher can't create one).
+    outcome_id = uuid.uuid4()
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO course_learning_outcomes "
+                "(id, course_id, outcome_text, position, created_at, updated_at) "
+                "VALUES (:id, :cid, 'Seeded LO', 1, NOW(), NOW())"
+            ),
+            {"id": outcome_id, "cid": course_a},
+        )
+
+    try:
+        create = await client.post(base, json={"outcome_text": "Teacher LO"}, headers=auth)
+        assert create.status_code == 403, create.text
+
+        patch = await client.patch(
+            f"{base}/{outcome_id}", json={"outcome_text": "edited"}, headers=auth
+        )
+        assert patch.status_code == 403, patch.text
+
+        delete = await client.delete(f"{base}/{outcome_id}", headers=auth)
+        assert delete.status_code == 403, delete.text
+
+        # The teacher CAN still read the LOs (content alignment needs it).
+        listing = await client.get(base, headers=auth)
+        assert listing.status_code == 200, listing.text
+    finally:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("DELETE FROM course_learning_outcomes WHERE course_id = :cid"),
+                {"cid": course_a},
+            )
+
+
+@pytest.mark.asyncio
+async def test_course_outcome_manager_can_author(
+    client: httpx.AsyncClient,
+    manager_bearer: str,
+    scenario: dict[str, uuid.UUID | str],
+    engine: AsyncEngine,
+) -> None:
+    """Manager (org-scoped learning_outcome.manage) can fully author LOs.
+
+    Exercised on course_a, which the manager does NOT own (admin owns it) — so
+    this proves authorisation flows through the ``learning_outcome.manage``
+    grant, not ownership.
+    """
+    course_a = scenario["course_a"]
+    auth = {"Authorization": f"Bearer {manager_bearer}"}
+    base = f"/api/v1/teacher/courses/{course_a}/outcomes"
+
+    try:
+        create = await client.post(base, json={"outcome_text": "Manager LO"}, headers=auth)
+        assert create.status_code == 201, create.text
+        outcome_id = create.json()["id"]
+
+        patch = await client.patch(
+            f"{base}/{outcome_id}", json={"outcome_text": "Manager LO v2"}, headers=auth
+        )
+        assert patch.status_code == 200, patch.text
+        assert patch.json()["outcome_text"] == "Manager LO v2"
+
+        delete = await client.delete(f"{base}/{outcome_id}", headers=auth)
+        assert delete.status_code == 204, delete.text
+    finally:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("DELETE FROM course_learning_outcomes WHERE course_id = :cid"),
+                {"cid": course_a},
+            )
+
+
+@pytest.mark.asyncio
+async def test_course_outcome_owner_teacher_cannot_bypass(
+    client: httpx.AsyncClient,
+    teacher_bearer: str,
+    seeded_users: SeededUsers,
+    engine: AsyncEngine,
+) -> None:
+    """A teacher who OWNS a course still cannot author its LOs.
+
+    The owner short-circuit is disabled for LO endpoints (allow_owner=False), so
+    even course ownership does not confer LO authoring — only the manager's
+    ``learning_outcome.manage`` grant does. This is the interaction that a naive
+    'just regate the endpoint' fix would miss.
+    """
+    owned_course = uuid.uuid4()
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO courses (id, organization_id, owner_user_id, slug, title, status) "
+                "VALUES (:id, :org, :owner, :slug, 'Teacher Owned', 'draft')"
+            ),
+            {
+                "id": owned_course,
+                "org": seeded_users.organization_id,
+                "owner": seeded_users.teacher_id,
+                "slug": f"teacher-owned-{owned_course.hex[:8]}",
+            },
+        )
+
+    auth = {"Authorization": f"Bearer {teacher_bearer}"}
+    base = f"/api/v1/teacher/courses/{owned_course}/outcomes"
+    try:
+        # Sanity: the teacher CAN edit the course itself (course.update via
+        # ownership), proving the 403 below is specifically the LO gate.
+        meta = await client.patch(
+            f"/api/v1/teacher/courses/{owned_course}",
+            json={"title": "Renamed by owner"},
+            headers=auth,
+        )
+        assert meta.status_code == 200, meta.text
+
+        create = await client.post(base, json={"outcome_text": "Owner LO"}, headers=auth)
+        assert create.status_code == 403, create.text
+    finally:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("DELETE FROM course_learning_outcomes WHERE course_id = :cid"),
+                {"cid": owned_course},
+            )
+            await conn.execute(text("DELETE FROM courses WHERE id = :id"), {"id": owned_course})
+
+
+async def test_course_outcome_hierarchy(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    scenario: dict[str, uuid.UUID | str],
+    engine: AsyncEngine,
+) -> None:
+    """Hierarchy (arbitrary depth): nest, dotted codes, re-parent, cycle guard,
+    and subtree delete.
+
+    Builds L.O.1 with children 1.1 and 1.2, and a grandchild 1.1.1; verifies
+    the derived dotted ``code`` + ``depth``; re-parents; rejects a cycle; and
+    confirms deleting a parent removes its whole subtree and compacts siblings.
+    """
+    course_a = scenario["course_a"]
+    auth = {"Authorization": f"Bearer {admin_bearer}"}
+    base = f"/api/v1/teacher/courses/{course_a}/outcomes"
+
+    # Two top-level outcomes.
+    lo1 = (await client.post(base, json={"outcome_text": "Root one"}, headers=auth)).json()
+    lo2 = (await client.post(base, json={"outcome_text": "Root two"}, headers=auth)).json()
+    assert lo1["code"] == "1" and lo1["depth"] == 0
+    assert lo2["code"] == "2" and lo2["depth"] == 0
+
+    # Two children under L.O.1, then a grandchild under the first child.
+    c1 = (
+        await client.post(
+            base, json={"outcome_text": "Child A", "parent_id": lo1["id"]}, headers=auth
+        )
+    ).json()
+    c2 = (
+        await client.post(
+            base, json={"outcome_text": "Child B", "parent_id": lo1["id"]}, headers=auth
+        )
+    ).json()
+    g1 = (
+        await client.post(
+            base, json={"outcome_text": "Grandchild", "parent_id": c1["id"]}, headers=auth
+        )
+    ).json()
+    assert c1["code"] == "1.1" and c1["depth"] == 1
+    assert c2["code"] == "1.2" and c2["depth"] == 1
+    assert g1["code"] == "1.1.1" and g1["depth"] == 2
+
+    # List is in tree order with codes.
+    listed = (await client.get(base, headers=auth)).json()
+    assert [(o["code"], o["outcome_text"]) for o in listed] == [
+        ("1", "Root one"),
+        ("1.1", "Child A"),
+        ("1.1.1", "Grandchild"),
+        ("1.2", "Child B"),
+        ("2", "Root two"),
+    ]
+
+    # Cycle guard: moving L.O.1 under its own grandchild must 4xx.
+    cycle = await client.patch(
+        f"{base}/{lo1['id']}", json={"parent_id": g1["id"]}, headers=auth
+    )
+    assert cycle.status_code == 400, cycle.text
+
+    # Re-parent Child B (1.2) to be a child of Root two → becomes 2.1.
+    moved = await client.patch(
+        f"{base}/{c2['id']}", json={"parent_id": lo2["id"]}, headers=auth
+    )
+    assert moved.status_code == 200, moved.text
+    after_move = {o["id"]: o for o in (await client.get(base, headers=auth)).json()}
+    assert after_move[c2["id"]]["code"] == "2.1"
+
+    # Delete L.O.1 → its subtree (Child A + Grandchild) goes too; Root two
+    # (and its new child) survive, and Root two compacts to code "1".
+    del_resp = await client.delete(f"{base}/{lo1['id']}", headers=auth)
+    assert del_resp.status_code == 204, del_resp.text
+    remaining = (await client.get(base, headers=auth)).json()
+    texts = {o["outcome_text"] for o in remaining}
+    assert texts == {"Root two", "Child B"}
+    by_text = {o["outcome_text"]: o for o in remaining}
+    assert by_text["Root two"]["code"] == "1"
+    assert by_text["Child B"]["code"] == "1.1"
+
+    # Cleanup (hard-delete; endpoint only soft-deletes).
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("DELETE FROM course_learning_outcomes WHERE course_id = :cid"),
+            {"cid": course_a},
+        )
+
+
+@pytest.mark.asyncio
+async def test_course_outcomes_frozen_once_published(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    scenario: dict[str, uuid.UUID | str],
+    engine: AsyncEngine,
+) -> None:
+    """LOs are editable only while the course is a draft.
+
+    Outcomes double as the graded assessment scale, so once a course is
+    published they are frozen: create/update/delete each return 409. And a
+    published course can never be reverted to draft (also 409) — publishing is
+    a one-way door. Edits are allowed again... never, by design.
+    """
+    course_a = scenario["course_a"]
+    auth = {"Authorization": f"Bearer {admin_bearer}"}
+    base = f"/api/v1/teacher/courses/{course_a}/outcomes"
+
+    # While DRAFT: create one outcome (allowed) so we have an id to edit/delete.
+    created = await client.post(base, json={"outcome_text": "Understand X"}, headers=auth)
+    assert created.status_code == 201, created.text
+    outcome_id = created.json()["id"]
+
+    # Publish the course (draft -> published).
+    pub = await client.post(f"/api/v1/teacher/courses/{course_a}/publish", headers=auth)
+    assert pub.status_code == 200, pub.text
+    assert pub.json()["status"] == "published"
+
+    # Now every LO write is frozen with 409.
+    add_after = await client.post(base, json={"outcome_text": "Apply Y"}, headers=auth)
+    assert add_after.status_code == 409, add_after.text
+
+    edit_after = await client.patch(
+        f"{base}/{outcome_id}", json={"outcome_text": "revised"}, headers=auth
+    )
+    assert edit_after.status_code == 409, edit_after.text
+
+    del_after = await client.delete(f"{base}/{outcome_id}", headers=auth)
+    assert del_after.status_code == 409, del_after.text
+
+    # The single outcome is untouched (still one, original text).
+    listed = (await client.get(base, headers=auth)).json()
+    assert [o["outcome_text"] for o in listed] == ["Understand X"]
+
+    # A published course can never be reverted to draft.
+    revert = await client.patch(
+        f"/api/v1/teacher/courses/{course_a}", json={"status": "draft"}, headers=auth
+    )
+    assert revert.status_code == 409, revert.text
+    still = (await client.get(f"/api/v1/teacher/courses/{course_a}", headers=auth)).json()
+    assert still["status"] == "published"
+
+    # Cleanup (hard-delete; endpoint only soft-deletes).
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("DELETE FROM course_learning_outcomes WHERE course_id = :cid"),
+            {"cid": course_a},
+        )

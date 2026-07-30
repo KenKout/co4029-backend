@@ -412,19 +412,17 @@ async def test_learner_quiz_response_omits_is_correct(
     assert create_resp.status_code == 201
     quiz_id = uuid.UUID(create_resp.json()["id"])
 
-    pub_resp = await client.post(
-        f"/api/v1/teacher/quizzes/{quiz_id}/publish",
-        headers=_auth(admin_bearer),
-    )
-    assert pub_resp.status_code == 200, pub_resp.text
-
+    # Seed the approved question BEFORE publishing — the publish gate now
+    # requires at least one approved question, so an empty quiz can't be
+    # published.
     question_id = uuid.uuid4()
     async with engine.begin() as conn:
         await conn.execute(
             text(
                 "INSERT INTO quiz_questions "
-                "(id, quiz_id, position, question_type, prompt_text, review_status) "
-                "VALUES (:id, :qz, 1, 'multiple_choice', 'What is 2+2?', 'approved')"
+                "(id, quiz_id, position, question_type, prompt_text, review_status, "
+                " expected_response_time_ms) "
+                "VALUES (:id, :qz, 1, 'multiple_choice', 'What is 2+2?', 'approved', 30000)"
             ),
             {"id": question_id, "qz": quiz_id},
         )
@@ -448,6 +446,12 @@ async def test_learner_quiz_response_omits_is_correct(
                     "p": position,
                 },
             )
+
+    pub_resp = await client.post(
+        f"/api/v1/teacher/quizzes/{quiz_id}/publish",
+        headers=_auth(admin_bearer),
+    )
+    assert pub_resp.status_code == 200, pub_resp.text
 
     student_sid = await _seed_session(engine, seeded_users.student_id)
     student_token = create_access_token(user_id=seeded_users.student_id, session_id=student_sid)
@@ -506,12 +510,10 @@ async def _seed_published_quiz_with_question(
     assert create_resp.status_code == 201, create_resp.text
     quiz_id = uuid.UUID(create_resp.json()["id"])
 
-    pub_resp = await client.post(
-        f"/api/v1/teacher/quizzes/{quiz_id}/publish",
-        headers=_auth(admin_bearer),
-    )
-    assert pub_resp.status_code == 200, pub_resp.text
-
+    # Seed the approved question + options BEFORE publishing. The publish gate
+    # requires at least one approved question (and a t_exp on each), so an
+    # empty quiz can no longer be published — insert content first, then flip
+    # to published.
     question_id = uuid.uuid4()
     option_ids: dict[str, uuid.UUID] = {}
     async with engine.begin() as conn:
@@ -548,6 +550,13 @@ async def _seed_published_quiz_with_question(
                     "p": position,
                 },
             )
+
+    pub_resp = await client.post(
+        f"/api/v1/teacher/quizzes/{quiz_id}/publish",
+        headers=_auth(admin_bearer),
+    )
+    assert pub_resp.status_code == 200, pub_resp.text
+
     return quiz_id, question_id, option_ids
 
 
@@ -988,10 +997,21 @@ async def test_update_quiz_persists_schedule_window(
     scenario: dict[str, uuid.UUID],
     engine: AsyncEngine,
 ) -> None:
-    """PATCH /teacher/quizzes/{id} accepts ISO window strings and echoes them back."""
-    quiz_id, _question_id, _opts = await _seed_published_quiz_with_question(
-        client, admin_bearer, engine, scenario, title="Schedule PATCH Quiz"
+    """PATCH /teacher/quizzes/{id} accepts ISO window strings on a DRAFT quiz.
+
+    A published quiz is frozen (see
+    test_update_published_quiz_is_rejected), so schedule edits are only
+    valid while the quiz is still a draft.
+    """
+    # Create a DRAFT quiz (do not publish) so the edit is allowed.
+    create_resp = await client.post(
+        f"/api/v1/teacher/courses/{scenario['course_id']}/quizzes",
+        json={"module_id": str(scenario["module_id"]), "title": "Schedule PATCH Quiz"},
+        headers=_auth(admin_bearer),
     )
+    assert create_resp.status_code == 201, create_resp.text
+    quiz_id = uuid.UUID(create_resp.json()["id"])
+
     open_ts = "2026-08-01T09:00:00+00:00"
     close_ts = "2026-08-08T09:00:00+00:00"
     due_ts = "2026-08-07T23:59:00+00:00"
@@ -1018,6 +1038,150 @@ async def test_update_quiz_persists_schedule_window(
     )
     assert clear_resp.status_code == 200, clear_resp.text
     assert clear_resp.json()["available_until"] is None
+
+
+async def test_update_quiz_browser_security_boolean_coerced(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    scenario: dict[str, uuid.UUID],
+    engine: AsyncEngine,
+) -> None:
+    """PATCH accepts the client's boolean ``browser_security`` toggle.
+
+    The column is a string enum ('none' | 'securewindow') guarded by
+    ``ck_quizzes_browser_security``. The Settings tab models the field as a
+    boolean toggle and sends a raw bool; the service must map it to the enum
+    so it can't reach the column and trip the CHECK constraint (which
+    previously surfaced as a 500).
+    """
+    create_resp = await client.post(
+        f"/api/v1/teacher/courses/{scenario['course_id']}/quizzes",
+        json={"module_id": str(scenario["module_id"]), "title": "Browser-Security PATCH Quiz"},
+        headers=_auth(admin_bearer),
+    )
+    assert create_resp.status_code == 201, create_resp.text
+    quiz_id = uuid.UUID(create_resp.json()["id"])
+
+    # true -> 'securewindow'
+    on_resp = await client.patch(
+        f"/api/v1/teacher/quizzes/{quiz_id}",
+        json={"browser_security": True},
+        headers=_auth(admin_bearer),
+    )
+    assert on_resp.status_code == 200, on_resp.text
+    async with engine.connect() as conn:
+        stored = await conn.scalar(
+            text("SELECT browser_security FROM quizzes WHERE id = :id"),
+            {"id": str(quiz_id)},
+        )
+    assert stored == "securewindow"
+
+    # false -> 'none'
+    off_resp = await client.patch(
+        f"/api/v1/teacher/quizzes/{quiz_id}",
+        json={"browser_security": False},
+        headers=_auth(admin_bearer),
+    )
+    assert off_resp.status_code == 200, off_resp.text
+    async with engine.connect() as conn:
+        stored = await conn.scalar(
+            text("SELECT browser_security FROM quizzes WHERE id = :id"),
+            {"id": str(quiz_id)},
+        )
+    assert stored == "none"
+
+    # A bogus string is a clean 400, not a 500 from the CHECK constraint.
+    bad_resp = await client.patch(
+        f"/api/v1/teacher/quizzes/{quiz_id}",
+        json={"browser_security": "lockdown"},
+        headers=_auth(admin_bearer),
+    )
+    assert bad_resp.status_code == 400, bad_resp.text
+
+
+async def test_published_quiz_allows_student_safe_settings(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    scenario: dict[str, uuid.UUID],
+    engine: AsyncEngine,
+) -> None:
+    """On a published quiz, student-safe settings stay editable.
+
+    Title/description/schedule/reminders don't disrupt a student who is
+    taking or has finished the quiz, so they may be PATCHed after publish.
+    """
+    create_resp = await client.post(
+        f"/api/v1/teacher/courses/{scenario['course_id']}/quizzes",
+        json={"module_id": str(scenario["module_id"]), "title": "Live Quiz"},
+        headers=_auth(admin_bearer),
+    )
+    assert create_resp.status_code == 201, create_resp.text
+    quiz_id = uuid.UUID(create_resp.json()["id"])
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("UPDATE quizzes SET status = 'published' WHERE id = :id"),
+            {"id": quiz_id},
+        )
+
+    resp = await client.patch(
+        f"/api/v1/teacher/quizzes/{quiz_id}",
+        json={
+            "title": "Renamed after publish",
+            "description": "Deadline extended",
+            "available_until": "2026-09-01T09:00:00+00:00",
+            "reminders_enabled": True,
+        },
+        headers=_auth(admin_bearer),
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["title"] == "Renamed after publish"
+    assert body["available_until"].startswith("2026-09-01T09:00:00")
+
+
+async def test_published_quiz_rejects_frozen_settings(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    scenario: dict[str, uuid.UUID],
+    engine: AsyncEngine,
+) -> None:
+    """On a published quiz, scoring/timing/attempt settings are frozen.
+
+    Changing these under a student who is mid-attempt (or already finished)
+    would corrupt grading/presentation, so they must 409
+    (quiz_published_setting_locked).
+    """
+    create_resp = await client.post(
+        f"/api/v1/teacher/courses/{scenario['course_id']}/quizzes",
+        json={"module_id": str(scenario["module_id"]), "title": "Frozen Quiz"},
+        headers=_auth(admin_bearer),
+    )
+    assert create_resp.status_code == 201, create_resp.text
+    quiz_id = uuid.UUID(create_resp.json()["id"])
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("UPDATE quizzes SET status = 'published' WHERE id = :id"),
+            {"id": quiz_id},
+        )
+
+    # A frozen field alone → 409.
+    resp = await client.patch(
+        f"/api/v1/teacher/quizzes/{quiz_id}",
+        json={"passing_score_percent": 90},
+        headers=_auth(admin_bearer),
+    )
+    assert resp.status_code == 409, resp.text
+    assert "quiz_published_setting_locked" in resp.text
+
+    # A frozen field mixed with a student-safe field is still rejected
+    # wholesale (no partial application).
+    mixed = await client.patch(
+        f"/api/v1/teacher/quizzes/{quiz_id}",
+        json={"title": "New title", "shuffle_questions": True},
+        headers=_auth(admin_bearer),
+    )
+    assert mixed.status_code == 409, mixed.text
+    assert "shuffle_questions" in mixed.text
 
 
 # ---------------------------------------------------------------------------

@@ -31,6 +31,7 @@ is rescaled to 0-100 percent so it slots cleanly into
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
@@ -54,6 +55,53 @@ fixtures and for the Gap Report which renders criteria in this order.
 _SCORE_MIN: float = 0.0
 _SCORE_MAX: float = 5.0
 _PERCENT_SCALE: float = 100.0 / _SCORE_MAX  # 5 → 100
+
+SUPPLEMENTARY_RUBRIC_KEY = "evaluation_rubric"
+"""Key inside ``supplementary_instructions`` JSON holding the SCORING rubric.
+
+Deliberately NOT ``rubric_weights``: that top-level key is already claimed by
+the GENERATION stage, where it means the question **type mix**
+(technical/behavioral/situational) — see
+:func:`...ai.stages.generation.resolve.resolve_type_mix`. Reusing it here would
+silently grade candidates against criteria named "technical"/"behavioral"
+instead of a real rubric, so the scoring rubric gets its own namespace.
+"""
+
+_MAX_CRITERIA = 10
+"""Upper bound on teacher-defined criteria.
+
+All criteria for one response are judged in a SINGLE LLM call, so a large set
+does not multiply cost — but it does dilute judge attention and bloat the
+output schema. Extra criteria beyond this cap are dropped (leading ones win).
+"""
+
+_MAX_CRITERION_NAME_CHARS = 64
+
+SUPPLEMENTARY_NOTES_KEY = "notes"
+"""Key inside ``supplementary_instructions`` JSON holding the teacher's prose.
+
+``supplementary_instructions`` serves two audiences from one column: structured
+authoring data (rubric, type mix, question count) and free prose guidance that
+is injected verbatim into the GENERATION prompt. Once the field holds JSON, the
+prose needs a home inside that JSON — otherwise the generation prompt receives
+a raw JSON blob instead of human instructions.
+"""
+
+
+def resolve_supplementary_notes(supplementary: str | None) -> str:
+    """Return ONLY the human-readable guidance from ``supplementary_instructions``.
+
+    Prose-only fields (the common case) are returned unchanged. When the field
+    holds a JSON object, the ``notes`` string is returned and the structured
+    keys (``evaluation_rubric``, ``rubric_weights``, ``question_count``) are
+    stripped — feeding those to the question-generation LLM as prose is noise at
+    best and confusing instructions at worst.
+    """
+    parsed = _try_parse_json_object(supplementary)
+    if parsed is None:
+        return (supplementary or "").strip()
+    notes = parsed.get(SUPPLEMENTARY_NOTES_KEY)
+    return notes.strip() if isinstance(notes, str) else ""
 
 
 @dataclass(frozen=True)
@@ -91,6 +139,127 @@ class RubricScores:
     response_evaluations: list[ResponseEvaluation]
     aggregated: dict[str, float]
     total_score: float
+
+
+@dataclass(frozen=True)
+class RubricDefinition:
+    """A fully resolved scoring rubric: normalised weights + optional prose.
+
+    ``descriptions`` maps criterion → the teacher's definition of what that
+    criterion means. It is optional per criterion; the judge prompt only renders
+    the ones present. Supplying a description is the single biggest lever a
+    teacher has on judge quality, because a bare key like ``communication``
+    otherwise leaves the judge to guess the intent.
+    """
+
+    weights: dict[str, float]
+    descriptions: dict[str, str]
+
+    @property
+    def criteria(self) -> tuple[str, ...]:
+        return tuple(self.weights.keys())
+
+
+def resolve_rubric_definition(supplementary: str | None) -> RubricDefinition:
+    """Parse the teacher's scoring rubric out of ``supplementary_instructions``.
+
+    ``supplementary_instructions`` is a free-text authoring field that MAY hold
+    a JSON object. When it does, this reads ``evaluation_rubric`` from it — see
+    :data:`SUPPLEMENTARY_RUBRIC_KEY` for why that key is not ``rubric_weights``.
+
+    Accepted shapes for ``evaluation_rubric``:
+
+    1. Full form — weight + description per criterion::
+
+        {"evaluation_rubric": {"criteria": [
+            {"name": "depth", "weight": 3, "description": "Cites concrete..."},
+            {"name": "clarity", "weight": 1}
+        ]}}
+
+    2. Weight mapping — ``{"depth": 3, "clarity": 1}`` (no descriptions).
+    3. Name list — ``["depth", "clarity"]`` (equal weight, no descriptions).
+
+    Anything unparseable, empty, or malformed falls back to the four-criterion
+    equal-weight default. Grading must never crash or silently produce an empty
+    rubric because a teacher typed prose into the field.
+    """
+    parsed = _try_parse_json_object(supplementary)
+    raw = parsed.get(SUPPLEMENTARY_RUBRIC_KEY) if parsed is not None else None
+
+    if isinstance(raw, Mapping):
+        nested = raw.get("criteria")
+        if isinstance(nested, Iterable) and not isinstance(nested, (str, bytes, Mapping)):
+            definition = _definition_from_entries(nested)
+            if definition is not None:
+                return definition
+        weights = _coerce_weight_mapping(raw)
+        if weights is not None:
+            return RubricDefinition(weights=_normalise_weights(weights), descriptions={})
+    elif isinstance(raw, Iterable) and not isinstance(raw, (str, bytes)):
+        definition = _definition_from_entries(raw)
+        if definition is not None:
+            return definition
+
+    return RubricDefinition(weights=resolve_rubric(None), descriptions={})
+
+
+def _definition_from_entries(entries: Iterable[object]) -> RubricDefinition | None:
+    """Build a definition from a list of criterion entries (dicts or names)."""
+    weights: dict[str, float] = {}
+    descriptions: dict[str, str] = {}
+    for entry in entries:
+        if len(weights) >= _MAX_CRITERIA:
+            break
+        if isinstance(entry, str):
+            name = _clean_criterion_name(entry)
+            if name and name not in weights:
+                weights[name] = 1.0
+            continue
+        if not isinstance(entry, Mapping):
+            continue
+        raw_name = entry.get("name") or entry.get("criterion")
+        name = _clean_criterion_name(raw_name if isinstance(raw_name, str) else "")
+        if not name or name in weights:
+            continue
+        weight = _coerce_positive_weight(entry.get("weight"))
+        weights[name] = weight if weight is not None else 1.0
+        description = entry.get("description")
+        if isinstance(description, str) and description.strip():
+            descriptions[name] = description.strip()
+    if not weights:
+        return None
+    return RubricDefinition(
+        weights=_normalise_weights(weights),
+        descriptions=descriptions,
+    )
+
+
+def _clean_criterion_name(value: str) -> str:
+    return value.strip()[:_MAX_CRITERION_NAME_CHARS]
+
+
+def _coerce_positive_weight(raw: object) -> float | None:
+    if raw is None or isinstance(raw, bool):
+        return None
+    try:
+        weight = float(raw)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return weight if weight > 0 else None
+
+
+def _try_parse_json_object(value: str | None) -> dict[str, object] | None:
+    """Best-effort JSON-object parse; None when the field is prose or invalid."""
+    if not value:
+        return None
+    stripped = value.strip()
+    if not stripped.startswith("{"):
+        return None
+    try:
+        parsed = json.loads(stripped)
+    except (TypeError, ValueError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
 
 
 def resolve_rubric(config: Mapping[str, object] | None) -> dict[str, float]:
@@ -235,10 +404,15 @@ def _normalise_weights(weights: Mapping[str, float]) -> dict[str, float]:
 
 __all__ = [
     "DEFAULT_CRITERIA",
+    "SUPPLEMENTARY_RUBRIC_KEY",
     "CriterionScore",
     "ResponseEvaluation",
+    "RubricDefinition",
     "RubricScores",
     "aggregate_rubric_scores",
     "build_criterion_score",
     "resolve_rubric",
+    "resolve_rubric_definition",
+    "resolve_supplementary_notes",
+    "SUPPLEMENTARY_NOTES_KEY",
 ]

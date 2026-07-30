@@ -30,6 +30,8 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
+from tests.support.db_graph import hard_delete_graph
+
 import abridgeai.features.access_control.models  # noqa: F401  -- register users/orgs FK targets
 import abridgeai.features.courses.models  # noqa: F401  -- register courses/modules/lessons FK targets
 import abridgeai.features.identity.models  # noqa: F401  -- register users FK target
@@ -106,6 +108,16 @@ async def published_quiz(engine: AsyncEngine) -> AsyncIterator[dict]:
         await conn.execute(
             text("INSERT INTO users (id, primary_email) VALUES (:id, :email)"),
             {"id": student_id, "email": f"qt-student-{suffix}@test.local"},
+        )
+        # The student must belong to the quiz's organization: start_attempt now
+        # enforces tenancy (organizations do not share quizzes).
+        await conn.execute(
+            text(
+                "INSERT INTO organization_memberships "
+                "(id, user_id, organization_id, status) "
+                "VALUES (uuid_generate_v4(), :uid, :org, 'active')"
+            ),
+            {"uid": student_id, "org": org_id},
         )
         await conn.execute(
             text(
@@ -200,9 +212,16 @@ async def published_quiz(engine: AsyncEngine) -> AsyncIterator[dict]:
             text("DELETE FROM quiz_questions WHERE quiz_id = :q"),
             {"q": quiz_id},
         )
-        await conn.execute(text("DELETE FROM quizzes WHERE id = :id"), {"id": quiz_id})
+        # Graph-driven: grading leaves quiz_grades under this quiz.
+        await hard_delete_graph(conn, "quizzes", [str(quiz_id)])
         await conn.execute(text("DELETE FROM modules WHERE course_id = :c"), {"c": course_id})
-        await conn.execute(text("DELETE FROM courses WHERE id = :id"), {"id": course_id})
+        # Graph-driven: enrollment/grade rows other suites attach to this
+        # course block a bare delete (NO ACTION FKs).
+        await hard_delete_graph(conn, "courses", [str(course_id)])
+        await conn.execute(
+            text("DELETE FROM organization_memberships WHERE user_id IN (:o, :s)"),
+            {"o": owner_id, "s": student_id},
+        )
         await conn.execute(
             text("DELETE FROM users WHERE id IN (:o, :s)"),
             {"o": owner_id, "s": student_id},
@@ -481,6 +500,144 @@ async def test_start_attempt_rejects_draft_quiz(
                 )
     finally:
         async with engine.begin() as conn:
+            await hard_delete_graph(conn, "quizzes", [str(draft_quiz_id)])
+
+
+@pytest.mark.asyncio
+async def test_start_attempt_rejects_cross_org_student(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    published_quiz: dict,
+) -> None:
+    """Organizations do not share quizzes: a student who is NOT a member of the
+    quiz's organization cannot start an attempt, even on a published quiz.
+
+    Raises NotFoundError (router -> 404), the same shape a missing quiz returns,
+    so the endpoint cannot be used to probe which quiz ids exist in another
+    tenant. The outsider has a valid account (and even a membership in a
+    DIFFERENT org) — only the tenancy mismatch blocks them.
+    """
+    outsider_id = uuid.uuid4()
+    other_org = uuid.uuid4()
+    suffix = outsider_id.hex[:8]
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("INSERT INTO organizations (id, slug, name) VALUES (:id, :slug, :name)"),
+            {"id": other_org, "slug": f"outsider-org-{suffix}", "name": "Outsider Org"},
+        )
+        await conn.execute(
+            text("INSERT INTO users (id, primary_email) VALUES (:id, :email)"),
+            {"id": outsider_id, "email": f"outsider-{suffix}@test.local"},
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO organization_memberships "
+                "(id, user_id, organization_id, status) "
+                "VALUES (uuid_generate_v4(), :uid, :org, 'active')"
+            ),
+            {"uid": outsider_id, "org": other_org},
+        )
+
+    try:
+        with pytest.raises(NotFoundError):
+            async with session_factory() as session, session.begin():
+                await taking_service.start_attempt(
+                    session, published_quiz["quiz_id"], _actor(outsider_id)
+                )
+    finally:
+        async with engine.begin() as conn:
             await conn.execute(
-                text("DELETE FROM quizzes WHERE id = :id"), {"id": draft_quiz_id}
+                text("DELETE FROM organization_memberships WHERE user_id = :uid"),
+                {"uid": outsider_id},
+            )
+            await conn.execute(text("DELETE FROM users WHERE id = :id"), {"id": outsider_id})
+            await conn.execute(text("DELETE FROM organizations WHERE id = :id"), {"id": other_org})
+
+
+@pytest.mark.asyncio
+async def test_shuffled_take_payload_reflects_layout_and_survives_position_sort(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    published_quiz: dict,
+) -> None:
+    """A shuffled attempt's take payload must present the SHUFFLED order.
+
+    Regression for the anti-cheat leak: apply_layout reorders the questions
+    but the SPA re-sorts by ``position``. The take payload must therefore
+    carry sequential display positions (1..N) matching the persisted layout
+    order, so sorting by position preserves the shuffle instead of restoring
+    the authored order. Verified for both the start payload and the resume
+    (get_attempt_progress) payload.
+    """
+    quiz_id = published_quiz["quiz_id"]
+    student_id = published_quiz["student_id"]
+    # Turn shuffle on and add enough questions that a shuffle is near-certain
+    # to differ from authored order (10 questions → 1/10! chance of identity).
+    extra_ids = [uuid.uuid4() for _ in range(9)]
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("UPDATE quizzes SET shuffle_questions = TRUE WHERE id = :id"),
+            {"id": quiz_id},
+        )
+        for i, qid in enumerate(extra_ids, start=2):
+            await conn.execute(
+                text(
+                    "INSERT INTO quiz_questions "
+                    "(id, quiz_id, position, question_type, prompt_text, review_status, "
+                    "expected_response_time_ms) "
+                    "VALUES (:id, :quiz, :pos, 'multiple_choice', :prompt, 'approved', 30000)"
+                ),
+                {"id": qid, "quiz": quiz_id, "pos": i, "prompt": f"Q{i}?"},
+            )
+
+    try:
+        async with session_factory() as session, session.begin():
+            attempt, payload = await taking_service.start_attempt(
+                session, quiz_id, _actor(student_id)
+            )
+            attempt_id = attempt.id
+            layout = attempt.layout
+            start_qids = [str(q.id) for q in payload.take.questions]
+            start_positions = [q.position for q in payload.take.questions]
+
+        # Positions are sequential 1..N (display slots), NOT the authored order.
+        assert start_positions == list(range(1, len(start_qids) + 1))
+        # The take payload order matches the persisted layout question_order.
+        assert layout is not None
+        assert start_qids == layout["question_order"]
+        # Sorting by position (as the SPA does) preserves the shuffled order.
+        by_position = sorted(
+            payload.take.questions, key=lambda q: q.position
+        )
+        assert [str(q.id) for q in by_position] == start_qids
+
+        # Resume must reproduce the SAME shuffled order (re-reads layout).
+        async with session_factory() as session, session.begin():
+            resume = await taking_service.get_attempt_progress(
+                session, attempt_id=attempt_id, actor=_actor(student_id)
+            )
+        assert resume is not None
+        resume_qids = [str(q.id) for q in resume.take.questions]
+        resume_positions = [q.position for q in resume.take.questions]
+        assert resume_qids == start_qids
+        assert resume_positions == list(range(1, len(resume_qids) + 1))
+    finally:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text(
+                    "DELETE FROM quiz_attempt_answers WHERE attempt_id IN "
+                    "(SELECT id FROM quiz_attempts WHERE quiz_id = :q)"
+                ),
+                {"q": quiz_id},
+            )
+            await conn.execute(
+                text("DELETE FROM quiz_attempts WHERE quiz_id = :q"), {"q": quiz_id}
+            )
+            await conn.execute(
+                text("DELETE FROM quiz_questions WHERE id = ANY(:ids)"),
+                {"ids": extra_ids},
+            )
+            await conn.execute(
+                text("UPDATE quizzes SET shuffle_questions = FALSE WHERE id = :id"),
+                {"id": quiz_id},
             )

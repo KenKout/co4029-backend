@@ -28,14 +28,18 @@ is needed.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from abridgeai.features.spaced_repetition.models import StudentCardState
 from abridgeai.features.spaced_repetition.queries.published import (
     review_compliance_rate as _review_compliance_rate,
+)
+from abridgeai.features.spaced_repetition.queries.unlock_sql import (
+    has_passing_interview_for_module,
 )
 from abridgeai.features.spaced_repetition.services import (
     CardFailedEvent,
@@ -43,7 +47,10 @@ from abridgeai.features.spaced_repetition.services import (
     dispatch_remediation_for_card_failure,
     record_card_review,
 )
-from abridgeai.features.spaced_repetition.sm2 import check_lesson_unlock
+from abridgeai.features.spaced_repetition.sm2 import (
+    LessonUnlockStatus,
+    check_lesson_unlock,
+)
 
 from ._dto import CardStateDTO
 
@@ -85,6 +92,34 @@ async def get_compliance_rate(
     return await _review_compliance_rate(db, user_id=student_id, lesson_id=lesson_id)
 
 
+async def purge_card_state_for_questions(
+    db: AsyncSession,
+    question_ids: Sequence[UUID],
+) -> int:
+    """Hard-delete SM-2 card state for the given questions. Returns rows removed.
+
+    Called by the quizzes feature when a question or quiz is (soft-)deleted:
+    ``student_card_state`` is per-student SM-2 scheduling state keyed on
+    ``question_id`` and is meaningless once the question no longer exists.
+    Unlike the authored content (soft-deleted for audit/restore), this state is
+    disposable, so we hard-delete it rather than leave orphaned rows that keep
+    surfacing as perpetually-"due" cards no one can review — they can't reach
+    the take/answer surface (which joins live questions) yet still inflate
+    reminder counts and every teacher analytic that reads the table directly.
+
+    Cross-feature write contract: quizzes cannot import the SR ORM model, so
+    this is the authorised entrypoint. Runs in the caller's transaction (no
+    commit here). ``card_reviews`` history is intentionally left intact — it is
+    an immutable audit trail and is never read as "due".
+    """
+    if not question_ids:
+        return 0
+    result = await db.execute(
+        delete(StudentCardState).where(StudentCardState.question_id.in_(list(question_ids)))
+    )
+    return int(result.rowcount or 0)
+
+
 __all__ = [
     "CardFailedEvent",
     "CardReviewResult",
@@ -94,5 +129,8 @@ __all__ = [
     "get_card_state",
     "get_compliance_rate",
     "get_due_card_count",
+    "has_passing_interview_for_module",
+    "LessonUnlockStatus",
+    "purge_card_state_for_questions",
     "record_card_review",
 ]

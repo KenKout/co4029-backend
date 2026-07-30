@@ -28,6 +28,7 @@ to keep this orchestrator focused on run-state bookkeeping.
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
@@ -43,6 +44,7 @@ from abridgeai.features.interviews.ai.pipelines.backfill import (
 )
 from abridgeai.features.interviews.ai.stages.generation import resolve_question_count
 from abridgeai.features.interviews.ai.stages.retrieval import retrieve_interview_context
+from abridgeai.features.interviews.dedup import store_question_embeddings
 from abridgeai.features.interviews.models import InterviewConfig, InterviewQuestion
 from abridgeai.features.interviews.queries.authoring import (
     list_outcomes_for_config,
@@ -61,16 +63,22 @@ if TYPE_CHECKING:
     )
 
 
+logger = logging.getLogger(__name__)
+
+
 @dataclass
 class _RunState:
     id: UUID
     course_id: UUID | None
     config_json: dict[str, Any]
+    requested_by: UUID | None = None
 
 
 async def run_interview_generation(
     db: AsyncSession,
     generation_run_id: UUID,
+    *,
+    arq_pool: object | None = None,
 ) -> None:
     """Drive retrieval → generation (with backfill) → validation → persistence.
 
@@ -83,6 +91,14 @@ async def run_interview_generation(
     ``status='failed'`` + the failure message, commits, and re-raises so
     the ARQ retry budget engages.
     """
+    # Lazy import to avoid a circular import at module load: this pipeline is
+    # imported by ``services/__init__`` (via services.generation), and
+    # completion_notify lives under services — importing it at top level here
+    # would form services → pipeline → services during package init.
+    from abridgeai.features.interviews.services.completion_notify import (  # noqa: PLC0415
+        notify_interview_generation_outcome,
+    )
+
     run_dto = await quizzes_public.get_generation_run(db, generation_run_id)
     if run_dto is None:
         raise NotFoundError("Generation run not found")
@@ -90,6 +106,7 @@ async def run_interview_generation(
         id=run_dto.id,
         course_id=run_dto.course_id,
         config_json=dict(run_dto.config_json or {}),
+        requested_by=run_dto.requested_by,
     )
 
     config_id = _config_uuid(state.config_json, "interview_config_id")
@@ -159,6 +176,7 @@ async def run_interview_generation(
             config=config,
             accepted=accepted,
             source_module_ids=_module_ids_for_questions(state.config_json, config),
+            pipeline_run_id=state.id,
         )
 
         state.config_json = state.config_json | {
@@ -184,6 +202,18 @@ async def run_interview_generation(
             config_json=state.config_json,
         )
         await db.commit()
+        # Notify the initiating teacher (best-effort; rides its own commit and
+        # never disturbs the generation transaction above).
+        await notify_interview_generation_outcome(
+            db,
+            recipient_user_id=state.requested_by,
+            course_id=state.course_id,
+            config_id=config.id,
+            interview_title=config.title,
+            succeeded=True,
+            arq_pool=arq_pool,
+        )
+        await db.commit()
     except Exception as exc:
         await db.rollback()
         fresh = await quizzes_public.get_generation_run(db, generation_run_id)
@@ -198,6 +228,18 @@ async def run_interview_generation(
             status="failed",
             finished_at=utcnow(),
             config_json=failure_config,
+        )
+        await db.commit()
+        # Notify the initiating teacher of the failure (best-effort).
+        await notify_interview_generation_outcome(
+            db,
+            recipient_user_id=state.requested_by,
+            course_id=state.course_id,
+            config_id=config.id,
+            interview_title=config.title,
+            succeeded=False,
+            error_message=str(exc),
+            arq_pool=arq_pool,
         )
         await db.commit()
         raise
@@ -309,25 +351,53 @@ async def _persist_questions(
     config: InterviewConfig,
     accepted: list[InterviewQuestionDraft],
     source_module_ids: list[str],
+    pipeline_run_id: UUID | None = None,
 ) -> None:
+    created: list[InterviewQuestion] = []
     for draft in accepted:
         position = await next_question_position(db, config.id)
-        db.add(
-            InterviewQuestion(
-                interview_config_id=config.id,
-                linked_outcome_id=draft.linked_outcome_id,
-                position=position,
-                question_type=draft.question_type,
-                prompt_text=draft.prompt_text,
-                difficulty=_persist_difficulty(draft.difficulty),
-                model_answer=draft.model_answer.strip() or None,
-                review_status="pending",
-                ai_generated=True,
-                source_refs_json=[str(c) for c in draft.source_refs],
-                source_module_ids=source_module_ids,
-            )
+        question = InterviewQuestion(
+            interview_config_id=config.id,
+            linked_outcome_id=draft.linked_outcome_id,
+            position=position,
+            question_type=draft.question_type,
+            prompt_text=draft.prompt_text,
+            difficulty=_persist_difficulty(draft.difficulty),
+            model_answer=draft.model_answer.strip() or None,
+            review_status="pending",
+            ai_generated=True,
+            source_refs_json=[str(c) for c in draft.source_refs],
+            source_module_ids=source_module_ids,
         )
+        db.add(question)
         await db.flush()
+        created.append(question)
+
+    # Embed the whole batch in ONE provider call, after the rows exist.
+    #
+    # This is the seam that was missing: duplicate detection only ever ran for
+    # hand-authored questions, because `add_question` / `update_question` embed
+    # but this pipeline did not. Since the shortlist skips `embedding IS NULL`
+    # rows, an AI-generated bank was invisible to the checker and every
+    # check-duplicate call on it answered "not a duplicate" — the feature looked
+    # enabled and silently did nothing.
+    #
+    # Best-effort and already gated on `interview_dedup_enabled` inside the
+    # helper: a provider failure here must not fail a completed generation run,
+    # whose questions are otherwise perfectly valid.
+    stored = await store_question_embeddings(
+        db,
+        question_ids=[q.id for q in created],
+        prompt_texts=[q.prompt_text for q in created],
+        pipeline_run_id=pipeline_run_id,
+    )
+    if stored:
+        logger.info(
+            "interview generation: embedded %d/%d question(s) for config %s",
+            stored,
+            len(created),
+            config.id,
+        )
 
 
 __all__ = ["run_interview_generation"]

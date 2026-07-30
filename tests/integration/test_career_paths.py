@@ -15,6 +15,8 @@ from alembic.config import Config
 from conftest import SeededUsers
 from fastapi import FastAPI
 from sqlalchemy import text
+
+from tests.support.db_graph import hard_delete_graph
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -287,9 +289,10 @@ async def scenario(
             text("DELETE FROM modules WHERE course_id = ANY(:cids)"),
             {"cids": [pub_a_id, pub_b_id, draft_id]},
         )
-        await conn.execute(
-            text("DELETE FROM courses WHERE id = ANY(:cids)"),
-            {"cids": [pub_a_id, pub_b_id, draft_id]},
+        # Graph-driven: career auto-enroll adds course_enrollments rows that
+        # block a bare course delete (NO ACTION FKs).
+        await hard_delete_graph(
+            conn, "courses", [str(c) for c in (pub_a_id, pub_b_id, draft_id)]
         )
 
 

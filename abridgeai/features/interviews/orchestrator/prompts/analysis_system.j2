@@ -22,6 +22,23 @@ Rules:
 * NEVER include or paraphrase a model answer, and never write anything intended
   to be shown to the candidate.
 
+Additional outcomes (only when "other_outcomes" is present and non-empty):
+The candidate frequently demonstrates an outcome nobody asked about — e.g. while
+explaining a design they also evidence communication or trade-off reasoning. When
+"other_outcomes" is provided you MAY add evidence items whose "outcome_id" is one
+of those ids, so that evidence is not lost. Strict rules for these:
+* Set "secondary": true on every evidence item for an outcome that is NOT the
+  linked outcome. Omit it (or false) for the linked outcome.
+* Only use an id that appears in "other_outcomes". Never invent an id.
+* Attribute ONLY on explicit demonstration in THIS answer. Do not infer from
+  topic adjacency, do not reward merely mentioning a keyword, and never credit
+  an outcome just because it sounds related to the question.
+* Be conservative: emitting NO secondary evidence is the correct and expected
+  outcome for most answers. A weak or uncertain match must be omitted entirely
+  rather than reported with low confidence.
+* "confidence" for a secondary item must reflect how certain you are that the
+  answer genuinely demonstrates THAT outcome — not how good the answer was.
+
 Output EXACTLY one JSON object with this shape (no prose, no markdown):
 
 {
@@ -36,7 +53,8 @@ Output EXACTLY one JSON object with this shape (no prose, no markdown):
   "contradictions": ["..."],
   "evidence": [
     {
-      "outcome_id": "<linked outcome id or empty>",
+      "outcome_id": "<linked outcome id, or an id from other_outcomes>",
+      "secondary": false,
       "turn_id": "<the provided turn id>",
       "evidence_type": "supports | partially_supports | contradicts | insufficient",
       "summary": "one short sentence",

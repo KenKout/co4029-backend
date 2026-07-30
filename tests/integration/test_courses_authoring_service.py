@@ -44,6 +44,8 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
+from tests.support.db_graph import hard_delete_graph
+
 import abridgeai.features.access_control.models  # noqa: F401  -- register users/orgs FK targets
 import abridgeai.features.identity.models  # noqa: F401  -- register users FK target
 import abridgeai.features.interviews.models  # noqa: F401  -- T6.1 registers interview_* tables
@@ -180,10 +182,19 @@ async def scenario(engine: AsyncEngine) -> AsyncIterator[dict]:
             text("DELETE FROM modules WHERE course_id = :c"),
             {"c": course_id},
         )
-        await conn.execute(
-            text("DELETE FROM courses WHERE organization_id = :o"),
-            {"o": org_id},
-        )
+        # Graph-driven: enrollments and publish artefacts other tests attach
+        # to org courses block a bare delete (NO ACTION FKs).
+        org_course_ids = [
+            str(v)
+            for v in (
+                await conn.execute(
+                    text("SELECT id FROM courses WHERE organization_id = :o"),
+                    {"o": org_id},
+                )
+            ).scalars()
+        ]
+        if org_course_ids:
+            await hard_delete_graph(conn, "courses", org_course_ids)
         await conn.execute(
             text("DELETE FROM user_role_assignments WHERE user_id = :id"),
             {"id": owner_id},
@@ -455,6 +466,127 @@ async def test_set_module_prerequisites_clears_existing(
                 text("DELETE FROM modules WHERE id IN (:m1, :m2)"),
                 {"m1": other_module, "m2": third_module},
             )
+
+
+async def test_duplicate_module_item_lesson_deep_clones_as_draft(
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict,
+) -> None:
+    """Duplicating a lesson item clones the lesson as a fresh draft + new pin."""
+    async with session_factory() as session:
+        owner = _actor(scenario["owner_id"])
+        lesson = await authoring_service.add_lesson(
+            session,
+            scenario["module_id"],
+            LessonCreate(
+                module_id=scenario["module_id"], slug="dup-src-lesson", title="Source Lesson"
+            ),
+            owner,
+        )
+        await session.commit()
+
+        source_item_id = (
+            await session.execute(
+                text("SELECT id FROM module_items WHERE module_id = :m AND lesson_id = :l"),
+                {"m": scenario["module_id"], "l": lesson.id},
+            )
+        ).scalar_one()
+
+        dup = await authoring_service.duplicate_module_item(session, source_item_id, owner)
+        await session.commit()
+
+        assert dup.id != source_item_id
+        assert dup.item_type == "lesson"
+        assert dup.lesson_id != lesson.id
+        assert dup.position == 2
+
+        new_lesson = (
+            (
+                await session.execute(
+                    text("SELECT status, slug, title FROM lessons WHERE id = :l"),
+                    {"l": dup.lesson_id},
+                )
+            )
+            .mappings()
+            .one()
+        )
+        assert new_lesson["status"] == "draft"
+        assert new_lesson["slug"] != "dup-src-lesson"
+        assert new_lesson["title"].endswith("(Copy)")
+
+
+async def test_duplicate_module_deep_clones_module_and_items_as_draft(
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict,
+) -> None:
+    """Duplicating a module clones the module + every item + every target draft."""
+    async with session_factory() as session:
+        owner = _actor(scenario["owner_id"])
+        for slug, title in (("mod-l1", "Lesson One"), ("mod-l2", "Lesson Two")):
+            await authoring_service.add_lesson(
+                session,
+                scenario["module_id"],
+                LessonCreate(module_id=scenario["module_id"], slug=slug, title=title),
+                owner,
+            )
+        await session.commit()
+
+        cloned = await authoring_service.duplicate_module(session, scenario["module_id"], owner)
+        await session.commit()
+
+        assert cloned.id != scenario["module_id"]
+        assert cloned.status == "draft"
+        assert cloned.title.endswith("(Copy)")
+
+        cloned_items = (
+            (
+                await session.execute(
+                    text(
+                        "SELECT item_type, lesson_id, position FROM module_items "
+                        "WHERE module_id = :m ORDER BY position"
+                    ),
+                    {"m": cloned.id},
+                )
+            )
+            .mappings()
+            .all()
+        )
+        assert len(cloned_items) == 2
+        assert [r["position"] for r in cloned_items] == [1, 2]
+
+        source_lesson_ids = {
+            r["lesson_id"]
+            for r in (
+                await session.execute(
+                    text("SELECT lesson_id FROM module_items WHERE module_id = :m"),
+                    {"m": scenario["module_id"]},
+                )
+            )
+            .mappings()
+            .all()
+        }
+        for row in cloned_items:
+            assert row["item_type"] == "lesson"
+            assert row["lesson_id"] not in source_lesson_ids
+            status = (
+                await session.execute(
+                    text("SELECT status FROM lessons WHERE id = :l"),
+                    {"l": row["lesson_id"]},
+                )
+            ).scalar_one()
+            assert status == "draft"
+
+    # Teardown: the shared `scenario` fixture only cleans lessons/items under
+    # the ORIGINAL module_id, so the cloned module (a distinct row) and its
+    # lessons must be removed here or the course-level module DELETE trips
+    # lessons_module_id_fkey.
+    async with session_factory() as session:
+        await session.execute(
+            text("DELETE FROM module_items WHERE module_id = :m"), {"m": cloned.id}
+        )
+        await session.execute(text("DELETE FROM lessons WHERE module_id = :m"), {"m": cloned.id})
+        await session.execute(text("DELETE FROM modules WHERE id = :m"), {"m": cloned.id})
+        await session.commit()
 
 
 def test_no_sqlalchemy_imports_in_services() -> None:

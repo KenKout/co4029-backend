@@ -173,6 +173,9 @@ import uuid
 from datetime import datetime
 from typing import Any
 
+from pgvector.sqlalchemy import (
+    HALFVEC,  # type: ignore[import-not-found,import-untyped,unused-ignore]
+)
 from sqlalchemy import (
     Boolean,
     CheckConstraint,
@@ -248,6 +251,13 @@ class InterviewConfig(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftD
     )
     time_limit_minutes: Mapped[int | None] = mapped_column(Integer)
     persona: Mapped[str | None] = mapped_column(String(20))
+    # Optional per-trait persona overrides (Phase 3). NULL = use the ``persona``
+    # preset as-is. When present, it is a partial dict of the PersonaProfile
+    # traits (warmth/directness/verbosity/formality/ack_frequency + optional
+    # opening_style) merged over the preset in ``profile_from``; unknown keys are
+    # ignored and values clamped to [0,4]. ``persona`` stays the preset selector,
+    # so this is purely additive tone-shaping and never reaches scoring.
+    persona_profile_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     # TTS voice for English narration/voice sessions: a Deepgram Aura-2 model id
     # (one voice per model, e.g. 'aura-2-thalia-en'). NULL = the deployment
     # default (settings.deepgram_tts_model_en). Vietnamese has no server TTS, so
@@ -257,6 +267,13 @@ class InterviewConfig(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftD
     supported_modes: Mapped[str] = mapped_column(
         String(20), nullable=False, server_default=text("'hybrid'")
     )
+    practice_mode_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("FALSE")
+    )
+    """Teacher opt-in. Gates whether a student may choose a practice run at all;
+    the student still picks per-run. Enabling this without marking any question
+    ``practice_only`` leaves practice unavailable — the authoring UI warns about
+    that rather than letting the student discover it."""
     supplementary_instructions: Mapped[str | None] = mapped_column(Text)
     security_response_policy: Mapped[str] = mapped_column(
         String(30), nullable=False, server_default=text("'warn_and_continue'")
@@ -351,6 +368,17 @@ class InterviewQuestion(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, Sof
     question_type: Mapped[str] = mapped_column(String(30), nullable=False)
     prompt_text: Mapped[str] = mapped_column(Text, nullable=False)
     difficulty: Mapped[str | None] = mapped_column(String(20))
+    embedding: Mapped[list[float] | None] = mapped_column(
+        HALFVEC(3072),
+        nullable=True,
+    )
+    """Semantic vector of ``prompt_text``, for duplicate detection in the bank.
+
+    Same width and the same ``EmbeddingClient`` as ``document_chunks.embedding``
+    (see migration 0063). ``NULL`` means "not embedded yet" — such rows are skipped
+    by the duplicate shortlist rather than treated as dissimilar, so a missing
+    vector degrades detection instead of producing a wrong verdict.
+    """
     model_answer: Mapped[str | None] = mapped_column(Text)
     """Teacher-facing reference answer. Authoring aid only — never exposed
     to learners and never used to auto-grade (scoring stays rubric-based
@@ -359,6 +387,18 @@ class InterviewQuestion(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, Sof
         String(20), nullable=False, server_default=text("'pending'")
     )
     ai_generated: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("TRUE"))
+    practice_only: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("FALSE")
+    )
+    """Bank partition. TRUE = this question is only ever asked in a practice
+    run; FALSE = only ever asked in a graded one. The two sets are disjoint by
+    construction, which is the whole point: selection avoids repeats only within
+    a session, so a shared bank would let a rehearsal pre-reveal the real exam.
+
+    A practice question is still protected content during a graded session (and
+    vice versa) — ``protected_content_for_config`` loads the bank unfiltered on
+    purpose, so the interviewer cannot utter questions from the other partition.
+    """
     source_refs_json: Mapped[Any] = mapped_column(
         JSONB, nullable=False, server_default=text("'[]'::jsonb")
     )
@@ -404,6 +444,10 @@ class InterviewSession(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             "interview_language IN ('en', 'vi')",
             name="ck_interview_sessions_language",
         ),
+        CheckConstraint(
+            "session_mode IN ('assessment', 'practice')",
+            name="ck_interview_sessions_session_mode",
+        ),
     )
 
     interview_config_id: Mapped[uuid.UUID] = mapped_column(
@@ -418,6 +462,20 @@ class InterviewSession(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         index=True,
     )
     attempt_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    session_mode: Mapped[str] = mapped_column(
+        String(20), nullable=False, server_default=text("'assessment'")
+    )
+    """``assessment`` (the default, and what every pre-existing row is) or
+    ``practice``.
+
+    This has to be its own column rather than being read off a NULL
+    ``pass_verdict``: ``recover_stalled_evaluations`` scans terminal sessions
+    with no verdict and re-enqueues them, so an ungraded run and a stuck one are
+    otherwise the same shape. A practice run consumes no attempt (it is numbered
+    0, outside the 1..n space real attempts use), anchors no cooldown, is never
+    evaluated, and therefore never writes ``pass_verdict`` — which is why it can
+    never satisfy the SR-lesson or quiz unlock gates.
+    """
     status: Mapped[str] = mapped_column(
         String(20), nullable=False, server_default=text("'in_progress'")
     )

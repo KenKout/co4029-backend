@@ -22,6 +22,11 @@ from typing import TYPE_CHECKING
 
 from abridgeai.ai.llm import LLMGateway, LLMRole
 from abridgeai.ai.prompts import render_prompt
+from abridgeai.features.interviews.orchestrator.interviewer_identity import (
+    InterviewerIdentity,
+    as_prompt_identity,
+)
+from abridgeai.features.interviews.orchestrator.persona import PersonaProfile, profile_from
 from abridgeai.features.interviews.orchestrator.utterance import (
     Persona,
     Utterance,
@@ -51,6 +56,8 @@ async def generate_utterance(
     persona: Persona,
     language: str | None,
     question_text: str | None = None,
+    persona_profile: object | None = None,
+    identity: object | None = None,
     use_llm: bool = True,
     affect: object | None = None,
     hint_level: int = 0,
@@ -83,19 +90,42 @@ async def generate_utterance(
 
     try:
         system_prompt = render_prompt("prompts/utterance_system.j2", language=(language or "en"))
-        user_prompt = json.dumps(
-            {
-                "persona": persona.value,
-                "language": language or "en",
-                "action": decision.action.value,
-                "approved_parts": {
-                    "acknowledgement": fallback.acknowledgement,
-                    "transition": fallback.transition,
-                    "question_or_probe": fallback.question_or_probe,
-                },
+        # Resolve the persona label to its trait profile and hand the phrasing
+        # model explicit tone numbers (warmth / directness / verbosity /
+        # formality / ack_frequency + opening_style) instead of a bare word it
+        # has to interpret. TONE ONLY — as_prompt_traits() carries no
+        # decision-bearing data (see persona.py), and the system prompt still
+        # forbids the model from changing difficulty, fairness, or the verbatim
+        # question. A fourth/custom persona flows through here with no code
+        # change: it is just a different set of trait numbers.
+        # A resolved override profile (teacher per-trait tuning, Phase 3) takes
+        # precedence; otherwise resolve the preset from the persona label. Both
+        # are clamped so an override can never push a trait out of range.
+        if isinstance(persona_profile, PersonaProfile):
+            profile = persona_profile.clamped()
+        else:
+            profile = profile_from(persona.value).clamped()
+        # Interviewer IDENTITY (who is speaking) rides alongside the tone traits.
+        # Separate axis from persona: a supportive tech lead and a strict tech
+        # lead are both coherent. as_prompt_identity() carries only name / title
+        # / register — presentational strings, nothing decision-bearing (guarded
+        # by tests/unit/test_interviewer_identity.py). Absent identity → the key
+        # is omitted entirely so an unnamed config's prompt is byte-identical to
+        # what it was before identity existed.
+        prompt_payload: dict[str, object] = {
+            "persona": persona.value,
+            "persona_traits": profile.as_prompt_traits(),
+            "language": language or "en",
+            "action": decision.action.value,
+            "approved_parts": {
+                "acknowledgement": fallback.acknowledgement,
+                "transition": fallback.transition,
+                "question_or_probe": fallback.question_or_probe,
             },
-            ensure_ascii=False,
-        )
+        }
+        if isinstance(identity, InterviewerIdentity) and identity.is_named():
+            prompt_payload["interviewer"] = as_prompt_identity(identity, language)
+        user_prompt = json.dumps(prompt_payload, ensure_ascii=False)
         gateway = gateway or LLMGateway()
         async with db.begin_nested():
             llm_result = await gateway.generate_json(

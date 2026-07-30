@@ -30,8 +30,10 @@ from abridgeai.core.security import CurrentUser
 from abridgeai.features.access_control.policies import (
     require_any_permission,
     require_course_permission,
+    require_org_access,
     require_permission,
 )
+from abridgeai.features.enrollments.queries import authoring as authoring_queries
 from abridgeai.features.enrollments.schemas import (
     BulkEnrollRequest,
     BulkEnrollResult,
@@ -47,6 +49,16 @@ from abridgeai.features.enrollments.services import manager as manager_service
 dept_router = APIRouter(prefix="/dept", tags=["enrollments-assignment"])
 management_router = APIRouter(prefix="/management", tags=["enrollments-assignment"])
 teacher_router = APIRouter(prefix="/teacher", tags=["enrollments-assignment"])
+
+
+async def get_arq_pool() -> object | None:
+    """ARQ Redis pool dependency (email dispatch for enrolment notifications).
+
+    Returns ``None`` until the app factory overrides it; the notification path
+    accepts ``None`` and writes the in-app row without enqueuing email. Mirrors
+    the identical dependency in the materials / quizzes / courses routers.
+    """
+    return None
 
 
 class CSVImportPayload(BaseModel):
@@ -66,6 +78,7 @@ _REQUIRE_COURSE_ENROLLMENT_CREATE = require_course_permission(
 _REQUIRE_COURSE_ENROLLMENT_REMOVE = require_course_permission(
     "course_id", "course.enrollment.remove", "system.administer"
 )
+_INVITATION_CODE_MANAGE_CODES = ("course.enrollment.create", "system.administer")
 _REQUIRE_INVITATION_CODE_MANAGE = require_permission("course.enrollment.create")
 _REQUIRE_TEACHER_ENROLLMENT_PATCH = require_any_permission(
     "course.enrollment.create",
@@ -111,8 +124,11 @@ async def manager_bulk_enroll(
     payload: BulkEnrollRequest,
     current_user: Annotated[CurrentUser, Depends(_REQUIRE_COURSE_ENROLLMENT_CREATE)],
     db: Annotated[AsyncSession, Depends(get_db)],
+    arq_pool: Annotated[object | None, Depends(get_arq_pool)],
 ) -> BulkEnrollResult:
-    result = await manager_service.bulk_enroll_students(db, course_id, payload, current_user)
+    result = await manager_service.bulk_enroll_students(
+        db, course_id, payload, current_user, arq_pool=arq_pool
+    )
     await db.commit()
     return result
 
@@ -160,6 +176,7 @@ async def manager_csv_import(
     payload: CSVImportPayload,
     current_user: Annotated[CurrentUser, Depends(_REQUIRE_COURSE_ENROLLMENT_CREATE)],
     db: Annotated[AsyncSession, Depends(get_db)],
+    arq_pool: Annotated[object | None, Depends(get_arq_pool)],
 ) -> CSVImportResult:
     csv_text = _decode_csv_text(payload)
     try:
@@ -167,7 +184,9 @@ async def manager_csv_import(
     except csv.Error as exc:
         raise _bad_request(f"invalid_csv: {exc.__class__.__name__}") from exc
 
-    result = await manager_service.bulk_import_students_from_csv(db, course_id, rows, current_user)
+    result = await manager_service.bulk_import_students_from_csv(
+        db, course_id, rows, current_user, arq_pool=arq_pool
+    )
     await db.commit()
     return result
 
@@ -208,6 +227,40 @@ async def create_invitation_code(
     return result
 
 
+async def _ensure_caller_in_code_org(
+    db: AsyncSession, current_user: CurrentUser, code_id: UUID
+) -> None:
+    """Require the caller to belong to the invitation code's organization.
+
+    Unlike the course-scoped endpoints above, these two resolve a code by its
+    own id, so ``require_course_permission`` cannot be used — there is no
+    course in the path to scope against. ``_REQUIRE_INVITATION_CODE_MANAGE``
+    is a flat permission check, and the flat set ignores ``scope_kind`` (see
+    ``access_control/api/public.py::_ACTIVE_PERMISSIONS_SQL``), so a manager
+    granted ``course.enrollment.create`` within org B satisfies it while
+    editing org A's code.
+
+    That matters more here than the shape suggests: an invitation code is a
+    self-service enrolment credential. Editing another org's code — extending
+    its expiry, raising its use limit, or reactivating a revoked one — is a
+    way into that org's courses, and deleting one is a denial of enrolment.
+
+    404s rather than 403s on failure, matching the resource-not-found shape
+    used elsewhere so the endpoint does not confirm the code exists.
+    """
+    code = await authoring_queries.get_invitation_code(db, code_id)
+    if code is None:
+        raise _not_found(f"Invitation code {code_id} not found")
+    await require_org_access(
+        db,
+        current_user,
+        code.organization_id,
+        resource="invitation_code",
+        resource_id=code_id,
+        permissions=_INVITATION_CODE_MANAGE_CODES,
+    )
+
+
 @management_router.patch(
     "/invitation-codes/{code_id}",
     response_model=InvitationCodeAuthoring,
@@ -219,6 +272,7 @@ async def update_invitation_code(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> InvitationCodeAuthoring:
     try:
+        await _ensure_caller_in_code_org(db, current_user, code_id)
         result = await manager_service.update_invitation_code(db, code_id, payload, current_user)
     except NotFoundError as exc:
         raise _not_found(str(exc)) from exc
@@ -236,6 +290,7 @@ async def delete_invitation_code(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> None:
     try:
+        await _ensure_caller_in_code_org(db, current_user, code_id)
         await manager_service.delete_invitation_code(db, code_id, current_user)
     except NotFoundError as exc:
         raise _not_found(str(exc)) from exc

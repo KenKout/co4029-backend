@@ -56,6 +56,9 @@ from abridgeai.features.admin.routers import (
     processing_router as admin_processing_router,
 )
 from abridgeai.features.admin.routers import (
+    settings_router as admin_settings_router,
+)
+from abridgeai.features.admin.routers import (
     stats_router as admin_stats_router,
 )
 from abridgeai.features.admin.routers import (
@@ -87,6 +90,9 @@ from abridgeai.features.courses.routers import (
 from abridgeai.features.courses.routers import (
     me_courses_router,
 )
+from abridgeai.features.courses.routers.assignment import (
+    get_arq_pool as courses_assignment_get_arq_pool,
+)
 from abridgeai.features.discussions.router import router as discussions_router
 from abridgeai.features.enrollments.routers import (
     assignment_dept_router as enrollments_dept_router,
@@ -99,6 +105,9 @@ from abridgeai.features.enrollments.routers import (
 )
 from abridgeai.features.enrollments.routers import (
     me_enrollments_router,
+)
+from abridgeai.features.enrollments.routers.assignment import (
+    get_arq_pool as enrollments_assignment_get_arq_pool,
 )
 from abridgeai.features.identity.routers import (
     auth_router as identity_auth_router,
@@ -159,6 +168,7 @@ from abridgeai.features.spaced_repetition.routers import (
 from abridgeai.features.spaced_repetition.routers import (
     teacher_router as spaced_repetition_teacher_router,
 )
+from abridgeai.infrastructure.neo4j_schema import ensure_graph_schema
 
 API_V1_PREFIX = "/api/v1"
 
@@ -214,9 +224,16 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.dependency_overrides[interviews_learner_get_arq_pool] = _provide_arq_pool
     app.dependency_overrides[materials_get_arq_pool] = _provide_arq_pool
     app.dependency_overrides[quizzes_get_arq_pool] = _provide_arq_pool
+    app.dependency_overrides[courses_assignment_get_arq_pool] = _provide_arq_pool
+    app.dependency_overrides[enrollments_assignment_get_arq_pool] = _provide_arq_pool
 
     # Best-effort embedding provider probe (non-fatal — logs, never raises).
     await _probe_embedding_health()
+
+    # Idempotent Neo4j constraints + indexes. The graph ran without either
+    # until now, so every MERGE was a label scan and duplicate Concept nodes
+    # were possible under concurrent ingest. Non-fatal like the probe above.
+    await ensure_graph_schema()
 
     yield
 
@@ -310,6 +327,7 @@ def create_app() -> FastAPI:
 
     # Admin-configurable AI model pricing (replaces hardcoded PRICE_TABLE)
     app.include_router(admin_ai_pricing_router, prefix=API_V1_PREFIX)
+    app.include_router(admin_settings_router, prefix=API_V1_PREFIX)
 
     # T0.28 -- security headers (HSTS, CSP, X-Frame-Options, ...). Added
     # BEFORE the audit-log middleware in source order so it sits INSIDE the

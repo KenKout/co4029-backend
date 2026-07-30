@@ -26,7 +26,10 @@ from abridgeai.core.db import get_db
 from abridgeai.core.exceptions import AppError, NotFoundError
 from abridgeai.core.pagination import PageResponse
 from abridgeai.core.security import CurrentUser
-from abridgeai.features.access_control.policies import require_any_permission
+from abridgeai.features.access_control.policies import (
+    require_any_permission,
+    require_org_access,
+)
 from abridgeai.features.access_control.schemas.admin import (
     MembershipPatch,
     MembershipRead,
@@ -48,9 +51,10 @@ from abridgeai.features.access_control.services import (
 router = APIRouter(tags=["admin", "access_control", "organizations"])
 
 
-_REQUIRE_ORG_MANAGE = require_any_permission(
-    "org_unit.manage", "user.bulk_import", "system.administer"
-)
+# One tuple for both the dependency ("held anywhere?") and the per-resource
+# org check ("held HERE?"), so the two cannot drift.
+_ORG_MANAGE_CODES = ("org_unit.manage", "user.bulk_import", "system.administer")
+_REQUIRE_ORG_MANAGE = require_any_permission(*_ORG_MANAGE_CODES)
 
 
 def _bad_request(detail: str) -> HTTPException:
@@ -67,14 +71,60 @@ def _not_found(detail: str) -> HTTPException:
     )
 
 
+
+async def _require_access_to(
+    db: AsyncSession,
+    current_user: CurrentUser,
+    *,
+    organization_id: UUID | None,
+    resource: str,
+    resource_id: UUID,
+) -> None:
+    """Guard a route addressed by a child resource's own id.
+
+    ``organization_id is None`` means the resource is absent or soft-deleted.
+    Raising the same 404 as a foreign-org caller keeps the two responses
+    identical, so the endpoint cannot be used to probe which ids exist in
+    another tenant.
+    """
+    if organization_id is None:
+        raise _not_found(f"{resource} {resource_id} not found")
+    await require_org_access(
+        db,
+        current_user,
+        organization_id,
+        resource=resource,
+        resource_id=resource_id,
+        permissions=_ORG_MANAGE_CODES,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Organizations
 # ---------------------------------------------------------------------------
 
 
+
+
+async def _visible_org_ids(
+    db: AsyncSession, current_user: CurrentUser
+) -> list[UUID] | None:
+    """Organizations this caller may see in a listing; ``None`` == unrestricted.
+
+    ``_REQUIRE_ORG_MANAGE`` accepts ``org_unit.manage`` / ``user.bulk_import``,
+    and the flat permission set behind it cannot tell a grant made inside one
+    tenant from a global one. Unrestricted listing therefore leaked the whole
+    tenant roster — names, slugs and statuses of every customer — to any
+    manager. Only ``system.administer`` keeps the global view.
+    """
+    if current_user.has_permission("system.administer"):
+        return None
+    return await org_service.organization_ids_for_user(db, current_user.user_id)
+
+
 @router.get("/admin/organizations", response_model=OrganizationListPage)
 async def list_organizations_endpoint(
-    _user: Annotated[CurrentUser, Depends(_REQUIRE_ORG_MANAGE)],
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_ORG_MANAGE)],
     db: Annotated[AsyncSession, Depends(get_db)],
     include_deleted: bool = False,
     org_status: str | None = None,
@@ -90,6 +140,7 @@ async def list_organizations_endpoint(
             status=org_status,
             limit=limit,
             cursor=cursor,
+            visible_to_ids=await _visible_org_ids(db, current_user),
         )
     except ValueError as exc:
         raise HTTPException(
@@ -107,7 +158,7 @@ async def list_organizations_endpoint(
     response_model=PageResponse[OrganizationRead],
 )
 async def search_organizations_endpoint(
-    _user: Annotated[CurrentUser, Depends(_REQUIRE_ORG_MANAGE)],
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_ORG_MANAGE)],
     db: Annotated[AsyncSession, Depends(get_db)],
     search: Annotated[str | None, Query(max_length=200)] = None,
     org_status: Annotated[str | None, Query(alias="status")] = None,
@@ -127,6 +178,7 @@ async def search_organizations_endpoint(
         sort_dir=sort_dir,
         page=page,
         page_size=page_size,
+        visible_to_ids=await _visible_org_ids(db, current_user),
     )
     return PageResponse[OrganizationRead](
         items=[OrganizationRead.model_validate(o) for o in result.items],
@@ -163,9 +215,17 @@ async def create_organization_endpoint(
 )
 async def get_organization_endpoint(
     org_id: UUID,
-    _user: Annotated[CurrentUser, Depends(_REQUIRE_ORG_MANAGE)],
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_ORG_MANAGE)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> OrganizationRead:
+    await require_org_access(
+        db,
+        current_user,
+        org_id,
+        resource="organization",
+        resource_id=org_id,
+        permissions=_ORG_MANAGE_CODES,
+    )
     try:
         org = await org_service.get_organization(db, org_id)
     except NotFoundError as exc:
@@ -180,9 +240,17 @@ async def get_organization_endpoint(
 async def patch_organization_endpoint(
     org_id: UUID,
     payload: OrganizationPatch,
-    _user: Annotated[CurrentUser, Depends(_REQUIRE_ORG_MANAGE)],
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_ORG_MANAGE)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> OrganizationRead:
+    await require_org_access(
+        db,
+        current_user,
+        org_id,
+        resource="organization",
+        resource_id=org_id,
+        permissions=_ORG_MANAGE_CODES,
+    )
     try:
         org = await org_service.patch_organization(db, org_id, payload)
     except NotFoundError as exc:
@@ -202,6 +270,14 @@ async def delete_organization_endpoint(
     current_user: Annotated[CurrentUser, Depends(_REQUIRE_ORG_MANAGE)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> None:
+    await require_org_access(
+        db,
+        current_user,
+        org_id,
+        resource="organization",
+        resource_id=org_id,
+        permissions=_ORG_MANAGE_CODES,
+    )
     try:
         await org_service.delete_organization(
             db, org_id, actor_id=current_user.user_id
@@ -222,9 +298,17 @@ async def delete_organization_endpoint(
 )
 async def list_domains_endpoint(
     org_id: UUID,
-    _user: Annotated[CurrentUser, Depends(_REQUIRE_ORG_MANAGE)],
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_ORG_MANAGE)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> list[OrganizationDomainRead]:
+    await require_org_access(
+        db,
+        current_user,
+        org_id,
+        resource="organization",
+        resource_id=org_id,
+        permissions=_ORG_MANAGE_CODES,
+    )
     try:
         rows = await org_service.list_domains(db, org_id)
     except NotFoundError as exc:
@@ -240,9 +324,17 @@ async def list_domains_endpoint(
 async def create_domain_endpoint(
     org_id: UUID,
     payload: OrganizationDomainCreate,
-    _user: Annotated[CurrentUser, Depends(_REQUIRE_ORG_MANAGE)],
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_ORG_MANAGE)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> OrganizationDomainRead:
+    await require_org_access(
+        db,
+        current_user,
+        org_id,
+        resource="organization",
+        resource_id=org_id,
+        permissions=_ORG_MANAGE_CODES,
+    )
     try:
         dom = await org_service.create_domain(db, org_id, payload)
     except NotFoundError as exc:
@@ -260,9 +352,16 @@ async def create_domain_endpoint(
 async def patch_domain_endpoint(
     domain_id: UUID,
     payload: OrganizationDomainPatch,
-    _user: Annotated[CurrentUser, Depends(_REQUIRE_ORG_MANAGE)],
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_ORG_MANAGE)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> OrganizationDomainRead:
+    await _require_access_to(
+        db,
+        current_user,
+        organization_id=await org_service.organization_id_for_domain(db, domain_id),
+        resource="organization_domain",
+        resource_id=domain_id,
+    )
     try:
         dom = await org_service.patch_domain(db, domain_id, payload)
     except NotFoundError as exc:
@@ -282,6 +381,13 @@ async def delete_domain_endpoint(
     current_user: Annotated[CurrentUser, Depends(_REQUIRE_ORG_MANAGE)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> None:
+    await _require_access_to(
+        db,
+        current_user,
+        organization_id=await org_service.organization_id_for_domain(db, domain_id),
+        resource="organization_domain",
+        resource_id=domain_id,
+    )
     try:
         await org_service.delete_domain(
             db, domain_id, actor_id=current_user.user_id
@@ -302,11 +408,19 @@ async def delete_domain_endpoint(
 )
 async def list_units_endpoint(
     org_id: UUID,
-    _user: Annotated[CurrentUser, Depends(_REQUIRE_ORG_MANAGE)],
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_ORG_MANAGE)],
     db: Annotated[AsyncSession, Depends(get_db)],
     parent_unit_id: UUID | None = None,
     only_roots: bool = False,
 ) -> list[OrgUnitRead]:
+    await require_org_access(
+        db,
+        current_user,
+        org_id,
+        resource="organization",
+        resource_id=org_id,
+        permissions=_ORG_MANAGE_CODES,
+    )
     try:
         rows = await org_service.list_units(
             db, org_id, parent_unit_id=parent_unit_id, only_roots=only_roots
@@ -324,9 +438,17 @@ async def list_units_endpoint(
 async def create_unit_endpoint(
     org_id: UUID,
     payload: OrgUnitCreate,
-    _user: Annotated[CurrentUser, Depends(_REQUIRE_ORG_MANAGE)],
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_ORG_MANAGE)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> OrgUnitRead:
+    await require_org_access(
+        db,
+        current_user,
+        org_id,
+        resource="organization",
+        resource_id=org_id,
+        permissions=_ORG_MANAGE_CODES,
+    )
     try:
         unit = await org_service.create_unit(db, org_id, payload)
     except NotFoundError as exc:
@@ -343,9 +465,16 @@ async def create_unit_endpoint(
 )
 async def get_unit_endpoint(
     unit_id: UUID,
-    _user: Annotated[CurrentUser, Depends(_REQUIRE_ORG_MANAGE)],
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_ORG_MANAGE)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> OrgUnitRead:
+    await _require_access_to(
+        db,
+        current_user,
+        organization_id=await org_service.organization_id_for_unit(db, unit_id),
+        resource="org_unit",
+        resource_id=unit_id,
+    )
     try:
         unit = await org_service.get_unit(db, unit_id)
     except NotFoundError as exc:
@@ -360,9 +489,16 @@ async def get_unit_endpoint(
 async def patch_unit_endpoint(
     unit_id: UUID,
     payload: OrgUnitPatch,
-    _user: Annotated[CurrentUser, Depends(_REQUIRE_ORG_MANAGE)],
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_ORG_MANAGE)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> OrgUnitRead:
+    await _require_access_to(
+        db,
+        current_user,
+        organization_id=await org_service.organization_id_for_unit(db, unit_id),
+        resource="org_unit",
+        resource_id=unit_id,
+    )
     try:
         unit = await org_service.patch_unit(db, unit_id, payload)
     except NotFoundError as exc:
@@ -382,6 +518,13 @@ async def delete_unit_endpoint(
     current_user: Annotated[CurrentUser, Depends(_REQUIRE_ORG_MANAGE)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> None:
+    await _require_access_to(
+        db,
+        current_user,
+        organization_id=await org_service.organization_id_for_unit(db, unit_id),
+        resource="org_unit",
+        resource_id=unit_id,
+    )
     try:
         await org_service.delete_unit(
             db, unit_id, actor_id=current_user.user_id
@@ -403,9 +546,16 @@ async def delete_unit_endpoint(
 async def patch_membership_endpoint(
     membership_id: UUID,
     payload: MembershipPatch,
-    _user: Annotated[CurrentUser, Depends(_REQUIRE_ORG_MANAGE)],
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_ORG_MANAGE)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> MembershipRead:
+    await _require_access_to(
+        db,
+        current_user,
+        organization_id=await org_service.organization_id_for_membership(db, membership_id),
+        resource="organization_membership",
+        resource_id=membership_id,
+    )
     try:
         m = await org_service.patch_membership(db, membership_id, payload)
     except NotFoundError as exc:
@@ -425,6 +575,13 @@ async def delete_membership_endpoint(
     current_user: Annotated[CurrentUser, Depends(_REQUIRE_ORG_MANAGE)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> None:
+    await _require_access_to(
+        db,
+        current_user,
+        organization_id=await org_service.organization_id_for_membership(db, membership_id),
+        resource="organization_membership",
+        resource_id=membership_id,
+    )
     try:
         await org_service.delete_membership(
             db, membership_id, actor_id=current_user.user_id

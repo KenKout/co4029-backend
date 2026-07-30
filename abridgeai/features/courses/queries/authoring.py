@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 from importlib import resources
-from typing import Any
+from typing import Any, NamedTuple
 from uuid import UUID
 
-from sqlalchemy import delete, func, select, text, true
+from sqlalchemy import delete, func, or_, select, text, true
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import InstrumentedAttribute, selectinload
 from sqlalchemy.sql.elements import ColumnElement
@@ -126,11 +126,280 @@ async def count_pending_grading_for_courses(
             InterviewConfig.deleted_at.is_(None),
             InterviewSession.status.in_(("completed", "timed_out")),
             InterviewSession.pass_verdict.is_(None),
+            # Practice runs are ungraded by design, so their NULL verdict is not
+            # work waiting for the teacher. Without this they would pile up on
+            # the dashboard as permanently pending marking.
+            InterviewSession.session_mode != "practice",
         )
     )
     pending_interviews = int((await db.execute(interview_stmt)).scalar_one())
 
     return (ungraded_quizzes, pending_interviews)
+
+
+async def count_pending_review_by_course(
+    db: AsyncSession, course_ids: list[UUID]
+) -> dict[UUID, int]:
+    """Per-course count of AI-generated items awaiting teacher review.
+
+    Returns ``{course_id: pending_count}`` covering quiz questions AND interview
+    questions still in ``review_status='pending'``. Courses with nothing pending
+    are omitted, so the caller can treat a missing key as zero.
+
+    Powers the pending-review dot on the dashboard's course cards: the aggregate
+    total tells a teacher that work exists, this tells them *where*, without
+    opening each course. Two GROUP BY queries — no per-course round trip.
+    """
+    from abridgeai.features.interviews.models import (
+        InterviewConfig,
+        InterviewQuestion,
+    )
+    from abridgeai.features.quizzes.models import Quiz, QuizQuestion
+
+    if not course_ids:
+        return {}
+
+    counts: dict[UUID, int] = {}
+
+    quiz_stmt = (
+        select(Quiz.course_id, func.count())
+        .select_from(QuizQuestion)
+        .join(Quiz, Quiz.id == QuizQuestion.quiz_id)
+        .where(
+            Quiz.course_id.in_(course_ids),
+            Quiz.deleted_at.is_(None),
+            QuizQuestion.deleted_at.is_(None),
+            QuizQuestion.review_status == "pending",
+        )
+        .group_by(Quiz.course_id)
+    )
+    for course_id, count in (await db.execute(quiz_stmt)).all():
+        counts[course_id] = counts.get(course_id, 0) + int(count)
+
+    interview_stmt = (
+        select(InterviewConfig.course_id, func.count())
+        .select_from(InterviewQuestion)
+        .join(
+            InterviewConfig,
+            InterviewConfig.id == InterviewQuestion.interview_config_id,
+        )
+        .where(
+            InterviewConfig.course_id.in_(course_ids),
+            InterviewConfig.deleted_at.is_(None),
+            InterviewQuestion.deleted_at.is_(None),
+            InterviewQuestion.review_status == "pending",
+        )
+        .group_by(InterviewConfig.course_id)
+    )
+    for course_id, count in (await db.execute(interview_stmt)).all():
+        counts[course_id] = counts.get(course_id, 0) + int(count)
+
+    return counts
+
+
+class TeacherReviewQueueCounts(NamedTuple):
+    """Batched dashboard aggregates for the review queue + retention block.
+
+    Returned by :func:`count_review_queue_and_retention_for_courses` so the
+    service layer stays free of positional-tuple guesswork.
+    """
+
+    quiz_cards_pending_review: int
+    interview_questions_pending_review: int
+    published_quizzes_missing_texp: int
+    materials_ready_for_quiz_gen: int
+    students_below_ef_threshold: int
+    avg_retention_ef: float
+    cards_overdue: int
+
+
+_EF_STRUGGLING_THRESHOLD = 2.0
+"""Average easiness factor below which a student counts as struggling.
+
+Mirrors ``lessons.ef_min_unlock``'s default (2.0) — the same SM-2 easiness
+level the unlock rule treats as "not yet retained".
+"""
+
+
+async def count_review_queue_and_retention_for_courses(
+    db: AsyncSession, course_ids: list[UUID]
+) -> TeacherReviewQueueCounts:
+    """Human-in-the-loop review backlog + spaced-repetition retention signal.
+
+    All seven aggregates are summed across ``course_ids`` in five grouped
+    queries — O(1) round-trips regardless of course count, same no-N+1
+    property as :func:`count_pending_grading_for_courses`.
+
+    Review queue:
+
+    * quiz_cards_pending_review = ``quiz_questions.review_status='pending'``
+      whose quiz belongs to an in-scope course (AI-generated cards awaiting
+      teacher approval).
+    * interview_questions_pending_review = the interview-side equivalent,
+      scoped through ``interview_configs.course_id``.
+    * published_quizzes_missing_texp = DISTINCT published quizzes holding at
+      least one ``approved`` question with no usable
+      ``expected_response_time_ms`` (NULL or ``<= 0``). SM-2 grading needs
+      ``t_exp``, so these are live-but-uncalibrated quizzes.
+    * materials_ready_for_quiz_gen = material versions whose ingestion
+      finished (a ``full_pipeline`` ``processing_jobs`` row with
+      ``status='completed'`` on ``entity_type='material_version'`` — the
+      status does NOT live on ``learning_materials``) whose lesson has not
+      yet been used as a quiz source (no ``quiz_source_lessons`` row).
+
+    Retention (spaced repetition), scoped through
+    ``student_card_state.question_id -> quiz_questions -> quizzes ->
+    modules -> courses``:
+
+    * students_below_ef_threshold = DISTINCT students whose AVERAGE ``ef``
+      over in-scope cards is below 2.0.
+    * avg_retention_ef = mean ``ef`` over in-scope cards, 2dp, 0.0 when the
+      caller has no cards.
+    * cards_overdue = in-scope cards with ``due_at < now()``.
+
+    Soft-deleted questions / quizzes / modules / materials are excluded
+    throughout, matching :func:`count_pending_grading_for_courses`.
+    """
+    # Local imports keep the cross-feature model dependency out of module
+    # load order (quizzes / interviews / materials / spaced_repetition import
+    # courses, not the other way around). Read-only JOINs only.
+    from abridgeai.ai.models import ProcessingJob
+    from abridgeai.features.interviews.models import InterviewConfig, InterviewQuestion
+    from abridgeai.features.materials.models import LearningMaterial, LearningMaterialVersion
+    from abridgeai.features.quizzes.models import Quiz, QuizQuestion, QuizSourceLesson
+    from abridgeai.features.spaced_repetition.models import StudentCardState
+
+    if not course_ids:
+        return TeacherReviewQueueCounts(0, 0, 0, 0, 0, 0.0, 0)
+
+    pending_cards_stmt = (
+        select(func.count())
+        .select_from(QuizQuestion)
+        .join(Quiz, Quiz.id == QuizQuestion.quiz_id)
+        .where(
+            Quiz.course_id.in_(course_ids),
+            Quiz.deleted_at.is_(None),
+            QuizQuestion.deleted_at.is_(None),
+            QuizQuestion.review_status == "pending",
+        )
+    )
+    quiz_cards_pending_review = int((await db.execute(pending_cards_stmt)).scalar_one())
+
+    pending_interview_q_stmt = (
+        select(func.count())
+        .select_from(InterviewQuestion)
+        .join(InterviewConfig, InterviewConfig.id == InterviewQuestion.interview_config_id)
+        .where(
+            InterviewConfig.course_id.in_(course_ids),
+            InterviewConfig.deleted_at.is_(None),
+            InterviewQuestion.deleted_at.is_(None),
+            InterviewQuestion.review_status == "pending",
+        )
+    )
+    interview_questions_pending_review = int(
+        (await db.execute(pending_interview_q_stmt)).scalar_one()
+    )
+
+    missing_texp_stmt = (
+        select(func.count(func.distinct(Quiz.id)))
+        .select_from(Quiz)
+        .join(QuizQuestion, QuizQuestion.quiz_id == Quiz.id)
+        .where(
+            Quiz.course_id.in_(course_ids),
+            Quiz.deleted_at.is_(None),
+            Quiz.status == "published",
+            QuizQuestion.deleted_at.is_(None),
+            QuizQuestion.review_status == "approved",
+            or_(
+                QuizQuestion.expected_response_time_ms.is_(None),
+                QuizQuestion.expected_response_time_ms <= 0,
+            ),
+        )
+    )
+    published_quizzes_missing_texp = int((await db.execute(missing_texp_stmt)).scalar_one())
+
+    # A lesson is "already covered" once any live quiz names it as a source.
+    # quizzes.module_id alone is too coarse (a module-wide quiz would mask
+    # every other lesson in that module), so the anti-join runs on the
+    # lesson-level quiz_source_lessons link table.
+    lesson_has_quiz = (
+        select(QuizSourceLesson.lesson_id)
+        .join(Quiz, Quiz.id == QuizSourceLesson.quiz_id)
+        .where(
+            QuizSourceLesson.lesson_id == Lesson.id,
+            Quiz.deleted_at.is_(None),
+        )
+        .exists()
+    )
+    ready_materials_stmt = (
+        select(func.count(func.distinct(LearningMaterialVersion.id)))
+        .select_from(LearningMaterialVersion)
+        .join(LearningMaterial, LearningMaterial.id == LearningMaterialVersion.material_id)
+        .join(Lesson, Lesson.id == LearningMaterial.lesson_id)
+        .join(Module, Module.id == Lesson.module_id)
+        .join(
+            ProcessingJob,
+            (ProcessingJob.entity_id == LearningMaterialVersion.id)
+            & (ProcessingJob.entity_type == "material_version")
+            & (ProcessingJob.job_type == "full_pipeline")
+            & (ProcessingJob.status == "completed"),
+        )
+        .where(
+            Module.course_id.in_(course_ids),
+            Module.deleted_at.is_(None),
+            Lesson.deleted_at.is_(None),
+            LearningMaterial.deleted_at.is_(None),
+            LearningMaterialVersion.deleted_at.is_(None),
+            ~lesson_has_quiz,
+        )
+    )
+    materials_ready_for_quiz_gen = int((await db.execute(ready_materials_stmt)).scalar_one())
+
+    # student_card_state.question_id -> quiz_questions -> quizzes ->
+    # modules -> courses. quizzes carries a denormalized course_id too, but
+    # the module hop is the authoritative containment path, so both are
+    # asserted (they agree in the schema's data).
+    card_scope = (
+        select(StudentCardState)
+        .join(QuizQuestion, QuizQuestion.id == StudentCardState.question_id)
+        .join(Quiz, Quiz.id == QuizQuestion.quiz_id)
+        .join(Module, Module.id == Quiz.module_id)
+        .where(
+            Module.course_id.in_(course_ids),
+            Module.deleted_at.is_(None),
+            Quiz.deleted_at.is_(None),
+            QuizQuestion.deleted_at.is_(None),
+        )
+    )
+
+    card_totals_stmt = card_scope.with_only_columns(
+        func.count(),
+        func.round(func.avg(StudentCardState.ef), 2),
+        func.count().filter(StudentCardState.due_at < func.now()),
+    )
+    card_count, avg_ef, cards_overdue = (await db.execute(card_totals_stmt)).one()
+
+    below_threshold_stmt = (
+        select(func.count())
+        .select_from(
+            card_scope.with_only_columns(StudentCardState.student_id)
+            .group_by(StudentCardState.student_id)
+            .having(func.avg(StudentCardState.ef) < _EF_STRUGGLING_THRESHOLD)
+            .subquery()
+        )
+    )
+    students_below_ef_threshold = int((await db.execute(below_threshold_stmt)).scalar_one())
+
+    return TeacherReviewQueueCounts(
+        quiz_cards_pending_review=quiz_cards_pending_review,
+        interview_questions_pending_review=interview_questions_pending_review,
+        published_quizzes_missing_texp=published_quizzes_missing_texp,
+        materials_ready_for_quiz_gen=materials_ready_for_quiz_gen,
+        students_below_ef_threshold=students_below_ef_threshold,
+        # avg() is NULL when the caller's courses hold no cards at all.
+        avg_retention_ef=float(avg_ef) if card_count and avg_ef is not None else 0.0,
+        cards_overdue=int(cards_overdue),
+    )
 
 
 async def list_courses_for_owner(
@@ -370,6 +639,19 @@ async def list_module_items(db: AsyncSession, module_id: UUID) -> list[ModuleIte
     return list((await db.execute(stmt)).scalars().all())
 
 
+async def next_module_position(db: AsyncSession, course_id: UUID) -> int:
+    """Return ``MAX(position) + 1`` for ``modules`` under ``course_id``.
+
+    Mirrors :func:`next_module_item_position`. Returns 1 for an empty course.
+    Ignores soft-deleted modules so a fresh clone lands after the live tail.
+    """
+    stmt = select(func.coalesce(func.max(Module.position), 0)).where(
+        Module.course_id == course_id,
+        Module.deleted_at.is_(None),
+    )
+    return int((await db.execute(stmt)).scalar_one()) + 1
+
+
 async def list_module_prerequisites(db: AsyncSession, module_id: UUID) -> list[UUID]:
     """Return the list of prerequisite module ids for ``module_id``."""
     stmt = select(ModulePrerequisite.prerequisite_module_id).where(
@@ -431,10 +713,12 @@ async def list_course_roster_with_progress(
 # Course learning outcomes (§LO-1/2) — teacher-side CRUD reads.
 # ---------------------------------------------------------------------------
 async def list_course_outcomes(db: AsyncSession, course_id: UUID) -> list[CourseLearningOutcome]:
-    """All (non-deleted) learning outcomes for a course, ordered by position.
+    """All (non-deleted) learning outcomes for a course.
 
-    The ``(L.O.x)`` display code is derived from this 1-based ``position``
-    at render time; the list order IS the code order.
+    Ordered by ``(parent_id, position)`` so siblings are contiguous. The
+    dotted ``L.O.x.y`` display code + depth are derived from the parent
+    chain at render time (see :func:`build_outcome_code_map`); the stored
+    ``position`` is the sibling order within each parent.
     """
     stmt = (
         select(CourseLearningOutcome)
@@ -442,45 +726,117 @@ async def list_course_outcomes(db: AsyncSession, course_id: UUID) -> list[Course
             CourseLearningOutcome.course_id == course_id,
             CourseLearningOutcome.deleted_at.is_(None),
         )
-        .order_by(CourseLearningOutcome.position)
+        .order_by(CourseLearningOutcome.parent_id, CourseLearningOutcome.position)
     )
     return list((await db.execute(stmt)).scalars().all())
 
 
-async def get_course_outcome(
-    db: AsyncSession, outcome_id: UUID
-) -> CourseLearningOutcome | None:
+async def get_course_outcome(db: AsyncSession, outcome_id: UUID) -> CourseLearningOutcome | None:
     return await db.get(CourseLearningOutcome, outcome_id)
 
 
-async def next_course_outcome_position(db: AsyncSession, course_id: UUID) -> int:
-    """Return ``MAX(position) + 1`` for a course's outcomes (1 when empty)."""
+async def next_course_outcome_position(
+    db: AsyncSession, course_id: UUID, parent_id: UUID | None = None
+) -> int:
+    """Return ``MAX(position) + 1`` among a parent's children (1 when empty).
+
+    Positions are per-parent: top-level rows (``parent_id IS NULL``) share
+    one sequence scoped to the course; each parent's children share their
+    own sequence. ``IS NOT DISTINCT FROM`` handles the NULL parent case in
+    a single predicate.
+    """
     stmt = select(func.coalesce(func.max(CourseLearningOutcome.position), 0)).where(
         CourseLearningOutcome.course_id == course_id,
+        CourseLearningOutcome.parent_id.is_not_distinct_from(parent_id),
         CourseLearningOutcome.deleted_at.is_(None),
     )
     return int((await db.execute(stmt)).scalar_one()) + 1
 
 
-async def reindex_course_outcomes(db: AsyncSession, course_id: UUID) -> None:
-    """Compact outcome positions to a contiguous 1..N chain (§LO-2).
+async def reindex_course_outcome_siblings(
+    db: AsyncSession, course_id: UUID, parent_id: UUID | None
+) -> None:
+    """Compact one parent's children to a contiguous 1..N chain (§LO-2).
 
-    Called after a delete so the ``L.O.x`` codes never gap. Uses the
-    ``_OFFSET`` two-phase shift to dodge the ``uq_course_learning_outcomes_position``
-    UNIQUE collision mid-update: first bump every row far out of the way,
-    then renumber 1..N in position order.
+    Called after a delete or move so sibling positions (and therefore the
+    dotted codes) never gap. Two-phase offset shift dodges the per-parent
+    ``uq_course_learning_outcomes_sibling_position`` UNIQUE collision
+    mid-update: bump every sibling far out of the way, flush, then
+    renumber 1..N in position order.
     """
-    outcomes = await list_course_outcomes(db, course_id)
-    if not outcomes:
+    stmt = (
+        select(CourseLearningOutcome)
+        .where(
+            CourseLearningOutcome.course_id == course_id,
+            CourseLearningOutcome.parent_id.is_not_distinct_from(parent_id),
+            CourseLearningOutcome.deleted_at.is_(None),
+        )
+        .order_by(CourseLearningOutcome.position)
+    )
+    siblings = list((await db.execute(stmt)).scalars().all())
+    if not siblings:
         return
-    # Phase 1: shift all rows out of the target range to avoid UNIQUE clashes.
-    for offset_idx, outcome in enumerate(outcomes, start=1):
+    for offset_idx, outcome in enumerate(siblings, start=1):
         outcome.position = 100_000 + offset_idx
     await db.flush()
-    # Phase 2: renumber contiguously in the original order.
-    for new_pos, outcome in enumerate(outcomes, start=1):
+    for new_pos, outcome in enumerate(siblings, start=1):
         outcome.position = new_pos
     await db.flush()
+
+
+def build_outcome_code_map(
+    outcomes: list[CourseLearningOutcome],
+) -> dict[UUID, tuple[str, int]]:
+    """Derive ``{outcome_id: (dotted_code, depth)}`` from a course's outcomes.
+
+    ``dotted_code`` is the position path root→leaf (e.g. ``"1.2.1"``,
+    rendered ``L.O.1.2.1``); ``depth`` is 0 for top-level. Pure function
+    over the full (non-deleted) outcome list — no DB access — so callers
+    resolve the whole tree in one pass. Orphaned rows (parent missing or
+    soft-deleted) are treated as top-level so they still get a code.
+    """
+    by_parent: dict[UUID | None, list[CourseLearningOutcome]] = {}
+    ids = {o.id for o in outcomes}
+    for o in outcomes:
+        parent = o.parent_id if o.parent_id in ids else None
+        by_parent.setdefault(parent, []).append(o)
+    for children in by_parent.values():
+        children.sort(key=lambda o: o.position)
+
+    code_map: dict[UUID, tuple[str, int]] = {}
+
+    def walk(parent: UUID | None, prefix: str, depth: int) -> None:
+        for idx, node in enumerate(by_parent.get(parent, []), start=1):
+            code = f"{prefix}{idx}" if not prefix else f"{prefix}.{idx}"
+            code_map[node.id] = (code, depth)
+            walk(node.id, code, depth + 1)
+
+    walk(None, "", 0)
+    return code_map
+
+
+def build_descendant_map(
+    outcomes: list[CourseLearningOutcome],
+) -> dict[UUID, set[UUID]]:
+    """Derive ``{outcome_id: {all descendant ids}}`` (excludes self).
+
+    Used for coverage rollup (a question on a child counts toward every
+    ancestor) and for cycle checks on re-parent. Pure function over the
+    full outcome list.
+    """
+    children: dict[UUID, list[UUID]] = {}
+    for o in outcomes:
+        if o.parent_id is not None:
+            children.setdefault(o.parent_id, []).append(o.id)
+
+    def collect(node: UUID) -> set[UUID]:
+        out: set[UUID] = set()
+        for child in children.get(node, []):
+            out.add(child)
+            out |= collect(child)
+        return out
+
+    return {o.id: collect(o.id) for o in outcomes}
 
 
 __all__ = [

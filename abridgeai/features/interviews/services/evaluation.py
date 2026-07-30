@@ -26,19 +26,31 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
+from abridgeai.ai.models import GenerationRun
 from abridgeai.core.db.conflict_mapper import flush_or_conflict
 from abridgeai.core.exceptions import NotFoundError
+from abridgeai.core.observability import get_logger
 from abridgeai.core.security import utcnow
+from abridgeai.features.interviews import practice
 from abridgeai.features.interviews.ai.stages.evaluation import evaluate_outcomes, evaluate_session
 from abridgeai.features.interviews.ai.stages.evaluation.outcome_verdicts import (
     OutcomeVerdict,
     OutcomeVerdicts,
     build_outcome_verdicts,
 )
-from abridgeai.features.interviews.ai.stages.evaluation.rubric import RubricScores
+from abridgeai.features.interviews.ai.stages.evaluation.rubric import (
+    RubricScores,
+    resolve_rubric_definition,
+)
 from abridgeai.features.interviews.ai.stages.gap_report import (
     GapReportDraft,
     generate_gap_report,
+)
+from abridgeai.features.interviews.ai.stages.persona_adherence import (
+    audit_persona_adherence,
+)
+from abridgeai.features.interviews.ai.stages.persona_adherence.parsers import (
+    PersonaAdherence,
 )
 from abridgeai.features.interviews.models import (
     GapReport,
@@ -48,6 +60,10 @@ from abridgeai.features.interviews.models import (
     InterviewSessionMessage,
     InterviewSessionQuestion,
 )
+from abridgeai.features.interviews.orchestrator.interviewer_identity import (
+    identity_from_config,
+)
+from abridgeai.features.interviews.orchestrator.persona import profile_from_config
 from abridgeai.features.interviews.orchestrator.security import (
     SecurityAction,
     SecurityAssessment,
@@ -56,11 +72,36 @@ from abridgeai.features.interviews.orchestrator.security import (
 from abridgeai.features.interviews.queries import authoring as authoring_queries
 from abridgeai.features.interviews.queries import sessions as sessions_queries
 from abridgeai.features.interviews.services import security as security_service
-from abridgeai.ai.models import GenerationRun
 from abridgeai.features.quizzes.api import public as quizzes_public
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
+
+_logger = get_logger(__name__)
+
+
+def _ungradeable_reason(session: object) -> str | None:
+    """Why this run may not be graded, or None when it may.
+
+    Two refusals, both defence in depth against the same class of damage:
+    ``evaluate_and_generate_report`` is the ONLY writer of ``pass_verdict``, so a
+    missed guard at any enqueue site must not be able to reach that write.
+
+    * ``"practice"`` — a rehearsal. A verdict on it would unlock the SR lesson
+      and quiz gates that read ``pass_verdict``.
+    * ``"never_started_assessment"`` — still in onboarding (identity check /
+      audio check / readiness), so there are no answers to judge: answering is
+      gated on ``onboarding_stage == 'completed'`` in ``taking.record_answer``,
+      making ``assessment_started_at IS NULL`` equivalent to "no answer can
+      exist". Grading one fabricated outcome verdicts and a pass/fail from
+      onboarding chatter alone, against a student who never saw a question, and
+      consumed one of their attempts.
+    """
+    if practice.is_practice(getattr(session, "session_mode", None)):
+        return "practice"
+    if getattr(session, "assessment_started_at", None) is None:
+        return "never_started_assessment"
+    return None
 
 
 async def evaluate_and_generate_report(
@@ -97,6 +138,16 @@ async def evaluate_and_generate_report(
     if session is None:
         raise NotFoundError(f"Interview session {session_id} not found")
 
+    ungradeable = _ungradeable_reason(session)
+    if ungradeable is not None:
+        # See _ungradeable_reason: practice rehearsals and runs that never
+        # reached the assessment are refused here, not only at the enqueue sites.
+        _logger.info(
+            "interview.evaluation.skipped",
+            extra={"session_id": str(session_id), "reason": ungradeable},
+        )
+        return
+
     # Parent generation_run for this evaluation so it surfaces on the admin
     # processing dashboard and its LLM calls attribute to a pipeline run.
     # Created + committed with status='running' BEFORE the stages so a later
@@ -106,8 +157,17 @@ async def evaluate_and_generate_report(
 
     try:
         outcomes = await authoring_queries.list_outcomes_for_config(db, session.interview_config_id)
+        # Partitioned by session mode, and this is the highest-consequence of the
+        # partition filters — it is not about leaking questions. This query takes
+        # every review state, and the questions it returns become
+        # ``expected_question_ids``: a question from the other partition would be
+        # counted as unanswered, inflate ``questions_total``, and hard-fail any
+        # outcome linked to it via ``_fail_unanswered_outcomes``. Unfiltered, the
+        # partition would corrupt real grades rather than merely reveal a bank.
         all_questions = await authoring_queries.list_questions_for_config(
-            db, session.interview_config_id
+            db,
+            session.interview_config_id,
+            practice_only=practice.partition_for_mode(session.session_mode),
         )
         candidate_answers = await _list_candidate_answers(db, session_id)
         snapshot = await sessions_queries.get_session_with_responses(db, session_id)
@@ -171,12 +231,21 @@ async def evaluate_and_generate_report(
 
         # Rubric stays as a teacher-facing diagnostic feeding the Gap Report;
         # it no longer gates pass/fail (phase-03).
+        #
+        # Resolve the teacher's scoring rubric from the config's
+        # ``supplementary_instructions``. Before this was wired up, no caller
+        # passed a rubric at all, so EVERY session was silently graded against
+        # the four-criterion equal-weight default and a teacher-authored rubric
+        # had no effect. Malformed / prose-only fields still fall back to that
+        # default, so grading cannot break on a bad config.
+        rubric = resolve_rubric_definition(getattr(config, "supplementary_instructions", None))
         rubric_scores = await evaluate_session(
             db,
             session=session,
             outcomes=outcomes,
             questions=questions,
             answers=candidate_answers,
+            rubric=rubric,
             question_prompts=question_prompts,
             expected_question_ids=expected_question_ids,
             pipeline_run_id=eval_run_id,
@@ -199,6 +268,27 @@ async def evaluate_and_generate_report(
             pipeline_run_id=eval_run_id,
         )
 
+        # Tone-only diagnostic (never gates pass/fail): did the AI interviewer
+        # hold the configured persona? Runs over the stored transcript. It is
+        # best-effort — audit_persona_adherence never raises, returning an
+        # unavailable() sentinel on no-turns / LLM failure — so a tone audit
+        # problem can never block a student's evaluation from completing.
+        transcript = await sessions_queries.list_session_messages(db, session_id)
+        persona_adherence = await audit_persona_adherence(
+            db,
+            persona=profile_from_config(
+                getattr(config, "persona", None),
+                getattr(config, "persona_profile_json", None),
+            ),
+            messages=transcript,
+            # The judge must know WHICH interviewer was declared, or it reads a
+            # role's register (concrete vs. trade-off-oriented wording) as tone
+            # drift and flags a config that behaved exactly as intended.
+            identity=identity_from_config(getattr(config, "persona_profile_json", None)),
+            language=getattr(session, "interview_language", None),
+            pipeline_run_id=eval_run_id,
+        )
+
         await _persist_outcome_evaluations(db, session_id=session_id, verdicts=outcome_verdicts)
         _stamp_session_summary(
             session,
@@ -207,6 +297,7 @@ async def evaluate_and_generate_report(
             min_outcomes_to_pass=min_outcomes_to_pass,
             question_count=len(expected_question_ids),
             answered_question_count=len(answered_question_ids),
+            persona_adherence=persona_adherence,
         )
         await _persist_gap_report(
             db,
@@ -269,6 +360,97 @@ async def _list_candidate_answers(
         and getattr(m, "session_question_id", None) is not None
         and (getattr(m, "metadata_json", None) or {}).get("kind") != "onboarding"
     ]
+
+
+async def generate_practice_feedback(db: AsyncSession, session_id: UUID) -> None:
+    """Judge a practice run against the criteria, without grading it.
+
+    A deliberately separate function rather than a branch inside
+    :func:`evaluate_and_generate_report`. That function is the only writer of
+    ``pass_verdict``, and ``pass_verdict = TRUE`` is what opens the SR-lesson
+    and quiz gates — keeping the two apart makes "a rehearsal can never unlock
+    anything" a structural property instead of a conditional someone could
+    later invert. Each function refuses the other's mode outright.
+
+    What it runs, and what it deliberately does not:
+
+    * ``evaluate_outcomes`` — per-criterion met/not-met. This is the whole
+      point: the student saw those criteria before the run, so the feedback
+      that closes the loop is which ones they actually demonstrated.
+    * NOT ``evaluate_session`` — that produces numeric rubric scores, which
+      thesis §4.3 keeps away from students in any mode.
+    * NOT ``generate_gap_report`` — it writes a ``gap_reports`` row that the
+      results screen reads as a graded outcome, and it needs the learner-facing
+      output guard. A rehearsal should not manufacture either.
+    * NOT ``_derive_pass_verdict`` / ``_stamp_session_summary`` — no verdict,
+      no score, no ``questions_total`` that a teacher view would read as a
+      graded attempt.
+
+    Failures are recorded rather than raised. Unlike a real evaluation there is
+    no verdict anyone is blocked on, nothing downstream is gated on this, and
+    the recovery sweep skips practice — so there is nothing for a retry loop to
+    repair. But the failure IS stamped, because the alternative is a client that
+    cannot tell "still thinking" from "never coming" and spins forever.
+    """
+    session = await sessions_queries.get_session(db, session_id)
+    if session is None:
+        raise NotFoundError(f"Interview session {session_id} not found")
+    if not practice.is_practice(session.session_mode):
+        # The mirror of the refusal in evaluate_and_generate_report. A graded
+        # session reaching here would get outcome rows written without the
+        # verdict, score and gap report that make them meaningful.
+        return
+
+    try:
+        outcomes = await authoring_queries.list_outcomes_for_config(db, session.interview_config_id)
+        all_questions = await authoring_queries.list_questions_for_config(
+            db,
+            session.interview_config_id,
+            practice_only=True,
+        )
+        candidate_answers = await _list_candidate_answers(db, session_id)
+        snapshot = await sessions_queries.get_session_with_responses(db, session_id)
+        if snapshot is None:
+            raise NotFoundError(f"Interview session {session_id} not found")
+        _, session_questions, _ = snapshot
+        questions, question_prompts, _expected, answered_question_ids = (
+            _build_question_evaluation_context(all_questions, session_questions, candidate_answers)
+        )
+
+        verdicts = await evaluate_outcomes(
+            db,
+            session=session,
+            outcomes=outcomes,
+            questions=questions,
+            answers=candidate_answers,
+            question_prompts=question_prompts,
+            pipeline_run_id=None,
+        )
+        # Same honesty as the graded path: a criterion whose question was never
+        # answered was not demonstrated, whatever the judge inferred elsewhere.
+        verdicts = _fail_unanswered_outcomes(
+            verdicts,
+            questions=questions,
+            answered_question_ids=answered_question_ids,
+        )
+
+        await _persist_outcome_evaluations(db, session_id=session_id, verdicts=verdicts)
+        session.internal_summary_json = dict(session.internal_summary_json or {}) | {
+            "practice": {
+                "outcomes_met": verdicts.met_count,
+                "outcomes_total": verdicts.total,
+                "evaluated_at": utcnow().isoformat(),
+            }
+        }
+        await db.commit()
+    except Exception as exc:  # noqa: BLE001 -- see the docstring: recorded, not raised
+        await db.rollback()
+        fresh = await db.get(InterviewSession, session_id)
+        if fresh is not None:
+            fresh.internal_summary_json = dict(fresh.internal_summary_json or {}) | {
+                "practice": {"failed": True, "message": str(exc), "at": utcnow().isoformat()}
+            }
+            await db.commit()
 
 
 def _build_question_evaluation_context(
@@ -469,6 +651,7 @@ def _stamp_session_summary(
     min_outcomes_to_pass: int | None,
     question_count: int,
     answered_question_count: int,
+    persona_adherence: PersonaAdherence | None = None,
 ) -> None:
     summary: dict[str, Any] = dict(session.internal_summary_json or {})
     summary.pop("evaluation_failure", None)
@@ -481,6 +664,11 @@ def _stamp_session_summary(
     summary["questions_answered"] = answered_question_count
     summary["questions_unanswered"] = max(0, question_count - answered_question_count)
     summary["evaluated_at"] = utcnow().isoformat()
+    # Teacher-only tone diagnostic. Only stored when the audit produced
+    # something usable — an unavailable() sentinel (no interviewer turns / LLM
+    # down) is not persisted, so the teacher UI can tell "audited" from "not".
+    if persona_adherence is not None and persona_adherence.available:
+        summary["persona_adherence"] = persona_adherence.to_json()
     session.internal_summary_json = summary
     session.pass_verdict = _derive_pass_verdict(verdicts, min_outcomes_to_pass)
 

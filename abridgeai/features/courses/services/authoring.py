@@ -38,7 +38,7 @@ from abridgeai.core.db.conflict_mapper import (
     register_conflict_mappings,
 )
 from abridgeai.core.db.recursive_delete import soft_delete_cascade
-from abridgeai.core.exceptions import AppError, NotFoundError
+from abridgeai.core.exceptions import AppError, ConflictError, NotFoundError
 from abridgeai.core.security import CurrentUser
 from abridgeai.features.courses.models import (
     Course,
@@ -77,6 +77,8 @@ from abridgeai.features.courses.schemas import (
     TeacherDashboardStats,
 )
 from abridgeai.features.identity.models import StorageObject
+from abridgeai.features.interviews.api import public as interviews_public
+from abridgeai.features.quizzes.api import public as quizzes_public
 from abridgeai.infrastructure.s3 import create_stream_url, put_object_bytes
 
 
@@ -236,6 +238,21 @@ async def update_course(
 ) -> CourseAuthoring:
     del actor
     course = await _require_course(db, course_id)
+    # Publishing is a one-way door: a published course can never be reverted
+    # to draft. Its learning outcomes double as the graded assessment scale,
+    # so re-opening it for edits would move the goalposts under enrolled
+    # students. (archived is a separate terminal state; only draft->published
+    # and ->archived transitions are allowed.)
+    new_status = payload.status
+    if (
+        new_status is not None
+        and new_status != course.status
+        and course.status == "published"
+        and new_status == "draft"
+    ):
+        raise ConflictError(
+            f"Course {course_id} is published and cannot be reverted to draft."
+        )
     _apply_patch(course, payload)
     await _flush_or_conflict(db)
     await db.refresh(course)
@@ -249,15 +266,54 @@ async def publish_course(db: AsyncSession, course_id: UUID, actor: CurrentUser) 
     For T3.5 the gate is intentionally minimal (status transition only)
     so the API surface is stable; tighter gates will land alongside
     quizzes / interviews when those features can publish independently.
+
+    On an actual transition INTO ``published`` (not a re-publish), everyone
+    already attached to the course is notified with a deep-link: assigned
+    teachers and actively-enrolled students. This back-fills the notifications
+    that assignment/enrolment skipped while the course was still a draft.
+    Notification failures never roll back the publish.
     """
     del actor
     course = await _require_course(db, course_id)
     if course.status == "archived":
         raise AppError(f"Cannot publish archived course {course_id}")
+    was_published = course.status == "published"
     course.status = "published"
     await db.flush()
     await db.refresh(course)
+
+    if not was_published:
+        await _notify_course_published(db, course)
+
     return CourseAuthoring.model_validate(course)
+
+
+async def _notify_course_published(db: AsyncSession, course: Course) -> None:
+    """Notify attached teachers + enrolled students that ``course`` published.
+
+    Lazy imports keep the module-load graph acyclic (enrollments.api.public →
+    enrollments.services.manager → courses.api.public would otherwise close a
+    cycle at import time). All dispatch is best-effort inside ``notify``.
+    """
+    from abridgeai.features.courses.queries import assignment as assignment_queries
+    from abridgeai.features.courses.services import notify
+    from abridgeai.features.enrollments.api import public as enrollments_api
+
+    teacher_rows = await assignment_queries.list_teachers_for_course(db, course.id)
+    teacher_ids = [row["user_id"] for row in teacher_rows]
+    student_ids = await enrollments_api.list_active_student_ids(db, course_id=course.id)
+
+    if not teacher_ids and not student_ids:
+        return
+
+    await notify.notify_course_published(
+        db,
+        course_id=course.id,
+        course_title=course.title,
+        course_slug=course.slug,
+        teacher_user_ids=teacher_ids,
+        student_user_ids=student_ids,
+    )
 
 
 async def archive_course(db: AsyncSession, course_id: UUID, actor: CurrentUser) -> CourseAuthoring:
@@ -424,6 +480,212 @@ async def delete_module_item(db: AsyncSession, item_id: UUID, actor: CurrentUser
     await soft_delete_cascade(db, item, actor_id=actor.user_id)
 
 
+# --- Duplicate (deep clone) ------------------------------------------------
+#
+# Duplicated content is ALWAYS unpublished: modules/lessons land in
+# ``status='draft'``; cloned quiz/interview subtrees are forced to draft +
+# ``review_status='pending'`` inside their feature's ``deep_clone_*`` helper.
+# A teacher must explicitly re-publish a copy — a duplicate never inherits the
+# source's published/approved state.
+
+_DUP_SUFFIX = " (Copy)"
+
+
+async def _deep_clone_lesson(
+    db: AsyncSession,
+    *,
+    source_lesson: Lesson,
+    target_module_id: UUID,
+    actor: CurrentUser,
+) -> UUID:
+    """Clone a lesson (+ its resources) into ``target_module_id`` as draft.
+
+    Slug must stay unique per module. When cloning inside the SAME module we
+    append a short uuid fragment to dodge ``uq_lessons_module_slug``; across
+    modules the original slug is free to reuse.
+
+    Resource rows are copied by reference to the same ``storage_object_id`` —
+    the underlying S3 object is shared, not re-uploaded (a duplicated lesson
+    points at the same files, which is the desired behaviour and avoids a
+    storage blow-up).
+    """
+    slug = source_lesson.slug
+    if source_lesson.module_id == target_module_id:
+        slug = f"{slug}-copy-{uuid4().hex[:8]}"
+
+    lesson_clone = Lesson(
+        module_id=target_module_id,
+        slug=slug,
+        title=f"{source_lesson.title}{_DUP_SUFFIX}",
+        summary=source_lesson.summary,
+        notes_markdown=source_lesson.notes_markdown,
+        primary_material_id=source_lesson.primary_material_id,
+        lesson_type=source_lesson.lesson_type,
+        difficulty=source_lesson.difficulty,
+        estimated_minutes=source_lesson.estimated_minutes,
+        status="draft",
+        ef_min_unlock=source_lesson.ef_min_unlock,
+        tau_unlock=source_lesson.tau_unlock,
+        requires_interview_pass=source_lesson.requires_interview_pass,
+        unlock_rule_json=dict(source_lesson.unlock_rule_json or {}),
+        created_by=actor.user_id,
+        updated_by=actor.user_id,
+    )
+    db.add(lesson_clone)
+    await _flush_or_conflict(db)
+
+    resources = await authoring_queries.list_all_lesson_resources(db, source_lesson.id)
+    for res in resources:
+        db.add(
+            LessonResource(
+                lesson_id=lesson_clone.id,
+                title=res.title,
+                resource_type=res.resource_type,
+                storage_object_id=res.storage_object_id,
+                position=res.position,
+                visible_to_students=res.visible_to_students,
+                created_by=actor.user_id,
+                updated_by=actor.user_id,
+            )
+        )
+    await _flush_or_conflict(db)
+    return lesson_clone.id
+
+
+async def _clone_item_target(
+    db: AsyncSession,
+    *,
+    source_item: ModuleItem,
+    target_module_id: UUID,
+    actor: CurrentUser,
+) -> tuple[str, dict[str, UUID]]:
+    """Deep-clone the polymorphic target a module item points at.
+
+    Returns ``(item_type, fk_kwargs)`` where ``fk_kwargs`` binds exactly one of
+    ``lesson_id`` / ``quiz_id`` / ``interview_config_id`` — ready to splat into
+    a new :class:`ModuleItem`. Cross-feature quiz/interview cloning goes through
+    the respective ``api.public`` (feature-independence contract).
+    """
+    if source_item.item_type == "lesson":
+        source_lesson = await _require_lesson(db, source_item.lesson_id)
+        new_lesson_id = await _deep_clone_lesson(
+            db,
+            source_lesson=source_lesson,
+            target_module_id=target_module_id,
+            actor=actor,
+        )
+        return "lesson", {"lesson_id": new_lesson_id}
+
+    if source_item.item_type == "quiz":
+        new_quiz_id = await quizzes_public.deep_clone_quiz(
+            db,
+            source_quiz_id=source_item.quiz_id,
+            target_module_id=target_module_id,
+            actor_id=actor.user_id,
+            title_suffix=_DUP_SUFFIX,
+        )
+        return "quiz", {"quiz_id": new_quiz_id}
+
+    if source_item.item_type == "interview":
+        new_config_id = await interviews_public.deep_clone_interview_config(
+            db,
+            source_config_id=source_item.interview_config_id,
+            target_module_id=target_module_id,
+            actor_id=actor.user_id,
+            title_suffix=_DUP_SUFFIX,
+        )
+        return "interview", {"interview_config_id": new_config_id}
+
+    raise AppError(f"Unknown module item type: {source_item.item_type!r}")
+
+
+async def duplicate_module_item(
+    db: AsyncSession,
+    item_id: UUID,
+    actor: CurrentUser,
+) -> ModuleItemAuthoring:
+    """Deep-clone a single module item into the SAME module, appended at the end.
+
+    The item's polymorphic target (lesson / quiz / interview) is fully cloned as
+    an independent draft; the new pin appends after the current last item.
+    """
+    source_item = await _require_module_item(db, item_id)
+    item_type, fk_kwargs = await _clone_item_target(
+        db,
+        source_item=source_item,
+        target_module_id=source_item.module_id,
+        actor=actor,
+    )
+    next_pos = await authoring_queries.next_module_item_position(db, source_item.module_id)
+    new_item = ModuleItem(
+        module_id=source_item.module_id,
+        item_type=item_type,
+        position=next_pos,
+        unlock_rule_json=dict(source_item.unlock_rule_json or {}),
+        **fk_kwargs,
+    )
+    db.add(new_item)
+    await _flush_or_conflict(db)
+    await db.refresh(new_item)
+    return ModuleItemAuthoring.model_validate(new_item)
+
+
+async def duplicate_module(
+    db: AsyncSession,
+    module_id: UUID,
+    actor: CurrentUser,
+) -> ModuleAuthoring:
+    """Deep-clone a whole module: the module row + every item + every target.
+
+    The new module is created as ``status='draft'`` at the end of its course's
+    module order. Each of the source module's items is cloned in position
+    order, and each item's lesson/quiz/interview target is deep-cloned into the
+    NEW module so the copy is fully self-contained (no shared child rows with
+    the original). Module prerequisites are intentionally NOT copied — they
+    reference sibling modules by id and a fresh draft starts with none.
+    """
+    source_module = await _require_module(db, module_id)
+
+    next_module_pos = await authoring_queries.next_module_position(db, source_module.course_id)
+    module_clone = Module(
+        course_id=source_module.course_id,
+        title=f"{source_module.title}{_DUP_SUFFIX}",
+        description=source_module.description,
+        position=next_module_pos,
+        status="draft",
+        estimated_minutes=source_module.estimated_minutes,
+        requires_all_lessons_unlocked=source_module.requires_all_lessons_unlocked,
+        created_by=actor.user_id,
+        updated_by=actor.user_id,
+    )
+    db.add(module_clone)
+    await _flush_or_conflict(db)
+
+    source_items = await authoring_queries.list_module_items(db, source_module.id)
+    for position, source_item in enumerate(source_items, start=1):
+        if source_item.deleted_at is not None:
+            continue
+        item_type, fk_kwargs = await _clone_item_target(
+            db,
+            source_item=source_item,
+            target_module_id=module_clone.id,
+            actor=actor,
+        )
+        db.add(
+            ModuleItem(
+                module_id=module_clone.id,
+                item_type=item_type,
+                position=position,
+                unlock_rule_json=dict(source_item.unlock_rule_json or {}),
+                **fk_kwargs,
+            )
+        )
+        await _flush_or_conflict(db)
+
+    await db.refresh(module_clone)
+    return ModuleAuthoring.model_validate(module_clone)
+
+
 async def reorder_module_items(
     db: AsyncSession,
     module_id: UUID,
@@ -576,6 +838,12 @@ async def get_teacher_dashboard_stats(
     clickable widgets: courses in draft, ungraded quiz attempts, and
     interview sessions awaiting evaluation. All aggregate queries are
     batched over the course-id set — no N+1.
+
+    Also returns the human-in-the-loop review backlog (pending quiz cards /
+    interview questions, published quizzes missing an expected response
+    time, ingested materials with no quiz yet) and the spaced-repetition
+    retention signal (students below the EF threshold, mean EF, overdue
+    cards) — same batched-over-course-ids property.
     """
     owned = await authoring_queries.list_courses_for_owner(db, user.user_id, include_archived=False)
     assigned = await authoring_queries.list_courses_assigned_to_teacher(
@@ -596,10 +864,22 @@ async def get_teacher_dashboard_stats(
         ungraded_quizzes,
         pending_interviews,
     ) = await authoring_queries.count_pending_grading_for_courses(db, course_ids)
+    pending_review_by_course = await authoring_queries.count_pending_review_by_course(
+        db, course_ids
+    )
+    review = await authoring_queries.count_review_queue_and_retention_for_courses(db, course_ids)
     return TeacherDashboardStats(
         draft_courses=draft_courses,
         ungraded_quizzes=ungraded_quizzes,
         pending_interviews=pending_interviews,
+        pending_review_by_course=pending_review_by_course,
+        quiz_cards_pending_review=review.quiz_cards_pending_review,
+        interview_questions_pending_review=review.interview_questions_pending_review,
+        published_quizzes_missing_texp=review.published_quizzes_missing_texp,
+        materials_ready_for_quiz_gen=review.materials_ready_for_quiz_gen,
+        students_below_ef_threshold=review.students_below_ef_threshold,
+        avg_retention_ef=review.avg_retention_ef,
+        cards_overdue=review.cards_overdue,
     )
 
 
@@ -745,6 +1025,14 @@ async def get_authoring_content(
                     "title": item.interview_config.title,
                     "status": item.interview_config.status,
                 }
+
+            # An item whose target resolved to None points at a soft-deleted
+            # (or missing) lesson/quiz/interview. Emitting it anyway shipped a
+            # dangling ``quiz_id`` to the client, which rendered a clickable
+            # entry that 404'd on open. Skip it — a content item with no
+            # reachable target is not content.
+            if target is None:
+                continue
 
             items_out.append(
                 {
@@ -899,13 +1187,69 @@ async def _require_outcome(
     return outcome
 
 
+def _assert_outcomes_editable(course: Course) -> None:
+    """Learning outcomes are editable only while the course is a draft.
+
+    Once a course is published its outcomes are frozen: they double as the
+    graded assessment scale, so changing/removing them after students have
+    started would silently move the goalposts. Archived courses are likewise
+    read-only. Callers pass the already-loaded course row so this stays a
+    pure guard (→ HTTP 409 via ConflictError at the router).
+    """
+    if course.status != "draft":
+        raise ConflictError(
+            "Learning outcomes can only be edited while the course is an "
+            f"unpublished draft (course {course.id} is {course.status})."
+        )
+
+
+def _project_outcomes(
+    outcomes: list[CourseLearningOutcome],
+) -> list[CourseLearningOutcomeAuthoring]:
+    """Validate ORM rows into authoring DTOs with derived code + depth.
+
+    The dotted ``L.O.x.y`` code and tree depth are projection-only, so we
+    compute them once over the whole list and stamp each DTO. Returned in
+    tree order (parent before children, siblings by position) so a client
+    can render the list top-to-bottom without re-sorting.
+    """
+    code_map = authoring_queries.build_outcome_code_map(outcomes)
+    dtos: dict[UUID, CourseLearningOutcomeAuthoring] = {}
+    for o in outcomes:
+        dto = CourseLearningOutcomeAuthoring.model_validate(o)
+        code, depth = code_map.get(o.id, (str(o.position), 0))
+        dto.code = code
+        dto.depth = depth
+        dtos[o.id] = dto
+    # Tree order: sort by the dotted code split into ints so 1.2 < 1.10.
+    def sort_key(dto: CourseLearningOutcomeAuthoring) -> list[int]:
+        return [int(part) for part in (dto.code or "").split(".") if part.isdigit()]
+
+    return sorted(dtos.values(), key=sort_key)
+
+
+def _project_one(
+    outcomes: list[CourseLearningOutcome], outcome_id: UUID
+) -> CourseLearningOutcomeAuthoring:
+    """Project the whole course tree, then return the one DTO we care about.
+
+    Single-outcome mutations (create/update) still need the full list to
+    derive the dotted code, since a code depends on the outcome's ancestor
+    chain and sibling positions.
+    """
+    for dto in _project_outcomes(outcomes):
+        if dto.id == outcome_id:
+            return dto
+    raise NotFoundError(f"Course outcome {outcome_id} not found")
+
+
 async def list_course_outcomes(
     db: AsyncSession, course_id: UUID
 ) -> list[CourseLearningOutcomeAuthoring]:
-    """All learning outcomes for a course, ordered by position (§LO-1)."""
+    """All learning outcomes for a course in tree order with codes (§LO-1)."""
     await _require_course(db, course_id)
     outcomes = await authoring_queries.list_course_outcomes(db, course_id)
-    return [CourseLearningOutcomeAuthoring.model_validate(o) for o in outcomes]
+    return _project_outcomes(outcomes)
 
 
 async def add_course_outcome(
@@ -914,23 +1258,31 @@ async def add_course_outcome(
     payload: CourseLearningOutcomeCreate,
     actor: CurrentUser,
 ) -> CourseLearningOutcomeAuthoring:
-    """Append a new outcome at the next free position (§LO-1).
+    """Append a new outcome under its parent at the next free position (§LO-1).
 
-    ``position`` is server-assigned (MAX+1); the ``(L.O.x)`` code is
-    derived from it at display time and never stored.
+    ``parent_id`` (optional) nests the outcome; it must belong to the same
+    course. ``position`` is server-assigned (MAX+1 among the parent's
+    children); the dotted code is derived at display time and never stored.
     """
     del actor
-    await _require_course(db, course_id)
-    next_pos = await authoring_queries.next_course_outcome_position(db, course_id)
+    course = await _require_course(db, course_id)
+    _assert_outcomes_editable(course)
+    if payload.parent_id is not None:
+        # Parent must exist in this course (guards cross-course nesting).
+        await _require_outcome(db, course_id, payload.parent_id)
+    next_pos = await authoring_queries.next_course_outcome_position(
+        db, course_id, payload.parent_id
+    )
     outcome = CourseLearningOutcome(
         course_id=course_id,
+        parent_id=payload.parent_id,
         position=next_pos,
         outcome_text=payload.outcome_text,
     )
     db.add(outcome)
     await _flush_or_conflict(db)
-    await db.refresh(outcome)
-    return CourseLearningOutcomeAuthoring.model_validate(outcome)
+    outcomes = await authoring_queries.list_course_outcomes(db, course_id)
+    return _project_one(outcomes, outcome.id)
 
 
 async def update_course_outcome(
@@ -940,30 +1292,77 @@ async def update_course_outcome(
     payload: CourseLearningOutcomeUpdate,
     actor: CurrentUser,
 ) -> CourseLearningOutcomeAuthoring:
-    """Edit an outcome's text (§LO-2). Position/code are not client-editable."""
+    """Edit text and/or re-parent an outcome (§LO-2).
+
+    Re-parenting is guarded against cycles (an outcome may not become its
+    own descendant, nor its own parent). When the parent changes, the
+    outcome is appended to the new parent's children and both the old and
+    new sibling groups are re-indexed so positions/codes stay contiguous.
+    """
     del actor
+    course = await _require_course(db, course_id)
+    _assert_outcomes_editable(course)
     outcome = await _require_outcome(db, course_id, outcome_id)
-    _apply_patch(outcome, payload)
+    reparenting = "parent_id" in payload.model_fields_set
+    new_parent_id = payload.parent_id if reparenting else outcome.parent_id
+    old_parent_id = outcome.parent_id
+
+    if reparenting and new_parent_id != old_parent_id:
+        if new_parent_id is not None:
+            if new_parent_id == outcome_id:
+                raise AppError("An outcome cannot be its own parent")
+            await _require_outcome(db, course_id, new_parent_id)
+            # Cycle guard: the new parent must not be a descendant of this
+            # outcome (that would detach a subtree into a loop).
+            all_outcomes = await authoring_queries.list_course_outcomes(db, course_id)
+            descendants = authoring_queries.build_descendant_map(all_outcomes)
+            if new_parent_id in descendants.get(outcome_id, set()):
+                raise AppError("Cannot move an outcome under one of its own descendants")
+        outcome.parent_id = new_parent_id
+        outcome.position = await authoring_queries.next_course_outcome_position(
+            db, course_id, new_parent_id
+        )
+
+    if payload.outcome_text is not None:
+        outcome.outcome_text = payload.outcome_text
+
     await _flush_or_conflict(db)
-    await db.refresh(outcome)
-    return CourseLearningOutcomeAuthoring.model_validate(outcome)
+
+    if reparenting and new_parent_id != old_parent_id:
+        # Old siblings gapped by the move; compact them.
+        await authoring_queries.reindex_course_outcome_siblings(db, course_id, old_parent_id)
+        await _flush_or_conflict(db)
+
+    outcomes = await authoring_queries.list_course_outcomes(db, course_id)
+    return _project_one(outcomes, outcome_id)
 
 
 async def delete_course_outcome(
     db: AsyncSession, course_id: UUID, outcome_id: UUID, actor: CurrentUser
 ) -> None:
-    """Soft-delete an outcome, then compact positions to 1..N (§LO-2).
+    """Soft-delete an outcome + its whole subtree, then compact siblings (§LO-2).
 
-    The FK on ``quiz_questions.learning_outcome_id`` is ``ON DELETE SET
-    NULL``, but that fires only on a hard DELETE; we soft-delete here, so
-    questions keep pointing at the now-deleted outcome row. That's benign:
-    the projection layer treats a soft-deleted / missing outcome as "no
-    outcome" (NULL position → no ``(L.O.x)`` prefix). After removal the
-    surviving outcomes are re-indexed so the display codes never gap.
+    Deleting a parent removes its descendants too (soft-delete cascade over
+    the subtree) so no child is orphaned to a dangling parent. The FK on
+    ``quiz_questions.learning_outcome_id`` is ``ON DELETE SET NULL`` but
+    fires only on hard DELETE; we soft-delete, so questions keep pointing
+    at the now-deleted rows. That's benign: the projection layer treats a
+    soft-deleted / missing outcome as "no outcome". Surviving siblings of
+    the removed node are re-indexed so codes never gap.
     """
+    course = await _require_course(db, course_id)
+    _assert_outcomes_editable(course)
     outcome = await _require_outcome(db, course_id, outcome_id)
-    await soft_delete_cascade(db, outcome, actor_id=actor.user_id)
-    await authoring_queries.reindex_course_outcomes(db, course_id)
+    parent_id = outcome.parent_id
+    # Soft-delete the whole subtree (deepest first) so children aren't
+    # orphaned. Resolve the subtree from the current tree snapshot.
+    all_outcomes = await authoring_queries.list_course_outcomes(db, course_id)
+    descendants = authoring_queries.build_descendant_map(all_outcomes)
+    by_id = {o.id: o for o in all_outcomes}
+    to_delete = [outcome, *(by_id[d] for d in descendants.get(outcome_id, set()) if d in by_id)]
+    for node in to_delete:
+        await soft_delete_cascade(db, node, actor_id=actor.user_id)
+    await authoring_queries.reindex_course_outcome_siblings(db, course_id, parent_id)
 
 
 __all__ = [

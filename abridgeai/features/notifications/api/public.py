@@ -22,12 +22,34 @@ as the underlying implementation.
 
 from __future__ import annotations
 
+from abridgeai.features.notifications import messages
 from abridgeai.features.notifications.services.dispatch import (
     EMAIL_NOTIFICATION_TASK_NAME,
     send_notification,
 )
 
+# Re-export the localized message builders so cross-feature producers render
+# notification copy through the blessed public surface instead of importing
+# ``notifications.messages`` directly (which the independence contract forbids —
+# only ``api.public`` is a sanctioned cross-feature import target).
+course_teacher_assigned_title = messages.course_teacher_assigned_title
+course_teacher_assigned_body = messages.course_teacher_assigned_body
+course_enrolled_title = messages.course_enrolled_title
+course_enrolled_body = messages.course_enrolled_body
+course_published_teacher_title = messages.course_published_teacher_title
+course_published_teacher_body = messages.course_published_teacher_body
+course_published_student_title = messages.course_published_student_title
+course_published_student_body = messages.course_published_student_body
+
 __all__ = [
     "EMAIL_NOTIFICATION_TASK_NAME",
+    "course_enrolled_body",
+    "course_enrolled_title",
+    "course_published_student_body",
+    "course_published_student_title",
+    "course_published_teacher_body",
+    "course_published_teacher_title",
+    "course_teacher_assigned_body",
+    "course_teacher_assigned_title",
     "send_notification",
 ]

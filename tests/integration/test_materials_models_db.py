@@ -26,7 +26,8 @@ def test_pgvector_column_type() -> None:
     assert rows, "embedding column missing"
     data_type, udt_name = rows[0]
     assert data_type == "USER-DEFINED"
-    assert udt_name == "vector"
+    # Widened from vector to halfvec(3072) in the embedding-3-large migration.
+    assert udt_name == "halfvec"
 
 
 def test_document_chunks_denormalized_fks_in_db() -> None:

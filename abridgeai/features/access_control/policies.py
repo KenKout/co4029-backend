@@ -15,6 +15,10 @@ Five public functions:
   §A1 -- ownership is an additional allow on top of explicit grants).
 * :func:`require_org_unit_permission` -- org_unit-scoped check that
   walks the unit's ancestor chain in Python.
+* :func:`require_org_access` -- organization-scoped check for org-owned
+  resources that are NOT course-owned, where there is no course to
+  re-resolve scope against. Resolves the caller's permissions FOR that
+  organization via :func:`load_org_permissions`. Mandatory for those.
 * :func:`can_manage_course` -- bool helper for non-route call sites
   (cron jobs, bulk operations) -- never raises.
 
@@ -36,7 +40,7 @@ to move to ``features/courses/queries`` once the feature lands.
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from typing import Annotated
 from uuid import UUID
 
@@ -48,6 +52,7 @@ from abridgeai.core.db import get_db
 from abridgeai.core.security import CurrentUser, get_current_user
 from abridgeai.features.access_control.queries import (
     load_course_permissions,
+    load_org_permissions,
     load_user_permissions,
 )
 
@@ -82,6 +87,95 @@ _ORG_UNIT_ANCESTORS_SQL = text(
     SELECT unit_id, organization_id FROM org_unit_tree
     """
 )
+
+
+_ORG_MEMBERSHIP_SQL = text(
+    """
+    SELECT 1
+    FROM organization_memberships
+    WHERE user_id = :user_id
+      AND organization_id = :organization_id
+      AND status = 'active'
+      AND deleted_at IS NULL
+    LIMIT 1
+    """
+)
+
+
+async def user_is_org_member(
+    db: AsyncSession,
+    *,
+    user_id: UUID,
+    organization_id: UUID,
+) -> bool:
+    """True iff the user holds an active, non-deleted membership in the org."""
+    row = (
+        await db.execute(
+            _ORG_MEMBERSHIP_SQL,
+            {"user_id": str(user_id), "organization_id": str(organization_id)},
+        )
+    ).first()
+    return row is not None
+
+
+async def require_org_access(
+    db: AsyncSession,
+    current_user: CurrentUser,
+    organization_id: UUID,
+    *,
+    resource: str,
+    resource_id: UUID,
+    permissions: Sequence[str] = (),
+) -> None:
+    """Raise 404 unless the caller may act on ``organization_id``.
+
+    The mandatory second half of authorising an **org-owned resource that is
+    not course-owned**. The permission dependencies above answer only "does
+    this principal hold code X anywhere", because :func:`load_user_permissions`
+    flattens role assignments without regard to ``scope_kind``. Course-owned
+    resources are fine — they route through :func:`require_course_permission`,
+    which re-resolves scope against the course's own organization. Anything
+    org-owned but course-less has nothing to re-resolve against, so it must
+    call this after loading the resource.
+
+    Pass ``permissions`` — the same codes the route's dependency checks — and
+    the question becomes *"was one of these granted FOR this organization?"*,
+    resolved through :func:`load_org_permissions`. That is the correct check
+    and what every call site should use.
+
+    Omit them and it falls back to bare organization membership, which is
+    necessary but NOT sufficient. Membership cannot separate a student of org A
+    from a manager of org B who also happens to study at A — and the flat set
+    behind the dependency has already accepted that manager's ``course.update``.
+    The fallback exists so an unconverted call site degrades to the previous
+    behaviour rather than to nothing.
+
+    ``system.administer`` passes either way — it is the platform-operator
+    permission and is only ever granted globally.
+
+    **404, not 403.** A 403 would confirm the resource exists, which turns any
+    id endpoint into an existence oracle across tenants: enumerate ids, read
+    the status code, learn which career paths or invitation codes another
+    organization owns. The not-found shape matches what the caller would see
+    for a genuinely absent id, so the two are indistinguishable.
+
+    Call it *inside* the handler's ``try`` block where one exists, so a missing
+    resource still maps to the router's own 404 shape.
+    """
+    if current_user.has_permission("system.administer"):
+        return
+
+    if permissions:
+        granted = await load_org_permissions(db, current_user.user_id, organization_id)
+        if any(code in granted for code in permissions):
+            return
+        raise _not_found(resource, resource_id)
+
+    if await user_is_org_member(
+        db, user_id=current_user.user_id, organization_id=organization_id
+    ):
+        return
+    raise _not_found(resource, resource_id)
 
 
 def _permission_denied(
@@ -172,6 +266,7 @@ def _resolve_path_uuid(request: Request, param_name: str, resource: str) -> UUID
 def require_course_permission(
     course_id_param: str,
     *perm_codes: str,
+    allow_owner: bool = True,
 ) -> PermissionDependency:
     """Build a FastAPI dependency that enforces course-scoped permissions.
 
@@ -179,13 +274,21 @@ def require_course_permission(
     UUID (typically ``"course_id"``). At request time the dependency:
 
     1. Loads the course's owner / organization / org_unit context.
-    2. Returns immediately if the principal IS the course owner -- ownership
-       is an additional allow on top of explicit permissions (Reconciliation
-       §A1). This saves a DB roundtrip on the hot path (teacher editing own
-       course).
+    2. Returns immediately if the principal IS the course owner AND
+       ``allow_owner`` is set -- ownership is an additional allow on top of
+       explicit permissions (Reconciliation §A1). This saves a DB roundtrip on
+       the hot path (teacher editing own course).
     3. Otherwise calls :func:`load_course_permissions` to resolve all four
        ``scope_kind`` values against the course context, and asserts that the
        intersection with ``perm_codes`` is non-empty.
+
+    ``allow_owner=False`` disables the ownership short-circuit, so ONLY an
+    explicit permission grant passes. Use it for operations that must stay with
+    a role even on a course the caller owns -- e.g. learning-outcome authoring
+    is manager-owned, so a teacher who owns the course still must NOT edit its
+    LOs (they hold ``course.update`` for content but not ``learning_outcome
+    .manage``). Without this flag the owner short-circuit would let the owning
+    teacher bypass the LO gate entirely.
 
     Missing course -> HTTP 404. Missing permission -> HTTP 403 with the
     required codes and course id in the detail body.
@@ -208,7 +311,7 @@ def require_course_permission(
             raise _not_found("course", course_id)
 
         owner_user_id, _organization_id, _org_unit_id = row
-        if owner_user_id == current_user.user_id:
+        if allow_owner and owner_user_id == current_user.user_id:
             return current_user
 
         course_perms = await load_course_permissions(db, current_user.user_id, course_id)
@@ -365,6 +468,8 @@ __all__ = [
     "can_manage_course",
     "require_any_permission",
     "require_course_permission",
+    "require_org_access",
     "require_org_unit_permission",
     "require_permission",
+    "user_is_org_member",
 ]

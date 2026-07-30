@@ -14,6 +14,7 @@ from abridgeai.ai.knowledge_graph import (
     build_knowledge_graph_for_material_version,
 )
 from abridgeai.ai.knowledge_graph import builder as builder_mod
+from abridgeai.ai.knowledge_graph import extraction as extraction_mod
 from abridgeai.ai.llm.gateway import LLMResult
 from abridgeai.ai.llm.roles import LLMRole
 from abridgeai.core.config import get_settings
@@ -30,6 +31,7 @@ class _Chunk:
 
 @dataclass
 class _Hierarchy:
+    organization_id: UUID
     course_id: UUID
     course_title: str
     module_id: UUID
@@ -167,6 +169,7 @@ def _make_chunk(
 
 def _make_hierarchy() -> _Hierarchy:
     return _Hierarchy(
+        organization_id=uuid4(),
         course_id=uuid4(),
         course_title="Algorithms",
         module_id=uuid4(),
@@ -200,7 +203,7 @@ def test_neo4j_client_is_slim() -> None:
 
 @pytest.mark.asyncio
 async def test_build_kg_disabled_returns_summary(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("KNOWLEDGE_GRAPH_ENABLED", raising=False)
+    monkeypatch.setenv("KNOWLEDGE_GRAPH_ENABLED", "false")
     get_settings.cache_clear()
 
     fake_client = _FakeKGClient()
@@ -333,25 +336,48 @@ async def test_build_kg_skips_mismatched_material_version() -> None:
     assert summary.enabled is True
 
 
-def test_normalize_kg_payload_drops_dangling_relationships() -> None:
+def test_normalize_kg_payload_promotes_dangling_endpoints() -> None:
+    """An endpoint named only in a relationship becomes an entity.
+
+    Dropping the edge instead (the old behaviour) cost both concepts a
+    connection the model had actually asserted, and left orphan nodes behind
+    in the graph. The model naming "Ghost" as a target IS an assertion that
+    Ghost is a concept — it just failed to list it twice.
+    """
     payload = {
         "entities": [{"name": "Python"}],
         "relationships": [
             {"source": "Python", "target": "Ghost", "relation": "RELATED_TO"},
+        ],
+    }
+    concepts, relationships = extraction_mod._normalize_kg_payload(payload)
+    assert {c["name"] for c in concepts} == {"Python", "Ghost"}
+    assert len(relationships) == 1
+    assert relationships[0]["target"] == "Ghost"
+    # Promoted endpoints carry no definition; consolidation folds them into
+    # whichever spelling of the same concept does.
+    ghost = next(c for c in concepts if c["name"] == "Ghost")
+    assert ghost["definition"] is None
+
+
+def test_normalize_kg_payload_drops_self_loops() -> None:
+    """"X relates to X" is a fact about nothing and renders as a visible loop."""
+    payload = {
+        "entities": [{"name": "Python"}],
+        "relationships": [
             {"source": "Python", "target": "Python", "relation": "RELATED_TO"},
         ],
     }
-    concepts, relationships = builder_mod._normalize_kg_payload(payload)
+    concepts, relationships = extraction_mod._normalize_kg_payload(payload)
     assert {c["name"] for c in concepts} == {"Python"}
-    assert len(relationships) == 1
-    assert relationships[0]["target"] == "Python"
+    assert relationships == []
 
 
 def test_normalize_kg_payload_handles_invalid_payload() -> None:
-    concepts, relationships = builder_mod._normalize_kg_payload({"oops": True})
+    concepts, relationships = extraction_mod._normalize_kg_payload({"oops": True})
     assert concepts == []
     assert relationships == []
-    concepts, relationships = builder_mod._normalize_kg_payload([])
+    concepts, relationships = extraction_mod._normalize_kg_payload([])
     assert concepts == []
     assert relationships == []
 

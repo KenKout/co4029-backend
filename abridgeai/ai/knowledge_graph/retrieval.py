@@ -179,6 +179,7 @@ async def lesson_concept_graph(
 async def retrieve_kg_context_for_anchors(
     anchor_concepts: list[str],
     *,
+    org_id: UUID | str,
     depth: int = 2,
     client: KnowledgeGraphClient | None = None,
 ) -> KGContext:
@@ -187,6 +188,14 @@ async def retrieve_kg_context_for_anchors(
     Used by quiz / interview retrieval stages: given the lesson's top
     concepts, return up to :data:`MAX_CONCEPTS` connected concepts and up to
     :data:`MAX_RELATIONSHIPS` of each of (PREREQUISITE_OF, RELATED_TO).
+
+    ``org_id`` is REQUIRED and keyword-only. Anchors are matched by name, and
+    concept names are the least distinctive thing in the graph — every
+    customer teaching databases has a "normalization" node. Without the tenant
+    predicate this traversal reads, and returns as course context, concepts
+    and prerequisite edges authored by a different organization. It is
+    keyword-only-and-required rather than defaulted precisely so a new call
+    site fails at import time instead of silently leaking.
 
     If the KG feature is disabled or Neo4j is unreachable, returns an empty
     ``KGContext`` (``enabled=False`` for the disabled case, ``enabled=True``
@@ -203,11 +212,11 @@ async def retrieve_kg_context_for_anchors(
     safe_depth = max(1, min(depth, 3))
 
     if client is not None:
-        return await _retrieve_with_client(client, names, safe_depth)
+        return await _retrieve_with_client(client, names, safe_depth, str(org_id))
 
     try:
         async with graph_client() as owned_client:
-            return await _retrieve_with_client(owned_client, names, safe_depth)
+            return await _retrieve_with_client(owned_client, names, safe_depth, str(org_id))
     except KnowledgeGraphDisabledError:
         return KGContext(enabled=False)
     except Exception as exc:  # pragma: no cover - graceful degradation when Neo4j is down
@@ -215,18 +224,110 @@ async def retrieve_kg_context_for_anchors(
         return KGContext(enabled=True)
 
 
+async def retrieve_kg_context_for_lesson_ids(
+    lesson_ids: Iterable[UUID | str],
+    *,
+    org_id: UUID | str,
+    depth: int = 2,
+    client: KnowledgeGraphClient | None = None,
+) -> KGContext:
+    """Return KG context seeded from the concepts taught by ``lesson_ids``.
+
+    Both quiz and interview retrieval used to call
+    :func:`retrieve_kg_context_for_anchors` with ``[str(lesson_id), ...]``.
+    That function matches ``Concept.name_norm IN $names``, and a lesson UUID
+    is never a concept name — so the lookup matched nothing and the KG arm was
+    silently dead in production, degrading both pipelines to vector-only
+    retrieval with no error anywhere.
+
+    This is the correct seeding path: walk ``Lesson -> Material -> Chunk ->
+    Concept`` to find what the lessons actually teach, order the seeds by
+    mention confidence, then expand outward. One round trip — the obvious
+    alternative of looping ``lesson_concept_graph`` per lesson opens a new
+    Neo4j session per lesson and returns concepts in arbitrary traversal
+    order, which then gets truncated to the top N.
+    """
+    ids = [str(lid) for lid in lesson_ids if lid is not None]
+    if not ids:
+        return KGContext(enabled=False)
+
+    settings = get_settings()
+    if not settings.knowledge_graph_enabled:
+        return KGContext(enabled=False)
+
+    safe_depth = max(1, min(depth, 3))
+
+    if client is not None:
+        return await _retrieve_for_lessons(client, ids, safe_depth, str(org_id))
+
+    try:
+        async with graph_client() as owned_client:
+            return await _retrieve_for_lessons(owned_client, ids, safe_depth, str(org_id))
+    except KnowledgeGraphDisabledError:
+        return KGContext(enabled=False)
+    except Exception as exc:  # pragma: no cover - graceful degradation when Neo4j is down
+        logger.warning("Knowledge graph lesson retrieval failed: %s", exc)
+        return KGContext(enabled=True)
+
+
+async def _retrieve_for_lessons(
+    client: KnowledgeGraphClient,
+    lesson_ids: list[str],
+    depth: int,
+    org_id: str,
+) -> KGContext:
+    async with client.session() as session:
+        result = await session.run(
+            f"""
+            MATCH (l:Lesson)-[:HAS_MATERIAL]->(:Material)-[:HAS_CHUNK]->(chunk:Chunk)
+            WHERE l.id IN $lesson_ids AND chunk.org_id = $org_id
+            MATCH (chunk)-[mention:MENTIONS_CONCEPT]->(seed:Concept {{org_id: $org_id}})
+            WITH seed, max(coalesce(mention.confidence, 0.0)) AS confidence
+            ORDER BY confidence DESC
+            LIMIT {MAX_CONCEPTS}
+            OPTIONAL MATCH path =
+                (seed)-[:RELATED_TO|PREREQUISITE_OF*0..{depth}]-(related:Concept)
+            WHERE related.org_id = $org_id
+            WITH collect(DISTINCT seed) + collect(DISTINCT related) AS node_list,
+                 collect(path) AS paths
+            UNWIND node_list AS node
+            WITH collect(DISTINCT node) AS nodes, paths
+            UNWIND paths AS path
+            UNWIND relationships(path) AS rel
+            RETURN [node IN nodes WHERE node IS NOT NULL | {{
+                id: node.name_norm,
+                label: node.name,
+                type: node.type,
+                definition: node.definition
+            }}] AS nodes,
+            collect(DISTINCT {{
+                source: startNode(rel).name_norm,
+                target: endNode(rel).name_norm,
+                relation: coalesce(rel.relation, type(rel)),
+                evidence: rel.evidence,
+                confidence: rel.confidence
+            }}) AS edges
+            """,  # noqa: E501
+            lesson_ids=lesson_ids,
+            org_id=org_id,
+        )
+        return _context_from_result(await result.single())
+
+
 async def _retrieve_with_client(
     client: KnowledgeGraphClient,
     names: list[str],
     depth: int,
+    org_id: str,
 ) -> KGContext:
     lowered = [n.lower() for n in names]
     async with client.session() as session:
         result = await session.run(
             f"""
-            MATCH (anchor:Concept)
+            MATCH (anchor:Concept {{org_id: $org_id}})
             WHERE anchor.name_norm IN $names
             OPTIONAL MATCH path = (anchor)-[:RELATED_TO|PREREQUISITE_OF*0..{depth}]-(related:Concept)
+            WHERE related.org_id = $org_id
             WITH collect(DISTINCT anchor) + collect(DISTINCT related) AS node_list, collect(path) AS paths
             UNWIND node_list AS node
             WITH collect(DISTINCT node) AS nodes, paths
@@ -247,9 +348,19 @@ async def _retrieve_with_client(
             }}) AS edges
             """,  # noqa: E501
             names=lowered,
+            org_id=org_id,
         )
         record = await result.single()
 
+    return _context_from_result(record)
+
+
+def _context_from_result(record: Any) -> KGContext:  # noqa: ANN401 -- a neo4j Record; driver ships loose types
+    """Fold one ``(nodes, edges)`` record into a bounded ``KGContext``.
+
+    Shared by the anchor-name and lesson-seeded queries: both return the same
+    projection, and duplicating the fold is how the two paths would drift.
+    """
     if record is None:
         return KGContext(enabled=True)
 

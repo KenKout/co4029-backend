@@ -80,11 +80,24 @@ class TagPublic(_ORMModel):
 
 
 class CourseLearningOutcomePublic(_ORMModel):
-    """Public projection of a course learning outcome (§A12)."""
+    """Public projection of a course learning outcome (§A12).
+
+    Hierarchy (arbitrary depth): ``parent_id`` is the self-referential
+    parent (NULL = top-level) and ``position`` is the sibling order within
+    that parent. ``code`` is the dotted display path (e.g. ``1.2.1`` →
+    rendered ``L.O.1.2.1``) derived from the parent chain at read time;
+    ``depth`` (0 = top-level) is provided so clients can indent the tree
+    without recomputing the chain. Both are projection-only — filled by the
+    service layer, not stored — so they default when validating a bare ORM
+    row.
+    """
 
     id: UUID
     position: int
     outcome_text: str
+    parent_id: UUID | None = None
+    code: str | None = None
+    depth: int = 0
 
 
 class CoursePublic(_ORMModel):
@@ -109,6 +122,12 @@ class CoursePublic(_ORMModel):
     # is set (the SPA falls back to the gradient banner). Not persisted — a
     # projection.
     thumbnail_url: str | None = None
+    # Teacher contact info shown on the landing page. All optional — the SPA
+    # renders a contact block only for the fields that are set.
+    contact_email: str | None = None
+    contact_phone: str | None = None
+    contact_website_url: str | None = None
+    contact_social_url: str | None = None
     tags: list[TagPublic] = []
     outcomes: list[CourseLearningOutcomePublic] = []
 

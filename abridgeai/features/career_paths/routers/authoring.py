@@ -9,9 +9,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from abridgeai.core.db import get_db
 from abridgeai.core.exceptions import AppError, ConflictError, NotFoundError
 from abridgeai.core.security import CurrentUser
-from abridgeai.features.access_control.api import public as access_control_api
 from abridgeai.features.access_control.policies import (
     require_any_permission,
+    require_org_access,
     require_permission,
 )
 from abridgeai.features.career_paths.schemas import (
@@ -34,16 +34,28 @@ management_router = APIRouter(prefix="/management/career-paths", tags=["career-p
 teacher_router = APIRouter(prefix="/teacher/career-paths", tags=["career-paths-authoring"])
 
 
-_REQUIRE_PATH_MANAGE = require_any_permission("course.create", "course.update", "system.administer")
-_REQUIRE_PATH_PUBLISH = require_any_permission("course.publish", "system.administer")
-_REQUIRE_PATH_DELETE = require_any_permission("course.delete", "system.administer")
-_REQUIRE_PATH_ENROLL = require_any_permission("course.enrollment.create", "system.administer")
-_REQUIRE_PATH_UNENROLL = require_any_permission("course.enrollment.remove", "system.administer")
-_REQUIRE_PATH_ROSTER_READ = require_any_permission(
+# Codes are named once and reused by BOTH the route dependency and the
+# per-resource org check, so the two can never drift apart. The dependency
+# answers "does this principal hold the code anywhere"; the org check answers
+# "was it granted for the organization that owns this path". Passing different
+# code sets to the two would make the second check pass on the wrong grant.
+_PATH_MANAGE_CODES = ("course.create", "course.update", "system.administer")
+_PATH_PUBLISH_CODES = ("course.publish", "system.administer")
+_PATH_DELETE_CODES = ("course.delete", "system.administer")
+_PATH_ENROLL_CODES = ("course.enrollment.create", "system.administer")
+_PATH_UNENROLL_CODES = ("course.enrollment.remove", "system.administer")
+_PATH_ROSTER_READ_CODES = (
     "course.enrollment.read",
     "progress.read.cohort",
     "system.administer",
 )
+
+_REQUIRE_PATH_MANAGE = require_any_permission(*_PATH_MANAGE_CODES)
+_REQUIRE_PATH_PUBLISH = require_any_permission(*_PATH_PUBLISH_CODES)
+_REQUIRE_PATH_DELETE = require_any_permission(*_PATH_DELETE_CODES)
+_REQUIRE_PATH_ENROLL = require_any_permission(*_PATH_ENROLL_CODES)
+_REQUIRE_PATH_UNENROLL = require_any_permission(*_PATH_UNENROLL_CODES)
+_REQUIRE_PATH_ROSTER_READ = require_any_permission(*_PATH_ROSTER_READ_CODES)
 _REQUIRE_PATH_CREATE = require_permission("course.create")
 
 
@@ -69,25 +81,43 @@ def _bad_request(detail: str) -> HTTPException:
 
 
 async def _ensure_caller_in_path_org(
-    db: AsyncSession, current_user: CurrentUser, career_path_id: UUID
+    db: AsyncSession,
+    current_user: CurrentUser,
+    career_path_id: UUID,
+    permissions: tuple[str, ...] = _PATH_MANAGE_CODES,
 ) -> None:
-    """FR-2.6 — managers only see roster/readiness for paths in THEIR org.
+    """Require ``permissions`` to be granted FOR the path's organization.
 
-    The permission deps above are permission-level (global scope); a
-    manager from org B with ``course.enrollment.read`` must not read
-    org A's student emails. Membership in the path's organization OR
-    ``system.administer`` passes; everything else 404s (no existence
-    leak — matches the resource-not-found shape).
+    Every ``require_permission`` dependency in this module resolves against
+    the caller's FLAT permission set, computed without regard to ``scope_kind``
+    (see ``access_control/api/public.py::_ACTIVE_PERMISSIONS_SQL``). A role
+    granted to a manager at ``scope_kind='organization'`` for org B yields the
+    same codes as a global grant, so the dependency alone cannot keep that
+    manager out of org A. Only a per-resource check can, and ``career_paths``
+    is org-owned.
+
+    ``permissions`` defaults to the manage set and every caller passes the same
+    codes its own dependency declares, so the two questions line up: "do you
+    hold this code at all" then "do you hold it *here*".
+
+    This started life as an FR-2.6 guard on the two roster/readiness reads.
+    It now applies to every endpoint that resolves a path by id — read, mutate,
+    publish, archive, enrol. Without it a manager in any org could rename,
+    re-order, publish or archive another org's career path and enrol students
+    into it.
+
+    404 rather than 403, so the endpoint cannot be used to discover which
+    paths another organization owns.
     """
     path = await authoring_service.get_career_path(db, career_path_id)
-    if await access_control_api.is_user_member_of_org(
-        db, user_id=current_user.user_id, org_id=path.organization_id
-    ):
-        return
-    permissions = await access_control_api.get_active_permissions(db, current_user.user_id)
-    if any(p.code == "system.administer" for p in permissions):
-        return
-    raise _not_found(f"Career path {career_path_id} not found")
+    await require_org_access(
+        db,
+        current_user,
+        path.organization_id,
+        resource="career_path",
+        resource_id=career_path_id,
+        permissions=permissions,
+    )
 
 
 @management_router.post(
@@ -122,9 +152,14 @@ async def list_career_paths(
 
     ``organization_id`` is OPTIONAL: when omitted the caller's primary
     org is resolved from the bearer token, matching the contract used by
-    POST. An explicit value is honoured (so platform admins can list any
-    org); managers without scope and no override get a 400 instead of a
-    confusing empty list.
+    POST. Managers without a primary org and no override get a 400 instead
+    of a confusing empty list.
+
+    An explicit value is honoured only for an org the caller belongs to, or
+    for ``system.administer``. It used to be honoured unconditionally "so
+    platform admins can list any org" — but the guard on this route is a flat
+    permission check, so the same query parameter let a manager in any org
+    enumerate another org's career paths by passing its id.
     """
     if organization_id is None:
         from abridgeai.features.career_paths.queries.published import (  # noqa: PLC0415
@@ -137,6 +172,15 @@ async def list_career_paths(
                 f"User {current_user.user_id} has no primary organization; "
                 "pass ?organization_id=... to list paths for a specific org."
             )
+    else:
+        await require_org_access(
+            db,
+            current_user,
+            organization_id,
+            resource="organization",
+            resource_id=organization_id,
+            permissions=_PATH_MANAGE_CODES,
+        )
     return await authoring_service.list_career_paths_for_org(
         db, organization_id, include_archived=include_archived
     )
@@ -151,8 +195,8 @@ async def get_career_path(
     current_user: Annotated[CurrentUser, Depends(_REQUIRE_PATH_MANAGE)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> CareerPathAuthoring:
-    del current_user
     try:
+        await _ensure_caller_in_path_org(db, current_user, career_path_id)
         return await authoring_service.get_career_path(db, career_path_id)
     except NotFoundError as exc:
         raise _not_found(str(exc)) from exc
@@ -169,6 +213,7 @@ async def update_career_path(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> CareerPathAuthoring:
     try:
+        await _ensure_caller_in_path_org(db, current_user, career_path_id)
         result = await authoring_service.update_career_path(
             db, career_path_id, payload, current_user
         )
@@ -189,8 +234,8 @@ async def list_career_path_courses(
     current_user: Annotated[CurrentUser, Depends(_REQUIRE_PATH_MANAGE)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> list[CareerPathCourseAuthoring]:
-    del current_user
     try:
+        await _ensure_caller_in_path_org(db, current_user, career_path_id)
         return await authoring_service.list_career_path_courses(db, career_path_id)
     except NotFoundError as exc:
         raise _not_found(str(exc)) from exc
@@ -208,6 +253,7 @@ async def add_course_to_path(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> CareerPathCourseAuthoring:
     try:
+        await _ensure_caller_in_path_org(db, current_user, career_path_id)
         result = await authoring_service.add_course_to_path(
             db,
             career_path_id,
@@ -235,6 +281,7 @@ async def reorder_courses_in_path(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> list[CareerPathCourseAuthoring]:
     try:
+        await _ensure_caller_in_path_org(db, current_user, career_path_id)
         result = await authoring_service.reorder_courses_in_path(
             db, career_path_id, payload.course_ids, current_user
         )
@@ -257,6 +304,7 @@ async def remove_course_from_path(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> None:
     try:
+        await _ensure_caller_in_path_org(db, current_user, career_path_id)
         await authoring_service.remove_course_from_path(db, career_path_id, course_id, current_user)
     except NotFoundError as exc:
         raise _not_found(str(exc)) from exc
@@ -275,6 +323,9 @@ async def enroll_student_in_path(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> StudentCareerEnrollmentAuthoring:
     try:
+        await _ensure_caller_in_path_org(
+            db, current_user, career_path_id, _PATH_ENROLL_CODES
+        )
         result = await enrollment_service.enroll_student_in_path(
             db,
             career_path_id=career_path_id,
@@ -300,6 +351,9 @@ async def unenroll_student_from_path(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> None:
     try:
+        await _ensure_caller_in_path_org(
+            db, current_user, career_path_id, _PATH_UNENROLL_CODES
+        )
         await enrollment_service.unenroll_student(
             db,
             career_path_id=career_path_id,
@@ -321,6 +375,9 @@ async def publish_path(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> CareerPathAuthoring:
     try:
+        await _ensure_caller_in_path_org(
+            db, current_user, career_path_id, _PATH_PUBLISH_CODES
+        )
         result = await authoring_service.publish_path(db, career_path_id, current_user)
     except NotFoundError as exc:
         raise _not_found(str(exc)) from exc
@@ -340,6 +397,9 @@ async def archive_path(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> CareerPathAuthoring:
     try:
+        await _ensure_caller_in_path_org(
+            db, current_user, career_path_id, _PATH_DELETE_CODES
+        )
         result = await authoring_service.archive_path(db, career_path_id, current_user)
     except NotFoundError as exc:
         raise _not_found(str(exc)) from exc
@@ -358,7 +418,9 @@ async def list_path_roster_progress(
     current_user: Annotated[CurrentUser, Depends(_REQUIRE_PATH_ROSTER_READ)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> list[StudentPathProgressAuthoring]:
-    await _ensure_caller_in_path_org(db, current_user, career_path_id)
+    await _ensure_caller_in_path_org(
+            db, current_user, career_path_id, _PATH_ROSTER_READ_CODES
+        )
     return await enrollment_service.get_roster_progress(db, career_path_id)
 
 
@@ -376,7 +438,9 @@ async def get_path_readiness_overview(
 
     Org-scoped (FR-2.6): caller must belong to the path's organization
     or hold ``system.administer`` — same gate as the roster read."""
-    await _ensure_caller_in_path_org(db, current_user, career_path_id)
+    await _ensure_caller_in_path_org(
+            db, current_user, career_path_id, _PATH_ROSTER_READ_CODES
+        )
     return await readiness_service.get_path_readiness_overview(db, career_path_id)
 
 

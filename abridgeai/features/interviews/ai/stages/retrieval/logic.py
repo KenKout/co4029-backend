@@ -31,6 +31,7 @@ from uuid import UUID
 from abridgeai.ai.knowledge_graph.schemas import Concept
 from abridgeai.ai.llm.embeddings import EmbeddingClient
 from abridgeai.ai.retrieval import ChunkWithDistance, mmr_diversify, vector_search
+from abridgeai.ai.retrieval.role_filter import split_by_role
 from abridgeai.features.interviews.ai.stages.retrieval.anchors import (
     MAX_ANCHORS,
     MAX_WEAK_TOPIC_CHUNKS,
@@ -173,8 +174,15 @@ async def retrieve_interview_context(
 
     if pool:
         merged = sorted(pool.values(), key=lambda c: c.distance)
+        # Cap summary/review/front_matter chunks before MMR, matching the quiz
+        # MMR-only path. Without it a cover slide, table of contents or recap
+        # page can win on cosine distance and become the source a question is
+        # grounded in — the interview then probes the syllabus rather than the
+        # material. Chunks whose metadata lacks ``content_role`` count as body,
+        # so pre-classification corpora are unaffected.
+        body_priority = split_by_role(merged, final_top_k)
         diversified = mmr_diversify(
-            merged,
+            body_priority,
             top_k=final_top_k,
             lambda_diversity=DEFAULT_MMR_LAMBDA,
         )

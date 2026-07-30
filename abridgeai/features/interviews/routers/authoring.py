@@ -70,6 +70,8 @@ from abridgeai.features.interviews.schemas import (
     InterviewQuestionBankItemRead,
     InterviewQuestionBankItemUpdate,
     InterviewQuestionCreate,
+    InterviewQuestionDuplicateCheck,
+    InterviewQuestionDuplicateCheckRequest,
     InterviewSessionPublic,
     InterviewSessionSummary,
     InterviewSessionTeacherRead,
@@ -590,6 +592,37 @@ async def create_question(
     return InterviewQuestionAuthoring.model_validate(question)
 
 
+@router.post(
+    "/interview-configs/{config_id}/questions/check-duplicate",
+    response_model=InterviewQuestionDuplicateCheck,
+)
+async def check_question_duplicate(
+    config_id: UUID,
+    payload: InterviewQuestionDuplicateCheckRequest,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_CONFIG)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> InterviewQuestionDuplicateCheck:
+    """Advisory check: does this question already exist in the bank?
+
+    Read-only and non-blocking — the teacher can save either way. Declared BEFORE
+    the ``{question_id}`` routes below so the literal path segment is not captured
+    as a UUID path parameter.
+    """
+    del current_user  # authorisation handled by the dependency
+    try:
+        result = await authoring_service.check_question_duplicate(
+            db,
+            config_id,
+            prompt_text=payload.prompt_text,
+            exclude_question_id=payload.exclude_question_id,
+        )
+    except NotFoundError as exc:
+        raise _not_found("interview_config", config_id) from exc
+    except AppError as exc:
+        raise _bad_request(str(exc)) from exc
+    return InterviewQuestionDuplicateCheck.model_validate(result)
+
+
 @router.patch(
     "/interview-configs/{config_id}/questions/{question_id}",
     response_model=InterviewQuestionAuthoring,
@@ -993,6 +1026,7 @@ async def get_session_gap_report_authoring(
     interview_title: str | None = None
     score_summary: dict[str, Any] = {}
     rubric_weights: dict[str, float] = {}
+    persona_adherence: dict[str, Any] = {}
     session_row = await db.get(InterviewSession, session_id)
     if session_row is not None:
         config_row = await db.get(InterviewConfig, session_row.interview_config_id)
@@ -1014,15 +1048,27 @@ async def get_session_gap_report_authoring(
                 )
                 if key in summary_json
             }
+            # Tone-only persona-adherence audit (teacher-only). Absent for
+            # sessions evaluated before this shipped or never audited.
+            audit = summary_json.get("persona_adherence")
+            if isinstance(audit, dict):
+                persona_adherence = audit
         # Resolve the per-criterion rubric weights so the teacher sees each
         # criterion's contribution to the weighted total.
         if config_row is not None:
             from abridgeai.features.interviews.ai.stages.evaluation.rubric import (  # noqa: PLC0415
-                resolve_rubric,
+                resolve_rubric_definition,
             )
 
-            config_json = getattr(config_row, "config_json", None)
-            rubric_weights = resolve_rubric(config_json if isinstance(config_json, dict) else None)
+            # Read the SAME source the grading stage reads
+            # (``supplementary_instructions``), so the weights a teacher sees
+            # here are the weights their session was actually graded with.
+            # This previously probed a non-existent ``config_json`` attribute,
+            # which always resolved to None and therefore always displayed the
+            # default equal weights regardless of the configured rubric.
+            rubric_weights = resolve_rubric_definition(
+                config_row.supplementary_instructions
+            ).weights
 
     # Qualitative per-criterion notes (criterion-tagged bullet phrases) already
     # live in report_json; surface them so the teacher sees the "why" per criterion.
@@ -1043,6 +1089,7 @@ async def get_session_gap_report_authoring(
             "weaknesses": [str(w) for w in weaknesses] if isinstance(weaknesses, list) else [],
             "score_summary": score_summary,
             "rubric_weights": rubric_weights,
+            "persona_adherence": persona_adherence,
             "raw_evaluation_json": raw_evaluation_json,
             "teacher_summary": report.teacher_summary,
             "source_quiz_attempt_id": report.source_quiz_attempt_id,

@@ -43,6 +43,17 @@ async def get_course_by_id(db: AsyncSession, course_id: UUID) -> CourseDTO | Non
     return CourseDTO.model_validate(course) if course else None
 
 
+async def list_course_outcome_texts(db: AsyncSession, course_id: UUID) -> list[str]:
+    """Course-level learning-outcome statements, ordered by position.
+
+    Returns just the text (interview outcomes carry their own type/weight),
+    so a sibling feature can seed rubric outcomes without importing the
+    courses ORM model.
+    """
+    rows = await queries.list_course_outcomes(db, course_id)
+    return [row.outcome_text for row in rows]
+
+
 async def get_lesson_by_id(db: AsyncSession, lesson_id: UUID) -> LessonDTO | None:
     lesson = await queries.get_lesson(db, lesson_id)
     return LessonDTO.model_validate(lesson) if lesson else None
@@ -128,6 +139,14 @@ async def get_user_primary_org(db: AsyncSession, user_id: UUID) -> OrgDTO | None
     return OrgDTO(id=org_id) if org_id is not None else None
 
 
+# Cross-feature notification helpers. Re-exported from courses.services.notify
+# so the enrollments feature (which enrolls students into courses) can emit the
+# "enrolled in a published course" notification through the blessed public
+# surface instead of importing a courses service directly.
+from abridgeai.features.courses.services.notify import (  # noqa: E402
+    notify_student_enrolled,
+)
+
 __all__ = [
     "ContentTreeDTO",
     "ContentTreeItemDTO",
@@ -146,8 +165,10 @@ __all__ = [
     "get_published_lessons_for_course",
     "get_user_primary_org",
     "insert_module_item",
+    "list_course_outcome_texts",
     "list_lesson_ids_for_modules",
     "next_module_item_position",
+    "notify_student_enrolled",
     "require_lesson_authoring_access",
     "walk_resource_to_course",
 ]

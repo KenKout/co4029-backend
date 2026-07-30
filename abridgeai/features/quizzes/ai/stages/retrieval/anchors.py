@@ -21,7 +21,8 @@ import logging
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
-from abridgeai.ai.retrieval import retrieve_kg_context_for_anchors
+from abridgeai.ai.knowledge_graph.retrieval import retrieve_kg_context_for_lesson_ids
+from abridgeai.ai.knowledge_graph.tenancy import organization_id_for_lessons
 from abridgeai.features.courses.api import public as courses_api
 
 if TYPE_CHECKING:
@@ -85,11 +86,18 @@ async def build_query_anchors(
     lesson_ids = _kg_lesson_ids(config, quiz)
     if kg_context_enabled and lesson_ids:
         try:
-            kg = await retrieve_kg_context_for_anchors(
-                [str(lid) for lid in lesson_ids],
-                depth=2,
-            )
-            anchors.extend(c.name for c in kg.concepts[:MAX_KG_CONCEPTS_AS_ANCHORS])
+            # Seeded from what the lessons TEACH, not from their ids. The old
+            # call passed lesson UUIDs as concept names into a
+            # ``name_norm IN $names`` match, which never matched anything —
+            # the KG arm was dead here with no error surfaced.
+            org_id = await organization_id_for_lessons(db, lesson_ids)
+            if org_id is not None:
+                kg = await retrieve_kg_context_for_lesson_ids(
+                    lesson_ids,
+                    org_id=org_id,
+                    depth=2,
+                )
+                anchors.extend(c.name for c in kg.concepts[:MAX_KG_CONCEPTS_AS_ANCHORS])
         except Exception as exc:
             logger.warning("KG anchor lookup failed: %s", exc)
 

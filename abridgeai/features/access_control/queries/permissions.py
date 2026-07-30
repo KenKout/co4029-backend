@@ -122,6 +122,53 @@ _LOAD_COURSE_PERMISSIONS_SQL = text(
 )
 
 
+_LOAD_ORG_PERMISSIONS_SQL = text(
+    """
+    SELECT DISTINCT p.code
+    FROM permissions p
+    JOIN role_permissions rp ON rp.permission_id = p.id
+    JOIN user_role_assignments ura ON ura.role_id = rp.role_id
+    WHERE ura.user_id = :user_id
+      AND ura.deleted_at IS NULL
+      AND ura.active_from <= :at
+      AND (ura.active_until IS NULL OR ura.active_until > :at)
+      AND p.deleted_at IS NULL
+      AND (
+          ura.scope_kind = 'global'
+          OR (ura.scope_kind = 'organization' AND ura.organization_id = :organization_id)
+          OR (
+              ura.scope_kind = 'org_unit'
+              AND ura.org_unit_id IN (
+                  SELECT id FROM org_units
+                  WHERE organization_id = :organization_id AND deleted_at IS NULL
+              )
+          )
+      )
+
+    UNION
+
+    SELECT DISTINCT p.code
+    FROM permissions p
+    JOIN user_permission_grants upg ON upg.permission_id = p.id
+    WHERE upg.user_id = :user_id
+      AND upg.deleted_at IS NULL
+      AND (upg.expires_at IS NULL OR upg.expires_at > :at)
+      AND p.deleted_at IS NULL
+      AND (
+          upg.scope_kind = 'global'
+          OR (upg.scope_kind = 'organization' AND upg.organization_id = :organization_id)
+          OR (
+              upg.scope_kind = 'org_unit'
+              AND upg.org_unit_id IN (
+                  SELECT id FROM org_units
+                  WHERE organization_id = :organization_id AND deleted_at IS NULL
+              )
+          )
+      )
+    """
+)
+
+
 def _now_at(at: datetime | None) -> datetime:
     if at is not None:
         return at
@@ -157,4 +204,40 @@ async def load_course_permissions(
     return {row[0] for row in result.all()}
 
 
-__all__ = ["load_course_permissions", "load_user_permissions"]
+async def load_org_permissions(
+    db: AsyncSession,
+    user_id: UUID,
+    organization_id: UUID,
+    *,
+    at: datetime | None = None,
+) -> set[str]:
+    """Permission codes the user holds **for** ``organization_id``.
+
+    The organization-level counterpart of :func:`load_course_permissions`, and
+    the answer that actually authorises a request against an org-owned
+    resource. :func:`load_user_permissions` cannot: it flattens assignments
+    without reading ``scope_kind``, so a role granted to a manager inside one
+    tenant yields the same codes as a global grant, everywhere.
+
+    Which scopes count, and why:
+
+    * ``global`` — platform-wide by definition.
+    * ``organization`` — granted for this org. The case the flat query loses.
+    * ``org_unit`` — a unit belongs to exactly one organization, so a
+      unit-scoped grant is authority *inside* this tenant. It is admitted here
+      deliberately: the boundary being enforced is the tenant one, and
+      narrowing a head-of-department's reach within their own organization is a
+      separate question that :func:`require_org_unit_permission` already owns.
+      Tightening it here would silently revoke access as a side effect of a
+      tenancy fix.
+    * ``course`` — deliberately absent. Authority over one course does not
+      confer authority over the organization that owns it.
+    """
+    result = await db.execute(
+        _LOAD_ORG_PERMISSIONS_SQL,
+        {"user_id": user_id, "organization_id": organization_id, "at": _now_at(at)},
+    )
+    return {row[0] for row in result.all()}
+
+
+__all__ = ["load_course_permissions", "load_org_permissions", "load_user_permissions"]

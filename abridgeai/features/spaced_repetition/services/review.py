@@ -95,6 +95,34 @@ async def _load_quiz_question_meta(
     return int(t_exp_ms), context.quiz_id, context.initial_ef
 
 
+#: Multiple of T_exp beyond which extra time cannot change the derived Q.
+#:
+#: ``derive_q`` buckets rho = t_actual / t_exp and floors at Q=3 for a correct
+#: unhinted answer, so rho=1.01 and rho=60 are already indistinguishable to the
+#: model. Clamping therefore costs zero fidelity while stopping pathological
+#: values (student left the tab open over lunch, clock skew, a hand-crafted
+#: payload) from polluting the stored ``t_actual_ms`` that analytics read.
+T_ACTUAL_CAP_MULTIPLIER = 3
+
+
+def _clamp_t_actual(t_actual_ms: int, t_exp_ms: int) -> int:
+    """Clamp a client-reported answer time into a defensible range.
+
+    The client measures per-question attention time and cannot apply this cap
+    itself: the student-facing question payload deliberately omits
+    ``expected_response_time_ms`` (it would leak how long the teacher thinks a
+    question should take), so the ceiling is only knowable server-side.
+
+    Negative values are floored at 0 — the Pydantic schema already enforces
+    ``ge=0``, this is defence in depth for any non-HTTP caller.
+    """
+    if t_actual_ms < 0:
+        return 0
+    if t_exp_ms <= 0:
+        return t_actual_ms
+    return min(t_actual_ms, t_exp_ms * T_ACTUAL_CAP_MULTIPLIER)
+
+
 async def _load_or_init_state(
     db: AsyncSession,
     *,
@@ -164,6 +192,8 @@ async def record_card_review(
     t_exp_ms, quiz_id, initial_ef = await _load_quiz_question_meta(db, question_id)
     if t_actual_ms is None:
         t_actual_ms = t_exp_ms
+    else:
+        t_actual_ms = _clamp_t_actual(t_actual_ms, t_exp_ms)
 
     state, _was_created = await _load_or_init_state(
         db, student_id=student_id, question_id=question_id, initial_ef=initial_ef

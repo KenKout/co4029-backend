@@ -46,6 +46,7 @@ from abridgeai.core.config import get_settings
 from abridgeai.core.db import Base, get_db
 from abridgeai.core.security import create_access_token, generate_token, hash_secret
 from abridgeai.features.spaced_repetition.routers import learner_router, teacher_router
+from tests.support.db_graph import hard_delete_graph
 
 for _stub_name in ("interview_configs",):
     if _stub_name not in Base.metadata.tables:
@@ -372,29 +373,31 @@ async def cards_due_scenario(
                 text("DELETE FROM student_card_state WHERE student_id = :s"),
                 {"s": student_id},
             )
-            await conn.execute(
-                text(
-                    "DELETE FROM quiz_questions WHERE quiz_id IN ("
-                    "SELECT id FROM quizzes WHERE course_id = :c)"
-                ),
-                {"c": course_id},
-            )
-            await conn.execute(
-                text(
-                    "DELETE FROM quiz_source_lessons WHERE quiz_id IN ("
-                    "SELECT id FROM quizzes WHERE course_id = :c)"
-                ),
-                {"c": course_id},
-            )
-            await conn.execute(text("DELETE FROM quizzes WHERE course_id = :c"), {"c": course_id})
-            await conn.execute(
-                text(
-                    "DELETE FROM lessons WHERE module_id IN ("
-                    "SELECT id FROM modules WHERE course_id = :c)"
-                ),
-                {"c": course_id},
-            )
-            await conn.execute(text("DELETE FROM modules WHERE course_id = :c"), {"c": course_id})
+            # Graph-driven purge: hand-rolled DELETE chains here kept missing
+            # sub-trees other files hang off the shared course (quiz attempts,
+            # grades) and errored every later test's setup with FK violations.
+            quiz_ids = [
+                str(v)
+                for v in (
+                    await conn.execute(
+                        text("SELECT id FROM quizzes WHERE course_id = :c"),
+                        {"c": course_id},
+                    )
+                ).scalars()
+            ]
+            if quiz_ids:
+                await hard_delete_graph(conn, "quizzes", quiz_ids)
+            module_ids = [
+                str(v)
+                for v in (
+                    await conn.execute(
+                        text("SELECT id FROM modules WHERE course_id = :c"),
+                        {"c": course_id},
+                    )
+                ).scalars()
+            ]
+            if module_ids:
+                await hard_delete_graph(conn, "modules", module_ids)
             await conn.execute(
                 text("DELETE FROM course_enrollments WHERE course_id = :c"),
                 {"c": course_id},
@@ -443,6 +446,70 @@ async def test_cards_due_returns_paginated(
     seen_qids = {item["question_id"] for item in body1["items"] + body2["items"]}
     expected_qids = {str(q) for q in cards_due_scenario["qa"] + cards_due_scenario["qb"]}
     assert seen_qids == expected_qids
+
+
+async def test_dashboard_summary_agrees_with_cards_due(
+    client: httpx.AsyncClient,
+    student_bearer: str,
+    cards_due_scenario: dict[str, Any],
+) -> None:
+    """The dashboard tile and the cards-due page must report the same number.
+
+    These previously came from different queries with different predicates, which
+    is how the notification ended up disagreeing with the page (a forward 1-hour
+    window vs due_at <= NOW()). Asserting equality here pins them together.
+    """
+    del cards_due_scenario
+    headers = {"Authorization": f"Bearer {student_bearer}"}
+
+    summary = await client.get("/api/v1/me/sr-dashboard-summary", headers=headers)
+    assert summary.status_code == 200, summary.text
+    body = summary.json()
+
+    # limit is capped at 100 by the endpoint; the scenario seeds 25 cards.
+    page = await client.get("/api/v1/me/cards-due?limit=100", headers=headers)
+    assert page.status_code == 200, page.text
+    page_count = len(page.json()["items"])
+
+    assert body["cards_due_now"] == page_count, (
+        "dashboard cards_due_now must match the cards-due page exactly"
+    )
+    assert body["cards_due_now"] > 0, "scenario should seed due cards"
+
+
+async def test_dashboard_summary_reports_retention_and_unlock(
+    client: httpx.AsyncClient,
+    student_bearer: str,
+    cards_due_scenario: dict[str, Any],
+) -> None:
+    """Shape check on the thesis metrics the student dashboard surfaces."""
+    del cards_due_scenario
+    headers = {"Authorization": f"Bearer {student_bearer}"}
+    response = await client.get("/api/v1/me/sr-dashboard-summary", headers=headers)
+    assert response.status_code == 200, response.text
+    body = response.json()
+
+    # R-hat is a probability.
+    assert 0.0 <= body["avg_kr_estimate"] <= 1.0
+    # has_retention_data distinguishes "no cards tracked yet" from a real 0%, so
+    # the UI can show an em-dash rather than alarming the student with 0%.
+    assert isinstance(body["has_retention_data"], bool)
+    assert body["has_retention_data"] is True, "scenario seeds cards, so there is data"
+
+    # Lesson buckets are consistent with the total.
+    assert (
+        body["lessons_mature"] + body["lessons_learning"] + body["lessons_locked"]
+        == body["lessons_total"]
+    )
+    # Unlock progress is a percentage.
+    assert 0.0 <= body["next_unlock_progress_pct"] <= 100.0
+    if body["next_unlock_lesson_title"] is None:
+        assert body["next_unlock_progress_pct"] == 0.0
+
+
+async def test_dashboard_summary_requires_auth(client: httpx.AsyncClient) -> None:
+    response = await client.get("/api/v1/me/sr-dashboard-summary")
+    assert response.status_code in (401, 403)
 
 
 async def test_cards_due_filtered_by_lesson_id(
@@ -943,3 +1010,180 @@ async def test_unauthenticated_returns_401(client: httpx.AsyncClient) -> None:
         f"/api/v1/teacher/courses/{uuid.uuid4()}/lessons/{uuid.uuid4()}/cohort-kr"
     )
     assert response.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# Review loop (resolve a due card without re-taking the whole quiz)
+# ---------------------------------------------------------------------------
+
+
+@pytest_asyncio.fixture
+async def review_scenario(
+    engine: AsyncEngine, seeded_users: SeededUsers
+) -> AsyncIterator[dict[str, Any]]:
+    """One overdue MCQ card with a correct option, ready to review."""
+    course_id = seeded_users.course_id
+    student_id = seeded_users.student_id
+    await _enroll(engine, course_id=course_id, student_id=student_id)
+    _, lesson_id, quiz_id, qids = await _seed_lesson(
+        engine, course_id=course_id, n_questions=1, lesson_title="Review Lesson"
+    )
+    question_id = qids[0]
+    correct_option_id = uuid.uuid4()
+    wrong_option_id = uuid.uuid4()
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO quiz_question_options "
+                "(id, question_id, option_key, option_text, is_correct, position) VALUES "
+                "(:c, :q, 'A', 'Correct', TRUE, 1), (:w, :q, 'B', 'Wrong', FALSE, 2)"
+            ),
+            {"c": correct_option_id, "w": wrong_option_id, "q": question_id},
+        )
+    await _set_card_state(
+        engine,
+        student_id=student_id,
+        question_id=question_id,
+        ef=Decimal("2.5"),
+        due_at=datetime.now(tz=UTC) - timedelta(hours=1),
+        last_q=0,
+    )
+    try:
+        yield {
+            "student_id": student_id,
+            "course_id": course_id,
+            "lesson_id": lesson_id,
+            "quiz_id": quiz_id,
+            "question_id": question_id,
+            "correct_option_id": correct_option_id,
+            "wrong_option_id": wrong_option_id,
+        }
+    finally:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("DELETE FROM card_reviews WHERE student_id = :s"), {"s": student_id}
+            )
+            await conn.execute(
+                text("DELETE FROM student_card_state WHERE student_id = :s"), {"s": student_id}
+            )
+            quiz_ids = [
+                str(v)
+                for v in (
+                    await conn.execute(
+                        text("SELECT id FROM quizzes WHERE course_id = :c"), {"c": course_id}
+                    )
+                ).scalars()
+            ]
+            if quiz_ids:
+                await hard_delete_graph(conn, "quizzes", quiz_ids)
+            module_ids = [
+                str(v)
+                for v in (
+                    await conn.execute(
+                        text("SELECT id FROM modules WHERE course_id = :c"), {"c": course_id}
+                    )
+                ).scalars()
+            ]
+            if module_ids:
+                await hard_delete_graph(conn, "modules", module_ids)
+            await conn.execute(
+                text("DELETE FROM course_enrollments WHERE course_id = :c"), {"c": course_id}
+            )
+
+
+async def test_review_queue_serves_no_leak_payload(
+    client: httpx.AsyncClient,
+    student_bearer: str,
+    review_scenario: dict[str, Any],
+) -> None:
+    """The queue returns the card + its question payload without leaking answers."""
+    headers = {"Authorization": f"Bearer {student_bearer}"}
+    resp = await client.get("/api/v1/me/review/queue", headers=headers)
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["total_due"] >= 1
+    card = next(c for c in body["items"] if c["question_id"] == str(review_scenario["question_id"]))
+    assert card["course_title"]  # course context present
+    assert card["lesson_title"] == "Review Lesson"
+    # Question payload embedded; options must NOT carry is_correct.
+    options = card["question"]["options"]
+    assert len(options) == 2
+    for opt in options:
+        assert "is_correct" not in opt
+
+
+async def test_review_submit_correct_advances_and_resolves(
+    client: httpx.AsyncClient,
+    student_bearer: str,
+    review_scenario: dict[str, Any],
+) -> None:
+    """Answering correctly grades the card, reschedules it out, and clears it."""
+    headers = {"Authorization": f"Bearer {student_bearer}"}
+    question_id = str(review_scenario["question_id"])
+
+    # Fast correct answer → q>=3 → passing, card advances beyond "now".
+    submit = await client.post(
+        f"/api/v1/me/review/{question_id}",
+        json={
+            "selected_option_id": str(review_scenario["correct_option_id"]),
+            "hint_used": False,
+            "t_actual_ms": 3000,
+        },
+        headers=headers,
+    )
+    assert submit.status_code == 200, submit.text
+    result = submit.json()
+    assert result["correct"] is True
+    assert result["passing"] is True
+    assert result["q"] >= 3
+    assert result["interval_days"] >= 1
+    assert result["remaining_due"] == 0  # the only due card is now resolved
+    # Feedback surfaces the correct option.
+    assert str(review_scenario["correct_option_id"]) in result["correct_option_ids"]
+
+    # The card no longer appears in the due queue.
+    queue = await client.get("/api/v1/me/review/queue", headers=headers)
+    assert queue.status_code == 200, queue.text
+    qids = {c["question_id"] for c in queue.json()["items"]}
+    assert question_id not in qids
+
+
+async def test_review_submit_wrong_resets_but_stays_due(
+    client: httpx.AsyncClient,
+    student_bearer: str,
+    review_scenario: dict[str, Any],
+) -> None:
+    """A wrong answer grades q=0, resets the card, and pushes it to cooldown."""
+    headers = {"Authorization": f"Bearer {student_bearer}"}
+    question_id = str(review_scenario["question_id"])
+    submit = await client.post(
+        f"/api/v1/me/review/{question_id}",
+        json={
+            "selected_option_id": str(review_scenario["wrong_option_id"]),
+            "hint_used": False,
+            "t_actual_ms": 5000,
+        },
+        headers=headers,
+    )
+    assert submit.status_code == 200, submit.text
+    result = submit.json()
+    assert result["correct"] is False
+    assert result["passing"] is False
+    assert result["q"] == 0
+    # Card is pushed out by the failure cooldown, so it leaves the "due now" set.
+    assert result["remaining_due"] == 0
+
+
+async def test_review_submit_unknown_question_404(
+    client: httpx.AsyncClient,
+    student_bearer: str,
+    review_scenario: dict[str, Any],
+) -> None:
+    del review_scenario
+    headers = {"Authorization": f"Bearer {student_bearer}"}
+    resp = await client.post(
+        f"/api/v1/me/review/{uuid.uuid4()}",
+        json={"selected_option_id": str(uuid.uuid4())},
+        headers=headers,
+    )
+    assert resp.status_code == 404, resp.text

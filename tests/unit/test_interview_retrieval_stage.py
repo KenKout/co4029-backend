@@ -25,7 +25,11 @@ from abridgeai.features.interviews.ai.stages.retrieval import (
 )
 
 
-def _chunk(distance: float = 0.1, content: str = "x") -> ChunkWithDistance:
+def _chunk(
+    distance: float = 0.1,
+    content: str = "x",
+    content_role: str | None = None,
+) -> ChunkWithDistance:
     return ChunkWithDistance(
         chunk_id=uuid4(),
         material_version_id=uuid4(),
@@ -34,6 +38,7 @@ def _chunk(distance: float = 0.1, content: str = "x") -> ChunkWithDistance:
         content=content,
         distance=distance,
         embedding=[1.0 - distance, distance, 0.0, 0.0],
+        metadata=None if content_role is None else {"content_role": content_role},
     )
 
 
@@ -81,7 +86,7 @@ async def test_retrieves_chunks_for_module_lessons(
             AsyncMock(return_value=hits),
         ) as mock_vs,
         patch(
-            "abridgeai.features.interviews.ai.stages.retrieval.anchors.retrieve_kg_context_for_anchors",
+            "abridgeai.features.interviews.ai.stages.retrieval.anchors.retrieve_kg_context_for_lesson_ids",
             AsyncMock(return_value=KGContext(enabled=False)),
         ),
         patch(
@@ -135,7 +140,7 @@ async def test_includes_weak_topic_chunks_when_student_id_present(
             AsyncMock(return_value=[_chunk(0.1)]),
         ),
         patch(
-            "abridgeai.features.interviews.ai.stages.retrieval.anchors.retrieve_kg_context_for_anchors",
+            "abridgeai.features.interviews.ai.stages.retrieval.anchors.retrieve_kg_context_for_lesson_ids",
             AsyncMock(return_value=KGContext(enabled=False)),
         ),
         patch(
@@ -181,7 +186,7 @@ async def test_omits_weak_topics_when_no_student_id(
             AsyncMock(return_value=[_chunk(0.1)]),
         ),
         patch(
-            "abridgeai.features.interviews.ai.stages.retrieval.anchors.retrieve_kg_context_for_anchors",
+            "abridgeai.features.interviews.ai.stages.retrieval.anchors.retrieve_kg_context_for_lesson_ids",
             AsyncMock(return_value=KGContext(enabled=False)),
         ),
         patch(
@@ -228,9 +233,13 @@ async def test_kg_concepts_loaded_when_module_has_lessons_with_kg_anchors(
             AsyncMock(return_value=[_chunk(0.1)]),
         ),
         patch(
-            "abridgeai.features.interviews.ai.stages.retrieval.anchors.retrieve_kg_context_for_anchors",
+            "abridgeai.features.interviews.ai.stages.retrieval.anchors.retrieve_kg_context_for_lesson_ids",
             AsyncMock(return_value=kg),
         ) as mock_kg,
+        patch(
+            "abridgeai.features.interviews.ai.stages.retrieval.anchors.organization_id_for_lessons",
+            AsyncMock(return_value=uuid4()),
+        ),
         patch(
             "abridgeai.features.interviews.ai.stages.retrieval.anchors._module_lesson_ids",
             AsyncMock(return_value=[uuid4(), uuid4()]),
@@ -273,7 +282,7 @@ async def test_falls_back_to_lesson_titles_when_no_kg_or_focus_topics(
             AsyncMock(return_value=[_chunk(0.1)]),
         ),
         patch(
-            "abridgeai.features.interviews.ai.stages.retrieval.anchors.retrieve_kg_context_for_anchors",
+            "abridgeai.features.interviews.ai.stages.retrieval.anchors.retrieve_kg_context_for_lesson_ids",
             AsyncMock(return_value=KGContext(concepts=[], enabled=True)),
         ),
         patch(
@@ -312,7 +321,7 @@ async def test_returns_empty_context_when_no_anchors() -> None:
             AsyncMock(return_value=[]),
         ),
         patch(
-            "abridgeai.features.interviews.ai.stages.retrieval.anchors.retrieve_kg_context_for_anchors",
+            "abridgeai.features.interviews.ai.stages.retrieval.anchors.retrieve_kg_context_for_lesson_ids",
             AsyncMock(return_value=KGContext(enabled=False)),
         ),
     ):

@@ -699,6 +699,7 @@ def llm_mocks(scenario: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> dict
         question_prompts: Any = None,
         expected_question_ids: Any = None,
         config: Any = None,
+        rubric: Any = None,
         pipeline_run_id: UUID | None = None,
         gateway: Any = None,
     ) -> RubricScores:
@@ -840,6 +841,28 @@ def llm_mocks(scenario: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> dict
         )
 
     monkeypatch.setattr(evaluation_service, "generate_gap_report", _fake_gap_report)
+
+    # Persona-adherence audit — offline tone diagnostic. Stub it so the E2E
+    # doesn't make a live LLM call; a real one is exercised in the stage's own
+    # unit tests. Return an available result so the summary-persist path runs.
+    async def _fake_persona_audit(*args: Any, **kwargs: Any) -> Any:
+        del args, kwargs
+        from abridgeai.features.interviews.ai.stages.persona_adherence.parsers import (
+            PersonaAdherence,
+        )
+
+        return PersonaAdherence(
+            tone_consistency=8,
+            reasoning="Held a consistent tone.",
+            warmth_observed=2,
+            directness_observed=2,
+            verbosity_observed=2,
+            formality_observed=3,
+        )
+
+    monkeypatch.setattr(
+        evaluation_service, "audit_persona_adherence", _fake_persona_audit
+    )
 
     # Spy on the gateway: the test must prove no STT call ever happens.
     real_generate = LLMGateway.generate_json
@@ -1000,7 +1023,6 @@ async def test_full_interview_lifecycle_generate_take_submit_evaluate(
     # resolves the current question from session_id, so the placeholder
     # session_question_id below satisfies the schema.
     await _complete_onboarding(engine, session_id)
-
 
     # 10. Student answers all three questions.
     for i in range(3):

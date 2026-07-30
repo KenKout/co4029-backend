@@ -58,7 +58,6 @@ async def run_interview_generation_task(
         generation → validation → persistence, then stamps
         ``completed`` / ``failed`` + ``finished_at``.
     """
-    _ = ctx
     set_worker_actor(actor_id)
     bind_request_context(
         generation_run_id=str(generation_run_id),
@@ -68,7 +67,9 @@ async def run_interview_generation_task(
     try:
         async with sessionmaker() as db:
             try:
-                await generation_service.run_interview_generation(db, generation_run_id)
+                await generation_service.run_interview_generation(
+                    db, generation_run_id, arq_pool=ctx.get("redis")
+                )
             except (KeyboardInterrupt, SystemExit):
                 raise
             except Exception:

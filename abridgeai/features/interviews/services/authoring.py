@@ -20,9 +20,12 @@ Locked task names (mirrored by T6.13 worker registration):
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
+from abridgeai.ai.llm.embeddings import EmbeddingClient
+from abridgeai.core.config import get_settings
 from abridgeai.core.db.conflict_mapper import (
     flush_or_conflict,
     register_conflict_mappings,
@@ -31,6 +34,11 @@ from abridgeai.core.db.recursive_delete import soft_delete_cascade
 from abridgeai.core.exceptions import AppError, NotFoundError
 from abridgeai.core.security import CurrentUser, utcnow
 from abridgeai.features.courses.api import public as courses_public
+from abridgeai.features.interviews.dedup import (
+    NOT_DUPLICATE,
+    check_duplicate,
+    store_question_embeddings,
+)
 from abridgeai.features.interviews.models import (
     InterviewConfig,
     InterviewOutcome,
@@ -38,6 +46,7 @@ from abridgeai.features.interviews.models import (
     InterviewQuestionBankItem,
 )
 from abridgeai.features.interviews.queries import authoring as authoring_queries
+from abridgeai.features.interviews.services import published_freeze
 from abridgeai.features.quizzes.api import public as quizzes_public
 from abridgeai.features.quizzes.api.public import GenerationRunDTO
 
@@ -47,9 +56,18 @@ if TYPE_CHECKING:
 
 _RUN_INTERVIEW_GENERATION_TASK = "run_interview_generation_task"
 
+logger = logging.getLogger(__name__)
+
 
 def _apply_patch(model: object, payload: object) -> None:
     data = payload.model_dump(exclude_unset=True)  # type: ignore[attr-defined]
+    # The API exposes per-trait persona overrides as the nested ``persona_profile``
+    # object, but the ORM stores them in the ``persona_profile_json`` JSONB column.
+    # Translate the key so a PATCH carrying persona_profile persists correctly;
+    # an explicit null clears the overrides (back to the bare preset).
+    if "persona_profile" in data:
+        override = data.pop("persona_profile")
+        model.persona_profile_json = override or None
     for key, value in data.items():
         setattr(model, key, value)
 
@@ -142,6 +160,7 @@ async def create_interview_config(
         module_id=module_id,
         title=data["title"],
         persona=data.get("persona"),
+        persona_profile_json=(data.get("persona_profile") or None),
         supported_modes=data.get("supported_modes", "hybrid"),
         tts_voice=data.get("tts_voice"),
         time_limit_minutes=data.get("time_limit_minutes"),
@@ -159,6 +178,27 @@ async def create_interview_config(
     )
     db.add(config)
     await flush_or_conflict(db)
+    # Seed the interview's rubric outcomes from the parent course's learning
+    # outcomes so a freshly created interview starts with the course LOs in
+    # place (no manual "import from course" needed). Course outcomes carry only
+    # text; interview outcomes also need a type + weight, so seeded rows get
+    # sensible defaults (knowledge / weight 3) the teacher can edit afterwards.
+    course_outcome_texts = await courses_public.list_course_outcome_texts(db, course_id)
+    for position, outcome_text in enumerate(course_outcome_texts, start=1):
+        text_clean = (outcome_text or "").strip()
+        if not text_clean:
+            continue
+        db.add(
+            InterviewOutcome(
+                interview_config_id=config.id,
+                position=position,
+                outcome_text=text_clean,
+                outcome_type="knowledge",
+                importance_weight=3,
+            )
+        )
+    if course_outcome_texts:
+        await flush_or_conflict(db)
     # Surface the draft on the course content tree immediately. The
     # ``/content`` reader renders one row per ``module_items`` entry, so without
     # this insert a freshly created draft is invisible until publish. The
@@ -177,6 +217,11 @@ async def update_interview_config(
 ) -> InterviewConfig:
     del actor
     config = await _require_config(db, config_id)
+    # Freeze conduct/grading settings once published. ``exclude_unset`` is what
+    # makes this precise: only fields the client actually sent are considered, so
+    # a UI that echoes the whole form back does not trip on untouched values.
+    changed = set(payload.model_dump(exclude_unset=True).keys())
+    published_freeze.assert_config_settings_editable(config, changed)
     _apply_patch(config, payload)
     await flush_or_conflict(db)
     await db.refresh(config)
@@ -190,8 +235,12 @@ async def publish_interview_config(
     config = await _require_config(db, config_id)
     if config.status == "archived":
         raise AppError(f"Cannot publish archived interview config {config_id}")
+    # Graded partition only. A config whose approved questions are all marked
+    # practice-only has nothing to assess with, so counting the whole bank here
+    # would let it publish into an interview that immediately runs out of
+    # questions.
     approved = await authoring_queries.list_questions_for_config(
-        db, config_id, review_status="approved"
+        db, config_id, review_status="approved", practice_only=False
     )
     if not approved:
         raise AppError(
@@ -279,8 +328,11 @@ async def adaptive_readiness(db: AsyncSession, config_id: UUID) -> dict[str, Any
     )
 
     config = await _require_config(db, config_id)
+    # Readiness measures the graded interview, so practice questions are out:
+    # counting them would report coverage and difficulty spread the assessment
+    # does not actually have.
     approved = await authoring_queries.list_questions_for_config(
-        db, config_id, review_status="approved"
+        db, config_id, review_status="approved", practice_only=False
     )
     outcomes = await authoring_queries.list_outcomes_for_config(db, config_id)
 
@@ -338,6 +390,7 @@ async def add_question(
         model_answer=(data.get("model_answer") or "").strip() or None,
         review_status="approved",
         ai_generated=False,
+        practice_only=bool(data.get("practice_only", False)),
         source_refs_json=data.get("source_refs_json", []) or [],
         reviewed_by=actor.user_id,
         reviewed_at=utcnow(),
@@ -346,7 +399,55 @@ async def add_question(
     db.add(question)
     await flush_or_conflict(db)
     await db.refresh(question)
+    await _store_question_embedding(db, question)
     return question
+
+
+async def check_question_duplicate(
+    db: AsyncSession,
+    config_id: UUID,
+    *,
+    prompt_text: str,
+    exclude_question_id: UUID | None = None,
+) -> dict[str, Any]:
+    """Report whether ``prompt_text`` duplicates something already in the bank.
+
+    A read-only advisory check for the authoring UI: it never blocks or mutates
+    anything, so a teacher who disagrees with the verdict can still save. Returns
+    the verdict as a dict (see :class:`DuplicateVerdict`) plus ``enabled`` so the
+    caller can distinguish "feature off" from "nothing similar found".
+
+    Returns ``enabled: False`` without any provider call when
+    ``interview_dedup_enabled`` is off.
+    """
+    await _require_config(db, config_id)
+    settings = get_settings()
+    if not settings.interview_dedup_enabled:
+        return {"enabled": False, **NOT_DUPLICATE.to_dict()}
+
+    verdict, _embedding = await check_duplicate(
+        db,
+        config_id=config_id,
+        prompt_text=prompt_text,
+        embedding_client=EmbeddingClient(),
+        exclude_question_id=exclude_question_id,
+    )
+    return {"enabled": True, **verdict.to_dict()}
+
+
+async def _store_question_embedding(db: AsyncSession, question: InterviewQuestion) -> None:
+    """Best-effort: persist the question's vector so it can be matched later.
+
+    Thin single-row wrapper over :func:`dedup.store_question_embeddings`, which
+    owns the feature gate, the pgvector text formatting and the swallow-and-log
+    policy — the generation pipeline needs the batch form, and two copies of that
+    UPDATE is how the two paths drifted apart in the first place.
+    """
+    await store_question_embeddings(
+        db,
+        question_ids=[question.id],
+        prompt_texts=[question.prompt_text],
+    )
 
 
 async def update_question(
@@ -358,12 +459,18 @@ async def update_question(
 ) -> InterviewQuestion:
     question = await _require_question(db, config_id, question_id)
     data = payload.model_dump(exclude_unset=True)
+    prompt_changed = "prompt_text" in data and (data["prompt_text"] or "") != question.prompt_text
     for key, value in data.items():
         setattr(question, key, value)
     question.reviewed_by = actor.user_id
     question.reviewed_at = utcnow()
     await flush_or_conflict(db)
     await db.refresh(question)
+    # Re-embed only when the text actually changed: a stale vector would make the
+    # bank match against wording the question no longer has, which is worse than
+    # having no vector at all. Edits to difficulty/outcome/status leave it alone.
+    if prompt_changed:
+        await _store_question_embedding(db, question)
     return question
 
 

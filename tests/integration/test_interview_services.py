@@ -69,6 +69,9 @@ from abridgeai.features.interviews.services import (
 from abridgeai.features.interviews.services import (
     taking as taking_service,
 )
+from abridgeai.features.interviews.queries import (
+    authoring as authoring_queries,
+)
 from abridgeai.features.quizzes.api.public import GenerationRunDTO
 
 
@@ -264,6 +267,10 @@ async def scenario(engine: AsyncEngine) -> AsyncIterator[dict[str, Any]]:
             {"m": module_id},
         )
         await conn.execute(text("DELETE FROM modules WHERE id = :m"), {"m": module_id})
+        await conn.execute(
+            text("DELETE FROM course_learning_outcomes WHERE course_id = :id"),
+            {"id": course_id},
+        )
         await conn.execute(text("DELETE FROM courses WHERE id = :id"), {"id": course_id})
         await conn.execute(
             text("DELETE FROM users WHERE id IN (:t, :s, :o)"),
@@ -361,6 +368,48 @@ async def test_create_interview_config_basic(
     assert config.course_id == scenario["course_id"]
     assert config.module_id == scenario["module_id"]
     assert config.status == "draft"
+
+
+@pytest.mark.asyncio
+async def test_create_interview_config_seeds_course_outcomes(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict[str, Any],
+) -> None:
+    # Seed the parent course with learning outcomes, then create a fresh
+    # interview config: it should copy those course LOs in as its starting
+    # rubric outcomes (no manual import needed).
+    course_outcome_texts = ["Understand data warehouses", "Design a star schema"]
+    async with engine.begin() as conn:
+        for idx, txt in enumerate(course_outcome_texts, start=1):
+            await conn.execute(
+                text(
+                    "INSERT INTO course_learning_outcomes "
+                    "(id, course_id, position, outcome_text) "
+                    "VALUES (:id, :course, :pos, :txt)"
+                ),
+                {
+                    "id": uuid.uuid4(),
+                    "course": scenario["course_id"],
+                    "pos": idx,
+                    "txt": txt,
+                },
+            )
+
+    payload = _CreatePayload(
+        title="Seeded Interview",
+        module_id=scenario["module_id"],
+        supported_modes="hybrid",
+    )
+    async with session_factory() as session, session.begin():
+        config = await authoring_service.create_interview_config(
+            session, scenario["course_id"], payload, _actor(scenario["teacher_id"])
+        )
+        seeded = await authoring_queries.list_outcomes_for_config(session, config.id)
+
+    assert [o.outcome_text for o in seeded] == course_outcome_texts
+    assert [o.position for o in seeded] == [1, 2]
+    assert all(o.outcome_type == "knowledge" and o.importance_weight == 3 for o in seeded)
 
 
 @pytest.mark.asyncio
@@ -769,6 +818,9 @@ async def test_submit_session_marks_completed_and_enqueues_eval(
         started = await taking_service.start_session(
             session, seeded["config_id"], payload, _actor(scenario["student_id"])
         )
+    # Reaching the assessment is what makes a run gradeable; a session still in
+    # onboarding is abandoned and never enqueued.
+    await _complete_onboarding(engine, started.id)
 
     arq_pool = SimpleNamespace(enqueue_job=AsyncMock(return_value=None))
     async with session_factory() as session:
@@ -803,6 +855,7 @@ async def test_submit_enqueues_eval(
         started = await taking_service.start_session(
             session, seeded["config_id"], payload, _actor(scenario["student_id"])
         )
+    await _complete_onboarding(engine, started.id)
 
     arq_pool = SimpleNamespace(enqueue_job=AsyncMock(return_value=None))
     async with session_factory() as session:
@@ -877,6 +930,9 @@ async def test_evaluate_and_generate_report_persists_outcome_evaluations_and_gap
             session, seeded["config_id"], payload, _actor(scenario["student_id"])
         )
     session_id = started.id
+    # The evaluator refuses a run that never reached the assessment, so this
+    # session has to be past onboarding for the persistence assertions below.
+    await _complete_onboarding(engine, session_id)
 
     fake_question_id = seeded["question_ids"][0]
     rubric = RubricScores(
@@ -994,6 +1050,7 @@ async def test_evaluate_and_generate_report_fails_when_outcomes_not_met(
             session, seeded["config_id"], payload, _actor(scenario["student_id"])
         )
     session_id = started.id
+    await _complete_onboarding(engine, session_id)
 
     # High rubric score (would have passed under old >=60 logic)...
     rubric = RubricScores(

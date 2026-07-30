@@ -12,9 +12,10 @@ gone stale, using two anchors:
 
 Once a session is past whichever deadline applies:
 
-* >=1 student turn recorded → ``timed_out`` + enqueue the normal async
-  evaluation (so the student still gets a verdict/gap-report from a partial
-  interview).
+* >=1 student turn recorded → ``timed_out`` + enqueue the async judge (so the
+  student still gets something back from a partial interview): the normal
+  evaluation for a graded run, or the criterion-feedback task for a practice
+  one, which writes no verdict.
 * no student turns → ``abandoned`` (nothing to evaluate).
 
 Disconnect itself is NOT terminal: the agent keeps the session ``in_progress``
@@ -42,10 +43,15 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _EVALUATE_INTERVIEW_SESSION_TASK = "evaluate_interview_session_task"
+_PRACTICE_FEEDBACK_TASK = "generate_practice_feedback_task"
 
 
 def _evaluation_job_id(session_id: UUID) -> str:
     return f"interview-evaluation:{session_id}"
+
+
+def _practice_feedback_job_id(session_id: UUID) -> str:
+    return f"interview-practice-feedback:{session_id}"
 
 
 async def sweep_stale_voice_sessions(
@@ -84,12 +90,21 @@ async def sweep_stale_voice_sessions(
         await db.commit()
         finalised += 1
 
+        # A swept practice run is still a run the student answered questions in,
+        # so it gets the same criterion feedback the normal finish path would
+        # have given it — just never the grading task, which is the only writer
+        # of ``pass_verdict``.
         if user_turns >= 1 and arq_pool is not None:
+            is_practice = session.session_mode == "practice"
             await arq_pool.enqueue_job(  # type: ignore[attr-defined]
-                _EVALUATE_INTERVIEW_SESSION_TASK,
+                _PRACTICE_FEEDBACK_TASK if is_practice else _EVALUATE_INTERVIEW_SESSION_TASK,
                 session.student_id,
                 session.id,
-                _job_id=_evaluation_job_id(session.id),
+                _job_id=(
+                    _practice_feedback_job_id(session.id)
+                    if is_practice
+                    else _evaluation_job_id(session.id)
+                ),
             )
         logger.info(
             "swept stale voice session %s → %s (user_turns=%d)",

@@ -641,6 +641,7 @@ async def _run_full_lifecycle(
             kg_client: Any,
             llm_gateway: Any,
             parent_job_id: UUID | None = None,
+            on_progress: Any = None,
         ) -> KGSummary:
             kg_recorder.append(
                 {

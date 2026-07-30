@@ -38,6 +38,7 @@ dependencies = [
     # 1.6.x imports agent_pb.TC_DONE at module load, so an older 1.1.x api/proto
     # crash-loops the agent worker on import. Do NOT relax below 1.2.
     "livekit-api>=1.2,<2",
+    "nh3>=0.3.6",
 ]
 
 [project.optional-dependencies]
@@ -140,6 +141,34 @@ max-complexity = 12
 # workstream. Legitimately writes to stdout (T20) and has long usage lines
 # (E501); imports the corpus loader from the tests tree via sys.path (E402).
 "scripts/security_replay.py" = ["T20", "E501", "E402", "I001"]
+# Analysis-isolation report — same shape as security_replay.py: a manual-trigger,
+# LLM-free CLI that prints a human report to stdout (T20), has long usage lines
+# (E501), and imports abridgeai after a sys.path insert (E402).
+"scripts/analysis_isolation_report.py" = ["T20", "E501", "E402", "I001"]
+# Interview quality report — a manual-trigger, read-only diagnostics CLI
+# (calibration / contingency / leading-question metrics over a finished
+# session). Prints a human report to stdout (T20), has long usage + rubric
+# lines (E501), imports after a sys.path insert (E402/I001), and its report
+# printer is a flat sequence of sections rather than genuinely complex logic
+# (C901).
+"scripts/interview_quality_report.py" = ["T20", "E501", "E402", "I001", "C901"]
+# Fabricated-grade cleanup — a manual-trigger, one-off remediation CLI for the
+# rows written before submit_session stopped grading runs that never reached the
+# assessment. Prints a per-session plan to stdout (T20), imports after a
+# sys.path insert (E402/I001), and uses raw SQL by design: it is a bulk sweep of
+# historical rows, so one DELETE/UPDATE per table is both atomic and clearer
+# than an ORM round-trip per row.
+"scripts/cleanup_fabricated_interview_grades.py" = ["T20", "E501", "E402", "I001"]
+# AI cost backfill — a manual-trigger maintenance CLI run after a pricing rate
+# is added. Prints a per-model report to stdout (T20) and uses raw SQL by
+# design: it sweeps historical rows, so an ORM round-trip per row would be
+# both slower and less atomic than one UPDATE.
+"scripts/backfill_ai_call_costs.py" = ["T20", "E501"]
+# Org-tenancy audit — a manual-trigger, read-only forensic CLI. Prints a
+# human report to stdout (T20) and builds its SQL by formatting a table name
+# into a template (S608): the names come from a module-level tuple, never from
+# input, and the alternative is seven near-identical query constants.
+"scripts/audit_org_tenancy.py" = ["T20", "E501", "S608"]
 
 [tool.mypy]
 python_version = "3.12"
@@ -241,6 +270,7 @@ ignore_imports = [
     "abridgeai.features.courses.services.authoring -> sqlalchemy",
     "abridgeai.features.courses.services.assignment -> sqlalchemy",
     "abridgeai.features.courses.services.administration -> sqlalchemy",
+    "abridgeai.features.courses.services.notify -> sqlalchemy",
     "abridgeai.features.enrollments.services.manager -> sqlalchemy",
     "abridgeai.features.enrollments.services.student_view -> sqlalchemy",
     "abridgeai.features.materials.services.catalog -> sqlalchemy",
@@ -249,6 +279,9 @@ ignore_imports = [
     "abridgeai.features.materials.services.authoring._reads -> sqlalchemy",
     "abridgeai.features.materials.services.authoring._upload -> sqlalchemy",
     "abridgeai.features.materials.services.authoring._versions -> sqlalchemy",
+    "abridgeai.features.materials.services.authoring._curated_kg -> sqlalchemy",
+    # TYPE_CHECKING-only AsyncSession annotation, same as the siblings above.
+    "abridgeai.features.materials.services.authoring._preprocess -> sqlalchemy",
     "abridgeai.features.quizzes.services.authoring -> sqlalchemy",
     "abridgeai.features.quizzes.services.publish_gate -> sqlalchemy",
     "abridgeai.features.quizzes.services.taking -> sqlalchemy",
@@ -341,6 +374,10 @@ ignore_imports = [
     # rationale as the dispatch carve-outs above; no public API exists.
     "abridgeai.features.spaced_repetition.workers.scan_due_cards -> abridgeai.features.notifications.messages",
     "abridgeai.features.spaced_repetition.services.remediation -> abridgeai.features.notifications.messages",
+    # Cooldown dedup reads the notifications table directly (read-only ORM
+    # query for the last SR reminder per student). Same side-effect-channel
+    # rationale as the dispatch/messages carve-outs above.
+    "abridgeai.features.spaced_repetition.workers.scan_due_cards -> abridgeai.features.notifications.models",
     # Courses queries JOIN cross-feature models for ORM-hydrated reads.
     # These are read-only JOINs (no writes to foreign tables); the ORM
     # approach replaces raw SQL that previously bypassed the linter.

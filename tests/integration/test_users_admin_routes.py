@@ -259,3 +259,121 @@ async def test_invalid_cursor_returns_422(
         headers={"Authorization": f"Bearer {token}"},
     )
     assert response.status_code == 422
+
+
+async def test_search_users_includes_role_codes(
+    client: httpx.AsyncClient,
+    admin_auth: tuple[uuid.UUID, str],
+    seeded_users: SeededUsers,
+) -> None:
+    """The search payload carries each user's active role codes (Role column)."""
+    _, token = admin_auth
+    response = await client.get(
+        "/api/v1/users/search?page_size=200",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert response.status_code == 200, response.text
+    items = {item["id"]: item for item in response.json()["items"]}
+
+    teacher = items.get(str(seeded_users.teacher_id))
+    assert teacher is not None
+    assert "roles" in teacher
+    assert "teacher" in teacher["roles"]
+
+
+async def test_search_users_role_filter_narrows_results(
+    client: httpx.AsyncClient,
+    admin_auth: tuple[uuid.UUID, str],
+    seeded_users: SeededUsers,
+) -> None:
+    """``?role=teacher`` returns only teachers; the seeded student is excluded."""
+    _, token = admin_auth
+    headers = {"Authorization": f"Bearer {token}"}
+
+    response = await client.get(
+        "/api/v1/users/search?role=teacher&page_size=200", headers=headers
+    )
+    assert response.status_code == 200, response.text
+    ids = {item["id"] for item in response.json()["items"]}
+    assert str(seeded_users.teacher_id) in ids
+    assert str(seeded_users.student_id) not in ids
+    # Every returned user actually holds the teacher role.
+    for item in response.json()["items"]:
+        assert "teacher" in item["roles"]
+
+
+async def test_search_users_unknown_role_returns_empty(
+    client: httpx.AsyncClient,
+    admin_auth: tuple[uuid.UUID, str],
+) -> None:
+    """A role code nobody holds yields an empty page, not an error."""
+    _, token = admin_auth
+    response = await client.get(
+        "/api/v1/users/search?role=nonexistent_role_xyz",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["items"] == []
+    assert body["total"] == 0
+
+
+async def test_search_users_includes_primary_organization(
+    client: httpx.AsyncClient,
+    admin_auth: tuple[uuid.UUID, str],
+    seeded_users: SeededUsers,
+) -> None:
+    """The search payload carries each user's primary org id + name."""
+    _, token = admin_auth
+    response = await client.get(
+        "/api/v1/users/search?page_size=200",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert response.status_code == 200, response.text
+    items = {item["id"]: item for item in response.json()["items"]}
+    teacher = items.get(str(seeded_users.teacher_id))
+    assert teacher is not None
+    # Field is present (may be null for users with no membership).
+    assert "organization_id" in teacher
+    assert "organization_name" in teacher
+
+
+async def test_search_users_org_filter_narrows_results(
+    client: httpx.AsyncClient,
+    admin_auth: tuple[uuid.UUID, str],
+    seeded_users: SeededUsers,
+) -> None:
+    """``?organization=<seeded org>`` returns only members of that org."""
+    _, token = admin_auth
+    headers = {"Authorization": f"Bearer {token}"}
+    org_id = seeded_users.organization_id
+
+    response = await client.get(
+        f"/api/v1/users/search?organization={org_id}&page_size=200",
+        headers=headers,
+    )
+    assert response.status_code == 200, response.text
+    # The seeded teacher belongs to the test org; every returned row reports it.
+    ids = {item["id"] for item in response.json()["items"]}
+    assert str(seeded_users.teacher_id) in ids
+    for item in response.json()["items"]:
+        assert item["organization_id"] == str(org_id)
+
+
+async def test_search_users_role_and_org_filter_intersect(
+    client: httpx.AsyncClient,
+    admin_auth: tuple[uuid.UUID, str],
+    seeded_users: SeededUsers,
+) -> None:
+    """role + organization filters intersect (teacher in the seeded org)."""
+    _, token = admin_auth
+    headers = {"Authorization": f"Bearer {token}"}
+    org_id = seeded_users.organization_id
+    response = await client.get(
+        f"/api/v1/users/search?role=teacher&organization={org_id}&page_size=200",
+        headers=headers,
+    )
+    assert response.status_code == 200, response.text
+    for item in response.json()["items"]:
+        assert "teacher" in item["roles"]
+        assert item["organization_id"] == str(org_id)

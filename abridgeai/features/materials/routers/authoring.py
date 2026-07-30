@@ -46,6 +46,8 @@ from abridgeai.features.courses.routers._deps import require_lesson_authoring_ac
 from abridgeai.features.materials.api import public as materials_api
 from abridgeai.features.materials.models import LearningMaterialVersion
 from abridgeai.features.materials.schemas import (
+    CuratedKGDraft,
+    CuratedKGDraftSave,
     LessonKnowledgeGraph,
     MaterialAuthoring,
     MaterialLinkExisting,
@@ -55,6 +57,12 @@ from abridgeai.features.materials.schemas import (
     MaterialVersionAuthoring,
     ProcessingProgress,
 )
+from abridgeai.features.materials.schemas.preprocess import (
+    CourseFilterSummaryRow,
+    PreprocessModeRequest,
+    PreprocessReportView,
+    TeacherActionRequest,
+)
 from abridgeai.features.materials.schemas.public import MaterialStreamUrl
 from abridgeai.features.materials.schemas.status import LessonProcessingSummary
 from abridgeai.features.materials.services import authoring as authoring_service
@@ -63,6 +71,7 @@ from abridgeai.features.materials.services.authoring import (
     ConcurrentReprocessError,
     HeadVerificationError,
 )
+from abridgeai.features.materials.services.authoring import _preprocess as preprocess_service
 
 router = APIRouter(prefix="/teacher", tags=["materials-authoring"])
 upload_router = APIRouter(prefix="/materials", tags=["materials-authoring"])
@@ -660,6 +669,76 @@ async def lesson_knowledge_graph(
     return await authoring_service.get_lesson_knowledge_graph(db, lesson_id, limit=limit)
 
 
+@router.get(
+    "/lessons/{lesson_id}/curated-knowledge-graph",
+    response_model=CuratedKGDraft,
+)
+async def get_curated_knowledge_graph(
+    lesson_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_LESSON)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> CuratedKGDraft:
+    """Teacher's editable KG draft for a lesson.
+
+    On first open (no curated row yet) the draft is seeded from the AI
+    concept graph as an editable starting point (``seeded=True``); the seed
+    is not persisted until the teacher saves. Returns publish state so the UI
+    can show whether there are unpublished changes.
+    """
+    del current_user
+    return await authoring_service.get_or_seed_draft(db, lesson_id)
+
+
+@router.put(
+    "/lessons/{lesson_id}/curated-knowledge-graph",
+    response_model=CuratedKGDraft,
+)
+async def save_curated_knowledge_graph(
+    lesson_id: UUID,
+    payload: CuratedKGDraftSave,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_LESSON)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> CuratedKGDraft:
+    """Save the teacher's KG draft (upsert).
+
+    The payload is validated at the schema boundary (exactly one primary
+    node, unique node ids, edges reference real nodes), so a malformed graph
+    is rejected with 422 before it can be persisted. Does not affect the
+    published student view — publishing is a separate action.
+    """
+    result = await authoring_service.save_draft(
+        db, lesson_id, payload, actor_id=current_user.user_id
+    )
+    await db.commit()
+    return result
+
+
+@router.post(
+    "/lessons/{lesson_id}/curated-knowledge-graph/publish",
+    response_model=CuratedKGDraft,
+)
+async def publish_curated_knowledge_graph(
+    lesson_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_LESSON)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> CuratedKGDraft:
+    """Publish the current draft to the student reading-lesson view.
+
+    Snapshots ``draft_json`` into the published slot. 409 when there is no
+    saved draft with at least one node to publish.
+    """
+    try:
+        result = await authoring_service.publish(
+            db, lesson_id, actor_id=current_user.user_id
+        )
+    except authoring_service.CuratedKGEmptyError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=str(exc)
+        ) from exc
+    await db.commit()
+    return result
+
+
 @router.get("/materials/{material_id}", response_model=MaterialAuthoring)
 async def get_material(
     material_id: UUID,
@@ -854,6 +933,113 @@ async def delete_material(
                 },
             ) from exc
         raise
+
+
+# ---------------------------------------------------------------------------
+# Preprocessing report + teacher overrides
+# ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/materials/{material_id}/preprocess/report",
+    response_model=PreprocessReportView,
+)
+async def get_preprocess_report_endpoint(
+    material_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_MATERIAL)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> PreprocessReportView:
+    """What the noise filter did to this material's current version.
+
+    Per-page decisions with reason codes, scores and the exact removed text.
+    A teacher cannot sensibly override what they cannot see, so this is the
+    first stop when a page seems to be missing from quiz/interview coverage.
+    """
+    del current_user
+    try:
+        return await preprocess_service.get_preprocess_report(db, material_id)
+    except NotFoundError as exc:
+        raise _not_found("material", material_id) from exc
+
+
+@router.post(
+    "/materials/{material_id}/preprocess/quarantine/{quarantine_id}/action",
+    response_model=TeacherActionRequest,
+)
+async def quarantine_teacher_action(
+    material_id: UUID,
+    quarantine_id: UUID,
+    payload: TeacherActionRequest,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_MATERIAL)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> TeacherActionRequest:
+    """Restore or confirm one quarantined unit.
+
+    ``restore`` re-injects the unit on the NEXT reprocess (the decision is
+    persisted, never applied in place — rewriting embedded chunks live is the
+    re-index this design exists to avoid). ``confirm`` marks the filter's
+    call as correct, which feeds the precision audit.
+    """
+    try:
+        await preprocess_service.apply_teacher_action(
+            db,
+            material_id,
+            quarantine_id,
+            action=payload.action,
+            user_id=current_user.user_id,
+        )
+    except NotFoundError as exc:
+        raise _not_found("quarantine_unit", quarantine_id) from exc
+    await db.commit()
+    return payload
+
+
+@router.patch(
+    "/materials/{material_id}/preprocess/mode",
+    response_model=PreprocessModeRequest,
+)
+async def set_preprocess_mode_endpoint(
+    material_id: UUID,
+    payload: PreprocessModeRequest,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_MATERIAL)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> PreprocessModeRequest:
+    """Per-material cascade kill switch. Applies on the next reprocess.
+
+    ``normalize_only`` keeps the never-destructive fixes (unicode,
+    de-hyphenation) while disabling every filter — the right setting for an
+    unusual document the rules misread.
+    """
+    del current_user
+    try:
+        mode = await preprocess_service.set_preprocess_mode(db, material_id, mode=payload.mode)
+    except NotFoundError as exc:
+        raise _not_found("material", material_id) from exc
+    await db.commit()
+    return PreprocessModeRequest(mode=mode)
+
+
+@router.get(
+    "/courses/{course_id}/preprocess/summary",
+    response_model=list[CourseFilterSummaryRow],
+)
+async def course_preprocess_summary(
+    course_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> list[CourseFilterSummaryRow]:
+    """Per-reason filter counts across the course.
+
+    The precision audit: a reason code with many restores is a rule that is
+    eating real content and needs its threshold revisited.
+    """
+    course = await courses_api.get_course_by_id(db, course_id)
+    if course is None:
+        raise _not_found("course", course_id)
+    await _enforce_course_permission(
+        db, current_user, course_id, course.owner_user_id, _DEFAULT_AUTHORING_PERM
+    )
+    return await preprocess_service.get_course_filter_summary(db, course_id)
 
 
 __all__ = [

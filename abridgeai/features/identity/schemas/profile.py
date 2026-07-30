@@ -32,6 +32,15 @@ class UserRead(_ORMModel):
     created_at: datetime
     updated_at: datetime
     profile: UserProfileRead | None = None
+    # Distinct active role codes across all scopes (admin user-list "Role"
+    # column). Empty when the user holds no active role assignment. Populated
+    # by the admin list/search services; other UserRead producers leave it [].
+    roles: list[str] = Field(default_factory=list)
+    # Primary organization (most recent active membership) for the admin
+    # user-list "Organization" column. None when the user belongs to no org
+    # (e.g. platform admins). Populated by the search service only.
+    organization_id: UUID | None = None
+    organization_name: str | None = None
 
 
 class UserProfileUpdate(BaseModel):

@@ -58,6 +58,13 @@ logger = logging.getLogger(__name__)
 
 FOLLOWUP_STAGE_NAME = "interview_followup"
 
+# How many recent interviewer turns the follow-up stage is shown so it can avoid
+# re-asking, in different words, something already covered. 5 matches the window
+# SparkMe uses and keeps the prompt bounded regardless of session length: long
+# enough to catch the realistic repeat (the last question or two), short enough
+# that it cannot crowd out the current answer.
+RECENT_QUESTION_WINDOW = 5
+
 
 async def maybe_generate_followup(
     db: AsyncSession,
@@ -94,6 +101,14 @@ async def maybe_generate_followup(
 
     chunk_views = [_chunk_for_prompt(chunk) for chunk in related_chunks or []]
 
+    # Semantic repetition guard: give the model the recent interviewer turns so
+    # it can avoid re-asking something already covered in different words.
+    # Exact-id de-dup elsewhere cannot catch this (a generated follow-up has no
+    # question id). Bounded so the prompt cannot grow with session length.
+    recent_questions = await _recent_interviewer_questions(
+        db, session_id=session.id, limit=RECENT_QUESTION_WINDOW
+    )
+
     try:
         system_prompt = render_prompt("prompts/system.j2")
         user_prompt = json.dumps(
@@ -101,6 +116,7 @@ async def maybe_generate_followup(
                 "current_question": current_question.prompt_text,
                 "student_answer": answer,
                 "related_chunks": chunk_views,
+                "recent_interviewer_questions": recent_questions,
             },
             ensure_ascii=False,
         )
@@ -134,6 +150,44 @@ async def maybe_generate_followup(
     if verdict.is_sufficient:
         return None
     return verdict.followup
+
+
+async def _recent_interviewer_questions(
+    db: AsyncSession,
+    *,
+    session_id: UUID,
+    limit: int,
+) -> list[str]:
+    """The last ``limit`` things the interviewer actually asked, newest last.
+
+    Without this the follow-up stage sees ONE question and one answer, so it can
+    re-ask — in different words — something already covered earlier in the
+    session. Exact-id de-duplication in ``selection.py`` cannot catch that,
+    because a generated follow-up has no question id at all.
+
+    Cheap by construction: one indexed SELECT on ``session_id``, no LLM call.
+    Only ``role='ai'`` messages are considered (both authored questions and
+    earlier follow-ups — both are things the candidate has already been asked).
+    """
+    if limit <= 0:
+        return []
+    stmt = (
+        select(InterviewSessionMessage.content_text)
+        .where(
+            InterviewSessionMessage.session_id == session_id,
+            InterviewSessionMessage.role == "ai",
+            InterviewSessionMessage.content_text.isnot(None),
+        )
+        .order_by(
+            InterviewSessionMessage.created_at.desc(),
+            InterviewSessionMessage.id.desc(),
+        )
+        .limit(limit)
+    )
+    rows = (await db.execute(stmt)).scalars().all()
+    # Query is newest-first for the LIMIT; hand back chronological order so the
+    # model reads them the way the conversation happened.
+    return [t.strip() for t in reversed(rows) if t and t.strip()]
 
 
 async def _has_existing_followup(

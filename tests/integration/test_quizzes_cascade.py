@@ -256,3 +256,175 @@ async def test_delete_question_repacks_sibling_positions(
         )
         assert [q.position for q in survivors] == [1, 2, 3]
         assert second_id not in {q.id for q in survivors}
+
+
+async def test_delete_question_purges_student_card_state(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    org_course,
+) -> None:
+    """Deleting a question hard-deletes its SM-2 card state (regression).
+
+    student_card_state is keyed on question_id and is cross-feature, so the
+    ONETOMANY soft-delete cascade never reached it. Orphaned rows survived the
+    delete and stayed perpetually "due" — invisible to the take/answer surface
+    (which joins live questions) yet inflating reminder counts and analytics.
+    delete_question must purge them via the SR public API.
+    """
+    from abridgeai.core.security import CurrentUser
+    from abridgeai.features.quizzes.services import authoring as authoring_service
+
+    _org_id, owner_id, course_id, module_id = org_course
+    student_id = uuid.uuid4()
+
+    async with session_factory() as session:
+        quiz = Quiz(course_id=course_id, module_id=module_id, title="Card State Quiz")
+        session.add(quiz)
+        await session.flush()
+        question = QuizQuestion(
+            quiz_id=quiz.id,
+            position=1,
+            question_type="multiple_choice",
+            prompt_text="Q1",
+        )
+        session.add(question)
+        await session.flush()
+        quiz_id = quiz.id
+        question_id = question.id
+        await session.commit()
+
+    # Seed a student + a due card-state row for the question (raw SQL: the SR
+    # ORM model must not be imported into a quizzes-feature test).
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("INSERT INTO users (id, primary_email) VALUES (:id, :email)"),
+            {"id": student_id, "email": f"cardstate-{student_id.hex[:8]}@test.local"},
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO student_card_state "
+                "(student_id, question_id, ef, interval_days, repetition_count, "
+                "due_at, total_reviews) "
+                "VALUES (:sid, :qid, 2.5, 1, 0, NOW() - INTERVAL '1 day', 1)"
+            ),
+            {"sid": student_id, "qid": question_id},
+        )
+
+    actor = CurrentUser(user_id=owner_id, session_id=uuid.uuid4())
+    try:
+        async with session_factory() as session:
+            await authoring_service.delete_question(session, question_id, actor)
+            await session.commit()
+
+        async with engine.connect() as conn:
+            remaining = (
+                await conn.execute(
+                    text(
+                        "SELECT COUNT(*) FROM student_card_state WHERE question_id = :qid"
+                    ),
+                    {"qid": question_id},
+                )
+            ).scalar_one()
+        assert remaining == 0
+    finally:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("DELETE FROM student_card_state WHERE question_id = :qid"),
+                {"qid": question_id},
+            )
+            await conn.execute(
+                text("DELETE FROM card_reviews WHERE question_id = :qid"),
+                {"qid": question_id},
+            )
+            await conn.execute(
+                text("DELETE FROM quiz_question_revisions WHERE question_id = :qid"),
+                {"qid": question_id},
+            )
+            await conn.execute(
+                text("DELETE FROM quiz_questions WHERE quiz_id = :qz"), {"qz": quiz_id}
+            )
+            await conn.execute(text("DELETE FROM quizzes WHERE id = :id"), {"id": quiz_id})
+            await conn.execute(text("DELETE FROM users WHERE id = :id"), {"id": student_id})
+
+
+async def test_delete_quiz_purges_student_card_state(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    org_course,
+) -> None:
+    """Deleting a whole quiz purges card state for ALL its questions."""
+    from abridgeai.core.security import CurrentUser
+    from abridgeai.features.quizzes.services import authoring as authoring_service
+
+    _org_id, owner_id, course_id, module_id = org_course
+    student_id = uuid.uuid4()
+
+    async with session_factory() as session:
+        quiz = Quiz(course_id=course_id, module_id=module_id, title="Quiz Delete Cards")
+        session.add(quiz)
+        await session.flush()
+        q_ids = []
+        for i in range(1, 4):
+            q = QuizQuestion(
+                quiz_id=quiz.id,
+                position=i,
+                question_type="multiple_choice",
+                prompt_text=f"Q{i}",
+            )
+            session.add(q)
+            await session.flush()
+            q_ids.append(q.id)
+        quiz_id = quiz.id
+        await session.commit()
+
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("INSERT INTO users (id, primary_email) VALUES (:id, :email)"),
+            {"id": student_id, "email": f"qcards-{student_id.hex[:8]}@test.local"},
+        )
+        for qid in q_ids:
+            await conn.execute(
+                text(
+                    "INSERT INTO student_card_state "
+                    "(student_id, question_id, ef, interval_days, repetition_count, "
+                    "due_at, total_reviews) "
+                    "VALUES (:sid, :qid, 2.5, 1, 0, NOW() - INTERVAL '1 day', 1)"
+                ),
+                {"sid": student_id, "qid": qid},
+            )
+
+    actor = CurrentUser(user_id=owner_id, session_id=uuid.uuid4())
+    try:
+        async with session_factory() as session:
+            await authoring_service.delete_quiz(session, quiz_id, actor)
+            await session.commit()
+
+        async with engine.connect() as conn:
+            remaining = (
+                await conn.execute(
+                    text(
+                        "SELECT COUNT(*) FROM student_card_state WHERE question_id = ANY(:ids)"
+                    ),
+                    {"ids": q_ids},
+                )
+            ).scalar_one()
+        assert remaining == 0
+    finally:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("DELETE FROM student_card_state WHERE question_id = ANY(:ids)"),
+                {"ids": q_ids},
+            )
+            await conn.execute(
+                text("DELETE FROM card_reviews WHERE question_id = ANY(:ids)"),
+                {"ids": q_ids},
+            )
+            await conn.execute(
+                text("DELETE FROM quiz_question_revisions WHERE question_id = ANY(:ids)"),
+                {"ids": q_ids},
+            )
+            await conn.execute(
+                text("DELETE FROM quiz_questions WHERE quiz_id = :qz"), {"qz": quiz_id}
+            )
+            await conn.execute(text("DELETE FROM quizzes WHERE id = :id"), {"id": quiz_id})
+            await conn.execute(text("DELETE FROM users WHERE id = :id"), {"id": student_id})
