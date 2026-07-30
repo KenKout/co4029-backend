@@ -29,6 +29,7 @@ from uuid import UUID
 from abridgeai.ai.models import GenerationRun
 from abridgeai.core.db.conflict_mapper import flush_or_conflict
 from abridgeai.core.exceptions import NotFoundError
+from abridgeai.core.observability import get_logger
 from abridgeai.core.security import utcnow
 from abridgeai.features.interviews import practice
 from abridgeai.features.interviews.ai.stages.evaluation import evaluate_outcomes, evaluate_session
@@ -76,6 +77,32 @@ from abridgeai.features.quizzes.api import public as quizzes_public
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
+_logger = get_logger(__name__)
+
+
+def _ungradeable_reason(session: object) -> str | None:
+    """Why this run may not be graded, or None when it may.
+
+    Two refusals, both defence in depth against the same class of damage:
+    ``evaluate_and_generate_report`` is the ONLY writer of ``pass_verdict``, so a
+    missed guard at any enqueue site must not be able to reach that write.
+
+    * ``"practice"`` — a rehearsal. A verdict on it would unlock the SR lesson
+      and quiz gates that read ``pass_verdict``.
+    * ``"never_started_assessment"`` — still in onboarding (identity check /
+      audio check / readiness), so there are no answers to judge: answering is
+      gated on ``onboarding_stage == 'completed'`` in ``taking.record_answer``,
+      making ``assessment_started_at IS NULL`` equivalent to "no answer can
+      exist". Grading one fabricated outcome verdicts and a pass/fail from
+      onboarding chatter alone, against a student who never saw a question, and
+      consumed one of their attempts.
+    """
+    if practice.is_practice(getattr(session, "session_mode", None)):
+        return "practice"
+    if getattr(session, "assessment_started_at", None) is None:
+        return "never_started_assessment"
+    return None
+
 
 async def evaluate_and_generate_report(
     db: AsyncSession, session_id: UUID, *, is_final_attempt: bool = False
@@ -111,12 +138,14 @@ async def evaluate_and_generate_report(
     if session is None:
         raise NotFoundError(f"Interview session {session_id} not found")
 
-    if practice.is_practice(session.session_mode):
-        # Defence in depth. The enqueue sites already skip practice, but this is
-        # the single function that writes ``pass_verdict`` — and a verdict on a
-        # rehearsal would unlock the SR lesson and quiz gates that read it. One
-        # missed enqueue anywhere must not be able to reach that write, so the
-        # refusal lives here too rather than only at the callers.
+    ungradeable = _ungradeable_reason(session)
+    if ungradeable is not None:
+        # See _ungradeable_reason: practice rehearsals and runs that never
+        # reached the assessment are refused here, not only at the enqueue sites.
+        _logger.info(
+            "interview.evaluation.skipped",
+            extra={"session_id": str(session_id), "reason": ungradeable},
+        )
         return
 
     # Parent generation_run for this evaluation so it surfaces on the admin

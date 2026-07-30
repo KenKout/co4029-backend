@@ -27,6 +27,7 @@ helper: anything we cannot positively identify as practice gets graded.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
@@ -301,9 +302,7 @@ async def test_practice_ceiling_is_separate_from_the_attempt_ceiling() -> None:
         (practice.MODE_PRACTICE, "generate_practice_feedback_task"),
     ],
 )
-async def test_finishing_queues_the_task_that_matches_the_mode(
-    mode: str, task: str
-) -> None:
+async def test_finishing_queues_the_task_that_matches_the_mode(mode: str, task: str) -> None:
     """One task writes verdicts, the other cannot. Picking the wrong one for a
     rehearsal would either grade it or leave it with no feedback at all."""
     session = SimpleNamespace(
@@ -314,6 +313,10 @@ async def test_finishing_queues_the_task_that_matches_the_mode(
         session_mode=mode,
         interview_language="en",
         ended_at=None,
+        # This test is about mode routing, so the run must be gradeable at all:
+        # a session that never reached the assessment is abandoned and enqueues
+        # nothing regardless of mode.
+        assessment_started_at=datetime(2026, 7, 24, 10, 0, tzinfo=UTC),
     )
     count_result = MagicMock()
     count_result.scalar_one.return_value = 0
@@ -377,12 +380,45 @@ async def test_sweep_queues_the_task_that_matches_the_mode(mode: str, task: str)
             lifecycle_service.sessions_queries, "count_user_messages", AsyncMock(return_value=2)
         ),
     ):
-        await lifecycle_service.sweep_stale_voice_sessions(
-            SimpleNamespace(commit=AsyncMock()), arq
-        )
+        await lifecycle_service.sweep_stale_voice_sessions(SimpleNamespace(commit=AsyncMock()), arq)
 
     assert arq.enqueue_job.await_count == 1
     assert arq.enqueue_job.await_args.args[0] == task
+
+
+@pytest.mark.asyncio
+async def test_evaluator_refuses_a_run_that_never_reached_the_assessment() -> None:
+    """Defence in depth against grading onboarding chatter.
+
+    ``evaluate_and_generate_report`` is the only writer of ``pass_verdict``, so
+    the refusal lives here as well as at the enqueue site — the same belt-and-
+    braces reasoning as the practice-mode refusal above. A session still in
+    identity check / audio check / readiness has no answers, and grading one
+    fabricated outcome verdicts and a pass/fail against a student who never saw
+    a question (14 such rows in production before this guard).
+    """
+    session = SimpleNamespace(
+        id=uuid4(),
+        session_mode=practice.MODE_ASSESSMENT,
+        interview_config_id=uuid4(),
+        student_id=uuid4(),
+        assessment_started_at=None,
+    )
+    outcomes = AsyncMock(return_value=[])
+    db = SimpleNamespace(commit=AsyncMock(), rollback=AsyncMock(), add=MagicMock())
+
+    with (
+        patch.object(
+            evaluation_service.sessions_queries, "get_session", AsyncMock(return_value=session)
+        ),
+        patch.object(evaluation_service.authoring_queries, "list_outcomes_for_config", outcomes),
+    ):
+        await evaluation_service.evaluate_and_generate_report(db, session.id)
+
+    # Bailed before touching outcomes, and wrote nothing at all.
+    outcomes.assert_not_awaited()
+    db.commit.assert_not_awaited()
+    db.add.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -407,9 +443,7 @@ async def test_practice_feedback_refuses_graded_sessions() -> None:
         patch.object(
             evaluation_service.sessions_queries, "get_session", AsyncMock(return_value=session)
         ),
-        patch.object(
-            evaluation_service.authoring_queries, "list_outcomes_for_config", outcomes
-        ),
+        patch.object(evaluation_service.authoring_queries, "list_outcomes_for_config", outcomes),
     ):
         await evaluation_service.generate_practice_feedback(db, session.id)
 
@@ -580,6 +614,9 @@ async def test_graded_evaluation_corpus_excludes_the_practice_partition() -> Non
         session_mode=practice.MODE_ASSESSMENT,
         interview_config_id=uuid4(),
         student_id=uuid4(),
+        # Must be a run that actually reached the assessment, or the evaluator's
+        # never-started guard refuses it before this corpus load happens.
+        assessment_started_at=datetime(2026, 7, 24, 10, 0, tzinfo=UTC),
     )
     mock, patcher = _capture_list_questions()
     # ``get`` returns None so the failure handler runs cleanly and re-raises,

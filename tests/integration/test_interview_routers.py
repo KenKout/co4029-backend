@@ -569,6 +569,9 @@ async def test_finish_returns_status_and_enqueues_evaluation(
     )
     assert start_resp.status_code == 201
     session_id = start_resp.json()["session_id"]
+    # A run that never reached the assessment finishes as ``abandoned`` and is
+    # never enqueued, so complete onboarding to assert the graded path.
+    await _complete_onboarding(engine, uuid.UUID(session_id))
 
     arq_pool.enqueue_job.reset_mock()
 
@@ -1902,9 +1905,7 @@ async def test_check_duplicate_route_is_not_shadowed_by_question_id(
     param and 422 on a path that looks entirely correct — a failure no unit test
     can see.
     """
-    config_id = await _create_interview_config(
-        client, admin_bearer, scenario, "Dedup Route"
-    )
+    config_id = await _create_interview_config(client, admin_bearer, scenario, "Dedup Route")
 
     resp = await client.post(
         f"/api/v1/teacher/interview-configs/{config_id}/questions/check-duplicate",
@@ -1934,9 +1935,7 @@ async def test_dedup_flag_off_reports_disabled_not_unique(
     # specifically about the DISABLED contract.
     monkeypatch.setenv("INTERVIEW_DEDUP_ENABLED", "false")
     get_settings.cache_clear()
-    config_id = await _create_interview_config(
-        client, admin_bearer, scenario, "Dedup Off"
-    )
+    config_id = await _create_interview_config(client, admin_bearer, scenario, "Dedup Off")
 
     resp = await client.post(
         f"/api/v1/teacher/interview-configs/{config_id}/questions/check-duplicate",
@@ -1969,9 +1968,7 @@ async def test_check_duplicate_rejects_unknown_fields(
     scenario: dict[str, uuid.UUID],
 ) -> None:
     """extra='forbid': a mistyped field must fail loudly, not be ignored."""
-    config_id = await _create_interview_config(
-        client, admin_bearer, scenario, "Dedup Strict"
-    )
+    config_id = await _create_interview_config(client, admin_bearer, scenario, "Dedup Strict")
 
     resp = await client.post(
         f"/api/v1/teacher/interview-configs/{config_id}/questions/check-duplicate",
@@ -1991,9 +1988,7 @@ async def test_authoring_unaffected_when_dedup_disabled(
     This is the regression that matters most: duplicate detection is an add-on and
     must not alter the normal authoring path when nobody enabled it.
     """
-    config_id = await _create_interview_config(
-        client, admin_bearer, scenario, "Dedup Create"
-    )
+    config_id = await _create_interview_config(client, admin_bearer, scenario, "Dedup Create")
 
     created = await client.post(
         f"/api/v1/teacher/interview-configs/{config_id}/questions",

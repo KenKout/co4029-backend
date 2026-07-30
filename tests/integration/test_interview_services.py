@@ -818,6 +818,9 @@ async def test_submit_session_marks_completed_and_enqueues_eval(
         started = await taking_service.start_session(
             session, seeded["config_id"], payload, _actor(scenario["student_id"])
         )
+    # Reaching the assessment is what makes a run gradeable; a session still in
+    # onboarding is abandoned and never enqueued.
+    await _complete_onboarding(engine, started.id)
 
     arq_pool = SimpleNamespace(enqueue_job=AsyncMock(return_value=None))
     async with session_factory() as session:
@@ -852,6 +855,7 @@ async def test_submit_enqueues_eval(
         started = await taking_service.start_session(
             session, seeded["config_id"], payload, _actor(scenario["student_id"])
         )
+    await _complete_onboarding(engine, started.id)
 
     arq_pool = SimpleNamespace(enqueue_job=AsyncMock(return_value=None))
     async with session_factory() as session:
@@ -926,6 +930,9 @@ async def test_evaluate_and_generate_report_persists_outcome_evaluations_and_gap
             session, seeded["config_id"], payload, _actor(scenario["student_id"])
         )
     session_id = started.id
+    # The evaluator refuses a run that never reached the assessment, so this
+    # session has to be past onboarding for the persistence assertions below.
+    await _complete_onboarding(engine, session_id)
 
     fake_question_id = seeded["question_ids"][0]
     rubric = RubricScores(
@@ -1043,6 +1050,7 @@ async def test_evaluate_and_generate_report_fails_when_outcomes_not_met(
             session, seeded["config_id"], payload, _actor(scenario["student_id"])
         )
     session_id = started.id
+    await _complete_onboarding(engine, session_id)
 
     # High rubric score (would have passed under old >=60 logic)...
     rubric = RubricScores(
