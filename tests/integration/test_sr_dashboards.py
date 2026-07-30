@@ -448,6 +448,85 @@ async def test_cards_due_returns_paginated(
     assert seen_qids == expected_qids
 
 
+async def test_cards_due_ordered_by_urgency(
+    client: httpx.AsyncClient,
+    engine: AsyncEngine,
+    student_bearer: str,
+    seeded_users: SeededUsers,
+) -> None:
+    """Most-overdue cards come first — the queue is a priority queue, not a
+    UUID shuffle.
+
+    Regression for the bug where ``ORDER BY question_id`` meant a card three
+    weeks overdue could sit behind one due five minutes ago depending on how
+    its UUID sorted, so a limited page returned an arbitrary slice rather than
+    the most urgent cards. The fix orders by ``due_at ASC`` (question_id as the
+    tie-breaker), so the response must be non-decreasing in ``due_at``.
+    """
+    course_id = seeded_users.course_id
+    student_id = seeded_users.student_id
+    await _enroll(engine, course_id=course_id, student_id=student_id)
+    _, _lesson, _, qids = await _seed_lesson(
+        engine, course_id=course_id, n_questions=5, lesson_title="Urgency"
+    )
+    now = datetime.now(tz=UTC)
+    # Deliberately seed in NON-urgency order so a stable sort on insertion or
+    # question_id would not accidentally produce the right answer.
+    offsets_days = [1, 21, 3, 0, 7]  # days overdue, scrambled
+    for qid, days in zip(qids, offsets_days, strict=True):
+        await _set_card_state(
+            engine,
+            student_id=student_id,
+            question_id=qid,
+            ef=Decimal("2.5"),
+            due_at=now - timedelta(days=days),
+            last_q=4,
+        )
+    try:
+        headers = {"Authorization": f"Bearer {student_bearer}"}
+        resp = await client.get("/api/v1/me/cards-due?limit=20", headers=headers)
+        assert resp.status_code == 200, resp.text
+        items = resp.json()["items"]
+        assert len(items) == 5
+        dues = [item["due_at"] for item in items]
+        # Non-decreasing due_at: most overdue (smallest timestamp) first.
+        assert dues == sorted(dues), dues
+        # And concretely the 21-days-overdue card leads, the 0-days one trails.
+        assert dues[0] < dues[-1]
+    finally:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("DELETE FROM student_card_state WHERE student_id = :s"),
+                {"s": student_id},
+            )
+            quiz_ids = [
+                str(v)
+                for v in (
+                    await conn.execute(
+                        text("SELECT id FROM quizzes WHERE course_id = :c"),
+                        {"c": course_id},
+                    )
+                ).scalars()
+            ]
+            if quiz_ids:
+                await hard_delete_graph(conn, "quizzes", quiz_ids)
+            module_ids = [
+                str(v)
+                for v in (
+                    await conn.execute(
+                        text("SELECT id FROM modules WHERE course_id = :c"),
+                        {"c": course_id},
+                    )
+                ).scalars()
+            ]
+            if module_ids:
+                await hard_delete_graph(conn, "modules", module_ids)
+            await conn.execute(
+                text("DELETE FROM course_enrollments WHERE course_id = :c"),
+                {"c": course_id},
+            )
+
+
 async def test_dashboard_summary_agrees_with_cards_due(
     client: httpx.AsyncClient,
     student_bearer: str,
