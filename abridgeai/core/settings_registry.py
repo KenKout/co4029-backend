@@ -40,7 +40,13 @@ SettingType = Literal["bool", "int", "float"]
 
 # Groups drive the section headings in the admin UI.
 SettingGroup = Literal[
-    "ai", "chunking", "preprocessing", "knowledge_graph", "retrieval", "notifications"
+    "ai",
+    "chunking",
+    "preprocessing",
+    "knowledge_graph",
+    "retrieval",
+    "notifications",
+    "spaced_repetition",
 ]
 
 
@@ -424,6 +430,25 @@ _SPECS: tuple[SettingSpec, ...] = (
             "promptly, but a student who already got a reminder inside this "
             "window is skipped — so at the default of 24 they get at most one "
             "review reminder per day no matter how many cards are overdue."
+        ),
+    ),
+    # -- spaced_repetition ------------------------------------------------
+    SettingSpec(
+        key="spaced_repetition.daily_review_cap",
+        group="spaced_repetition",
+        type="int",
+        default=200,
+        minimum=0,
+        maximum=1000,
+        env_var="SR_DAILY_REVIEW_CAP",
+        label="Daily review cap (cards/day)",
+        description=(
+            "Maximum spaced-repetition cards a student is served for review in "
+            "one day, so a large backlog stays a finishable daily goal instead "
+            "of an unbounded wall. Cards already reviewed today count toward the "
+            "cap. This bounds the REVIEW QUEUE only — it never changes lesson "
+            "unlock eligibility or retention scoring, so progression is "
+            "unaffected. Set to 0 for no cap (serve the whole backlog)."
         ),
     ),
 )

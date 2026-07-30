@@ -36,6 +36,7 @@ from abridgeai.core.pagination.cursor import (
     decode_composite_cursor,
     encode_composite_cursor,
 )
+from abridgeai.core.runtime_settings import resolve_setting
 from abridgeai.core.security import CurrentUser, get_current_user
 from abridgeai.features.courses.api.public import get_published_lessons_for_course
 from abridgeai.features.quizzes.api.public import (
@@ -46,6 +47,7 @@ from abridgeai.features.quizzes.api.public import (
 from abridgeai.features.spaced_repetition.api.public import (
     dispatch_remediation_for_card_failure,
     get_due_card_count,
+    get_reviews_done_today,
     record_card_review,
 )
 from abridgeai.features.spaced_repetition.models import StudentCardState
@@ -293,14 +295,49 @@ async def get_review_queue(
     review screen can tell the student how many cards remain beyond this
     session. Questions that no longer resolve to an approved payload (edited to
     draft after becoming due) are dropped from the queue.
+
+    Daily cap: the served queue is bounded to what remains of the admin-set
+    ``spaced_repetition.daily_review_cap`` today (0 = unlimited), so a large
+    backlog stays a finishable daily goal. This caps the QUEUE ONLY — it never
+    touches unlock eligibility or retention scoring, so progression is
+    unaffected. ``reviewed_today`` / ``daily_remaining`` are returned so the
+    client can show progress and a "come back tomorrow" state.
     """
+    daily_cap = int(await resolve_setting(db, "spaced_repetition.daily_review_cap"))
+    reviewed_today = (
+        await get_reviews_done_today(db, current_user.user_id) if daily_cap > 0 else 0
+    )
+    # How many more cards the student may review today. cap==0 means unlimited,
+    # so the queue is bounded only by `limit`. When capped, never serve more
+    # than what's left of the cap (floored at 0 → an empty, "done for today"
+    # queue even though cards remain due).
+    if daily_cap > 0:
+        allowed_today = max(0, daily_cap - reviewed_today)
+        effective_limit = min(limit, allowed_today)
+    else:
+        effective_limit = limit
+
+    total_due = await get_due_card_count(db, current_user.user_id)
+
+    if effective_limit == 0:
+        # Cap reached: return an empty queue but still report the full backlog
+        # and the cap state so the client renders "come back tomorrow".
+        daily_remaining = 0 if daily_cap > 0 else total_due
+        return ReviewQueue(
+            items=[],
+            total_due=total_due,
+            daily_cap=daily_cap,
+            reviewed_today=reviewed_today,
+            daily_remaining=daily_remaining,
+        )
+
     page = await _load_cards_due(
         db,
         student_id=current_user.user_id,
         lesson_id=lesson_id,
         course_slug=course_slug,
         cursor=None,
-        limit=limit,
+        limit=effective_limit,
     )
     payloads = await get_review_question_payloads(db, [c.question_id for c in page.items])
     payload_by_qid = {p.id: p for p in payloads}
@@ -323,8 +360,16 @@ async def get_review_queue(
                 question=question,
             )
         )
-    total_due = await get_due_card_count(db, current_user.user_id)
-    return ReviewQueue(items=cards, total_due=total_due)
+    daily_remaining = (
+        max(0, daily_cap - reviewed_today) if daily_cap > 0 else total_due
+    )
+    return ReviewQueue(
+        items=cards,
+        total_due=total_due,
+        daily_cap=daily_cap,
+        reviewed_today=reviewed_today,
+        daily_remaining=daily_remaining,
+    )
 
 
 @router.post("/me/review/{question_id}", response_model=ReviewSubmitResult)

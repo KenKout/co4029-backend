@@ -58,3 +58,45 @@ def test_update_ef_invalid_q_raises(q: int) -> None:
 
 def test_update_ef_alpha_one_is_no_calibration() -> None:
     assert update_ef(2.5, q=5, n=0, alpha=1.0) == 2.6
+
+
+# -- guess-channel dampening (positive_delta_scale) --------------------------
+
+
+def test_update_ef_guess_scale_dampens_positive_delta() -> None:
+    # n=10 (calibration off) so we isolate the guess scale. Q=5 delta = 0.1.
+    # 4-option MCQ → guess prob 0.25 → scale 0.75 → delta 0.075 → 2.575.
+    assert update_ef(2.5, q=5, n=10, positive_delta_scale=0.75) == 2.575
+    # true/false → guess prob 0.5 → scale 0.5 → delta 0.05 → 2.55.
+    assert update_ef(2.5, q=5, n=10, positive_delta_scale=0.5) == 2.55
+
+
+def test_update_ef_guess_scale_default_is_no_effect() -> None:
+    # Default 1.0 must reproduce the pre-feature value exactly.
+    assert update_ef(2.5, q=5, n=10) == update_ef(
+        2.5, q=5, n=10, positive_delta_scale=1.0
+    )
+    assert update_ef(2.5, q=5, n=10, positive_delta_scale=1.0) == 2.6
+
+
+def test_update_ef_guess_scale_never_touches_negative_delta() -> None:
+    # A wrong answer's EF drop must be identical regardless of format — the
+    # forgetting signal is never dampened by the guess channel.
+    assert update_ef(2.5, q=0, n=10, positive_delta_scale=0.5) == update_ef(
+        2.5, q=0, n=10, positive_delta_scale=1.0
+    )
+    assert update_ef(2.5, q=2, n=10, positive_delta_scale=0.25) == pytest.approx(
+        2.18
+    )
+
+
+def test_update_ef_guess_scale_stacks_with_calibration() -> None:
+    # Early rep (n=0) MCQ: both alpha (0.6) and guess scale (0.75) apply to the
+    # positive delta → 0.1 * 0.6 * 0.75 = 0.045 → 2.545.
+    assert update_ef(2.5, q=5, n=0, alpha=0.6, positive_delta_scale=0.75) == 2.545
+
+
+@pytest.mark.parametrize("scale", [0, -0.1, 1.5, 2.0])
+def test_update_ef_invalid_guess_scale_raises(scale: float) -> None:
+    with pytest.raises(ValueError, match="positive_delta_scale must be in"):
+        update_ef(2.5, q=5, n=0, positive_delta_scale=scale)

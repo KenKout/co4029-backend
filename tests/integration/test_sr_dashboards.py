@@ -44,6 +44,7 @@ import abridgeai.features.identity.models  # noqa: F401  -- register users FK ta
 import abridgeai.features.interviews.models  # noqa: F401  -- T6.1 registers interview_* tables
 from abridgeai.core.config import get_settings
 from abridgeai.core.db import Base, get_db
+from abridgeai.core.runtime_settings import invalidate_settings_cache
 from abridgeai.core.security import create_access_token, generate_token, hash_secret
 from abridgeai.features.spaced_repetition.routers import learner_router, teacher_router
 from tests.support.db_graph import hard_delete_graph
@@ -1266,3 +1267,99 @@ async def test_review_submit_unknown_question_404(
         headers=headers,
     )
     assert resp.status_code == 404, resp.text
+
+
+async def test_review_queue_respects_daily_cap(
+    client: httpx.AsyncClient,
+    engine: AsyncEngine,
+    student_bearer: str,
+    seeded_users: SeededUsers,
+) -> None:
+    """The daily cap bounds the served queue without hiding the true backlog.
+
+    Regression cover for the daily-review-cap feature: with 3 cards due and the
+    admin cap set to 1, the queue serves only 1 card but still reports the full
+    ``total_due`` and the cap accounting (``daily_cap`` / ``reviewed_today`` /
+    ``daily_remaining``). The cap bounds the QUEUE only — it must not touch the
+    due-card count that unlock/progression reads.
+    """
+    course_id = seeded_users.course_id
+    student_id = seeded_users.student_id
+    await _enroll(engine, course_id=course_id, student_id=student_id)
+    _, _lesson, _quiz, qids = await _seed_lesson(
+        engine, course_id=course_id, n_questions=3, lesson_title="Capped"
+    )
+    past = datetime.now(tz=UTC) - timedelta(hours=1)
+    for qid in qids:
+        await _set_card_state(
+            engine,
+            student_id=student_id,
+            question_id=qid,
+            ef=Decimal("2.5"),
+            due_at=past,
+            last_q=4,
+        )
+    # Set a global daily cap of 1 and clear the resolver's TTL cache so the
+    # endpoint sees it on the next call.
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO system_settings (setting_key, setting_value_json, organization_id) "
+                "VALUES ('spaced_repetition.daily_review_cap', '1'::jsonb, NULL) "
+                "ON CONFLICT (setting_key) WHERE organization_id IS NULL "
+                "DO UPDATE SET setting_value_json = EXCLUDED.setting_value_json"
+            )
+        )
+    invalidate_settings_cache()
+    try:
+        headers = {"Authorization": f"Bearer {student_bearer}"}
+        resp = await client.get("/api/v1/me/review/queue", headers=headers)
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        # Only 1 card served (the cap), but the backlog is reported honestly.
+        assert len(body["items"]) == 1
+        assert body["total_due"] == 3
+        assert body["daily_cap"] == 1
+        assert body["reviewed_today"] == 0
+        assert body["daily_remaining"] == 1
+    finally:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text(
+                    "DELETE FROM system_settings "
+                    "WHERE setting_key = 'spaced_repetition.daily_review_cap' "
+                    "AND organization_id IS NULL"
+                )
+            )
+            await conn.execute(
+                text("DELETE FROM card_reviews WHERE student_id = :s"), {"s": student_id}
+            )
+            await conn.execute(
+                text("DELETE FROM student_card_state WHERE student_id = :s"),
+                {"s": student_id},
+            )
+            quiz_ids = [
+                str(v)
+                for v in (
+                    await conn.execute(
+                        text("SELECT id FROM quizzes WHERE course_id = :c"), {"c": course_id}
+                    )
+                ).scalars()
+            ]
+            if quiz_ids:
+                await hard_delete_graph(conn, "quizzes", quiz_ids)
+            module_ids = [
+                str(v)
+                for v in (
+                    await conn.execute(
+                        text("SELECT id FROM modules WHERE course_id = :c"), {"c": course_id}
+                    )
+                ).scalars()
+            ]
+            if module_ids:
+                await hard_delete_graph(conn, "modules", module_ids)
+            await conn.execute(
+                text("DELETE FROM course_enrollments WHERE course_id = :c"),
+                {"c": course_id},
+            )
+        invalidate_settings_cache()
