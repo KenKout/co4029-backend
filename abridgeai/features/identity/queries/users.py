@@ -72,6 +72,7 @@ async def search_users(
     *,
     status: str | None = None,
     search: str | None = None,
+    restrict_ids: Sequence[UUID] | None = None,
     sort: str | None = None,
     sort_dir: str = "asc",
     page: int = 0,
@@ -83,10 +84,16 @@ async def search_users(
     ``display_name`` lives on ``user_profiles``, so we ``outerjoin`` it for the
     search predicate; the SELECT still yields ``User`` rows only (the profile
     is loaded separately by the service, matching :func:`list_users`).
+
+    ``restrict_ids`` — when provided — limits the result to that id set (the
+    admin role filter resolves matching ids via access_control and passes them
+    here so this query never joins access-control tables directly).
     """
     stmt = select(User).outerjoin(UserProfile, UserProfile.user_id == User.id)
     if status is not None:
         stmt = stmt.where(User.status == status)
+    if restrict_ids is not None:
+        stmt = stmt.where(User.id.in_(list(restrict_ids)))
     return await paginate(
         db,
         stmt,

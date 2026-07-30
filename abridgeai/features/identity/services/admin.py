@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING
 from uuid import UUID
 
 from abridgeai.core.pagination import Page
+from abridgeai.features.access_control.api import public as access_control_api
 from abridgeai.features.identity.queries import users as user_queries
 from abridgeai.features.identity.schemas import UserListPage, UserRead
 from abridgeai.features.identity.services.profile import serialize_user
@@ -85,6 +86,7 @@ async def search_users(
     *,
     status: str | None = None,
     search: str | None = None,
+    role: str | None = None,
     sort: str | None = None,
     sort_dir: str = "asc",
     page: int = 0,
@@ -92,21 +94,40 @@ async def search_users(
 ) -> Page[UserRead]:
     """Offset page of users (server-side search + whitelisted sort) as
     ``UserRead``. Delegates the SQLAlchemy statement to the query layer, then
-    batch-loads profiles for the page (same shape as :func:`list_users`)."""
+    batch-loads profiles + role codes for the page.
+
+    ``role`` filters to users holding that role code at any scope. The id set
+    is resolved via ``access_control.api.public`` (feature independence) and
+    passed to the query as an allowlist; an empty set short-circuits to an
+    empty page without hitting the DB again.
+    """
+    restrict_ids: list[UUID] | None = None
+    if role:
+        restrict_ids = await access_control_api.list_user_ids_with_role(db, role)
+        if not restrict_ids:
+            return Page(items=[], total=0, page=page, page_size=page_size, total_pages=0)
+
     result = await user_queries.search_users(
         db,
         status=status,
         search=search,
+        restrict_ids=restrict_ids,
         sort=sort,
         sort_dir=sort_dir,
         page=page,
         page_size=page_size,
     )
+    user_ids = [u.id for u in result.items]
     profiles = {
-        p.user_id: p
-        for p in await user_queries.list_profiles(db, [u.id for u in result.items])
+        p.user_id: p for p in await user_queries.list_profiles(db, user_ids)
     }
-    items = [serialize_user(u, profiles.get(u.id)) for u in result.items]
+    role_map = await access_control_api.get_role_codes_for_users(db, user_ids)
+    items = [
+        serialize_user(u, profiles.get(u.id)).model_copy(
+            update={"roles": role_map.get(u.id, [])}
+        )
+        for u in result.items
+    ]
     return Page(
         items=items,
         total=result.total,

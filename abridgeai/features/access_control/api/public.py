@@ -13,6 +13,7 @@ will be satisfied without exceptions.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from uuid import UUID
 
@@ -281,6 +282,71 @@ async def get_active_permissions(
     return [PermissionDTO.model_validate(dict(row)) for row in rows]
 
 
+async def get_role_codes_for_users(
+    db: AsyncSession, user_ids: Sequence[UUID], *, at: datetime | None = None
+) -> dict[UUID, list[str]]:
+    """Batch-resolve the distinct active role codes for many users at once.
+
+    Backs the admin user-list "Role" column: one query for the whole page
+    instead of N per-user lookups. Returns ``{user_id: [role_code, ...]}`` with
+    codes sorted alphabetically; users with no active assignment are absent
+    from the dict (callers default to an empty list). Soft-deleted assignments
+    / roles and elapsed ``active_until`` windows are excluded, matching
+    :func:`get_role_assignments_for_user`.
+    """
+    if not user_ids:
+        return {}
+    at_value = _now_at(at)
+    stmt = (
+        select(UserRoleAssignment.user_id, Role.code)
+        .join(Role, Role.id == UserRoleAssignment.role_id)
+        .where(
+            UserRoleAssignment.user_id.in_(list(user_ids)),
+            UserRoleAssignment.deleted_at.is_(None),
+            Role.deleted_at.is_(None),
+            UserRoleAssignment.active_from <= at_value,
+            or_(
+                UserRoleAssignment.active_until.is_(None),
+                UserRoleAssignment.active_until > at_value,
+            ),
+        )
+        .distinct()
+    )
+    result: dict[UUID, set[str]] = {}
+    for user_id, code in (await db.execute(stmt)).all():
+        result.setdefault(user_id, set()).add(code)
+    return {user_id: sorted(codes) for user_id, codes in result.items()}
+
+
+async def list_user_ids_with_role(
+    db: AsyncSession, role_code: str, *, at: datetime | None = None
+) -> list[UUID]:
+    """User ids holding an active assignment of ``role_code`` (any scope).
+
+    Backs the admin user-list role filter: the identity search intersects its
+    result with this id set rather than joining access-control tables itself
+    (feature independence). Scope is not narrowed — a user with the role at any
+    scope (global / org / org_unit / course) matches.
+    """
+    at_value = _now_at(at)
+    stmt = (
+        select(UserRoleAssignment.user_id)
+        .join(Role, Role.id == UserRoleAssignment.role_id)
+        .where(
+            Role.code == role_code,
+            UserRoleAssignment.deleted_at.is_(None),
+            Role.deleted_at.is_(None),
+            UserRoleAssignment.active_from <= at_value,
+            or_(
+                UserRoleAssignment.active_until.is_(None),
+                UserRoleAssignment.active_until > at_value,
+            ),
+        )
+        .distinct()
+    )
+    return list((await db.execute(stmt)).scalars().all())
+
+
 __all__ = [
     "OrgDTO",
     "OrgUnitDTO",
@@ -290,10 +356,12 @@ __all__ = [
     "find_auto_provision_org_id",
     "get_active_permissions",
     "get_org_unit_ancestors",
-    "grant_default_student_access",
     "get_role_assignments_for_user",
+    "get_role_codes_for_users",
+    "grant_default_student_access",
     "get_user_primary_org",
     "is_user_member_of_org",
+    "list_user_ids_with_role",
     "require_any_permission",
     "require_course_permission",
     "require_org_unit_permission",
