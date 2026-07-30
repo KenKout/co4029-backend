@@ -31,7 +31,7 @@ from abridgeai.core.db.conflict_mapper import (
     register_conflict_mappings,
 )
 from abridgeai.core.db.recursive_delete import soft_delete_cascade
-from abridgeai.core.exceptions import AppError, NotFoundError
+from abridgeai.core.exceptions import AppError, ConflictError, NotFoundError
 from abridgeai.core.security import CurrentUser, utcnow
 from abridgeai.features.courses.api import public as courses_public
 from abridgeai.features.interviews.dedup import (
@@ -69,6 +69,66 @@ def _apply_patch(model: object, payload: object) -> None:
         model.persona_profile_json = override or None
     for key, value in data.items():
         setattr(model, key, value)
+
+
+# Settings that stay editable on a PUBLISHED interview config, because changing
+# them cannot alter how a live or already-graded attempt is conducted or judged.
+# Mirrors the quiz-side freeze (``quizzes/services/authoring.py``) deliberately:
+# same reasoning, same shape, so the two features behave alike.
+#
+# A WHITELIST, not a blacklist — any column added later is frozen by default
+# until someone explicitly vets it as student-safe. That is the whole point;
+# forgetting to freeze a new scoring knob is far more damaging than forgetting
+# to unfreeze a new cosmetic one.
+#
+# Why each of these is safe:
+#   title                              teacher-facing label; never enters the
+#                                      interview prompt or the transcript
+#   max_attempts / cooldown_hours      only gate STARTING a new attempt, read
+#                                      before a session exists; loosening or
+#                                      tightening them cannot disturb a run in
+#                                      flight or re-judge a finished one
+#   security_incident_summary_enabled  controls a teacher-side report only
+#                                      (routers/authoring.py), never the run
+#   lock_quiz_ef_until_pass            downstream SR/quiz gating, read outside
+#                                      the interview itself
+#
+# Everything else is frozen: time_limit_minutes, min_outcomes_to_pass, persona,
+# persona_profile, supported_modes, tts_voice, supplementary_instructions,
+# practice_mode_enabled and the security response knobs are all read by
+# ``services/taking.py`` / ``orchestrator/`` while an interview runs, or by
+# ``services/evaluation.py`` when it is graded. Changing any of them mid-cohort
+# means two students sit "the same" interview under different rules — the exact
+# unfairness a published config is supposed to rule out.
+_PUBLISHED_EDITABLE_CONFIG_FIELDS = frozenset(
+    {
+        "title",
+        "max_attempts",
+        "cooldown_hours",
+        "security_incident_summary_enabled",
+        "lock_quiz_ef_until_pass",
+    }
+)
+
+
+def _assert_config_settings_editable(config: InterviewConfig, changed_fields: set[str]) -> None:
+    """Field-aware freeze for the config PATCH on a published interview.
+
+    Draft and archived configs are unrestricted. On a published one, only
+    :data:`_PUBLISHED_EDITABLE_CONFIG_FIELDS` may change; anything that would
+    alter how the interview is conducted or graded is rejected, naming the
+    offending fields so the client can point at them.
+    """
+    if config.status != "published":
+        return
+    frozen = changed_fields - _PUBLISHED_EDITABLE_CONFIG_FIELDS
+    if frozen:
+        raise ConflictError(
+            "interview_published_setting_locked: these settings are frozen on a "
+            "published interview because they change how it is conducted or "
+            f"graded: {', '.join(sorted(frozen))}. Unpublish the interview first "
+            "to change them."
+        )
 
 
 async def _require_config(db: AsyncSession, config_id: UUID) -> InterviewConfig:
@@ -216,6 +276,11 @@ async def update_interview_config(
 ) -> InterviewConfig:
     del actor
     config = await _require_config(db, config_id)
+    # Freeze conduct/grading settings once published. ``exclude_unset`` is what
+    # makes this precise: only fields the client actually sent are considered, so
+    # a UI that echoes the whole form back does not trip on untouched values.
+    changed = set(payload.model_dump(exclude_unset=True).keys())
+    _assert_config_settings_editable(config, changed)
     _apply_patch(config, payload)
     await flush_or_conflict(db)
     await db.refresh(config)

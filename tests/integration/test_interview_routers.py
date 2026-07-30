@@ -2015,3 +2015,94 @@ async def test_authoring_unaffected_when_dedup_disabled(
     )
     assert other.status_code == 200, other.text
     assert other.json()["difficulty"] == "senior"
+
+
+async def test_published_config_rejects_conduct_setting_edits(
+    client: httpx.AsyncClient,
+    engine: AsyncEngine,
+    admin_bearer: str,
+    scenario: dict[str, uuid.UUID],
+    seeded_users: SeededUsers,
+) -> None:
+    """A published interview's conduct/grading settings are frozen (409).
+
+    Students may be sitting it right now. Changing the time limit, persona or
+    pass threshold underneath them means two students sit "the same" interview
+    under different rules.
+    """
+    config_id = await _seed_published_config(
+        engine,
+        course_id=scenario["course_id"],
+        module_id=scenario["module_id"],
+        actor_id=seeded_users.admin_id,
+    )
+
+    resp = await client.patch(
+        f"/api/v1/teacher/interview-configs/{config_id}",
+        json={"time_limit_minutes": 45},
+        headers=_auth(admin_bearer),
+    )
+    assert resp.status_code == 409, resp.text
+    message = resp.json()["detail"]["message"]
+    assert "interview_published_setting_locked" in message
+    assert "time_limit_minutes" in message
+
+
+async def test_published_config_allows_student_safe_setting_edits(
+    client: httpx.AsyncClient,
+    engine: AsyncEngine,
+    admin_bearer: str,
+    scenario: dict[str, uuid.UUID],
+    seeded_users: SeededUsers,
+) -> None:
+    """Renaming and retake limits stay editable on a published interview.
+
+    ``max_attempts`` / ``cooldown_hours`` are read before a session exists, so
+    they gate starting a NEW attempt and cannot disturb one in flight.
+    """
+    config_id = await _seed_published_config(
+        engine,
+        course_id=scenario["course_id"],
+        module_id=scenario["module_id"],
+        actor_id=seeded_users.admin_id,
+    )
+
+    resp = await client.patch(
+        f"/api/v1/teacher/interview-configs/{config_id}",
+        json={"title": "Renamed after publish", "max_attempts": 3, "cooldown_hours": 12},
+        headers=_auth(admin_bearer),
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["title"] == "Renamed after publish"
+    assert body["max_attempts"] == 3
+
+
+async def test_unpublishing_restores_full_editability(
+    client: httpx.AsyncClient,
+    engine: AsyncEngine,
+    admin_bearer: str,
+    scenario: dict[str, uuid.UUID],
+    seeded_users: SeededUsers,
+) -> None:
+    """The 409 message tells teachers to unpublish first, so that must work."""
+    config_id = await _seed_published_config(
+        engine,
+        course_id=scenario["course_id"],
+        module_id=scenario["module_id"],
+        actor_id=seeded_users.admin_id,
+    )
+
+    unpublished = await client.post(
+        f"/api/v1/teacher/interview-configs/{config_id}/unpublish",
+        headers=_auth(admin_bearer),
+    )
+    assert unpublished.status_code == 200, unpublished.text
+
+    resp = await client.patch(
+        f"/api/v1/teacher/interview-configs/{config_id}",
+        json={"time_limit_minutes": 45},
+        headers=_auth(admin_bearer),
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["time_limit_minutes"] == 45
