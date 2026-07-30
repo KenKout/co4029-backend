@@ -14,6 +14,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, Literal
+from uuid import UUID
+
+from sqlalchemy.ext.asyncio import AsyncSession
 
 if TYPE_CHECKING:
     from abridgeai.core.config import Settings
@@ -169,6 +172,26 @@ INTERACTIVE_LLM_ROLES: frozenset[LLMRole] = frozenset(
 
 
 @dataclass(frozen=True)
+class RetryPolicy:
+    """Inline HTTP-429 retry policy for a single call.
+
+    Resolved from runtime settings (``ai.rate_limit_*``) with env/default
+    fallback, so an admin can tune 429 backoff without a deploy. Only HTTP 429
+    is retried inline; every other failure propagates to the job-level retry.
+    """
+
+    max_attempts: int
+    base_delay_s: float
+    max_delay_s: float
+
+
+# Code defaults, kept in sync with the ``ai.rate_limit_*`` registry specs.
+# Used when a caller resolves no override (e.g. scripts constructing a binding
+# straight from Settings without a db session).
+DEFAULT_RETRY_POLICY = RetryPolicy(max_attempts=4, base_delay_s=1.0, max_delay_s=30.0)
+
+
+@dataclass(frozen=True)
 class ModelBinding:
     """One concrete (endpoint, key, model) tuple resolved for a single call.
 
@@ -182,9 +205,16 @@ class ModelBinding:
     model: str
     extra_headers: dict[str, str]
     timeout_s: float
+    retry: RetryPolicy = DEFAULT_RETRY_POLICY
 
 
-def binding_for(role: LLMRole, settings: Settings) -> ModelBinding:
+def binding_for(
+    role: LLMRole,
+    settings: Settings,
+    *,
+    timeout_override_s: float | None = None,
+    retry_override: RetryPolicy | None = None,
+) -> ModelBinding:
     """Resolve a ``ModelBinding`` for ``role`` against ``settings``.
 
     Precedence for chat-completion roles:
@@ -194,10 +224,18 @@ def binding_for(role: LLMRole, settings: Settings) -> ModelBinding:
 
     Embedding bypasses the tier system and reads ``EMBEDDING_*`` settings.
 
+    ``timeout_override_s`` / ``retry_override`` let a caller that has resolved
+    the DB-backed ``ai.*`` runtime settings (org-aware) inject them. When
+    ``None`` the binding falls back to the env-based ``Settings`` timeout and
+    the code-default retry policy, so callers without a db session (scripts,
+    startup probes) keep working unchanged.
+
     Raises:
         ConfigError: when the required API key is unset.
     """
     from abridgeai.ai.llm.errors import ConfigError
+
+    retry = retry_override or DEFAULT_RETRY_POLICY
 
     if role is LLMRole.EMBEDDING:
         if not settings.embedding_api_key:
@@ -209,7 +247,12 @@ def binding_for(role: LLMRole, settings: Settings) -> ModelBinding:
             api_key=settings.embedding_api_key,
             model=settings.embedding_model,
             extra_headers=_resolve_extra_headers(settings),
-            timeout_s=settings.embedding_timeout_seconds,
+            timeout_s=(
+                timeout_override_s
+                if timeout_override_s is not None
+                else settings.embedding_timeout_seconds
+            ),
+            retry=retry,
         )
 
     if not settings.llm_api_key:
@@ -223,12 +266,16 @@ def binding_for(role: LLMRole, settings: Settings) -> ModelBinding:
     # Interactive stages (user waiting on a spinner) get the tighter timeout so
     # a stalled endpoint fails fast and the job-level retry engages, instead of
     # hanging the worker for the full batch timeout. Batch roles keep the long
-    # one for large-context ingest calls.
-    timeout_s = (
-        settings.llm_interactive_timeout_seconds
-        if role in INTERACTIVE_LLM_ROLES
-        else settings.llm_timeout_seconds
-    )
+    # one for large-context ingest calls. A caller-supplied override (resolved
+    # from runtime settings) wins over the env-based Settings value.
+    if timeout_override_s is not None:
+        timeout_s = timeout_override_s
+    else:
+        timeout_s = (
+            settings.llm_interactive_timeout_seconds
+            if role in INTERACTIVE_LLM_ROLES
+            else settings.llm_timeout_seconds
+        )
 
     return ModelBinding(
         role=role,
@@ -238,6 +285,7 @@ def binding_for(role: LLMRole, settings: Settings) -> ModelBinding:
         model=model,
         extra_headers=_resolve_extra_headers(settings),
         timeout_s=timeout_s,
+        retry=retry,
     )
 
 
@@ -251,3 +299,41 @@ def _resolve_extra_headers(settings: Settings) -> dict[str, str]:
     if isinstance(cleaned, dict):
         return dict(cleaned)
     return {}
+
+
+async def resolve_binding_overrides(
+    db: AsyncSession,
+    role: LLMRole,
+    *,
+    organization_id: UUID | None = None,
+) -> tuple[float, RetryPolicy]:
+    """Resolve the DB-backed ``ai.*`` runtime settings into a (timeout, retry)
+    pair for ``role``, honouring org overrides.
+
+    Returns ``(timeout_s, RetryPolicy)`` ready to hand to :func:`binding_for`
+    as ``timeout_override_s`` / ``retry_override``. The timeout picks the
+    interactive vs batch value the same way the env-based path does — an
+    interactive role gets ``ai.llm_interactive_timeout_seconds``, embedding
+    gets ``ai.embedding_timeout_seconds``, everything else the batch timeout.
+
+    Never raises: :func:`resolve_settings` already degrades to env + defaults
+    on a database error, so the AI call path stays up even if the settings
+    table is unreachable.
+    """
+    from abridgeai.core.runtime_settings import resolve_settings  # noqa: PLC0415 - avoid import cycle
+
+    resolved = await resolve_settings(db, organization_id)
+
+    if role is LLMRole.EMBEDDING:
+        timeout_s = float(resolved["ai.embedding_timeout_seconds"])
+    elif role in INTERACTIVE_LLM_ROLES:
+        timeout_s = float(resolved["ai.llm_interactive_timeout_seconds"])
+    else:
+        timeout_s = float(resolved["ai.llm_timeout_seconds"])
+
+    retry = RetryPolicy(
+        max_attempts=int(resolved["ai.rate_limit_max_attempts"]),
+        base_delay_s=float(resolved["ai.rate_limit_base_delay_seconds"]),
+        max_delay_s=float(resolved["ai.rate_limit_max_delay_seconds"]),
+    )
+    return timeout_s, retry
