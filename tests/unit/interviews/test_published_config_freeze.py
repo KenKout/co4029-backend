@@ -38,6 +38,12 @@ FROZEN_FIELDS = [
     "security_max_consecutive_attempts",
     "security_custom_refusal_en",
     "security_custom_refusal_vi",
+    # Read before a session exists, so they cannot corrupt a run in flight — but
+    # they are the terms of assessment. Lowering max_attempts mid-cohort strands a
+    # student who already spent one; raising it gives later students more chances
+    # than earlier ones got.
+    "max_attempts",
+    "cooldown_hours",
 ]
 
 

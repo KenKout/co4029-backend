@@ -84,14 +84,18 @@ def _apply_patch(model: object, payload: object) -> None:
 # Why each of these is safe:
 #   title                              teacher-facing label; never enters the
 #                                      interview prompt or the transcript
-#   max_attempts / cooldown_hours      only gate STARTING a new attempt, read
-#                                      before a session exists; loosening or
-#                                      tightening them cannot disturb a run in
-#                                      flight or re-judge a finished one
 #   security_incident_summary_enabled  controls a teacher-side report only
 #                                      (routers/authoring.py), never the run
 #   lock_quiz_ef_until_pass            downstream SR/quiz gating, read outside
 #                                      the interview itself
+#
+# ``max_attempts`` and ``cooldown_hours`` are deliberately NOT here, even though
+# they are only read before a session exists and so cannot disturb a run in
+# flight. They are still the terms of assessment: lowering ``max_attempts``
+# mid-cohort can retroactively strand a student who already used an attempt in
+# good faith, and raising it hands later students more chances than earlier ones
+# got. "Cannot corrupt a live run" is a weaker test than "is fair to everyone
+# sitting the same published interview", and the second is the one that matters.
 #
 # Everything else is frozen: time_limit_minutes, min_outcomes_to_pass, persona,
 # persona_profile, supported_modes, tts_voice, supplementary_instructions,
@@ -103,8 +107,6 @@ def _apply_patch(model: object, payload: object) -> None:
 _PUBLISHED_EDITABLE_CONFIG_FIELDS = frozenset(
     {
         "title",
-        "max_attempts",
-        "cooldown_hours",
         "security_incident_summary_enabled",
         "lock_quiz_ef_until_pass",
     }

@@ -2069,13 +2069,48 @@ async def test_published_config_allows_student_safe_setting_edits(
 
     resp = await client.patch(
         f"/api/v1/teacher/interview-configs/{config_id}",
-        json={"title": "Renamed after publish", "max_attempts": 3, "cooldown_hours": 12},
+        json={"title": "Renamed after publish"},
         headers=_auth(admin_bearer),
     )
     assert resp.status_code == 200, resp.text
-    body = resp.json()
-    assert body["title"] == "Renamed after publish"
-    assert body["max_attempts"] == 3
+    assert resp.json()["title"] == "Renamed after publish"
+
+
+async def test_published_config_rejects_attempt_limit_edits(
+    client: httpx.AsyncClient,
+    engine: AsyncEngine,
+    admin_bearer: str,
+    scenario: dict[str, uuid.UUID],
+    seeded_users: SeededUsers,
+) -> None:
+    """Retake limits are frozen once published, despite not touching a live run.
+
+    ``max_attempts`` / ``cooldown_hours`` are read before a session exists, so
+    editing them cannot corrupt an interview in flight. They are frozen anyway
+    because they are the terms of assessment: lowering the cap mid-cohort strands
+    a student who already spent an attempt in good faith, and raising it gives
+    later students more chances than earlier ones got.
+    """
+    config_id = await _seed_published_config(
+        engine,
+        course_id=scenario["course_id"],
+        module_id=scenario["module_id"],
+        actor_id=seeded_users.admin_id,
+    )
+
+    for payload, field in (
+        ({"max_attempts": 3}, "max_attempts"),
+        ({"cooldown_hours": 12}, "cooldown_hours"),
+    ):
+        resp = await client.patch(
+            f"/api/v1/teacher/interview-configs/{config_id}",
+            json=payload,
+            headers=_auth(admin_bearer),
+        )
+        assert resp.status_code == 409, resp.text
+        message = resp.json()["detail"]["message"]
+        assert "interview_published_setting_locked" in message
+        assert field in message
 
 
 async def test_unpublishing_restores_full_editability(
