@@ -451,10 +451,17 @@ class InterviewAgent(Agent):
     async def _publish_control(self, event: tp.ControlEvent) -> None:
         """Send one control event on the application control topic.
 
+        The room is reached through ``session.room_io.room``. ``AgentSession``
+        itself has NO ``.room`` attribute — an earlier version of this method
+        looked for one, found nothing, and silently dropped every control event.
+        Unit tests did not catch it because their fake session exposed ``.room``;
+        a live probe against a real ``AgentSession`` did.
+
         Never raises: control is a convenience channel for the client, and a
-        failed publish must not abort a turn that the brain already committed.
+        failed publish must not abort a turn the brain already committed.
         """
-        room = getattr(self.session, "room", None)
+        room_io = getattr(self.session, "room_io", None)
+        room = getattr(room_io, "room", None)
         local = getattr(room, "local_participant", None)
         if local is None:
             logger.debug(

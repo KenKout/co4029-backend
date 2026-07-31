@@ -52,14 +52,23 @@ class FakeLocalParticipant:
 
 
 class FakeSession:
-    """Minimal AgentSession surface used by InterviewAgent."""
+    """Minimal AgentSession surface used by InterviewAgent.
+
+    The room is exposed as ``room_io.room``, matching the REAL ``AgentSession``.
+    This shape is load-bearing: an earlier fake exposed ``session.room`` directly,
+    which does not exist on the SDK class, so every control-publish test passed
+    while the shipped code silently dropped every event. Keep this mirroring the
+    SDK, and prefer failing here over inventing a friendlier surface.
+    """
 
     def __init__(self) -> None:
         self.said: list[tuple[str, dict]] = []
         self.interrupted = 0
         self.claims = 0
         self.local_participant = FakeLocalParticipant()
-        self.room = SimpleNamespace(local_participant=self.local_participant)
+        self.room_io = SimpleNamespace(
+            room=SimpleNamespace(local_participant=self.local_participant)
+        )
 
     def say(self, text: str, **kwargs) -> FakeSpeechHandle:
         self.said.append((text, kwargs))
@@ -430,3 +439,35 @@ class TestControlStream:
         topics = {topic for topic, _ in session.local_participant.sent}
         assert topics == {tp.TOPIC_CONTROL}
         assert tp.TOPIC_CHAT not in topics
+
+    @pytest.mark.asyncio
+    async def test_control_publish_uses_room_io_not_a_session_room_attribute(self, session):
+        """Regression: AgentSession has NO `.room`; the room is `session.room_io.room`.
+
+        The shipped code originally read `getattr(self.session, "room", None)`,
+        found nothing on the real SDK class, and silently dropped EVERY control
+        event — while this suite stayed green because the fake exposed `.room`.
+        A live probe against a real AgentSession caught it.
+
+        This test pins the contract from the other side: a session that offers
+        ONLY `.room` (the wrong shape) must publish nothing, so the fake can never
+        drift back into hiding the bug.
+        """
+        agent = make_agent(session)
+        wrong_shape = SimpleNamespace(
+            room=SimpleNamespace(local_participant=FakeLocalParticipant()),
+            said=[],
+            interrupted=0,
+        )
+        # Confirm the real class genuinely lacks `.room`, so this is not a guess.
+        from livekit.agents import AgentSession as RealAgentSession
+
+        assert not hasattr(RealAgentSession, "room")
+        assert hasattr(RealAgentSession, "room_io")
+
+        published = getattr(wrong_shape.room.local_participant, "sent", [])
+        with patch.object(type(agent), "session", property(lambda self: wrong_shape)):
+            await agent._publish_control(
+                tp.ControlEvent(status=tp.ControlStatus.ACCEPTED, turn_key="tk-1", seq=1)
+            )
+        assert published == [], "control must resolve the room via room_io, not .room"
