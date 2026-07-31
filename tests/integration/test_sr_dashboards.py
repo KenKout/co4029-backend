@@ -528,6 +528,96 @@ async def test_cards_due_ordered_by_urgency(
             )
 
 
+async def test_cards_due_excludes_unapproved_questions(
+    client: httpx.AsyncClient,
+    engine: AsyncEngine,
+    student_bearer: str,
+    seeded_users: SeededUsers,
+) -> None:
+    """A due card whose question isn't ``approved`` is not counted or listed.
+
+    Regression for the "21 due but Start Review has 13, and Computer Network
+    shows a row with nothing behind it" bug: the cards-due SQL and total_due
+    counted every due card, but the review queue drops questions that don't
+    resolve to an APPROVED payload. A pending/draft question therefore inflated
+    the count and rendered a course row the student couldn't act on. Both the
+    list and total_due must now exclude non-approved questions so the surfaces
+    agree.
+    """
+    course_id = seeded_users.course_id
+    student_id = seeded_users.student_id
+    await _enroll(engine, course_id=course_id, student_id=student_id)
+    _, _lesson, _quiz, qids = await _seed_lesson(
+        engine, course_id=course_id, n_questions=3, lesson_title="Mixed status"
+    )
+    past = datetime.now(tz=UTC) - timedelta(hours=1)
+    for qid in qids:
+        await _set_card_state(
+            engine,
+            student_id=student_id,
+            question_id=qid,
+            ef=Decimal("2.5"),
+            due_at=past,
+            last_q=4,
+        )
+    # Flip one of the three approved questions to pending: still due, its
+    # quiz/lesson are live, but it can't be served for review.
+    pending_qid = qids[0]
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("UPDATE quiz_questions SET review_status = 'pending' WHERE id = :id"),
+            {"id": pending_qid},
+        )
+    try:
+        headers = {"Authorization": f"Bearer {student_bearer}"}
+        cards = await client.get("/api/v1/me/cards-due?limit=100", headers=headers)
+        assert cards.status_code == 200, cards.text
+        items = cards.json()["items"]
+        # Only the 2 approved cards appear; the pending one is gone.
+        assert len(items) == 2
+        assert str(pending_qid) not in {i["question_id"] for i in items}
+
+        # total_due (from the review queue) agrees — no phantom 3rd card.
+        queue = await client.get("/api/v1/me/review/queue", headers=headers)
+        assert queue.status_code == 200, queue.text
+        qbody = queue.json()
+        assert qbody["total_due"] == 2
+        assert len(qbody["items"]) == 2
+        assert str(pending_qid) not in {c["question_id"] for c in qbody["items"]}
+    finally:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("DELETE FROM student_card_state WHERE student_id = :s"),
+                {"s": student_id},
+            )
+            quiz_ids = [
+                str(v)
+                for v in (
+                    await conn.execute(
+                        text("SELECT id FROM quizzes WHERE course_id = :c"),
+                        {"c": course_id},
+                    )
+                ).scalars()
+            ]
+            if quiz_ids:
+                await hard_delete_graph(conn, "quizzes", quiz_ids)
+            module_ids = [
+                str(v)
+                for v in (
+                    await conn.execute(
+                        text("SELECT id FROM modules WHERE course_id = :c"),
+                        {"c": course_id},
+                    )
+                ).scalars()
+            ]
+            if module_ids:
+                await hard_delete_graph(conn, "modules", module_ids)
+            await conn.execute(
+                text("DELETE FROM course_enrollments WHERE course_id = :c"),
+                {"c": course_id},
+            )
+
+
 async def test_dashboard_summary_agrees_with_cards_due(
     client: httpx.AsyncClient,
     student_bearer: str,

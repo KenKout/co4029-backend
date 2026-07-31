@@ -32,7 +32,7 @@ from collections.abc import Sequence
 from datetime import UTC, datetime, time
 from uuid import UUID
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from abridgeai.features.spaced_repetition.models import CardReview, StudentCardState
@@ -67,15 +67,36 @@ async def get_card_state(
 
 
 async def get_due_card_count(db: AsyncSession, student_id: UUID) -> int:
-    stmt = (
-        select(func.count())
-        .select_from(StudentCardState)
-        .where(
-            StudentCardState.student_id == student_id,
-            StudentCardState.due_at <= func.now(),
-        )
+    """Count a student's due, REVIEWABLE cards.
+
+    "Reviewable" is the crux: a card is only counted if its question still
+    resolves to an approved, non-deleted payload the review loop can actually
+    serve. This must match the reviewability predicate in the cards-due /
+    review-queue SQL (``routers/learner.py:_CARDS_DUE_SQL``) exactly —
+    otherwise ``total_due`` counts cards whose question is ``pending`` / draft /
+    soft-deleted and the student sees "21 due" but Start Review serves fewer,
+    with a course row that has nothing behind it. A raw join (rather than the
+    bare ``student_card_state`` count) is required because ``review_status`` and
+    the soft-delete flags live on the quizzes-side tables.
+    """
+    stmt = text(
+        """
+        SELECT count(*)
+        FROM student_card_state scs
+        JOIN quiz_questions qq ON qq.id = scs.question_id
+        JOIN quizzes q ON q.id = qq.quiz_id
+        JOIN quiz_source_lessons qsl ON qsl.quiz_id = q.id
+        JOIN lessons l ON l.id = qsl.lesson_id
+        WHERE scs.student_id = CAST(:student_id AS uuid)
+          AND scs.due_at IS NOT NULL
+          AND scs.due_at <= NOW()
+          AND qq.deleted_at IS NULL
+          AND q.deleted_at IS NULL
+          AND l.deleted_at IS NULL
+          AND qq.review_status = 'approved'
+        """
     )
-    return int((await db.execute(stmt)).scalar_one())
+    return int((await db.execute(stmt, {"student_id": str(student_id)})).scalar_one())
 
 
 async def get_reviews_done_today(db: AsyncSession, student_id: UUID) -> int:

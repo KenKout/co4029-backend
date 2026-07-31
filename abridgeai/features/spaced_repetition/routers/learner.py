@@ -106,6 +106,7 @@ _CARDS_DUE_SQL = text(
       AND qq.deleted_at IS NULL
       AND q.deleted_at IS NULL
       AND l.deleted_at IS NULL
+      AND qq.review_status = 'approved'
       AND (CAST(:lesson_id AS uuid) IS NULL OR qsl.lesson_id = CAST(:lesson_id AS uuid))
       AND (CAST(:course_slug AS text) IS NULL OR c.slug = CAST(:course_slug AS text))
       AND (
