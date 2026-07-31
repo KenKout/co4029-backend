@@ -28,11 +28,13 @@ from livekit.agents import (
     TurnHandlingOptions,
     get_job_context,
 )
+from livekit.agents.voice.room_io import TextInputEvent
 from livekit.plugins import deepgram, openai, silero
 
 from abridgeai.core.config import Settings
 from abridgeai.features.interviews.realtime import observability as obs
 from abridgeai.features.interviews.realtime import orchestration_bridge as bridge
+from abridgeai.features.interviews.realtime import text_protocol as tp
 from abridgeai.features.interviews.services import narration
 
 logger = logging.getLogger(__name__)
@@ -99,6 +101,16 @@ class InterviewAgent(Agent):
         # Language for adaptive interviewer utterances ("vi"/"en"). Voice parity
         # with the REST path, which reads Accept-Language. Default "en".
         self._language = language
+        # ── Typed-turn (lk.chat) guards. Voice turns are serialised by the SDK's
+        # own turn detection, but a typed turn can arrive at ANY moment — including
+        # mid-closing or while another turn is still being graded. Both would
+        # interleave `take_session_step` calls on one session.
+        self._turn_in_flight = False
+        self._closing = False
+        # Fallback ordering counter for control events. Preferred source is the
+        # brain's own `state_version`; this covers events emitted BEFORE the brain
+        # runs (accepted / rejected) which have no brain version yet.
+        self._control_seq = 0
 
     async def on_enter(self) -> None:
         """Speak the greeting completely, then begin with question one."""
@@ -144,27 +156,130 @@ class InterviewAgent(Agent):
             logger.debug("thinking filler failed (session=%s)", self._interview_session_id)
 
     async def on_user_turn_completed(self, turn_ctx: ChatContext, new_message: ChatMessage) -> None:
-        """Route the transcribed answer to the text brain; speak the result.
+        """Route a SPOKEN answer to the shared turn handler.
 
         ``StopResponse`` is raised at the end so the pipeline does not attempt
         a default (LLM) reply — we have already said everything we intend to.
+
+        This is now a thin adapter: all grading, observability, filler, TTS and
+        closing/shutdown behaviour lives in :meth:`_process_turn` so a typed turn
+        arriving over ``lk.chat`` is handled identically. Spoken turns carry no
+        turn_action (STT gives us plain text) and no client turn_key, so both
+        default.
         """
         del turn_ctx
         transcript = (new_message.text_content or "").strip()
         if not transcript:
             raise StopResponse()
 
+        await self._process_turn(transcript, source="voice")
+        raise StopResponse()
+
+    async def on_text_input(self, session: AgentSession[Any], ev: TextInputEvent) -> None:
+        """Route a TYPED answer (``lk.chat``) to the shared turn handler.
+
+        Registered as ``TextInputOptions.text_input_cb``. A custom callback is
+        mandatory rather than optional here: the SDK default calls
+        ``session.generate_reply()``, which drives the LLM plugin, and this agent
+        deliberately has none (see the module docstring) — so the default would
+        produce nothing at all.
+
+        ``session_id`` / ``student_id`` come from ``self``, i.e. from the job's
+        dispatch metadata minted into the join token server-side. Nothing
+        identifying is read from ``ev``.
+        """
+        del session  # we already hold self.session; the arg is the SDK's contract
+
+        attributes = None
+        if ev.info is not None:
+            attributes = getattr(ev.info, "attributes", None)
+
+        try:
+            turn = tp.parse_inbound_attributes(ev.text, attributes)
+        except tp.InboundTurnError as exc:
+            obs.emit(
+                obs.EV_TEXT_TURN_REJECTED,
+                session_id=self._interview_session_id,
+                rejection=exc.rejection.value,
+            )
+            await self._publish_control(
+                tp.ControlEvent(
+                    status=tp.ControlStatus.REJECTED,
+                    turn_key=(attributes or {}).get(tp.ATTR_TURN_KEY),
+                    seq=self._next_control_seq(),
+                    rejection=exc.rejection,
+                )
+            )
+            return
+
+        # Reject rather than queue: two turns in flight would interleave two
+        # `take_session_step` calls on one session, and a turn typed during the
+        # closing would be graded after the session already finished.
+        if self._closing:
+            await self._reject_turn(turn, tp.TurnRejection.SESSION_CLOSING)
+            return
+        if self._turn_in_flight:
+            await self._reject_turn(turn, tp.TurnRejection.TURN_IN_FLIGHT)
+            return
+
+        await self._publish_control(
+            tp.ControlEvent(
+                status=tp.ControlStatus.ACCEPTED,
+                turn_key=turn.turn_key,
+                seq=self._next_control_seq(),
+                turn_action=turn.turn_action,
+            )
+        )
+
+        # `_claim_user_turn` pins user_state to "speaking" for the duration so
+        # the VAD path cannot treat the typed turn's processing time as candidate
+        # silence and fire a second turn underneath it. `interrupt()` stops any
+        # in-progress agent speech — except a closing, which is published
+        # non-interruptible and is guarded by `self._closing` above anyway.
+        async with self.session._claim_user_turn():  # noqa: SLF001 - documented SDK entrypoint
+            await self.session.interrupt()
+            await self._process_turn(
+                turn.text,
+                source="text",
+                turn_action=turn.turn_action,
+                client_turn_key=turn.turn_key,
+            )
+
+    async def _process_turn(
+        self,
+        transcript: str,
+        *,
+        source: str,
+        turn_action: str = tp.DEFAULT_TURN_ACTION,
+        client_turn_key: str | None = None,
+    ) -> None:
+        """The one turn implementation, shared by the spoken and typed paths.
+
+        Extracted verbatim from ``on_user_turn_completed`` so both modalities get
+        identical grading, observability, thinking filler, TTS, closing playout
+        and shutdown. Anything added here applies to both by construction — which
+        is the point: the previous shape made it possible for a typed turn to
+        skip the finish/shutdown path entirely.
+
+        ``source`` only tags observability. ``turn_action`` and
+        ``client_turn_key`` are always defaults on the voice path, preserving its
+        existing behaviour exactly.
+        """
         # One id correlates the I/O events emitted here with the decision-level
-        # events the bridge emits for this same turn.
-        turn_id = uuid4().hex
+        # events the bridge emits for this same turn. A client-supplied turn_key
+        # is reused so the brain's idempotency and our telemetry agree.
+        turn_id = client_turn_key or uuid4().hex
         turn_started = obs.monotonic()
-        # STT produced a final transcript (content NOT logged — length only).
+        self._turn_in_flight = True
+        # STT/typed produced a final transcript (content NOT logged — length only).
         obs.emit(
             obs.EV_TURN_STARTED,
             session_id=self._interview_session_id,
             turn_id=turn_id,
             transcript_chars=len(transcript),
             language=self._language,
+            source=source,
+            turn_action=turn_action,
         )
 
         # Cover the brain's thinking time with a short acknowledgement rather
@@ -182,9 +297,11 @@ class InterviewAgent(Agent):
                 transcript,
                 language=self._language,
                 turn_id=turn_id,
+                turn_action=turn_action,
             )
         except Exception as exc:
             filler_task.cancel()
+            self._turn_in_flight = False
             logger.exception("interview turn failed (session=%s)", self._interview_session_id)
             obs.emit(
                 obs.EV_TURN_ERROR,
@@ -192,8 +309,21 @@ class InterviewAgent(Agent):
                 turn_id=turn_id,
                 error_class=type(exc).__name__,
                 latency_ms=obs.latency_ms(turn_started),
+                source=source,
             )
-            raise StopResponse() from None
+            if source == "text":
+                await self._publish_control(
+                    tp.ControlEvent(
+                        status=tp.ControlStatus.FAILED,
+                        turn_key=client_turn_key,
+                        seq=self._next_control_seq(),
+                        turn_action=turn_action,
+                        error_class=type(exc).__name__,
+                    )
+                )
+            # The spoken path raises StopResponse in its caller; the typed path
+            # has no pipeline to stop, so swallowing here is correct for both.
+            return
 
         filler_task.cancel()
 
@@ -206,7 +336,30 @@ class InterviewAgent(Agent):
             decision_latency_ms=obs.latency_ms(turn_started),
             will_speak=bool(result.speak_text),
             finished=result.is_finished,
+            source=source,
         )
+
+        # Mark closing BEFORE the (non-interruptible) closing utterance starts,
+        # so a turn typed during playout is rejected rather than graded late.
+        if result.is_finished:
+            self._closing = True
+
+        # Publish structured state before speaking: the client should be able to
+        # re-enable its composer / show the next question without waiting for TTS
+        # playout, which can take many seconds.
+        if source == "text":
+            await self._publish_control(
+                tp.ControlEvent(
+                    status=tp.ControlStatus.COMPLETED,
+                    turn_key=client_turn_key,
+                    seq=self._next_control_seq(),
+                    turn_action=turn_action,
+                    state_version=result.state_version,
+                    state=self._control_state(result),
+                )
+            )
+
+        self._turn_in_flight = False
 
         # Track the LAST utterance's handle so, on a finished turn, we can wait
         # for the closing to finish PLAYING OUT before we shut the room down.
@@ -246,7 +399,77 @@ class InterviewAgent(Agent):
             if ctx is not None:
                 ctx.shutdown(reason="interview_complete")
 
-        raise StopResponse()
+    def _next_control_seq(self) -> int:
+        """Monotonic per-session sequence for control-event ordering.
+
+        Not a timestamp on purpose: client clocks skew, and LiveKit gives no
+        cross-stream delivery-order guarantee, so the client needs a value it can
+        compare exactly and use to drop a stale event after a reconnect.
+
+        This is the AGENT's own sequence, distinct from the brain's
+        ``state_version``. A COMPLETED event carries both: ``state_version`` for
+        reconciling against persisted history, this for ordering the control
+        stream itself (accepted/rejected events have no brain version).
+        """
+        self._control_seq += 1
+        return self._control_seq
+
+    @staticmethod
+    def _control_state(result: bridge.TurnResult) -> dict[str, Any]:
+        """The structured turn state a typed client needs, mirroring `/respond`.
+
+        Deliberately an explicit projection, not `asdict(result)`: only fields the
+        UI renders are published, so an internal field added to ``TurnResult``
+        later cannot leak to the browser by default.
+        """
+        return {
+            "is_finished": result.is_finished,
+            "next_question_text": result.next_question_text,
+            "followup_text": result.followup_text,
+            "ai_turn_text": result.ai_turn_text,
+            "question_type": result.question_type,
+            "time_remaining_seconds": result.time_remaining_seconds,
+        }
+
+    async def _reject_turn(self, turn: tp.InboundTurn, rejection: tp.TurnRejection) -> None:
+        """Report a turn refused by the in-flight / closing guards."""
+        obs.emit(
+            obs.EV_TEXT_TURN_REJECTED,
+            session_id=self._interview_session_id,
+            rejection=rejection.value,
+        )
+        await self._publish_control(
+            tp.ControlEvent(
+                status=tp.ControlStatus.REJECTED,
+                turn_key=turn.turn_key,
+                seq=self._next_control_seq(),
+                turn_action=turn.turn_action,
+                rejection=rejection,
+            )
+        )
+
+    async def _publish_control(self, event: tp.ControlEvent) -> None:
+        """Send one control event on the application control topic.
+
+        Never raises: control is a convenience channel for the client, and a
+        failed publish must not abort a turn that the brain already committed.
+        """
+        room = getattr(self.session, "room", None)
+        local = getattr(room, "local_participant", None)
+        if local is None:
+            logger.debug(
+                "no local participant; dropping control event (session=%s)",
+                self._interview_session_id,
+            )
+            return
+        try:
+            await local.send_text(event.to_json(), topic=tp.TOPIC_CONTROL)
+        except Exception:  # noqa: BLE001 - client convenience channel; never fail a turn
+            logger.warning(
+                "failed to publish control event (session=%s, status=%s)",
+                self._interview_session_id,
+                event.status.value,
+            )
 
     async def _await_closing_playout(
         self,

@@ -164,9 +164,7 @@ async def test_handle_student_turn_session_finished(session_id, student_id):
                 patch(
                     "abridgeai.features.interviews.realtime.orchestration_bridge.ensure_ceremony_message",
                     new_callable=AsyncMock,
-                    return_value=MagicMock(
-                        content_text="Thank you. That concludes the interview."
-                    ),
+                    return_value=MagicMock(content_text="Thank you. That concludes the interview."),
                 ),
             ):
                 result = await handle_student_turn(
@@ -453,3 +451,103 @@ async def test_adaptive_closing_suppresses_canned_remark(session_id, student_id)
     assert result.speak_text == "Thank you. That concludes your interview. Goodbye."
     assert result.suppress_default_closing is True
     mock_submit.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_turn_action_is_forwarded_to_take_session_step(session_id, student_id):
+    """A hint/clarify/repeat request must NOT be graded as an answer.
+
+    Regression guard with a specific history: the shared-handler tests assert the
+    agent passes `turn_action` INTO this bridge, and they kept passing when the
+    bridge's own forwarding to `take_session_step` was deleted. This closes that
+    hop — the one where a "give me a hint" request silently becomes an answer.
+    """
+    with (
+        patch(
+            "abridgeai.features.interviews.realtime.orchestration_bridge.take_session_step",
+            new_callable=AsyncMock,
+        ) as mock_step,
+        patch(
+            "abridgeai.features.interviews.realtime.orchestration_bridge.get_sessionmaker"
+        ) as mock_maker,
+    ):
+        mock_step.return_value = {"followup_text": "Here is a hint.", "is_finished": False}
+        mock_db = AsyncMock()
+        ctx = AsyncMock()
+        ctx.__aenter__ = AsyncMock(return_value=mock_db)
+        ctx.__aexit__ = AsyncMock(return_value=None)
+        mock_maker.return_value = MagicMock(return_value=ctx)
+
+        await handle_student_turn(
+            session_id=session_id,
+            student_id=student_id,
+            transcript="I am stuck",
+            turn_action="hint",
+        )
+
+    assert mock_step.call_args.kwargs["turn_action"] == "hint"
+
+
+@pytest.mark.asyncio
+async def test_turn_action_defaults_to_answer(session_id, student_id):
+    """The voice path passes no action; it must arrive as a plain answer."""
+    with (
+        patch(
+            "abridgeai.features.interviews.realtime.orchestration_bridge.take_session_step",
+            new_callable=AsyncMock,
+        ) as mock_step,
+        patch(
+            "abridgeai.features.interviews.realtime.orchestration_bridge.get_sessionmaker"
+        ) as mock_maker,
+    ):
+        mock_step.return_value = {"followup_text": "ok", "is_finished": False}
+        mock_db = AsyncMock()
+        ctx = AsyncMock()
+        ctx.__aenter__ = AsyncMock(return_value=mock_db)
+        ctx.__aexit__ = AsyncMock(return_value=None)
+        mock_maker.return_value = MagicMock(return_value=ctx)
+
+        await handle_student_turn(
+            session_id=session_id, student_id=student_id, transcript="spoken answer"
+        )
+
+    assert mock_step.call_args.kwargs["turn_action"] == "answer"
+
+
+@pytest.mark.asyncio
+async def test_structured_state_is_populated_for_text_clients(session_id, student_id):
+    """TurnResult must carry the /respond-equivalent fields the control stream sends."""
+    next_q = MagicMock()
+    next_q.prompt_text = "What is a star schema?"
+    next_q.question_type = "technical"
+    next_q.difficulty = "medium"
+    with (
+        patch(
+            "abridgeai.features.interviews.realtime.orchestration_bridge.take_session_step",
+            new_callable=AsyncMock,
+        ) as mock_step,
+        patch(
+            "abridgeai.features.interviews.realtime.orchestration_bridge.get_sessionmaker"
+        ) as mock_maker,
+    ):
+        mock_step.return_value = {
+            "next_question": next_q,
+            "is_finished": False,
+            "state_version": 12,
+            "time_remaining_seconds": 900,
+        }
+        mock_db = AsyncMock()
+        ctx = AsyncMock()
+        ctx.__aenter__ = AsyncMock(return_value=mock_db)
+        ctx.__aexit__ = AsyncMock(return_value=None)
+        mock_maker.return_value = MagicMock(return_value=ctx)
+
+        result = await handle_student_turn(
+            session_id=session_id, student_id=student_id, transcript="an answer"
+        )
+
+    # These are what a typed client renders without an extra REST round-trip.
+    assert result.next_question_text == "What is a star schema?"
+    assert result.question_type == "technical"
+    assert result.state_version == 12
+    assert result.time_remaining_seconds == 900

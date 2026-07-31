@@ -65,6 +65,11 @@ EV_SESSION_SUBMITTED = "voice.session_submitted"
 EV_EVALUATION_ENQUEUED = "voice.evaluation_enqueued"
 EV_TURN_ERROR = "voice.turn_error"
 
+# Typed turn (lk.chat) refused before it reached the brain — malformed
+# attributes, or a guard (another turn in flight / session already closing).
+# Distinct from EV_TURN_ERROR, which means the brain itself raised.
+EV_TEXT_TURN_REJECTED = "voice.text_turn_rejected"
+
 # Shared prompt-injection/output-integrity events. These use the same compact,
 # transcript-free emitter for REST, hybrid, and voice paths.
 EV_SECURITY_ASSESSED = "interview.security.assessed"

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from typing import Any
 from uuid import UUID, uuid4
 
 from arq import create_pool
@@ -58,6 +59,24 @@ class TurnResult:
     speak_text: str | None
     is_finished: bool
     suppress_default_closing: bool = False
+
+    # ── Structured turn state, for clients that drive the interview over
+    # LiveKit text streams instead of REST `/respond` (hybrid text mode).
+    #
+    # These mirror the fields `InterviewSubmitAnswerResponse` returns, so a typed
+    # client learns the new state from the control stream and needs no extra
+    # round-trip. All default to None/absent so the voice path — which ignores
+    # them — is unaffected.
+    #
+    # `state_version` is the brain's OWN per-session version (from
+    # `take_session_step`), not a counter invented here: it is the value the
+    # client must reconcile persisted history against.
+    next_question_text: str | None = None
+    followup_text: str | None = None
+    ai_turn_text: str | None = None
+    question_type: str | None = None
+    state_version: int | None = None
+    time_remaining_seconds: int | None = None
 
 
 def _build_actor(student_id: UUID) -> CurrentUser:
@@ -242,6 +261,7 @@ async def handle_student_turn(
     *,
     language: str = "en",
     turn_id: str | None = None,
+    turn_action: str = "answer",
 ) -> TurnResult:
     """Feed a transcribed answer to the text brain; return the next utterance.
 
@@ -265,6 +285,7 @@ async def handle_student_turn(
             actor,
             language=language,
             turn_key=turn_id,
+            turn_action=turn_action,
         )
 
         # ``ai_turn_text`` is the adaptive combined utterance (ack + transition +
@@ -290,6 +311,18 @@ async def handle_student_turn(
         )
         # should_finish is the adaptive end signal; is_finished the legacy one.
         finished = bool(result.get("should_finish") or result.get("is_finished"))
+
+        # Structured state for text clients, built ONCE here and spread into
+        # every return below so no branch can drift from another. The voice path
+        # ignores these fields entirely.
+        turn_state: dict[str, Any] = {
+            "next_question_text": next_question_text,
+            "followup_text": followup_text,
+            "ai_turn_text": ai_turn_text,
+            "question_type": selected_question_type,
+            "state_version": result.get("state_version"),
+            "time_remaining_seconds": result.get("time_remaining_seconds"),
+        }
 
         # ── Observability: decision-level event (no transcript content) ──────
         # ``action`` is present only on the adaptive path; its absence is the
@@ -365,24 +398,25 @@ async def handle_student_turn(
                 speak_text=closing,
                 is_finished=True,
                 suppress_default_closing=suppress,
+                **turn_state,
             )
 
         # Not finished. Prefer the adaptive combined utterance when present: it
         # already contains ack + transition + the selected question, so we must
         # NOT also append next_question (that would double-speak the question).
         if ai_turn_text:
-            return TurnResult(speak_text=ai_turn_text, is_finished=False)
+            return TurnResult(speak_text=ai_turn_text, is_finished=False, **turn_state)
 
         # ── Legacy path (adaptive off / failed) — unchanged behaviour ────────
         if followup_text:
-            return TurnResult(speak_text=followup_text, is_finished=False)
+            return TurnResult(speak_text=followup_text, is_finished=False, **turn_state)
 
         if next_question_text is not None:
-            return TurnResult(speak_text=next_question_text, is_finished=False)
+            return TurnResult(speak_text=next_question_text, is_finished=False, **turn_state)
 
         # Defensive: no follow-up, not finished, no next question.
         logger.warning("interview turn produced no next utterance (session=%s)", session_id)
-        return TurnResult(speak_text=None, is_finished=True)
+        return TurnResult(speak_text=None, is_finished=True, **turn_state)
 
 
 async def record_integrity_event(
