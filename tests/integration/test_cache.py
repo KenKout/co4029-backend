@@ -13,6 +13,7 @@ from sqlalchemy import String, create_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 
 from abridgeai.core.cache import (
+    CARDS_DUE,
     INVALIDATION_RULES,
     PERM_USER,
     SESSION,
@@ -54,6 +55,14 @@ class FakeUser(_Base):
     status: Mapped[str] = mapped_column(String(32), default="active")
 
 
+class FakeCardState(_Base):
+    """Stand-in for student_card_state — exercises CARDS_DUE prefix invalidation."""
+
+    __tablename__ = "_cache_test_card_state"
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    student_id: Mapped[str] = mapped_column(String(64))
+
+
 @pytest.fixture(autouse=True)
 def _redis_url(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("REDIS_URL", TEST_REDIS_URL)
@@ -83,6 +92,7 @@ def invalidator_rules() -> Any:
     INVALIDATION_RULES[FakeUserRoleAssignment] = [PERM_USER]
     INVALIDATION_RULES[FakeAuthSession] = [SESSION, SESSION_BY_REFRESH_HASH]
     INVALIDATION_RULES[FakeUser] = [USER_STATUS, PERM_USER]
+    INVALIDATION_RULES[FakeCardState] = [CARDS_DUE]
     USER_SESSION_CASCADE_MODELS.add(FakeUser)
     register_cache_invalidator()
     yield
@@ -129,6 +139,43 @@ async def test_invalidation_after_write(redis_clean: Any, sqlite_session: Sessio
     await drain_invalidations()
 
     assert await redis_clean.exists(key) == 0
+
+
+@pytest.mark.asyncio
+async def test_prefix_match_invalidates_suffixed_cards_due(
+    redis_clean: Any, sqlite_session: Session
+) -> None:
+    """A prefix_match key clears every suffixed variant, not just the bare key.
+
+    Regression for the "card still lives in cards-due after review" bug: the
+    live cards_due keys are ``cards_due:{user}:{lesson}:{course}:{cursor}:{limit}``
+    but the CARDS_DUE pattern is ``cards_due:{user}``. Without prefix_match the
+    after_flush listener issued an exact DEL of the bare key (which never
+    exists) and left every real entry to rot until its 60s TTL. With
+    prefix_match the listener pattern-deletes ``cards_due:{user}*``.
+    """
+    user = "u-review"
+    # Live keys as built by _build_cards_due_cache_key (with scopes/pagination).
+    live_keys = [
+        f"cards_due:{user}:all:all:first:20",
+        f"cards_due:{user}:all:data-warehouses:first:20",
+        f"cards_due:{user}:lesson-xyz:all:cursorABC:100",
+    ]
+    for k in live_keys:
+        await redis_clean.set(k, json.dumps({"items": []}), ex=60)
+    # A different user's key must survive.
+    other_key = "cards_due:u-other:all:all:first:20"
+    await redis_clean.set(other_key, json.dumps({"items": []}), ex=60)
+    for k in live_keys:
+        assert await redis_clean.exists(k) == 1
+
+    sqlite_session.add(FakeCardState(student_id=user))
+    sqlite_session.flush()
+    await drain_invalidations()
+
+    for k in live_keys:
+        assert await redis_clean.exists(k) == 0, f"{k} should have been invalidated"
+    assert await redis_clean.exists(other_key) == 1, "other user's cache untouched"
 
 
 @pytest.mark.asyncio
