@@ -101,7 +101,10 @@ _REQUIRE_CREATE = require_permission("course.create")
 _REQUIRE_AUTHORING_LIST = require_any_permission("course.read.draft", "course.create")
 _REQUIRE_COURSE_UPDATE = require_course_permission("course_id", "course.update")
 _REQUIRE_COURSE_PUBLISH = require_course_permission("course_id", "course.publish")
-_REQUIRE_COURSE_DELETE = require_course_permission("course_id", "course.delete")
+# Course deletion is manager-owned. ``allow_owner=False`` kills the ownership
+# short-circuit so a teacher who owns the course still cannot delete it —
+# ownership grants authoring access (course.update), NOT lifecycle control.
+_REQUIRE_COURSE_DELETE = require_course_permission("course_id", "course.delete", allow_owner=False)
 # Learning outcomes are manager-owned (§LO split): gate on learning_outcome.manage
 # and disable the owner short-circuit so a course-owning teacher (who holds
 # course.update but NOT learning_outcome.manage) cannot author LOs.

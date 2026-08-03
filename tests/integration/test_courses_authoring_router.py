@@ -1647,15 +1647,11 @@ async def test_course_outcome_hierarchy(
     ]
 
     # Cycle guard: moving L.O.1 under its own grandchild must 4xx.
-    cycle = await client.patch(
-        f"{base}/{lo1['id']}", json={"parent_id": g1["id"]}, headers=auth
-    )
+    cycle = await client.patch(f"{base}/{lo1['id']}", json={"parent_id": g1["id"]}, headers=auth)
     assert cycle.status_code == 400, cycle.text
 
     # Re-parent Child B (1.2) to be a child of Root two → becomes 2.1.
-    moved = await client.patch(
-        f"{base}/{c2['id']}", json={"parent_id": lo2["id"]}, headers=auth
-    )
+    moved = await client.patch(f"{base}/{c2['id']}", json={"parent_id": lo2["id"]}, headers=auth)
     assert moved.status_code == 200, moved.text
     after_move = {o["id"]: o for o in (await client.get(base, headers=auth)).json()}
     assert after_move[c2["id"]]["code"] == "2.1"
@@ -1736,4 +1732,53 @@ async def test_course_outcomes_frozen_once_published(
         await conn.execute(
             text("DELETE FROM course_learning_outcomes WHERE course_id = :cid"),
             {"cid": course_a},
+        )
+
+
+async def test_teacher_with_course_scope_cannot_delete_course(
+    client: httpx.AsyncClient,
+    teacher_bearer: str,
+    scenario: dict[str, uuid.UUID | str],
+    engine: AsyncEngine,
+) -> None:
+    """Course deletion is manager-owned: a teacher holding ``course.update``
+    scope on the course (not the owner) gets 403 even though they can author
+    its content (FIX: ``allow_owner=False`` on ``course.delete``)."""
+    auth = {"Authorization": f"Bearer {teacher_bearer}"}
+    resp = await client.delete(f"/api/v1/teacher/courses/{scenario['course_a']}", headers=auth)
+    assert resp.status_code == 403, resp.text
+
+    # The course is still there (soft-delete never ran).
+    detail = await client.get(f"/api/v1/teacher/courses/{scenario['course_a']}", headers=auth)
+    assert detail.status_code == 200, detail.text
+    assert detail.json()["id"] == str(scenario["course_a"])
+
+
+async def test_manager_can_delete_course(
+    client: httpx.AsyncClient,
+    manager_bearer: str,
+    scenario: dict[str, uuid.UUID | str],
+    engine: AsyncEngine,
+) -> None:
+    """A manager holding ``course.delete`` at org scope CAN soft-delete the
+    course via the teacher route (same permission gate, no owner needed)."""
+    auth = {"Authorization": f"Bearer {manager_bearer}"}
+    resp = await client.delete(f"/api/v1/teacher/courses/{scenario['course_a']}", headers=auth)
+    assert resp.status_code == 204, resp.text
+
+    # Soft-delete tombstone applied.
+    async with engine.begin() as conn:
+        deleted_at = (
+            await conn.execute(
+                text("SELECT deleted_at FROM courses WHERE id = :cid"),
+                {"cid": scenario["course_a"]},
+            )
+        ).scalar_one()
+    assert deleted_at is not None
+
+    # Restore for the rest of the suite (test isolation).
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("UPDATE courses SET deleted_at = NULL, deleted_by = NULL WHERE id = :cid"),
+            {"cid": scenario["course_a"]},
         )

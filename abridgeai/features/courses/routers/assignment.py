@@ -46,6 +46,7 @@ from abridgeai.features.courses.schemas import (
     TeacherAssignmentRead,
 )
 from abridgeai.features.courses.services import assignment as assignment_service
+from abridgeai.features.courses.services.authoring import delete_course as delete_course_service
 
 router = APIRouter(prefix="/dept", tags=["courses-assignment"])
 
@@ -70,6 +71,10 @@ _REQUIRE_COURSE_STAFFING = require_course_permission(
 _REQUIRE_ORG_UNIT_STAFFING = require_org_unit_permission(
     "org_unit_id", "course.assign_teacher", "user.role_assign", "system.administer"
 )
+# Course deletion is manager-owned: only an explicit ``course.delete`` grant
+# passes. ``allow_owner=False`` kills the ownership short-circuit so a
+# teacher-owner cannot delete their own course through the dept surface.
+_REQUIRE_COURSE_DELETE = require_course_permission("course_id", "course.delete", allow_owner=False)
 
 
 def _not_found(detail: str) -> HTTPException:
@@ -187,6 +192,29 @@ async def get_course_roster(
     """Enrolled students for HOD/Manager oversight (read-only)."""
     rows = await assignment_service.list_course_roster(db, course_id)
     return [RosterEntry.model_validate(row) for row in rows]
+
+
+@router.delete(
+    "/courses/{course_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def delete_dept_course(
+    course_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_COURSE_DELETE)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> None:
+    """Manager-facing soft-delete of a course (reversible tombstone).
+
+    Manager-owned (``course.delete``): a manager can delete a course in
+    their org; HOD (``course.assign_teacher`` only) and teachers — even
+    the course owner — get 403. Cascades to the course's children via
+    ``soft_delete_cascade`` (same semantics as the admin delete).
+    """
+    try:
+        await delete_course_service(db, course_id, current_user)
+    except NotFoundError as exc:
+        raise _not_found(str(exc)) from exc
+    await db.commit()
 
 
 @router.get("/org-units/{org_unit_id}/courses", response_model=list[CourseAuthoring])
