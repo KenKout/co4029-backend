@@ -235,9 +235,24 @@ class InterviewAgent(Agent):
         # the VAD path cannot treat the typed turn's processing time as candidate
         # silence and fire a second turn underneath it. `interrupt()` stops any
         # in-progress agent speech — except a closing, which is published
-        # non-interruptible and is guarded by `self._closing` above anyway.
+        # non-interruptible and is guarded by `self._closing` above anyway, and
+        # except the OPENING block (greeting + first question), which is also
+        # published `allow_interruptions=False` so it always plays fully. If the
+        # candidate types while the opening is still being spoken, the SDK
+        # raises RuntimeError from `interrupt()`; the turn must still be graded
+        # — the speech simply keeps playing underneath it (the response queues
+        # after it). Interrupt is a courtesy, never a precondition: a typed
+        # turn that fails here must not die, or the client waits forever on an
+        # ACCEPTED control event that never resolves (observed in staging).
         async with self.session._claim_user_turn():  # noqa: SLF001 - documented SDK entrypoint
-            await self.session.interrupt()
+            try:
+                await self.session.interrupt()
+            except RuntimeError:
+                logger.warning(
+                    "typed turn could not interrupt current speech (session=%s); "
+                    "grading anyway",
+                    self._interview_session_id,
+                )
             await self._process_turn(
                 turn.text,
                 source="text",

@@ -387,6 +387,36 @@ class TestGuards:
         assert session.interrupted == 1
         assert session.claims == 1
 
+    @pytest.mark.asyncio
+    async def test_typed_turn_survives_a_refused_interrupt(self):
+        """A typed turn during the opening block must still be graded.
+
+        The opening (greeting + first question) is spoken with
+        ``allow_interruptions=False`` so it always plays fully. If the candidate
+        types while it is still being spoken, the SDK raises RuntimeError from
+        ``session.interrupt()`` — and the turn must NOT die: we already published
+        ACCEPTED, so a drop would leave the client waiting forever. Regression
+        for the failure observed in the live staging pass.
+        """
+
+        class _RefusingSession(FakeSession):
+            async def interrupt(self) -> None:
+                raise RuntimeError("This generation handle does not allow interruptions")
+
+        refusing = _RefusingSession()
+        agent = make_agent(refusing)
+        brain = AsyncMock(return_value=NOT_FINISHED)
+        with patch(
+            "abridgeai.features.interviews.realtime.session_runtime.bridge.handle_student_turn",
+            new=brain,
+        ):
+            await agent.on_text_input(refusing, text_event("early answer"))
+        # The brain ran despite the refused interrupt…
+        brain.assert_awaited_once()
+        # …and the client still got the full accepted → completed sequence.
+        evs = control_events(refusing)
+        assert [e["status"] for e in evs] == ["accepted", "completed"]
+
 
 class TestControlStream:
     @pytest.mark.asyncio

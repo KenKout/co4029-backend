@@ -187,6 +187,10 @@ max-complexity = 12
     # sequence. Splitting it would scatter a script meant to read top-to-bottom.
     "C901",
 ]
+# Live staging pass — walks a real hybrid session through onboarding, joins the
+# room, and drives one typed turn end-to-end. Same shape as the other probes:
+# CLI prints a human report (T20), sys.path insert (E402), linear main (C901).
+"scripts/probe_live_staging.py" = ["T20", "E501", "E402", "I001", "C901"]
 
 [tool.mypy]
 python_version = "3.12"
