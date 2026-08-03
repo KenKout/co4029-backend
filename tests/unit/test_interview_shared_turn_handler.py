@@ -127,17 +127,59 @@ def _no_filler_delay():
         yield
 
 
+# `turn_state` is the full serialized `InterviewSubmitAnswerResponse` payload,
+# exactly as `handle_student_turn` now builds it via the shared projection. The
+# fixtures carry a realistic subset (not a bespoke shape) so a test asserting on
+# `state` is asserting on the real wire contract — including `next_question` as a
+# projected object, which is what the client needs to render the next card.
 NOT_FINISHED = TurnResult(
     speak_text="Good. Next question?",
     is_finished=False,
-    next_question_text="Next question?",
     state_version=3,
+    turn_state={
+        "next_question": {
+            "id": "11111111-1111-1111-1111-111111111111",
+            "prompt_text": "Next question?",
+            "question_type": "technical",
+        },
+        "is_finished": False,
+        "ai_followup_text": None,
+        "time_remaining_seconds": 540,
+        "ai_turn_text": None,
+        "language": "en",
+        "should_narrate": None,
+        "should_await_response": None,
+        "should_finish": None,
+        "assistance_kind": None,
+        "pending_confirmation": None,
+        "interaction_state": None,
+        "transition_id": None,
+        "transition_text": None,
+        "transition_target": None,
+    },
 )
 FINISHED = TurnResult(
     speak_text="That concludes the interview.",
     is_finished=True,
     suppress_default_closing=True,
     state_version=9,
+    turn_state={
+        "next_question": None,
+        "is_finished": True,
+        "ai_followup_text": None,
+        "time_remaining_seconds": 0,
+        "ai_turn_text": None,
+        "language": "en",
+        "should_narrate": None,
+        "should_await_response": None,
+        "should_finish": True,
+        "assistance_kind": None,
+        "pending_confirmation": None,
+        "interaction_state": None,
+        "transition_id": None,
+        "transition_text": None,
+        "transition_target": None,
+    },
 )
 
 
@@ -384,7 +426,14 @@ class TestControlStream:
             await agent.on_text_input(session, text_event("a"))
         completed = [e for e in control_events(session) if e["status"] == "completed"][0]
         assert completed["state_version"] == 3
-        assert completed["state"]["next_question_text"] == "Next question?"
+        # The OBJECT, not just its text: the client builds its transcript turn id
+        # from `next_question.id`, so publishing only the prompt string would
+        # leave a typed client unable to render the next Question Card.
+        assert completed["state"]["next_question"]["prompt_text"] == "Next question?"
+        assert completed["state"]["next_question"]["id"]
+        assert completed["state"]["next_question"]["question_type"] == "technical"
+        # The timer must be a real countdown, not the null the brain returns.
+        assert completed["state"]["time_remaining_seconds"] == 540
 
     @pytest.mark.asyncio
     async def test_failed_event_reports_only_the_error_class(self, session):

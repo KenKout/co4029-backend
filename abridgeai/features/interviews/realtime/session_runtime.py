@@ -418,18 +418,21 @@ class InterviewAgent(Agent):
     def _control_state(result: bridge.TurnResult) -> dict[str, Any]:
         """The structured turn state a typed client needs, mirroring `/respond`.
 
-        Deliberately an explicit projection, not `asdict(result)`: only fields the
-        UI renders are published, so an internal field added to ``TurnResult``
-        later cannot leak to the browser by default.
+        ``result.turn_state`` is already the full, JSON-serialized
+        ``InterviewSubmitAnswerResponse`` payload, built by the SAME classmethod
+        the REST route uses — so this is a pass-through rather than a projection.
+
+        It deliberately no longer hand-lists fields. The previous version did,
+        and that is exactly how it came to publish six fields while REST returned
+        fifteen: `next_question` (the object the client needs to render the next
+        Question Card), every `transition_*` field, `pending_confirmation`,
+        `assistance_kind` and others were silently absent, and the timer was
+        always null because the brain never returns it. A pass-through cannot
+        drift from REST; a hand-written list will.
+
+        `is_finished` is part of the payload already, so it is not re-added here.
         """
-        return {
-            "is_finished": result.is_finished,
-            "next_question_text": result.next_question_text,
-            "followup_text": result.followup_text,
-            "ai_turn_text": result.ai_turn_text,
-            "question_type": result.question_type,
-            "time_remaining_seconds": result.time_remaining_seconds,
-        }
+        return dict(result.turn_state)
 
     async def _reject_turn(self, turn: tp.InboundTurn, rejection: tp.TurnRejection) -> None:
         """Report a turn refused by the in-flight / closing guards."""

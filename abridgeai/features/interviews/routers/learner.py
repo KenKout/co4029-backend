@@ -750,7 +750,6 @@ async def respond_to_session(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail={"error": "internal_error", "message": "Unable to save this turn"},
         ) from exc
-    next_question = result.get("next_question")
     # Server-authoritative timer (resilience A-Tier-1 #4): return the current
     # whole-second countdown on every turn so the client reconciles its locally
     # computed deadline against the server clock instead of trusting a value
@@ -767,30 +766,11 @@ async def respond_to_session(
             )
     except Exception:  # noqa: BLE001 -- timer reconciliation is advisory, never fatal
         logger.warning("respond_to_session: time-remaining lookup failed (session=%s)", session_id)
-    return InterviewSubmitAnswerResponse(
-        # ── legacy fields (always present; unchanged for existing clients) ───
-        next_question=(
-            InterviewQuestionPublic.model_validate(next_question)
-            if next_question is not None
-            else None
-        ),
-        is_finished=bool(result.get("is_finished")),
-        ai_followup_text=result.get("followup_text"),
+    # Built by the shared projection so the LiveKit control topic (which carries
+    # this same state for typed turns over `lk.chat`) cannot drift from REST.
+    return InterviewSubmitAnswerResponse.from_step_result(
+        result,
         time_remaining_seconds=remaining_seconds,
-        # ── adaptive structured fields (None on the legacy/sequential path) ──
-        ai_turn_text=result.get("ai_turn_text"),
-        language=result.get("language"),
-        should_narrate=result.get("should_narrate"),
-        should_await_response=result.get("should_await_response"),
-        should_finish=result.get("should_finish"),
-        assistance_kind=result.get("assistance_kind"),
-        # ── End-confirmation gate (Slice 4; None on legacy/sequential path) ──
-        pending_confirmation=result.get("pending_confirmation"),
-        interaction_state=result.get("interaction_state"),
-        # ── Natural Interview Transitions (additive; None when no transition) ─
-        transition_id=result.get("transition_id"),
-        transition_text=result.get("transition_text"),
-        transition_target=result.get("transition_target"),
     )
 
 
