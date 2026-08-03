@@ -191,6 +191,16 @@ Hard rules — violate any and the question is invalid:
    │     world knowledge or elimination alone.
    │   * The stem states the task ("Match each term to its definition.").
    │     Do not put the pairs in the stem.
+   │ DISTRACTORS (optional):
+   │   * ``match_distractors`` — a JSON ARRAY of strings: extra RIGHT-side
+   │     choices with NO left partner. They join the shuffled choice pool
+   │     the learner picks from, so the final prompt is not a forced pick
+   │     and elimination is harder. 0-4 is typical; at most 10.
+   │   * Each must be PLAUSIBLE for this category (a believable-but-wrong
+   │     definition/capital/etc.), unique, and MUST NOT equal any ``right``
+   │     value — a distractor that matches a correct answer makes that
+   │     answer both right and wrong and the question is rejected.
+   │   * Omit the key entirely for classic 1:1 matching.
    └────────────────────────────────────────────────────────────────────
 
    ┌─ ``ordering`` ─────────────────────────────────────────────────────

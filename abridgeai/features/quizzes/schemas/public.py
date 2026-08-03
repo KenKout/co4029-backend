@@ -203,16 +203,32 @@ class QuizQuestionPublic(_ORMModel):
         pairs = _get("match_pairs")
         if isinstance(pairs, list) and pairs:
             prompts = [str(p.get("left", "")) for p in pairs if isinstance(p, dict)]
-            answer_aligned = [
-                str(p.get("right", "")) for p in pairs if isinstance(p, dict)
-            ]
-            choices = list(answer_aligned)
+            answer_aligned = [str(p.get("right", "")) for p in pairs if isinstance(p, dict)]
+            # Distractors are extra right-side values with no left partner. They
+            # go into the choice pool the learner picks from — never into the
+            # prompts — so the last prompt isn't a forced pick and elimination is
+            # harder. Dedupe against the real answers (a distractor equal to a
+            # correct value would make that value un-wrong, defeating the point).
+            raw_distractors = _get("match_distractors")
+            answer_set = {a.strip().lower() for a in answer_aligned}
+            distractors = (
+                [
+                    d
+                    for d in (str(x).strip() for x in raw_distractors)
+                    if d and d.lower() not in answer_set
+                ]
+                if isinstance(raw_distractors, list)
+                else []
+            )
+            choices = [*answer_aligned, *distractors]
             rng = random.Random(seed ^ 0x9E3779B9)
             # Reshuffle until the choice order no longer positionally aligns with
-            # the prompts (which would imply the pairing on small lists). Bounded.
+            # the prompts (which would imply the pairing on small lists). With
+            # distractors present the lengths differ, so alignment is impossible
+            # and one shuffle suffices — the guard still holds for the 1:1 case.
             for _ in range(8):
                 rng.shuffle(choices)
-                if choices != answer_aligned or len(choices) <= 1:
+                if choices[: len(answer_aligned)] != answer_aligned or len(choices) <= 1:
                     break
             derived["match_prompts"] = prompts
             derived["match_choices"] = choices

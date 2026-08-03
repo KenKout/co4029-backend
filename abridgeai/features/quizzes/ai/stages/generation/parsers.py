@@ -121,6 +121,10 @@ class GeneratedQuestion(BaseModel):
     match_pairs: list[dict[str, str]] | None = None
     """``matching`` only. ``[{"left": .., "right": ..}]`` — the answer key."""
 
+    match_distractors: list[str] | None = None
+    """``matching`` only. Extra right-side values with NO left partner — they
+    enlarge the learner's shuffled choice pool but are never a correct answer."""
+
     ordering_sequence: list[str] | None = None
     """``ordering`` only. Items in their CORRECT order (shuffled for students)."""
 

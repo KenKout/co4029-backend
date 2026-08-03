@@ -20,6 +20,7 @@ from typing import Any
 from abridgeai.features.quizzes.ai.stages.generation.coercions import (
     _VALID_TYPES,
     _coerce_decimal,
+    _coerce_match_distractors,
     _coerce_match_pairs,
     _coerce_ordering_sequence,
     _normalize_format,
@@ -89,9 +90,7 @@ def _prepare_question(entry: Any, *, default_position: int) -> dict[str, Any] | 
         # asks for multi-select.
         "single_answer": _coerce_single_answer(entry, question_type),
         "numeric_answer": _coerce_decimal(
-            entry.get("numeric_answer")
-            if entry.get("numeric_answer") is not None
-            else correct_raw
+            entry.get("numeric_answer") if entry.get("numeric_answer") is not None else correct_raw
         )
         if question_type == "numerical"
         else None,
@@ -99,9 +98,14 @@ def _prepare_question(entry: Any, *, default_position: int) -> dict[str, Any] | 
         if question_type == "numerical"
         else None,
         "match_pairs": _coerce_match_pairs(
-            entry.get("match_pairs")
-            if entry.get("match_pairs") is not None
-            else entry.get("pairs")
+            entry.get("match_pairs") if entry.get("match_pairs") is not None else entry.get("pairs")
+        )
+        if question_type == "matching"
+        else None,
+        "match_distractors": _coerce_match_distractors(
+            entry.get("match_distractors")
+            if entry.get("match_distractors") is not None
+            else entry.get("distractors")
         )
         if question_type == "matching"
         else None,
@@ -137,9 +141,7 @@ def _coerce_single_answer(entry: dict[str, Any], question_type: str) -> bool:
     options_raw = entry.get("options")
     if isinstance(options_raw, list):
         flagged = sum(
-            1
-            for item in options_raw
-            if isinstance(item, dict) and item.get("is_correct")
+            1 for item in options_raw if isinstance(item, dict) and item.get("is_correct")
         )
         if flagged > 1:
             return False

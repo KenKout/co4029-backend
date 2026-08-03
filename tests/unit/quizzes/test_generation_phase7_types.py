@@ -121,9 +121,7 @@ def test_format_is_case_insensitive() -> None:
 
 
 def test_numerical_parses() -> None:
-    q = _parse_one(
-        {"question_type": "numerical", "numeric_answer": 10.5, "numeric_tolerance": 0.5}
-    )
+    q = _parse_one({"question_type": "numerical", "numeric_answer": 10.5, "numeric_tolerance": 0.5})
     assert q is not None
     assert q.numeric_answer == Decimal("10.5")
     assert q.numeric_tolerance == Decimal("0.5")
@@ -150,9 +148,7 @@ def test_numerical_without_answer_is_dropped() -> None:
 
 def test_numerical_negative_tolerance_is_dropped() -> None:
     assert (
-        _parse_one(
-            {"question_type": "numerical", "numeric_answer": 5, "numeric_tolerance": -1}
-        )
+        _parse_one({"question_type": "numerical", "numeric_answer": 5, "numeric_tolerance": -1})
         is None
     )
 
@@ -196,9 +192,7 @@ def test_matching_accepts_key_aliases() -> None:
 
 def test_matching_single_pair_is_dropped() -> None:
     assert (
-        _parse_one(
-            {"question_type": "matching", "match_pairs": [{"left": "A", "right": "1"}]}
-        )
+        _parse_one({"question_type": "matching", "match_pairs": [{"left": "A", "right": "1"}]})
         is None
     )
 
@@ -234,15 +228,65 @@ def test_matching_duplicate_left_is_dropped() -> None:
     )
 
 
+def test_matching_parses_with_distractors() -> None:
+    """Distractors are extra unpaired right-side choices; they parse onto the
+    dedicated field and don't disturb the pairs."""
+    q = _parse_one(
+        {
+            "question_type": "matching",
+            "match_pairs": [
+                {"left": "France", "right": "Paris"},
+                {"left": "Japan", "right": "Tokyo"},
+            ],
+            "match_distractors": ["Berlin", "Madrid"],
+        }
+    )
+    assert q is not None
+    assert q.match_distractors == ["Berlin", "Madrid"]
+
+
+def test_matching_distractor_alias_and_object_shape() -> None:
+    """``distractors`` alias and object entries ({right/value/text}) are
+    tolerated the way ``match_pairs`` aliases are."""
+    q = _parse_one(
+        {
+            "question_type": "matching",
+            "match_pairs": [
+                {"left": "A", "right": "1"},
+                {"left": "B", "right": "2"},
+            ],
+            "distractors": [{"right": "3"}, "4"],
+        }
+    )
+    assert q is not None
+    assert q.match_distractors == ["3", "4"]
+
+
+def test_matching_distractor_colliding_with_answer_is_dropped() -> None:
+    """A distractor equal to a correct right value is rejected — it would make
+    that value both right and wrong."""
+    assert (
+        _parse_one(
+            {
+                "question_type": "matching",
+                "match_pairs": [
+                    {"left": "A", "right": "1"},
+                    {"left": "B", "right": "2"},
+                ],
+                "match_distractors": ["2"],
+            }
+        )
+        is None
+    )
+
+
 # ---------------------------------------------------------------------------
 # Stage 4 — ordering
 # ---------------------------------------------------------------------------
 
 
 def test_ordering_parses() -> None:
-    q = _parse_one(
-        {"question_type": "ordering", "ordering_sequence": ["one", "two", "three"]}
-    )
+    q = _parse_one({"question_type": "ordering", "ordering_sequence": ["one", "two", "three"]})
     assert q is not None
     assert q.ordering_sequence == ["one", "two", "three"]
 
@@ -264,20 +308,12 @@ def test_ordering_accepts_objects_with_positions() -> None:
 
 
 def test_ordering_too_few_items_is_dropped() -> None:
-    assert (
-        _parse_one({"question_type": "ordering", "ordering_sequence": ["a", "b"]})
-        is None
-    )
+    assert _parse_one({"question_type": "ordering", "ordering_sequence": ["a", "b"]}) is None
 
 
 def test_ordering_duplicate_items_is_dropped() -> None:
     """Duplicates make the exact-sequence answer ambiguous."""
-    assert (
-        _parse_one(
-            {"question_type": "ordering", "ordering_sequence": ["a", "b", "a"]}
-        )
-        is None
-    )
+    assert _parse_one({"question_type": "ordering", "ordering_sequence": ["a", "b", "a"]}) is None
 
 
 # ---------------------------------------------------------------------------
@@ -336,9 +372,7 @@ def test_multi_select_with_all_correct_is_dropped() -> None:
 
 
 def test_review_projection_renders_numerical_answer() -> None:
-    q = _parse_one(
-        {"question_type": "numerical", "numeric_answer": 3, "numeric_tolerance": 0}
-    )
+    q = _parse_one({"question_type": "numerical", "numeric_answer": 3, "numeric_tolerance": 0})
     assert q is not None
     assert question_for_review(q)["correct_answer"] == "3 (tolerance 0)"
 
@@ -354,15 +388,11 @@ def test_review_projection_renders_matching_pairs() -> None:
         }
     )
     assert q is not None
-    assert question_for_review(q)["correct_answer"] == (
-        "Extract -> Reads; Load -> Writes"
-    )
+    assert question_for_review(q)["correct_answer"] == ("Extract -> Reads; Load -> Writes")
 
 
 def test_review_projection_renders_ordering_sequence() -> None:
-    q = _parse_one(
-        {"question_type": "ordering", "ordering_sequence": ["E", "T", "L"]}
-    )
+    q = _parse_one({"question_type": "ordering", "ordering_sequence": ["E", "T", "L"]})
     assert q is not None
     assert question_for_review(q)["correct_answer"] == "1. E; 2. T; 3. L"
 

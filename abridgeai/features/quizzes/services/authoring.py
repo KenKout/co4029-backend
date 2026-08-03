@@ -519,11 +519,7 @@ async def delete_quiz(db: AsyncSession, quiz_id: UUID, actor: CurrentUser) -> No
     )
 
     question_ids = list(
-        (
-            await db.execute(
-                _select(QuizQuestion.id).where(QuizQuestion.quiz_id == quiz_id)
-            )
-        )
+        (await db.execute(_select(QuizQuestion.id).where(QuizQuestion.quiz_id == quiz_id)))
         .scalars()
         .all()
     )
@@ -619,6 +615,9 @@ async def create_question(
     _pairs = getattr(payload, "match_pairs", None)
     if _pairs is not None:
         question.match_pairs = _as_plain_json(_pairs)
+    _distractors = getattr(payload, "match_distractors", None)
+    if _distractors is not None:
+        question.match_distractors = _as_plain_json(_distractors)
     _seq = getattr(payload, "ordering_sequence", None)
     if _seq is not None:
         question.ordering_sequence = _as_plain_json(_seq)
@@ -687,12 +686,8 @@ async def update_question(
         ("explanation", "explanation_format"),
     ):
         if _text_field in field_updates and field_updates[_text_field] is not None:
-            _fmt = field_updates.get(
-                _format_field, getattr(question, _format_field, "plain")
-            )
-            field_updates[_text_field] = sanitize_rich_content(
-                field_updates[_text_field], fmt=_fmt
-            )
+            _fmt = field_updates.get(_format_field, getattr(question, _format_field, "plain"))
+            field_updates[_text_field] = sanitize_rich_content(field_updates[_text_field], fmt=_fmt)
 
     for key, value in field_updates.items():
         setattr(question, key, value)

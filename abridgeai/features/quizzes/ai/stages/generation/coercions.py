@@ -126,6 +126,30 @@ def _coerce_match_pairs(raw: Any) -> list[dict[str, str]] | None:  # noqa: ANN40
     return out or None
 
 
+def _coerce_match_distractors(raw: Any) -> list[str] | None:  # noqa: ANN401 -- raw LLM JSON
+    """Coerce matching distractors into a list of non-empty strings.
+
+    Distractors are extra right-side values with no left partner. Accepts a
+    plain list of strings, tolerating a list of objects carrying
+    ``right``/``value``/``text`` (models drift). Empty entries are dropped;
+    ``validate_matching`` then enforces uniqueness against the answer values.
+    """
+    if not isinstance(raw, list) or not raw:
+        return None
+    out: list[str] = []
+    for item in raw:
+        if isinstance(item, str):
+            text = item.strip()
+        elif isinstance(item, dict):
+            value = item.get("right") or item.get("value") or item.get("text")
+            text = str(value).strip() if value is not None else ""
+        else:
+            continue
+        if text:
+            out.append(text)
+    return out or None
+
+
 def _coerce_ordering_sequence(raw: Any) -> list[str] | None:  # noqa: ANN401 -- raw LLM JSON
     """Coerce an ordering answer key into a list of item strings in correct order.
 
@@ -182,6 +206,7 @@ __all__ = [
     "_VALID_TYPES",
     "_coerce_decimal",
     "_coerce_match_pairs",
+    "_coerce_match_distractors",
     "_coerce_ordering_sequence",
     "_normalize_format",
     "_normalize_question_type",

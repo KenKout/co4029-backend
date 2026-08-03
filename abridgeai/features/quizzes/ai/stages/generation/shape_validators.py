@@ -31,13 +31,9 @@ def validate_multiple_choice(question: GeneratedQuestion) -> None:
         if n_correct != 1:
             raise ValueError("multiple_choice requires exactly one correct option")
     elif n_correct < 2:
-        raise ValueError(
-            "multi-select multiple_choice requires at least two correct options"
-        )
+        raise ValueError("multi-select multiple_choice requires at least two correct options")
     elif n_correct == len(question.options):
-        raise ValueError(
-            "multi-select multiple_choice cannot mark every option correct"
-        )
+        raise ValueError("multi-select multiple_choice cannot mark every option correct")
 
 
 def validate_true_false(question: GeneratedQuestion) -> None:
@@ -67,8 +63,7 @@ def validate_fill_blank(question: GeneratedQuestion) -> None:
     missing = correct_lower - bank_lower
     if missing:
         raise ValueError(
-            "fill_blank options word bank is missing correct answers: "
-            f"{sorted(missing)}"
+            f"fill_blank options word bank is missing correct answers: {sorted(missing)}"
         )
     correct_count = sum(1 for opt in question.options if opt.is_correct)
     if correct_count != len(correct_lower):
@@ -142,6 +137,32 @@ def validate_matching(question: GeneratedQuestion) -> None:
         raise ValueError("matching left prompts must be unique")
     if len(set(rights)) != len(rights):
         raise ValueError("matching right values must be unique (ambiguous otherwise)")
+    _validate_match_distractors(question.match_distractors, rights)
+
+
+def _validate_match_distractors(distractors: object, rights: list[str]) -> None:
+    """Validate optional matching distractors against the answer's right values.
+
+    Distractors are extra right-side choices with no left partner. Optional.
+    They must be non-empty, unique among themselves, and MUST NOT collide with
+    any real ``right`` answer — a distractor equal to a correct value would make
+    that value indistinguishably right and wrong at once. ``rights`` is the
+    already-lowercased list of correct right values.
+    """
+    if distractors is None:
+        return
+    if not isinstance(distractors, list):
+        raise ValueError("matching distractors must be a list of strings")
+    if len(distractors) > 10:
+        raise ValueError("matching supports at most 10 distractors")
+    cleaned = [str(d).strip() for d in distractors]
+    if any(not d for d in cleaned):
+        raise ValueError("matching distractors must be non-empty")
+    lowered = [d.lower() for d in cleaned]
+    if len(set(lowered)) != len(lowered):
+        raise ValueError("matching distractors must be unique")
+    if set(lowered) & set(rights):
+        raise ValueError("matching distractors must differ from the correct right values")
 
 
 def validate_ordering(question: GeneratedQuestion) -> None:
