@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from abridgeai.features.materials.models import (
@@ -113,8 +113,60 @@ async def get_latest_ready_version(
     return (await db.execute(stmt)).scalar_one_or_none()
 
 
+# Raw cross-feature FK walks (material/lesson → course). Deliberately
+# plain ``text()`` SQL: the target tables are owned by the courses feature
+# and importing its models here would cross the ``Features are independent``
+# contract. Same pattern as ``spaced_repetition``'s raw ``_CARDS_DUE_SQL``.
+
+_RESOLVE_MATERIAL_COURSE_SQL = text(
+    """
+    SELECT c.id
+    FROM learning_materials lm
+    JOIN lessons l ON l.id = lm.lesson_id
+    JOIN modules m ON m.id = l.module_id
+    JOIN courses c ON c.id = m.course_id
+    WHERE lm.id = :material_id
+      AND lm.deleted_at IS NULL
+    """
+)
+
+
+async def resolve_material_course(db: AsyncSession, material_id: UUID) -> UUID | None:
+    """Owning ``course_id`` for a material, or ``None`` (missing / deleted).
+
+    Feeds the tenant gate on learner material reads: the caller must be
+    able to see the owning course before visibility alone grants access.
+    """
+    return (
+        await db.execute(
+            _RESOLVE_MATERIAL_COURSE_SQL, {"material_id": material_id}
+        )
+    ).scalar_one_or_none()
+
+
+_RESOLVE_LESSON_COURSE_SQL = text(
+    """
+    SELECT c.id
+    FROM lessons l
+    JOIN modules m ON m.id = l.module_id
+    JOIN courses c ON c.id = m.course_id
+    WHERE l.id = :lesson_id
+      AND l.deleted_at IS NULL
+    """
+)
+
+
+async def resolve_lesson_course(db: AsyncSession, lesson_id: UUID) -> UUID | None:
+    """Owning ``course_id`` for a lesson, or ``None`` (missing / deleted)."""
+    return (
+        await db.execute(_RESOLVE_LESSON_COURSE_SQL, {"lesson_id": lesson_id})
+    ).scalar_one_or_none()
+
+
 __all__ = [
     "get_latest_ready_version",
     "get_visible_material",
     "list_visible_materials",
+    "resolve_lesson_course",
+    "resolve_material_course",
 ]

@@ -139,6 +139,38 @@ async def get_user_primary_org(db: AsyncSession, user_id: UUID) -> OrgDTO | None
     return OrgDTO(id=org_id) if org_id is not None else None
 
 
+async def can_view_course_content(
+    db: AsyncSession,
+    *,
+    user_id: UUID,
+    course_id: UUID,
+) -> bool:
+    """Tenant + manage gate for learner content reads (materials, quizzes).
+
+    ``True`` iff the caller is an active member of the course's owning
+    organization OR holds course-management rights on the course (owner
+    short-circuit included, so a teacher previewing their own course's
+    material passes; ``system.administer`` passes through the global-scope
+    grant). This is the org-membership side of the courses-learner
+    ``_ensure_org_access`` perimeter, exported here so by-id content reads
+    in sibling features (``/materials/{id}``, ``/quizzes/{id}``) can apply
+    the same isolation instead of trusting a visibility flag alone.
+
+    Lazy imports keep the cross-feature edges (access_control api.public +
+    policies) inside the function body; both are authorised by the
+    import-linter ignore list (``features.** -> access_control.policies``).
+    """
+    from abridgeai.features.access_control.api import public as access_api
+    from abridgeai.features.access_control.policies import can_manage_course
+
+    org = await queries.get_course_org(db, course_id)
+    if org is None:
+        return False
+    if await access_api.is_user_member_of_org(db, user_id=user_id, org_id=org):
+        return True
+    return await can_manage_course(db, user_id, course_id)
+
+
 # Cross-feature notification helpers. Re-exported from courses.services.notify
 # so the enrollments feature (which enrolls students into courses) can emit the
 # "enrolled in a published course" notification through the blessed public
@@ -171,4 +203,5 @@ __all__ = [
     "notify_student_enrolled",
     "require_lesson_authoring_access",
     "walk_resource_to_course",
+    "can_view_course_content",
 ]

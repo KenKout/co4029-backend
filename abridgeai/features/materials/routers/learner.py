@@ -151,8 +151,15 @@ async def get_lesson_published_kg(
     Returns ``published=False`` with empty lists when the teacher has never
     published a graph (the SPA then hides the knowledge-map panel), so this
     endpoint never 404s on an un-published lesson. Gated by the same
-    lesson-unlock check as the other learner material reads (FR-4.5).
+    lesson-unlock check as the other learner material reads (FR-4.5) and by
+    the owning-course tenant gate (org membership / course-manage) — a
+    lesson from another organization resolves to 404 like the material
+    reads, so by-id knowledge graphs cannot leak across tenants.
     """
+    if not await catalog_service.can_access_lesson_content(
+        db, user_id=current_user.user_id, lesson_id=lesson_id
+    ):
+        raise _not_found(lesson_id)
     await _ensure_owning_lesson_unlocked(db, current_user, lesson_id)
     return await catalog_service.get_published_kg_for_learner(db, lesson_id)
 

@@ -29,6 +29,7 @@ from abridgeai.core.db import get_db
 from abridgeai.core.exceptions import NotFoundError
 from abridgeai.core.observability import get_logger
 from abridgeai.core.security import CurrentUser, get_current_user, utcnow
+from abridgeai.features.courses.api.public import can_view_course_content
 from abridgeai.features.quizzes.queries.published import (
     QuizClosed,
     QuizNotYetOpen,
@@ -133,10 +134,20 @@ async def get_published_quiz(
     current_user: Annotated[CurrentUser, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> QuizPublic:
-    """Public projection of one published quiz (no ``is_correct`` leak)."""
-    del current_user
+    """Public projection of one published quiz (no ``is_correct`` leak).
+
+    Tenant-gated: the caller must be able to see the quiz's owning course
+    (org membership or course-management rights) or the quiz resolves to
+    404 — a published quiz from another organization must not be readable
+    by id, which would leak question counts (and, via the attempt flow,
+    the questions themselves) across tenants.
+    """
     quiz = await taking_service.get_published_quiz(db, quiz_id)
     if quiz is None:
+        raise _not_found("quiz", quiz_id)
+    if not await can_view_course_content(
+        db, user_id=current_user.user_id, course_id=quiz.course_id
+    ):
         raise _not_found("quiz", quiz_id)
     # Count-only signal: how many approved questions the student will face.
     # Counts rows (matching the taking filter: approved + non-deleted) so no
@@ -194,6 +205,16 @@ async def start_attempt(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={"error": "quiz_id_mismatch"},
         )
+    # Tenant gate: a quiz from another organization must not be takable by
+    # id. The attempt flow would otherwise create cross-tenant attempts and
+    # serve the full question payload (options included) to anyone.
+    quiz = await taking_service.get_published_quiz(db, quiz_id)
+    if quiz is None:
+        raise _not_found("quiz", quiz_id)
+    if not await can_view_course_content(
+        db, user_id=current_user.user_id, course_id=quiz.course_id
+    ):
+        raise _not_found("quiz", quiz_id)
     try:
         _, take_payload = await taking_service.start_attempt(
             db,
