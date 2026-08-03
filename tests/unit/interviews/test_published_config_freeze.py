@@ -12,6 +12,7 @@ The freeze is a WHITELIST, and the test that matters most here is
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -21,6 +22,7 @@ from abridgeai.features.interviews.schemas import InterviewConfigUpdate
 from abridgeai.features.interviews.services.published_freeze import (
     PUBLISHED_EDITABLE_CONFIG_FIELDS,
     assert_config_settings_editable,
+    assert_learning_outcomes_editable,
 )
 
 # Settings read by taking.py / orchestrator / evaluation.py during a run or its
@@ -118,3 +120,99 @@ def test_the_whitelist_only_contains_real_patchable_fields() -> None:
     """A typo in the whitelist would silently freeze a field meant to be editable."""
     patchable = set(InterviewConfigUpdate.model_fields.keys())
     assert patchable >= PUBLISHED_EDITABLE_CONFIG_FIELDS
+
+
+class TestLearningOutcomesFreeze:
+    """Outcomes are the grading criteria, so they freeze with the rest.
+
+    The settings freeze above covers the PATCHed config fields. Outcomes are a
+    separate collection (create/update/delete endpoints), so they get their own
+    guard — but the same policy, the same error code, and the same escape hatch
+    (unpublish).
+    """
+
+    @pytest.mark.parametrize(
+        "status",
+        ["draft", "archived"],
+    )
+    def test_unpublished_configs_may_change_outcomes(self, status: str) -> None:
+        # Unpublishing is the documented escape hatch; it must actually work.
+        assert_learning_outcomes_editable(_config(status))  # type: ignore[arg-type]
+
+    def test_a_published_config_rejects_outcome_changes(self) -> None:
+        with pytest.raises(ConflictError) as exc:
+            assert_learning_outcomes_editable(_config("published"))  # type: ignore[arg-type]
+        message = str(exc.value)
+        assert "interview_published_setting_locked" in message
+        # The teacher has to know WHICH thing is frozen and how to unfreeze it.
+        assert "learning outcomes" in message
+        assert "Unpublish" in message
+
+    def test_the_guard_fires_before_any_write(self) -> None:
+        """Prove the service functions gate on the guard before touching the db.
+
+        Each outcome mutation must fetch the config and refuse a published one
+        without creating/updating/deleting anything — otherwise the UI dimming
+        would be the only line of defence.
+        """
+        from unittest.mock import AsyncMock, patch
+
+        from abridgeai.features.interviews.services import authoring as svc  # noqa: PLC0415
+
+        published = _config("published")
+        db = AsyncMock()
+        config_id = "00000000-0000-0000-0000-000000000001"
+        outcome_id = "00000000-0000-0000-0000-000000000002"
+
+        with patch.object(svc, "_require_config", new=AsyncMock(return_value=published)):
+            # add_outcome: refuses before computing a position or inserting.
+            with (
+                patch.object(svc.authoring_queries, "next_outcome_position", new=AsyncMock()) as pos,
+                patch.object(svc, "flush_or_conflict", new=AsyncMock()) as flush,
+            ):
+                with pytest.raises(ConflictError):
+                    asyncio.run(
+                        svc.add_outcome(  # type: ignore[arg-type]
+                            db,
+                            config_id,
+                            SimpleNamespace(
+                                model_dump=lambda exclude_unset: {
+                                    "outcome_text": "x",
+                                    "outcome_type": "knowledge",
+                                }
+                            ),
+                            object(),
+                        )
+                    )
+                pos.assert_not_awaited()
+                flush.assert_not_awaited()
+
+            # update_outcome: refuses before touching the existing row.
+            with (
+                patch.object(svc, "_require_outcome", new=AsyncMock()) as require_outcome,
+                patch.object(svc, "_apply_patch") as apply_patch,
+                patch.object(svc, "flush_or_conflict", new=AsyncMock()) as flush,
+            ):
+                with pytest.raises(ConflictError):
+                    asyncio.run(
+                        svc.update_outcome(  # type: ignore[arg-type]
+                            db, config_id, outcome_id, SimpleNamespace(), object()
+                        )
+                    )
+                require_outcome.assert_not_awaited()
+                apply_patch.assert_not_called()
+                flush.assert_not_awaited()
+
+            # delete_outcome: refuses before loading or soft-deleting the row.
+            with (
+                patch.object(svc, "_require_outcome", new=AsyncMock()) as require_outcome,
+                patch.object(svc, "soft_delete_cascade", new=AsyncMock()) as soft_delete,
+            ):
+                with pytest.raises(ConflictError):
+                    asyncio.run(
+                        svc.delete_outcome(  # type: ignore[arg-type]
+                            db, config_id, outcome_id, object()
+                        )
+                    )
+                require_outcome.assert_not_awaited()
+                soft_delete.assert_not_awaited()
