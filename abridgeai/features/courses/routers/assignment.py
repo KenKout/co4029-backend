@@ -30,7 +30,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from abridgeai.core.db import get_db
-from abridgeai.core.exceptions import NotFoundError
+from abridgeai.core.exceptions import ConflictError, NotFoundError
 from abridgeai.core.security import CurrentUser
 from abridgeai.features.access_control.api import public as access_control_api
 from abridgeai.features.access_control.policies import (
@@ -41,12 +41,18 @@ from abridgeai.features.access_control.policies import (
 from abridgeai.features.courses.schemas import (
     AssignTeacherRequest,
     CourseAuthoring,
+    CourseUpdate,
     RosterEntry,
     TeacherAssignmentCreated,
     TeacherAssignmentRead,
 )
 from abridgeai.features.courses.services import assignment as assignment_service
-from abridgeai.features.courses.services.authoring import delete_course as delete_course_service
+from abridgeai.features.courses.services.authoring import (
+    delete_course as delete_course_service,
+)
+from abridgeai.features.courses.services.authoring import (
+    update_course as update_course_service,
+)
 
 router = APIRouter(prefix="/dept", tags=["courses-assignment"])
 
@@ -81,6 +87,13 @@ def _not_found(detail: str) -> HTTPException:
     return HTTPException(
         status_code=status.HTTP_404_NOT_FOUND,
         detail={"error": "not_found", "message": detail},
+    )
+
+
+def _conflict(detail: str) -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail={"error": "conflict", "message": detail},
     )
 
 
@@ -215,6 +228,29 @@ async def delete_dept_course(
     except NotFoundError as exc:
         raise _not_found(str(exc)) from exc
     await db.commit()
+
+
+@router.patch("/courses/{course_id}", response_model=CourseAuthoring)
+async def update_dept_course(
+    course_id: UUID,
+    payload: CourseUpdate,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_COURSE_DELETE)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> CourseAuthoring:
+    """Manager-facing course update (title/slug/description/…).
+
+    Gated on ``course.delete`` (manager-owned, same gate as the delete
+    route) so identity edits — title, slug — live on the dept surface and
+    are manager-only, while the teacher surface keeps content authoring.
+    """
+    try:
+        course = await update_course_service(db, course_id, payload, current_user)
+    except NotFoundError as exc:
+        raise _not_found(str(exc)) from exc
+    except ConflictError as exc:
+        raise _conflict(str(exc)) from exc
+    await db.commit()
+    return course
 
 
 @router.get("/org-units/{org_unit_id}/courses", response_model=list[CourseAuthoring])

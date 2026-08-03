@@ -413,13 +413,27 @@ async def test_teacher_with_course_scope_can_update_assigned_course(
     teacher_bearer: str,
     scenario: dict[str, uuid.UUID | str],
 ) -> None:
-    """Seeded teacher has scope=course on Course-A → course.update passes."""
-    response = await client.patch(
+    """Seeded teacher has scope=course on Course-A → course.update passes.
+
+    Content fields (description, level, …) are editable; title/slug are
+    course identity and manager-owned — the teacher surface 403s on them
+    even with valid course scope (identity edits live on the dept page).
+    """
+    ok = await client.patch(
+        f"/api/v1/teacher/courses/{scenario['course_a']}",
+        json={"description": "Teacher-authored description"},
+        headers={"Authorization": f"Bearer {teacher_bearer}"},
+    )
+    assert ok.status_code == 200, ok.text
+    assert ok.json()["description"] == "Teacher-authored description"
+
+    blocked = await client.patch(
         f"/api/v1/teacher/courses/{scenario['course_a']}",
         json={"title": "Teacher Patched A"},
         headers={"Authorization": f"Bearer {teacher_bearer}"},
     )
-    assert response.status_code == 200, response.text
+    assert blocked.status_code == 403, blocked.text
+    assert blocked.json()["detail"]["error"] == "permission_denied"
 
 
 async def test_teacher_403_on_sibling_course(
@@ -1574,10 +1588,12 @@ async def test_course_outcome_owner_teacher_cannot_bypass(
     base = f"/api/v1/teacher/courses/{owned_course}/outcomes"
     try:
         # Sanity: the teacher CAN edit the course itself (course.update via
-        # ownership), proving the 403 below is specifically the LO gate.
+        # ownership — content fields like description), proving the 403 below
+        # is specifically the LO gate. (Title/slug are manager-owned identity,
+        # so this sanity check uses a content field.)
         meta = await client.patch(
             f"/api/v1/teacher/courses/{owned_course}",
-            json={"title": "Renamed by owner"},
+            json={"description": "Owner-authored description"},
             headers=auth,
         )
         assert meta.status_code == 200, meta.text

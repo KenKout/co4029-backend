@@ -51,6 +51,7 @@ from abridgeai.features.access_control.policies import (
     require_course_permission,
     require_permission,
 )
+from abridgeai.features.access_control.queries.permissions import load_course_permissions
 from abridgeai.features.courses.routers._deps import (
     require_lesson_authoring_access,
     require_module_authoring_access,
@@ -136,6 +137,13 @@ def _conflict(detail: str) -> HTTPException:
     return HTTPException(
         status_code=status.HTTP_409_CONFLICT,
         detail={"error": "conflict", "message": detail},
+    )
+
+
+def _forbidden(detail: str) -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail={"error": "permission_denied", "message": detail},
     )
 
 
@@ -288,6 +296,15 @@ async def update_course(
     current_user: Annotated[CurrentUser, Depends(_REQUIRE_COURSE_UPDATE)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> CourseAuthoring:
+    # Title/slug are course identity — manager-owned. A teacher (or a
+    # course-owning teacher via the owner short-circuit) may author content
+    # (course.update) but never rename the course; only ``course.delete``
+    # holders (manager/admin) change its identity. Checked before the patch
+    # so a mixed payload either fully applies or fully rejects.
+    if "title" in payload.model_fields_set or "slug" in payload.model_fields_set:
+        course_perms = await load_course_permissions(db, current_user.user_id, course_id)
+        if "course.delete" not in course_perms:
+            raise _forbidden("Only managers may change a course's title or slug.")
     try:
         course = await authoring_service.update_course(db, course_id, payload, current_user)
     except NotFoundError as exc:

@@ -175,6 +175,14 @@ async def student_bearer(engine: AsyncEngine, seeded_users: SeededUsers) -> Asyn
 
 
 @pytest_asyncio.fixture
+async def teacher_bearer(engine: AsyncEngine, seeded_users: SeededUsers) -> AsyncIterator[str]:
+    sid = await _seed_session(engine, seeded_users.teacher_id)
+    yield create_access_token(user_id=seeded_users.teacher_id, session_id=sid)
+    async with engine.begin() as conn:
+        await conn.execute(text("DELETE FROM auth_sessions WHERE id = :id"), {"id": sid})
+
+
+@pytest_asyncio.fixture
 async def scenario(
     engine: AsyncEngine, seeded_users: SeededUsers
 ) -> AsyncIterator[dict[str, uuid.UUID]]:
@@ -653,3 +661,71 @@ def test_no_bare_get_current_user() -> None:
     ).read_text(encoding="utf-8")
     bare = re.findall(r"Depends\(get_current_user\)", src)
     assert bare == [], f"assignment.py uses bare Depends(get_current_user): {bare}"
+
+
+async def test_manager_can_edit_course_identity_via_dept(
+    client: httpx.AsyncClient,
+    manager_bearer: str,
+    scenario: dict[str, uuid.UUID],
+    engine: AsyncEngine,
+) -> None:
+    """The dept surface is where course identity edits live: a manager
+    holding ``course.delete`` at org scope can PATCH title/slug (identity)
+    via ``/dept/courses/{id}``."""
+    auth = {"Authorization": f"Bearer {manager_bearer}"}
+    course_a = scenario["course_a"]
+
+    async with engine.begin() as conn:
+        original_slug = (
+            await conn.execute(
+                text("SELECT slug FROM courses WHERE id = :cid"),
+                {"cid": course_a},
+            )
+        ).scalar_one()
+
+    resp = await client.patch(
+        f"/api/v1/dept/courses/{course_a}",
+        json={"title": "Manager Renamed", "slug": f"renamed-{course_a.hex[:6]}"},
+        headers=auth,
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["title"] == "Manager Renamed"
+
+    # Restore original identity for suite isolation.
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("UPDATE courses SET title = 'Course A', slug = :slug WHERE id = :cid"),
+            {"cid": course_a, "slug": original_slug},
+        )
+
+
+async def test_hod_cannot_edit_course_identity_via_dept(
+    client: httpx.AsyncClient,
+    hod_bearer: str,
+    scenario: dict[str, uuid.UUID],
+) -> None:
+    """HOD holds staffing/roster codes but NOT ``course.delete`` — identity
+    edits on the dept surface are manager-owned and 403 for them."""
+    resp = await client.patch(
+        f"/api/v1/dept/courses/{scenario['course_a']}",
+        json={"title": "HOD Renamed"},
+        headers={"Authorization": f"Bearer {hod_bearer}"},
+    )
+    assert resp.status_code == 403, resp.text
+    assert resp.json()["detail"]["error"] == "permission_denied"
+
+
+async def test_teacher_owner_cannot_edit_identity_via_dept(
+    client: httpx.AsyncClient,
+    teacher_bearer: str,
+    scenario: dict[str, uuid.UUID],
+) -> None:
+    """Even the course owner cannot edit identity via the dept surface:
+    ``allow_owner=False`` on the gate means only an explicit ``course.delete``
+    grant passes (manager/admin)."""
+    resp = await client.patch(
+        f"/api/v1/dept/courses/{scenario['course_a']}",
+        json={"title": "Owner Renamed"},
+        headers={"Authorization": f"Bearer {teacher_bearer}"},
+    )
+    assert resp.status_code == 403, resp.text
