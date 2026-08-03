@@ -15,8 +15,12 @@ is behind would be pinged 24×/day. Two guards prevent that:
   ``notifications.sr_reminder_cooldown_hours`` (admin-configurable, default
   24h) is skipped this run. The hourly scan stays responsive to *new*
   backlog while nobody is reminded more than once per window.
-* ``Quiz.reminders_enabled`` gate. Only cards from quizzes with reminders
-  turned on generate pings; the flag was previously ignored.
+* ``Quiz.reminders_enabled`` trigger gate. A ping is sent only to students
+  who have at least one due card from a quiz with reminders turned on; a
+  student whose due backlog comes entirely from opted-out quizzes is never
+  pinged (the flag was previously ignored). The gate decides *who* gets a
+  ping — it does NOT shrink the number in the notification, which always
+  mirrors the cards-due page (see the count contract in ``_run``).
 
 In-app channel only
 -------------------
@@ -116,6 +120,13 @@ async def _run(db: AsyncSession) -> None:
     # Count cards that are DUE, i.e. due_at has passed — including everything
     # already overdue.
     #
+    # COUNT CONTRACT: the number in the notification MUST equal the number the
+    # student sees on the cards-due page (/me/cards-due → _CARDS_DUE_SQL and
+    # get_due_card_count). The joins, the due predicate (due_at <= NOW()), the
+    # reviewability filter (review_status='approved') and the soft-delete
+    # filters mirror that read exactly — including the deliberate ABSENCE of a
+    # reminders_enabled filter — so the two can never disagree.
+    #
     # This previously used a forward window (due_at BETWEEN now AND now+1h),
     # which counted only cards *about to become* due and silently excluded the
     # backlog. Two consequences, both observed on the dev DB (68 cards all
@@ -125,26 +136,28 @@ async def _run(db: AsyncSession) -> None:
     #   2. The number in the notification disagreed with every read surface,
     #      which count due_at <= NOW(). Same words, different query.
     #
-    # The joins mirror the canonical cards-due read in routers/learner.py
-    # (_CARDS_DUE_SQL) exactly, including the soft-delete filters, so the
-    # notification and the page a student lands on can never disagree. Note a
+    # reminders_enabled is applied as a TRIGGER, not a count filter: the
+    # per-lesson rows carry a reminder-eligible count (cards from quizzes with
+    # the flag on), and a student is only pinged if that count is > 0. A
+    # student whose backlog comes entirely from opted-out quizzes gets no ping
+    # (teachers who left reminders off never generate reminders), but a pinged
+    # student is told the FULL backlog — the same number the page shows. Note a
     # quiz reaches a lesson via quiz_source_lessons — there is no lesson_id
     # column on quizzes.
-    #
-    # reminders_enabled gate: a card only earns a reminder if the quiz it came
-    # from has reminders turned on (Quiz.reminders_enabled, default FALSE).
-    # Teachers who left reminders off never generate pings for their quizzes —
-    # previously this flag was defined but ignored, so every quiz notified.
     #
     # Grouping by lesson carries lesson identity through so the notification can
     # name what is due; the old flat count discarded the per-lesson structure
     # that SM-2 scheduling actually produces.
     due_count_expr = func.count().label("due_count")
+    reminder_eligible_expr = (
+        func.count().filter(Quiz.reminders_enabled.is_(True)).label("reminder_eligible")
+    )
     stmt = (
         select(
             StudentCardState.student_id,
             QuizSourceLesson.lesson_id.label("lesson_id"),
             due_count_expr,
+            reminder_eligible_expr,
         )
         .join(QuizQuestion, QuizQuestion.id == StudentCardState.question_id)
         .join(Quiz, Quiz.id == QuizQuestion.quiz_id)
@@ -153,10 +166,10 @@ async def _run(db: AsyncSession) -> None:
         .where(
             StudentCardState.due_at.is_not(None),
             StudentCardState.due_at <= started_at,
-            Quiz.reminders_enabled.is_(True),
             QuizQuestion.deleted_at.is_(None),
             Quiz.deleted_at.is_(None),
             Lesson.deleted_at.is_(None),
+            QuizQuestion.review_status == "approved",
         )
         .group_by(
             StudentCardState.student_id,
@@ -167,13 +180,17 @@ async def _run(db: AsyncSession) -> None:
 
     # Fold the per-lesson rows into one dispatch per student, so a student with
     # cards across three lessons gets a single notification that names them
-    # rather than three separate pings.
+    # rather than three separate pings. reminder_eligible (>0 anywhere) marks
+    # the student as pingable — the reminders_enabled trigger gate.
     by_student: dict[UUID, list[tuple[UUID, int]]] = {}
+    has_reminder_eligible: set[UUID] = set()
     for row in rows:
         student_id: UUID = row.student_id
         lesson_id: UUID = row.lesson_id
         count: int = int(row.due_count)
         by_student.setdefault(student_id, []).append((lesson_id, count))
+        if int(row.reminder_eligible) > 0:
+            has_reminder_eligible.add(student_id)
 
     if not by_student:
         _logger.info("sr.scan_due_cards.completed", students_notified=0, duration_ms=0)
@@ -199,7 +216,13 @@ async def _run(db: AsyncSession) -> None:
 
     dispatched = 0
     skipped_cooldown = 0
+    skipped_no_reminders = 0
     for student_id, lesson_counts in by_student.items():
+        if student_id not in has_reminder_eligible:
+            # reminders_enabled trigger gate: the student's backlog comes
+            # entirely from opted-out quizzes — no ping.
+            skipped_no_reminders += 1
+            continue
         if student_id in recently_notified:
             skipped_cooldown += 1
             continue
@@ -210,6 +233,7 @@ async def _run(db: AsyncSession) -> None:
     _logger.info(
         "sr.scan_due_cards.completed",
         students_notified=dispatched,
+        students_skipped_no_reminders=skipped_no_reminders,
         students_skipped_cooldown=skipped_cooldown,
         cooldown_hours=cooldown_hours,
         duration_ms=duration_ms,
