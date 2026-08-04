@@ -191,6 +191,15 @@ async def scenario(engine: AsyncEngine, seeded_users: SeededUsers) -> AsyncItera
                 "slug": f"t46-{suffix}",
             },
         )
+        # BR gate: material reads resolve through can_view_course_content,
+        # which now requires an active/completed enrollment for org members.
+        await conn.execute(
+            text(
+                "INSERT INTO course_enrollments (course_id, student_id, status, source) "
+                "VALUES (:c, :s, 'active', 'manager_bulk')"
+            ),
+            {"c": course_id, "s": seeded_users.student_id},
+        )
         await conn.execute(
             text(
                 "INSERT INTO modules (id, course_id, title, position, status) "
@@ -293,6 +302,10 @@ async def scenario(engine: AsyncEngine, seeded_users: SeededUsers) -> AsyncItera
     yield data
 
     async with engine.begin() as conn:
+        await conn.execute(
+            text("DELETE FROM course_enrollments WHERE course_id = :id"),
+            {"id": course_id},
+        )
         await conn.execute(
             text("DELETE FROM document_chunks WHERE id = ANY(:ids)"),
             {"ids": chunk_ids},

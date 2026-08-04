@@ -334,6 +334,16 @@ async def test_quiz_progress_completion_matrix(
             grade_percent=42.0, passed=False,
         )
         # never: no rows at all.
+        # BR gate: quiz-progress is a course-item read — the student must
+        # be enrolled for it to resolve (can_view_course_content).
+        await conn.execute(
+            text(
+                "INSERT INTO course_enrollments (course_id, student_id, status, source) "
+                "VALUES (:c, :s, 'active', 'manager_bulk') "
+                "ON CONFLICT (course_id, student_id) DO NOTHING"
+            ),
+            {"c": seeded_users.course_id, "s": student},
+        )
 
     sid = await _seed_session(engine, student)
     token = create_access_token(user_id=student, session_id=sid)

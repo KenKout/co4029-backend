@@ -161,6 +161,67 @@ async def student_bearer(auth_session: uuid.UUID, seeded_users: SeededUsers) -> 
 
 
 @pytest_asyncio.fixture
+async def unenrolled_bearer(engine: AsyncEngine, seeded_users: SeededUsers) -> AsyncIterator[str]:
+    """A second org member with NO enrollment — the BR's unenrolled student.
+
+    Same org membership as the seeded student (so the tenancy gate passes)
+    but no ``course_enrollments`` row — exactly the case the BR gate must
+    block from every course-item read while leaving landing-page reads open.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    from abridgeai.core.security import create_access_token, generate_token, hash_secret
+
+    uid = uuid.uuid4()
+    session_id = uuid.uuid4()
+    expires_at = datetime.now(tz=UTC) + timedelta(hours=1)
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("INSERT INTO users (id, primary_email, status) VALUES (:id, :email, 'active')"),
+            {"id": uid, "email": f"second-student-{uid.hex[:8]}@abridgeai.local"},
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO user_profiles (user_id, given_name, family_name, display_name) "
+                "VALUES (:id, 'Second', 'Student', 'Second Student')"
+            ),
+            {"id": uid},
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO organization_memberships "
+                "(id, user_id, organization_id, org_unit_id, status) "
+                "VALUES (gen_random_uuid(), :uid, :org, :unit, 'active')"
+            ),
+            {"uid": uid, "org": seeded_users.organization_id, "unit": seeded_users.org_unit_id},
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO auth_sessions (id, user_id, refresh_token_hash, expires_at) "
+                "VALUES (:id, :uid, :h, :exp)"
+            ),
+            {
+                "id": session_id,
+                "uid": uid,
+                "h": hash_secret(generate_token()),
+                "exp": expires_at,
+            },
+        )
+    try:
+        yield create_access_token(user_id=uid, session_id=session_id)
+    finally:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("DELETE FROM auth_sessions WHERE id = :id"), {"id": session_id}
+            )
+            await conn.execute(
+                text("DELETE FROM organization_memberships WHERE user_id = :id"), {"id": uid}
+            )
+            await conn.execute(text("DELETE FROM user_profiles WHERE user_id = :id"), {"id": uid})
+            await conn.execute(text("DELETE FROM users WHERE id = :id"), {"id": uid})
+
+
+@pytest_asyncio.fixture
 async def scenario(engine: AsyncEngine, seeded_users: SeededUsers) -> AsyncIterator[dict]:
     """Seed published + draft courses under the seeded test organization.
 
@@ -261,6 +322,17 @@ async def scenario(engine: AsyncEngine, seeded_users: SeededUsers) -> AsyncItera
                 "so": storage_obj_id,
             },
         )
+        # The seeded student is ACTIVE-enrolled in the published course so the
+        # visibility tests exercise their intended semantics (draft/module/
+        # lesson/resource filtering) rather than the enrollment gate. The
+        # unenrolled + dropped/completed cases have their own dedicated tests.
+        await conn.execute(
+            text(
+                "INSERT INTO course_enrollments (course_id, student_id, status, source) "
+                "VALUES (:c, :s, 'active', 'manager_bulk')"
+            ),
+            {"c": pub_course, "s": seeded_users.student_id},
+        )
 
     data = {
         "pub_course": pub_course,
@@ -281,6 +353,12 @@ async def scenario(engine: AsyncEngine, seeded_users: SeededUsers) -> AsyncItera
     yield data
 
     async with engine.begin() as conn:
+        # Enrollment rows block the course delete (FK is NO ACTION in the
+        # real schema even though the model declares ondelete=CASCADE).
+        await conn.execute(
+            text("DELETE FROM course_enrollments WHERE course_id = :c"),
+            {"c": pub_course},
+        )
         await conn.execute(
             text("DELETE FROM lesson_resources WHERE lesson_id = :l"),
             {"l": pub_lesson},
@@ -697,6 +775,249 @@ async def test_same_org_by_id_reads_still_work(
     assert resp.status_code == 200, resp.text
     content = await client.get(f"/api/v1/courses/{scenario['pub_course']}/content", headers=auth)
     assert content.status_code == 200, content.text
+
+
+# ── BR: no enrollment → no course-item access ─────────────────────────────
+# Landing-page reads (detail / by-slug / outcomes / tags) stay open to every
+# org member; every item read (content tree, modules, lessons, resources,
+# downloads) requires an active/completed enrollment or course-manage rights.
+
+
+def _item_urls(scenario: dict) -> list[str]:
+    return [
+        f"/api/v1/courses/{scenario['pub_course']}/content",
+        f"/api/v1/courses/{scenario['pub_course']}/modules",
+        f"/api/v1/modules/{scenario['pub_module']}",
+        f"/api/v1/modules/{scenario['pub_module']}/items",
+        f"/api/v1/modules/{scenario['pub_module']}/lessons",
+        f"/api/v1/lessons/{scenario['pub_lesson']}",
+        f"/api/v1/lessons/{scenario['pub_lesson']}/resources",
+        f"/api/v1/lesson-resources/{scenario['resource_visible']}/download-url",
+    ]
+
+
+async def test_unenrolled_org_member_blocked_from_all_course_items(
+    client: httpx.AsyncClient,
+    unenrolled_bearer: str,
+    scenario: dict,
+) -> None:
+    """BR: a same-org student with no enrollment gets 403 not_enrolled on
+    every course-item read — the hole this change closes."""
+    auth = {"Authorization": f"Bearer {unenrolled_bearer}"}
+    for url in _item_urls(scenario):
+        resp = await client.get(url, headers=auth)
+        assert resp.status_code == 403, f"{url} -> {resp.status_code}: {resp.text}"
+        assert resp.json()["detail"]["error"] == "not_enrolled", f"{url}: {resp.text}"
+
+
+async def test_unenrolled_org_member_landing_reads_still_open(
+    client: httpx.AsyncClient,
+    unenrolled_bearer: str,
+    scenario: dict,
+) -> None:
+    """BR: the landing page stays displayable — detail, by-slug, outcomes
+    and tags remain 200 for an unenrolled org member."""
+    auth = {"Authorization": f"Bearer {unenrolled_bearer}"}
+    urls = [
+        f"/api/v1/courses/{scenario['pub_course']}",
+        f"/api/v1/courses/by-slug/{scenario['pub_slug']}",
+        f"/api/v1/courses/{scenario['pub_course']}/outcomes",
+        f"/api/v1/courses/{scenario['pub_course']}/tags",
+    ]
+    for url in urls:
+        resp = await client.get(url, headers=auth)
+        assert resp.status_code == 200, f"{url} -> {resp.status_code}: {resp.text}"
+
+
+async def test_dropped_enrollment_blocked(
+    client: httpx.AsyncClient,
+    unenrolled_bearer: str,
+    scenario: dict,
+    engine: AsyncEngine,
+    seeded_users: SeededUsers,
+) -> None:
+    """A ``dropped`` enrollment row still denies item access."""
+    dropped_uid = uuid.uuid4()
+    session_id = uuid.uuid4()
+    from datetime import UTC, datetime, timedelta
+
+    from abridgeai.core.security import create_access_token, generate_token, hash_secret
+
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("INSERT INTO users (id, primary_email, status) VALUES (:id, :email, 'active')"),
+            {"id": dropped_uid, "email": f"dropped-{dropped_uid.hex[:8]}@abridgeai.local"},
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO user_profiles (user_id, given_name, family_name, display_name) "
+                "VALUES (:id, 'Dropped', 'Student', 'Dropped Student')"
+            ),
+            {"id": dropped_uid},
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO organization_memberships "
+                "(id, user_id, organization_id, org_unit_id, status) "
+                "VALUES (gen_random_uuid(), :uid, :org, :unit, 'active')"
+            ),
+            {"uid": dropped_uid, "org": seeded_users.organization_id, "unit": seeded_users.org_unit_id},
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO course_enrollments (course_id, student_id, status, source) "
+                "VALUES (:c, :s, 'dropped', 'manager_bulk')"
+            ),
+            {"c": scenario["pub_course"], "s": dropped_uid},
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO auth_sessions (id, user_id, refresh_token_hash, expires_at) "
+                "VALUES (:id, :uid, :h, :exp)"
+            ),
+            {
+                "id": session_id,
+                "uid": dropped_uid,
+                "h": hash_secret(generate_token()),
+                "exp": datetime.now(tz=UTC) + timedelta(hours=1),
+            },
+        )
+    try:
+        bearer = create_access_token(user_id=dropped_uid, session_id=session_id)
+        auth = {"Authorization": f"Bearer {bearer}"}
+        for url in _item_urls(scenario):
+            resp = await client.get(url, headers=auth)
+            assert resp.status_code == 403, f"{url} -> {resp.status_code}: {resp.text}"
+    finally:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("DELETE FROM auth_sessions WHERE id = :id"), {"id": session_id}
+            )
+            await conn.execute(
+                text("DELETE FROM organization_memberships WHERE user_id = :id"),
+                {"id": dropped_uid},
+            )
+            await conn.execute(
+                text("DELETE FROM course_enrollments WHERE student_id = :id"),
+                {"id": dropped_uid},
+            )
+            await conn.execute(text("DELETE FROM user_profiles WHERE user_id = :id"), {"id": dropped_uid})
+            await conn.execute(text("DELETE FROM users WHERE id = :id"), {"id": dropped_uid})
+
+
+async def test_completed_enrollment_still_reads(
+    client: httpx.AsyncClient,
+    unenrolled_bearer: str,
+    scenario: dict,
+    engine: AsyncEngine,
+    seeded_users: SeededUsers,
+) -> None:
+    """A ``completed`` enrollment keeps item access (review / re-read)."""
+    completed_uid = uuid.uuid4()
+    session_id = uuid.uuid4()
+    from datetime import UTC, datetime, timedelta
+
+    from abridgeai.core.security import create_access_token, generate_token, hash_secret
+
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("INSERT INTO users (id, primary_email, status) VALUES (:id, :email, 'active')"),
+            {"id": completed_uid, "email": f"completed-{completed_uid.hex[:8]}@abridgeai.local"},
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO user_profiles (user_id, given_name, family_name, display_name) "
+                "VALUES (:id, 'Done', 'Student', 'Done Student')"
+            ),
+            {"id": completed_uid},
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO organization_memberships "
+                "(id, user_id, organization_id, org_unit_id, status) "
+                "VALUES (gen_random_uuid(), :uid, :org, :unit, 'active')"
+            ),
+            {"uid": completed_uid, "org": seeded_users.organization_id, "unit": seeded_users.org_unit_id},
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO course_enrollments (course_id, student_id, status, source) "
+                "VALUES (:c, :s, 'completed', 'manager_bulk')"
+            ),
+            {"c": scenario["pub_course"], "s": completed_uid},
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO auth_sessions (id, user_id, refresh_token_hash, expires_at) "
+                "VALUES (:id, :uid, :h, :exp)"
+            ),
+            {
+                "id": session_id,
+                "uid": completed_uid,
+                "h": hash_secret(generate_token()),
+                "exp": datetime.now(tz=UTC) + timedelta(hours=1),
+            },
+        )
+    try:
+        bearer = create_access_token(user_id=completed_uid, session_id=session_id)
+        auth = {"Authorization": f"Bearer {bearer}"}
+        for url in _item_urls(scenario):
+            resp = await client.get(url, headers=auth)
+            assert resp.status_code == 200, f"{url} -> {resp.status_code}: {resp.text}"
+    finally:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("DELETE FROM auth_sessions WHERE id = :id"), {"id": session_id}
+            )
+            await conn.execute(
+                text("DELETE FROM organization_memberships WHERE user_id = :id"),
+                {"id": completed_uid},
+            )
+            await conn.execute(
+                text("DELETE FROM course_enrollments WHERE student_id = :id"),
+                {"id": completed_uid},
+            )
+            await conn.execute(text("DELETE FROM user_profiles WHERE user_id = :id"), {"id": completed_uid})
+            await conn.execute(text("DELETE FROM users WHERE id = :id"), {"id": completed_uid})
+
+
+async def test_course_manager_bypasses_enrollment_gate(
+    client: httpx.AsyncClient,
+    scenario: dict,
+    engine: AsyncEngine,
+    seeded_users: SeededUsers,
+) -> None:
+    """Course owners/managers (not enrolled) keep preview access."""
+    from datetime import UTC, datetime, timedelta
+
+    from abridgeai.core.security import create_access_token, generate_token, hash_secret
+
+    session_id = uuid.uuid4()
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO auth_sessions (id, user_id, refresh_token_hash, expires_at) "
+                "VALUES (:id, :uid, :h, :exp)"
+            ),
+            {
+                "id": session_id,
+                "uid": seeded_users.teacher_id,
+                "h": hash_secret(generate_token()),
+                "exp": datetime.now(tz=UTC) + timedelta(hours=1),
+            },
+        )
+    try:
+        bearer = create_access_token(user_id=seeded_users.teacher_id, session_id=session_id)
+        auth = {"Authorization": f"Bearer {bearer}"}
+        # The scenario course's owner IS the seeded teacher — owner bypass.
+        for url in _item_urls(scenario):
+            resp = await client.get(url, headers=auth)
+            assert resp.status_code == 200, f"{url} -> {resp.status_code}: {resp.text}"
+    finally:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("DELETE FROM auth_sessions WHERE id = :id"), {"id": session_id}
+            )
 
 
 def test_no_authoring_imports_in_learner() -> None:
