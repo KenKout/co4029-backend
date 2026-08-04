@@ -39,7 +39,11 @@ from abridgeai.features.quizzes.schemas import (
     QuizAttemptRead,
     QuizAttemptReviewRead,
     QuizAttemptStart,
+    QuizProgressRead,
     QuizPublic,
+)
+from abridgeai.features.quizzes.services import (
+    learner_progress as learner_progress_service,
 )
 from abridgeai.features.quizzes.services import taking as taking_service
 
@@ -50,10 +54,10 @@ from abridgeai.features.quizzes.services import taking as taking_service
 from abridgeai.features.quizzes.services.taking import (
     AllCardsInCooldownError,
     CooldownActive,
+    MaxAttemptsReached,
     QuizPasswordIncorrect,
     QuizPasswordRequired,
     QuizSubnetBlocked,
-    MaxAttemptsReached,
 )
 from abridgeai.features.spaced_repetition.api.public import (
     dispatch_remediation_for_card_failure,
@@ -468,6 +472,37 @@ async def list_my_attempts(
     """List the calling student's attempts on this quiz."""
     attempts = await taking_service.get_attempt_history(db, quiz_id, current_user)
     return [QuizAttemptRead.model_validate(a) for a in attempts]
+
+
+@router.get(
+    "/courses/{course_id}/quiz-progress",
+    response_model=list[QuizProgressRead],
+)
+async def list_my_quiz_progress(
+    course_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> list[QuizProgressRead]:
+    """Per-quiz completion state for the calling student in a course.
+
+    Feeds the course-learn screen's curriculum (auto-collapse + next-item
+    highlight): a quiz is completed when the student passed it (headline
+    grade-of-record vs ``passing_score_percent``) OR failed with every
+    allowed attempt consumed and no attempt still in flight. See
+    :class:`QuizProgressRead` for the field semantics.
+
+    Gated by :func:`can_view_course_content` — the same org/enrollment
+    perimeter the other by-id learner reads use — so a cross-tenant caller
+    gets 404 with no existence leak.
+    """
+    if not await can_view_course_content(
+        db, user_id=current_user.user_id, course_id=course_id
+    ):
+        raise _not_found("course", course_id)
+    rows = await learner_progress_service.list_my_quiz_progress(
+        db, course_id=course_id, user_id=current_user.user_id
+    )
+    return [QuizProgressRead.model_validate(r) for r in rows]
 
 
 __all__ = ["QuizAttemptAnswerInput", "QuizAttemptAnswerRead", "router"]

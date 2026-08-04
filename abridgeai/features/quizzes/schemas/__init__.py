@@ -42,24 +42,11 @@ from abridgeai.features.quizzes.schemas.bank import (
     QuestionBankImportRequest,
     QuestionBankPage,
 )
-from abridgeai.features.quizzes.schemas.public import (
-    QuestionTypeLiteral,
-    QuizForTakingPublic,
-    QuizPublic,
-    QuizQuestionOptionPublic,
-    QuizQuestionPublic,
-)
 from abridgeai.features.quizzes.schemas.feedback import (
     FeedbackBandIn,
     FeedbackBandRead,
     OverallFeedbackRead,
     QuizGradeRow,
-)
-from abridgeai.features.quizzes.schemas.reports import (
-    ResponsesReportRead,
-    ResponsesReportRow,
-    StatisticsReportRead,
-    StatisticsReportRow,
 )
 from abridgeai.features.quizzes.schemas.manual_grading import (
     ManualGradeIn,
@@ -70,14 +57,24 @@ from abridgeai.features.quizzes.schemas.overrides import (
     QuizOverrideIn,
     QuizOverrideRead,
 )
+from abridgeai.features.quizzes.schemas.public import (
+    QuestionTypeLiteral,
+    QuizForTakingPublic,
+    QuizProgressRead,
+    QuizPublic,
+    QuizQuestionOptionPublic,
+    QuizQuestionPublic,
+)
 from abridgeai.features.quizzes.schemas.regrade import (
     RegradeItemRead,
     RegradeRunRead,
     RegradeScopeIn,
 )
-from abridgeai.features.quizzes.schemas.review_options import (
-    ReviewOptions,
-    ReviewWindowFlags,
+from abridgeai.features.quizzes.schemas.reports import (
+    ResponsesReportRead,
+    ResponsesReportRow,
+    StatisticsReportRead,
+    StatisticsReportRow,
 )
 from abridgeai.features.quizzes.schemas.results import (
     QuizOptionDistribution,
@@ -86,6 +83,10 @@ from abridgeai.features.quizzes.schemas.results import (
     QuizResultsRead,
     QuizResultsSummary,
     QuizScoreBucket,
+)
+from abridgeai.features.quizzes.schemas.review_options import (
+    ReviewOptions,
+    ReviewWindowFlags,
 )
 from abridgeai.features.quizzes.schemas.run import (
     CoverageOptions,
@@ -131,6 +132,7 @@ __all__ = [
     "QuizGenerationStageEvent",
     "QuizOptionDistribution",
     "QuizPerStudentRow",
+    "QuizProgressRead",
     "QuizPublic",
     "QuizQuestionAuthoring",
     "QuizQuestionBreakdown",

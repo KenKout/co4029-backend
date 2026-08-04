@@ -341,9 +341,36 @@ class QuizForTakingPublic(_ORMModel):
     questions: list[QuizQuestionPublic] = []
 
 
+class QuizProgressRead(BaseModel):
+    """Per-quiz completion state for one student, for the course-learn screen.
+
+    Completion follows the teacher-configured milestone: the quiz counts as
+    done when the student passed it (headline grade-of-record, reduced per
+    ``grading_method``) OR failed with every allowed attempt consumed and no
+    attempt still in flight — a failed-but-exhausted quiz is terminal, so it
+    stops being the "next thing to do".
+
+    ``max_attempts`` is the EFFECTIVE ceiling after ``allow_retakes=FALSE``
+    clamping (→ 1) and Phase 5 student/group overrides; ``None`` = unlimited
+    retakes, which can never be exhausted by failure alone. ``attempts_used``
+    counts every attempt row (in_progress / abandoned consume a slot exactly
+    like submitted, matching the start-attempt gate).
+    """
+
+    quiz_id: UUID
+    attempts_used: int
+    max_attempts: int | None = None
+    allow_retakes: bool = True
+    passed: bool | None = None
+    grade_percent: Decimal | None = None
+    completed: bool
+    attempts_remaining: int | None = None
+
+
 __all__ = [
     "QuestionTypeLiteral",
     "QuizForTakingPublic",
+    "QuizProgressRead",
     "QuizPublic",
     "QuizQuestionOptionPublic",
     "QuizQuestionPublic",
