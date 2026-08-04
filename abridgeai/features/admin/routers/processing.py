@@ -74,6 +74,23 @@ async def get_queue_depth(
     return QueueDepthOut(**await processing_service.queue_depth(db))
 
 
+@router.get("/summary", response_model=QueueDepthOut)
+async def get_processing_summary(
+    _user: Annotated[CurrentUser, Depends(_REQUIRE_READ)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    since: Annotated[datetime, Query(description="Lower bound on updated_at (required).")],
+) -> QueueDepthOut:
+    """Per-status job counts over the same ``since`` window as ``GET /jobs``.
+
+    The admin processing page's status-tab badges read from here. Deriving
+    them client-side from the status-filtered jobs list made every other
+    tab's count collapse to zero the moment one status was selected; a
+    client-side derivation from an unfiltered list would additionally be
+    wrong once a window holds more rows than the list endpoint's cap.
+    """
+    return QueueDepthOut(**(await processing_service.status_counts_since(db, since=since)))
+
+
 @router.get("/jobs", response_model=list[ProcessingJobOut])
 async def list_jobs(
     _user: Annotated[CurrentUser, Depends(_REQUIRE_READ)],
