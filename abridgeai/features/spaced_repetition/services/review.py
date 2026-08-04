@@ -134,6 +134,16 @@ async def _load_or_init_state(
     state = await db.get(StudentCardState, (student_id, question_id))
     if state is not None:
         return state, False
+    # Clamp the teacher-supplied initial EF to the same [1.3, 2.5] range the
+    # CHECK constraint (ck_student_card_state_ef_range) and update_ef enforce.
+    # The quiz settings allow initial_ef to be set without range validation,
+    # so an out-of-range value must be clamped here rather than blowing up the
+    # first review with an IntegrityError.
+    from abridgeai.features.spaced_repetition.sm2 import EF_MAX, EF_MIN
+
+    if initial_ef is not None:
+        ef_value = min(EF_MAX, max(EF_MIN, float(initial_ef)))
+        initial_ef = Decimal(str(ef_value))
     state = StudentCardState(
         student_id=student_id,
         question_id=question_id,
