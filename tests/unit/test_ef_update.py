@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from abridgeai.features.spaced_repetition.sm2.ef_update import EF_MIN, update_ef
+from abridgeai.features.spaced_repetition.sm2.ef_update import EF_MAX, EF_MIN, update_ef
 
 
 def test_update_ef_q4_neutral_unchanged() -> None:
@@ -11,14 +11,19 @@ def test_update_ef_q4_neutral_unchanged() -> None:
 
 
 def test_update_ef_q5_calibrated_during_early_reps() -> None:
-    assert update_ef(2.5, q=5, n=0, alpha=0.6) == 2.56
-    assert update_ef(2.5, q=5, n=1, alpha=0.6) == 2.56
-    assert update_ef(2.5, q=5, n=3, alpha=0.6) == 2.56
+    # From 2.4 (below the 2.5 ceiling) a perfect review grows EF by
+    # 0.1 * alpha; from 2.5 the ceiling pins it at 2.5.
+    assert update_ef(2.4, q=5, n=0, alpha=0.6) == 2.46
+    assert update_ef(2.4, q=5, n=1, alpha=0.6) == 2.46
+    assert update_ef(2.4, q=5, n=3, alpha=0.6) == 2.46
+    assert update_ef(2.5, q=5, n=0, alpha=0.6) == 2.5
 
 
 def test_update_ef_q5_full_after_calibration_window() -> None:
-    assert update_ef(2.5, q=5, n=4, alpha=0.6) == 2.6
-    assert update_ef(2.5, q=5, n=10, alpha=0.6) == 2.6
+    # A perfect review adds +0.1, which would take 2.5 → 2.6; the ceiling
+    # caps it at 2.5 so EF stays within the KR-normalisation range.
+    assert update_ef(2.5, q=5, n=4, alpha=0.6) == EF_MAX
+    assert update_ef(2.5, q=5, n=10, alpha=0.6) == EF_MAX
 
 
 def test_update_ef_q0_negative_delta_not_calibrated() -> None:
@@ -57,7 +62,23 @@ def test_update_ef_invalid_q_raises(q: int) -> None:
 
 
 def test_update_ef_alpha_one_is_no_calibration() -> None:
-    assert update_ef(2.5, q=5, n=0, alpha=1.0) == 2.6
+    assert update_ef(2.5, q=5, n=0, alpha=1.0) == EF_MAX
+
+
+def test_update_ef_ceiling_enforced() -> None:
+    # Any input above the ceiling must never come back above 2.5 — this is
+    # the invariant the KR estimate (kr_estimate.sql / class_kr_distribution.sql)
+    # relies on to stay in [0, 1]. Previously uncapped, a run of perfect
+    # reviews drifted EF to 2.6+ and KR silently exceeded 100%.
+    assert EF_MAX == 2.5
+    assert update_ef(2.5, q=5, n=10, positive_delta_scale=1.0) == EF_MAX
+    assert update_ef(2.6, q=5, n=10) == EF_MAX
+    assert update_ef(3.0, q=5, n=10) == EF_MAX
+    assert update_ef(2.5, q=5, n=0, alpha=1.0) == EF_MAX
+    # Dampened positive deltas below the ceiling still apply.
+    assert update_ef(2.4, q=5, n=10, positive_delta_scale=0.75) == 2.475
+    # The floor is unaffected: negative deltas still drop EF toward 1.3.
+    assert update_ef(1.5, q=0, n=10) == EF_MIN
 
 
 # -- guess-channel dampening (positive_delta_scale) --------------------------
@@ -65,18 +86,19 @@ def test_update_ef_alpha_one_is_no_calibration() -> None:
 
 def test_update_ef_guess_scale_dampens_positive_delta() -> None:
     # n=10 (calibration off) so we isolate the guess scale. Q=5 delta = 0.1.
-    # 4-option MCQ → guess prob 0.25 → scale 0.75 → delta 0.075 → 2.575.
-    assert update_ef(2.5, q=5, n=10, positive_delta_scale=0.75) == 2.575
-    # true/false → guess prob 0.5 → scale 0.5 → delta 0.05 → 2.55.
-    assert update_ef(2.5, q=5, n=10, positive_delta_scale=0.5) == 2.55
+    # Start at 2.4 so the 2.5 ceiling doesn't swallow the dampened delta.
+    # 4-option MCQ → guess prob 0.25 → scale 0.75 → delta 0.075 → 2.475.
+    assert update_ef(2.4, q=5, n=10, positive_delta_scale=0.75) == 2.475
+    # true/false → guess prob 0.5 → scale 0.5 → delta 0.05 → 2.45.
+    assert update_ef(2.4, q=5, n=10, positive_delta_scale=0.5) == 2.45
 
 
 def test_update_ef_guess_scale_default_is_no_effect() -> None:
-    # Default 1.0 must reproduce the pre-feature value exactly.
+    # Default 1.0 must reproduce the pre-feature value exactly (capped at 2.5).
     assert update_ef(2.5, q=5, n=10) == update_ef(
         2.5, q=5, n=10, positive_delta_scale=1.0
     )
-    assert update_ef(2.5, q=5, n=10, positive_delta_scale=1.0) == 2.6
+    assert update_ef(2.5, q=5, n=10, positive_delta_scale=1.0) == EF_MAX
 
 
 def test_update_ef_guess_scale_never_touches_negative_delta() -> None:
@@ -92,8 +114,8 @@ def test_update_ef_guess_scale_never_touches_negative_delta() -> None:
 
 def test_update_ef_guess_scale_stacks_with_calibration() -> None:
     # Early rep (n=0) MCQ: both alpha (0.6) and guess scale (0.75) apply to the
-    # positive delta → 0.1 * 0.6 * 0.75 = 0.045 → 2.545.
-    assert update_ef(2.5, q=5, n=0, alpha=0.6, positive_delta_scale=0.75) == 2.545
+    # positive delta → 0.1 * 0.6 * 0.75 = 0.045 → 2.445 (base 2.4, under cap).
+    assert update_ef(2.4, q=5, n=0, alpha=0.6, positive_delta_scale=0.75) == 2.445
 
 
 @pytest.mark.parametrize("scale", [0, -0.1, 1.5, 2.0])

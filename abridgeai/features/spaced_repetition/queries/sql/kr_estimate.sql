@@ -10,8 +10,12 @@
 -- cards to the floor (R̂ contribution = 0). Empty lesson collapses to 0.0 via
 -- the outer COALESCE.
 --
--- Result is bounded in [0, 1] by the EF >= 1.3 / EF <= 2.5 invariants enforced
--- on ``student_card_state.ef`` (CHECK constraint) and ``update_ef`` clamp.
+-- Result is bounded in [0, 1]: ``student_card_state.ef`` is constrained to
+-- [1.3, 2.5] by the CHECK ``ck_student_card_state_ef_range`` and the
+-- ``update_ef`` clamp (min 1.3, max 2.5), so every per-card term lies in
+-- [0, 1] and the average cannot exceed 1.0. The ceiling matters: without it,
+-- a run of perfect reviews drifted EF past 2.5 and this term silently
+-- exceeded 1.0 (a ">100%" retention figure).
 SELECT COALESCE(
     AVG((COALESCE(scs.ef, 1.3) - 1.3) / (2.5 - 1.3)),
     0.0

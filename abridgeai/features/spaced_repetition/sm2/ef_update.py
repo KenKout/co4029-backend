@@ -3,6 +3,14 @@
 from __future__ import annotations
 
 EF_MIN = 1.3
+# Canonical SM-2 has no hard upper bound, but every EF consumer in this
+# codebase assumes 2.5: the initial EF (2.5), the lesson-unlock range
+# (1.3..2.5), and the KR normalisation denominator (2.5 - 1.3) in
+# kr_estimate.sql / class_kr_distribution.sql. Without a cap, a run of
+# perfect reviews drifts EF past 2.5 (2.6, 2.7, ...) and the KR estimate
+# (EF-1.3)/(2.5-1.3) silently exceeds 1.0 — a ">100%" retention figure.
+# Capping at 2.5 keeps EF in [1.3, 2.5] and KR in [0, 1] by construction.
+EF_MAX = 2.5
 
 
 def update_ef(
@@ -40,7 +48,8 @@ def update_ef(
             must be in (0, 1].
 
     Returns:
-        New EF, floored at 1.3, rounded to 4 decimals.
+        New EF, clamped to [EF_MIN, EF_MAX] = [1.3, 2.5], rounded to 4
+        decimals.
 
     Raises:
         ValueError: if alpha/positive_delta_scale is outside (0, 1] or q is
@@ -63,8 +72,8 @@ def update_ef(
     # negative one, so a wrong answer's EF drop is unaffected.
     if delta > 0:
         delta *= positive_delta_scale
-    ef_new = max(EF_MIN, ef_old + delta)
+    ef_new = min(EF_MAX, max(EF_MIN, ef_old + delta))
     return round(ef_new, 4)
 
 
-__all__ = ["EF_MIN", "update_ef"]
+__all__ = ["EF_MAX", "EF_MIN", "update_ef"]

@@ -5,6 +5,11 @@
 -- lesson's cards), then bucket into 10 equal-width bins [0.0, 0.1) ..
 -- [0.9, 1.0]. Bin upper bound 1.0 is included in the last bucket.
 --
+-- Boundedness: per-card EF is constrained to [1.3, 2.5] (CHECK
+-- ``ck_student_card_state_ef_range`` + ``update_ef`` clamp), so each
+-- normalised term lies in [0, 1] and R̂ cannot exceed 1.0. The ``LEAST``
+-- on the bucket index remains as belt-and-braces.
+--
 -- ``mean_kr`` and ``median_kr`` are computed over the same per-student R̂
 -- distribution (PERCENTILE_CONT for the linearly interpolated median, since
 -- the discrete distribution is small enough that a continuous interpolation

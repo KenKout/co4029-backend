@@ -28,7 +28,10 @@ from abridgeai.core.db import (
 class StudentCardState(TimestampMixin, Base):
     __tablename__ = "student_card_state"
     __table_args__ = (
-        CheckConstraint("ef >= 1.3", name="ck_student_card_state_ef_floor"),
+        CheckConstraint(
+            "ef >= 1.3 AND ef <= 2.5",
+            name="ck_student_card_state_ef_range",
+        ),
         CheckConstraint(
             "interval_days >= 0",
             name="ck_student_card_state_interval_nonneg",
