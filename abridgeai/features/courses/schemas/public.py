@@ -117,6 +117,11 @@ class CoursePublic(_ORMModel):
     organization_id: UUID
     instructor: InstructorRead | None = None
     status: Literal["published"]
+    # Difficulty / effort exposed for the landing-page meta line (e.g.
+    # "Nam · 10 modules · ~18h · Intermediate"). Both are plain Course
+    # columns surfaced verbatim — the SPA formats them.
+    level: str | None = None
+    estimated_minutes: int | None = None
     # Short-TTL presigned GET URL for the course thumbnail, minted by the
     # service layer from the thumbnail's storage object. None when no thumbnail
     # is set (the SPA falls back to the gradient banner). Not persisted — a
