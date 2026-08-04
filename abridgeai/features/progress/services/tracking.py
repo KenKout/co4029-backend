@@ -80,18 +80,29 @@ async def unmark_lesson_complete(
 ) -> LessonProgressPublic | None:
     """Undo a manual completion — recompute status from engagement.
 
-    If the engagement aggregate would still auto-complete the lesson
-    (≥ ``_AUTO_COMPLETION_THRESHOLD``), the row stays ``completed`` (the
-    student watched/read enough to satisfy the threshold even without
-    manual marking). Otherwise the row reverts to ``in_progress`` (any
-    engagement at all) or ``not_started``.
+    The manual toggle WINS over the engagement auto-complete threshold:
+    unlike a plain engagement recompute, this call does NOT let
+    ``completion_percent >= _AUTO_COMPLETION_THRESHOLD`` re-assert
+    ``completed`` (that was a silent no-op — a student who had watched
+    enough could never un-tick the lesson). Status reverts to
+    ``in_progress`` (any engagement at all) or ``not_started``, with
+    ``completion_percent`` kept at the raw engagement aggregate.
+
+    A later engagement heartbeat (``record_material_engagement``) WILL
+    re-apply auto-completion — if the student keeps watching/reading past
+    the threshold, the lesson legitimately becomes complete again.
 
     Returns ``None`` when no row exists — there's nothing to undo.
     """
     progress = await get_my_lesson_progress(db, user_id=user_id, lesson_id=lesson_id)
     if progress is None:
         return None
-    return await update_lesson_progress(db, user_id=user_id, lesson_id=lesson_id)
+    return await update_lesson_progress(
+        db,
+        user_id=user_id,
+        lesson_id=lesson_id,
+        apply_auto_complete=False,
+    )
 
 
 async def record_material_engagement(
@@ -127,6 +138,7 @@ async def update_lesson_progress(
     *,
     user_id: UUID,
     lesson_id: UUID,
+    apply_auto_complete: bool = True,
 ) -> LessonProgressPublic:
     engagements = await list_my_engagement_for_lesson(db, user_id=user_id, lesson_id=lesson_id)
     total_seconds = sum(e.engagement_seconds for e in engagements)
@@ -155,7 +167,7 @@ async def update_lesson_progress(
     progress.completion_percent = completion_percent_decimal
     progress.last_activity_at = last_activity_at or _utcnow()
 
-    if auto_complete:
+    if apply_auto_complete and auto_complete:
         progress.status = "completed"
     elif total_seconds > 0 or (max_scroll is not None and max_scroll > 0):
         progress.status = "in_progress"
