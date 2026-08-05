@@ -339,6 +339,12 @@ class QuizQuestion(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftDele
         Numeric(18, 6), server_default=text("0")
     )
     match_pairs: Mapped[Any | None] = mapped_column(JSONB, nullable=True)
+    # Phase 7b (migration 0068): matching distractors — extra right-side values
+    # with NO left partner. They enlarge the shuffled choice pool a learner
+    # picks from (harder than a 1:1 match where the last prompt is forced), but
+    # are never the correct answer for any prompt, so they don't touch grading.
+    # NULL / [] = classic 1:1 matching. Only meaningful for the matching type.
+    match_distractors: Mapped[Any | None] = mapped_column(JSONB, nullable=True)
     ordering_sequence: Mapped[Any | None] = mapped_column(JSONB, nullable=True)
     # Phase 11 (migration 0055): shared question bank category.
     category_id: Mapped[uuid.UUID | None] = mapped_column(

@@ -36,9 +36,12 @@ from abridgeai.ai.llm.roles import ModelBinding
 logger = logging.getLogger(__name__)
 
 
-# Bounded inline retry policy for HTTP 429 only. Any other failure
-# (4xx other than 429, 5xx, network errors) propagates immediately and
-# the job-level retry mechanism handles it from there.
+# Fallback inline retry policy for HTTP 429. The live values come from the
+# binding's ``RetryPolicy`` (resolved from the ``ai.rate_limit_*`` runtime
+# settings); these constants are the code defaults the registry mirrors and the
+# floor used if a binding somehow carries no policy. Any failure other than 429
+# (4xx other than 429, 5xx, network errors) propagates immediately and the
+# job-level retry mechanism handles it from there.
 _RATE_LIMIT_MAX_ATTEMPTS = 4  # 1 initial + 3 retries
 _RATE_LIMIT_BASE_DELAY_S = 1.0
 _RATE_LIMIT_MAX_DELAY_S = 30.0
@@ -57,19 +60,25 @@ def _parse_retry_after(header_value: str | None) -> float | None:
         return None
 
 
-def _next_backoff(attempt: int, retry_after: float | None) -> float:
+def _next_backoff(
+    attempt: int,
+    retry_after: float | None,
+    *,
+    base_delay_s: float,
+    max_delay_s: float,
+) -> float:
     """Decide how long to sleep before the next retry.
 
     Prefer ``Retry-After`` when the provider offers one (capped at
-    ``_RATE_LIMIT_MAX_DELAY_S`` to bound the worst case). Fall back to
-    exponential backoff with jitter so multiple parallel callers don't
-    re-collide at exactly the same wall-clock instant.
+    ``max_delay_s`` to bound the worst case). Fall back to exponential backoff
+    with jitter so multiple parallel callers don't re-collide at exactly the
+    same wall-clock instant.
     """
     if retry_after is not None:
-        return min(retry_after, _RATE_LIMIT_MAX_DELAY_S)
-    base: float = _RATE_LIMIT_BASE_DELAY_S * (2 ** (attempt - 1))
-    jitter: float = random.uniform(0.0, _RATE_LIMIT_BASE_DELAY_S)  # noqa: S311  # nosec B311 - jitter, not security
-    return min(_RATE_LIMIT_MAX_DELAY_S, base + jitter)
+        return min(retry_after, max_delay_s)
+    base: float = base_delay_s * (2 ** (attempt - 1))
+    jitter: float = random.uniform(0.0, base_delay_s)  # noqa: S311  # nosec B311 - jitter, not security
+    return min(max_delay_s, base + jitter)
 
 
 class OpenAICompatibleClient:
@@ -126,6 +135,7 @@ class OpenAICompatibleClient:
         attempt = 0
         last_429_body: str | None = None
         last_retry_after: float | None = None
+        retry = self._binding.retry
 
         while True:
             attempt += 1
@@ -143,16 +153,21 @@ class OpenAICompatibleClient:
             if response.status_code == 429:
                 last_429_body = response.text[:500]
                 last_retry_after = _parse_retry_after(response.headers.get("Retry-After"))
-                if attempt >= _RATE_LIMIT_MAX_ATTEMPTS:
+                if attempt >= retry.max_attempts:
                     raise ProviderError(
                         f"{path} returned HTTP 429 after {attempt} attempts: {last_429_body}"
                     )
-                sleep_for = _next_backoff(attempt, last_retry_after)
+                sleep_for = _next_backoff(
+                    attempt,
+                    last_retry_after,
+                    base_delay_s=retry.base_delay_s,
+                    max_delay_s=retry.max_delay_s,
+                )
                 logger.warning(
                     "rate-limited on %s (attempt %d/%d); sleeping %.2fs",
                     path,
                     attempt,
-                    _RATE_LIMIT_MAX_ATTEMPTS,
+                    retry.max_attempts,
                     sleep_for,
                 )
                 await asyncio.sleep(sleep_for)

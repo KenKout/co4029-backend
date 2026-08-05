@@ -641,3 +641,143 @@ async def test_shuffled_take_payload_reflects_layout_and_survives_position_sort(
                 text("UPDATE quizzes SET shuffle_questions = FALSE WHERE id = :id"),
                 {"id": quiz_id},
             )
+
+
+@pytest.mark.asyncio
+async def test_initial_ef_out_of_range_is_clamped(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A teacher-set ``initial_ef`` outside [1.3, 2.5] must clamp, not 500.
+
+    ``student_card_state.ef`` is CHECK-constrained to [1.3, 2.5]
+    (``ck_student_card_state_ef_range``) and the quiz settings accept
+    ``initial_ef`` without range validation, so an out-of-range value (e.g.
+    3.0) would violate the constraint on the first review and blow up with
+    an IntegrityError. ``_load_or_init_state`` clamps it into range instead.
+    """
+    org_id, owner_id, student_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    course_id, module_id, quiz_id, question_id = (
+        uuid.uuid4(),
+        uuid.uuid4(),
+        uuid.uuid4(),
+        uuid.uuid4(),
+    )
+    suffix = org_id.hex[:8]
+
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("INSERT INTO organizations (id, slug, name) VALUES (:id, :slug, :name)"),
+            {"id": org_id, "slug": f"qt-clamp-{suffix}", "name": "Clamp Org"},
+        )
+        await conn.execute(
+            text("INSERT INTO users (id, primary_email) VALUES (:id, :email)"),
+            {"id": owner_id, "email": f"qt-clamp-owner-{suffix}@test.local"},
+        )
+        await conn.execute(
+            text("INSERT INTO users (id, primary_email) VALUES (:id, :email)"),
+            {"id": student_id, "email": f"qt-clamp-student-{suffix}@test.local"},
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO organization_memberships "
+                "(id, user_id, organization_id, status) "
+                "VALUES (uuid_generate_v4(), :uid, :org, 'active')"
+            ),
+            {"uid": student_id, "org": org_id},
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO courses "
+                "(id, organization_id, owner_user_id, slug, title, status) "
+                "VALUES (:id, :org, :owner, :slug, 'Clamp Course', 'published')"
+            ),
+            {"id": course_id, "org": org_id, "owner": owner_id, "slug": f"cclamp-{suffix}"},
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO modules (id, course_id, title, position, status) "
+                "VALUES (:id, :course, 'Module', 1, 'published')"
+            ),
+            {"id": module_id, "course": course_id},
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO quizzes (id, course_id, module_id, title, status, "
+                "passing_score_percent, initial_ef) VALUES (:id, :course, :module, "
+                "'Clamp Quiz', 'published', 70.00, 3.00)"
+            ),
+            {"id": quiz_id, "course": course_id, "module": module_id},
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO quiz_questions "
+                "(id, quiz_id, position, question_type, prompt_text, review_status, "
+                "expected_response_time_ms) "
+                "VALUES (:id, :quiz, 1, 'multiple_choice', 'Clamp?', 'approved', 30000)"
+            ),
+            {"id": question_id, "quiz": quiz_id},
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO quiz_question_options "
+                "(id, question_id, option_key, option_text, is_correct, position) "
+                "VALUES (uuid_generate_v4(), :q, 'A', 'right', TRUE, 1), "
+                "       (uuid_generate_v4(), :q, 'B', 'wrong', FALSE, 2)"
+            ),
+            {"q": question_id},
+        )
+
+    try:
+        correct_option = await _fetch_option_id(engine, question_id, correct=True)
+        async with session_factory() as session, session.begin():
+            attempt, _ = await taking_service.start_attempt(
+                session, quiz_id, _actor(student_id)
+            )
+            await session.flush()
+            _, review = await taking_service.answer_attempt(
+                session,
+                attempt.id,
+                _AnswerPayload(
+                    question_id,
+                    selected_option_id=correct_option,
+                    t_actual_ms=30000,
+                ),
+                _actor(student_id),
+            )
+
+        assert review is not None
+        # initial_ef 3.0 clamps to the 2.5 ceiling (never raises IntegrityError).
+        assert review.ef_before == pytest.approx(2.5)
+    finally:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("DELETE FROM card_reviews WHERE question_id = :q"), {"q": question_id}
+            )
+            await conn.execute(
+                text("DELETE FROM student_card_state WHERE question_id = :q"), {"q": question_id}
+            )
+            await conn.execute(
+                text(
+                    "DELETE FROM quiz_attempt_answers WHERE attempt_id IN "
+                    "(SELECT id FROM quiz_attempts WHERE quiz_id = :q)"
+                ),
+                {"q": quiz_id},
+            )
+            await conn.execute(
+                text("DELETE FROM quiz_attempts WHERE quiz_id = :q"), {"q": quiz_id}
+            )
+            await conn.execute(
+                text("DELETE FROM quiz_question_options WHERE question_id = :q"), {"q": question_id}
+            )
+            await conn.execute(text("DELETE FROM quiz_questions WHERE id = :q"), {"q": question_id})
+            await conn.execute(text("DELETE FROM quizzes WHERE id = :q"), {"q": quiz_id})
+            await conn.execute(text("DELETE FROM modules WHERE id = :m"), {"m": module_id})
+            await conn.execute(text("DELETE FROM courses WHERE id = :c"), {"c": course_id})
+            await conn.execute(
+                text("DELETE FROM organization_memberships WHERE user_id = :u"), {"u": student_id}
+            )
+            await conn.execute(
+                text("DELETE FROM users WHERE id IN (:o, :s)"), {"o": owner_id, "s": student_id}
+            )
+            await conn.execute(text("DELETE FROM organizations WHERE id = :o"), {"o": org_id})

@@ -240,7 +240,15 @@ async def test_first_review_correct_q5_calibrated(
         )
     assert result.q == 5
     assert result.repetition_count_after == 1
-    expected_ef_after = 2.5 + 0.6 * 0.1
+    # EF growth is dampened twice on a first correct review of an MCQ:
+    #   * calibration alpha=0.6 (n<=3) — early over-confidence guard, and
+    #   * guess-channel scale — this seed question is multiple_choice with no
+    #     options, so get_guess_probability floors option count at 2 → 0.5 guess
+    #     probability → positive-delta scale 1-0.5 = 0.5.
+    # So delta = 0.1 * 0.6 * 0.5 = 0.03 → EF 2.5 → 2.53. (A free-recall format
+    # would keep the full 0.1*0.6 = 0.06; see test_ef_update for the unit-level
+    # guess-scale coverage.)
+    expected_ef_after = 2.5 + 0.6 * 0.1 * 0.5
     assert abs(result.ef_after - expected_ef_after) < 1e-6
     assert result.calibration_active is True
 

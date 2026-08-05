@@ -100,6 +100,41 @@ async def _ensure_org_access(
         raise _not_found(kind, resource_id)
 
 
+async def _ensure_course_enrolled(
+    db: AsyncSession,
+    current_user: CurrentUser,
+    course_id: UUID,
+) -> None:
+    """BR gate for learner item reads: 403 unless enrolled (or course manager).
+
+    A published course's landing page (detail, outcomes, tags) stays open to
+    every org member, but NONE of its items — content tree, modules, lessons,
+    resources, downloads — may be reached without an ``active`` /
+    ``completed`` enrollment. Course managers (owner / ``course.update``
+    grants) bypass so a teacher previewing their own course still passes;
+    ``dropped`` / ``waitlisted`` students are blocked. Runs after
+    :func:`_ensure_org_access`, so cross-tenant probes still 404 first.
+    """
+    from abridgeai.features.access_control.policies import (  # noqa: PLC0415
+        can_manage_course,
+    )
+    from abridgeai.features.enrollments.api import public as enrollments_api  # noqa: PLC0415
+
+    if await enrollments_api.has_active_or_completed_enrollment(
+        db, student_id=current_user.user_id, course_id=course_id
+    ):
+        return
+    if await can_manage_course(db, current_user.user_id, course_id):
+        return
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail={
+            "error": "not_enrolled",
+            "course_id": str(course_id),
+        },
+    )
+
+
 async def _ensure_lesson_unlocked(
     db: AsyncSession, current_user: CurrentUser, lesson_id: UUID
 ) -> None:
@@ -214,6 +249,7 @@ async def get_course_content(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> CourseContentPublic:
     await _ensure_org_access(db, user, kind="course", resource_id=course_id)
+    await _ensure_course_enrolled(db, user, course_id)
     tree = await catalog_service.get_published_course_content_for_learner(db, course_id)
     if tree is None:
         raise _not_found("course", course_id)
@@ -253,6 +289,7 @@ async def list_course_modules(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> list[ModulePublic]:
     await _ensure_org_access(db, user, kind="course", resource_id=course_id)
+    await _ensure_course_enrolled(db, user, course_id)
     modules = await catalog_service.list_published_modules_for_course(db, course_id)
     if modules is None:
         raise _not_found("course", course_id)
@@ -266,6 +303,11 @@ async def get_module(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> ModulePublic:
     await _ensure_org_access(db, user, kind="module", resource_id=module_id)
+    course_id = await catalog_service.course_id_for_course_resource(
+        db, kind="module", resource_id=module_id
+    )
+    if course_id is not None:
+        await _ensure_course_enrolled(db, user, course_id)
     module = await catalog_service.get_published_module_for_learner(db, module_id)
     if module is None:
         raise _not_found("module", module_id)
@@ -279,6 +321,11 @@ async def list_module_items(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> list[ModuleItemPublic]:
     await _ensure_org_access(db, user, kind="module", resource_id=module_id)
+    course_id = await catalog_service.course_id_for_course_resource(
+        db, kind="module", resource_id=module_id
+    )
+    if course_id is not None:
+        await _ensure_course_enrolled(db, user, course_id)
     items = await catalog_service.list_visible_module_items_for_learner(db, module_id)
     if items is None:
         raise _not_found("module", module_id)
@@ -292,6 +339,11 @@ async def list_module_lessons(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> list[LessonPublic]:
     await _ensure_org_access(db, user, kind="module", resource_id=module_id)
+    course_id = await catalog_service.course_id_for_course_resource(
+        db, kind="module", resource_id=module_id
+    )
+    if course_id is not None:
+        await _ensure_course_enrolled(db, user, course_id)
     lessons = await catalog_service.list_published_lessons_for_module(db, module_id)
     if lessons is None:
         raise _not_found("module", module_id)
@@ -305,6 +357,11 @@ async def get_lesson(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> LessonPublic:
     await _ensure_org_access(db, user, kind="lesson", resource_id=lesson_id)
+    course_id = await catalog_service.course_id_for_course_resource(
+        db, kind="lesson", resource_id=lesson_id
+    )
+    if course_id is not None:
+        await _ensure_course_enrolled(db, user, course_id)
     lesson = await catalog_service.get_published_lesson_for_learner(db, lesson_id)
     if lesson is None:
         raise _not_found("lesson", lesson_id)
@@ -319,6 +376,11 @@ async def list_lesson_resources(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> list[LessonResourcePublic]:
     await _ensure_org_access(db, user, kind="lesson", resource_id=lesson_id)
+    course_id = await catalog_service.course_id_for_course_resource(
+        db, kind="lesson", resource_id=lesson_id
+    )
+    if course_id is not None:
+        await _ensure_course_enrolled(db, user, course_id)
     resources = await catalog_service.list_visible_lesson_resources_for_learner(db, lesson_id)
     if resources is None:
         raise _not_found("lesson", lesson_id)
@@ -336,6 +398,11 @@ async def get_lesson_resource_download_url(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> ResourceDownloadUrlResponse:
     await _ensure_org_access(db, user, kind="resource", resource_id=resource_id)
+    course_id = await catalog_service.course_id_for_course_resource(
+        db, kind="resource", resource_id=resource_id
+    )
+    if course_id is not None:
+        await _ensure_course_enrolled(db, user, course_id)
     lesson_id = await catalog_service.get_visible_resource_lesson_id(db, resource_id)
     if lesson_id is not None:
         await _ensure_lesson_unlocked(db, user, lesson_id)

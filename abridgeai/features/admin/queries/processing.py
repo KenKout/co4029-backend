@@ -19,12 +19,31 @@ def _load(name: str) -> TextClause:
 
 
 _QUEUE_DEPTH_SQL = _load("processing/queue_depth.sql")
+_SUMMARY_SQL = _load("processing/summary.sql")
 _LIST_JOBS_SQL = _load("processing/list_jobs.sql")
 _GET_JOB_SQL = _load("processing/get_job.sql")
 
 
 async def queue_depth(db: AsyncSession) -> dict[str, int]:
     row = (await db.execute(_QUEUE_DEPTH_SQL)).mappings().one()
+    return {
+        "pending": int(row["pending_count"] or 0),
+        "running": int(row["running_count"] or 0),
+        "failed": int(row["failed_count"] or 0),
+        "completed": int(row["completed_count"] or 0),
+        "cancelled": int(row["cancelled_count"] or 0),
+        "total": int(row["total_count"] or 0),
+    }
+
+
+async def status_counts_since(db: AsyncSession, *, since: datetime) -> dict[str, int]:
+    """Per-status counts over the same ``since`` window as :func:`list_jobs`.
+
+    The admin processing page's tab badges read from here — deriving them
+    client-side from the status-filtered jobs list made every other tab's
+    count collapse to zero the moment one status was selected.
+    """
+    row = (await db.execute(_SUMMARY_SQL, {"since": since})).mappings().one()
     return {
         "pending": int(row["pending_count"] or 0),
         "running": int(row["running_count"] or 0),
@@ -56,4 +75,4 @@ async def get_job(db: AsyncSession, *, job_id: UUID) -> dict[str, Any] | None:
     return dict(row) if row is not None else None
 
 
-__all__ = ["get_job", "list_jobs", "queue_depth"]
+__all__ = ["get_job", "list_jobs", "queue_depth", "status_counts_since"]

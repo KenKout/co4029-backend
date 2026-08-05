@@ -160,6 +160,16 @@ async def scenario(
             ),
             {"m": module_id, "c": seeded_users.course_id},
         )
+        # BR gate: quiz taking is a course-item flow — the student must be
+        # enrolled for the learner reads to resolve (can_view_course_content).
+        await conn.execute(
+            text(
+                "INSERT INTO course_enrollments (course_id, student_id, status, source) "
+                "VALUES (:c, :s, 'active', 'manager_bulk') "
+                "ON CONFLICT (course_id, student_id) DO NOTHING"
+            ),
+            {"c": seeded_users.course_id, "s": seeded_users.student_id},
+        )
 
     yield {"course_id": seeded_users.course_id, "module_id": module_id}
 
@@ -487,6 +497,104 @@ async def test_learner_quiz_response_omits_is_correct(
 # ---------------------------------------------------------------------------
 # Source-grep guard (FIX-SEC-1 perimeter)
 # ---------------------------------------------------------------------------
+
+
+async def test_cross_org_quiz_not_readable_or_takable(
+    client: httpx.AsyncClient,
+    engine: AsyncEngine,
+    seeded_users: SeededUsers,
+) -> None:
+    """A published quiz from another organization is not reachable by id.
+
+    Regression: ``GET /quizzes/{id}`` and ``POST /quizzes/{id}/attempts``
+    used to trust ``status='published'`` alone (``del current_user``), so a
+    student of org A could fetch org B's quiz — question count, and via the
+    attempt flow the questions + options themselves — by UUID. Both entry
+    points must now resolve to 404 for a caller who is neither a member of
+    the owning org nor a course manager (no existence leak).
+    """
+    org2 = uuid.uuid4()
+    course2 = uuid.uuid4()
+    module2 = uuid.uuid4()
+    quiz2 = uuid.uuid4()
+    question2 = uuid.uuid4()
+    suffix = org2.hex[:8]
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO organizations (id, slug, name, status) "
+                "VALUES (:id, :slug, :name, 'active')"
+            ),
+            {"id": org2, "slug": f"xorg-{suffix}", "name": "X Org"},
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO courses (id, organization_id, owner_user_id, slug, title, status) "
+                "VALUES (:id, :org, :owner, :slug, 'X Course', 'published')"
+            ),
+            {
+                "id": course2,
+                "org": org2,
+                "owner": seeded_users.teacher_id,
+                "slug": f"xcourse-{suffix}",
+            },
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO modules (id, course_id, title, position, status) "
+                "VALUES (:m, :c, 'X Module', 1, 'published')"
+            ),
+            {"m": module2, "c": course2},
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO quizzes (id, course_id, module_id, title, status) "
+                "VALUES (:q, :c, :m, 'X Quiz', 'published')"
+            ),
+            {"q": quiz2, "c": course2, "m": module2},
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO quiz_questions (id, quiz_id, position, question_type, "
+                "prompt_text, review_status, expected_response_time_ms) "
+                "VALUES (:q, :qz, 1, 'multiple_choice', 'X secret?', 'approved', 30000)"
+            ),
+            {"q": question2, "qz": quiz2},
+        )
+
+    student_sid = await _seed_session(engine, seeded_users.student_id)
+    student_token = create_access_token(user_id=seeded_users.student_id, session_id=student_sid)
+    try:
+        quiz_resp = await client.get(
+            f"/api/v1/quizzes/{quiz2}",
+            headers=_auth(student_token),
+        )
+        assert quiz_resp.status_code == 404, quiz_resp.text
+        attempt_resp = await client.post(
+            f"/api/v1/quizzes/{quiz2}/attempts",
+            json={"quiz_id": str(quiz2)},
+            headers=_auth(student_token),
+        )
+        assert attempt_resp.status_code == 404, attempt_resp.text
+    finally:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("DELETE FROM quiz_question_options WHERE question_id = :q"),
+                {"q": question2},
+            )
+            await conn.execute(text("DELETE FROM quiz_questions WHERE id = :q"), {"q": question2})
+            await conn.execute(
+                text("DELETE FROM quiz_source_lessons WHERE quiz_id = :q"),
+                {"q": quiz2},
+            )
+            await conn.execute(text("DELETE FROM quizzes WHERE id = :q"), {"q": quiz2})
+            await conn.execute(text("DELETE FROM modules WHERE id = :m"), {"m": module2})
+            await conn.execute(text("DELETE FROM courses WHERE id = :c"), {"c": course2})
+            await conn.execute(text("DELETE FROM organizations WHERE id = :o"), {"o": org2})
+            await conn.execute(
+                text("DELETE FROM auth_sessions WHERE id = :id"),
+                {"id": student_sid},
+            )
 
 
 async def _seed_published_quiz_with_question(

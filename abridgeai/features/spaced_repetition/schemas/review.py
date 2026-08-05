@@ -42,6 +42,16 @@ class ReviewCard(BaseModel):
 class ReviewQueue(BaseModel):
     items: list[ReviewCard]
     total_due: int
+    #: Admin-configured daily review cap; 0 means unlimited. The queue length
+    #: is bounded to what remains of this cap today. Bounds the queue ONLY —
+    #: unlock eligibility and retention scoring are never affected.
+    daily_cap: int = 0
+    #: Cards this student has already reviewed today (counts toward the cap).
+    reviewed_today: int = 0
+    #: Cards still allowed today = max(0, daily_cap - reviewed_today); when
+    #: daily_cap is 0 this equals total_due (no cap). 0 with total_due > 0
+    #: means the student hit today's cap and should come back tomorrow.
+    daily_remaining: int = 0
 
 
 class ReviewSubmitRequest(BaseModel):

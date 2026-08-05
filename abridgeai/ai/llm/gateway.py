@@ -23,7 +23,7 @@ from abridgeai.ai.llm.audit import write_ai_model_call
 from abridgeai.ai.llm.client import OpenAICompatibleClient
 from abridgeai.ai.llm.errors import ConfigError, ProviderError, ResponseFormatError
 from abridgeai.ai.llm.pricing import compute_cost
-from abridgeai.ai.llm.roles import LLMRole, binding_for
+from abridgeai.ai.llm.roles import LLMRole, binding_for, resolve_binding_overrides
 from abridgeai.core.config import Settings, get_settings
 from abridgeai.core.exceptions import AppError
 
@@ -130,6 +130,7 @@ class LLMGateway:
         parent_job_id: UUID | None = None,
         parent_run_id: UUID | None = None,
         image_data_url: str | None = None,
+        organization_id: UUID | None = None,
     ) -> LLMResult:
         if role is LLMRole.EMBEDDING:
             raise ConfigError(
@@ -137,7 +138,15 @@ class LLMGateway:
                 "use EmbeddingClient.embed instead"
             )
 
-        binding = binding_for(role, self._settings)
+        # Resolve the admin-tunable AI timeout + 429 retry policy for this org
+        # (falls back to global → env → code default) and inject them into the
+        # binding. Passing organization_id=None yields the deployment-wide value.
+        timeout_s, retry = await resolve_binding_overrides(
+            db, role, organization_id=organization_id
+        )
+        binding = binding_for(
+            role, self._settings, timeout_override_s=timeout_s, retry_override=retry
+        )
         client = OpenAICompatibleClient(binding)
         # When ``image_data_url`` is supplied the user turn becomes an
         # OpenAI-style multimodal content array (text part + image_url part)

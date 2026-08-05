@@ -38,9 +38,10 @@ Reconciliation directives (HIGHER PRECEDENCE — see plan §266-585)
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import datetime
 from decimal import Decimal
-from typing import Literal
+from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -314,6 +315,59 @@ class InterviewSubmitAnswerResponse(BaseModel):
     transition_id: str | None = None
     transition_text: str | None = None
     transition_target: Literal["next_question", "closing"] | None = None
+
+    @classmethod
+    def from_step_result(
+        cls,
+        result: Mapping[str, Any],
+        *,
+        time_remaining_seconds: int | None,
+    ) -> InterviewSubmitAnswerResponse:
+        """Build the turn response from ``take_session_step``'s result dict.
+
+        THE single place this projection is defined. Two transports deliver a
+        typed interview turn — REST ``/respond`` and the LiveKit control topic —
+        and they must present identical state, so both call this rather than
+        hand-listing fields at their own call site. Adding a field above without
+        mapping it here shows up as a failing parity test, not as a field that
+        silently reaches one client and not the other.
+
+        ``next_question`` is projected through :class:`InterviewQuestionPublic`,
+        so the ORM row never escapes: only ``id``, ``prompt_text`` and
+        ``question_type`` are exposed, and authoring-only columns (difficulty,
+        review status, source refs) cannot leak to a learner.
+
+        ``time_remaining_seconds`` is a REQUIRED keyword rather than read from
+        ``result``: the brain does not return it. It is computed by
+        ``session_time_remaining_seconds`` against the session row, and passing
+        it explicitly is what stops a caller from quietly publishing ``None``.
+        """
+        next_question = result.get("next_question")
+        return cls(
+            # ── legacy fields (always present; unchanged for existing clients) ─
+            next_question=(
+                InterviewQuestionPublic.model_validate(next_question)
+                if next_question is not None
+                else None
+            ),
+            is_finished=bool(result.get("is_finished")),
+            ai_followup_text=result.get("followup_text"),
+            time_remaining_seconds=time_remaining_seconds,
+            # ── adaptive structured fields (None on the legacy/sequential path)
+            ai_turn_text=result.get("ai_turn_text"),
+            language=result.get("language"),
+            should_narrate=result.get("should_narrate"),
+            should_await_response=result.get("should_await_response"),
+            should_finish=result.get("should_finish"),
+            assistance_kind=result.get("assistance_kind"),
+            # ── End-confirmation gate (None on legacy/sequential path) ────────
+            pending_confirmation=result.get("pending_confirmation"),
+            interaction_state=result.get("interaction_state"),
+            # ── Natural Interview Transitions (None when no transition) ───────
+            transition_id=result.get("transition_id"),
+            transition_text=result.get("transition_text"),
+            transition_target=result.get("transition_target"),
+        )
 
 
 class InterviewRubricScore(BaseModel):

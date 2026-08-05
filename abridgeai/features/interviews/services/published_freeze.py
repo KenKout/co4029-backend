@@ -73,4 +73,33 @@ def assert_config_settings_editable(config: InterviewConfig, changed_fields: set
         )
 
 
-__all__ = ["PUBLISHED_EDITABLE_CONFIG_FIELDS", "assert_config_settings_editable"]
+def assert_learning_outcomes_editable(config: InterviewConfig) -> None:
+    """Freeze learning-outcome mutations on a published interview.
+
+    The outcomes ARE the grading criteria: evaluation.py compares each answer
+    against them and weights the result by ``importance_weight``. Adding,
+    removing, or reweighting an outcome mid-cohort means two students sit \"the
+    same\" interview judged against different standards — strictly worse than a
+    frozen settings field, because it silently changes how already-submitted
+    answers would score. The config PATCH freeze covers the pass threshold
+    (``min_outcomes_to_pass``); this covers the criteria themselves.
+
+    Called by the outcome create/update/delete service functions before any
+    write, so a published config rejects the mutation with the same
+    ``interview_published_setting_locked`` error the settings PATCH uses — the
+    client treats both identically. Unpublishing lifts the restriction.
+    """
+    if config.status != "published":
+        return
+    raise ConflictError(
+        "interview_published_setting_locked: learning outcomes are frozen on a "
+        "published interview because the AI judges answers against them. "
+        "Unpublish the interview first to change them."
+    )
+
+
+__all__ = [
+    "PUBLISHED_EDITABLE_CONFIG_FIELDS",
+    "assert_config_settings_editable",
+    "assert_learning_outcomes_editable",
+]

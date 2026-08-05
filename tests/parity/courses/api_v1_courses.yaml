@@ -19,6 +19,8 @@ allow_extra_fields:
   - "$.items[*].contact_phone"
   - "$.items[*].contact_website_url"
   - "$.items[*].contact_social_url"
+  - "$.items[*].level"
+  - "$.items[*].estimated_minutes"
 strict_match_fields: []
 behavior:
   status_code: null

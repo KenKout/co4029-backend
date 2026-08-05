@@ -39,6 +39,7 @@ from abridgeai.core.config import get_settings
 from abridgeai.core.security import CurrentUser
 from abridgeai.features.career_paths.services import authoring as authoring_service
 from abridgeai.features.career_paths.services import enrollment as enrollment_service
+from abridgeai.features.enrollments.api import public as enrollments_api
 
 
 def _async_url(database_url: str) -> str:
@@ -235,6 +236,35 @@ async def test_enroll_fans_out_required_courses_only(
 
     assert await _enrollment_status(engine, seed["student"], seed["req_course"]) == "active"
     assert await _enrollment_status(engine, seed["student"], seed["opt_course"]) is None
+
+
+@pytest.mark.asyncio
+async def test_single_course_enrollment_does_not_cascade_to_path(
+    engine, session_factory, seed
+) -> None:
+    """The reverse direction: enrolling a student in ONE course of a path
+    must NOT enroll them in the path itself nor in its other courses.
+    Only the career-enrollment entry point fans out (required courses)."""
+    async with session_factory() as db:
+        await enrollments_api.ensure_course_enrollment(
+            db, student_id=seed["student"], course_id=seed["req_course"],
+            actor_id=seed["manager"],
+        )
+        await db.commit()
+
+    assert await _enrollment_status(engine, seed["student"], seed["req_course"]) == "active"
+    assert await _enrollment_status(engine, seed["student"], seed["opt_course"]) is None
+    async with engine.connect() as conn:
+        count = (
+            await conn.execute(
+                text(
+                    "SELECT COUNT(*) FROM student_career_enrollments "
+                    "WHERE student_id=:s"
+                ),
+                {"s": seed["student"]},
+            )
+        ).scalar_one()
+    assert count == 0
 
 
 @pytest.mark.asyncio

@@ -250,9 +250,7 @@ async def update_course(
         and course.status == "published"
         and new_status == "draft"
     ):
-        raise ConflictError(
-            f"Course {course_id} is published and cannot be reverted to draft."
-        )
+        raise ConflictError(f"Course {course_id} is published and cannot be reverted to draft.")
     _apply_patch(course, payload)
     await _flush_or_conflict(db)
     await db.refresh(course)
@@ -326,7 +324,7 @@ async def archive_course(db: AsyncSession, course_id: UUID, actor: CurrentUser) 
 
 
 async def delete_course(db: AsyncSession, course_id: UUID, actor: CurrentUser) -> None:
-    """Soft-delete a course (teacher-facing), cascading to its children.
+    """Soft-delete a course (manager-facing), cascading to its children.
 
     Reversible tombstone via :func:`soft_delete_cascade` — nothing is
     physically removed, the row is stamped ``deleted_at`` / ``deleted_by`` and
@@ -1221,6 +1219,7 @@ def _project_outcomes(
         dto.code = code
         dto.depth = depth
         dtos[o.id] = dto
+
     # Tree order: sort by the dotted code split into ints so 1.2 < 1.10.
     def sort_key(dto: CourseLearningOutcomeAuthoring) -> list[int]:
         return [int(part) for part in (dto.code or "").split(".") if part.isdigit()]

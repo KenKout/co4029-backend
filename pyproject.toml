@@ -169,6 +169,28 @@ max-complexity = 12
 # into a template (S608): the names come from a module-level tuple, never from
 # input, and the alternative is seven near-identical query constants.
 "scripts/audit_org_tenancy.py" = ["T20", "E501", "S608"]
+# LiveKit text-stream probes — manual-trigger CLIs used to verify that a typed
+# `lk.chat` turn reaches the agent and that our control topic comes back. Both
+# legitimately print (T20), import after a sys.path insert (E402/I001), assert
+# on live results (S101), and use the private `_publish_control` /
+# `_process_turn` seams the SDK gives us no public equivalent for (SLF001).
+"scripts/probe_lk_chat.py" = ["T20", "E501", "E402", "I001", "S101"]
+"scripts/probe_agent_text_input.py" = [
+    "T20",
+    "E501",
+    "E402",
+    "I001",
+    "S101",
+    "SLF001",
+    "ANN",
+    # One linear main() that connects, sends, then checks each invariant in
+    # sequence. Splitting it would scatter a script meant to read top-to-bottom.
+    "C901",
+]
+# Live staging pass — walks a real hybrid session through onboarding, joins the
+# room, and drives one typed turn end-to-end. Same shape as the other probes:
+# CLI prints a human report (T20), sys.path insert (E402), linear main (C901).
+"scripts/probe_live_staging.py" = ["T20", "E501", "E402", "I001", "C901"]
 
 [tool.mypy]
 python_version = "3.12"

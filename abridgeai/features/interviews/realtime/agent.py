@@ -20,11 +20,16 @@ from uuid import UUID
 from livekit import (
     rtc,  # type: ignore[attr-defined]  # rtc is a lazy submodule; livekit ships no stubs
 )
-from livekit.agents import JobContext, RoomOutputOptions, WorkerOptions, cli
+from livekit.agents import JobContext, WorkerOptions, cli
 from livekit.agents.voice.background_audio import (
     AudioConfig,
     BackgroundAudioPlayer,
     BuiltinAudioClip,
+)
+from livekit.agents.voice.room_io import (
+    RoomOptions,
+    TextInputOptions,
+    TextOutputOptions,
 )
 
 from abridgeai.core.config import get_settings
@@ -122,18 +127,26 @@ async def entrypoint(ctx: JobContext) -> None:
         verbosity=voice_verbosity,
     )
     # Make transcript↔audio sync EXPLICIT (do not rely on SDK defaults). With
-    # transcription_enabled + sync_transcription True, livekit-agents attaches a
+    # text_output enabled + sync_transcription True, livekit-agents attaches a
     # TranscriptSynchronizer that paces the published transcript to the ACTUAL
     # TTS audio playout (RMS-based speaking-rate detection) — so the on-screen
     # text advances at the same speed as the spoken voice. transcription_speed_factor
     # 1.0 keeps text exactly in step with audio (no lead/lag).
+    #
+    # `text_input` accepts typed answers over the `lk.chat` text stream in the
+    # SAME room as voice (hybrid mode). The callback is custom because the SDK
+    # default calls `generate_reply()`, which drives the LLM plugin — this agent
+    # deliberately has none, so the default would silently produce nothing. Ours
+    # routes typed turns through the same shared handler the spoken path uses.
     await session.start(
         agent,
         room=ctx.room,
-        room_output_options=RoomOutputOptions(
-            transcription_enabled=True,
-            sync_transcription=True,
-            transcription_speed_factor=1.0,
+        room_options=RoomOptions(
+            text_input=TextInputOptions(text_input_cb=agent.on_text_input),
+            text_output=TextOutputOptions(
+                sync_transcription=True,
+                transcription_speed_factor=1.0,
+            ),
         ),
     )
 

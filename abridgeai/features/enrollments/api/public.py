@@ -62,6 +62,28 @@ async def is_user_enrolled(
     return (await db.execute(stmt)).scalar_one_or_none() is not None
 
 
+async def has_active_or_completed_enrollment(
+    db: AsyncSession,
+    *,
+    student_id: UUID,
+    course_id: UUID,
+) -> bool:
+    """Return ``True`` iff the student's enrollment is ``active`` or ``completed``.
+
+    The learner content gate (``courses.api.public.can_view_course_content``)
+    treats a completed course as still accessible — the student was enrolled
+    and keeps read access for review / re-reading — while ``dropped`` and
+    ``waitlisted`` rows deny access, matching the BR that an unenrolled
+    student must not reach course items.
+    """
+    stmt = select(Enrollment.id).where(
+        Enrollment.student_id == student_id,
+        Enrollment.course_id == course_id,
+        Enrollment.status.in_(("active", "completed")),
+    )
+    return (await db.execute(stmt)).scalar_one_or_none() is not None
+
+
 async def ensure_course_enrollment(
     db: AsyncSession,
     *,
@@ -104,6 +126,7 @@ __all__ = [
     "EnrollmentDTO",
     "ensure_course_enrollment",
     "get_course_enrollment",
+    "has_active_or_completed_enrollment",
     "is_user_enrolled",
     "list_active_student_ids",
 ]

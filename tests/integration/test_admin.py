@@ -464,6 +464,43 @@ async def test_list_processing_jobs_smoke(
     assert all(row["status"] == "failed" for row in with_filter.json())
 
 
+async def test_processing_summary_matches_unfiltered_list(
+    client: httpx.AsyncClient,
+    engine: AsyncEngine,
+    seeded_users: SeededUsers,
+    failed_job: uuid.UUID,
+) -> None:
+    """``GET /admin/processing/summary`` counts must equal the per-status
+    counts of the UNFILTERED jobs list over the same ``since`` window.
+
+    Regression: the page derived its status-tab badges from the jobs list
+    while that list was filtered by the selected status — so picking one tab
+    collapsed every other tab's count to zero. The summary endpoint is the
+    badges' source; it must stay window-wide regardless of any status filter.
+    """
+    del failed_job  # ensures at least one row exists
+    token, _ = await _bearer(engine, seeded_users.admin_id)
+    since = quote_plus((datetime.now(tz=UTC) - timedelta(days=7)).isoformat())
+    try:
+        summary_res = await client.get(
+            f"/api/v1/admin/processing/summary?since={since}",
+            headers=_auth(token),
+        )
+        listing_res = await client.get(
+            f"/api/v1/admin/processing/jobs?since={since}&limit=500",
+            headers=_auth(token),
+        )
+    finally:
+        await _purge_sessions(engine, seeded_users.admin_id)
+    assert summary_res.status_code == 200, summary_res.text
+    assert listing_res.status_code == 200, listing_res.text
+    body = summary_res.json()
+    rows = listing_res.json()
+    assert body["total"] == len(rows)
+    for status in ("pending", "running", "completed", "failed", "cancelled"):
+        assert body[status] == sum(1 for r in rows if r["status"] == status), status
+
+
 async def test_list_admin_users_smoke(
     client: httpx.AsyncClient,
     engine: AsyncEngine,

@@ -31,6 +31,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict
 
 from abridgeai.core.config import get_settings
+from abridgeai.features.materials.models import LearningMaterial
 from abridgeai.features.materials.queries.chunks import (
     get_stream_target_for_material,
     list_chunks_preview,
@@ -38,6 +39,8 @@ from abridgeai.features.materials.queries.chunks import (
 from abridgeai.features.materials.queries.published import (
     get_published_curated_kg,
     get_visible_material,
+    resolve_lesson_course,
+    resolve_material_course,
 )
 from abridgeai.features.materials.schemas.curated_kg import (
     CuratedKGEdge,
@@ -87,20 +90,45 @@ def _escape_filename(filename: str) -> str:
     return filename.replace("\\", "\\\\").replace('"', '\\"').replace("\r", "").replace("\n", "")
 
 
+async def _resolve_visible_material_for_user(
+    db: AsyncSession, material_id: UUID, user_id: UUID
+) -> LearningMaterial | None:
+    """Visible material + tenant gate.
+
+    Visibility (``visible_to_students=TRUE AND ready``) is necessary but
+    NOT sufficient: the caller must also be able to see the owning course
+    (org membership or course-manage rights — see
+    ``courses.api.public.can_view_course_content``). Without the second
+    half, any authenticated user could fetch any org's material by UUID,
+    including a presigned stream URL (cross-tenant content exfiltration).
+    Returns ``None`` on any miss so routers keep the 404-no-existence-leak
+    contract.
+    """
+    from abridgeai.features.courses.api.public import can_view_course_content
+
+    material = await get_visible_material(db, material_id)
+    if material is None:
+        return None
+    course_id = await resolve_material_course(db, material_id)
+    if course_id is None:
+        return None
+    if not await can_view_course_content(db, user_id=user_id, course_id=course_id):
+        return None
+    return material
+
+
 async def get_visible_material_for_user(
     db: AsyncSession, material_id: UUID, user_id: UUID
 ) -> MaterialPublic | None:
     """Return the public DTO for ``material_id`` if visible to ``user_id``.
 
-    ``user_id`` is currently unused — visibility is enforced solely by the
-    query layer's ``visible_to_students=TRUE AND processing_status='ready'``
-    predicate. The arg is reserved for the Phase 7 enrollments check
-    ("only students enrolled in the owning course see the material");
-    keeping the slot present means routers don't change when that gate
-    lands.
+    Visibility is enforced by the query layer's ``visible_to_students=TRUE
+    AND processing_status='ready'`` predicate AND the owning-course tenant
+    gate (org membership or course-management rights), so a material from
+    another organization resolves to ``None`` → 404 rather than leaking
+    through by id.
     """
-    del user_id
-    material = await get_visible_material(db, material_id)
+    material = await _resolve_visible_material_for_user(db, material_id, user_id)
     return None if material is None else MaterialPublic.model_validate(material)
 
 
@@ -110,8 +138,8 @@ async def get_stream_url_for_material(
     """Mint a presigned GET URL for a learner streaming a visible material.
 
     Returns ``None`` (router maps to 404) when the material is invisible,
-    soft-deleted, draft, mid-pipeline, or its current version has no
-    resolvable storage object.
+    soft-deleted, draft, mid-pipeline, outside the caller's tenant, or its
+    current version has no resolvable storage object.
 
     The TTL is :data:`_LEARNER_STREAM_TTL_CAP_SECONDS` or the global
     ``settings.s3_url_ttl_seconds``, whichever is smaller. The
@@ -119,7 +147,9 @@ async def get_stream_url_for_material(
     rather than inline streaming for non-media types and tags the file
     with the material's title (filename-quoted to block header injection).
     """
-    del user_id
+    material = await _resolve_visible_material_for_user(db, material_id, user_id)
+    if material is None:
+        return None
     target = await get_stream_target_for_material(db, material_id)
     if target is None:
         return None
@@ -148,16 +178,33 @@ async def list_visible_chunks_preview(
 ) -> list[ChunkPreview] | None:
     """Return the first ``limit`` chunks for a visible material (or ``None``).
 
-    ``None`` signals the material is not visible; the router maps it to
-    404 to preserve the no-existence-leak contract. An empty list
-    surfaces normally for visible-but-not-yet-chunked materials.
+    ``None`` signals the material is not visible (or outside the caller's
+    tenant); the router maps it to 404 to preserve the
+    no-existence-leak contract. An empty list surfaces normally for
+    visible-but-not-yet-chunked materials.
     """
-    del user_id
-    material = await get_visible_material(db, material_id)
+    material = await _resolve_visible_material_for_user(db, material_id, user_id)
     if material is None:
         return None
     chunks = await list_chunks_preview(db, material_id, limit=limit)
     return [ChunkPreview.model_validate(chunk) for chunk in chunks]
+
+
+async def can_access_lesson_content(
+    db: AsyncSession, user_id: UUID, lesson_id: UUID
+) -> bool:
+    """Tenant gate for lesson-scoped learner reads (knowledge-graph).
+
+    Resolves the lesson's owning course and applies the same org-membership
+    / course-manage check as material reads; ``False`` for lessons that do
+    not resolve or belong to another organization.
+    """
+    from abridgeai.features.courses.api.public import can_view_course_content
+
+    course_id = await resolve_lesson_course(db, lesson_id)
+    if course_id is None:
+        return False
+    return await can_view_course_content(db, user_id=user_id, course_id=course_id)
 
 
 async def get_published_kg_for_learner(

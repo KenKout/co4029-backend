@@ -44,6 +44,13 @@ class CacheKey:
     pattern: str
     ttl_seconds: int
     description: str
+    #: When True, invalidation treats the rendered key as a PREFIX and
+    #: pattern-deletes ``<rendered>*``. Set this for namespaces whose live keys
+    #: append their own suffixes beyond ``pattern`` (e.g. cards_due appends
+    #: ``:{lesson}:{course}:{cursor}:{limit}``), so the ``after_flush``
+    #: invalidator's exact ``DEL`` would otherwise miss every real key and the
+    #: entry would only clear on TTL expiry.
+    prefix_match: bool = False
 
     def format(self, **ctx: object) -> str:
         """Render the key. Missing placeholder raises KeyError (fail loud)."""
@@ -90,6 +97,9 @@ CARDS_DUE: Final = CacheKey(
     pattern="cards_due:{user_id}",
     ttl_seconds=60,
     description="Spaced-repetition cards due for a user (SR queue).",
+    # Live keys append :{lesson}:{course}:{cursor}:{limit}, so invalidation must
+    # pattern-delete cards_due:{user_id}* rather than the bare exact key.
+    prefix_match=True,
 )
 
 KG_LESSON_CONCEPTS: Final = CacheKey(

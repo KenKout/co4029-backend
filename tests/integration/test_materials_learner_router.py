@@ -191,6 +191,15 @@ async def scenario(engine: AsyncEngine, seeded_users: SeededUsers) -> AsyncItera
                 "slug": f"t46-{suffix}",
             },
         )
+        # BR gate: material reads resolve through can_view_course_content,
+        # which now requires an active/completed enrollment for org members.
+        await conn.execute(
+            text(
+                "INSERT INTO course_enrollments (course_id, student_id, status, source) "
+                "VALUES (:c, :s, 'active', 'manager_bulk')"
+            ),
+            {"c": course_id, "s": seeded_users.student_id},
+        )
         await conn.execute(
             text(
                 "INSERT INTO modules (id, course_id, title, position, status) "
@@ -293,6 +302,10 @@ async def scenario(engine: AsyncEngine, seeded_users: SeededUsers) -> AsyncItera
     yield data
 
     async with engine.begin() as conn:
+        await conn.execute(
+            text("DELETE FROM course_enrollments WHERE course_id = :id"),
+            {"id": course_id},
+        )
         await conn.execute(
             text("DELETE FROM document_chunks WHERE id = ANY(:ids)"),
             {"ids": chunk_ids},
@@ -468,3 +481,113 @@ async def test_unknown_material_returns_404(
         headers={"Authorization": f"Bearer {student_bearer}"},
     )
     assert response.status_code == 404
+
+
+async def test_cross_org_material_not_readable(
+    client: httpx.AsyncClient,
+    engine: AsyncEngine,
+    student_bearer: str,
+    seeded_users: SeededUsers,
+) -> None:
+    """A visible+ready material from another organization is not reachable.
+
+    Regression: the learner material reads (by id, stream-url, chunks)
+    trusted ``visible_to_students=TRUE AND ready`` alone — ``user_id`` was
+    discarded — so a student of org A could fetch org B's material by UUID,
+    including a presigned stream URL (content exfiltration). All three
+    surfaces must now resolve to 404 for a caller who is neither a member
+    of the owning org nor a course manager (no existence leak).
+    """
+    org2 = uuid.uuid4()
+    course2 = uuid.uuid4()
+    module2 = uuid.uuid4()
+    lesson2 = uuid.uuid4()
+    storage2 = uuid.uuid4()
+    material2 = uuid.uuid4()
+    version2 = uuid.uuid4()
+    suffix = org2.hex[:8]
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO organizations (id, slug, name, status) "
+                "VALUES (:id, :slug, :name, 'active')"
+            ),
+            {"id": org2, "slug": f"xorg-{suffix}", "name": "X Org"},
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO courses (id, organization_id, owner_user_id, slug, title, status) "
+                "VALUES (:id, :org, :owner, :slug, 'X Course', 'published')"
+            ),
+            {
+                "id": course2,
+                "org": org2,
+                "owner": seeded_users.teacher_id,
+                "slug": f"xcourse-{suffix}",
+            },
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO modules (id, course_id, title, position, status) "
+                "VALUES (:m, :c, 'X Module', 1, 'published')"
+            ),
+            {"m": module2, "c": course2},
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO lessons (id, module_id, slug, title, status) "
+                "VALUES (:l, :m, :slug, 'X Lesson', 'published')"
+            ),
+            {"l": lesson2, "m": module2, "slug": f"xlesson-{suffix}"},
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO storage_objects (id, bucket, object_key) "
+                "VALUES (:id, 'x-bucket', :k)"
+            ),
+            {"id": storage2, "k": f"x/{suffix}.pdf"},
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO learning_materials (id, lesson_id, title, material_type, visible_to_students) "
+                "VALUES (:id, :l, 'X Material', 'pdf', TRUE)"
+            ),
+            {"id": material2, "l": lesson2},
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO learning_material_versions "
+                "(id, material_id, storage_object_id, version_no, is_current, processing_status) "
+                "VALUES (:id, :m, :s, 1, TRUE, 'ready')"
+            ),
+            {"id": version2, "m": material2, "s": storage2},
+        )
+        await conn.execute(
+            text("UPDATE learning_materials SET current_version_id = :v WHERE id = :m"),
+            {"v": version2, "m": material2},
+        )
+
+    headers = {"Authorization": f"Bearer {student_bearer}"}
+    try:
+        response = await client.get(f"/api/v1/materials/{material2}", headers=headers)
+        assert response.status_code == 404, response.text
+        response = await client.get(
+            f"/api/v1/materials/{material2}/stream-url", headers=headers
+        )
+        assert response.status_code == 404, response.text
+        response = await client.get(
+            f"/api/v1/materials/{material2}/chunks/preview", headers=headers
+        )
+        assert response.status_code == 404, response.text
+    finally:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("DELETE FROM learning_material_versions WHERE id = :v"),
+                {"v": version2},
+            )
+            await conn.execute(text("DELETE FROM learning_materials WHERE id = :m"), {"m": material2})
+            await conn.execute(text("DELETE FROM storage_objects WHERE id = :s"), {"s": storage2})
+            await conn.execute(text("DELETE FROM lessons WHERE id = :l"), {"l": lesson2})
+            await conn.execute(text("DELETE FROM modules WHERE id = :m"), {"m": module2})
+            await conn.execute(text("DELETE FROM courses WHERE id = :c"), {"c": course2})
+            await conn.execute(text("DELETE FROM organizations WHERE id = :o"), {"o": org2})

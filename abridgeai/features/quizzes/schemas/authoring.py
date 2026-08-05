@@ -94,6 +94,11 @@ class QuizQuestionAuthoring(QuizQuestionPublic):
     numeric_answer: Decimal | None = None
     numeric_tolerance: Decimal | None = None
     match_pairs: list[dict[str, Any]] | None = None
+    # Matching distractors: extra right-side values with no left partner. Teacher
+    # authoring field — safe to expose here (it's not an answer key, just extra
+    # wrong choices), and the public schema folds it into the shuffled
+    # ``match_choices`` pool rather than serving it raw.
+    match_distractors: list[str] | None = None
     ordering_sequence: list[Any] | None = None
     difficulty: Literal["easy", "medium", "hard"] | None = None
     bloom_level: (

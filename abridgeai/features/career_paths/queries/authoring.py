@@ -92,8 +92,28 @@ async def course_belongs_to_org(db: AsyncSession, course_id: UUID, organization_
     return course is not None and course.organization_id == organization_id
 
 
+async def course_is_published_in_org(
+    db: AsyncSession, course_id: UUID, organization_id: UUID
+) -> bool:
+    """The course exists, belongs to ``organization_id`` AND is published.
+
+    Career paths are published surfaces: attaching a draft/archived course
+    would put an invisible or never-visible item into a path students are
+    shown. The UI picker already filters to the published catalogue; this is
+    the backend guard so a direct API call cannot attach an unpublished
+    course either.
+    """
+    course = await courses_api.get_course_by_id(db, course_id)
+    return (
+        course is not None
+        and course.organization_id == organization_id
+        and course.status == "published"
+    )
+
+
 __all__ = [
     "course_belongs_to_org",
+    "course_is_published_in_org",
     "get_career_path_for_authoring",
     "get_path_course_link",
     "list_authoring_career_path_courses",

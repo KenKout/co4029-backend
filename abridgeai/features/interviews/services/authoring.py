@@ -490,7 +490,10 @@ async def add_outcome(
     payload: Any,  # noqa: ANN401
     actor: CurrentUser,
 ) -> InterviewOutcome:
-    await _require_config(db, config_id)
+    config = await _require_config(db, config_id)
+    # The outcomes are the grading criteria; a published interview must not
+    # grow a criterion mid-cohort (see published_freeze.py).
+    published_freeze.assert_learning_outcomes_editable(config)
     data = payload.model_dump(exclude_unset=True)
     next_position = await authoring_queries.next_outcome_position(db, config_id)
     outcome = InterviewOutcome(
@@ -515,6 +518,9 @@ async def update_outcome(
     actor: CurrentUser,
 ) -> InterviewOutcome:
     del actor
+    config = await _require_config(db, config_id)
+    # Reweighting an outcome changes how every answer scores; frozen on publish.
+    published_freeze.assert_learning_outcomes_editable(config)
     outcome = await _require_outcome(db, config_id, outcome_id)
     _apply_patch(outcome, payload)
     await flush_or_conflict(db)
@@ -528,6 +534,9 @@ async def delete_outcome(
     outcome_id: UUID,
     actor: CurrentUser,
 ) -> None:
+    config = await _require_config(db, config_id)
+    # Dropping a criterion retroactively rewrites what the interview measured.
+    published_freeze.assert_learning_outcomes_editable(config)
     outcome = await _require_outcome(db, config_id, outcome_id)
     await soft_delete_cascade(db, outcome, actor_id=actor.user_id)
 

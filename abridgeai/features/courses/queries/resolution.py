@@ -132,7 +132,50 @@ async def organization_id_for_resource(db: AsyncSession, resource_id: UUID) -> U
     return (await db.execute(stmt)).scalar_one_or_none()
 
 
+# ---------------------------------------------------------------------------
+# Sub-resource -> owning course_id (enrollment gating for learner reads).
+#
+# The learner content gate needs the COURSE id (not just the org id) so the
+# router can require an active enrollment in the owning course. These mirror
+# the organization_id_for_* resolvers above and return ``None`` when the row
+# is missing / soft-deleted.
+# ---------------------------------------------------------------------------
+
+
+async def course_id_for_course(db: AsyncSession, course_id: UUID) -> UUID | None:
+    stmt = select(Course.id).where(Course.id == course_id)
+    return (await db.execute(stmt)).scalar_one_or_none()
+
+
+async def course_id_for_module(db: AsyncSession, module_id: UUID) -> UUID | None:
+    stmt = select(Module.course_id).where(Module.id == module_id)
+    return (await db.execute(stmt)).scalar_one_or_none()
+
+
+async def course_id_for_lesson(db: AsyncSession, lesson_id: UUID) -> UUID | None:
+    stmt = (
+        select(Module.course_id)
+        .join(Lesson, Lesson.module_id == Module.id)
+        .where(Lesson.id == lesson_id)
+    )
+    return (await db.execute(stmt)).scalar_one_or_none()
+
+
+async def course_id_for_resource(db: AsyncSession, resource_id: UUID) -> UUID | None:
+    stmt = (
+        select(Module.course_id)
+        .join(Lesson, Lesson.module_id == Module.id)
+        .join(LessonResource, LessonResource.lesson_id == Lesson.id)
+        .where(LessonResource.id == resource_id)
+    )
+    return (await db.execute(stmt)).scalar_one_or_none()
+
+
 __all__ = [
+    "course_id_for_course",
+    "course_id_for_lesson",
+    "course_id_for_module",
+    "course_id_for_resource",
     "organization_id_for_course",
     "organization_id_for_lesson",
     "organization_id_for_module",

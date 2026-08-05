@@ -43,6 +43,11 @@ async def queue_depth(db: AsyncSession) -> dict[str, int]:
     return await processing_queries.queue_depth(db)
 
 
+async def status_counts_since(db: AsyncSession, *, since: datetime) -> dict[str, int]:
+    """Per-status counts over the same ``since`` window as :func:`list_jobs`."""
+    return await processing_queries.status_counts_since(db, since=since)
+
+
 async def list_jobs(
     db: AsyncSession,
     *,
@@ -92,4 +97,4 @@ async def retry_failed_job(
     return refreshed
 
 
-__all__ = ["get_job", "list_jobs", "queue_depth", "retry_failed_job"]
+__all__ = ["get_job", "list_jobs", "queue_depth", "retry_failed_job", "status_counts_since"]

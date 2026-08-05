@@ -44,6 +44,7 @@ import abridgeai.features.identity.models  # noqa: F401  -- register users FK ta
 import abridgeai.features.interviews.models  # noqa: F401  -- T6.1 registers interview_* tables
 from abridgeai.core.config import get_settings
 from abridgeai.core.db import Base, get_db
+from abridgeai.core.runtime_settings import invalidate_settings_cache
 from abridgeai.core.security import create_access_token, generate_token, hash_secret
 from abridgeai.features.spaced_repetition.routers import learner_router, teacher_router
 from tests.support.db_graph import hard_delete_graph
@@ -446,6 +447,175 @@ async def test_cards_due_returns_paginated(
     seen_qids = {item["question_id"] for item in body1["items"] + body2["items"]}
     expected_qids = {str(q) for q in cards_due_scenario["qa"] + cards_due_scenario["qb"]}
     assert seen_qids == expected_qids
+
+
+async def test_cards_due_ordered_by_urgency(
+    client: httpx.AsyncClient,
+    engine: AsyncEngine,
+    student_bearer: str,
+    seeded_users: SeededUsers,
+) -> None:
+    """Most-overdue cards come first — the queue is a priority queue, not a
+    UUID shuffle.
+
+    Regression for the bug where ``ORDER BY question_id`` meant a card three
+    weeks overdue could sit behind one due five minutes ago depending on how
+    its UUID sorted, so a limited page returned an arbitrary slice rather than
+    the most urgent cards. The fix orders by ``due_at ASC`` (question_id as the
+    tie-breaker), so the response must be non-decreasing in ``due_at``.
+    """
+    course_id = seeded_users.course_id
+    student_id = seeded_users.student_id
+    await _enroll(engine, course_id=course_id, student_id=student_id)
+    _, _lesson, _, qids = await _seed_lesson(
+        engine, course_id=course_id, n_questions=5, lesson_title="Urgency"
+    )
+    now = datetime.now(tz=UTC)
+    # Deliberately seed in NON-urgency order so a stable sort on insertion or
+    # question_id would not accidentally produce the right answer.
+    offsets_days = [1, 21, 3, 0, 7]  # days overdue, scrambled
+    for qid, days in zip(qids, offsets_days, strict=True):
+        await _set_card_state(
+            engine,
+            student_id=student_id,
+            question_id=qid,
+            ef=Decimal("2.5"),
+            due_at=now - timedelta(days=days),
+            last_q=4,
+        )
+    try:
+        headers = {"Authorization": f"Bearer {student_bearer}"}
+        resp = await client.get("/api/v1/me/cards-due?limit=20", headers=headers)
+        assert resp.status_code == 200, resp.text
+        items = resp.json()["items"]
+        assert len(items) == 5
+        dues = [item["due_at"] for item in items]
+        # Non-decreasing due_at: most overdue (smallest timestamp) first.
+        assert dues == sorted(dues), dues
+        # And concretely the 21-days-overdue card leads, the 0-days one trails.
+        assert dues[0] < dues[-1]
+    finally:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("DELETE FROM student_card_state WHERE student_id = :s"),
+                {"s": student_id},
+            )
+            quiz_ids = [
+                str(v)
+                for v in (
+                    await conn.execute(
+                        text("SELECT id FROM quizzes WHERE course_id = :c"),
+                        {"c": course_id},
+                    )
+                ).scalars()
+            ]
+            if quiz_ids:
+                await hard_delete_graph(conn, "quizzes", quiz_ids)
+            module_ids = [
+                str(v)
+                for v in (
+                    await conn.execute(
+                        text("SELECT id FROM modules WHERE course_id = :c"),
+                        {"c": course_id},
+                    )
+                ).scalars()
+            ]
+            if module_ids:
+                await hard_delete_graph(conn, "modules", module_ids)
+            await conn.execute(
+                text("DELETE FROM course_enrollments WHERE course_id = :c"),
+                {"c": course_id},
+            )
+
+
+async def test_cards_due_excludes_unapproved_questions(
+    client: httpx.AsyncClient,
+    engine: AsyncEngine,
+    student_bearer: str,
+    seeded_users: SeededUsers,
+) -> None:
+    """A due card whose question isn't ``approved`` is not counted or listed.
+
+    Regression for the "21 due but Start Review has 13, and Computer Network
+    shows a row with nothing behind it" bug: the cards-due SQL and total_due
+    counted every due card, but the review queue drops questions that don't
+    resolve to an APPROVED payload. A pending/draft question therefore inflated
+    the count and rendered a course row the student couldn't act on. Both the
+    list and total_due must now exclude non-approved questions so the surfaces
+    agree.
+    """
+    course_id = seeded_users.course_id
+    student_id = seeded_users.student_id
+    await _enroll(engine, course_id=course_id, student_id=student_id)
+    _, _lesson, _quiz, qids = await _seed_lesson(
+        engine, course_id=course_id, n_questions=3, lesson_title="Mixed status"
+    )
+    past = datetime.now(tz=UTC) - timedelta(hours=1)
+    for qid in qids:
+        await _set_card_state(
+            engine,
+            student_id=student_id,
+            question_id=qid,
+            ef=Decimal("2.5"),
+            due_at=past,
+            last_q=4,
+        )
+    # Flip one of the three approved questions to pending: still due, its
+    # quiz/lesson are live, but it can't be served for review.
+    pending_qid = qids[0]
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("UPDATE quiz_questions SET review_status = 'pending' WHERE id = :id"),
+            {"id": pending_qid},
+        )
+    try:
+        headers = {"Authorization": f"Bearer {student_bearer}"}
+        cards = await client.get("/api/v1/me/cards-due?limit=100", headers=headers)
+        assert cards.status_code == 200, cards.text
+        items = cards.json()["items"]
+        # Only the 2 approved cards appear; the pending one is gone.
+        assert len(items) == 2
+        assert str(pending_qid) not in {i["question_id"] for i in items}
+
+        # total_due (from the review queue) agrees — no phantom 3rd card.
+        queue = await client.get("/api/v1/me/review/queue", headers=headers)
+        assert queue.status_code == 200, queue.text
+        qbody = queue.json()
+        assert qbody["total_due"] == 2
+        assert len(qbody["items"]) == 2
+        assert str(pending_qid) not in {c["question_id"] for c in qbody["items"]}
+    finally:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("DELETE FROM student_card_state WHERE student_id = :s"),
+                {"s": student_id},
+            )
+            quiz_ids = [
+                str(v)
+                for v in (
+                    await conn.execute(
+                        text("SELECT id FROM quizzes WHERE course_id = :c"),
+                        {"c": course_id},
+                    )
+                ).scalars()
+            ]
+            if quiz_ids:
+                await hard_delete_graph(conn, "quizzes", quiz_ids)
+            module_ids = [
+                str(v)
+                for v in (
+                    await conn.execute(
+                        text("SELECT id FROM modules WHERE course_id = :c"),
+                        {"c": course_id},
+                    )
+                ).scalars()
+            ]
+            if module_ids:
+                await hard_delete_graph(conn, "modules", module_ids)
+            await conn.execute(
+                text("DELETE FROM course_enrollments WHERE course_id = :c"),
+                {"c": course_id},
+            )
 
 
 async def test_dashboard_summary_agrees_with_cards_due(
@@ -1187,3 +1357,99 @@ async def test_review_submit_unknown_question_404(
         headers=headers,
     )
     assert resp.status_code == 404, resp.text
+
+
+async def test_review_queue_respects_daily_cap(
+    client: httpx.AsyncClient,
+    engine: AsyncEngine,
+    student_bearer: str,
+    seeded_users: SeededUsers,
+) -> None:
+    """The daily cap bounds the served queue without hiding the true backlog.
+
+    Regression cover for the daily-review-cap feature: with 3 cards due and the
+    admin cap set to 1, the queue serves only 1 card but still reports the full
+    ``total_due`` and the cap accounting (``daily_cap`` / ``reviewed_today`` /
+    ``daily_remaining``). The cap bounds the QUEUE only — it must not touch the
+    due-card count that unlock/progression reads.
+    """
+    course_id = seeded_users.course_id
+    student_id = seeded_users.student_id
+    await _enroll(engine, course_id=course_id, student_id=student_id)
+    _, _lesson, _quiz, qids = await _seed_lesson(
+        engine, course_id=course_id, n_questions=3, lesson_title="Capped"
+    )
+    past = datetime.now(tz=UTC) - timedelta(hours=1)
+    for qid in qids:
+        await _set_card_state(
+            engine,
+            student_id=student_id,
+            question_id=qid,
+            ef=Decimal("2.5"),
+            due_at=past,
+            last_q=4,
+        )
+    # Set a global daily cap of 1 and clear the resolver's TTL cache so the
+    # endpoint sees it on the next call.
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO system_settings (setting_key, setting_value_json, organization_id) "
+                "VALUES ('spaced_repetition.daily_review_cap', '1'::jsonb, NULL) "
+                "ON CONFLICT (setting_key) WHERE organization_id IS NULL "
+                "DO UPDATE SET setting_value_json = EXCLUDED.setting_value_json"
+            )
+        )
+    invalidate_settings_cache()
+    try:
+        headers = {"Authorization": f"Bearer {student_bearer}"}
+        resp = await client.get("/api/v1/me/review/queue", headers=headers)
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        # Only 1 card served (the cap), but the backlog is reported honestly.
+        assert len(body["items"]) == 1
+        assert body["total_due"] == 3
+        assert body["daily_cap"] == 1
+        assert body["reviewed_today"] == 0
+        assert body["daily_remaining"] == 1
+    finally:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text(
+                    "DELETE FROM system_settings "
+                    "WHERE setting_key = 'spaced_repetition.daily_review_cap' "
+                    "AND organization_id IS NULL"
+                )
+            )
+            await conn.execute(
+                text("DELETE FROM card_reviews WHERE student_id = :s"), {"s": student_id}
+            )
+            await conn.execute(
+                text("DELETE FROM student_card_state WHERE student_id = :s"),
+                {"s": student_id},
+            )
+            quiz_ids = [
+                str(v)
+                for v in (
+                    await conn.execute(
+                        text("SELECT id FROM quizzes WHERE course_id = :c"), {"c": course_id}
+                    )
+                ).scalars()
+            ]
+            if quiz_ids:
+                await hard_delete_graph(conn, "quizzes", quiz_ids)
+            module_ids = [
+                str(v)
+                for v in (
+                    await conn.execute(
+                        text("SELECT id FROM modules WHERE course_id = :c"), {"c": course_id}
+                    )
+                ).scalars()
+            ]
+            if module_ids:
+                await hard_delete_graph(conn, "modules", module_ids)
+            await conn.execute(
+                text("DELETE FROM course_enrollments WHERE course_id = :c"),
+                {"c": course_id},
+            )
+        invalidate_settings_cache()

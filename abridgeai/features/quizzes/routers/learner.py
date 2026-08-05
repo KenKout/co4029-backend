@@ -29,6 +29,7 @@ from abridgeai.core.db import get_db
 from abridgeai.core.exceptions import NotFoundError
 from abridgeai.core.observability import get_logger
 from abridgeai.core.security import CurrentUser, get_current_user, utcnow
+from abridgeai.features.courses.api.public import can_view_course_content
 from abridgeai.features.quizzes.queries.published import (
     QuizClosed,
     QuizNotYetOpen,
@@ -38,7 +39,11 @@ from abridgeai.features.quizzes.schemas import (
     QuizAttemptRead,
     QuizAttemptReviewRead,
     QuizAttemptStart,
+    QuizProgressRead,
     QuizPublic,
+)
+from abridgeai.features.quizzes.services import (
+    learner_progress as learner_progress_service,
 )
 from abridgeai.features.quizzes.services import taking as taking_service
 
@@ -49,10 +54,10 @@ from abridgeai.features.quizzes.services import taking as taking_service
 from abridgeai.features.quizzes.services.taking import (
     AllCardsInCooldownError,
     CooldownActive,
+    MaxAttemptsReached,
     QuizPasswordIncorrect,
     QuizPasswordRequired,
     QuizSubnetBlocked,
-    MaxAttemptsReached,
 )
 from abridgeai.features.spaced_repetition.api.public import (
     dispatch_remediation_for_card_failure,
@@ -133,10 +138,20 @@ async def get_published_quiz(
     current_user: Annotated[CurrentUser, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> QuizPublic:
-    """Public projection of one published quiz (no ``is_correct`` leak)."""
-    del current_user
+    """Public projection of one published quiz (no ``is_correct`` leak).
+
+    Tenant-gated: the caller must be able to see the quiz's owning course
+    (org membership or course-management rights) or the quiz resolves to
+    404 — a published quiz from another organization must not be readable
+    by id, which would leak question counts (and, via the attempt flow,
+    the questions themselves) across tenants.
+    """
     quiz = await taking_service.get_published_quiz(db, quiz_id)
     if quiz is None:
+        raise _not_found("quiz", quiz_id)
+    if not await can_view_course_content(
+        db, user_id=current_user.user_id, course_id=quiz.course_id
+    ):
         raise _not_found("quiz", quiz_id)
     # Count-only signal: how many approved questions the student will face.
     # Counts rows (matching the taking filter: approved + non-deleted) so no
@@ -194,6 +209,16 @@ async def start_attempt(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={"error": "quiz_id_mismatch"},
         )
+    # Tenant gate: a quiz from another organization must not be takable by
+    # id. The attempt flow would otherwise create cross-tenant attempts and
+    # serve the full question payload (options included) to anyone.
+    quiz = await taking_service.get_published_quiz(db, quiz_id)
+    if quiz is None:
+        raise _not_found("quiz", quiz_id)
+    if not await can_view_course_content(
+        db, user_id=current_user.user_id, course_id=quiz.course_id
+    ):
+        raise _not_found("quiz", quiz_id)
     try:
         _, take_payload = await taking_service.start_attempt(
             db,
@@ -447,6 +472,37 @@ async def list_my_attempts(
     """List the calling student's attempts on this quiz."""
     attempts = await taking_service.get_attempt_history(db, quiz_id, current_user)
     return [QuizAttemptRead.model_validate(a) for a in attempts]
+
+
+@router.get(
+    "/courses/{course_id}/quiz-progress",
+    response_model=list[QuizProgressRead],
+)
+async def list_my_quiz_progress(
+    course_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> list[QuizProgressRead]:
+    """Per-quiz completion state for the calling student in a course.
+
+    Feeds the course-learn screen's curriculum (auto-collapse + next-item
+    highlight): a quiz is completed when the student passed it (headline
+    grade-of-record vs ``passing_score_percent``) OR failed with every
+    allowed attempt consumed and no attempt still in flight. See
+    :class:`QuizProgressRead` for the field semantics.
+
+    Gated by :func:`can_view_course_content` — the same org/enrollment
+    perimeter the other by-id learner reads use — so a cross-tenant caller
+    gets 404 with no existence leak.
+    """
+    if not await can_view_course_content(
+        db, user_id=current_user.user_id, course_id=course_id
+    ):
+        raise _not_found("course", course_id)
+    rows = await learner_progress_service.list_my_quiz_progress(
+        db, course_id=course_id, user_id=current_user.user_id
+    )
+    return [QuizProgressRead.model_validate(r) for r in rows]
 
 
 __all__ = ["QuizAttemptAnswerInput", "QuizAttemptAnswerRead", "router"]

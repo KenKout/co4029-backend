@@ -1,4 +1,4 @@
-from abridgeai.features.spaced_repetition.sm2.ef_update import EF_MIN, update_ef
+from abridgeai.features.spaced_repetition.sm2.ef_update import EF_MAX, EF_MIN, update_ef
 from abridgeai.features.spaced_repetition.sm2.lesson_unlock import (
     BlockingCardInfo,
     LessonUnlockStatus,
@@ -12,6 +12,7 @@ from abridgeai.features.spaced_repetition.sm2.scheduler import (
 )
 
 __all__ = [
+    "EF_MAX",
     "EF_MIN",
     "BlockingCardInfo",
     "LessonUnlockStatus",

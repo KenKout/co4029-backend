@@ -71,6 +71,7 @@ router = APIRouter(tags=["interviews-learner"])
 
 if TYPE_CHECKING:
     from abridgeai.features.interviews.models import (
+        InterviewConfig,
         InterviewQuestion,
         InterviewSession,
         InterviewSessionMessage,
@@ -110,6 +111,32 @@ def _voice_unavailable() -> HTTPException:
     )
 
 
+async def _ensure_config_course_enrolled(
+    db: AsyncSession, current_user: CurrentUser, config: InterviewConfig
+) -> None:
+    """BR gate: an interview config is a course item — enrollment required.
+
+    A published config is only reachable through a course's curriculum,
+    and per BR an unenrolled student must not reach ANY course item. This
+    404s (the feature's no-existence-leak convention) unless the caller
+    has an ``active`` / ``completed`` enrollment in the owning course or
+    holds course-management rights (owner/teacher preview).
+    """
+    from abridgeai.features.access_control.policies import (  # noqa: PLC0415
+        can_manage_course,
+    )
+    from abridgeai.features.enrollments.api import public as enrollments_api  # noqa: PLC0415
+
+    course_id = config.course_id
+    if await enrollments_api.has_active_or_completed_enrollment(
+        db, student_id=current_user.user_id, course_id=course_id
+    ):
+        return
+    if await can_manage_course(db, current_user.user_id, course_id):
+        return
+    raise _not_found("interview_config", config.id)
+
+
 async def get_arq_pool() -> object | None:
     return None
 
@@ -132,6 +159,7 @@ async def get_interview_for_taking(
     config = await db.get(InterviewConfig, config_id)
     if config is None or config.status != "published":
         raise _not_found("interview_config", config_id)
+    await _ensure_config_course_enrolled(db, current_user, config)
     if config.max_attempts is not None and config.max_attempts > 0:
         used = (
             await db.execute(
@@ -219,6 +247,7 @@ async def get_practice_info(
     config = await db.get(InterviewConfig, config_id)
     if config is None or config.status != "published":
         raise _not_found("interview_config", config_id)
+    await _ensure_config_course_enrolled(db, current_user, config)
 
     if not config.practice_mode_enabled:
         # No criteria either: rubric visibility is part of what the teacher opts
@@ -264,6 +293,7 @@ async def start_session(
     config = await db.get(InterviewConfig, config_id)
     if config is None or config.status != "published":
         raise _not_found("interview_config", config_id)
+    await _ensure_config_course_enrolled(db, current_user, config)
     try:
         session = await taking_service.start_session(
             db,
@@ -750,7 +780,6 @@ async def respond_to_session(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail={"error": "internal_error", "message": "Unable to save this turn"},
         ) from exc
-    next_question = result.get("next_question")
     # Server-authoritative timer (resilience A-Tier-1 #4): return the current
     # whole-second countdown on every turn so the client reconciles its locally
     # computed deadline against the server clock instead of trusting a value
@@ -767,30 +796,11 @@ async def respond_to_session(
             )
     except Exception:  # noqa: BLE001 -- timer reconciliation is advisory, never fatal
         logger.warning("respond_to_session: time-remaining lookup failed (session=%s)", session_id)
-    return InterviewSubmitAnswerResponse(
-        # ── legacy fields (always present; unchanged for existing clients) ───
-        next_question=(
-            InterviewQuestionPublic.model_validate(next_question)
-            if next_question is not None
-            else None
-        ),
-        is_finished=bool(result.get("is_finished")),
-        ai_followup_text=result.get("followup_text"),
+    # Built by the shared projection so the LiveKit control topic (which carries
+    # this same state for typed turns over `lk.chat`) cannot drift from REST.
+    return InterviewSubmitAnswerResponse.from_step_result(
+        result,
         time_remaining_seconds=remaining_seconds,
-        # ── adaptive structured fields (None on the legacy/sequential path) ──
-        ai_turn_text=result.get("ai_turn_text"),
-        language=result.get("language"),
-        should_narrate=result.get("should_narrate"),
-        should_await_response=result.get("should_await_response"),
-        should_finish=result.get("should_finish"),
-        assistance_kind=result.get("assistance_kind"),
-        # ── End-confirmation gate (Slice 4; None on legacy/sequential path) ──
-        pending_confirmation=result.get("pending_confirmation"),
-        interaction_state=result.get("interaction_state"),
-        # ── Natural Interview Transitions (additive; None when no transition) ─
-        transition_id=result.get("transition_id"),
-        transition_text=result.get("transition_text"),
-        transition_target=result.get("transition_target"),
     )
 
 

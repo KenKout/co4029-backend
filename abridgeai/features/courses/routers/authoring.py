@@ -51,6 +51,7 @@ from abridgeai.features.access_control.policies import (
     require_course_permission,
     require_permission,
 )
+from abridgeai.features.access_control.queries.permissions import load_course_permissions
 from abridgeai.features.courses.routers._deps import (
     require_lesson_authoring_access,
     require_module_authoring_access,
@@ -101,7 +102,10 @@ _REQUIRE_CREATE = require_permission("course.create")
 _REQUIRE_AUTHORING_LIST = require_any_permission("course.read.draft", "course.create")
 _REQUIRE_COURSE_UPDATE = require_course_permission("course_id", "course.update")
 _REQUIRE_COURSE_PUBLISH = require_course_permission("course_id", "course.publish")
-_REQUIRE_COURSE_DELETE = require_course_permission("course_id", "course.delete")
+# Course deletion is manager-owned. ``allow_owner=False`` kills the ownership
+# short-circuit so a teacher who owns the course still cannot delete it —
+# ownership grants authoring access (course.update), NOT lifecycle control.
+_REQUIRE_COURSE_DELETE = require_course_permission("course_id", "course.delete", allow_owner=False)
 # Learning outcomes are manager-owned (§LO split): gate on learning_outcome.manage
 # and disable the owner short-circuit so a course-owning teacher (who holds
 # course.update but NOT learning_outcome.manage) cannot author LOs.
@@ -133,6 +137,13 @@ def _conflict(detail: str) -> HTTPException:
     return HTTPException(
         status_code=status.HTTP_409_CONFLICT,
         detail={"error": "conflict", "message": detail},
+    )
+
+
+def _forbidden(detail: str) -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail={"error": "permission_denied", "message": detail},
     )
 
 
@@ -285,6 +296,15 @@ async def update_course(
     current_user: Annotated[CurrentUser, Depends(_REQUIRE_COURSE_UPDATE)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> CourseAuthoring:
+    # Title/slug are course identity — manager-owned. A teacher (or a
+    # course-owning teacher via the owner short-circuit) may author content
+    # (course.update) but never rename the course; only ``course.delete``
+    # holders (manager/admin) change its identity. Checked before the patch
+    # so a mixed payload either fully applies or fully rejects.
+    if "title" in payload.model_fields_set or "slug" in payload.model_fields_set:
+        course_perms = await load_course_permissions(db, current_user.user_id, course_id)
+        if "course.delete" not in course_perms:
+            raise _forbidden("Only managers may change a course's title or slug.")
     try:
         course = await authoring_service.update_course(db, course_id, payload, current_user)
     except NotFoundError as exc:

@@ -141,6 +141,29 @@ async def organization_id_for_course_resource(
     return await resolver(db, resource_id)
 
 
+async def course_id_for_course_resource(
+    db: AsyncSession, *, kind: str, resource_id: UUID
+) -> UUID | None:
+    """Resolve any learner-addressable resource id to its owning course.
+
+    Companion to :func:`organization_id_for_course_resource` for the
+    enrollment gate: the router needs the COURSE id to require an active
+    enrollment. Returns ``None`` when the row is missing / soft-deleted.
+    """
+    from abridgeai.features.courses.queries import resolution  # noqa: PLC0415
+
+    resolvers = {
+        "course": resolution.course_id_for_course,
+        "module": resolution.course_id_for_module,
+        "lesson": resolution.course_id_for_lesson,
+        "resource": resolution.course_id_for_resource,
+    }
+    resolver = resolvers.get(kind)
+    if resolver is None:  # pragma: no cover - programming error
+        raise ValueError(f"unknown kind {kind!r}")
+    return await resolver(db, resource_id)
+
+
 async def list_published_courses_for_user(
     db: AsyncSession,
     user_id: UUID,
@@ -411,7 +434,21 @@ async def get_published_module_for_learner(
     db: AsyncSession, module_id: UUID
 ) -> ModulePublic | None:
     module = await get_published_module_by_id(db, module_id)
-    return None if module is None else ModulePublic.model_validate(module)
+    if module is None:
+        return None
+    # Plain-dict validation, same MissingGreenlet mitigation as
+    # :func:`list_published_modules_for_course`: validating the raw ORM
+    # row makes pydantic probe the lazy ``items`` relationship outside
+    # the async session. Items are served by ``/modules/{id}/items``.
+    return ModulePublic.model_validate(
+        {
+            "id": module.id,
+            "course_id": module.course_id,
+            "title": module.title,
+            "position": module.position,
+            "items": [],
+        }
+    )
 
 
 def _slim_lesson_public(lesson: object) -> LessonPublic:

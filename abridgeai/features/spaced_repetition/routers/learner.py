@@ -20,7 +20,7 @@ compose:
 from __future__ import annotations
 
 import logging
-from typing import Annotated
+from typing import Annotated, Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -33,9 +33,10 @@ from abridgeai.core.cache.keys import CARDS_DUE
 from abridgeai.core.db import get_db
 from abridgeai.core.exceptions import NotFoundError
 from abridgeai.core.pagination.cursor import (
-    decode_cursor,
-    encode_cursor,
+    decode_composite_cursor,
+    encode_composite_cursor,
 )
+from abridgeai.core.runtime_settings import resolve_setting
 from abridgeai.core.security import CurrentUser, get_current_user
 from abridgeai.features.courses.api.public import get_published_lessons_for_course
 from abridgeai.features.quizzes.api.public import (
@@ -46,6 +47,7 @@ from abridgeai.features.quizzes.api.public import (
 from abridgeai.features.spaced_repetition.api.public import (
     dispatch_remediation_for_card_failure,
     get_due_card_count,
+    get_reviews_done_today,
     record_card_review,
 )
 from abridgeai.features.spaced_repetition.models import StudentCardState
@@ -104,9 +106,18 @@ _CARDS_DUE_SQL = text(
       AND qq.deleted_at IS NULL
       AND q.deleted_at IS NULL
       AND l.deleted_at IS NULL
+      AND qq.review_status = 'approved'
       AND (CAST(:lesson_id AS uuid) IS NULL OR qsl.lesson_id = CAST(:lesson_id AS uuid))
-      AND (CAST(:after_qid AS uuid) IS NULL OR scs.question_id > CAST(:after_qid AS uuid))
-    ORDER BY scs.question_id
+      AND (CAST(:course_slug AS text) IS NULL OR c.slug = CAST(:course_slug AS text))
+      AND (
+            CAST(:after_due AS timestamptz) IS NULL
+            OR scs.due_at > CAST(:after_due AS timestamptz)
+            OR (
+                scs.due_at = CAST(:after_due AS timestamptz)
+                AND scs.question_id > CAST(:after_qid AS uuid)
+            )
+      )
+    ORDER BY scs.due_at ASC, scs.question_id ASC
     LIMIT :limit
     """
 )
@@ -133,11 +144,12 @@ def _build_cards_due_cache_key(
     *,
     user_id: UUID,
     lesson_id: UUID | None,
+    course_slug: str | None,
     cursor: str | None,
     limit: int,
 ) -> str:
     base = CARDS_DUE.format(user_id=user_id)
-    return f"{base}:{lesson_id or 'all'}:{cursor or 'first'}:{limit}"
+    return f"{base}:{lesson_id or 'all'}:{course_slug or 'all'}:{cursor or 'first'}:{limit}"
 
 
 async def _load_cards_due(
@@ -145,16 +157,26 @@ async def _load_cards_due(
     *,
     student_id: UUID,
     lesson_id: UUID | None,
+    course_slug: str | None,
     cursor: str | None,
     limit: int,
 ) -> CardsDuePage:
-    after_qid = decode_cursor(cursor) if cursor else None
+    # Keyset cursor over the (due_at, question_id) sort. due_at alone is not
+    # unique (many cards can share a due instant), so question_id is the
+    # tie-breaker in both the ORDER BY and the cursor — otherwise a page
+    # boundary that lands mid-tie would skip or repeat cards.
+    after_due: Any = None
+    after_qid: UUID | None = None
+    if cursor:
+        after_due, after_qid = decode_composite_cursor(cursor)
     rows = (
         await db.execute(
             _CARDS_DUE_SQL,
             {
                 "student_id": str(student_id),
                 "lesson_id": str(lesson_id) if lesson_id else None,
+                "course_slug": course_slug,
+                "after_due": after_due.isoformat() if after_due is not None else None,
                 "after_qid": str(after_qid) if after_qid else None,
                 "limit": limit,
             },
@@ -174,7 +196,11 @@ async def _load_cards_due(
         )
         for row in rows
     ]
-    next_cursor = encode_cursor(items[-1].question_id) if len(items) == limit else None
+    next_cursor = (
+        encode_composite_cursor(items[-1].due_at, items[-1].question_id)
+        if len(items) == limit
+        else None
+    )
     return CardsDuePage(items=items, next_cursor=next_cursor)
 
 
@@ -183,6 +209,7 @@ async def list_my_cards_due(
     current_user: Annotated[CurrentUser, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
     lesson_id: Annotated[UUID | None, Query()] = None,
+    course_slug: Annotated[str | None, Query()] = None,
     cursor: Annotated[str | None, Query()] = None,
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
 ) -> CardsDuePage:
@@ -192,6 +219,9 @@ async def list_my_cards_due(
     student id is always derived from the JWT, so user A can never query
     user B's queue.
 
+    ``lesson_id`` narrows to one lesson; ``course_slug`` narrows to one course
+    (the two can combine). Both are optional — omit for the full backlog.
+
     Cached under the ``CARDS_DUE`` namespace (``cards_due:{user_id}:...``)
     so T7.5.13's cache invalidator can pattern-delete ``cards_due:{user_id}*``
     on any write to ``student_card_state`` / ``card_reviews``.
@@ -200,6 +230,7 @@ async def list_my_cards_due(
     cache_key = _build_cards_due_cache_key(
         user_id=current_user.user_id,
         lesson_id=lesson_id,
+        course_slug=course_slug,
         cursor=cursor,
         limit=limit,
     )
@@ -224,6 +255,7 @@ async def list_my_cards_due(
         db,
         student_id=current_user.user_id,
         lesson_id=lesson_id,
+        course_slug=course_slug,
         cursor=cursor,
         limit=limit,
     )
@@ -242,6 +274,7 @@ async def get_review_queue(
     current_user: Annotated[CurrentUser, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
     lesson_id: Annotated[UUID | None, Query()] = None,
+    course_slug: Annotated[str | None, Query()] = None,
     limit: Annotated[int, Query(ge=1, le=50)] = 20,
 ) -> ReviewQueue:
     """Due cards + their (no-leak) question payloads, ready to answer.
@@ -253,17 +286,59 @@ async def get_review_queue(
     quizzes public API so ``is_correct`` never leaks — and answers each card via
     ``POST /me/review/{question_id}``.
 
+    ``lesson_id`` / ``course_slug`` scope the queue the same way they scope
+    ``/me/cards-due`` — so a "Review" action next to one course pulls only that
+    course's due cards, not the whole backlog.
+
     Cards are drawn from the exact same query as ``/me/cards-due`` (so the queue
     and the dashboard count can never disagree), joined to their question
-    payloads. Questions that no longer resolve to an approved payload (edited to
+    payloads. ``total_due`` is the student's FULL due backlog (unscoped), so the
+    review screen can tell the student how many cards remain beyond this
+    session. Questions that no longer resolve to an approved payload (edited to
     draft after becoming due) are dropped from the queue.
+
+    Daily cap: the served queue is bounded to what remains of the admin-set
+    ``spaced_repetition.daily_review_cap`` today (0 = unlimited), so a large
+    backlog stays a finishable daily goal. This caps the QUEUE ONLY — it never
+    touches unlock eligibility or retention scoring, so progression is
+    unaffected. ``reviewed_today`` / ``daily_remaining`` are returned so the
+    client can show progress and a "come back tomorrow" state.
     """
+    daily_cap = int(await resolve_setting(db, "spaced_repetition.daily_review_cap"))
+    reviewed_today = (
+        await get_reviews_done_today(db, current_user.user_id) if daily_cap > 0 else 0
+    )
+    # How many more cards the student may review today. cap==0 means unlimited,
+    # so the queue is bounded only by `limit`. When capped, never serve more
+    # than what's left of the cap (floored at 0 → an empty, "done for today"
+    # queue even though cards remain due).
+    if daily_cap > 0:
+        allowed_today = max(0, daily_cap - reviewed_today)
+        effective_limit = min(limit, allowed_today)
+    else:
+        effective_limit = limit
+
+    total_due = await get_due_card_count(db, current_user.user_id)
+
+    if effective_limit == 0:
+        # Cap reached: return an empty queue but still report the full backlog
+        # and the cap state so the client renders "come back tomorrow".
+        daily_remaining = 0 if daily_cap > 0 else total_due
+        return ReviewQueue(
+            items=[],
+            total_due=total_due,
+            daily_cap=daily_cap,
+            reviewed_today=reviewed_today,
+            daily_remaining=daily_remaining,
+        )
+
     page = await _load_cards_due(
         db,
         student_id=current_user.user_id,
         lesson_id=lesson_id,
+        course_slug=course_slug,
         cursor=None,
-        limit=limit,
+        limit=effective_limit,
     )
     payloads = await get_review_question_payloads(db, [c.question_id for c in page.items])
     payload_by_qid = {p.id: p for p in payloads}
@@ -286,8 +361,16 @@ async def get_review_queue(
                 question=question,
             )
         )
-    total_due = await get_due_card_count(db, current_user.user_id)
-    return ReviewQueue(items=cards, total_due=total_due)
+    daily_remaining = (
+        max(0, daily_cap - reviewed_today) if daily_cap > 0 else total_due
+    )
+    return ReviewQueue(
+        items=cards,
+        total_due=total_due,
+        daily_cap=daily_cap,
+        reviewed_today=reviewed_today,
+        daily_remaining=daily_remaining,
+    )
 
 
 @router.post("/me/review/{question_id}", response_model=ReviewSubmitResult)

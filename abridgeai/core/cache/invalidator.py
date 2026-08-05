@@ -164,10 +164,22 @@ def _gather_keys(instances: Iterable[object]) -> tuple[set[str], set[str]]:
         for rule in rules:
             rendered = _interpolate(rule, obj)
             if rendered is not None:
-                exact.add(rendered)
+                # A prefix-match key's live entries carry suffixes beyond the
+                # rendered pattern, so an exact DEL would miss them all — fan
+                # out as ``<rendered>*`` instead.
+                if getattr(rule, "prefix_match", False):
+                    globs.add(rendered + _GLOB_WILDCARD)
+                else:
+                    exact.add(rendered)
                 continue
             glob = _interpolate_with_glob(rule, obj)
             if glob is not None and _GLOB_WILDCARD in glob:
+                # Also append a trailing wildcard for prefix-match keys so a
+                # partially-resolved key still sweeps its suffixed entries.
+                if getattr(rule, "prefix_match", False) and not glob.endswith(
+                    _GLOB_WILDCARD
+                ):
+                    glob = glob + _GLOB_WILDCARD
                 globs.add(glob)
     return exact, globs
 

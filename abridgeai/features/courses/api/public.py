@@ -139,6 +139,47 @@ async def get_user_primary_org(db: AsyncSession, user_id: UUID) -> OrgDTO | None
     return OrgDTO(id=org_id) if org_id is not None else None
 
 
+async def can_view_course_content(
+    db: AsyncSession,
+    *,
+    user_id: UUID,
+    course_id: UUID,
+) -> bool:
+    """Tenant + enrollment + manage gate for learner content reads (materials, quizzes).
+
+    ``True`` iff the caller holds course-management rights on the course
+    (owner short-circuit included, so a teacher previewing their own
+    course's material passes; ``system.administer`` passes through the
+    global-scope grant), OR is an active member of the course's owning
+    organization AND has an ``active`` / ``completed`` enrollment. An
+    org member without an enrollment row — or with a ``dropped`` /
+    ``waitlisted`` row — gets ``False``: per BR, an unenrolled student
+    must not reach any course item. This is the org-membership side of
+    the courses-learner ``_ensure_org_access`` perimeter, exported here
+    so by-id content reads in sibling features (``/materials/{id}``,
+    ``/quizzes/{id}``) can apply the same isolation instead of trusting
+    a visibility flag alone.
+
+    Lazy imports keep the cross-feature edges (access_control api.public,
+    policies, enrollments api.public) inside the function body; all are
+    authorised by the import-linter ignore list.
+    """
+    from abridgeai.features.access_control.api import public as access_api
+    from abridgeai.features.access_control.policies import can_manage_course
+    from abridgeai.features.enrollments.api import public as enrollments_api
+
+    if await can_manage_course(db, user_id, course_id):
+        return True
+    org = await queries.get_course_org(db, course_id)
+    if org is None:
+        return False
+    if not await access_api.is_user_member_of_org(db, user_id=user_id, org_id=org):
+        return False
+    return await enrollments_api.has_active_or_completed_enrollment(
+        db, student_id=user_id, course_id=course_id
+    )
+
+
 # Cross-feature notification helpers. Re-exported from courses.services.notify
 # so the enrollments feature (which enrolls students into courses) can emit the
 # "enrolled in a published course" notification through the blessed public
@@ -171,4 +212,5 @@ __all__ = [
     "notify_student_enrolled",
     "require_lesson_authoring_access",
     "walk_resource_to_course",
+    "can_view_course_content",
 ]

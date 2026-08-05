@@ -36,6 +36,7 @@ def _base(**over):
         "learning_outcome_id": None,
         "outcome_position": None,
         "match_pairs": None,
+        "match_distractors": None,
         "ordering_sequence": None,
     }
     row.update(over)
@@ -79,9 +80,7 @@ def test_matching_choices_not_positionally_aligned_with_prompts():
         {"left": "D", "right": "4"},
         {"left": "E", "right": "5"},
     ]
-    pub = QuizQuestionPublic.model_validate(
-        _base(question_type="matching", match_pairs=pairs)
-    )
+    pub = QuizQuestionPublic.model_validate(_base(question_type="matching", match_pairs=pairs))
     answer_aligned = ["1", "2", "3", "4", "5"]
     assert pub.match_choices != answer_aligned
     assert sorted(pub.match_choices) == answer_aligned
@@ -120,3 +119,57 @@ def test_shuffle_is_stable_across_validations():
         _base(id=qid, question_type="ordering", ordering_sequence=seq)
     )
     assert a.ordering_items == b.ordering_items
+
+
+def test_matching_distractors_join_choice_pool_without_becoming_prompts():
+    """Distractors enlarge the shuffled choice pool but never appear as a
+    prompt and never serialize raw — they're just extra wrong choices."""
+    pairs = [
+        {"left": "France", "right": "Paris"},
+        {"left": "Japan", "right": "Tokyo"},
+    ]
+    pub = QuizQuestionPublic.model_validate(
+        _base(
+            question_type="matching",
+            match_pairs=pairs,
+            match_distractors=["Berlin", "Madrid"],
+        )
+    )
+    dumped = pub.model_dump()
+
+    # Raw answer key AND raw distractor list must NOT serialize.
+    assert "match_pairs" not in dumped
+    assert "match_distractors" not in dumped
+
+    # Prompts are the left column only — distractors never leak in as prompts.
+    assert pub.match_prompts == ["France", "Japan"]
+
+    # The choice pool is the correct rights PLUS the distractors, shuffled.
+    assert sorted(pub.match_choices) == ["Berlin", "Madrid", "Paris", "Tokyo"]
+
+
+def test_matching_distractor_colliding_with_answer_is_dropped():
+    """A distractor equal to a correct right value would make that value both
+    right and wrong; the projection drops the duplicate (case-insensitive)."""
+    pairs = [{"left": "France", "right": "Paris"}]
+    pub = QuizQuestionPublic.model_validate(
+        _base(
+            question_type="matching",
+            match_pairs=pairs,
+            match_distractors=["paris", "London"],
+        )
+    )
+    # "paris" collides with the answer "Paris" → dropped; only "London" survives.
+    assert sorted(pub.match_choices) == ["London", "Paris"]
+
+
+def test_matching_no_distractors_is_classic_one_to_one():
+    """Empty / absent distractors → choice pool is exactly the answer set."""
+    pairs = [
+        {"left": "A", "right": "1"},
+        {"left": "B", "right": "2"},
+    ]
+    pub = QuizQuestionPublic.model_validate(
+        _base(question_type="matching", match_pairs=pairs, match_distractors=[])
+    )
+    assert sorted(pub.match_choices) == ["1", "2"]

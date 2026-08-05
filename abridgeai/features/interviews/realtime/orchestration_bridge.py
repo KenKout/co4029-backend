@@ -19,7 +19,8 @@ This module is never exposed over HTTP.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Any
 from uuid import UUID, uuid4
 
 from arq import create_pool
@@ -32,12 +33,18 @@ from abridgeai.features.interviews.orchestrator.interviewer_identity import (
     identity_from_config,
 )
 from abridgeai.features.interviews.realtime import observability as obs
+from abridgeai.features.interviews.schemas.session import InterviewSubmitAnswerResponse
 from abridgeai.features.interviews.services.ceremony import (
     ensure_ceremony_message,
     onboarding_ceremony_kind,
     room_intro_text,
 )
-from abridgeai.features.interviews.services.taking import submit_session, take_session_step
+from abridgeai.features.interviews.services.taking import (
+    get_session_for_user,
+    session_time_remaining_seconds,
+    submit_session,
+    take_session_step,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +65,30 @@ class TurnResult:
     speak_text: str | None
     is_finished: bool
     suppress_default_closing: bool = False
+
+    # ── Structured turn state, for clients that drive the interview over
+    # LiveKit text streams instead of REST `/respond` (hybrid text mode).
+    #
+    # `turn_state` is the FULL `InterviewSubmitAnswerResponse` payload, already
+    # JSON-serialized (mode="json", so UUIDs and datetimes are strings). It is
+    # built by `InterviewSubmitAnswerResponse.from_step_result` — the same
+    # classmethod the REST route uses — so a typed client over `lk.chat` receives
+    # byte-identical state to a REST client, including `next_question` as a
+    # properly projected `InterviewQuestionPublic`.
+    #
+    # Deliberately NOT a hand-picked subset: the earlier version listed six
+    # fields, which silently dropped nine (next_question, transition_*,
+    # pending_confirmation, assistance_kind, …) and published a null timer,
+    # because the brain never returns `time_remaining_seconds` at all.
+    #
+    # Empty dict on the voice path, which ignores it entirely.
+    turn_state: dict[str, Any] = field(default_factory=dict)
+
+    # The brain's OWN per-session version (from `take_session_step`), NOT a
+    # counter invented here: it is what the client reconciles persisted history
+    # against. Kept as a top-level field because it is control-plane metadata
+    # rather than part of the REST response body.
+    state_version: int | None = None
 
 
 def _build_actor(student_id: UUID) -> CurrentUser:
@@ -242,6 +273,7 @@ async def handle_student_turn(
     *,
     language: str = "en",
     turn_id: str | None = None,
+    turn_action: str = "answer",
 ) -> TurnResult:
     """Feed a transcribed answer to the text brain; return the next utterance.
 
@@ -265,6 +297,7 @@ async def handle_student_turn(
             actor,
             language=language,
             turn_key=turn_id,
+            turn_action=turn_action,
         )
 
         # ``ai_turn_text`` is the adaptive combined utterance (ack + transition +
@@ -290,6 +323,43 @@ async def handle_student_turn(
         )
         # should_finish is the adaptive end signal; is_finished the legacy one.
         finished = bool(result.get("should_finish") or result.get("is_finished"))
+
+        # Structured state for text clients, built ONCE here and spread into
+        # every return below so no branch can drift from another. The voice path
+        # ignores these fields entirely.
+        #
+        # Built through `InterviewSubmitAnswerResponse.from_step_result` — the
+        # SAME projection REST `/respond` returns — so a typed client over
+        # `lk.chat` gets full parity, `next_question` included, without the ORM
+        # row ever escaping. `mode="json"` renders UUIDs/datetimes as strings so
+        # the payload is directly JSON-serializable onto the control topic.
+        #
+        # The timer is computed here rather than read from `result`: the brain
+        # does not return `time_remaining_seconds`, so reading it from the result
+        # dict yields None (the bug this replaces). Best-effort, exactly like the
+        # REST route — a lookup failure must never fail a committed turn.
+        remaining_seconds: int | None = None
+        try:
+            live_session = await get_session_for_user(db, session_id, student_id)
+            if live_session is not None:
+                remaining_seconds = await session_time_remaining_seconds(db, live_session)
+        except Exception:  # noqa: BLE001 — advisory timer; never fail the turn
+            logger.warning(
+                "handle_student_turn: time-remaining lookup failed (session=%s)",
+                session_id,
+            )
+
+        turn_payload = InterviewSubmitAnswerResponse.from_step_result(
+            result,
+            time_remaining_seconds=remaining_seconds,
+        ).model_dump(mode="json")
+        # Spread into every TurnResult below so no branch can drift. Named
+        # distinctly from the payload it carries: `turn_state` is the REST-parity
+        # body, `state_version` is control-plane metadata beside it.
+        control_fields: dict[str, Any] = {
+            "turn_state": turn_payload,
+            "state_version": result.get("state_version"),
+        }
 
         # ── Observability: decision-level event (no transcript content) ──────
         # ``action`` is present only on the adaptive path; its absence is the
@@ -365,24 +435,25 @@ async def handle_student_turn(
                 speak_text=closing,
                 is_finished=True,
                 suppress_default_closing=suppress,
+                **control_fields,
             )
 
         # Not finished. Prefer the adaptive combined utterance when present: it
         # already contains ack + transition + the selected question, so we must
         # NOT also append next_question (that would double-speak the question).
         if ai_turn_text:
-            return TurnResult(speak_text=ai_turn_text, is_finished=False)
+            return TurnResult(speak_text=ai_turn_text, is_finished=False, **control_fields)
 
         # ── Legacy path (adaptive off / failed) — unchanged behaviour ────────
         if followup_text:
-            return TurnResult(speak_text=followup_text, is_finished=False)
+            return TurnResult(speak_text=followup_text, is_finished=False, **control_fields)
 
         if next_question_text is not None:
-            return TurnResult(speak_text=next_question_text, is_finished=False)
+            return TurnResult(speak_text=next_question_text, is_finished=False, **control_fields)
 
         # Defensive: no follow-up, not finished, no next question.
         logger.warning("interview turn produced no next utterance (session=%s)", session_id)
-        return TurnResult(speak_text=None, is_finished=True)
+        return TurnResult(speak_text=None, is_finished=True, **control_fields)
 
 
 async def record_integrity_event(

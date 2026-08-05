@@ -110,6 +110,7 @@ async def _seed_card(
     module_id: UUID,
     owner_id: UUID,
     create_user: bool = True,
+    review_status: str = "approved",
 ) -> None:
     async with engine.begin() as conn:
         if create_user:
@@ -124,10 +125,15 @@ async def _seed_card(
                 "expected_response_time_ms, source_refs, review_status"
                 ") VALUES ("
                 ":id, :quiz, :pos, 'multiple_choice', 'Q?', "
-                "30000, '[]'::jsonb, 'approved'"
+                "30000, '[]'::jsonb, :review_status"
                 ")"
             ),
-            {"id": question_id, "quiz": quiz_id, "pos": position},
+            {
+                "id": question_id,
+                "quiz": quiz_id,
+                "pos": position,
+                "review_status": review_status,
+            },
         )
         await conn.execute(
             text(
@@ -545,10 +551,14 @@ async def test_scan_due_cards_skips_quiz_with_reminders_disabled(
     session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A due card whose quiz has reminders_enabled=FALSE generates no ping.
+    """A student whose due cards ALL come from reminders-disabled quizzes gets
+    no ping.
 
-    The flag is teacher-controlled per quiz; leaving it off must suppress
-    reminders entirely for that quiz's cards.
+    reminders_enabled is a per-quiz teacher flag; when every due card belongs
+    to an opted-out quiz the trigger gate suppresses the reminder entirely.
+    (When the student ALSO has opted-in cards, the ping fires and reports the
+    full backlog — see
+    ``test_scan_due_cards_counts_full_backlog_across_mixed_reminders``.)
     """
     org_id, course_id, module_id, quiz_id, owner_id = await _seed_quiz_root(engine)
     # Turn reminders OFF on the seeded quiz.
@@ -580,6 +590,146 @@ async def test_scan_due_cards_skips_quiz_with_reminders_disabled(
     await scan_due_cards_task(ctx={}, actor_id=owner_id)
 
     assert send_mock.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_scan_due_cards_counts_full_backlog_across_mixed_reminders(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ping triggered by one opted-in quiz reports the FULL due backlog.
+
+    reminders_enabled gates WHO gets pinged, not what the notification says.
+    A student with due cards from an opted-in quiz AND an opted-out quiz must
+    be told the same total the cards-due page shows — the gate used to shrink
+    the count to the opted-in subset, so the notification disagreed with the
+    landing page (6 due in the ping, 12 on /study/cards-due).
+    """
+    org_id, course_id, module_id, quiz_on, owner_id = await _seed_quiz_root(engine)
+    # Second quiz whose cards are due but reminders are OFF.
+    *_, quiz_off, _ = await _seed_quiz_root(engine)
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("UPDATE quizzes SET reminders_enabled = FALSE WHERE id = :id"),
+            {"id": quiz_off},
+        )
+        await conn.execute(
+            text(
+                "UPDATE lessons SET title = 'Opted-Out Lesson' WHERE id = "
+                "(SELECT lesson_id FROM quiz_source_lessons WHERE quiz_id = :q)"
+            ),
+            {"q": quiz_off},
+        )
+
+    student_id = uuid.uuid4()
+    due_at = datetime.now(tz=UTC) - timedelta(minutes=30)
+    for i in range(3):
+        await _seed_card(
+            engine,
+            student_id=student_id,
+            question_id=uuid.uuid4(),
+            due_at=due_at,
+            quiz_id=quiz_on,
+            position=i + 1,
+            org_id=org_id,
+            course_id=course_id,
+            module_id=module_id,
+            owner_id=owner_id,
+            create_user=(i == 0),
+        )
+    for i in range(2):
+        await _seed_card(
+            engine,
+            student_id=student_id,
+            question_id=uuid.uuid4(),
+            due_at=due_at,
+            quiz_id=quiz_off,
+            position=10 + i,
+            org_id=org_id,
+            course_id=course_id,
+            module_id=module_id,
+            owner_id=owner_id,
+            create_user=False,
+        )
+
+    send_mock = AsyncMock(return_value=None)
+    monkeypatch.setattr(
+        "abridgeai.features.notifications.services.dispatch.send_notification",
+        send_mock,
+    )
+    monkeypatch.setattr(worker_mod, "get_sessionmaker", _make_sessionmaker_factory(session_factory))
+
+    await scan_due_cards_task(ctx={}, actor_id=owner_id)
+
+    assert send_mock.await_count == 1
+    call = send_mock.await_args_list[0]
+    assert call.kwargs["recipient_user_id"] == student_id
+    # Full backlog (3 + 2), NOT the opted-in subset (3).
+    assert "5 cards due" in call.kwargs["title"]
+    # The opted-out lesson is reported too — same lessons the page lists.
+    assert "Scheduling Basics" in call.kwargs["body"]
+    assert "Opted-Out Lesson" in call.kwargs["body"]
+    # Multi-lesson backlog falls back to the unscoped page.
+    assert call.kwargs["action_url"] == "/study/cards-due"
+
+
+@pytest.mark.asyncio
+async def test_scan_due_cards_excludes_pending_questions(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cards whose question is not 'approved' are not reviewable and must not
+    be counted.
+
+    The cards-due page only serves approved questions (``_CARDS_DUE_SQL``
+    filters ``review_status = 'approved'``); the notification must agree with
+    it, so a pending-question card can't inflate the pinged count.
+    """
+    org_id, course_id, module_id, quiz_id, owner_id = await _seed_quiz_root(engine)
+    student_id = uuid.uuid4()
+    due_at = datetime.now(tz=UTC) - timedelta(minutes=30)
+    await _seed_card(
+        engine,
+        student_id=student_id,
+        question_id=uuid.uuid4(),
+        due_at=due_at,
+        quiz_id=quiz_id,
+        position=1,
+        org_id=org_id,
+        course_id=course_id,
+        module_id=module_id,
+        owner_id=owner_id,
+    )
+    await _seed_card(
+        engine,
+        student_id=student_id,
+        question_id=uuid.uuid4(),
+        due_at=due_at,
+        quiz_id=quiz_id,
+        position=2,
+        org_id=org_id,
+        course_id=course_id,
+        module_id=module_id,
+        owner_id=owner_id,
+        create_user=False,
+        review_status="pending",
+    )
+
+    send_mock = AsyncMock(return_value=None)
+    monkeypatch.setattr(
+        "abridgeai.features.notifications.services.dispatch.send_notification",
+        send_mock,
+    )
+    monkeypatch.setattr(worker_mod, "get_sessionmaker", _make_sessionmaker_factory(session_factory))
+
+    await scan_due_cards_task(ctx={}, actor_id=owner_id)
+
+    assert send_mock.await_count == 1
+    title = send_mock.await_args_list[0].kwargs["title"]
+    assert "1 card due" in title
+    assert "2 cards" not in title
 
 
 @pytest.mark.asyncio

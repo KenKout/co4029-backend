@@ -15,8 +15,6 @@ from alembic.config import Config
 from conftest import SeededUsers
 from fastapi import FastAPI
 from sqlalchemy import text
-
-from tests.support.db_graph import hard_delete_graph
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -38,6 +36,7 @@ from abridgeai.features.career_paths.routers import (
     career_paths_learner_router,
     me_career_enrollments_router,
 )
+from tests.support.db_graph import hard_delete_graph
 
 
 def _async_url(database_url: str) -> str:
@@ -291,9 +290,7 @@ async def scenario(
         )
         # Graph-driven: career auto-enroll adds course_enrollments rows that
         # block a bare course delete (NO ACTION FKs).
-        await hard_delete_graph(
-            conn, "courses", [str(c) for c in (pub_a_id, pub_b_id, draft_id)]
-        )
+        await hard_delete_graph(conn, "courses", [str(c) for c in (pub_a_id, pub_b_id, draft_id)])
 
 
 def test_no_self_enroll_route_exists() -> None:
@@ -610,3 +607,69 @@ async def test_create_career_path_duplicate_slug_returns_409(
     finally:
         async with engine.begin() as conn:
             await conn.execute(text("DELETE FROM career_paths WHERE id = :id"), {"id": created_id})
+
+
+async def test_add_unpublished_course_to_path_is_rejected(
+    client: httpx.AsyncClient,
+    manager_bearer: str,
+    scenario: dict[str, object],
+    engine: AsyncEngine,
+) -> None:
+    """A draft course must not be attachable to a career path — the path is a
+    published surface and an invisible item would never appear for students
+    (guard on ``course.status == 'published'`` in add_course_to_path)."""
+    suffix = uuid.uuid4().hex[:6]
+    auth = {"Authorization": f"Bearer {manager_bearer}"}
+
+    create_resp = await client.post(
+        "/api/v1/management/career-paths",
+        json={"slug": f"guard-{suffix}", "name": "Guard Path"},
+        headers=auth,
+    )
+    assert create_resp.status_code == 201, create_resp.text
+    fresh_path_id = create_resp.json()["id"]
+
+    try:
+        # Draft course -> rejected (409 AppError).
+        reject = await client.post(
+            f"/api/v1/management/career-paths/{fresh_path_id}/courses",
+            json={"course_id": str(scenario["draft_id"]), "is_required": True},
+            headers=auth,
+        )
+        assert reject.status_code == 409, reject.text
+        detail = reject.json()["detail"]
+        assert detail["error"] == "conflict"
+        assert "not published" in detail["message"]
+
+        # Published course -> accepted.
+        ok = await client.post(
+            f"/api/v1/management/career-paths/{fresh_path_id}/courses",
+            json={"course_id": str(scenario["pub_a_id"]), "is_required": True},
+            headers=auth,
+        )
+        assert ok.status_code == 201, ok.text
+
+        # And the draft was never attached.
+        async with engine.begin() as conn:
+            rows = (
+                (
+                    await conn.execute(
+                        text(
+                            "SELECT course_id FROM career_course_items WHERE career_path_id = :pid"
+                        ),
+                        {"pid": fresh_path_id},
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        assert [str(r) for r in rows] == [str(scenario["pub_a_id"])]
+    finally:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("DELETE FROM career_course_items WHERE career_path_id = :pid"),
+                {"pid": fresh_path_id},
+            )
+            await conn.execute(
+                text("DELETE FROM career_paths WHERE id = :id"), {"id": fresh_path_id}
+            )

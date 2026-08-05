@@ -144,8 +144,11 @@ async def add_course_to_path(
     actor: CurrentUser,
 ) -> CareerPathCourseAuthoring:
     path = await _require_path(db, career_path_id)
-    if not await authoring_queries.course_belongs_to_org(db, course_id, path.organization_id):
-        raise AppError(f"Course {course_id} does not belong to organization {path.organization_id}")
+    if not await authoring_queries.course_is_published_in_org(db, course_id, path.organization_id):
+        raise AppError(
+            f"Course {course_id} does not belong to organization {path.organization_id} "
+            "or is not published — only published courses of this organization can be attached"
+        )
     existing = await authoring_queries.get_path_course_link(db, career_path_id, course_id)
     if existing is not None:
         raise AppError(f"Course {course_id} already attached to career path {career_path_id}")

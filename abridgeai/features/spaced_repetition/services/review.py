@@ -36,6 +36,7 @@ from uuid import UUID
 from abridgeai.core.config import get_settings
 from abridgeai.core.exceptions import NotFoundError
 from abridgeai.features.quizzes.api.public import (
+    get_guess_probability,
     get_question_with_quiz_context,
     get_t_exp_for_question,
 )
@@ -133,6 +134,16 @@ async def _load_or_init_state(
     state = await db.get(StudentCardState, (student_id, question_id))
     if state is not None:
         return state, False
+    # Clamp the teacher-supplied initial EF to the same [1.3, 2.5] range the
+    # CHECK constraint (ck_student_card_state_ef_range) and update_ef enforce.
+    # The quiz settings allow initial_ef to be set without range validation,
+    # so an out-of-range value must be clamped here rather than blowing up the
+    # first review with an IntegrityError.
+    from abridgeai.features.spaced_repetition.sm2 import EF_MAX, EF_MIN
+
+    if initial_ef is not None:
+        ef_value = min(EF_MAX, max(EF_MIN, float(initial_ef)))
+        initial_ef = Decimal(str(ef_value))
     state = StudentCardState(
         student_id=student_id,
         question_id=question_id,
@@ -210,7 +221,16 @@ async def record_card_review(
         t_actual_ms=t_actual_ms,
         t_exp_ms=t_exp_ms,
     )
-    ef_after = update_ef(ef_before, q, n_before)
+    # Guess-channel dampening (does NOT alter q — the thesis Q is recorded as
+    # derived). A correct answer on a format with a 1/N guess channel (MCQ /
+    # true_false) grows EF less than genuine free recall, so a fast lucky guess
+    # can't balloon the interval. Free-recall formats return 0.0 → scale 1.0 →
+    # no change, preserving current behaviour for short_answer / fill_blank etc.
+    guess_probability = await get_guess_probability(db, question_id)
+    positive_delta_scale = 1.0 - guess_probability
+    ef_after = update_ef(
+        ef_before, q, n_before, positive_delta_scale=positive_delta_scale
+    )
 
     now = datetime.now(tz=UTC)
     passing = q >= 3

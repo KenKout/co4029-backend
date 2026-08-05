@@ -28,6 +28,12 @@ async def get_course(db: AsyncSession, course_id: UUID) -> Course | None:
     return await db.get(Course, course_id)
 
 
+async def get_course_org(db: AsyncSession, course_id: UUID) -> UUID | None:
+    """Resolve the course's owning organization id (None when absent)."""
+    stmt = select(Course.organization_id).where(Course.id == course_id)
+    return (await db.execute(stmt)).scalar_one_or_none()
+
+
 async def list_course_outcomes(
     db: AsyncSession, course_id: UUID
 ) -> list[CourseLearningOutcome]:

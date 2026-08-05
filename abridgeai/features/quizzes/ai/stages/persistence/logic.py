@@ -98,6 +98,10 @@ def _apply_answer_fields(question: QuizQuestion, payload: dict[str, Any]) -> Non
             if isinstance(pair, dict)
         ]
 
+    match_distractors = payload.get("match_distractors")
+    if isinstance(match_distractors, list) and match_distractors:
+        question.match_distractors = [str(d) for d in match_distractors]
+
     ordering_sequence = payload.get("ordering_sequence")
     if isinstance(ordering_sequence, list) and ordering_sequence:
         question.ordering_sequence = [str(item) for item in ordering_sequence]
@@ -224,9 +228,7 @@ async def persist_questions(
             # markdown/html, since the client renders those as HTML.
             prompt_text=_sanitize_rich_content(payload["prompt_text"], fmt=prompt_fmt),
             hint_text=_sanitize_rich_content(payload.get("hint_text"), fmt=hint_fmt),
-            explanation=_sanitize_rich_content(
-                payload.get("explanation"), fmt=explanation_fmt
-            ),
+            explanation=_sanitize_rich_content(payload.get("explanation"), fmt=explanation_fmt),
             prompt_format=prompt_fmt,
             hint_format=hint_fmt,
             explanation_format=explanation_fmt,
@@ -287,9 +289,7 @@ async def replace_question_in_place(
     # Phase 3 SECURITY: same nh3 cleaning as the create path above.
     question.prompt_text = _sanitize_rich_content(payload["prompt_text"], fmt=prompt_fmt)
     question.hint_text = _sanitize_rich_content(payload.get("hint_text"), fmt=hint_fmt)
-    question.explanation = _sanitize_rich_content(
-        payload.get("explanation"), fmt=explanation_fmt
-    )
+    question.explanation = _sanitize_rich_content(payload.get("explanation"), fmt=explanation_fmt)
     question.prompt_format = prompt_fmt
     question.hint_format = hint_fmt
     question.explanation_format = explanation_fmt

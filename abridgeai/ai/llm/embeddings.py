@@ -23,7 +23,7 @@ from abridgeai.ai.llm.audit import write_ai_model_call
 from abridgeai.ai.llm.client import OpenAICompatibleClient
 from abridgeai.ai.llm.errors import ConfigError, ProviderError, ResponseFormatError
 from abridgeai.ai.llm.pricing import compute_cost
-from abridgeai.ai.llm.roles import LLMRole, binding_for
+from abridgeai.ai.llm.roles import LLMRole, binding_for, resolve_binding_overrides
 from abridgeai.core.config import Settings, get_settings
 from abridgeai.core.exceptions import AppError
 
@@ -86,6 +86,7 @@ class EmbeddingClient:
         pipeline_run_id: UUID | None = None,
         parent_job_id: UUID | None = None,
         parent_run_id: UUID | None = None,
+        organization_id: UUID | None = None,
     ) -> list[list[float]]:
         """Embed ``texts``; return one float vector per input, in order.
 
@@ -93,7 +94,17 @@ class EmbeddingClient:
         ``request_payload``). Raises ``AppError`` on any upstream failure
         after writing a ``status='failed'`` audit row.
         """
-        binding = binding_for(LLMRole.EMBEDDING, self._settings)
+        # Admin-tunable embedding timeout + 429 retry (org → global → env →
+        # default). organization_id=None resolves the deployment-wide value.
+        timeout_s, retry = await resolve_binding_overrides(
+            db, LLMRole.EMBEDDING, organization_id=organization_id
+        )
+        binding = binding_for(
+            LLMRole.EMBEDDING,
+            self._settings,
+            timeout_override_s=timeout_s,
+            retry_override=retry,
+        )
         client = OpenAICompatibleClient(binding)
 
         request_meta: dict[str, Any] = {

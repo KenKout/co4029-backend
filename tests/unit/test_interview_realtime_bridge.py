@@ -7,8 +7,10 @@ No real DB required.
 
 from __future__ import annotations
 
+import json
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -16,6 +18,26 @@ from abridgeai.features.interviews.realtime.orchestration_bridge import (
     TurnResult,
     handle_student_turn,
 )
+from abridgeai.features.interviews.schemas.session import InterviewSubmitAnswerResponse
+
+QUESTION_ID = UUID("22222222-2222-2222-2222-222222222222")
+
+
+def _question_stub():
+    """A question shaped like the ORM row, valid for `InterviewQuestionPublic`.
+
+    A `MagicMock` will NOT do here: the shared projection runs
+    `InterviewQuestionPublic.model_validate`, and a mock's `.id` is a Mock rather
+    than a UUID, so validation fails. Using a realistic stub is what makes tests
+    exercise the real serialization path instead of a mock-shaped one.
+    """
+    return SimpleNamespace(
+        id=QUESTION_ID,
+        prompt_text="What is a star schema?",
+        question_type="technical",
+        # Authoring-only column: present on the row, and must NOT reach the client.
+        difficulty="medium",
+    )
 
 
 @pytest.fixture
@@ -80,8 +102,10 @@ async def test_handle_student_turn_next_question(session_id, student_id):
     """Student turn yields next question (is_finished=False)."""
     student_transcript = "My answer to the question"
 
-    # Mock a question object with prompt_text
-    mock_question = MagicMock()
+    # A REAL question-shaped object: the shared projection now runs
+    # `InterviewQuestionPublic.model_validate`, which rejects MagicMock (its
+    # `.id` is a Mock, not a UUID).
+    mock_question = _question_stub()
     mock_question.prompt_text = "What is the meaning of life?"
 
     # Mock take_session_step to return dict with next_question
@@ -164,9 +188,7 @@ async def test_handle_student_turn_session_finished(session_id, student_id):
                 patch(
                     "abridgeai.features.interviews.realtime.orchestration_bridge.ensure_ceremony_message",
                     new_callable=AsyncMock,
-                    return_value=MagicMock(
-                        content_text="Thank you. That concludes the interview."
-                    ),
+                    return_value=MagicMock(content_text="Thank you. That concludes the interview."),
                 ),
             ):
                 result = await handle_student_turn(
@@ -299,7 +321,7 @@ async def test_adaptive_advance_speaks_combined_ai_turn_text(session_id, student
     ai_turn_text (ack + transition + question), NOT just the ack/transition and
     NOT the bare next_question — so voice never drops or doubles the question.
     """
-    mock_question = MagicMock()
+    mock_question = _question_stub()
     mock_question.prompt_text = "What is a fact table?"
 
     with patch(
@@ -453,3 +475,238 @@ async def test_adaptive_closing_suppresses_canned_remark(session_id, student_id)
     assert result.speak_text == "Thank you. That concludes your interview. Goodbye."
     assert result.suppress_default_closing is True
     mock_submit.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_turn_action_is_forwarded_to_take_session_step(session_id, student_id):
+    """A hint/clarify/repeat request must NOT be graded as an answer.
+
+    Regression guard with a specific history: the shared-handler tests assert the
+    agent passes `turn_action` INTO this bridge, and they kept passing when the
+    bridge's own forwarding to `take_session_step` was deleted. This closes that
+    hop — the one where a "give me a hint" request silently becomes an answer.
+    """
+    with (
+        patch(
+            "abridgeai.features.interviews.realtime.orchestration_bridge.take_session_step",
+            new_callable=AsyncMock,
+        ) as mock_step,
+        patch(
+            "abridgeai.features.interviews.realtime.orchestration_bridge.get_sessionmaker"
+        ) as mock_maker,
+    ):
+        mock_step.return_value = {"followup_text": "Here is a hint.", "is_finished": False}
+        mock_db = AsyncMock()
+        ctx = AsyncMock()
+        ctx.__aenter__ = AsyncMock(return_value=mock_db)
+        ctx.__aexit__ = AsyncMock(return_value=None)
+        mock_maker.return_value = MagicMock(return_value=ctx)
+
+        await handle_student_turn(
+            session_id=session_id,
+            student_id=student_id,
+            transcript="I am stuck",
+            turn_action="hint",
+        )
+
+    assert mock_step.call_args.kwargs["turn_action"] == "hint"
+
+
+@pytest.mark.asyncio
+async def test_turn_action_defaults_to_answer(session_id, student_id):
+    """The voice path passes no action; it must arrive as a plain answer."""
+    with (
+        patch(
+            "abridgeai.features.interviews.realtime.orchestration_bridge.take_session_step",
+            new_callable=AsyncMock,
+        ) as mock_step,
+        patch(
+            "abridgeai.features.interviews.realtime.orchestration_bridge.get_sessionmaker"
+        ) as mock_maker,
+    ):
+        mock_step.return_value = {"followup_text": "ok", "is_finished": False}
+        mock_db = AsyncMock()
+        ctx = AsyncMock()
+        ctx.__aenter__ = AsyncMock(return_value=mock_db)
+        ctx.__aexit__ = AsyncMock(return_value=None)
+        mock_maker.return_value = MagicMock(return_value=ctx)
+
+        await handle_student_turn(
+            session_id=session_id, student_id=student_id, transcript="spoken answer"
+        )
+
+    assert mock_step.call_args.kwargs["turn_action"] == "answer"
+
+
+def _bridge_patches(step_result, *, remaining=900):
+    """Patch the bridge's brain call, sessionmaker, and timer lookup.
+
+    The timer pair is patched explicitly because `handle_student_turn` now
+    computes the countdown from the session row (as REST does) rather than
+    reading it from the brain result — the brain never returns it.
+    """
+    mock_db = AsyncMock()
+    ctx = AsyncMock()
+    ctx.__aenter__ = AsyncMock(return_value=mock_db)
+    ctx.__aexit__ = AsyncMock(return_value=None)
+
+    step = patch(
+        "abridgeai.features.interviews.realtime.orchestration_bridge.take_session_step",
+        new_callable=AsyncMock,
+        return_value=step_result,
+    )
+    maker = patch(
+        "abridgeai.features.interviews.realtime.orchestration_bridge.get_sessionmaker",
+        return_value=MagicMock(return_value=ctx),
+    )
+    lookup = patch(
+        "abridgeai.features.interviews.realtime.orchestration_bridge.get_session_for_user",
+        new_callable=AsyncMock,
+        return_value=SimpleNamespace(id=uuid4()),
+    )
+    timer = patch(
+        "abridgeai.features.interviews.realtime.orchestration_bridge"
+        ".session_time_remaining_seconds",
+        new_callable=AsyncMock,
+        return_value=remaining,
+    )
+    return step, maker, lookup, timer
+
+
+@pytest.mark.asyncio
+async def test_turn_state_carries_next_question_as_a_projected_object(session_id, student_id):
+    """The control payload must carry the next question OBJECT, not just its text.
+
+    The client builds its transcript turn id from `next_question.id` and renders
+    the held Question Card from the object; a prompt string alone leaves a typed
+    client unable to advance.
+    """
+    step, maker, lookup, timer = _bridge_patches(
+        {
+            "next_question": _question_stub(),
+            "is_finished": False,
+            "state_version": 12,
+        }
+    )
+    with step, maker, lookup, timer:
+        result = await handle_student_turn(
+            session_id=session_id, student_id=student_id, transcript="an answer"
+        )
+
+    question = result.turn_state["next_question"]
+    assert question["id"] == str(QUESTION_ID)
+    assert question["prompt_text"] == "What is a star schema?"
+    assert question["question_type"] == "technical"
+    # Authoring-only column must not be published to a learner.
+    assert "difficulty" not in question
+    assert result.state_version == 12
+
+
+@pytest.mark.asyncio
+async def test_turn_state_timer_comes_from_the_session_not_the_brain(session_id, student_id):
+    """The countdown is computed from the session row, never read from the result.
+
+    `take_session_step` does not return `time_remaining_seconds` at all, so a
+    bridge that reads it from the result dict publishes null on every turn — the
+    bug this guards. Here the brain returns a decoy value and the session lookup
+    returns the truth; the payload must show the truth.
+    """
+    step, maker, lookup, timer = _bridge_patches(
+        {
+            "next_question": None,
+            "is_finished": False,
+            # Decoy: if the bridge trusts this, the assertion below fails.
+            "time_remaining_seconds": 11111,
+        },
+        remaining=420,
+    )
+    with step, maker, lookup, timer:
+        result = await handle_student_turn(
+            session_id=session_id, student_id=student_id, transcript="an answer"
+        )
+
+    assert result.turn_state["time_remaining_seconds"] == 420
+
+
+@pytest.mark.asyncio
+async def test_turn_state_covers_every_rest_response_field(session_id, student_id):
+    """Full realtime/REST parity, asserted against the response model itself.
+
+    Pinning the field list by hand would rot. Reading it from
+    `InterviewSubmitAnswerResponse` means adding a field there without teaching
+    the projection about it fails HERE, at the transport that would have silently
+    omitted it.
+    """
+    step, maker, lookup, timer = _bridge_patches(
+        {
+            "next_question": _question_stub(),
+            "is_finished": False,
+            "followup_text": "Say more?",
+            "ai_turn_text": "Thanks. Say more?",
+            "language": "en",
+            "should_narrate": True,
+            "should_await_response": True,
+            "should_finish": False,
+            "assistance_kind": "clarification",
+            "pending_confirmation": False,
+            "interaction_state": "awaiting_answer",
+            "transition_id": "t-1",
+            "transition_text": "Let's move on.",
+            "transition_target": "next_question",
+            "state_version": 5,
+        }
+    )
+    with step, maker, lookup, timer:
+        result = await handle_student_turn(
+            session_id=session_id, student_id=student_id, transcript="an answer"
+        )
+
+    expected = set(InterviewSubmitAnswerResponse.model_fields)
+    assert set(result.turn_state) == expected, (
+        "control payload diverged from the REST response contract: "
+        f"missing={expected - set(result.turn_state)} "
+        f"extra={set(result.turn_state) - expected}"
+    )
+    # Spot-check fields the earlier hand-written projection dropped entirely.
+    assert result.turn_state["transition_target"] == "next_question"
+    assert result.turn_state["assistance_kind"] == "clarification"
+    assert result.turn_state["interaction_state"] == "awaiting_answer"
+
+
+@pytest.mark.asyncio
+async def test_turn_state_is_json_serializable(session_id, student_id):
+    """The payload goes onto a text stream, so it must survive json.dumps as-is."""
+    step, maker, lookup, timer = _bridge_patches(
+        {"next_question": _question_stub(), "is_finished": False}
+    )
+    with step, maker, lookup, timer:
+        result = await handle_student_turn(
+            session_id=session_id, student_id=student_id, transcript="an answer"
+        )
+
+    # Raises TypeError if a UUID or datetime leaked through unserialized.
+    encoded = json.dumps(result.turn_state)
+    assert str(QUESTION_ID) in encoded
+
+
+@pytest.mark.asyncio
+async def test_timer_lookup_failure_does_not_fail_a_committed_turn(session_id, student_id):
+    """A timer lookup is advisory; the answer is already persisted."""
+    step, maker, lookup, _ = _bridge_patches(
+        {"next_question": None, "is_finished": False},
+    )
+    timer = patch(
+        "abridgeai.features.interviews.realtime.orchestration_bridge"
+        ".session_time_remaining_seconds",
+        new_callable=AsyncMock,
+        side_effect=RuntimeError("db gone"),
+    )
+    with step, maker, lookup, timer:
+        result = await handle_student_turn(
+            session_id=session_id, student_id=student_id, transcript="an answer"
+        )
+
+    assert result.turn_state["time_remaining_seconds"] is None
+    # The turn itself still committed and finished normally — a timer lookup
+    # failure is advisory and must never change the turn's outcome.
+    assert result.is_finished is True

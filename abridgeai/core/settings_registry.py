@@ -40,7 +40,13 @@ SettingType = Literal["bool", "int", "float"]
 
 # Groups drive the section headings in the admin UI.
 SettingGroup = Literal[
-    "chunking", "preprocessing", "knowledge_graph", "retrieval", "notifications"
+    "ai",
+    "chunking",
+    "preprocessing",
+    "knowledge_graph",
+    "retrieval",
+    "notifications",
+    "spaced_repetition",
 ]
 
 
@@ -69,6 +75,98 @@ class SettingSpec:
 
 
 _SPECS: tuple[SettingSpec, ...] = (
+    # -- ai (model call timeouts + rate-limit retry) ----------------------
+    # These override the code defaults that used to live only in
+    # ``core.config.Settings`` (timeouts) and ``ai/llm/client.py`` (the 429
+    # retry constants). env_var names match the existing Settings env vars so a
+    # deployment's current ``.env`` keeps working as the env-layer fallback.
+    SettingSpec(
+        key="ai.llm_timeout_seconds",
+        group="ai",
+        type="float",
+        default=60.0,
+        minimum=1.0,
+        maximum=1200.0,
+        env_var="LLM_TIMEOUT_SECONDS",
+        label="LLM timeout — batch (seconds)",
+        description=(
+            "Per-call timeout for background/batch LLM roles (extraction, "
+            "enrichment, KG extraction, OCR). Raise it for long large-context "
+            "ingest calls; lower it to fail a stalled endpoint sooner."
+        ),
+    ),
+    SettingSpec(
+        key="ai.llm_interactive_timeout_seconds",
+        group="ai",
+        type="float",
+        default=240.0,
+        minimum=1.0,
+        maximum=1200.0,
+        env_var="LLM_INTERACTIVE_TIMEOUT_SECONDS",
+        label="LLM timeout — interactive (seconds)",
+        description=(
+            "Per-call timeout for interactive stages where a user waits on a "
+            "spinner (quiz + interview ideation / generation / validation and "
+            "the interview runtime roles). Kept tighter than the batch timeout "
+            "so a stalled endpoint can't hang the user for the full batch limit."
+        ),
+    ),
+    SettingSpec(
+        key="ai.embedding_timeout_seconds",
+        group="ai",
+        type="float",
+        default=30.0,
+        minimum=1.0,
+        maximum=600.0,
+        env_var="EMBEDDING_TIMEOUT_SECONDS",
+        label="Embedding timeout (seconds)",
+        description="Per-call timeout for embedding requests.",
+    ),
+    SettingSpec(
+        key="ai.rate_limit_max_attempts",
+        group="ai",
+        type="int",
+        default=4,
+        minimum=1,
+        maximum=10,
+        env_var="LLM_RATE_LIMIT_MAX_ATTEMPTS",
+        label="Rate-limit (429) max attempts",
+        description=(
+            "Total attempts for an LLM/embedding call that keeps returning "
+            "HTTP 429 (rate-limited): 1 initial try plus (N-1) retries. Only "
+            "429 is retried inline; all other errors propagate to the "
+            "job-level retry. 1 disables inline 429 retry."
+        ),
+    ),
+    SettingSpec(
+        key="ai.rate_limit_base_delay_seconds",
+        group="ai",
+        type="float",
+        default=1.0,
+        minimum=0.0,
+        maximum=60.0,
+        env_var="LLM_RATE_LIMIT_BASE_DELAY_SECONDS",
+        label="Rate-limit backoff base delay (seconds)",
+        description=(
+            "Base delay for exponential backoff between 429 retries when the "
+            "provider sends no Retry-After header. Delay = base * 2^(attempt-1) "
+            "plus jitter, capped by the max delay below."
+        ),
+    ),
+    SettingSpec(
+        key="ai.rate_limit_max_delay_seconds",
+        group="ai",
+        type="float",
+        default=30.0,
+        minimum=1.0,
+        maximum=300.0,
+        env_var="LLM_RATE_LIMIT_MAX_DELAY_SECONDS",
+        label="Rate-limit backoff max delay (seconds)",
+        description=(
+            "Upper bound on any single wait between 429 retries, applied to "
+            "both the exponential backoff and a provider-supplied Retry-After."
+        ),
+    ),
     # -- chunking ---------------------------------------------------------
     SettingSpec(
         key="chunking.max_tokens",
@@ -332,6 +430,25 @@ _SPECS: tuple[SettingSpec, ...] = (
             "promptly, but a student who already got a reminder inside this "
             "window is skipped — so at the default of 24 they get at most one "
             "review reminder per day no matter how many cards are overdue."
+        ),
+    ),
+    # -- spaced_repetition ------------------------------------------------
+    SettingSpec(
+        key="spaced_repetition.daily_review_cap",
+        group="spaced_repetition",
+        type="int",
+        default=200,
+        minimum=0,
+        maximum=1000,
+        env_var="SR_DAILY_REVIEW_CAP",
+        label="Daily review cap (cards/day)",
+        description=(
+            "Maximum spaced-repetition cards a student is served for review in "
+            "one day, so a large backlog stays a finishable daily goal instead "
+            "of an unbounded wall. Cards already reviewed today count toward the "
+            "cap. This bounds the REVIEW QUEUE only — it never changes lesson "
+            "unlock eligibility or retention scoring, so progression is "
+            "unaffected. Set to 0 for no cap (serve the whole backlog)."
         ),
     ),
 )

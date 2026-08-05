@@ -46,7 +46,7 @@ from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from abridgeai.ai.models import GenerationRun
 from abridgeai.features.quizzes.api._dto import (
@@ -523,6 +523,49 @@ async def deep_clone_quiz(
     return clone.id
 
 
+async def get_guess_probability(db: AsyncSession, question_id: UUID) -> float:
+    """Return the probability a CORRECT answer could come from blind guessing.
+
+    Used by SR to dampen easiness-factor growth on guessable formats (a fast
+    lucky multiple-choice answer shouldn't inflate the interval like genuine
+    free recall). This is a format property, not a per-attempt judgement — it
+    never sees the student's answer.
+
+    Estimates:
+      * ``true_false``            → 0.5 (two options).
+      * single-answer MCQ         → 1/N over its N options (min 2 assumed).
+      * multi-select MCQ          → treated as single-answer 1/N here; picking
+        the exact correct SUBSET by chance is far rarer, so 1/N is a safe
+        upper bound on the guess channel (we never over-dampen).
+      * short_answer / fill_blank / numerical / code → 0.0 (no closed option
+        set to guess from — a free-recall channel, like Anki's).
+      * matching / ordering       → 0.0 (arranging all items correctly by
+        chance is negligible; treat as free recall).
+
+    Returns 0.0 for an unknown / soft-deleted question (no dampening, safe
+    default). The caller converts this to a positive-delta scale of
+    ``1 - guess_probability``.
+    """
+    question = await db.get(QuizQuestion, question_id)
+    if question is None or question.deleted_at is not None:
+        return 0.0
+    qtype = question.question_type
+    if qtype == "true_false":
+        return 0.5
+    if qtype == "multiple_choice":
+        option_count = (
+            await db.execute(
+                select(func.count(QuizQuestionOption.id)).where(
+                    QuizQuestionOption.question_id == question_id
+                )
+            )
+        ).scalar_one()
+        n = max(2, int(option_count or 0))
+        return 1.0 / n
+    # Free-recall / arrangement formats: no meaningful guess channel.
+    return 0.0
+
+
 __all__ = [
     "AttemptScoreDTO",
     "GenerationRunDTO",
@@ -535,6 +578,7 @@ __all__ = [
     "deep_clone_quiz",
     "get_attempt_score",
     "get_generation_run",
+    "get_guess_probability",
     "get_question_with_quiz_context",
     "get_quiz_question_id_set_by_lesson",
     "get_review_question_payloads",

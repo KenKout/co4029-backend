@@ -421,3 +421,96 @@ async def test_at_risk(
     assert matched, "expected student flagged as at-risk"
     codes = {r["code"] for r in matched[0]["reasons"]}
     assert codes & {"inactive_7d", "low_completion", "no_engagement"}
+
+
+# ---------------------------------------------------------------------------
+# Manual mark/unmark toggle (bug report 2026-08-04: uncomplete was a no-op)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_uncomplete_flips_back_even_when_engagement_would_auto_complete(
+    client: httpx.AsyncClient,
+    scenario: dict[str, uuid.UUID],
+    student_bearer: str,
+) -> None:
+    """Regression: uncomplete used to recompute from engagement, and the
+    auto-complete threshold (≥80%) re-asserted ``completed`` — a student who
+    had watched enough could never un-tick the lesson (the button sent the
+    request, the server silently kept ``completed``, UI showed no change).
+    The manual toggle must win: status goes back to ``in_progress``."""
+    # Enough engagement to auto-complete (lesson estimate is 20 min = 1200s).
+    for _ in range(5):
+        response = await client.post(
+            "/api/v1/me/progress/material-engagement",
+            json=_engagement_payload(scenario["version_id"], seconds=240),
+            headers=_auth(student_bearer),
+        )
+        assert response.status_code == 201, response.text
+
+    progress = await client.get(
+        f"/api/v1/me/progress/lessons/{scenario['lesson_id']}",
+        headers=_auth(student_bearer),
+    )
+    assert progress.status_code == 200, progress.text
+    assert progress.json()["status"] == "completed"
+
+    unmark = await client.post(
+        f"/api/v1/me/progress/lessons/{scenario['lesson_id']}/uncomplete",
+        json={},
+        headers=_auth(student_bearer),
+    )
+    assert unmark.status_code == 200, unmark.text
+    body = unmark.json()
+    assert body["status"] == "in_progress", body
+    # Raw engagement percent stays 100 (they did watch 20min of 20min) — the
+    # toggle flips STATUS, which is what the curriculum keys on.
+    assert float(body["completion_percent"]) == 100.0, body
+
+    after = await client.get(
+        f"/api/v1/me/progress/lessons/{scenario['lesson_id']}",
+        headers=_auth(student_bearer),
+    )
+    assert after.json()["status"] == "in_progress"
+
+
+@pytest.mark.asyncio
+async def test_uncomplete_then_new_engagement_re_auto_completes(
+    client: httpx.AsyncClient,
+    scenario: dict[str, uuid.UUID],
+    student_bearer: str,
+) -> None:
+    """After unmarking, a NEW engagement heartbeat legitimately re-applies
+    auto-completion — the student keeps watching past the threshold, so the
+    lesson becomes complete again. Documents the re-assert behaviour so the
+    toggle isn't mistaken for a permanent lock."""
+    for _ in range(5):
+        response = await client.post(
+            "/api/v1/me/progress/material-engagement",
+            json=_engagement_payload(scenario["version_id"], seconds=240),
+            headers=_auth(student_bearer),
+        )
+        assert response.status_code == 201, response.text
+
+    unmark = await client.post(
+        f"/api/v1/me/progress/lessons/{scenario['lesson_id']}/uncomplete",
+        json={},
+        headers=_auth(student_bearer),
+    )
+    assert unmark.status_code == 200, unmark.text
+    assert unmark.json()["status"] == "in_progress", unmark.text
+
+    # One more heartbeat crosses the threshold again → auto-complete re-applies.
+    extra = await client.post(
+        "/api/v1/me/progress/material-engagement",
+        json=_engagement_payload(scenario["version_id"], seconds=240),
+        headers=_auth(student_bearer),
+    )
+    assert extra.status_code == 201, extra.text
+
+    after = await client.get(
+        f"/api/v1/me/progress/lessons/{scenario['lesson_id']}",
+        headers=_auth(student_bearer),
+    )
+    assert after.status_code == 200, after.text
+    assert after.json()["status"] == "completed"
