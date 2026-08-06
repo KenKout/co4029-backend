@@ -336,7 +336,9 @@ async def start_course_in_path(
     1. the caller is **actively enrolled** in the path (a manager put them
        there — this is the manager-made assignment the permission rests on);
     2. the course is **in that path**;
-    3. the course's stage is **unlocked** for this caller.
+    3. the course's stage is **unlocked** for this caller — or, if locked, its
+       ``enforcement`` is not ``hard`` (``soft``/``advisory`` allow the Start
+       and return ``stage_locked_warning=True``).
 
     So the reachable set is exactly "courses a manager already assigned me,
     in stages I have already earned". A student cannot enroll themselves in
@@ -371,10 +373,20 @@ async def start_course_in_path(
     target = next((ev for ev in evals if ev.stage.id == link.stage_id), None)
     if target is None:
         raise NotFoundError(f"Stage {link.stage_id} not found in career path {career_path_id}")
-    if not target.unlocked:
+    # Only `enforcement='hard'` blocks. `soft` and `advisory` are display/warn
+    # levels: the manager UI literally offers them as "Show a warning, still
+    # allow" and "Only mark it in the interface", so blocking them here would
+    # make the settings popover lie. `soft` is also the DDL default, which is
+    # why this must go through the helper rather than test `unlocked` directly.
+    if stage_service.stage_is_hard_locked(target):
         raise ForbiddenError(
             "stage_locked: this course is in a stage that is not unlocked for you yet"
         )
+    # Locked but not hard — the Start succeeds and the caller is told they are
+    # working ahead. Without this flag a soft-locked Start would look exactly
+    # like a normal one and the student would never see the warning they were
+    # promised.
+    stage_locked_warning = not target.unlocked
 
     before = await enrollments_api.get_course_enrollment(
         db, student_id=student_id, course_id=course_id
@@ -403,6 +415,7 @@ async def start_course_in_path(
         stage_id=link.stage_id,
         created=created,
         over_concurrency_cap=cap is not None and active_in_path > cap,
+        stage_locked_warning=stage_locked_warning,
     )
 
 

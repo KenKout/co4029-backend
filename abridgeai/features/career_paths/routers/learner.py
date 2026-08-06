@@ -154,9 +154,12 @@ async def start_course_in_path(
     Pattern B lazy enrollment, and the documented carve-out to the locked
     "students cannot self-enroll" decision. It is not general self-enrollment:
     the student cannot name an arbitrary course. The server 403s unless the
-    course sits in an **unlocked stage of a path the caller is already
-    actively enrolled in** — so eligibility is derived entirely from a
-    manager-made assignment.
+    course sits in a **stage of a path the caller is already actively enrolled
+    in** — so eligibility is derived entirely from a manager-made assignment.
+
+    A LOCKED stage 403s only under ``enforcement='hard'``. ``soft`` and
+    ``advisory`` allow the Start and set ``stage_locked_warning`` instead,
+    matching what the manager settings UI promises for those levels.
 
     Idempotent (``created=false`` when an enrollment already existed).
     ``over_concurrency_cap`` is advisory: the attention cap never blocks.
