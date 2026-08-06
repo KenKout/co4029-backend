@@ -30,6 +30,7 @@ from abridgeai.features.career_paths.schemas import (
     CareerPathUpdate,
     StageReorderWarning,
 )
+from abridgeai.features.enrollments.api import public as enrollments_api
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -614,6 +615,20 @@ async def validate_path_for_publish(db: AsyncSession, career_path_id: UUID) -> l
                 raise AppError(
                     f"stage_course_not_published: course {link.course_id} in stage "
                     f"position {stage.position} is not a published course of this organization"
+                )
+            # A published course with no gradeable unit can never be completed:
+            # the D2 writer refuses to promote an empty course, so `satisfied`
+            # stays false forever. As a REQUIRED course that locks the stage and
+            # every stage behind it permanently; as an optional one it can still
+            # be counted toward `min_optional_to_complete` and make the quota
+            # unreachable. Publishing is the last point where a manager can be
+            # told before a student is stuck, so both are hard failures.
+            units = await enrollments_api.count_course_gradeable_units(db, course_id=link.course_id)
+            if units == 0:
+                raise AppError(
+                    f"stage_course_has_no_gradeable_units: course {link.course_id} in "
+                    f"stage position {stage.position} has no published lessons, quizzes "
+                    "or interviews, so no student could ever complete it"
                 )
         if not required and stage.min_optional_to_complete == 0:
             warnings.append(

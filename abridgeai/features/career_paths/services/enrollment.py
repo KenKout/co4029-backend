@@ -240,7 +240,16 @@ async def get_my_path_progress(
     courses = [_to_course_summary(row) for row in rows]
     course_count = len(courses)
     completed = sum(1 for c in courses if c.satisfied)
-    in_progress = sum(1 for c in courses if not c.satisfied and c.completion_percent > 0)
+    # "In progress" is enrolled-but-not-satisfied, NOT completion_percent > 0.
+    #
+    # Completion is counted in whole units now (a lesson/quiz/interview is done
+    # or it is not), so a student who has started a course but not yet finished
+    # a single unit reads 0% — under the old fractional lesson average they read
+    # something above 0. Keying off the percent therefore stopped counting
+    # exactly the students who most obviously have work in flight. Under
+    # Pattern B an enrollment row only exists because the student pressed
+    # Start, which is a better signal of "in progress" than any percentage.
+    in_progress = sum(1 for c in courses if c.is_enrolled and not c.satisfied)
 
     formula_version = await stage_service.resolve_formula_version(db)
     overall = (
@@ -279,6 +288,8 @@ def _to_course_summary(row: dict[str, object]) -> CourseProgressSummary:
         title=row["title"],  # type: ignore[arg-type]
         status=row["status"],  # type: ignore[arg-type]
         completion_percent=float(row["completion_percent"]),  # type: ignore[arg-type]
+        unit_total=int(row.get("unit_total") or 0),  # type: ignore[arg-type]
+        unit_done=int(row.get("unit_done") or 0),  # type: ignore[arg-type]
         stage_id=row.get("stage_id"),  # type: ignore[arg-type]
         is_required=bool(row["is_required"]),
         satisfied=bool(row["satisfied"]),

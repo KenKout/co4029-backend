@@ -60,6 +60,14 @@ class CourseProgressSummary(BaseModel):
     title: str
     status: str
     completion_percent: float
+    """Percent of gradeable UNITS done — lessons, quizzes and interviews.
+
+    Measured the same way ``satisfied`` is decided, so the bar cannot read
+    100% on a course the stage gate still considers unfinished. A course with
+    no gradeable unit reports 0.0, never 100.0."""
+    unit_total: int = 0
+    """Gradeable units in the course. 0 ⇒ the course can never be completed."""
+    unit_done: int = 0
     stage_id: UUID | None = None
     is_required: bool = True
     satisfied: bool = False

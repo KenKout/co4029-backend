@@ -20,11 +20,14 @@ from typing import TYPE_CHECKING
 from sqlalchemy import delete, select
 
 from abridgeai.core.db.conflict_mapper import flush_or_conflict
+from abridgeai.core.observability import get_logger
 from abridgeai.core.security import utcnow
 from abridgeai.features.quizzes.models import Quiz, QuizAttempt, QuizGrade
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
+
+_logger = get_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -81,16 +84,20 @@ async def recompute_final_grade(
     commit. Deletes the grade row when the student has no completed attempts.
     """
     rows = (
-        await db.execute(
-            select(QuizAttempt)
-            .where(
-                QuizAttempt.quiz_id == quiz.id,
-                QuizAttempt.student_id == student_id,
-                QuizAttempt.status.in_(["submitted", "graded"]),
+        (
+            await db.execute(
+                select(QuizAttempt)
+                .where(
+                    QuizAttempt.quiz_id == quiz.id,
+                    QuizAttempt.student_id == student_id,
+                    QuizAttempt.status.in_(["submitted", "graded"]),
+                )
+                .order_by(QuizAttempt.attempt_number)
             )
-            .order_by(QuizAttempt.attempt_number)
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
 
     scores = [
         AttemptScore(
@@ -115,9 +122,7 @@ async def recompute_final_grade(
 
     if final is None:
         if existing is not None:
-            await db.execute(
-                delete(QuizGrade).where(QuizGrade.id == existing.id)
-            )
+            await db.execute(delete(QuizGrade).where(QuizGrade.id == existing.id))
             await flush_or_conflict(db)
         return None
 
@@ -133,19 +138,56 @@ async def recompute_final_grade(
     existing.attempts_counted = final.attempts_counted
     existing.computed_at = utcnow()
     await flush_or_conflict(db)
+    await _sync_course_completion(db, quiz=quiz, student_id=student_id)
     return existing
+
+
+async def _sync_course_completion(db: AsyncSession, *, quiz: Quiz, student_id: uuid.UUID) -> None:
+    """Fire the D2 course-completion writer for this quiz's course.
+
+    Course completion counts quiz units (passed, or failed with every attempt
+    consumed), and ``course_enrollments.status`` is what career-path stage
+    unlock reads as ``satisfied``. Grading is where a quiz unit changes state,
+    so without this call a student could pass their last quiz and watch the
+    next stage stay locked until the nightly drift sweep.
+
+    Runs inside the caller's transaction (submit / regrade) and never commits.
+
+    Never raises into the caller: a submitted attempt must still be recorded if
+    a downstream completion side-effect fails. The nightly sweeper
+    (``enrollments...resync_stale_course_completions``) repairs any miss — the
+    same contract ``progress.services.tracking`` uses.
+    """
+    from abridgeai.features.enrollments.api import public as enrollments_api  # noqa: PLC0415
+
+    course_id = getattr(quiz, "course_id", None)
+    if course_id is None:
+        return
+    try:
+        await enrollments_api.sync_course_completion(db, course_id=course_id, student_id=student_id)
+    except Exception:  # noqa: BLE001 -- side-effect; nightly sweeper repairs drift
+        _logger.warning(
+            "quizzes.course_completion_sync_failed",
+            exc_info=True,
+            quiz_id=str(quiz.id),
+            student_id=str(student_id),
+        )
 
 
 async def list_quiz_grades(db: AsyncSession, quiz_id: uuid.UUID) -> list[QuizGrade]:
     """All whole-quiz grade-of-record rows for a quiz (teacher gradebook)."""
     rows = (
-        await db.execute(
-            select(QuizGrade).where(
-                QuizGrade.quiz_id == quiz_id,
-                QuizGrade.grade_item_id.is_(None),
+        (
+            await db.execute(
+                select(QuizGrade).where(
+                    QuizGrade.quiz_id == quiz_id,
+                    QuizGrade.grade_item_id.is_(None),
+                )
             )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     return list(rows)
 
 

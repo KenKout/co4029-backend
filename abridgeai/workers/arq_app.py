@@ -23,6 +23,7 @@ import abridgeai.features.quizzes.models  # noqa: F401
 import abridgeai.features.spaced_repetition.models  # noqa: F401
 from abridgeai.core.config import get_settings
 from abridgeai.features.career_paths.workers import snapshot_career_readiness_task
+from abridgeai.features.enrollments.workers import resync_course_completions_task
 from abridgeai.features.interviews.workers import JOBS as INTERVIEW_JOBS
 from abridgeai.features.interviews.workers.lifecycle import sweep_interview_sessions_task
 from abridgeai.features.materials.workers import JOBS as MATERIAL_JOBS
@@ -72,6 +73,12 @@ class WorkerSettings:
         cron(scan_due_cards_task, minute=0),
         # Finalise stale in-progress voice interview sessions every 5 minutes.
         cron(sweep_interview_sessions_task, minute=set(range(0, 60, 5))),
+        # Repair drifted course_enrollments.status rows. The D2 writer's
+        # synchronous call sites all swallow their own failures, so this sweep
+        # is what keeps `satisfied` (and career-path stage unlock) honest when
+        # one of them drops a write. Runs BEFORE the 02:30 readiness snapshots
+        # so those aggregate repaired state.
+        cron(resync_course_completions_task, hour={2}, minute=0),
         # FR-6.8 — nightly career readiness snapshots (one row per active
         # career enrollment) feeding manager aggregates + student history.
         cron(snapshot_career_readiness_task, hour={2}, minute=30),

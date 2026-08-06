@@ -459,7 +459,12 @@ async def test_progress_aggregate(
     assert body["course_count"] == 2
     assert body["completed_courses"] == 1
     assert body["in_progress_courses"] == 1
-    assert 70 <= body["overall_percent"] <= 80
+    # 50%, not the old 75%. Completion is counted in whole UNITS now
+    # (lesson/quiz/interview done or not done), so pub_b's half-watched lesson
+    # contributes 0 rather than 50: one of two courses is finished. The old
+    # fractional lesson average is what let a course carrying an unanswered
+    # quiz read as complete, so the loss of partial credit is the point.
+    assert body["overall_percent"] == 50.0
 
 
 async def test_reorder_courses_in_path(

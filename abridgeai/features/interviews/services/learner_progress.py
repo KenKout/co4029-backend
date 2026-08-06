@@ -45,22 +45,32 @@ if TYPE_CHECKING:
 # Interview configs reachable from the curriculum, in render order.
 #
 # Mirrors the quiz query's population rule exactly: only configs linked from a
-# live ``module_items`` row in a published, non-deleted module. That is what
-# makes the returned keys line up with ``ModuleItemPublic.target.id`` on
-# interview items, so the frontend can map them without translation.
+# live ``module_items`` row in a published, non-deleted module, and only when
+# the config itself is published and not soft-deleted. That is what makes the
+# returned keys line up with ``ModuleItemPublic.target.id`` on interview items,
+# so the frontend can map them without translation.
 #
-# NOTE: interview_configs has no ``status``/``deleted_at`` column (unlike
-# quizzes), so there is no publish filter to apply on the config itself — the
-# module_items row IS the publication signal here.
+# The config-level filter is NOT optional. ``courses.visibility.
+# published_interview_clause`` and ``courses.queries.published`` both gate
+# interview items on ``interview_configs.status = 'published'`` and
+# ``deleted_at IS NULL``, so omitting it here reported interviews the
+# curriculum never renders (measured on this database: a course showing 0
+# interview items reported 3, and 5 curriculum rows point at draft or deleted
+# configs). That mismatch is now load-bearing: course completion counts
+# interview units, so an invisible draft interview would be an unsatisfiable
+# unit that locks the course — and every career-path stage behind it — forever.
 _INTERVIEW_IDS_SQL = """
 SELECT mi.interview_config_id AS config_id
 FROM module_items mi
 JOIN modules m ON m.id = mi.module_id
+JOIN interview_configs ic ON ic.id = mi.interview_config_id
 WHERE m.course_id = :course_id
   AND mi.item_type = 'interview'
   AND mi.interview_config_id IS NOT NULL
   AND mi.deleted_at IS NULL
   AND m.deleted_at IS NULL
+  AND ic.status = 'published'
+  AND ic.deleted_at IS NULL
 ORDER BY m.position, mi.position
 """
 

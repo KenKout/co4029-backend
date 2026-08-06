@@ -69,37 +69,106 @@ _PATH_COURSE_PROGRESS_SQL = text(
           AND c.status = 'published'
           AND c.deleted_at IS NULL
     ),
-    course_lessons AS (
-        SELECT pc.course_id, l.id AS lesson_id
+    -- Per-course UNIT tally, matching enrollments.queries.completion_units
+    -- exactly. `completion_percent` has to be measured the same way
+    -- `satisfied` is decided, or the bar reads 100% on a course the stage
+    -- gate still considers unfinished (which is what happened while this
+    -- averaged lesson progress and the D2 writer counted quizzes).
+    lesson_units AS (
+        -- Lessons join through modules, NOT module_items: module_items is the
+        -- ordering table and a published lesson can have no row in it (one
+        -- course in this database has 4 published lessons, 3 module_items).
+        -- Quizzes/interviews have no other membership link, so they must.
+        SELECT pc.course_id,
+               COUNT(*) AS total,
+               COUNT(*) FILTER (WHERE lp.status = 'completed') AS done
         FROM path_courses pc
-        JOIN modules m ON m.course_id = pc.course_id
-            AND m.deleted_at IS NULL
+        JOIN modules m ON m.course_id = pc.course_id AND m.deleted_at IS NULL
         JOIN lessons l ON l.module_id = m.id
             AND l.deleted_at IS NULL
             AND l.status = 'published'
-    ),
-    lesson_completion AS (
-        SELECT cl.course_id, cl.lesson_id,
-               COALESCE(lp.completion_percent, 0) AS completion_percent
-        FROM course_lessons cl
         LEFT JOIN lesson_progress lp
-            ON lp.lesson_id = cl.lesson_id
-            AND lp.user_id = :student_id
+            ON lp.lesson_id = l.id AND lp.user_id = :student_id
+        GROUP BY pc.course_id
+    ),
+    quiz_pop AS (
+        SELECT pc.course_id, q.id AS quiz_id,
+               CASE WHEN q.allow_retakes THEN q.max_attempts ELSE 1 END AS eff_max
+        FROM path_courses pc
+        JOIN modules m ON m.course_id = pc.course_id AND m.deleted_at IS NULL
+        JOIN module_items mi ON mi.module_id = m.id
+            AND mi.item_type = 'quiz'
+            AND mi.deleted_at IS NULL
+        JOIN quizzes q ON q.id = mi.quiz_id
+            AND q.deleted_at IS NULL
+            AND q.status = 'published'
+    ),
+    quiz_units AS (
+        SELECT qp.course_id,
+               COUNT(*) AS total,
+               COUNT(*) FILTER (
+                   WHERE COALESCE(g.passed, FALSE)
+                      OR (qp.eff_max IS NOT NULL
+                          AND COALESCE(a.used, 0) >= qp.eff_max
+                          AND COALESCE(a.in_flight, 0) = 0)
+               ) AS done
+        FROM quiz_pop qp
+        LEFT JOIN (
+            SELECT quiz_id, passed FROM quiz_grades
+            WHERE student_id = :student_id AND grade_item_id IS NULL
+        ) g ON g.quiz_id = qp.quiz_id
+        LEFT JOIN (
+            SELECT quiz_id, COUNT(*) AS used,
+                   COUNT(*) FILTER (WHERE status = 'in_progress') AS in_flight
+            FROM quiz_attempts WHERE student_id = :student_id
+            GROUP BY quiz_id
+        ) a ON a.quiz_id = qp.quiz_id
+        GROUP BY qp.course_id
+    ),
+    interview_units AS (
+        SELECT pc.course_id,
+               COUNT(*) AS total,
+               COUNT(*) FILTER (WHERE COALESCE(s.passed, FALSE)) AS done
+        FROM path_courses pc
+        JOIN modules m ON m.course_id = pc.course_id AND m.deleted_at IS NULL
+        JOIN module_items mi ON mi.module_id = m.id
+            AND mi.item_type = 'interview'
+            AND mi.deleted_at IS NULL
+        JOIN interview_configs ic ON ic.id = mi.interview_config_id
+            AND ic.deleted_at IS NULL
+            AND ic.status = 'published'
+        LEFT JOIN (
+            SELECT interview_config_id, BOOL_OR(pass_verdict IS TRUE) AS passed
+            FROM interview_sessions
+            WHERE student_id = :student_id AND session_mode <> 'practice'
+            GROUP BY interview_config_id
+        ) s ON s.interview_config_id = ic.id
+        GROUP BY pc.course_id
     ),
     course_progress AS (
         SELECT pc.course_id, pc.slug, pc.title, pc.status, pc.position,
                pc.stage_id, pc.is_required, pc.satisfied_by,
-               COALESCE(AVG(lc.completion_percent), 0)::float AS completion_percent
+               COALESCE(lu.total, 0) + COALESCE(qu.total, 0)
+                   + COALESCE(iu.total, 0) AS unit_total,
+               COALESCE(lu.done, 0) + COALESCE(qu.done, 0)
+                   + COALESCE(iu.done, 0) AS unit_done
         FROM path_courses pc
-        LEFT JOIN lesson_completion lc ON lc.course_id = pc.course_id
-        GROUP BY pc.course_id, pc.slug, pc.title, pc.status, pc.position,
-                 pc.stage_id, pc.is_required, pc.satisfied_by
+        LEFT JOIN lesson_units lu ON lu.course_id = pc.course_id
+        LEFT JOIN quiz_units qu ON qu.course_id = pc.course_id
+        LEFT JOIN interview_units iu ON iu.course_id = pc.course_id
     )
     SELECT cp.course_id, cp.slug, cp.title, cp.status, cp.position,
-           cp.stage_id, cp.is_required, cp.satisfied_by, cp.completion_percent,
+           cp.stage_id, cp.is_required, cp.satisfied_by,
+           -- A course with no gradeable unit reports 0, never 100: it cannot
+           -- be completed, and the D2 writer refuses to promote it.
+           CASE WHEN cp.unit_total = 0 THEN 0.0
+                ELSE ROUND(cp.unit_done * 100.0 / cp.unit_total, 2)
+           END::float AS completion_percent,
+           cp.unit_total, cp.unit_done,
            -- satisfied is course_enrollments.status = 'completed' (D2), NOT
-           -- completion_percent >= 100. The two can differ: a course the
-           -- student was never enrolled in has no status row at all.
+           -- completion_percent >= 100. The two can still differ: a course the
+           -- student was never enrolled in has no status row at all, and the
+           -- writer only fires for enrolled students.
            COALESCE(ce.status = 'completed', FALSE) AS satisfied,
            (ce.id IS NOT NULL) AS is_enrolled
     FROM course_progress cp
