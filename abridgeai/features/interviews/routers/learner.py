@@ -59,6 +59,7 @@ from abridgeai.features.interviews.schemas import (
 )
 from abridgeai.features.interviews.schemas.integrity import IntegrityEventBatchRequest
 from abridgeai.features.interviews.services import narration as narration_service
+from abridgeai.features.interviews.services import narration_cache
 from abridgeai.features.interviews.services import onboarding as onboarding_service
 from abridgeai.features.interviews.services import real_time as realtime_service
 from abridgeai.features.interviews.services import taking as taking_service
@@ -616,6 +617,27 @@ async def narrate_session_text(
         tts_voice = config.tts_voice
 
     settings = get_settings()
+    # Cache lookup sits BEHIND the output guard above: only text already
+    # approved as an interview utterance can reach it, so this never widens
+    # what the endpoint will speak. The win is the ceremony lines — the
+    # transition ("Great—the introduction is complete…") is a fixed string,
+    # identical for every session in a language, yet cost a full ~3.0-3.6s
+    # Deepgram round trip every time. The browser holds its "preparing"
+    # indicator for that whole window (text and voice are released together),
+    # which is exactly the delay reported at the head of that line.
+    cached = narration_cache.get(
+        text=guarded_narration.text,
+        voice=tts_voice,
+        persona=persona,
+        language=narration_language,
+    )
+    if cached is not None:
+        return Response(
+            content=cached,
+            media_type="audio/mpeg",
+            headers={"Cache-Control": "no-store"},
+        )
+
     try:
         audio = await narration_service.synthesize_speech(
             guarded_narration.text,
@@ -629,6 +651,14 @@ async def narrate_session_text(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail={"error": "narration_unavailable", "message": str(exc)},
         ) from exc
+
+    narration_cache.put(
+        text=guarded_narration.text,
+        voice=tts_voice,
+        persona=persona,
+        language=narration_language,
+        audio=audio,
+    )
 
     return Response(
         content=audio,
