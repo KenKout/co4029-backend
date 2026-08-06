@@ -192,6 +192,49 @@ async def get_opening_text(session_id: UUID, *, language: str = "en") -> str | N
         return message.content_text
 
 
+async def _ceremony_already_introduced(db: object, session_id: UUID) -> bool:
+    """True when the REST ceremony has already introduced the interviewer.
+
+    ``ready_transition`` is the right marker rather than the opening greeting:
+    it is written only once onboarding actually completed, and its own text
+    ("…the introduction is complete. Let's begin. Here is your first
+    question.") is the explicit hand-off into question one. If the candidate
+    heard that, they have been introduced to and are expecting a question — not
+    another "X here. Let's get started."
+
+    A pure voice session never runs the REST onboarding loop, so no
+    ``ready_transition`` row exists and the room intro still plays, unchanged.
+
+    Defensive: any lookup failure returns False, which restores the previous
+    behaviour (intro plays) rather than silencing a greeting on a DB hiccup.
+    """
+    from sqlalchemy import select  # noqa: PLC0415
+
+    from abridgeai.features.interviews.models import (  # noqa: PLC0415
+        InterviewSessionMessage,
+    )
+
+    try:
+        result = await db.execute(  # type: ignore[attr-defined]
+            select(InterviewSessionMessage).where(
+                InterviewSessionMessage.session_id == session_id,
+                InterviewSessionMessage.role == "ai",
+            )
+        )
+        # Metadata is filtered in Python for parity with ceremony._existing_message,
+        # which does the same for compatibility with the unit tests' DB doubles.
+        for message in result.scalars().all():
+            metadata = message.metadata_json
+            if isinstance(metadata, dict) and metadata.get("ceremony_key") == "ready_transition":
+                return True
+    except Exception:  # noqa: BLE001 -- never fail a join over a greeting
+        logger.warning(
+            "room-intro ceremony lookup failed; keeping the intro (session=%s)",
+            session_id,
+        )
+    return False
+
+
 async def get_room_intro_text(session_id: UUID, *, language: str = "en") -> str | None:
     """Short line spoken as the voice channel opens, or ``None``.
 
@@ -204,6 +247,15 @@ async def get_room_intro_text(session_id: UUID, *, language: str = "en") -> str 
 
     ``None`` whenever the config has not opted into a named interviewer, so
     existing voice sessions are unchanged.
+
+    ALSO ``None`` once the REST ceremony has already run its introduction —
+    see :func:`_ceremony_already_introduced`. The intro exists to fill the beat
+    for a candidate nobody has greeted yet; a hybrid candidate has by then been
+    greeted by name ("I'm Ha, an engineering manager…") AND told "Let's begin.
+    Here is your first question.", so adding "Ha here. Let's get started."
+    is a third introduction. It also lands in front of question one in
+    ``on_enter``, which pushes the question's own audio later and is what made
+    the text visibly outrun the voice on question one.
     """
     from abridgeai.features.interviews.models import (  # noqa: PLC0415
         InterviewConfig,
@@ -213,6 +265,8 @@ async def get_room_intro_text(session_id: UUID, *, language: str = "en") -> str 
     async with get_sessionmaker()() as db:
         session = await db.get(InterviewSession, session_id)
         if session is None:
+            return None
+        if await _ceremony_already_introduced(db, session_id):
             return None
         config = await db.get(InterviewConfig, session.interview_config_id)
         return room_intro_text(
