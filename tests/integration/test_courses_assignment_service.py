@@ -106,6 +106,16 @@ async def scenario(engine: AsyncEngine) -> AsyncIterator[dict]:
             text("INSERT INTO user_profiles (user_id, display_name) VALUES (:t, :dn)"),
             {"t": teacher_id, "dn": "Teacher Display"},
         )
+        # Assignment requires the assignee to be a member of the course's
+        # organization, enforced server-side rather than trusted from the
+        # client. Real teachers all carry this row; the fixture must too.
+        await conn.execute(
+            text(
+                "INSERT INTO organization_memberships (user_id, organization_id, status) "
+                "VALUES (:t, :org, 'active')"
+            ),
+            {"t": teacher_id, "org": org_id},
+        )
         await conn.execute(
             text(
                 "INSERT INTO courses "
@@ -135,6 +145,9 @@ async def scenario(engine: AsyncEngine) -> AsyncIterator[dict]:
             {"a": actor_id, "t": teacher_id, "c": course_id},
         )
         await conn.execute(text("DELETE FROM courses WHERE id = :id"), {"id": course_id})
+        await conn.execute(
+            text("DELETE FROM organization_memberships WHERE user_id = :t"), {"t": teacher_id}
+        )
         await conn.execute(text("DELETE FROM user_profiles WHERE user_id = :t"), {"t": teacher_id})
         await conn.execute(
             text("DELETE FROM users WHERE id = ANY(:ids)"),

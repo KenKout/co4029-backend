@@ -16,9 +16,74 @@ from uuid import UUID
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from abridgeai.features.access_control.models import Role, UserRoleAssignment
+from abridgeai.features.access_control.models import (
+    OrganizationMembership,
+    Role,
+    UserRoleAssignment,
+)
 from abridgeai.features.courses.models import Course
 from abridgeai.features.identity.models import User, UserProfile
+
+
+async def list_assignable_teachers(
+    db: AsyncSession, *, organization_id: UUID, course_id: UUID
+) -> list[dict[str, Any]]:
+    """Users holding the ``teacher`` role who are members of ``organization_id``.
+
+    Backs the manager's teacher picker. Two filters matter and both are
+    server-side:
+
+    * **role** — the user must hold ``teacher`` at some scope. Filtering on
+      the role alone is not enough, which is why the org filter is a JOIN
+      here rather than a query parameter the client passes: a teacher of
+      another organization also "holds the teacher role".
+    * **organization membership** — an active, non-deleted membership row.
+
+    ``already_assigned`` marks users who already teach this course so the
+    picker can show them as chosen instead of offering a no-op.
+    """
+    assigned_subq = (
+        select(UserRoleAssignment.user_id)
+        .join(Role, Role.id == UserRoleAssignment.role_id)
+        .where(
+            UserRoleAssignment.course_id == course_id,
+            UserRoleAssignment.scope_kind == "course",
+            Role.code == "teacher",
+            UserRoleAssignment.deleted_at.is_(None),
+            (UserRoleAssignment.active_until.is_(None))
+            | (UserRoleAssignment.active_until > func.now()),
+        )
+        .scalar_subquery()
+    )
+    stmt = (
+        select(
+            User.id.label("user_id"),
+            User.primary_email,
+            UserProfile.display_name,
+            User.id.in_(assigned_subq).label("already_assigned"),
+        )
+        .join(OrganizationMembership, OrganizationMembership.user_id == User.id)
+        .join(UserRoleAssignment, UserRoleAssignment.user_id == User.id)
+        .join(Role, Role.id == UserRoleAssignment.role_id)
+        .outerjoin(UserProfile, UserProfile.user_id == User.id)
+        .where(
+            OrganizationMembership.organization_id == organization_id,
+            OrganizationMembership.status == "active",
+            OrganizationMembership.deleted_at.is_(None),
+            Role.code == "teacher",
+            UserRoleAssignment.deleted_at.is_(None),
+            (UserRoleAssignment.active_until.is_(None))
+            | (UserRoleAssignment.active_until > func.now()),
+            # `users` has no deleted_at (0002 skip-list); `status` is the
+            # lifecycle column, so an inactive/suspended account is excluded
+            # here rather than by a soft-delete filter.
+            User.status == "active",
+        )
+        .distinct()
+        .order_by(UserProfile.display_name, User.primary_email)
+    )
+    rows = (await db.execute(stmt)).mappings().all()
+    return [dict(row) for row in rows]
 
 
 async def list_teachers_for_course(db: AsyncSession, course_id: UUID) -> list[dict[str, Any]]:

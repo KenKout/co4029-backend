@@ -31,6 +31,23 @@ class TeacherAssignmentRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class AssignableTeacher(BaseModel):
+    """A teacher the manager may pick for this course.
+
+    The list is org-scoped server-side from the course, so every entry here is
+    already a legal choice — the client does not filter, it renders.
+    """
+
+    user_id: UUID
+    primary_email: str
+    display_name: str | None = None
+    already_assigned: bool = False
+    """True when this user already teaches the course: show as chosen rather
+    than offering an assignment that would be a no-op."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+
 class AssignTeacherRequest(BaseModel):
     user_id: UUID
 
@@ -112,6 +129,7 @@ class CourseRosterRead(BaseModel):
 
 __all__ = [
     "AssignTeacherRequest",
+    "AssignableTeacher",
     "CourseRosterRead",
     "RosterEntry",
     "RosterStudentRead",

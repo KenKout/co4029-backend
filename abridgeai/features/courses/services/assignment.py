@@ -19,7 +19,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
 
-from abridgeai.core.exceptions import NotFoundError
+from abridgeai.core.exceptions import ForbiddenError, NotFoundError
 from abridgeai.core.security import CurrentUser
 from abridgeai.features.courses.queries import (
     assignment as assignment_queries,
@@ -57,6 +57,18 @@ async def assign_teacher_to_course(
     course = await authoring_queries.get_course_for_authoring(db, course_id)
     if course is None:
         raise NotFoundError(f"Course {course_id} not found")
+
+    # The assignee MUST belong to the course's organization. Enforced here,
+    # server-side, rather than by whatever list the UI happened to render: the
+    # request carries a bare user_id, so a client could otherwise name any user
+    # in the system and grant them course.update on another org's course. The
+    # course-scoped permission dep upstream checks the ACTOR's reach, not the
+    # assignee's membership — different question.
+    if not await _user_is_in_org(db, user_id=user_id, org_id=course.organization_id):
+        raise ForbiddenError(
+            f"teacher_not_in_course_org: user {user_id} is not a member of the "
+            f"organization that owns course {course_id}"
+        )
 
     existing = await assignment_queries.find_active_teacher_assignment(
         db, course_id=course_id, user_id=user_id
@@ -116,6 +128,32 @@ async def assign_teacher_to_course(
         "organization_id": course.organization_id,
         "granted_by": actor.user_id,
     }
+
+
+async def list_assignable_teachers(db: AsyncSession, course_id: UUID) -> list[dict[str, Any]]:
+    """Teachers a manager may assign to ``course_id``: same org, teacher role.
+
+    The organization is derived from the COURSE, never from a client
+    parameter — "belongs to that org" has to be a server-side fact, otherwise
+    it is only a UI convention that a crafted request walks straight past.
+    """
+    course = await authoring_queries.get_course_for_authoring(db, course_id)
+    if course is None:
+        raise NotFoundError(f"Course {course_id} not found")
+    return await assignment_queries.list_assignable_teachers(
+        db, organization_id=course.organization_id, course_id=course_id
+    )
+
+
+async def _user_is_in_org(db: AsyncSession, *, user_id: UUID, org_id: UUID) -> bool:
+    """Whether ``user_id`` has an active membership in ``org_id``.
+
+    Lazy import keeps the courses -> access_control edge out of module import
+    time, matching the pattern in ``courses.services.catalog``.
+    """
+    from abridgeai.features.access_control.api import public as access_api  # noqa: PLC0415
+
+    return await access_api.is_user_member_of_org(db, user_id=user_id, org_id=org_id)
 
 
 async def remove_teacher_from_course(
