@@ -151,6 +151,13 @@ class StartCourseResult(BaseModel):
     flag is the channel for that warning: without it a soft-locked Start is
     indistinguishable from a normal one and the student is never told they are
     working ahead of the path."""
+    active_in_path: int = 0
+    """How many courses of this path the caller now has active, counted AFTER
+    this Start. The number ``over_concurrency_cap`` was decided against — the
+    warning copy interpolates it, and previously the FE had no source for it
+    and hardcoded 0, so the toast read "you have 0 courses open"."""
+    max_concurrent: int | None = None
+    """The path's attention cap, or None when unset. Advisory: never blocks."""
 
 
 __all__ = [
