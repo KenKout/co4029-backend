@@ -44,8 +44,6 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
-from tests.support.db_graph import hard_delete_graph
-
 import abridgeai.features.access_control.models  # noqa: F401  -- register users/orgs FK targets
 import abridgeai.features.identity.models  # noqa: F401  -- register users FK target
 import abridgeai.features.interviews.models  # noqa: F401  -- T6.1 registers interview_* tables
@@ -58,6 +56,7 @@ from abridgeai.features.courses.schemas import (
     LessonResourceCreate,
 )
 from abridgeai.features.courses.services import authoring as authoring_service
+from tests.support.db_graph import hard_delete_graph
 
 for _stub_name in ("interview_configs",):
     if _stub_name not in Base.metadata.tables:
@@ -389,6 +388,27 @@ async def test_publish_course_widens_status(
         )
         await session.commit()
         assert new_course.status == "draft"
+
+        # Publishing is gated on at least one gradeable unit — a course with
+        # nothing to grade can never be completed, so it cannot go live. Give
+        # it one published lesson, which is what the real authoring flow does
+        # between create and publish.
+        module_id, lesson_id = uuid.uuid4(), uuid.uuid4()
+        await session.execute(
+            text(
+                "INSERT INTO modules (id, course_id, title, position, status) "
+                "VALUES (:id, :cid, 'M1', 1, 'published')"
+            ),
+            {"id": module_id, "cid": new_course.id},
+        )
+        await session.execute(
+            text(
+                "INSERT INTO lessons (id, module_id, slug, title, status, lesson_type) "
+                "VALUES (:id, :mid, :slug, 'L1', 'published', 'video')"
+            ),
+            {"id": lesson_id, "mid": module_id, "slug": f"lesson-{suffix}"},
+        )
+        await session.commit()
 
         published = await authoring_service.publish_course(session, new_course.id, owner)
         await session.commit()

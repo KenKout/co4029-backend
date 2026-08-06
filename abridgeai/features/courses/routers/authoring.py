@@ -102,6 +102,31 @@ _REQUIRE_CREATE = require_permission("course.create")
 _REQUIRE_AUTHORING_LIST = require_any_permission("course.read.draft", "course.create")
 _REQUIRE_COURSE_UPDATE = require_course_permission("course_id", "course.update")
 _REQUIRE_COURSE_PUBLISH = require_course_permission("course_id", "course.publish")
+
+# Fields on CourseUpdate a TEACHER (course.update) may patch: the course
+# description, the study-time estimate, and their own contact details.
+# User decision 2026-08-06.
+_TEACHER_PATCHABLE_COURSE_FIELDS: frozenset[str] = frozenset(
+    {
+        "description",
+        "estimated_minutes",
+        "contact_email",
+        "contact_phone",
+        "contact_website_url",
+        "contact_social_url",
+    }
+)
+
+# Everything else on CourseUpdate is manager-owned (needs course.delete):
+# title, slug, status, level, org_unit_id, thumbnail_object_id,
+# expected_completion_days, enrollment_cap.
+#
+# DERIVED from the schema rather than hand-listed, so a field added to
+# CourseUpdate later defaults to manager-only instead of silently becoming
+# teacher-writable — fail closed, not open.
+_MANAGER_ONLY_COURSE_FIELDS: frozenset[str] = (
+    frozenset(CourseUpdate.model_fields) - _TEACHER_PATCHABLE_COURSE_FIELDS
+)
 # Course deletion is manager-owned. ``allow_owner=False`` kills the ownership
 # short-circuit so a teacher who owns the course still cannot delete it —
 # ownership grants authoring access (course.update), NOT lifecycle control.
@@ -296,15 +321,30 @@ async def update_course(
     current_user: Annotated[CurrentUser, Depends(_REQUIRE_COURSE_UPDATE)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> CourseAuthoring:
-    # Title/slug are course identity — manager-owned. A teacher (or a
-    # course-owning teacher via the owner short-circuit) may author content
-    # (course.update) but never rename the course; only ``course.delete``
-    # holders (manager/admin) change its identity. Checked before the patch
-    # so a mixed payload either fully applies or fully rejects.
-    if "title" in payload.model_fields_set or "slug" in payload.model_fields_set:
+    # Field ownership (user decision 2026-08-06). `course.update` is the
+    # CONTENT permission a teacher holds on a course assigned to them; it must
+    # not carry course identity, lifecycle, or delivery policy with it.
+    #
+    # Teacher may patch only: description, estimated_minutes and the four
+    # contact_* fields (their own contact details).
+    #
+    # Everything else needs `course.delete` (manager/admin). `status` in
+    # particular: without it a teacher could PATCH {"status": "published"} and
+    # publish their own course, bypassing the manager publish gate entirely —
+    # the POST /publish ROUTE is gated on `course.publish`, but this PATCH was
+    # not, so the gate had a hole straight through it.
+    #
+    # Checked before the patch so a mixed payload either fully applies or
+    # fully rejects.
+    manager_only = _MANAGER_ONLY_COURSE_FIELDS & payload.model_fields_set
+    if manager_only:
         course_perms = await load_course_permissions(db, current_user.user_id, course_id)
         if "course.delete" not in course_perms:
-            raise _forbidden("Only managers may change a course's title or slug.")
+            raise _forbidden(
+                "Only managers may change "
+                + ", ".join(sorted(manager_only))
+                + " on a course."
+            )
     try:
         course = await authoring_service.update_course(db, course_id, payload, current_user)
     except NotFoundError as exc:
@@ -360,6 +400,10 @@ async def publish_course(
         course = await authoring_service.publish_course(db, course_id, current_user)
     except NotFoundError as exc:
         raise _not_found(str(exc)) from exc
+    # ConflictError subclasses AppError, so it MUST be caught first or the
+    # gradeable-unit refusal degrades from 409 to a generic 400.
+    except ConflictError as exc:
+        raise _conflict(str(exc)) from exc
     except AppError as exc:
         raise _bad_request(str(exc)) from exc
     await db.commit()

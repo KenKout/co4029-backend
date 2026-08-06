@@ -275,15 +275,56 @@ async def test_list_courses_in_dept_returns_org_unit_courses(
     assert any(course.id == scenario["course_id"] for course in rows)
 
 
-async def test_assign_teacher_to_draft_course_does_not_notify(
+async def test_assign_teacher_to_draft_course_notifies(
     session_factory: async_sessionmaker[AsyncSession],
     scenario: dict,
 ) -> None:
-    """The scenario course is a draft — assigning must NOT create a notification.
+    """A DRAFT course assignment must notify — this is the normal case.
 
-    A teacher can't act on a course they can't yet see; they're told when it
-    publishes.
+    Previously this test asserted `count == 0` for a draft, i.e. it encoded
+    the bug. The manager flow is: create (draft) -> assign teacher -> teacher
+    edits content -> manager publishes. Assignment therefore ALWAYS happens
+    while the course is a draft, so gating the notification on
+    `status == "published"` meant it never fired in the real flow and the
+    teacher was handed work nobody told them about.
+
+    The premise the old guard rested on — "a teacher can't act on a draft they
+    can't yet see" — is false: `list_courses_assigned_to_teacher` applies only
+    `_archived_filter`, with no status filter, which is exactly what makes the
+    "teacher edits content" step possible.
     """
+    async with session_factory() as session:
+        actor = _actor(scenario["actor_id"])
+        await assignment_service.assign_teacher_to_course(
+            session, scenario["course_id"], scenario["teacher_id"], actor
+        )
+        await session.commit()
+
+        row = (
+            await session.execute(
+                text(
+                    "SELECT category, entity_type, entity_id FROM notifications "
+                    "WHERE user_id = :u AND category = 'course_announcement'"
+                ),
+                {"u": scenario["teacher_id"]},
+            )
+        ).one()
+    assert row.category == "course_announcement"
+    assert row.entity_type == "course"
+    assert row.entity_id == scenario["course_id"]
+
+
+async def test_assign_teacher_to_archived_course_does_not_notify(
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict,
+    engine: AsyncEngine,
+) -> None:
+    """Archived is the one status with nothing to act on, so it stays silent."""
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("UPDATE courses SET status = 'archived' WHERE id = :id"),
+            {"id": scenario["course_id"]},
+        )
     async with session_factory() as session:
         actor = _actor(scenario["actor_id"])
         await assignment_service.assign_teacher_to_course(

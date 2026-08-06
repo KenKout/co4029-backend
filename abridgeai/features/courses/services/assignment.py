@@ -84,9 +84,21 @@ async def assign_teacher_to_course(
         granted_by=actor.user_id,
     )
 
-    # Notify only for published courses: a teacher can't act on a draft they
-    # can't yet see. Never let a notification failure roll back the assignment.
-    if course.status == "published":
+    # Notify on assignment for draft AND published alike. The manager flow is
+    # create (draft) -> assign teacher -> teacher edits content -> publish, so
+    # at assignment time the course is ALWAYS a draft: gating this on
+    # `status == "published"` meant the notification never fired in the real
+    # flow and the teacher was handed work nobody told them about.
+    #
+    # The premise the old guard rested on — "a teacher can't act on a draft
+    # they can't yet see" — is false. `list_courses_assigned_to_teacher`
+    # applies only `_archived_filter` and has no status filter, so assigned
+    # teachers do see drafts; that is what makes the "teacher edits content"
+    # step work at all.
+    #
+    # Archived is the one status with nothing left to act on.
+    # Never let a notification failure roll back the assignment.
+    if course.status != "archived":
         await notify.notify_teacher_assigned(
             db,
             teacher_user_id=user_id,

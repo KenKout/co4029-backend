@@ -180,8 +180,14 @@ async def create_course(
     A duplicate ``(organization_id, slug)`` is mapped to :class:`ConflictError`
     (HTTP 409) instead of bubbling the raw ``IntegrityError`` up to a 500.
 
-    The creator is automatically assigned as a teacher on the new course so
-    the course appears in their "My Courses" list and the dept teachers tab.
+    The creator is auto-assigned as a teacher ONLY when they actually hold the
+    teacher role. A teacher self-creating a course wants it in their authoring
+    list; a manager creating one on a teacher's behalf does not — assignment is
+    purely additive (``assign_teacher_to_course`` never removes anyone), so
+    auto-assigning the manager left them as a permanent co-teacher on every
+    course they ever created, cluttering their authoring list and the dept
+    teachers tab. The manager's real handle on the course is ownership plus
+    ``course.delete``/``course.publish``, none of which depend on a teacher row.
     """
     org_id = await _resolve_owner_org(db, owner)
     data = payload.model_dump()
@@ -192,22 +198,36 @@ async def create_course(
     await _flush_or_conflict(db)
     await db.refresh(course)
 
-    # Auto-assign the creator as teacher so the course shows up in their
-    # authoring list and in the dept teachers tab immediately.
-    existing = await find_active_teacher_assignment(db, course_id=course.id, user_id=owner.user_id)
-    if existing is None:
-        role_id = await get_teacher_role_id(db)
-        await insert_teacher_assignment(
-            db,
-            assignment_id=uuid4(),
-            course_id=course.id,
-            user_id=owner.user_id,
-            role_id=role_id,
-            organization_id=org_id,
-            granted_by=owner.user_id,
+    if await _creator_is_teacher(db, owner.user_id):
+        existing = await find_active_teacher_assignment(
+            db, course_id=course.id, user_id=owner.user_id
         )
+        if existing is None:
+            role_id = await get_teacher_role_id(db)
+            await insert_teacher_assignment(
+                db,
+                assignment_id=uuid4(),
+                course_id=course.id,
+                user_id=owner.user_id,
+                role_id=role_id,
+                organization_id=org_id,
+                granted_by=owner.user_id,
+            )
 
     return CourseAuthoring.model_validate(course)
+
+
+async def _creator_is_teacher(db: AsyncSession, user_id: UUID) -> bool:
+    """Whether ``user_id`` holds the ``teacher`` role at any scope.
+
+    Lazy import: ``courses.services`` reaching ``access_control.api.public`` at
+    module level would add a cross-feature edge at import time; the same lazy
+    pattern is used by ``courses.services.catalog``.
+    """
+    from abridgeai.features.access_control.api import public as access_api  # noqa: PLC0415
+
+    codes = await access_api.get_role_codes_for_users(db, [user_id])
+    return "teacher" in codes.get(user_id, [])
 
 
 async def check_course_slug_available(db: AsyncSession, *, slug: str, owner: CurrentUser) -> bool:
@@ -251,31 +271,67 @@ async def update_course(
         and new_status == "draft"
     ):
         raise ConflictError(f"Course {course_id} is published and cannot be reverted to draft.")
+    # PATCH is the second door into `published`. `POST /publish` is the first.
+    # Both must apply the gradeable-unit gate or the gate is decorative — a
+    # manager could publish an empty course through whichever door is not
+    # guarded.
+    if new_status == "published" and course.status != "published":
+        await _require_gradeable_units(db, course_id)
     _apply_patch(course, payload)
     await _flush_or_conflict(db)
     await db.refresh(course)
     return CourseAuthoring.model_validate(course)
 
 
+async def _require_gradeable_units(db: AsyncSession, course_id: UUID) -> None:
+    """Refuse to publish a course no student could ever complete.
+
+    A gradeable unit is a published lesson, quiz or interview config. With
+    zero of them the completion writer can never promote an enrollment, so
+    ``satisfied`` stays false forever: as a required course on a career path
+    that locks its stage and every stage behind it permanently.
+
+    The same rule already guards career-path publication, but that fires only
+    once someone puts the course on a path — possibly weeks later, and with a
+    message pointing at the path rather than the course. Publishing the course
+    is the first moment the system can tell the manager, so it says it here.
+
+    Lazy import keeps the courses -> enrollments edge out of module import
+    time (same pattern as ``_notify_course_published``).
+    """
+    from abridgeai.features.enrollments.api import public as enrollments_api  # noqa: PLC0415
+
+    units = await enrollments_api.count_course_gradeable_units(db, course_id=course_id)
+    if units == 0:
+        raise ConflictError(
+            f"course_has_no_gradeable_units: course {course_id} has no published "
+            "lessons, quizzes or interviews, so no student could ever complete it. "
+            "Add and publish at least one before publishing the course."
+        )
+
+
 async def publish_course(db: AsyncSession, course_id: UUID, actor: CurrentUser) -> CourseAuthoring:
     """Transition a course's status to ``published``.
 
-    The plan body suggests checking "all modules ready" before publish.
-    For T3.5 the gate is intentionally minimal (status transition only)
-    so the API surface is stable; tighter gates will land alongside
-    quizzes / interviews when those features can publish independently.
+    Gated on at least one gradeable unit — a published lesson, quiz or
+    interview config. A course with none can never be completed by anyone (the
+    completion writer refuses to promote an empty course), and as a required
+    course on a career path it would lock its stage permanently. See
+    :func:`_require_gradeable_units`. Re-publishing an already-published course
+    is a no-op and skips the gate.
 
     On an actual transition INTO ``published`` (not a re-publish), everyone
     already attached to the course is notified with a deep-link: assigned
-    teachers and actively-enrolled students. This back-fills the notifications
-    that assignment/enrolment skipped while the course was still a draft.
-    Notification failures never roll back the publish.
+    teachers and actively-enrolled students. Notification failures never roll
+    back the publish.
     """
     del actor
     course = await _require_course(db, course_id)
     if course.status == "archived":
         raise AppError(f"Cannot publish archived course {course_id}")
     was_published = course.status == "published"
+    if not was_published:
+        await _require_gradeable_units(db, course_id)
     course.status = "published"
     await db.flush()
     await db.refresh(course)
