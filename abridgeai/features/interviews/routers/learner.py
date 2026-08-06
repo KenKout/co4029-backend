@@ -29,7 +29,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Annotated, Any, cast
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Response, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -447,14 +447,89 @@ async def realtime_token(
     current_user: Annotated[CurrentUser, Depends(_REQUIRE_SESSION_OWNER)],
     db: Annotated[AsyncSession, Depends(get_db)],
     accept_language: Annotated[str | None, Header()] = None,
+    warm: Annotated[bool, Query()] = False,
 ) -> RealtimeTokenResponse:
-    """Mint a LiveKit join token (+ agent dispatch) for a voice session.
+    """Mint a LiveKit join token for a voice session.
 
     Ownership + existence are enforced by ``_REQUIRE_SESSION_OWNER``. Here we
     additionally gate on the voice feature flag and the session's
     mode/status, persist the room name on first call (idempotent), and return
-    a short-lived participant token. Phase 3's agent worker is dispatched by
-    the token's room-config when the room is first created.
+    a short-lived participant token.
+
+    Two shapes:
+
+    * default — the token carries the agent dispatch, so joining starts the
+      interviewer. Still requires completed onboarding, because that IS the
+      moment the interview begins.
+    * ``?warm=true`` — a **warm-up** token with no dispatch, allowed DURING
+      onboarding. It lets the client open the room while the candidate is
+      still doing setup, so the ~10-13s worker startup (measured) overlaps
+      work the candidate is doing anyway instead of sitting in front of
+      question one as dead air. The interviewer is sent in afterwards by
+      ``POST .../realtime-agent``.
+
+    A warm token grants exactly the same room access as a normal one — it
+    simply does not start the interview. The onboarding gate that used to sit
+    on every mint is preserved where it actually matters: on the dispatch.
+    """
+    settings = get_settings()
+    if not settings.interview_voice_enabled:
+        raise _voice_unavailable()
+
+    from abridgeai.features.interviews.models import InterviewSession  # noqa: PLC0415
+
+    session = await db.get(InterviewSession, session_id)
+    if session is None:  # pragma: no cover - dep already 404s; defensive
+        raise _not_found("interview_session", session_id)
+    if session.input_mode not in ("voice", "hybrid"):
+        raise _conflict("session is not a voice interview")
+    if session.status != "in_progress":
+        raise _conflict(f"session is not in progress (status={session.status})")
+    # Only the DISPATCHING mint waits for onboarding. A warm token starts
+    # nothing, so holding it back would just reinstate the delay it exists to
+    # remove.
+    if not warm and session.onboarding_stage != "completed":
+        raise _conflict("Complete interview onboarding before joining the voice room")
+
+    room_name = session.livekit_room_name or realtime_service.build_room_name(session_id)
+    if session.livekit_room_name is None:
+        session.livekit_room_name = room_name
+        await db.commit()
+
+    try:
+        return realtime_service.mint_participant_token(
+            session_id=session_id,
+            student_id=current_user.user_id,
+            room_name=room_name,
+            settings=settings,
+            language=session.interview_language,
+            dispatch_agent=not warm,
+        )
+    except ValueError as exc:  # credentials missing despite the flag
+        raise _voice_unavailable() from exc
+
+
+@router.post(
+    "/interview-sessions/{session_id}/realtime-agent",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def dispatch_realtime_agent(
+    session_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_SESSION_OWNER)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> None:
+    """Send the interviewer into a room the candidate already warmed.
+
+    The second half of the warm-room flow: the client joined during setup with
+    ``?warm=true`` (which starts nothing), and calls this once onboarding is
+    complete. The onboarding gate lives HERE now — this is the call that
+    actually begins the interview, so it carries the same guarantee the
+    token-mint gate used to.
+
+    ``language`` is read from the session at THIS point rather than at warm-up,
+    which is the other reason the split matters: the language check is part of
+    onboarding, so a dispatch embedded in an early token would have shipped a
+    stale value.
     """
     settings = get_settings()
     if not settings.interview_voice_enabled:
@@ -470,23 +545,29 @@ async def realtime_token(
     if session.status != "in_progress":
         raise _conflict(f"session is not in progress (status={session.status})")
     if session.onboarding_stage != "completed":
-        raise _conflict("Complete interview onboarding before joining the voice room")
-
-    room_name = session.livekit_room_name or realtime_service.build_room_name(session_id)
+        raise _conflict("Complete interview onboarding before the interviewer joins")
     if session.livekit_room_name is None:
-        session.livekit_room_name = room_name
-        await db.commit()
+        raise _conflict("no voice room has been opened for this session")
 
     try:
-        return realtime_service.mint_participant_token(
+        await realtime_service.dispatch_interview_agent(
             session_id=session_id,
             student_id=current_user.user_id,
-            room_name=room_name,
+            room_name=session.livekit_room_name,
             settings=settings,
             language=session.interview_language,
         )
     except ValueError as exc:  # credentials missing despite the flag
         raise _voice_unavailable() from exc
+    except Exception as exc:  # noqa: BLE001 -- surfaced, never swallowed
+        # A room with no interviewer is a dead interview. Report it so the
+        # client can fall back to the token-embedded dispatch path rather than
+        # leaving the candidate staring at silence.
+        logger.exception("realtime agent dispatch failed (session=%s)", session_id)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail={"error": "agent_dispatch_failed", "message": "Could not start the interviewer"},
+        ) from exc
 
 
 class NarrationRequest(BaseModel):

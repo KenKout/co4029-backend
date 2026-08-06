@@ -6,11 +6,20 @@ import-linter contract — the caller (learner router) loads the session,
 enforces eligibility, and persists ``livekit_room_name``; this module only
 turns ``(session_id, student_id, settings)`` into a signed join token.
 
-The minted token carries an explicit *agent dispatch* via
-``RoomConfiguration``: when LiveKit first creates the room it dispatches the
-worker registered under ``settings.livekit_agent_name`` and hands it the
-session/student ids as JSON metadata. So no separate room-create or
-dispatch API call is needed — the participant token itself is the trigger.
+Agent dispatch happens one of two ways, and the choice is the whole point of
+this module's shape:
+
+* **Token-embedded** (``dispatch_agent=True``, the original path). The minted
+  token carries ``RoomConfiguration.agents``, so LiveKit dispatches the worker
+  the moment it creates the room. Simple, but it welds "candidate joined" to
+  "interview started".
+* **Warm room + explicit dispatch** (``dispatch_agent=False`` then
+  :func:`dispatch_interview_agent`). The candidate joins during setup with a
+  token that starts nothing, and the interviewer is sent in afterwards through
+  the agent-dispatch API. This is what lets the ~10-13s worker startup overlap
+  the onboarding the candidate is doing anyway, instead of being dead air in
+  front of question one.
+
 See ``features/interviews/realtime/`` (Phase 3) for the worker side.
 """
 
@@ -70,18 +79,32 @@ def mint_participant_token(
     room_name: str,
     settings: Settings,
     language: str = "en",
+    dispatch_agent: bool = True,
 ) -> RealtimeTokenResponse:
-    """Mint a room-scoped participant JWT that dispatches the interview agent.
+    """Mint a room-scoped participant JWT.
 
     Caller MUST have already verified voice is enabled + the session is
     owned by ``student_id`` and in a voice-eligible state. Raises
     ``ValueError`` if credentials are missing (defensive — startup
     validation in :class:`Settings` should prevent this reaching here).
+
+    ``dispatch_agent=False`` mints a **warm-up** token: identical grants, but
+    no ``RoomConfiguration.agents``, so joining creates the room WITHOUT
+    starting the interviewer. That split exists because embedding the dispatch
+    in the token welds two separate things together — "the candidate is in the
+    room" and "the interview has begun" — which is why the room could not be
+    opened until onboarding finished, and why the candidate then waited
+    10-13s (measured) for the worker to spin up before question one.
+
+    With the warm token the room can be joined during setup and the agent
+    dispatched later via :func:`dispatch_interview_agent`, once
+    ``language``/``preferred_name`` are actually settled. The agent still
+    cannot speak early, because it is not there yet.
     """
     if not (settings.livekit_ws_url and settings.livekit_api_key and settings.livekit_api_secret):
         raise ValueError("LiveKit credentials are not configured")
 
-    token = (
+    builder = (
         api.AccessToken(
             settings.livekit_api_key.get_secret_value(),
             settings.livekit_api_secret.get_secret_value(),
@@ -99,7 +122,9 @@ def mint_participant_token(
                 can_publish_data=True,
             )
         )
-        .with_room_config(
+    )
+    if dispatch_agent:
+        builder = builder.with_room_config(
             api.RoomConfiguration(
                 agents=[
                     api.RoomAgentDispatch(
@@ -109,14 +134,54 @@ def mint_participant_token(
                 ],
             )
         )
-        .to_jwt()
-    )
 
     return RealtimeTokenResponse(
         url=settings.livekit_ws_url,
-        token=token,
+        token=builder.to_jwt(),
         room_name=room_name,
     )
+
+
+async def dispatch_interview_agent(
+    *,
+    session_id: UUID,
+    student_id: UUID,
+    room_name: str,
+    settings: Settings,
+    language: str = "en",
+) -> None:
+    """Send the interviewer into an already-open room.
+
+    The other half of the warm-room split: the candidate joins early with a
+    token minted at ``dispatch_agent=False``, and this runs once onboarding is
+    complete — at which point ``language`` is finally known, so the agent is
+    handed the value the candidate actually chose rather than a guess made
+    before the language check ran.
+
+    Idempotent in the way that matters: LiveKit refuses a second dispatch of
+    the same agent into the same room, and the caller (the router) already
+    guards on session state. A failure here must be surfaced, NOT swallowed —
+    an interview with no interviewer in the room is a dead session, and the
+    caller falls back to the token-embedded dispatch path.
+    """
+    if not (settings.livekit_ws_url and settings.livekit_api_key and settings.livekit_api_secret):
+        raise ValueError("LiveKit credentials are not configured")
+
+    lkapi = api.LiveKitAPI(
+        url=settings.livekit_ws_url,
+        api_key=settings.livekit_api_key.get_secret_value(),
+        api_secret=settings.livekit_api_secret.get_secret_value(),
+    )
+    try:
+        await lkapi.agent_dispatch.create_dispatch(
+            api.CreateAgentDispatchRequest(
+                agent_name=settings.livekit_agent_name,
+                room=room_name,
+                metadata=build_agent_metadata(session_id, student_id, language=language),
+            )
+        )
+    finally:
+        await lkapi.aclose()
 
 
 __all__ = [
@@ -125,6 +190,7 @@ __all__ = [
     "META_STUDENT_ID",
     "build_agent_metadata",
     "build_room_name",
+    "dispatch_interview_agent",
     "mint_participant_token",
     "normalize_language",
 ]
