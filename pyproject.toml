@@ -295,6 +295,9 @@ ignore_imports = [
     "abridgeai.features.courses.services.notify -> sqlalchemy",
     "abridgeai.features.enrollments.services.manager -> sqlalchemy",
     "abridgeai.features.enrollments.services.student_view -> sqlalchemy",
+    # TYPE_CHECKING-only AsyncSession annotation; reads go through queries and
+    # writes mutate ORM objects fetched by them (D2 course-completion writer).
+    "abridgeai.features.enrollments.services.completion -> sqlalchemy",
     "abridgeai.features.materials.services.catalog -> sqlalchemy",
     "abridgeai.features.materials.services.authoring._common -> sqlalchemy",
     "abridgeai.features.materials.services.authoring._storage -> sqlalchemy",
@@ -332,6 +335,8 @@ ignore_imports = [
     "abridgeai.features.career_paths.services.authoring -> sqlalchemy",
     "abridgeai.features.career_paths.services.enrollment -> sqlalchemy",
     "abridgeai.features.career_paths.services.readiness -> sqlalchemy",
+    # TYPE_CHECKING-only AsyncSession annotation, same as the siblings above.
+    "abridgeai.features.career_paths.services.stages -> sqlalchemy",
     "abridgeai.features.spaced_repetition.services.review -> sqlalchemy",
     "abridgeai.features.spaced_repetition.services.remediation -> sqlalchemy",
 ]

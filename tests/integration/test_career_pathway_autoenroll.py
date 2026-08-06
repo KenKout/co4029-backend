@@ -1,13 +1,26 @@
-"""Integration tests for W3 career-pathway auto-enroll + "prepared" milestone.
+"""Integration tests for career-pathway course access + "prepared" milestone.
+
+**Rewritten for Pattern B (lazy enrollment, migration 0070.)** The eager
+auto-enroll this file was originally built around is gone: assigning a student
+to a path no longer fans out ``course_enrollments`` for its required courses,
+and adding a required course no longer backfills existing enrollees. Three of
+the original five tests asserted exactly that fan-out and were invalid the
+moment ``_autoenroll_required_courses`` was deleted; they are replaced by their
+Pattern-B counterparts (assert NO fan-out) plus the Start endpoint, which now
+owns the idempotency/reactivation behaviour those tests were guarding.
+
+Stage-level rules (unlock, latch, cap, cross-stage move, two-class validation)
+live in ``test_career_path_stages.py``.
 
 Covers:
-* Enrolling a student in a career auto-creates ``course_enrollments`` for its
-  **required** courses only; idempotent; reactivates a dropped row.
-* Adding a required course to a career backfills active enrollees.
-* Removing a course from the career leaves ``course_enrollments`` intact and
-  drops it from derived progress (no in-flight conflict).
+* Assigning a path grants access to the PATH only — no course fan-out.
+* Adding a required course does NOT backfill active enrollees.
+* ``ensure_course_enrollment`` remains an idempotent primitive (KEPT, not
+  rewritten) and Start is the flow that uses it.
+* Removing a course from the path leaves ``course_enrollments`` intact and
+  drops it from derived progress.
 * Completing every course flips the career enrollment to ``completed``
-  ("prepared") and surfaces `is_prepared`/`overall_percent`.
+  ("prepared") and surfaces ``is_prepared`` / ``overall_percent``.
 """
 
 from __future__ import annotations
@@ -33,7 +46,7 @@ import abridgeai.features.career_paths.models  # noqa: F401
 import abridgeai.features.courses.models  # noqa: F401
 import abridgeai.features.enrollments.models  # noqa: F401
 import abridgeai.features.identity.models  # noqa: F401
-import abridgeai.features.interviews.models  # noqa: F401 
+import abridgeai.features.interviews.models  # noqa: F401
 import abridgeai.features.progress.models  # noqa: F401
 from abridgeai.core.config import get_settings
 from abridgeai.core.security import CurrentUser
@@ -55,9 +68,7 @@ def _async_url(database_url: str) -> str:
 def _ensure_head() -> None:
     cfg_path = Path(__file__).resolve().parents[2] / "alembic.ini"
     cfg = Config(str(cfg_path))
-    cfg.set_main_option(
-        "script_location", str(Path(__file__).resolve().parents[2] / "migrations")
-    )
+    cfg.set_main_option("script_location", str(Path(__file__).resolve().parents[2] / "migrations"))
     command.upgrade(cfg, "head")
 
 
@@ -109,10 +120,10 @@ async def _course_with_lesson(
 @pytest_asyncio.fixture
 async def seed(engine: AsyncEngine) -> AsyncIterator[dict]:
     """Org + manager + student; a REQUIRED and an OPTIONAL published course in
-    one published path."""
+    one 'always'-unlocked stage of a published path."""
     s = uuid.uuid4().hex[:8]
     org, manager, student = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
-    path_id = uuid.uuid4()
+    path_id, stage_id = uuid.uuid4(), uuid.uuid4()
 
     async with engine.begin() as conn:
         await conn.execute(
@@ -137,37 +148,57 @@ async def seed(engine: AsyncEngine) -> AsyncIterator[dict]:
             ),
             {"id": path_id, "org": org, "slug": f"path-{s}"},
         )
-        for pos, (cid, req) in enumerate(
-            ((req_course, True), (opt_course, False)), start=1
-        ):
+        await conn.execute(
+            text(
+                "INSERT INTO career_path_stages "
+                "(id, career_path_id, position, unlock_policy, enforcement) "
+                "VALUES (:sid, :pid, 1, 'always', 'advisory')"
+            ),
+            {"sid": stage_id, "pid": path_id},
+        )
+        for pos, (cid, req) in enumerate(((req_course, True), (opt_course, False)), start=1):
             await conn.execute(
                 text(
                     "INSERT INTO career_course_items "
-                    "(career_path_id, course_id, position, is_required) "
-                    "VALUES (:pid, :cid, :pos, :req)"
+                    "(career_path_id, course_id, stage_id, position, is_required) "
+                    "VALUES (:pid, :cid, :sid, :pos, :req)"
                 ),
-                {"pid": path_id, "cid": cid, "pos": pos, "req": req},
+                {"pid": path_id, "cid": cid, "sid": stage_id, "pos": pos, "req": req},
             )
 
     yield {
-        "org": org, "manager": manager, "student": student, "path_id": path_id,
-        "req_course": req_course, "opt_course": opt_course,
-        "req_lesson": req_lesson, "opt_lesson": opt_lesson,
+        "org": org,
+        "manager": manager,
+        "student": student,
+        "path_id": path_id,
+        "stage_id": stage_id,
+        "req_course": req_course,
+        "opt_course": opt_course,
+        "req_lesson": req_lesson,
+        "opt_lesson": opt_lesson,
     }
 
     async with engine.begin() as conn:
         await conn.execute(
-            text("DELETE FROM course_enrollments WHERE student_id = :s"), {"s": student}
+            text(
+                "DELETE FROM student_stage_progress WHERE enrollment_id IN "
+                "(SELECT id FROM student_career_enrollments WHERE career_path_id = :p)"
+            ),
+            {"p": path_id},
         )
         await conn.execute(
-            text("DELETE FROM lesson_progress WHERE user_id = :s"), {"s": student}
+            text("DELETE FROM course_enrollments WHERE student_id = :s"), {"s": student}
         )
+        await conn.execute(text("DELETE FROM lesson_progress WHERE user_id = :s"), {"s": student})
         await conn.execute(
             text("DELETE FROM student_career_enrollments WHERE career_path_id = :p"),
             {"p": path_id},
         )
         await conn.execute(
             text("DELETE FROM career_course_items WHERE career_path_id = :p"), {"p": path_id}
+        )
+        await conn.execute(
+            text("DELETE FROM career_path_stages WHERE career_path_id = :p"), {"p": path_id}
         )
         await conn.execute(text("DELETE FROM career_paths WHERE id = :p"), {"p": path_id})
         # Scoped by organization_id (not the fixed [req_course, opt_course] ids)
@@ -190,7 +221,8 @@ async def seed(engine: AsyncEngine) -> AsyncIterator[dict]:
             {"org": org},
         )
         await conn.execute(
-            text("DELETE FROM courses WHERE organization_id = :org"), {"org": org},
+            text("DELETE FROM courses WHERE organization_id = :org"),
+            {"org": org},
         )
         await conn.execute(
             text("DELETE FROM users WHERE id = ANY(CAST(:ids AS uuid[]))"),
@@ -204,8 +236,7 @@ async def _enrollment_status(engine: AsyncEngine, student: uuid.UUID, course: uu
         return (
             await conn.execute(
                 text(
-                    "SELECT status FROM course_enrollments "
-                    "WHERE student_id = :s AND course_id = :c"
+                    "SELECT status FROM course_enrollments WHERE student_id = :s AND course_id = :c"
                 ),
                 {"s": student, "c": course},
             )
@@ -224,18 +255,38 @@ async def _mark_lesson_complete(engine: AsyncEngine, student: uuid.UUID, lesson:
 
 
 @pytest.mark.asyncio
-async def test_enroll_fans_out_required_courses_only(
-    engine, session_factory, seed
-) -> None:
+async def test_path_assignment_does_not_fan_out_to_courses(engine, session_factory, seed) -> None:
+    """Pattern B: assigning a path grants access to the PATH only.
+
+    Replaces the original ``test_enroll_fans_out_required_courses_only``. The
+    eager fan-out it asserted enrolled a student in every required course of
+    every stage at once — including stages still locked to them — which is the
+    behaviour Pattern B removes. Course enrollments now come from Start.
+    """
     async with session_factory() as db:
         await enrollment_service.enroll_student_in_path(
-            db, career_path_id=seed["path_id"], student_id=seed["student"],
+            db,
+            career_path_id=seed["path_id"],
+            student_id=seed["student"],
             actor=_actor(seed["manager"]),
         )
         await db.commit()
 
-    assert await _enrollment_status(engine, seed["student"], seed["req_course"]) == "active"
+    assert await _enrollment_status(engine, seed["student"], seed["req_course"]) is None
     assert await _enrollment_status(engine, seed["student"], seed["opt_course"]) is None
+
+    # The PATH enrollment itself exists and is active.
+    async with engine.connect() as conn:
+        status = (
+            await conn.execute(
+                text(
+                    "SELECT status FROM student_career_enrollments "
+                    "WHERE career_path_id = :p AND student_id = :s"
+                ),
+                {"p": seed["path_id"], "s": seed["student"]},
+            )
+        ).scalar_one()
+    assert status == "active"
 
 
 @pytest.mark.asyncio
@@ -247,7 +298,9 @@ async def test_single_course_enrollment_does_not_cascade_to_path(
     Only the career-enrollment entry point fans out (required courses)."""
     async with session_factory() as db:
         await enrollments_api.ensure_course_enrollment(
-            db, student_id=seed["student"], course_id=seed["req_course"],
+            db,
+            student_id=seed["student"],
+            course_id=seed["req_course"],
             actor_id=seed["manager"],
         )
         await db.commit()
@@ -257,10 +310,7 @@ async def test_single_course_enrollment_does_not_cascade_to_path(
     async with engine.connect() as conn:
         count = (
             await conn.execute(
-                text(
-                    "SELECT COUNT(*) FROM student_career_enrollments "
-                    "WHERE student_id=:s"
-                ),
+                text("SELECT COUNT(*) FROM student_career_enrollments WHERE student_id=:s"),
                 {"s": seed["student"]},
             )
         ).scalar_one()
@@ -268,49 +318,89 @@ async def test_single_course_enrollment_does_not_cascade_to_path(
 
 
 @pytest.mark.asyncio
-async def test_reenroll_reactivates_and_is_idempotent(engine, session_factory, seed) -> None:
+async def test_reenroll_reactivates_path_without_touching_courses(
+    engine, session_factory, seed
+) -> None:
+    """Re-assigning a dropped path enrollment reactivates the PATH row.
+
+    Replaces the original test's course-fan-out half. The idempotency /
+    reactivate-a-dropped-row behaviour it guarded now belongs to the Start
+    endpoint (``ensure_course_enrollment`` was KEPT as the primitive, not
+    rewritten) and is covered in ``test_career_path_stages.py``.
+    """
     async with session_factory() as db:
         await enrollment_service.enroll_student_in_path(
-            db, career_path_id=seed["path_id"], student_id=seed["student"],
+            db,
+            career_path_id=seed["path_id"],
+            student_id=seed["student"],
             actor=_actor(seed["manager"]),
         )
         await db.commit()
-    # Drop career + course enrollment, then re-enroll → both reactivate, no dup.
-    async with engine.begin() as conn:
-        await conn.execute(
-            text("UPDATE course_enrollments SET status='dropped' WHERE student_id=:s"),
-            {"s": seed["student"]},
+    # The student starts one course, then drops off the path entirely.
+    async with session_factory() as db:
+        await enrollment_service.start_course_in_path(
+            db,
+            career_path_id=seed["path_id"],
+            course_id=seed["req_course"],
+            student_id=seed["student"],
         )
+        await db.commit()
     async with session_factory() as db:
         await enrollment_service.unenroll_student(
-            db, career_path_id=seed["path_id"], student_id=seed["student"],
+            db,
+            career_path_id=seed["path_id"],
+            student_id=seed["student"],
             actor=_actor(seed["manager"]),
         )
         await enrollment_service.enroll_student_in_path(
-            db, career_path_id=seed["path_id"], student_id=seed["student"],
+            db,
+            career_path_id=seed["path_id"],
+            student_id=seed["student"],
             actor=_actor(seed["manager"]),
         )
         await db.commit()
 
-    assert await _enrollment_status(engine, seed["student"], seed["req_course"]) == "active"
+    # Path reactivated, exactly one row.
     async with engine.connect() as conn:
-        count = (
-            await conn.execute(
-                text(
-                    "SELECT COUNT(*) FROM course_enrollments "
-                    "WHERE student_id=:s AND course_id=:c"
-                ),
-                {"s": seed["student"], "c": seed["req_course"]},
+        rows = (
+            (
+                await conn.execute(
+                    text(
+                        "SELECT status FROM student_career_enrollments "
+                        "WHERE career_path_id = :p AND student_id = :s"
+                    ),
+                    {"p": seed["path_id"], "s": seed["student"]},
+                )
             )
-        ).scalar_one()
-    assert count == 1
+            .scalars()
+            .all()
+        )
+    assert list(rows) == ["active"]
+
+    # The course enrollment the student already had is left alone — dropping
+    # off a path must not revoke work in flight, and re-assigning must not
+    # silently re-create anything either.
+    assert await _enrollment_status(engine, seed["student"], seed["req_course"]) == "active"
+    assert await _enrollment_status(engine, seed["student"], seed["opt_course"]) is None
 
 
 @pytest.mark.asyncio
-async def test_add_required_course_backfills_active_students(engine, session_factory, seed) -> None:
+async def test_add_required_course_does_not_backfill_active_students(
+    engine, session_factory, seed
+) -> None:
+    """Pattern B: adding a required course must NOT backfill enrollees.
+
+    Replaces ``test_add_required_course_backfills_active_students``. The
+    backfill it asserted was the second eager fan-out (``add_course_to_path``'s
+    enrollee loop) and is deleted: a manager attaching a course must not
+    silently create enrollments for everyone already on the path, least of all
+    into a stage they haven't unlocked. The student picks it up via Start.
+    """
     async with session_factory() as db:
         await enrollment_service.enroll_student_in_path(
-            db, career_path_id=seed["path_id"], student_id=seed["student"],
+            db,
+            career_path_id=seed["path_id"],
+            student_id=seed["student"],
             actor=_actor(seed["manager"]),
         )
         await db.commit()
@@ -322,11 +412,28 @@ async def test_add_required_course_backfills_active_students(engine, session_fac
         )
     async with session_factory() as db:
         await authoring_service.add_course_to_path(
-            db, seed["path_id"], new_course, position=None, is_required=True,
+            db,
+            seed["path_id"],
+            new_course,
+            stage_id=seed["stage_id"],
+            position=None,
+            is_required=True,
             actor=_actor(seed["manager"]),
         )
         await db.commit()
 
+    assert await _enrollment_status(engine, seed["student"], new_course) is None
+
+    # ...and Start is what grants it (the stage is 'always' unlocked).
+    async with session_factory() as db:
+        result = await enrollment_service.start_course_in_path(
+            db,
+            career_path_id=seed["path_id"],
+            course_id=new_course,
+            student_id=seed["student"],
+        )
+        await db.commit()
+    assert result.created is True
     assert await _enrollment_status(engine, seed["student"], new_course) == "active"
 
 
@@ -334,8 +441,19 @@ async def test_add_required_course_backfills_active_students(engine, session_fac
 async def test_remove_course_is_non_destructive(engine, session_factory, seed) -> None:
     async with session_factory() as db:
         await enrollment_service.enroll_student_in_path(
-            db, career_path_id=seed["path_id"], student_id=seed["student"],
+            db,
+            career_path_id=seed["path_id"],
+            student_id=seed["student"],
             actor=_actor(seed["manager"]),
+        )
+        await db.commit()
+    # Pattern B: the student has to start the course for an enrollment to exist.
+    async with session_factory() as db:
+        await enrollment_service.start_course_in_path(
+            db,
+            career_path_id=seed["path_id"],
+            course_id=seed["req_course"],
+            student_id=seed["student"],
         )
         await db.commit()
     async with session_factory() as db:
@@ -351,6 +469,7 @@ async def test_remove_course_is_non_destructive(engine, session_factory, seed) -
         progress = await enrollment_service.get_my_path_progress(
             db, career_path_id=seed["path_id"], student_id=seed["student"]
         )
+        await db.commit()
     assert seed["req_course"] not in {c.course_id for c in progress.courses}
 
 
@@ -358,13 +477,34 @@ async def test_remove_course_is_non_destructive(engine, session_factory, seed) -
 async def test_completion_flips_to_prepared(engine, session_factory, seed) -> None:
     async with session_factory() as db:
         await enrollment_service.enroll_student_in_path(
-            db, career_path_id=seed["path_id"], student_id=seed["student"],
+            db,
+            career_path_id=seed["path_id"],
+            student_id=seed["student"],
             actor=_actor(seed["manager"]),
         )
+        await db.commit()
+    # Pattern B: start both courses, then finish them.
+    async with session_factory() as db:
+        for course in (seed["req_course"], seed["opt_course"]):
+            await enrollment_service.start_course_in_path(
+                db,
+                career_path_id=seed["path_id"],
+                course_id=course,
+                student_id=seed["student"],
+            )
         await db.commit()
 
     await _mark_lesson_complete(engine, seed["student"], seed["req_lesson"])
     await _mark_lesson_complete(engine, seed["student"], seed["opt_lesson"])
+    # The D2 writer normally fires from the tracking service; these tests
+    # insert lesson_progress directly, so drive it explicitly to promote the
+    # course enrollments to 'completed'.
+    async with session_factory() as db:
+        for course in (seed["req_course"], seed["opt_course"]):
+            await enrollments_api.sync_course_completion(
+                db, course_id=course, student_id=seed["student"]
+            )
+        await db.commit()
 
     async with session_factory() as db:
         progress = await enrollment_service.get_my_path_progress(
@@ -372,7 +512,9 @@ async def test_completion_flips_to_prepared(engine, session_factory, seed) -> No
         )
         assert progress.overall_percent == 100
         flipped = await enrollment_service.sync_enrollment_completion(
-            db, career_path_id=seed["path_id"], student_id=seed["student"],
+            db,
+            career_path_id=seed["path_id"],
+            student_id=seed["student"],
             overall_percent=progress.overall_percent,
         )
         await db.commit()

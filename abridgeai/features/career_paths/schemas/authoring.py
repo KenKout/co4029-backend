@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -14,6 +15,7 @@ class CareerPathAuthoring(BaseModel):
     name: str
     description: str | None = None
     status: str
+    max_concurrent: int | None = None
     created_at: datetime
     updated_at: datetime
     created_by: UUID | None = None
@@ -27,13 +29,96 @@ class CareerPathAuthoring(BaseModel):
 class CareerPathCourseAuthoring(BaseModel):
     career_path_id: UUID
     course_id: UUID
+    stage_id: UUID
     position: int
     is_required: bool
+    satisfied_by: str
     course_slug: str
     course_title: str
     course_status: str
 
     model_config = ConfigDict(from_attributes=True)
+
+
+UnlockPolicy = Literal["always", "after_previous", "after_previous_required"]
+StageEnforcement = Literal["hard", "soft", "advisory"]
+
+
+class CareerPathStageAuthoring(BaseModel):
+    id: UUID
+    career_path_id: UUID
+    position: int
+    title: str | None = None
+    description: str | None = None
+    min_optional_to_complete: int
+    unlock_policy: str
+    enforcement: str
+    course_count: int = 0
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class CareerPathStageCreate(BaseModel):
+    """Create a stage. Every field is optional but ``position``-less creates
+    append to the end.
+
+    Note there is intentionally NO "stage must contain >= 1 course" check
+    here: the normal authoring flow is *create empty stage, then add
+    courses*, so enforcing it on the mutation path would make adding a
+    second stage to a published path impossible. That invariant is a
+    **publish gate** instead.
+    """
+
+    title: str | None = Field(default=None, max_length=200)
+    description: str | None = None
+    position: int | None = Field(default=None, gt=0)
+    min_optional_to_complete: int = Field(default=0, ge=0)
+    unlock_policy: UnlockPolicy = "after_previous"
+    enforcement: StageEnforcement = "soft"
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class CareerPathStageUpdate(BaseModel):
+    title: str | None = Field(default=None, max_length=200)
+    description: str | None = None
+    min_optional_to_complete: int | None = Field(default=None, ge=0)
+    unlock_policy: UnlockPolicy | None = None
+    enforcement: StageEnforcement | None = None
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class CareerPathStageReorder(BaseModel):
+    stage_ids: list[UUID]
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class StageReorderWarning(BaseModel):
+    """A reorder that would silently change effective unlock for students.
+
+    Reorder deliberately does NOT rewrite ``unlock_policy`` — that is
+    destructive and silently edits manager intent. It warns instead.
+    """
+
+    stage_id: UUID
+    code: str
+    message: str
+
+
+class CareerPathStageReorderResult(BaseModel):
+    stages: list[CareerPathStageAuthoring]
+    warnings: list[StageReorderWarning] = []
+
+
+class CareerPathCourseMove(BaseModel):
+    """Move an item to ``stage_id`` (possibly a different stage) at ``position``."""
+
+    stage_id: UUID
+    position: int | None = Field(default=None, gt=0)
+
+    model_config = ConfigDict(extra="forbid")
 
 
 class CareerPathCreate(BaseModel):
@@ -49,14 +134,18 @@ class CareerPathUpdate(BaseModel):
     org_unit_id: UUID | None = None
     name: str | None = Field(default=None, min_length=1, max_length=255)
     description: str | None = None
+    max_concurrent: int | None = Field(default=None, gt=0)
+    """Attention cap; ``None`` in a PATCH means "unchanged", not "clear"."""
 
     model_config = ConfigDict(extra="forbid")
 
 
 class CareerPathCourseAdd(BaseModel):
+    stage_id: UUID
     course_id: UUID
     position: int | None = Field(default=None, gt=0)
     is_required: bool = True
+    satisfied_by: Literal["completion", "pass"] = "completion"
 
     model_config = ConfigDict(extra="forbid")
 
@@ -124,12 +213,21 @@ __all__ = [
     "CareerPathAuthoring",
     "CareerPathCourseAdd",
     "CareerPathCourseAuthoring",
+    "CareerPathCourseMove",
     "CareerPathCourseReorder",
     "CareerPathCreate",
+    "CareerPathStageAuthoring",
+    "CareerPathStageCreate",
+    "CareerPathStageReorder",
+    "CareerPathStageReorderResult",
+    "CareerPathStageUpdate",
     "CareerPathStudentEnroll",
     "CareerPathUpdate",
     "PathReadinessOverview",
+    "StageEnforcement",
+    "StageReorderWarning",
     "StudentCareerEnrollmentAuthoring",
     "StudentPathProgressAuthoring",
     "StudentReadinessRead",
+    "UnlockPolicy",
 ]

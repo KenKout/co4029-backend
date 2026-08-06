@@ -12,10 +12,11 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from abridgeai.features.enrollments.models import Enrollment
+from abridgeai.features.enrollments.services import completion as completion_service
 from abridgeai.features.enrollments.services import manager as manager_service
 
 from ._dto import EnrollmentDTO
@@ -122,11 +123,68 @@ async def list_active_student_ids(db: AsyncSession, *, course_id: UUID) -> list[
     return list((await db.execute(stmt)).scalars().all())
 
 
+async def sync_course_completion_for_lesson(
+    db: AsyncSession,
+    *,
+    lesson_id: UUID,
+    student_id: UUID,
+) -> str | None:
+    """Recompute ``course_enrollments.status`` for the lesson's course.
+
+    The D2 writer, exposed cross-feature so ``progress.services.tracking``
+    can fire it **synchronously** on every lesson-progress write. Returns
+    the new status when it changed, else ``None``. Promotes at 100% and
+    demotes below it; never touches the append-only stage latch. Caller owns
+    the transaction.
+    """
+    return await completion_service.sync_completion_for_lesson(
+        db, lesson_id=lesson_id, student_id=student_id
+    )
+
+
+async def sync_course_completion(
+    db: AsyncSession,
+    *,
+    course_id: UUID,
+    student_id: UUID,
+) -> str | None:
+    """:func:`sync_course_completion_for_lesson` for a known course id."""
+    return await completion_service.sync_course_completion(
+        db, course_id=course_id, student_id=student_id
+    )
+
+
+async def count_active_enrollments_in_courses(
+    db: AsyncSession, *, student_id: UUID, course_ids: list[UUID]
+) -> int:
+    """How many of ``course_ids`` the student currently has ``active``.
+
+    Backs the career-path attention cap (``career_paths.max_concurrent``),
+    which is counted **path-wide** — the caller passes every course in the
+    path, not one stage's worth.
+    """
+    if not course_ids:
+        return 0
+    stmt = (
+        select(func.count())
+        .select_from(Enrollment)
+        .where(
+            Enrollment.student_id == student_id,
+            Enrollment.course_id.in_(course_ids),
+            Enrollment.status == "active",
+        )
+    )
+    return int((await db.execute(stmt)).scalar_one())
+
+
 __all__ = [
     "EnrollmentDTO",
+    "count_active_enrollments_in_courses",
     "ensure_course_enrollment",
     "get_course_enrollment",
     "has_active_or_completed_enrollment",
     "is_user_enrolled",
     "list_active_student_ids",
+    "sync_course_completion",
+    "sync_course_completion_for_lesson",
 ]

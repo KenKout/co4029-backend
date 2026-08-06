@@ -47,6 +47,7 @@ SettingGroup = Literal[
     "retrieval",
     "notifications",
     "spaced_repetition",
+    "careerpath",
 ]
 
 
@@ -320,8 +321,7 @@ _SPECS: tuple[SettingSpec, ...] = (
         env_var="PREPROCESS_OCR_ENABLED",
         label="OCR image-only pages",
         description=(
-            "Read back pages that carry a figure but no text layer. Off loses those pages "
-            "entirely."
+            "Read back pages that carry a figure but no text layer. Off loses those pages entirely."
         ),
         requires_reprocess=True,
     ),
@@ -449,6 +449,31 @@ _SPECS: tuple[SettingSpec, ...] = (
             "cap. This bounds the REVIEW QUEUE only — it never changes lesson "
             "unlock eligibility or retention scoring, so progression is "
             "unaffected. Set to 0 for no cap (serve the whole backlog)."
+        ),
+    ),
+    # -- careerpath -------------------------------------------------------
+    SettingSpec(
+        key="careerpath.progress_formula_version",
+        group="careerpath",
+        type="int",
+        default=1,
+        minimum=1,
+        maximum=2,
+        label="Career path progress formula version",
+        description=(
+            "Which formula computes career-path completion. 1 = the legacy "
+            "flat average of every course's completion percent. 2 = the "
+            "stage-aware formula, which counts a course as done only when it "
+            "is satisfied and credits at most min_optional_to_complete "
+            "optional courses per stage, so electives beyond the quota no "
+            "longer inflate progress. GLOBAL on purpose — a single dated "
+            "cutover keeps the readiness chart segmentable on time rather "
+            "than per path. Every snapshot is stamped with the version that "
+            "actually produced it (career_readiness_snapshots.formula_version), "
+            "so switching this does not retroactively relabel history — but "
+            "the chart MUST segment or annotate at the change, because an "
+            "unsegmented line across two formulas misleads even though every "
+            "point on it is honest."
         ),
     ),
 )

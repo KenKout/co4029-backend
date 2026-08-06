@@ -41,6 +41,7 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
+    Integer,
     String,
     Text,
     text,
@@ -392,6 +393,10 @@ class CareerPath(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftDelete
             "status IN ('draft', 'published', 'archived')",
             name="ck_career_paths_status",
         ),
+        CheckConstraint(
+            "max_concurrent IS NULL OR max_concurrent > 0",
+            name="career_paths_max_concurrent_check",
+        ),
     )
 
     organization_id: Mapped[uuid.UUID] = mapped_column(
@@ -407,6 +412,17 @@ class CareerPath(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftDelete
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     description: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String(20), nullable=False, server_default=text("'draft'"))
+    max_concurrent: Mapped[int | None] = mapped_column(Integer)
+    """Attention cap: how many courses of THIS path a student should have in
+    flight at once. ``NULL`` ⇒ unlimited.
+
+    Path-level on purpose. It is evaluated against a **path-wide** count of
+    the student's ``active`` course enrollments, so a stage-level column
+    would have compared a stage-scoped cap to a path-scoped count. It is
+    advisory in the strict sense: exceeding it returns a warning flag, never
+    a 4xx — not even under ``enforcement='hard'``, which governs stage
+    *lock* only.
+    """
 
     enrollments: Mapped[list[StudentCareerEnrollment]] = relationship(
         back_populates="career_path",

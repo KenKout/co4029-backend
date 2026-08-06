@@ -5,7 +5,10 @@ from uuid import UUID
 
 from sqlalchemy import select, text
 
-from abridgeai.features.career_paths.models import StudentCareerEnrollment
+from abridgeai.features.career_paths.models import (
+    StudentCareerEnrollment,
+    StudentStageProgress,
+)
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -43,9 +46,7 @@ async def get_my_career_enrollment(
     return (await db.execute(stmt)).scalar_one_or_none()
 
 
-async def list_active_enrollee_student_ids(
-    db: AsyncSession, career_path_id: UUID
-) -> list[UUID]:
+async def list_active_enrollee_student_ids(db: AsyncSession, career_path_id: UUID) -> list[UUID]:
     """Student ids of every ``active`` enrollee of the path (backfill target)."""
     stmt = select(StudentCareerEnrollment.student_id).where(
         StudentCareerEnrollment.career_path_id == career_path_id,
@@ -58,8 +59,11 @@ async def list_active_enrollee_student_ids(
 _PATH_COURSE_PROGRESS_SQL = text(
     """
     WITH path_courses AS (
-        SELECT cci.course_id, cci.position, c.slug, c.title, c.status
+        SELECT cci.course_id, cci.position, cci.stage_id, cci.is_required,
+               cci.satisfied_by, c.slug, c.title, c.status
         FROM career_course_items cci
+        JOIN career_path_stages s ON s.id = cci.stage_id
+            AND s.deleted_at IS NULL
         JOIN courses c ON c.id = cci.course_id
         WHERE cci.career_path_id = :career_path_id
           AND c.status = 'published'
@@ -84,14 +88,25 @@ _PATH_COURSE_PROGRESS_SQL = text(
     ),
     course_progress AS (
         SELECT pc.course_id, pc.slug, pc.title, pc.status, pc.position,
+               pc.stage_id, pc.is_required, pc.satisfied_by,
                COALESCE(AVG(lc.completion_percent), 0)::float AS completion_percent
         FROM path_courses pc
         LEFT JOIN lesson_completion lc ON lc.course_id = pc.course_id
-        GROUP BY pc.course_id, pc.slug, pc.title, pc.status, pc.position
+        GROUP BY pc.course_id, pc.slug, pc.title, pc.status, pc.position,
+                 pc.stage_id, pc.is_required, pc.satisfied_by
     )
-    SELECT course_id, slug, title, status, position, completion_percent
-    FROM course_progress
-    ORDER BY position
+    SELECT cp.course_id, cp.slug, cp.title, cp.status, cp.position,
+           cp.stage_id, cp.is_required, cp.satisfied_by, cp.completion_percent,
+           -- satisfied is course_enrollments.status = 'completed' (D2), NOT
+           -- completion_percent >= 100. The two can differ: a course the
+           -- student was never enrolled in has no status row at all.
+           COALESCE(ce.status = 'completed', FALSE) AS satisfied,
+           (ce.id IS NOT NULL) AS is_enrolled
+    FROM course_progress cp
+    LEFT JOIN course_enrollments ce
+        ON ce.course_id = cp.course_id
+        AND ce.student_id = :student_id
+    ORDER BY cp.stage_id, cp.position
     """
 )
 
@@ -106,6 +121,41 @@ async def get_path_course_progress(
         )
     ).mappings()
     return [dict(row) for row in rows]
+
+
+async def list_latched_stage_ids(db: AsyncSession, enrollment_id: UUID) -> set[UUID]:
+    """Stage ids this enrollment has ever completed (append-only latch)."""
+    stmt = select(StudentStageProgress.stage_id).where(
+        StudentStageProgress.enrollment_id == enrollment_id
+    )
+    return set((await db.execute(stmt)).scalars().all())
+
+
+async def latch_stage_complete(db: AsyncSession, *, enrollment_id: UUID, stage_id: UUID) -> bool:
+    """Insert the latch row for a stage that just evaluated complete.
+
+    Idempotent via ``ON CONFLICT DO NOTHING`` on the
+    ``(enrollment_id, stage_id)`` unique constraint — two concurrent reads
+    both evaluating a stage complete must not raise. Returns ``True`` iff
+    this call wrote the row (so the caller knows whether to commit).
+
+    Never UPDATEs and never DELETEs: the table is append-only, which is
+    exactly what makes stage completion irreversible.
+    """
+    result = await db.execute(
+        _INSERT_STAGE_LATCH_SQL,
+        {"enrollment_id": enrollment_id, "stage_id": stage_id},
+    )
+    return result.rowcount > 0
+
+
+_INSERT_STAGE_LATCH_SQL = text(
+    """
+    INSERT INTO student_stage_progress (enrollment_id, stage_id)
+    VALUES (:enrollment_id, :stage_id)
+    ON CONFLICT (enrollment_id, stage_id) DO NOTHING
+    """
+)
 
 
 _ROSTER_PROGRESS_SQL = text(
@@ -175,5 +225,8 @@ __all__ = [
     "get_my_career_enrollment",
     "get_path_course_progress",
     "get_roster_path_progress",
+    "latch_stage_complete",
+    "list_active_enrollee_student_ids",
+    "list_latched_stage_ids",
     "list_my_career_enrollments",
 ]

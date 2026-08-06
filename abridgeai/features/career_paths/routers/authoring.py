@@ -18,8 +18,14 @@ from abridgeai.features.career_paths.schemas import (
     CareerPathAuthoring,
     CareerPathCourseAdd,
     CareerPathCourseAuthoring,
+    CareerPathCourseMove,
     CareerPathCourseReorder,
     CareerPathCreate,
+    CareerPathStageAuthoring,
+    CareerPathStageCreate,
+    CareerPathStageReorder,
+    CareerPathStageReorderResult,
+    CareerPathStageUpdate,
     CareerPathStudentEnroll,
     CareerPathUpdate,
     PathReadinessOverview,
@@ -258,14 +264,166 @@ async def add_course_to_path(
             db,
             career_path_id,
             payload.course_id,
+            stage_id=payload.stage_id,
             position=payload.position,
             is_required=payload.is_required,
+            satisfied_by=payload.satisfied_by,
             actor=current_user,
         )
     except NotFoundError as exc:
         raise _not_found(str(exc)) from exc
     except AppError as exc:
         raise _conflict(str(exc)) from exc
+    await db.commit()
+    return result
+
+
+# --- stages ------------------------------------------------------------
+
+
+@management_router.get(
+    "/{career_path_id}/stages",
+    response_model=list[CareerPathStageAuthoring],
+)
+async def list_path_stages(
+    career_path_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_PATH_MANAGE)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> list[CareerPathStageAuthoring]:
+    try:
+        await _ensure_caller_in_path_org(db, current_user, career_path_id)
+        return await authoring_service.list_path_stages(db, career_path_id)
+    except NotFoundError as exc:
+        raise _not_found(str(exc)) from exc
+
+
+@management_router.post(
+    "/{career_path_id}/stages",
+    response_model=CareerPathStageAuthoring,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_stage(
+    career_path_id: UUID,
+    payload: CareerPathStageCreate,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_PATH_MANAGE)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> CareerPathStageAuthoring:
+    """Create a stage. An EMPTY stage is valid, including on a published path
+    — "every stage has a course" is a publish-gate rule, not a mutation rule.
+    """
+    try:
+        await _ensure_caller_in_path_org(db, current_user, career_path_id)
+        result = await authoring_service.create_stage(db, career_path_id, payload, current_user)
+    except NotFoundError as exc:
+        raise _not_found(str(exc)) from exc
+    except ConflictError as exc:
+        raise _conflict(str(exc)) from exc
+    except AppError as exc:
+        raise _bad_request(str(exc)) from exc
+    await db.commit()
+    return result
+
+
+@management_router.patch(
+    "/{career_path_id}/stages/{stage_id}",
+    response_model=CareerPathStageAuthoring,
+)
+async def update_stage(
+    career_path_id: UUID,
+    stage_id: UUID,
+    payload: CareerPathStageUpdate,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_PATH_MANAGE)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> CareerPathStageAuthoring:
+    try:
+        await _ensure_caller_in_path_org(db, current_user, career_path_id)
+        result = await authoring_service.update_stage(
+            db, career_path_id, stage_id, payload, current_user
+        )
+    except NotFoundError as exc:
+        raise _not_found(str(exc)) from exc
+    except ConflictError as exc:
+        raise _conflict(str(exc)) from exc
+    except AppError as exc:
+        raise _bad_request(str(exc)) from exc
+    await db.commit()
+    return result
+
+
+@management_router.delete(
+    "/{career_path_id}/stages/{stage_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def delete_stage(
+    career_path_id: UUID,
+    stage_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_PATH_MANAGE)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> None:
+    """Delete a stage. 409 ``stage_in_use`` when it holds courses OR when any
+    student has latched progress against it (deleting that would move their
+    progress bar without them doing anything)."""
+    try:
+        await _ensure_caller_in_path_org(db, current_user, career_path_id)
+        await authoring_service.delete_stage(db, career_path_id, stage_id, current_user)
+    except NotFoundError as exc:
+        raise _not_found(str(exc)) from exc
+    except ConflictError as exc:
+        raise _conflict(str(exc)) from exc
+    await db.commit()
+
+
+@management_router.put(
+    "/{career_path_id}/stages/reorder",
+    response_model=CareerPathStageReorderResult,
+)
+async def reorder_stages(
+    career_path_id: UUID,
+    payload: CareerPathStageReorder,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_PATH_MANAGE)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> CareerPathStageReorderResult:
+    """Reorder stages. Returns WARNINGS rather than rewriting unlock policy —
+    moving a non-``always`` stage into position 1 silently unlocks it, and
+    moving position 1 out can re-lock a stage students are working in."""
+    try:
+        await _ensure_caller_in_path_org(db, current_user, career_path_id)
+        result = await authoring_service.reorder_stages(
+            db, career_path_id, payload.stage_ids, current_user
+        )
+    except NotFoundError as exc:
+        raise _not_found(str(exc)) from exc
+    except AppError as exc:
+        raise _bad_request(str(exc)) from exc
+    await db.commit()
+    return result
+
+
+@management_router.put(
+    "/{career_path_id}/courses/{course_id}/stage",
+    response_model=list[CareerPathCourseAuthoring],
+)
+async def move_course_to_stage(
+    career_path_id: UUID,
+    course_id: UUID,
+    payload: CareerPathCourseMove,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_PATH_MANAGE)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> list[CareerPathCourseAuthoring]:
+    """Move a course between stages (or reposition within one)."""
+    try:
+        await _ensure_caller_in_path_org(db, current_user, career_path_id)
+        result = await authoring_service.move_course_to_stage(
+            db,
+            career_path_id,
+            course_id,
+            stage_id=payload.stage_id,
+            position=payload.position,
+        )
+    except NotFoundError as exc:
+        raise _not_found(str(exc)) from exc
+    except AppError as exc:
+        raise _bad_request(str(exc)) from exc
     await db.commit()
     return result
 
@@ -323,9 +481,7 @@ async def enroll_student_in_path(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> StudentCareerEnrollmentAuthoring:
     try:
-        await _ensure_caller_in_path_org(
-            db, current_user, career_path_id, _PATH_ENROLL_CODES
-        )
+        await _ensure_caller_in_path_org(db, current_user, career_path_id, _PATH_ENROLL_CODES)
         result = await enrollment_service.enroll_student_in_path(
             db,
             career_path_id=career_path_id,
@@ -351,9 +507,7 @@ async def unenroll_student_from_path(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> None:
     try:
-        await _ensure_caller_in_path_org(
-            db, current_user, career_path_id, _PATH_UNENROLL_CODES
-        )
+        await _ensure_caller_in_path_org(db, current_user, career_path_id, _PATH_UNENROLL_CODES)
         await enrollment_service.unenroll_student(
             db,
             career_path_id=career_path_id,
@@ -375,9 +529,7 @@ async def publish_path(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> CareerPathAuthoring:
     try:
-        await _ensure_caller_in_path_org(
-            db, current_user, career_path_id, _PATH_PUBLISH_CODES
-        )
+        await _ensure_caller_in_path_org(db, current_user, career_path_id, _PATH_PUBLISH_CODES)
         result = await authoring_service.publish_path(db, career_path_id, current_user)
     except NotFoundError as exc:
         raise _not_found(str(exc)) from exc
@@ -397,9 +549,7 @@ async def archive_path(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> CareerPathAuthoring:
     try:
-        await _ensure_caller_in_path_org(
-            db, current_user, career_path_id, _PATH_DELETE_CODES
-        )
+        await _ensure_caller_in_path_org(db, current_user, career_path_id, _PATH_DELETE_CODES)
         result = await authoring_service.archive_path(db, career_path_id, current_user)
     except NotFoundError as exc:
         raise _not_found(str(exc)) from exc
@@ -418,9 +568,7 @@ async def list_path_roster_progress(
     current_user: Annotated[CurrentUser, Depends(_REQUIRE_PATH_ROSTER_READ)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> list[StudentPathProgressAuthoring]:
-    await _ensure_caller_in_path_org(
-            db, current_user, career_path_id, _PATH_ROSTER_READ_CODES
-        )
+    await _ensure_caller_in_path_org(db, current_user, career_path_id, _PATH_ROSTER_READ_CODES)
     return await enrollment_service.get_roster_progress(db, career_path_id)
 
 
@@ -438,9 +586,7 @@ async def get_path_readiness_overview(
 
     Org-scoped (FR-2.6): caller must belong to the path's organization
     or hold ``system.administer`` — same gate as the roster read."""
-    await _ensure_caller_in_path_org(
-            db, current_user, career_path_id, _PATH_ROSTER_READ_CODES
-        )
+    await _ensure_caller_in_path_org(db, current_user, career_path_id, _PATH_ROSTER_READ_CODES)
     return await readiness_service.get_path_readiness_overview(db, career_path_id)
 
 

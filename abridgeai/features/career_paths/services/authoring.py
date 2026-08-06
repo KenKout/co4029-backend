@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from uuid import UUID
 
@@ -8,10 +9,13 @@ from abridgeai.core.db.conflict_mapper import (
     register_conflict_mappings,
 )
 from abridgeai.core.db.recursive_delete import soft_delete_cascade
-from abridgeai.core.exceptions import AppError, NotFoundError
-from abridgeai.features.career_paths.models import CareerPath, CareerPathCourse
+from abridgeai.core.exceptions import AppError, ConflictError, NotFoundError
+from abridgeai.features.career_paths.models import (
+    CareerPath,
+    CareerPathCourse,
+    CareerPathStage,
+)
 from abridgeai.features.career_paths.queries import authoring as authoring_queries
-from abridgeai.features.career_paths.queries import student as student_queries
 from abridgeai.features.career_paths.queries.published import (
     get_user_primary_organization_id,
 )
@@ -19,9 +23,13 @@ from abridgeai.features.career_paths.schemas import (
     CareerPathAuthoring,
     CareerPathCourseAuthoring,
     CareerPathCreate,
+    CareerPathStageAuthoring,
+    CareerPathStageCreate,
+    CareerPathStageReorderResult,
+    CareerPathStageUpdate,
     CareerPathUpdate,
+    StageReorderWarning,
 )
-from abridgeai.features.enrollments.api import public as enrollments_api
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -29,6 +37,8 @@ if TYPE_CHECKING:
     from abridgeai.core.security import CurrentUser
 
 _OFFSET = 100_000
+# "cap of 1 but this many required courses in one stage" → publish warning.
+_CAP_ONE_MANY_REQUIRED = 4
 
 
 register_conflict_mappings(
@@ -139,11 +149,25 @@ async def add_course_to_path(
     career_path_id: UUID,
     course_id: UUID,
     *,
+    stage_id: UUID,
     position: int | None,
     is_required: bool,
+    satisfied_by: str = "completion",
     actor: CurrentUser,
 ) -> CareerPathCourseAuthoring:
+    """Attach a published course to ONE stage of the path.
+
+    No enrollee backfill: under Pattern B (lazy enrollment) adding a required
+    course to a path must not silently create course enrollments for everyone
+    already on it. Students pick it up via the Start endpoint when its stage
+    is unlocked for them. The eager fan-out that used to live here was
+    removed with ``_autoenroll_required_courses``.
+    """
+    del actor
     path = await _require_path(db, career_path_id)
+    stage = await authoring_queries.get_stage(db, stage_id)
+    if stage is None or stage.career_path_id != career_path_id:
+        raise NotFoundError(f"Stage {stage_id} not found in career path {career_path_id}")
     if not await authoring_queries.course_is_published_in_org(db, course_id, path.organization_id):
         raise AppError(
             f"Course {course_id} does not belong to organization {path.organization_id} "
@@ -154,38 +178,34 @@ async def add_course_to_path(
         raise AppError(f"Course {course_id} already attached to career path {career_path_id}")
     target_position = position
     if target_position is None:
-        target_position = await authoring_queries.next_path_course_position(db, career_path_id)
+        target_position = await authoring_queries.next_stage_course_position(db, stage_id)
     else:
-        await _make_room_for_position(db, career_path_id, target_position)
+        await _make_room_for_position(db, stage_id, target_position)
 
     link = CareerPathCourse(
         career_path_id=career_path_id,
         course_id=course_id,
+        stage_id=stage_id,
         position=target_position,
         is_required=is_required,
+        satisfied_by=satisfied_by,
     )
     db.add(link)
     await flush_or_conflict(db)
-
-    # Backfill course access for students already on the path when the newly
-    # attached course is required (additive + non-destructive — W3 plan).
-    if is_required:
-        for student_id in await student_queries.list_active_enrollee_student_ids(
-            db, career_path_id
-        ):
-            await enrollments_api.ensure_course_enrollment(
-                db, student_id=student_id, course_id=course_id, actor_id=actor.user_id
-            )
+    await _validate_stage_integrity(db, stage_id)
 
     rows = await authoring_queries.list_authoring_career_path_courses(db, career_path_id)
     target = next(row for row in rows if row["course_id"] == course_id)
     return CareerPathCourseAuthoring.model_validate(target)
 
 
-async def _make_room_for_position(
-    db: AsyncSession, career_path_id: UUID, target_position: int
-) -> None:
-    links = await authoring_queries.list_path_course_links(db, career_path_id)
+async def _make_room_for_position(db: AsyncSession, stage_id: UUID, target_position: int) -> None:
+    """Shift items at/after ``target_position`` down by one, within ONE stage.
+
+    Two-phase through ``_OFFSET`` because ``(stage_id, position)`` is UNIQUE:
+    a naive sequential increment collides with the row it is about to move.
+    """
+    links = await authoring_queries.list_stage_course_links(db, stage_id)
     affected = [link for link in links if link.position >= target_position]
     if not affected:
         return
@@ -218,6 +238,15 @@ async def reorder_courses_in_path(
     course_ids: list[UUID],
     actor: CurrentUser,
 ) -> list[CareerPathCourseAuthoring]:
+    """Reorder courses WITHIN their stages.
+
+    ``course_ids`` is the full set of the path's courses; each keeps its own
+    ``stage_id`` and is renumbered 1..n inside that stage. Two-phase via
+    ``_OFFSET`` because ``(stage_id, position)`` is UNIQUE.
+
+    To move a course to a DIFFERENT stage use :func:`move_course_to_stage` —
+    that mutates two position sequences and needs both offset.
+    """
     del actor
     await _require_path(db, career_path_id)
     existing_links = await authoring_queries.list_path_course_links(db, career_path_id)
@@ -229,20 +258,389 @@ async def reorder_courses_in_path(
         existing_by_course[course_id].position = _OFFSET + idx
     await flush_or_conflict(db)
 
-    for idx, course_id in enumerate(course_ids, start=1):
-        existing_by_course[course_id].position = idx
+    # Renumber per stage, preserving the caller's relative order.
+    per_stage: dict[UUID, int] = {}
+    for course_id in course_ids:
+        link = existing_by_course[course_id]
+        per_stage[link.stage_id] = per_stage.get(link.stage_id, 0) + 1
+        link.position = per_stage[link.stage_id]
     await flush_or_conflict(db)
 
     rows = await authoring_queries.list_authoring_career_path_courses(db, career_path_id)
     return [CareerPathCourseAuthoring.model_validate(row) for row in rows]
 
 
+async def move_course_to_stage(
+    db: AsyncSession,
+    career_path_id: UUID,
+    course_id: UUID,
+    *,
+    stage_id: UUID,
+    position: int | None,
+) -> list[CareerPathCourseAuthoring]:
+    """Move one course from its current stage to ``stage_id``.
+
+    **This mutates TWO ``(stage_id, position)`` sequences**, which is why it
+    is not a drop-in for ``reorder_courses_in_path``'s single-sequence
+    ``_OFFSET`` dance. Offsetting only the target leaves a hole in the source;
+    offsetting only the source collides in the target. So: park BOTH stages'
+    items in the offset band, then reindex both, inside one transaction.
+
+    A same-stage call is a plain reposition and is handled by the same code.
+    """
+    await _require_path(db, career_path_id)
+    stage = await authoring_queries.get_stage(db, stage_id)
+    if stage is None or stage.career_path_id != career_path_id:
+        raise NotFoundError(f"Stage {stage_id} not found in career path {career_path_id}")
+    link = await authoring_queries.get_path_course_link(db, career_path_id, course_id)
+    if link is None:
+        raise NotFoundError(f"Course {course_id} not attached to career path {career_path_id}")
+
+    source_stage_id = link.stage_id
+    source = await authoring_queries.list_stage_course_links(db, source_stage_id)
+    target = (
+        source
+        if source_stage_id == stage_id
+        else await authoring_queries.list_stage_course_links(db, stage_id)
+    )
+
+    # Phase 1: park every row of BOTH sequences in the offset band so no
+    # intermediate assignment can collide with a live position.
+    parked = {id(row): row for row in [*source, *target]}.values()
+    for idx, row in enumerate(parked):
+        row.position = _OFFSET + idx
+    await flush_or_conflict(db)
+
+    # Phase 2: reindex the source without the moved row, then the target with
+    # it inserted at the requested slot.
+    remaining = [row for row in source if row.course_id != course_id]
+    if source_stage_id != stage_id:
+        for idx, row in enumerate(remaining, start=1):
+            row.position = idx
+        target_rows = [row for row in target if row.course_id != course_id]
+    else:
+        target_rows = remaining
+
+    slot = len(target_rows) + 1 if position is None else max(1, min(position, len(target_rows) + 1))
+    target_rows.insert(slot - 1, link)
+    link.stage_id = stage_id
+    for idx, row in enumerate(target_rows, start=1):
+        row.position = idx
+    await flush_or_conflict(db)
+
+    await _validate_stage_integrity(db, source_stage_id)
+    await _validate_stage_integrity(db, stage_id)
+
+    rows = await authoring_queries.list_authoring_career_path_courses(db, career_path_id)
+    return [CareerPathCourseAuthoring.model_validate(row) for row in rows]
+
+
+# --- stage CRUD -------------------------------------------------------
+
+
+async def list_path_stages(
+    db: AsyncSession, career_path_id: UUID
+) -> list[CareerPathStageAuthoring]:
+    await _require_path(db, career_path_id)
+    stages = await authoring_queries.list_path_stages(db, career_path_id)
+    return [await _to_stage_authoring(db, stage) for stage in stages]
+
+
+async def _to_stage_authoring(db: AsyncSession, stage: CareerPathStage) -> CareerPathStageAuthoring:
+    return CareerPathStageAuthoring(
+        id=stage.id,
+        career_path_id=stage.career_path_id,
+        position=stage.position,
+        title=stage.title,
+        description=stage.description,
+        min_optional_to_complete=stage.min_optional_to_complete,
+        unlock_policy=stage.unlock_policy,
+        enforcement=stage.enforcement,
+        course_count=await authoring_queries.count_stage_courses(db, stage.id),
+    )
+
+
+async def create_stage(
+    db: AsyncSession,
+    career_path_id: UUID,
+    payload: CareerPathStageCreate,
+    actor: CurrentUser,
+) -> CareerPathStageAuthoring:
+    """Create a stage — EMPTY is valid, including on a published path.
+
+    Deliberately does not enforce "a stage has >= 1 course": the authoring
+    flow is create-then-fill, so that check belongs on the publish gate. With
+    it here you could never add a second stage to a published path.
+    """
+    await _require_path(db, career_path_id)
+    target_position = payload.position
+    if target_position is None:
+        target_position = await authoring_queries.next_stage_position(db, career_path_id)
+    else:
+        await _make_room_for_stage_position(db, career_path_id, target_position)
+
+    stage = CareerPathStage(
+        career_path_id=career_path_id,
+        position=target_position,
+        title=payload.title,
+        description=payload.description,
+        min_optional_to_complete=payload.min_optional_to_complete,
+        unlock_policy=payload.unlock_policy,
+        enforcement=payload.enforcement,
+        created_by=actor.user_id,
+        updated_by=actor.user_id,
+    )
+    db.add(stage)
+    await flush_or_conflict(db)
+    await db.refresh(stage)
+    return await _to_stage_authoring(db, stage)
+
+
+async def _make_room_for_stage_position(
+    db: AsyncSession, career_path_id: UUID, target_position: int
+) -> None:
+    stages = await authoring_queries.list_path_stages(db, career_path_id)
+    affected = [s for s in stages if s.position >= target_position]
+    if not affected:
+        return
+    for idx, stage in enumerate(affected):
+        stage.position = _OFFSET + idx
+    await flush_or_conflict(db)
+    for idx, stage in enumerate(affected, start=1):
+        stage.position = target_position + idx
+    await flush_or_conflict(db)
+
+
+async def _require_stage(db: AsyncSession, career_path_id: UUID, stage_id: UUID) -> CareerPathStage:
+    stage = await authoring_queries.get_stage(db, stage_id)
+    if stage is None or stage.career_path_id != career_path_id:
+        raise NotFoundError(f"Stage {stage_id} not found in career path {career_path_id}")
+    return stage
+
+
+async def update_stage(
+    db: AsyncSession,
+    career_path_id: UUID,
+    stage_id: UUID,
+    payload: CareerPathStageUpdate,
+    actor: CurrentUser,
+) -> CareerPathStageAuthoring:
+    await _require_path(db, career_path_id)
+    stage = await _require_stage(db, career_path_id, stage_id)
+    data = payload.model_dump(exclude_unset=True)
+    for key, value in data.items():
+        setattr(stage, key, value)
+    stage.updated_by = actor.user_id
+    await flush_or_conflict(db)
+    # Integrity class: a quota above the stage's optional count makes the
+    # stage — and therefore the path — unfinishable. Checked on EVERY
+    # mutation, unlike the completeness checks at the publish gate.
+    await _validate_stage_integrity(db, stage_id)
+    await db.refresh(stage)
+    return await _to_stage_authoring(db, stage)
+
+
+async def delete_stage(
+    db: AsyncSession,
+    career_path_id: UUID,
+    stage_id: UUID,
+    actor: CurrentUser,
+) -> None:
+    """Soft-delete a stage — blocked when it still holds courses OR latched progress.
+
+    Blocking on courses alone is not enough: a manager could move every
+    course out and then delete a stage students had already LATCHED, which
+    orphans the latch rows and silently changes the progress denominator, so
+    a student's bar jumps or slides backward without them doing anything.
+    """
+    await _require_path(db, career_path_id)
+    stage = await _require_stage(db, career_path_id, stage_id)
+
+    if await authoring_queries.count_stage_courses(db, stage_id) > 0:
+        raise ConflictError(
+            "stage_in_use: this stage still contains courses — move or remove them first"
+        )
+    if await authoring_queries.has_latched_stage_progress(db, stage_id):
+        raise ConflictError(
+            "stage_in_use: at least one student has already completed this stage; "
+            "deleting it would change their recorded progress"
+        )
+
+    stage.deleted_at = datetime.now(tz=UTC)
+    stage.deleted_by = actor.user_id
+    stage.updated_by = actor.user_id
+    await flush_or_conflict(db)
+    await _renumber_stages(db, career_path_id)
+
+
+async def _renumber_stages(db: AsyncSession, career_path_id: UUID) -> None:
+    """Close gaps left by a deletion so positions stay 1..n contiguous."""
+    stages = await authoring_queries.list_path_stages(db, career_path_id)
+    if not stages:
+        return
+    for idx, stage in enumerate(stages):
+        stage.position = _OFFSET + idx
+    await flush_or_conflict(db)
+    for idx, stage in enumerate(stages, start=1):
+        stage.position = idx
+    await flush_or_conflict(db)
+
+
+async def reorder_stages(
+    db: AsyncSession,
+    career_path_id: UUID,
+    stage_ids: list[UUID],
+    actor: CurrentUser,
+) -> CareerPathStageReorderResult:
+    """Reorder stages, WARNING rather than rewriting unlock policy.
+
+    Reorder deliberately does not normalise ``unlock_policy``. Rewriting it
+    would silently edit manager intent and could not be undone by moving the
+    stage back. Instead it reports what the reorder changes in *effective*
+    unlock for students with active enrollments:
+
+    * a non-``always`` stage moved INTO position 1 becomes unconditionally
+      unlocked (position 1 is an implicit override);
+    * the stage moved OUT of position 1 starts obeying its stored policy,
+      which can re-lock a stage students are working in right now.
+    """
+    del actor
+    await _require_path(db, career_path_id)
+    stages = await authoring_queries.list_path_stages(db, career_path_id)
+    by_id = {stage.id: stage for stage in stages}
+    if set(stage_ids) != set(by_id):
+        raise AppError(f"reorder stage_ids must match existing stages of path {career_path_id}")
+
+    old_first = next((s.id for s in stages if s.position == 1), None)
+    warnings: list[StageReorderWarning] = []
+    new_first_id = stage_ids[0]
+    if old_first != new_first_id:
+        new_first = by_id[new_first_id]
+        if new_first.unlock_policy != "always":
+            warnings.append(
+                StageReorderWarning(
+                    stage_id=new_first_id,
+                    code="stage_becomes_implicitly_unlocked",
+                    message=(
+                        f"Stage moved to position 1 keeps unlock_policy "
+                        f"'{new_first.unlock_policy}', but position 1 is always "
+                        "unlocked — students will be able to start it immediately."
+                    ),
+                )
+            )
+        if old_first is not None:
+            previous_first = by_id[old_first]
+            if previous_first.unlock_policy != "always":
+                warnings.append(
+                    StageReorderWarning(
+                        stage_id=old_first,
+                        code="stage_may_become_locked",
+                        message=(
+                            f"Stage moved out of position 1 will now enforce "
+                            f"unlock_policy '{previous_first.unlock_policy}', which may "
+                            "re-lock it for students currently working in it."
+                        ),
+                    )
+                )
+
+    for idx, stage_id in enumerate(stage_ids):
+        by_id[stage_id].position = _OFFSET + idx
+    await flush_or_conflict(db)
+    for idx, stage_id in enumerate(stage_ids, start=1):
+        by_id[stage_id].position = idx
+    await flush_or_conflict(db)
+
+    ordered = await authoring_queries.list_path_stages(db, career_path_id)
+    return CareerPathStageReorderResult(
+        stages=[await _to_stage_authoring(db, stage) for stage in ordered],
+        warnings=warnings,
+    )
+
+
+# --- validation: two classes ------------------------------------------
+
+
+async def _validate_stage_integrity(db: AsyncSession, stage_id: UUID) -> None:
+    """INTEGRITY check — runs on every mutation.
+
+    Only catches states that make the path **unfinishable**: a
+    ``min_optional_to_complete`` above the number of optional courses
+    actually in the stage can never be satisfied, so the stage can never
+    complete and every later stage stays locked forever.
+
+    Completeness checks ("this stage is empty", "the path has no stages")
+    are NOT here — those are merely *unfinished*, they are the normal state
+    of a path mid-authoring, and enforcing them per-mutation makes the
+    authoring flow impossible. They live on the publish gate.
+    """
+    stage = await authoring_queries.get_stage(db, stage_id)
+    if stage is None:
+        return
+    links = await authoring_queries.list_stage_course_links(db, stage_id)
+    optional_count = sum(1 for link in links if not link.is_required)
+    if stage.min_optional_to_complete > optional_count:
+        raise AppError(
+            f"stage_min_optional_exceeds_optional_count: stage requires "
+            f"{stage.min_optional_to_complete} optional course(s) but only "
+            f"{optional_count} optional course(s) are attached — the stage "
+            "could never be completed"
+        )
+
+
+async def validate_path_for_publish(db: AsyncSession, career_path_id: UUID) -> list[str]:
+    """COMPLETENESS checks — publish gate only. Returns warning strings.
+
+    Hard failures raise; soft findings are returned so the UI can surface
+    them without blocking a deliberate publish.
+    """
+    stages = await authoring_queries.list_path_stages(db, career_path_id)
+    if not stages:
+        raise AppError("path_has_no_stages: add at least one stage before publishing")
+
+    warnings: list[str] = []
+    path = await _require_path(db, career_path_id)
+    for stage in stages:
+        links = await authoring_queries.list_stage_course_links(db, stage.id)
+        if not links:
+            raise AppError(
+                f"stage_has_no_courses: stage at position {stage.position} is empty — "
+                "every stage must contain at least one course before publishing"
+            )
+        required = [link for link in links if link.is_required]
+        for link in links:
+            if not await authoring_queries.course_is_published_in_org(
+                db, link.course_id, path.organization_id
+            ):
+                raise AppError(
+                    f"stage_course_not_published: course {link.course_id} in stage "
+                    f"position {stage.position} is not a published course of this organization"
+                )
+        if not required and stage.min_optional_to_complete == 0:
+            warnings.append(
+                f"stage_completes_immediately: stage at position {stage.position} has no "
+                "required courses and no optional quota, so it completes with no work done"
+            )
+        if path.max_concurrent == 1 and len(required) >= _CAP_ONE_MANY_REQUIRED:
+            warnings.append(
+                f"cap_one_with_many_required: stage at position {stage.position} has "
+                f"{len(required)} required courses while the path caps concurrency at 1"
+            )
+    return warnings
+
+
 async def publish_path(
     db: AsyncSession, career_path_id: UUID, actor: CurrentUser
 ) -> CareerPathAuthoring:
+    """Publish a path after the COMPLETENESS gate passes.
+
+    This is where "every path has >= 1 stage" and "every stage has >= 1
+    course" are enforced — not on the mutation path, where they would make
+    create-then-fill authoring impossible.
+    """
     path = await _require_path(db, career_path_id)
     if path.status == "archived":
         raise AppError(f"Cannot publish archived career path {career_path_id}")
+    await validate_path_for_publish(db, career_path_id)
     path.status = "published"
     path.updated_by = actor.user_id
     await db.flush()
@@ -272,12 +670,19 @@ __all__ = [
     "add_course_to_path",
     "archive_path",
     "create_career_path",
+    "create_stage",
+    "delete_stage",
     "get_career_path",
     "list_career_path_courses",
     "list_career_paths_for_org",
+    "list_path_stages",
+    "move_course_to_stage",
     "publish_path",
     "remove_course_from_path",
     "reorder_courses_in_path",
+    "reorder_stages",
     "soft_delete_path",
     "update_career_path",
+    "update_stage",
+    "validate_path_for_publish",
 ]

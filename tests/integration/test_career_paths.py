@@ -202,6 +202,7 @@ async def scenario(
     suffix = uuid.uuid4().hex[:8]
     path_slug = f"path-{suffix}"
     path_id = uuid.uuid4()
+    stage_id = uuid.uuid4()
 
     pub_a_id, pub_a_lesson = await _insert_course_with_lesson(
         engine,
@@ -241,19 +242,30 @@ async def scenario(
                 "name": f"Career path {suffix}",
             },
         )
+        # Migration 0070: every course item belongs to a stage. One 'always'
+        # stage reproduces the pre-stage flat-list behaviour these tests assert.
+        await conn.execute(
+            text(
+                "INSERT INTO career_path_stages "
+                "(id, career_path_id, position, unlock_policy, enforcement) "
+                "VALUES (:sid, :pid, 1, 'always', 'advisory')"
+            ),
+            {"sid": stage_id, "pid": path_id},
+        )
         for position, course_id in enumerate([pub_a_id, pub_b_id, draft_id], start=1):
             await conn.execute(
                 text(
                     "INSERT INTO career_course_items "
-                    "(career_path_id, course_id, position, is_required) "
-                    "VALUES (:pid, :cid, :pos, TRUE)"
+                    "(career_path_id, course_id, stage_id, position, is_required) "
+                    "VALUES (:pid, :cid, :sid, :pos, TRUE)"
                 ),
-                {"pid": path_id, "cid": course_id, "pos": position},
+                {"pid": path_id, "cid": course_id, "sid": stage_id, "pos": position},
             )
 
     yield {
         "path_id": path_id,
         "path_slug": path_slug,
+        "stage_id": stage_id,
         "pub_a_id": pub_a_id,
         "pub_b_id": pub_b_id,
         "draft_id": draft_id,
@@ -267,11 +279,22 @@ async def scenario(
             {"ids": [pub_a_lesson, pub_b_lesson]},
         )
         await conn.execute(
+            text(
+                "DELETE FROM student_stage_progress WHERE enrollment_id IN "
+                "(SELECT id FROM student_career_enrollments WHERE career_path_id = :pid)"
+            ),
+            {"pid": path_id},
+        )
+        await conn.execute(
             text("DELETE FROM student_career_enrollments WHERE career_path_id = :pid"),
             {"pid": path_id},
         )
         await conn.execute(
             text("DELETE FROM career_course_items WHERE career_path_id = :pid"),
+            {"pid": path_id},
+        )
+        await conn.execute(
+            text("DELETE FROM career_path_stages WHERE career_path_id = :pid"),
             {"pid": path_id},
         )
         await conn.execute(
@@ -404,6 +427,28 @@ async def test_progress_aggregate(
                 "pct": Decimal("50"),
             },
         )
+        # D2: `completed_courses` counts courses whose COURSE ENROLLMENT is
+        # 'completed', not those at 100% lesson progress — the two are
+        # deliberately different (a course with no enrollment row has no
+        # status to be complete). Pattern B means path assignment no longer
+        # creates these rows, so the test creates them explicitly: pub_a
+        # finished, pub_b still in flight.
+        for course_key, enrollment_status in (
+            ("pub_a_id", "completed"),
+            ("pub_b_id", "active"),
+        ):
+            await conn.execute(
+                text(
+                    "INSERT INTO course_enrollments "
+                    "(id, course_id, student_id, status, source) "
+                    "VALUES (uuid_generate_v4(), :cid, :uid, :st, 'manager_bulk')"
+                ),
+                {
+                    "cid": scenario[course_key],
+                    "uid": seeded_users.student_id,
+                    "st": enrollment_status,
+                },
+            )
 
     response = await client.get(
         f"/api/v1/me/career-enrollments/{scenario['path_id']}/progress",
@@ -509,16 +554,64 @@ async def test_create_publish_lifecycle(
     body = create_resp.json()
     path_id = body["id"]
     assert body["status"] == "draft"
+    auth = {"Authorization": f"Bearer {manager_bearer}"}
+
+    # Publish GATE (rev 3 two-class validation): a path with no stages is
+    # merely *unfinished*, which is fine to save but not to publish.
+    premature = await client.post(
+        f"/api/v1/management/career-paths/{path_id}/publish", headers=auth
+    )
+    assert premature.status_code == 400, premature.text
+    assert "path_has_no_stages" in premature.text
+
+    # Add a stage — still empty, so the gate must STILL refuse...
+    stage_resp = await client.post(
+        f"/api/v1/management/career-paths/{path_id}/stages",
+        json={"title": "Stage 1", "unlock_policy": "always"},
+        headers=auth,
+    )
+    assert stage_resp.status_code == 201, stage_resp.text
+    stage_id = stage_resp.json()["id"]
+
+    empty_stage = await client.post(
+        f"/api/v1/management/career-paths/{path_id}/publish", headers=auth
+    )
+    assert empty_stage.status_code == 400, empty_stage.text
+    assert "stage_has_no_courses" in empty_stage.text
+
+    # ...until the stage holds a published course.
+    course_id, lesson_id = await _insert_course_with_lesson(
+        engine,
+        organization_id=seeded_users.organization_id,
+        owner_id=seeded_users.admin_id,
+        slug=f"lc-course-{suffix}",
+        title="Lifecycle course",
+        status="published",
+    )
+    add_resp = await client.post(
+        f"/api/v1/management/career-paths/{path_id}/courses",
+        json={"stage_id": stage_id, "course_id": str(course_id), "is_required": True},
+        headers=auth,
+    )
+    assert add_resp.status_code == 201, add_resp.text
 
     publish_resp = await client.post(
-        f"/api/v1/management/career-paths/{path_id}/publish",
-        headers={"Authorization": f"Bearer {manager_bearer}"},
+        f"/api/v1/management/career-paths/{path_id}/publish", headers=auth
     )
-    assert publish_resp.status_code == 200
+    assert publish_resp.status_code == 200, publish_resp.text
     assert publish_resp.json()["status"] == "published"
 
     async with engine.begin() as conn:
+        await conn.execute(
+            text("DELETE FROM career_course_items WHERE career_path_id = :id"), {"id": path_id}
+        )
+        await conn.execute(
+            text("DELETE FROM career_path_stages WHERE career_path_id = :id"), {"id": path_id}
+        )
         await conn.execute(text("DELETE FROM career_paths WHERE id = :id"), {"id": path_id})
+        await conn.execute(text("DELETE FROM lessons WHERE id = :id"), {"id": lesson_id})
+        await conn.execute(text("DELETE FROM modules WHERE course_id = :id"), {"id": course_id})
+        await conn.execute(text("DELETE FROM courses WHERE id = :id"), {"id": course_id})
 
 
 async def test_create_career_path_resolves_org_from_token(
@@ -629,11 +722,25 @@ async def test_add_unpublished_course_to_path_is_rejected(
     assert create_resp.status_code == 201, create_resp.text
     fresh_path_id = create_resp.json()["id"]
 
+    # Every course item now belongs to a stage, so the guard is exercised
+    # through a real stage.
+    stage_resp = await client.post(
+        f"/api/v1/management/career-paths/{fresh_path_id}/stages",
+        json={"title": "Stage 1", "unlock_policy": "always"},
+        headers=auth,
+    )
+    assert stage_resp.status_code == 201, stage_resp.text
+    fresh_stage_id = stage_resp.json()["id"]
+
     try:
         # Draft course -> rejected (409 AppError).
         reject = await client.post(
             f"/api/v1/management/career-paths/{fresh_path_id}/courses",
-            json={"course_id": str(scenario["draft_id"]), "is_required": True},
+            json={
+                "stage_id": fresh_stage_id,
+                "course_id": str(scenario["draft_id"]),
+                "is_required": True,
+            },
             headers=auth,
         )
         assert reject.status_code == 409, reject.text
@@ -644,7 +751,11 @@ async def test_add_unpublished_course_to_path_is_rejected(
         # Published course -> accepted.
         ok = await client.post(
             f"/api/v1/management/career-paths/{fresh_path_id}/courses",
-            json={"course_id": str(scenario["pub_a_id"]), "is_required": True},
+            json={
+                "stage_id": fresh_stage_id,
+                "course_id": str(scenario["pub_a_id"]),
+                "is_required": True,
+            },
             headers=auth,
         )
         assert ok.status_code == 201, ok.text
@@ -668,6 +779,10 @@ async def test_add_unpublished_course_to_path_is_rejected(
         async with engine.begin() as conn:
             await conn.execute(
                 text("DELETE FROM career_course_items WHERE career_path_id = :pid"),
+                {"pid": fresh_path_id},
+            )
+            await conn.execute(
+                text("DELETE FROM career_path_stages WHERE career_path_id = :pid"),
                 {"pid": fresh_path_id},
             )
             await conn.execute(
