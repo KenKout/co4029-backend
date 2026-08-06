@@ -944,7 +944,20 @@ async def test_start_requires_active_path_enrollment(session_factory, seed) -> N
 
 @pytest.mark.asyncio
 async def test_start_refuses_course_in_locked_stage(session_factory, seed, engine) -> None:
-    stage2 = await _new_stage(session_factory, seed, title="S2", unlock_policy="after_previous")
+    """A LOCKED stage blocks Start only under ``enforcement='hard'``.
+
+    Previously this test created a stage with the DDL default (`soft`) and
+    asserted the block, which encoded the bug: Start tested `not
+    target.unlocked` directly and blocked every enforcement level, so a
+    manager who picked "Show a warning, still allow" got a hard block.
+    """
+    stage2 = await _new_stage(
+        session_factory,
+        seed,
+        title="S2",
+        unlock_policy="after_previous",
+        enforcement="hard",
+    )
     async with engine.begin() as conn:
         c2, _ = await _course_with_lesson(
             conn, org=seed["org"], owner=seed["manager"], slug=f"lk-{uuid.uuid4().hex[:6]}"
@@ -967,6 +980,93 @@ async def test_start_refuses_course_in_locked_stage(session_factory, seed, engin
             await enrollment_service.start_course_in_path(
                 db, career_path_id=seed["path_id"], course_id=c2, student_id=seed["student"]
             )
+
+
+@pytest.mark.parametrize("enforcement", ["soft", "advisory"])
+@pytest.mark.asyncio
+async def test_start_allows_locked_stage_under_non_hard_enforcement(
+    session_factory, seed, engine, enforcement
+) -> None:
+    """`soft` and `advisory` must ALLOW the Start and warn instead.
+
+    This is the behaviour test the helper's unit test could not give: it
+    asserted `stage_is_hard_locked()` in isolation while Start never called
+    the helper at all. Driven through the ROUTE so the response the student
+    actually receives is what is pinned.
+
+    `soft` is the DDL default, so before the fix every stage a manager created
+    through the UI hard-blocked students while the settings popover said it
+    only warns.
+    """
+    stage2 = await _new_stage(
+        session_factory,
+        seed,
+        title="S2",
+        unlock_policy="after_previous",
+        enforcement=enforcement,
+    )
+    async with engine.begin() as conn:
+        c2, _ = await _course_with_lesson(
+            conn, org=seed["org"], owner=seed["manager"], slug=f"sf-{uuid.uuid4().hex[:6]}"
+        )
+    async with session_factory() as db:
+        await authoring_service.add_course_to_path(
+            db,
+            seed["path_id"],
+            c2,
+            stage_id=stage2,
+            position=None,
+            is_required=True,
+            actor=_actor(seed["manager"]),
+        )
+        await db.commit()
+    await _enroll(session_factory, seed)
+
+    # Stage 2 really is locked: stage 1's required course is unfinished.
+    async with session_factory() as db:
+        evals = await stage_service.evaluate_stages(
+            db,
+            career_path_id=seed["path_id"],
+            student_id=seed["student"],
+            enrollment_id=None,
+        )
+    target = next(ev for ev in evals if ev.stage.id == stage2)
+    assert target.unlocked is False
+    assert stage_service.stage_is_hard_locked(target) is False
+
+    from abridgeai.features.career_paths.routers import learner as learner_router  # noqa: PLC0415
+
+    async with session_factory() as db:
+        result = await learner_router.start_course_in_path(
+            seed["path_id"],
+            c2,
+            _actor(seed["student"]),
+            db,
+        )
+
+    # Allowed...
+    assert result.created is True
+    assert result.stage_id == stage2
+    # ...and the student is TOLD they are working ahead.
+    assert result.stage_locked_warning is True
+
+    # The enrollment was really written, not just reported.
+    assert await _enrollment_status(engine, seed["student"], c2) == "active"
+
+
+@pytest.mark.asyncio
+async def test_start_in_unlocked_stage_sets_no_locked_warning(session_factory, seed) -> None:
+    """The warning must not cry wolf on a normal Start."""
+    await _enroll(session_factory, seed)
+    async with session_factory() as db:
+        result = await enrollment_service.start_course_in_path(
+            db,
+            career_path_id=seed["path_id"],
+            course_id=seed["req_course"],
+            student_id=seed["student"],
+        )
+        await db.commit()
+    assert result.stage_locked_warning is False
 
 
 @pytest.mark.asyncio

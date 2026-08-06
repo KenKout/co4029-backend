@@ -142,6 +142,15 @@ class StartCourseResult(BaseModel):
     """False when an enrollment already existed — Start is idempotent."""
     over_concurrency_cap: bool = False
     """Advisory warning; the cap never blocks the Start."""
+    stage_locked_warning: bool = False
+    """True when the course's stage is LOCKED but its ``enforcement`` is not
+    ``hard``, so the Start was allowed anyway.
+
+    Only ``enforcement='hard'`` blocks — ``soft`` warns and ``advisory`` is
+    display-only, which is exactly what the manager settings UI promises. This
+    flag is the channel for that warning: without it a soft-locked Start is
+    indistinguishable from a normal one and the student is never told they are
+    working ahead of the path."""
 
 
 __all__ = [
