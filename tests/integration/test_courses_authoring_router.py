@@ -541,6 +541,28 @@ async def _course_status(engine: AsyncEngine, course_id: object) -> str:
         ).scalar_one()
 
 
+async def test_teacher_cannot_upload_a_thumbnail(
+    client: httpx.AsyncClient,
+    teacher_bearer: str,
+    scenario: dict[str, uuid.UUID | str],
+) -> None:
+    """The thumbnail's side door.
+
+    `thumbnail_object_id` is manager-only in the PATCH allow-list, but the
+    upload endpoint pointed the course at a new image itself — gated on
+    course.update it would have let a teacher change the artwork anyway.
+    """
+    response = await client.put(
+        f"/api/v1/teacher/courses/{scenario['course_a']}/thumbnail",
+        content=b"\x89PNG\r\n\x1a\n" + b"0" * 64,
+        headers={
+            "Authorization": f"Bearer {teacher_bearer}",
+            "Content-Type": "image/png",
+        },
+    )
+    assert response.status_code == 403, response.text
+
+
 async def test_teacher_403_on_sibling_course(
     client: httpx.AsyncClient,
     teacher_bearer: str,

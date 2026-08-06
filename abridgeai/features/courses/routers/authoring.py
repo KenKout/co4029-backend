@@ -359,7 +359,11 @@ async def update_course(
 async def upload_course_thumbnail(
     course_id: UUID,
     request: Request,
-    current_user: Annotated[CurrentUser, Depends(_REQUIRE_COURSE_UPDATE)],
+    # Manager-owned, matching `thumbnail_object_id` in the PATCH allow-list.
+    # Gating this on course.update would have left a side door: the teacher
+    # cannot set thumbnail_object_id via PATCH but could still replace the
+    # image by uploading through here.
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_COURSE_DELETE)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> CourseAuthoring:
     """Upload a course thumbnail image (JPEG/PNG/WebP/GIF, ≤ 5 MiB).
@@ -367,7 +371,8 @@ async def upload_course_thumbnail(
     The raw image bytes are sent as the request body with the image's MIME
     type in the ``Content-Type`` header (no multipart wrapper — matches the
     avatar upload pattern). Stores the image in object storage and points the
-    course at it. Requires ``course.update`` on the course.
+    course at it. Manager-owned: requires ``course.delete`` on the course,
+    the same gate as ``thumbnail_object_id`` in the PATCH allow-list.
     """
     data = await request.body()
     content_type = request.headers.get("content-type", "application/octet-stream")
