@@ -307,6 +307,18 @@ async def evaluate_and_generate_report(
             draft=report_draft,
         )
 
+        # An interview is a gradeable course unit, completed by a passing
+        # verdict on a non-practice attempt. `_stamp_session_summary` above just
+        # wrote `pass_verdict`, so this is the moment the unit can change state
+        # — fire the D2 course-completion writer before the commit below so the
+        # student's last interview unlocks the next career-path stage now
+        # instead of at the nightly drift sweep.
+        #
+        # No practice check needed here: `_ungradeable_reason` already returned
+        # early for practice sessions, so reaching this line means the session
+        # is a graded attempt.
+        await _sync_course_completion(db, student_id=session.student_id, course_id=course_id)
+
         # Mark the evaluation run completed now that all work has committed.
         run_row = await db.get(GenerationRun, eval_run_id)
         if run_row is not None:
@@ -671,6 +683,36 @@ def _stamp_session_summary(
         summary["persona_adherence"] = persona_adherence.to_json()
     session.internal_summary_json = summary
     session.pass_verdict = _derive_pass_verdict(verdicts, min_outcomes_to_pass)
+
+
+async def _sync_course_completion(db: AsyncSession, *, student_id: UUID, course_id: UUID) -> None:
+    """Fire the D2 course-completion writer for this interview's course.
+
+    Course completion counts interview units, and an interview unit is done
+    only when a non-practice attempt has ``pass_verdict = TRUE``. Since
+    ``course_enrollments.status`` is what career-path stage unlock reads as
+    ``satisfied``, the verdict write above has to be followed by this call or
+    passing the last interview leaves the next stage locked until the nightly
+    drift sweep.
+
+    Runs inside the caller's transaction — the commit that follows persists
+    both the verdict and the status change together.
+
+    Never raises into the caller: an evaluation that produced a real verdict
+    must not be rolled back because a completion side-effect failed. The
+    nightly sweeper (``enrollments...resync_stale_course_completions``) repairs
+    any miss — the same contract ``progress.services.tracking`` uses.
+    """
+    from abridgeai.features.enrollments.api import public as enrollments_api  # noqa: PLC0415
+
+    try:
+        await enrollments_api.sync_course_completion(db, course_id=course_id, student_id=student_id)
+    except Exception:  # noqa: BLE001 -- side-effect; nightly sweeper repairs drift
+        _logger.warning(
+            "interview.course_completion_sync_failed",
+            exc_info=True,
+            extra={"course_id": str(course_id), "student_id": str(student_id)},
+        )
 
 
 async def _persist_gap_report(

@@ -22,7 +22,7 @@ from abridgeai.features.access_control.models import (
     CareerPath,
     StudentCareerEnrollment,
 )
-from abridgeai.features.career_paths.models import CareerPathCourse
+from abridgeai.features.career_paths.models import CareerPathCourse, CareerPathStage
 
 
 def _async_url(database_url: str) -> str:
@@ -105,6 +105,13 @@ async def seeded_scope(engine: AsyncEngine):
             {"org": org_id},
         )
         await conn.execute(
+            text(
+                "DELETE FROM career_path_stages WHERE career_path_id IN "
+                "(SELECT id FROM career_paths WHERE organization_id = :org)"
+            ),
+            {"org": org_id},
+        )
+        await conn.execute(
             text("DELETE FROM career_paths WHERE organization_id = :org"),
             {"org": org_id},
         )
@@ -140,9 +147,20 @@ async def test_career_path_enrollment_pair_loads_bidirectionally(
         )
         session.add(enrollment)
 
+        # Migration 0070: course items hang off a stage, not the path directly.
+        stage = CareerPathStage(
+            career_path_id=path.id,
+            position=1,
+            unlock_policy="always",
+            enforcement="advisory",
+        )
+        session.add(stage)
+        await session.flush()
+
         path_course = CareerPathCourse(
             career_path_id=path.id,
             course_id=course_id,
+            stage_id=stage.id,
             position=1,
             is_required=True,
         )

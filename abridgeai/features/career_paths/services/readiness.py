@@ -37,13 +37,18 @@ _TWO_PLACES = Decimal("0.01")
 
 async def compute_readiness_score(
     db: AsyncSession, *, career_path_id: UUID, student_id: UUID
-) -> Decimal:
-    """0–100 readiness for one (student, path) pair — completion aggregate v1."""
+) -> tuple[Decimal, int]:
+    """``(score, formula_version)`` for one (student, path) pair.
+
+    Returns the version alongside the score so the caller stamps the snapshot
+    with the formula that ACTUALLY produced it rather than a column default.
+    """
     progress = await enrollment_service.get_my_path_progress(
         db, career_path_id=career_path_id, student_id=student_id
     )
     score = Decimal(str(progress.overall_percent)).quantize(_TWO_PLACES, rounding=ROUND_HALF_UP)
-    return max(Decimal("0"), min(Decimal("100"), score))
+    bounded = max(Decimal("0"), min(Decimal("100"), score))
+    return bounded, progress.formula_version
 
 
 async def snapshot_enrollment(
@@ -51,16 +56,24 @@ async def snapshot_enrollment(
 ) -> Decimal:
     """Compute + persist one snapshot; returns the stored score.
 
+    ``formula_version`` is written EXPLICITLY from the version that produced
+    the score, never left to the column default. The column defaults to 1 and
+    the setting starts at 1, but relying on that coupling is exactly the bug
+    that would mislabel every snapshot in the window between deploying
+    formula 2 and flipping the setting.
+
     Also flips the enrollment to ``completed`` ("prepared") once the score
-    reaches 100 — the authoritative backstop to the lazy flip on the
-    learner read path.
+    reaches 100 — a backstop to the synchronous writer, not the primary path.
     """
-    score = await compute_readiness_score(db, career_path_id=career_path_id, student_id=student_id)
+    score, formula_version = await compute_readiness_score(
+        db, career_path_id=career_path_id, student_id=student_id
+    )
     await readiness_queries.insert_snapshot(
         db,
         student_id=student_id,
         career_path_id=career_path_id,
         readiness_score=score,
+        formula_version=formula_version,
     )
     await enrollment_service.sync_enrollment_completion(
         db,

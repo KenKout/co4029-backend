@@ -13,6 +13,7 @@ class CareerPathCoursePublic(BaseModel):
     title: str
     position: int
     is_required: bool
+    stage_id: UUID | None = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -59,6 +60,48 @@ class CourseProgressSummary(BaseModel):
     title: str
     status: str
     completion_percent: float
+    """Percent of gradeable UNITS done — lessons, quizzes and interviews.
+
+    Measured the same way ``satisfied`` is decided, so the bar cannot read
+    100% on a course the stage gate still considers unfinished. A course with
+    no gradeable unit reports 0.0, never 100.0."""
+    unit_total: int = 0
+    """Gradeable units in the course. 0 ⇒ the course can never be completed."""
+    unit_done: int = 0
+    stage_id: UUID | None = None
+    is_required: bool = True
+    satisfied: bool = False
+    """``course_enrollments.status = 'completed'`` — NOT ``completion_percent
+    >= 100``. The two can disagree: the writer is synchronous but a course
+    the student never enrolled in has no status row at all."""
+    is_enrolled: bool = False
+    """Whether a lazy course enrollment exists yet (Pattern B)."""
+
+
+class StageProgressRead(BaseModel):
+    """One stage of a path, as the student sees it."""
+
+    stage_id: UUID
+    position: int
+    title: str | None = None
+    description: str | None = None
+    min_optional_to_complete: int
+    unlock_policy: str
+    enforcement: str
+    unlocked: bool
+    """Stage 1 is ALWAYS unlocked regardless of its stored policy — a path
+    whose first stage is locked could never be started."""
+    complete: bool
+    """True when latched in ``student_stage_progress`` OR the live rule
+    holds. Latched wins: a stage that ever completed stays complete."""
+    latched: bool
+    required_count: int
+    satisfied_required: int
+    optional_count: int
+    satisfied_optional: int
+    stage_total: int
+    stage_done: int
+    courses: list[CourseProgressSummary] = []
 
 
 class CareerPathProgressRead(BaseModel):
@@ -68,6 +111,13 @@ class CareerPathProgressRead(BaseModel):
     completed_courses: int
     in_progress_courses: int
     courses: list[CourseProgressSummary]
+    stages: list[StageProgressRead] = []
+    formula_version: int = 1
+    max_concurrent: int | None = None
+    active_in_path: int = 0
+    over_concurrency_cap: bool = False
+    """Advisory ONLY. The cap never blocks — not even under ``hard``
+    enforcement, which governs stage lock exclusively."""
 
 
 class CareerReadinessSnapshotRead(BaseModel):
@@ -77,6 +127,21 @@ class CareerReadinessSnapshotRead(BaseModel):
 
     readiness_score: float
     captured_at: datetime
+    formula_version: int = 1
+    """Which formula produced this point. The chart MUST segment or annotate
+    where this changes — an unsegmented line across two formulas misleads
+    even though every point on it is honest."""
+
+
+class StartCourseResult(BaseModel):
+    """Result of the student-initiated Start (Pattern B lazy enrollment)."""
+
+    course_id: UUID
+    stage_id: UUID
+    created: bool
+    """False when an enrollment already existed — Start is idempotent."""
+    over_concurrency_cap: bool = False
+    """Advisory warning; the cap never blocks the Start."""
 
 
 __all__ = [
@@ -87,4 +152,6 @@ __all__ = [
     "CareerReadinessSnapshotRead",
     "CourseProgressSummary",
     "MyCareerEnrollmentRead",
+    "StageProgressRead",
+    "StartCourseResult",
 ]

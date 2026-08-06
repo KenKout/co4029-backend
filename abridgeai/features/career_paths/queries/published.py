@@ -54,13 +54,15 @@ async def get_published_career_path_by_slug(
 _PUBLISHED_PATH_COURSES_SQL = text(
     """
     SELECT cci.course_id, c.slug AS course_slug, c.title AS course_title,
-           cci.position, cci.is_required
+           cci.position, cci.is_required, cci.stage_id
     FROM career_course_items cci
+    JOIN career_path_stages s ON s.id = cci.stage_id
+        AND s.deleted_at IS NULL
     JOIN courses c ON c.id = cci.course_id
     WHERE cci.career_path_id = :career_path_id
       AND c.status = 'published'
       AND c.deleted_at IS NULL
-    ORDER BY cci.position
+    ORDER BY s.position, cci.position
     """
 )
 

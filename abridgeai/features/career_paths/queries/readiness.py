@@ -30,11 +30,20 @@ async def insert_snapshot(
     student_id: UUID,
     career_path_id: UUID,
     readiness_score: Decimal,
+    formula_version: int = 1,
 ) -> CareerReadinessSnapshot:
+    """Append one readiness snapshot.
+
+    ``formula_version`` must be passed explicitly by the caller with the
+    version that actually produced ``readiness_score``. The default of 1
+    matches the column default and the setting's default, but a caller that
+    relies on it during a cutover would mislabel its snapshots.
+    """
     snapshot = CareerReadinessSnapshot(
         student_id=student_id,
         career_path_id=career_path_id,
         readiness_score=readiness_score,
+        formula_version=formula_version,
     )
     db.add(snapshot)
     await db.flush()

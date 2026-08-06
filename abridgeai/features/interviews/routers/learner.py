@@ -29,7 +29,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Annotated, Any, cast
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Response, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -37,6 +37,7 @@ from abridgeai.core.config import get_settings
 from abridgeai.core.db import get_db
 from abridgeai.core.exceptions import AppError, ForbiddenError, NotFoundError
 from abridgeai.core.security import CurrentUser, get_current_user
+from abridgeai.features.courses.api.public import can_view_course_content
 from abridgeai.features.interviews.routers._deps import require_session_owner_access
 from abridgeai.features.interviews.schemas import (
     GapReportRead,
@@ -46,6 +47,7 @@ from abridgeai.features.interviews.schemas import (
     InterviewOnboardingRespondResponse,
     InterviewPracticeFeedback,
     InterviewPracticeInfo,
+    InterviewProgressRead,
     InterviewQuestionPublic,
     InterviewSessionFinishRequest,
     InterviewSessionFinishResponse,
@@ -58,7 +60,11 @@ from abridgeai.features.interviews.schemas import (
     RealtimeTokenResponse,
 )
 from abridgeai.features.interviews.schemas.integrity import IntegrityEventBatchRequest
+from abridgeai.features.interviews.services import (
+    learner_progress as learner_progress_service,
+)
 from abridgeai.features.interviews.services import narration as narration_service
+from abridgeai.features.interviews.services import narration_cache
 from abridgeai.features.interviews.services import onboarding as onboarding_service
 from abridgeai.features.interviews.services import real_time as realtime_service
 from abridgeai.features.interviews.services import taking as taking_service
@@ -441,14 +447,89 @@ async def realtime_token(
     current_user: Annotated[CurrentUser, Depends(_REQUIRE_SESSION_OWNER)],
     db: Annotated[AsyncSession, Depends(get_db)],
     accept_language: Annotated[str | None, Header()] = None,
+    warm: Annotated[bool, Query()] = False,
 ) -> RealtimeTokenResponse:
-    """Mint a LiveKit join token (+ agent dispatch) for a voice session.
+    """Mint a LiveKit join token for a voice session.
 
     Ownership + existence are enforced by ``_REQUIRE_SESSION_OWNER``. Here we
     additionally gate on the voice feature flag and the session's
     mode/status, persist the room name on first call (idempotent), and return
-    a short-lived participant token. Phase 3's agent worker is dispatched by
-    the token's room-config when the room is first created.
+    a short-lived participant token.
+
+    Two shapes:
+
+    * default — the token carries the agent dispatch, so joining starts the
+      interviewer. Still requires completed onboarding, because that IS the
+      moment the interview begins.
+    * ``?warm=true`` — a **warm-up** token with no dispatch, allowed DURING
+      onboarding. It lets the client open the room while the candidate is
+      still doing setup, so the ~10-13s worker startup (measured) overlaps
+      work the candidate is doing anyway instead of sitting in front of
+      question one as dead air. The interviewer is sent in afterwards by
+      ``POST .../realtime-agent``.
+
+    A warm token grants exactly the same room access as a normal one — it
+    simply does not start the interview. The onboarding gate that used to sit
+    on every mint is preserved where it actually matters: on the dispatch.
+    """
+    settings = get_settings()
+    if not settings.interview_voice_enabled:
+        raise _voice_unavailable()
+
+    from abridgeai.features.interviews.models import InterviewSession  # noqa: PLC0415
+
+    session = await db.get(InterviewSession, session_id)
+    if session is None:  # pragma: no cover - dep already 404s; defensive
+        raise _not_found("interview_session", session_id)
+    if session.input_mode not in ("voice", "hybrid"):
+        raise _conflict("session is not a voice interview")
+    if session.status != "in_progress":
+        raise _conflict(f"session is not in progress (status={session.status})")
+    # Only the DISPATCHING mint waits for onboarding. A warm token starts
+    # nothing, so holding it back would just reinstate the delay it exists to
+    # remove.
+    if not warm and session.onboarding_stage != "completed":
+        raise _conflict("Complete interview onboarding before joining the voice room")
+
+    room_name = session.livekit_room_name or realtime_service.build_room_name(session_id)
+    if session.livekit_room_name is None:
+        session.livekit_room_name = room_name
+        await db.commit()
+
+    try:
+        return realtime_service.mint_participant_token(
+            session_id=session_id,
+            student_id=current_user.user_id,
+            room_name=room_name,
+            settings=settings,
+            language=session.interview_language,
+            dispatch_agent=not warm,
+        )
+    except ValueError as exc:  # credentials missing despite the flag
+        raise _voice_unavailable() from exc
+
+
+@router.post(
+    "/interview-sessions/{session_id}/realtime-agent",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def dispatch_realtime_agent(
+    session_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_SESSION_OWNER)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> None:
+    """Send the interviewer into a room the candidate already warmed.
+
+    The second half of the warm-room flow: the client joined during setup with
+    ``?warm=true`` (which starts nothing), and calls this once onboarding is
+    complete. The onboarding gate lives HERE now — this is the call that
+    actually begins the interview, so it carries the same guarantee the
+    token-mint gate used to.
+
+    ``language`` is read from the session at THIS point rather than at warm-up,
+    which is the other reason the split matters: the language check is part of
+    onboarding, so a dispatch embedded in an early token would have shipped a
+    stale value.
     """
     settings = get_settings()
     if not settings.interview_voice_enabled:
@@ -464,23 +545,29 @@ async def realtime_token(
     if session.status != "in_progress":
         raise _conflict(f"session is not in progress (status={session.status})")
     if session.onboarding_stage != "completed":
-        raise _conflict("Complete interview onboarding before joining the voice room")
-
-    room_name = session.livekit_room_name or realtime_service.build_room_name(session_id)
+        raise _conflict("Complete interview onboarding before the interviewer joins")
     if session.livekit_room_name is None:
-        session.livekit_room_name = room_name
-        await db.commit()
+        raise _conflict("no voice room has been opened for this session")
 
     try:
-        return realtime_service.mint_participant_token(
+        await realtime_service.dispatch_interview_agent(
             session_id=session_id,
             student_id=current_user.user_id,
-            room_name=room_name,
+            room_name=session.livekit_room_name,
             settings=settings,
             language=session.interview_language,
         )
     except ValueError as exc:  # credentials missing despite the flag
         raise _voice_unavailable() from exc
+    except Exception as exc:  # noqa: BLE001 -- surfaced, never swallowed
+        # A room with no interviewer is a dead interview. Report it so the
+        # client can fall back to the token-embedded dispatch path rather than
+        # leaving the candidate staring at silence.
+        logger.exception("realtime agent dispatch failed (session=%s)", session_id)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail={"error": "agent_dispatch_failed", "message": "Could not start the interviewer"},
+        ) from exc
 
 
 class NarrationRequest(BaseModel):
@@ -616,6 +703,27 @@ async def narrate_session_text(
         tts_voice = config.tts_voice
 
     settings = get_settings()
+    # Cache lookup sits BEHIND the output guard above: only text already
+    # approved as an interview utterance can reach it, so this never widens
+    # what the endpoint will speak. The win is the ceremony lines — the
+    # transition ("Great—the introduction is complete…") is a fixed string,
+    # identical for every session in a language, yet cost a full ~3.0-3.6s
+    # Deepgram round trip every time. The browser holds its "preparing"
+    # indicator for that whole window (text and voice are released together),
+    # which is exactly the delay reported at the head of that line.
+    cached = narration_cache.get(
+        text=guarded_narration.text,
+        voice=tts_voice,
+        persona=persona,
+        language=narration_language,
+    )
+    if cached is not None:
+        return Response(
+            content=cached,
+            media_type="audio/mpeg",
+            headers={"Cache-Control": "no-store"},
+        )
+
     try:
         audio = await narration_service.synthesize_speech(
             guarded_narration.text,
@@ -629,6 +737,14 @@ async def narrate_session_text(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail={"error": "narration_unavailable", "message": str(exc)},
         ) from exc
+
+    narration_cache.put(
+        text=guarded_narration.text,
+        voice=tts_voice,
+        persona=persona,
+        language=narration_language,
+        audio=audio,
+    )
 
     return Response(
         content=audio,
@@ -1260,6 +1376,38 @@ async def _gap_report_view(db: AsyncSession, report: Any) -> GapReportRead:  # n
             "generated_at": report.created_at,
         }
     )
+
+
+@router.get(
+    "/courses/{course_id}/interview-progress",
+    response_model=list[InterviewProgressRead],
+)
+async def list_my_interview_progress(
+    course_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> list[InterviewProgressRead]:
+    """Per-interview completion state for the calling student in a course.
+
+    Feeds the course-learn curriculum, which had no completion signal for
+    interview items at all — they stayed pending forever and a module holding
+    one could never auto-collapse, even after the student passed.
+
+    Completed ⟺ at least one non-practice attempt has ``pass_verdict = TRUE``.
+    Deliberately stricter than the quiz rule (which also completes on
+    failed-and-exhausted): the tag reads as *passed*. See
+    :class:`InterviewProgressRead` for the field semantics.
+
+    Gated by :func:`can_view_course_content` — the same org/enrollment
+    perimeter the quiz-progress endpoint uses — so a cross-tenant caller gets
+    404 with no existence leak.
+    """
+    if not await can_view_course_content(db, user_id=current_user.user_id, course_id=course_id):
+        raise _not_found("course", course_id)
+    rows = await learner_progress_service.list_my_interview_progress(
+        db, course_id=course_id, user_id=current_user.user_id
+    )
+    return [InterviewProgressRead.model_validate(r) for r in rows]
 
 
 __all__ = ["get_arq_pool", "router"]

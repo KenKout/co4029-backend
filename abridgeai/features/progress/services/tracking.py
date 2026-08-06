@@ -9,6 +9,7 @@ from abridgeai.core.db.conflict_mapper import (
     flush_or_conflict,
     register_conflict_mappings,
 )
+from abridgeai.core.observability import get_logger
 from abridgeai.features.progress.models import LessonProgress, MaterialEngagement
 from abridgeai.features.progress.queries import (
     get_lesson_estimated_seconds,
@@ -28,6 +29,8 @@ if TYPE_CHECKING:
 
 _AUTO_COMPLETION_THRESHOLD = Decimal("80")
 _DEFAULT_ESTIMATED_SECONDS = 600
+
+logger = get_logger(__name__)
 
 
 register_conflict_mappings(
@@ -52,6 +55,11 @@ async def mark_lesson_complete(
 
     Creates the row if missing (e.g. a learner who never opened the lesson
     but skips to mark complete from the curriculum view).
+
+    Fires the course-completion writer SYNCHRONOUSLY (see
+    :func:`_sync_course_completion`): finishing the last lesson of the last
+    required course must unlock the next career-path stage now, not after
+    tonight's cron.
     """
     progress = await get_my_lesson_progress(db, user_id=user_id, lesson_id=lesson_id)
     if progress is None:
@@ -68,8 +76,47 @@ async def mark_lesson_complete(
         progress.completion_percent = Decimal("100")
     progress.last_activity_at = _utcnow()
     await flush_or_conflict(db)
+    await _sync_course_completion(db, user_id=user_id, lesson_id=lesson_id)
     await db.refresh(progress)
     return LessonProgressPublic.model_validate(progress)
+
+
+async def _sync_course_completion(
+    db: AsyncSession,
+    *,
+    user_id: UUID,
+    lesson_id: UUID,
+) -> None:
+    """Recompute ``course_enrollments.status`` for this lesson's course.
+
+    The D2 writer (``enrollments.services.completion``), called on **every**
+    lesson-progress write point so ``course_enrollments.status`` — the
+    definition of "satisfied" for career-path stage unlock — is maintained
+    synchronously. The lazy read on the career-path progress endpoint and the
+    nightly readiness cron remain only as a drift backstop.
+
+    This also carries the DEMOTION path: ``unmark_lesson_complete`` can drop a
+    course below 100%, and the writer flips ``'completed' → 'active'`` so
+    ``satisfied`` stays honest. It does NOT un-latch a completed stage —
+    ``student_stage_progress`` is append-only by design.
+
+    Never raises into the caller: a student's mark-complete must not fail
+    because a downstream completion side-effect could not be computed. The
+    backstop repairs any miss.
+    """
+    from abridgeai.features.enrollments.api import public as enrollments_api  # noqa: PLC0415
+
+    try:
+        await enrollments_api.sync_course_completion_for_lesson(
+            db, lesson_id=lesson_id, student_id=user_id
+        )
+    except Exception:  # noqa: BLE001 -- side-effect; backstop repairs drift
+        logger.warning(
+            "progress.course_completion_sync_failed",
+            exc_info=True,
+            lesson_id=str(lesson_id),
+            user_id=str(user_id),
+        )
 
 
 async def unmark_lesson_complete(
@@ -175,6 +222,11 @@ async def update_lesson_progress(
         progress.status = "not_started"
 
     await flush_or_conflict(db)
+    # Synchronous D2 writer. Reached from BOTH directions: an engagement
+    # heartbeat that pushes the course to 100% (promotion) and
+    # `unmark_lesson_complete`, which routes through here with
+    # apply_auto_complete=False and can drop it below 100% (demotion).
+    await _sync_course_completion(db, user_id=user_id, lesson_id=lesson_id)
     await db.refresh(progress)
     return LessonProgressPublic.model_validate(progress)
 
