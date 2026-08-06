@@ -37,6 +37,7 @@ from abridgeai.core.config import get_settings
 from abridgeai.core.db import get_db
 from abridgeai.core.exceptions import AppError, ForbiddenError, NotFoundError
 from abridgeai.core.security import CurrentUser, get_current_user
+from abridgeai.features.courses.api.public import can_view_course_content
 from abridgeai.features.interviews.routers._deps import require_session_owner_access
 from abridgeai.features.interviews.schemas import (
     GapReportRead,
@@ -46,6 +47,7 @@ from abridgeai.features.interviews.schemas import (
     InterviewOnboardingRespondResponse,
     InterviewPracticeFeedback,
     InterviewPracticeInfo,
+    InterviewProgressRead,
     InterviewQuestionPublic,
     InterviewSessionFinishRequest,
     InterviewSessionFinishResponse,
@@ -58,6 +60,9 @@ from abridgeai.features.interviews.schemas import (
     RealtimeTokenResponse,
 )
 from abridgeai.features.interviews.schemas.integrity import IntegrityEventBatchRequest
+from abridgeai.features.interviews.services import (
+    learner_progress as learner_progress_service,
+)
 from abridgeai.features.interviews.services import narration as narration_service
 from abridgeai.features.interviews.services import narration_cache
 from abridgeai.features.interviews.services import onboarding as onboarding_service
@@ -1290,6 +1295,38 @@ async def _gap_report_view(db: AsyncSession, report: Any) -> GapReportRead:  # n
             "generated_at": report.created_at,
         }
     )
+
+
+@router.get(
+    "/courses/{course_id}/interview-progress",
+    response_model=list[InterviewProgressRead],
+)
+async def list_my_interview_progress(
+    course_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> list[InterviewProgressRead]:
+    """Per-interview completion state for the calling student in a course.
+
+    Feeds the course-learn curriculum, which had no completion signal for
+    interview items at all — they stayed pending forever and a module holding
+    one could never auto-collapse, even after the student passed.
+
+    Completed ⟺ at least one non-practice attempt has ``pass_verdict = TRUE``.
+    Deliberately stricter than the quiz rule (which also completes on
+    failed-and-exhausted): the tag reads as *passed*. See
+    :class:`InterviewProgressRead` for the field semantics.
+
+    Gated by :func:`can_view_course_content` — the same org/enrollment
+    perimeter the quiz-progress endpoint uses — so a cross-tenant caller gets
+    404 with no existence leak.
+    """
+    if not await can_view_course_content(db, user_id=current_user.user_id, course_id=course_id):
+        raise _not_found("course", course_id)
+    rows = await learner_progress_service.list_my_interview_progress(
+        db, course_id=course_id, user_id=current_user.user_id
+    )
+    return [InterviewProgressRead.model_validate(r) for r in rows]
 
 
 __all__ = ["get_arq_pool", "router"]

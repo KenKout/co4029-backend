@@ -247,10 +247,47 @@ class InterviewForTakingPublic(_ORMModel):
     outcome_count: int = 0
 
 
+class InterviewProgressRead(BaseModel):
+    """Per-interview completion state for one student, for course-learn.
+
+    Interviews were graded per attempt long before this existed
+    (``interview_sessions.pass_verdict``), but the verdict never reached the
+    curriculum, so an interview item stayed pending forever.
+
+    Completion rule (user decision, 2026-08-06): completed ⟺ at least one
+    **non-practice** attempt has ``pass_verdict = TRUE``. This is intentionally
+    STRICTER than the quiz rule, which also completes on "failed with every
+    attempt consumed": here the tag is meant to read as *passed*, so a student
+    who failed every attempt keeps the item pending. Practice runs never count,
+    matching the attempt gate — rehearsing must not tick off a graded
+    milestone.
+
+    ``attempts_graded`` is exposed separately from ``attempts_used`` because a
+    finished attempt is not necessarily a graded one: evaluation is an ARQ job,
+    so a just-submitted attempt sits with ``pass_verdict IS NULL`` until the
+    worker lands. A UI can use the gap to say "being marked" rather than
+    implying a fail.
+
+    SECURITY: deliberately carries no score, rubric aggregate, outcome text or
+    ``min_outcomes_to_pass``. The learner contract for interviews withholds all
+    of those (see :class:`InterviewForTakingPublic`), and a progress payload is
+    not a licence to leak them — a pass/fail boolean is the whole signal the
+    curriculum needs.
+    """
+
+    interview_config_id: UUID
+    attempts_used: int
+    attempts_in_flight: int = 0
+    attempts_graded: int = 0
+    passed: bool = False
+    completed: bool
+
+
 __all__ = [
     "InterviewConfigPublic",
     "InterviewForTakingPublic",
     "InterviewOutcomePublic",
+    "InterviewProgressRead",
     "InterviewQuestionPublic",
     "OutcomeTypeLiteral",
     "PersonaLiteral",
