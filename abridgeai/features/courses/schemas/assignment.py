@@ -31,6 +31,41 @@ class TeacherAssignmentRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class CoursePathPlacement(BaseModel):
+    """Where a course sits on one career path."""
+
+    career_path_id: UUID
+    career_path_name: str
+    career_path_status: str
+    stage_id: UUID
+    stage_title: str | None = None
+    stage_position: int
+    is_required: bool
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class CourseReadiness(BaseModel):
+    """Whether a course is actually deliverable, before publish rather than after.
+
+    The manager's checklist. `can_publish` mirrors the publish gate's condition
+    exactly (at least one gradeable unit, not archived), so the checklist and
+    the 409 cannot disagree.
+    """
+
+    course_id: UUID
+    status: str
+    teacher_count: int
+    gradeable_unit_count: int
+    career_paths: list[CoursePathPlacement] = []
+    blocks_required_stage: bool = False
+    """True when this course has no gradeable unit AND is required on a path —
+    it is locking that stage and every stage behind it for every student."""
+    can_publish: bool
+
+    model_config = ConfigDict(from_attributes=True)
+
+
 class AssignableTeacher(BaseModel):
     """A teacher the manager may pick for this course.
 
@@ -130,6 +165,8 @@ class CourseRosterRead(BaseModel):
 __all__ = [
     "AssignTeacherRequest",
     "AssignableTeacher",
+    "CoursePathPlacement",
+    "CourseReadiness",
     "CourseRosterRead",
     "RosterEntry",
     "RosterStudentRead",

@@ -130,6 +130,50 @@ async def assign_teacher_to_course(
     }
 
 
+async def get_course_readiness(db: AsyncSession, course_id: UUID) -> dict[str, Any]:
+    """The four things that decide whether a course can actually be delivered.
+
+    Answers, before the manager presses publish, the questions that otherwise
+    surface as a 409 or — worse — as silence:
+
+    * **teacher** — nobody is going to author the content otherwise.
+    * **content** — at least one published lesson / quiz / interview. This is
+      the publish gate; showing it here is the difference between "fix it now"
+      and a 409 weeks later.
+    * **career path** — a course on no path is unreachable for students; the
+      paths are how they enrol. Not a publish blocker, but it means done-looking
+      work that nobody can see.
+    * **published** — the course's own status.
+
+    `can_publish` is exactly the publish gate's condition, so the checklist and
+    the 409 can never disagree: both read the gradeable-unit count.
+    """
+    course = await authoring_queries.get_course_for_authoring(db, course_id)
+    if course is None:
+        raise NotFoundError(f"Course {course_id} not found")
+
+    from abridgeai.features.enrollments.api import public as enrollments_api  # noqa: PLC0415
+
+    teachers = await assignment_queries.list_teachers_for_course(db, course_id)
+    units = await enrollments_api.count_course_gradeable_units(db, course_id=course_id)
+    paths = await assignment_queries.list_career_paths_containing_course(db, course_id)
+
+    return {
+        "course_id": course_id,
+        "status": course.status,
+        "teacher_count": len(teachers),
+        "gradeable_unit_count": units,
+        "career_paths": paths,
+        # A REQUIRED course with no gradeable unit does not merely fail to
+        # complete: it locks its stage and every stage behind it, for every
+        # student on that path. Surfaced separately because the fix is urgent
+        # in a way the plain "no content" row is not.
+        "blocks_required_stage": units == 0
+        and any(path["is_required"] for path in paths),
+        "can_publish": units > 0 and course.status != "archived",
+    }
+
+
 async def list_assignable_teachers(db: AsyncSession, course_id: UUID) -> list[dict[str, Any]]:
     """Teachers a manager may assign to ``course_id``: same org, teacher role.
 

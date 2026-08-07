@@ -56,8 +56,9 @@ import abridgeai.features.identity.models  # noqa: F401  -- register users FK ta
 import abridgeai.features.interviews.models  # noqa: F401  -- T6.1 registers interview_* tables
 from abridgeai.core.config import get_settings
 from abridgeai.core.db import Base, get_db
-from abridgeai.core.security import create_access_token, generate_token, hash_secret
+from abridgeai.core.security import CurrentUser, create_access_token, generate_token, hash_secret
 from abridgeai.features.courses.routers import assignment_router
+from abridgeai.features.courses.services import authoring as authoring_service
 
 for _stub_name in ("interview_configs",):
     if _stub_name not in Base.metadata.tables:
@@ -672,6 +673,208 @@ async def test_assignable_teachers_requires_staffing_permission(
     """A teacher cannot enumerate who else could be staffed."""
     response = await client.get(
         f"/api/v1/dept/courses/{scenario['course_a']}/assignable-teachers",
+        headers={"Authorization": f"Bearer {teacher_bearer}"},
+    )
+    assert response.status_code == 403, response.text
+
+
+async def test_readiness_reports_an_empty_course_as_not_publishable(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    scenario: dict[str, uuid.UUID],
+) -> None:
+    """The checklist's whole purpose: say it BEFORE publish, not as a 409 after.
+
+    The scenario's course_b has no published lesson, no teacher and no career
+    path — the state a freshly created course is in.
+    """
+    response = await client.get(
+        f"/api/v1/dept/courses/{scenario['course_b']}/readiness",
+        headers={"Authorization": f"Bearer {admin_bearer}"},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["gradeable_unit_count"] == 0
+    assert body["can_publish"] is False
+    assert body["career_paths"] == []
+    assert body["status"] == "draft"
+
+
+def _service_actor(user_id: uuid.UUID) -> CurrentUser:
+    """Service-level actor for the one assertion that bypasses HTTP."""
+    return CurrentUser(user_id=user_id, session_id=uuid.uuid4())
+
+
+async def test_readiness_can_publish_matches_the_publish_gate(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    scenario: dict[str, uuid.UUID],
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    seeded_users: SeededUsers,
+) -> None:
+    """`can_publish` must agree with the gate, or the checklist lies.
+
+    Publish the course through the API right after the checklist says it can be
+    published: a green row followed by a 409 would be worse than no row at all.
+    """
+    headers = {"Authorization": f"Bearer {admin_bearer}"}
+    # course_a, not course_b: the publish route resolves through the course's
+    # org_unit, and course_b sits in a unit the admin has no path to (404).
+    course_id = scenario["course_a"]
+    # This fixture seeds courses with no curriculum at all, so create the one
+    # gradeable unit rather than promoting a lesson that does not exist.
+    module_id, lesson_id = uuid.uuid4(), uuid.uuid4()
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO modules (id, course_id, title, position, status) "
+                "VALUES (:id, :cid, 'M1', 1, 'published')"
+            ),
+            {"id": module_id, "cid": course_id},
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO lessons (id, module_id, slug, title, status, lesson_type) "
+                "VALUES (:id, :mid, :slug, 'L1', 'published', 'video')"
+            ),
+            {
+                "id": lesson_id,
+                "mid": module_id,
+                "slug": f"rl-{uuid.uuid4().hex[:8]}",
+            },
+        )
+
+    try:
+        readiness = await client.get(
+            f"/api/v1/dept/courses/{course_id}/readiness", headers=headers
+        )
+        assert readiness.status_code == 200, readiness.text
+        assert readiness.json()["gradeable_unit_count"] == 1
+        assert readiness.json()["can_publish"] is True
+
+        # Cross-check against the gate itself. The publish ROUTE lives on the
+        # teacher router, which this test app does not mount (it mounts only
+        # the dept router), so call the gate directly: the point is that
+        # can_publish and the gate agree, not which URL carries it.
+        async with session_factory() as db:
+            published = await authoring_service.publish_course(
+                db, course_id, _service_actor(seeded_users.admin_id)
+            )
+            await db.commit()
+        assert published.status == "published"
+    finally:
+        async with engine.begin() as conn:
+            await conn.execute(text("DELETE FROM lessons WHERE id = :id"), {"id": lesson_id})
+            await conn.execute(text("DELETE FROM modules WHERE id = :id"), {"id": module_id})
+
+
+async def test_readiness_counts_assigned_teachers(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    seeded_users: SeededUsers,
+    scenario: dict[str, uuid.UUID],
+) -> None:
+    headers = {"Authorization": f"Bearer {admin_bearer}"}
+    before = await client.get(
+        f"/api/v1/dept/courses/{scenario['course_b']}/readiness", headers=headers
+    )
+    assert before.json()["teacher_count"] == 0
+
+    assign = await client.post(
+        f"/api/v1/dept/courses/{scenario['course_b']}/teachers",
+        json={"user_id": str(seeded_users.teacher_id)},
+        headers=headers,
+    )
+    assert assign.status_code == 201, assign.text
+
+    after = await client.get(
+        f"/api/v1/dept/courses/{scenario['course_b']}/readiness", headers=headers
+    )
+    assert after.json()["teacher_count"] == 1
+
+
+async def test_readiness_flags_a_required_course_that_locks_its_stage(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    scenario: dict[str, uuid.UUID],
+    engine: AsyncEngine,
+) -> None:
+    """The urgent case, separated from plain "no content".
+
+    A REQUIRED course with nothing to grade does not merely fail to complete: no
+    student can ever satisfy it, so its stage and every stage behind it stay
+    locked forever. That is worth shouting about; an optional empty course is
+    not.
+    """
+    path_id, stage_id = uuid.uuid4(), uuid.uuid4()
+    async with engine.begin() as conn:
+        org_id = (
+            await conn.execute(
+                text("SELECT organization_id FROM courses WHERE id = :c"),
+                {"c": scenario["course_b"]},
+            )
+        ).scalar_one()
+        await conn.execute(
+            text(
+                "INSERT INTO career_paths (id, organization_id, slug, name, status) "
+                "VALUES (:id, :org, :slug, 'Readiness Path', 'draft')"
+            ),
+            {
+                "id": path_id,
+                "org": org_id,
+                "slug": f"rp-{uuid.uuid4().hex[:8]}",
+            },
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO career_path_stages "
+                "(id, career_path_id, position, title, unlock_policy, enforcement) "
+                "VALUES (:id, :pid, 1, 'Stage 1', 'always', 'advisory')"
+            ),
+            {"id": stage_id, "pid": path_id},
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO career_course_items "
+                "(career_path_id, course_id, stage_id, position, is_required) "
+                "VALUES (:pid, :cid, :sid, 1, TRUE)"
+            ),
+            {"pid": path_id, "cid": scenario["course_b"], "sid": stage_id},
+        )
+    try:
+        response = await client.get(
+            f"/api/v1/dept/courses/{scenario['course_b']}/readiness",
+            headers={"Authorization": f"Bearer {admin_bearer}"},
+        )
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["blocks_required_stage"] is True
+        assert len(body["career_paths"]) == 1
+        placement = body["career_paths"][0]
+        assert placement["career_path_name"] == "Readiness Path"
+        assert placement["is_required"] is True
+        assert placement["stage_position"] == 1
+    finally:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("DELETE FROM career_course_items WHERE career_path_id = :p"),
+                {"p": path_id},
+            )
+            await conn.execute(
+                text("DELETE FROM career_path_stages WHERE career_path_id = :p"),
+                {"p": path_id},
+            )
+            await conn.execute(text("DELETE FROM career_paths WHERE id = :p"), {"p": path_id})
+
+
+async def test_readiness_requires_staffing_permission(
+    client: httpx.AsyncClient,
+    teacher_bearer: str,
+    scenario: dict[str, uuid.UUID],
+) -> None:
+    response = await client.get(
+        f"/api/v1/dept/courses/{scenario['course_b']}/readiness",
         headers={"Authorization": f"Bearer {teacher_bearer}"},
     )
     assert response.status_code == 403, response.text

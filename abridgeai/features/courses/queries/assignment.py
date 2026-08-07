@@ -17,12 +17,50 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from abridgeai.features.access_control.models import (
+    CareerPath,
     OrganizationMembership,
     Role,
     UserRoleAssignment,
 )
+from abridgeai.features.career_paths.models import CareerPathCourse, CareerPathStage
 from abridgeai.features.courses.models import Course
 from abridgeai.features.identity.models import User, UserProfile
+
+
+async def list_career_paths_containing_course(
+    db: AsyncSession, course_id: UUID
+) -> list[dict[str, Any]]:
+    """Career paths this course sits on, with the stage it occupies.
+
+    Backs the readiness checklist's "on a career path" row. A course nobody put
+    on a path is invisible to students — the paths are how they reach it — so a
+    manager finishing a course needs to know that before calling it done.
+
+    ``is_required`` matters for the warning's severity: a REQUIRED course with
+    no gradeable unit locks its stage and everything behind it, whereas an
+    optional one merely cannot be completed.
+    """
+    stmt = (
+        select(
+            CareerPath.id.label("career_path_id"),
+            CareerPath.name.label("career_path_name"),
+            CareerPath.status.label("career_path_status"),
+            CareerPathStage.id.label("stage_id"),
+            CareerPathStage.title.label("stage_title"),
+            CareerPathStage.position.label("stage_position"),
+            CareerPathCourse.is_required,
+        )
+        .join(CareerPathCourse, CareerPathCourse.career_path_id == CareerPath.id)
+        .join(CareerPathStage, CareerPathStage.id == CareerPathCourse.stage_id)
+        .where(
+            CareerPathCourse.course_id == course_id,
+            CareerPath.deleted_at.is_(None),
+            CareerPathStage.deleted_at.is_(None),
+        )
+        .order_by(CareerPath.name, CareerPathStage.position)
+    )
+    rows = (await db.execute(stmt)).mappings().all()
+    return [dict(row) for row in rows]
 
 
 async def list_assignable_teachers(

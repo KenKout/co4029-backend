@@ -42,6 +42,7 @@ from abridgeai.features.courses.schemas import (
     AssignableTeacher,
     AssignTeacherRequest,
     CourseAuthoring,
+    CourseReadiness,
     CourseUpdate,
     RosterEntry,
     TeacherAssignmentCreated,
@@ -212,6 +213,26 @@ async def list_assignable_teachers(
     except NotFoundError as exc:
         raise _not_found(str(exc)) from exc
     return [AssignableTeacher.model_validate(row) for row in rows]
+
+
+@router.get("/courses/{course_id}/readiness", response_model=CourseReadiness)
+async def get_course_readiness(
+    course_id: UUID,
+    _current_user: Annotated[CurrentUser, Depends(_REQUIRE_COURSE_STAFFING)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> CourseReadiness:
+    """Is this course actually deliverable? Asked before publish, not after.
+
+    Four checks: an assigned teacher, at least one gradeable unit, placement on
+    a career path, and the course's own status. `can_publish` mirrors the
+    publish gate's condition exactly, so the checklist cannot promise a publish
+    the gate then refuses with a 409.
+    """
+    try:
+        data = await assignment_service.get_course_readiness(db, course_id)
+    except NotFoundError as exc:
+        raise _not_found(str(exc)) from exc
+    return CourseReadiness.model_validate(data)
 
 
 @router.delete(
