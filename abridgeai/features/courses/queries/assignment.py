@@ -13,7 +13,7 @@ from __future__ import annotations
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import func, literal, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from abridgeai.features.access_control.models import (
@@ -64,7 +64,7 @@ async def list_career_paths_containing_course(
 
 
 async def list_assignable_teachers(
-    db: AsyncSession, *, organization_id: UUID, course_id: UUID
+    db: AsyncSession, *, organization_id: UUID, course_id: UUID | None = None
 ) -> list[dict[str, Any]]:
     """Users holding the ``teacher`` role who are members of ``organization_id``.
 
@@ -78,7 +78,10 @@ async def list_assignable_teachers(
     * **organization membership** — an active, non-deleted membership row.
 
     ``already_assigned`` marks users who already teach this course so the
-    picker can show them as chosen instead of offering a no-op.
+    picker can show them as chosen instead of offering a no-op. ``course_id``
+    is optional because the create-course wizard picks teachers BEFORE the
+    course exists; with no course there is nothing to be already assigned to,
+    so the flag is uniformly false.
     """
     assigned_subq = (
         select(UserRoleAssignment.user_id)
@@ -93,12 +96,15 @@ async def list_assignable_teachers(
         )
         .scalar_subquery()
     )
+    already_assigned = (
+        User.id.in_(assigned_subq) if course_id is not None else literal(False)  # noqa: FBT003
+    )
     stmt = (
         select(
             User.id.label("user_id"),
             User.primary_email,
             UserProfile.display_name,
-            User.id.in_(assigned_subq).label("already_assigned"),
+            already_assigned.label("already_assigned"),
         )
         .join(OrganizationMembership, OrganizationMembership.user_id == User.id)
         .join(UserRoleAssignment, UserRoleAssignment.user_id == User.id)

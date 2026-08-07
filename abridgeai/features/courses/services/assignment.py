@@ -19,7 +19,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
 
-from abridgeai.core.exceptions import ForbiddenError, NotFoundError
+from abridgeai.core.exceptions import AppError, ForbiddenError, NotFoundError
 from abridgeai.core.security import CurrentUser
 from abridgeai.features.courses.queries import (
     assignment as assignment_queries,
@@ -172,6 +172,34 @@ async def get_course_readiness(db: AsyncSession, course_id: UUID) -> dict[str, A
         and any(path["is_required"] for path in paths),
         "can_publish": units > 0 and course.status != "archived",
     }
+
+
+async def list_assignable_teachers_for_creator(
+    db: AsyncSession, creator: CurrentUser
+) -> list[dict[str, Any]]:
+    """Teachers the creator could staff a course with, BEFORE the course exists.
+
+    The create-course wizard picks teachers in the same form that creates the
+    course, so there is no ``course_id`` to derive the organization from yet.
+    It resolves to the same organization ``create_course`` will stamp on the
+    new row — the creator's primary org, from the token — so the picker cannot
+    offer someone the subsequent assignment would then reject. Deriving it from
+    the token rather than a client parameter keeps the org restriction a
+    server-side fact here too.
+    """
+    from abridgeai.features.career_paths.queries import (  # noqa: PLC0415
+        get_user_primary_organization_id,
+    )
+
+    org_id = await get_user_primary_organization_id(db, creator.user_id)
+    if org_id is None:
+        # Same condition create_course raises on, surfaced here as an empty
+        # picker would be a lie ("no teachers exist") rather than the truth
+        # ("you have no organization, so you cannot create a course at all").
+        raise AppError(
+            f"User {creator.user_id} has no primary organization; cannot staff a course."
+        )
+    return await assignment_queries.list_assignable_teachers(db, organization_id=org_id)
 
 
 async def list_assignable_teachers(db: AsyncSession, course_id: UUID) -> list[dict[str, Any]]:

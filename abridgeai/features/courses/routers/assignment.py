@@ -189,6 +189,30 @@ async def assign_teacher(
     return TeacherAssignmentCreated.model_validate(result)
 
 
+@router.get("/assignable-teachers", response_model=list[AssignableTeacher])
+async def list_assignable_teachers_for_new_course(
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_STAFFING)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> list[AssignableTeacher]:
+    """Teachers for a course that does not exist yet — the create wizard's picker.
+
+    Same list as the per-course endpoint, but the organization comes from the
+    CALLER's token instead of the course, because the wizard staffs the course
+    in the same form that creates it. That is the same org ``create_course``
+    stamps on the new row, so the picker cannot offer someone the follow-up
+    assignment would reject.
+
+    Guarded by the GLOBAL staffing dependency, not the per-course one: there is
+    no ``course_id`` path param to scope against, and asking for one would make
+    the policy layer 500 with ``policy_misconfigured``.
+
+    Declared BEFORE ``/courses/{course_id}/...`` deliberately — a literal path
+    segment must not be shadowed by a parameterised route.
+    """
+    rows = await assignment_service.list_assignable_teachers_for_creator(db, current_user)
+    return [AssignableTeacher.model_validate(row) for row in rows]
+
+
 @router.get(
     "/courses/{course_id}/assignable-teachers",
     response_model=list[AssignableTeacher],

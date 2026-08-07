@@ -678,6 +678,59 @@ async def test_assignable_teachers_requires_staffing_permission(
     assert response.status_code == 403, response.text
 
 
+async def test_assignable_teachers_for_a_new_course_uses_the_callers_org(
+    client: httpx.AsyncClient,
+    manager_bearer: str,
+    seeded_users: SeededUsers,
+) -> None:
+    """The create wizard picks teachers before any course exists.
+
+    Org comes from the caller's token, so the list must match what the
+    per-course endpoint would return for a course this manager creates.
+    """
+    response = await client.get(
+        "/api/v1/dept/assignable-teachers",
+        headers={"Authorization": f"Bearer {manager_bearer}"},
+    )
+    assert response.status_code == 200, response.text
+    rows = response.json()
+    ids = {row["user_id"] for row in rows}
+    assert str(seeded_users.teacher_id) in ids
+    # Nothing to be assigned to yet, so the flag must be uniformly false rather
+    # than leaking state from some other course.
+    assert all(row["already_assigned"] is False for row in rows)
+
+
+async def test_assignable_teachers_for_a_new_course_excludes_other_orgs(
+    client: httpx.AsyncClient,
+    manager_bearer: str,
+    scenario: dict[str, uuid.UUID],
+) -> None:
+    """The org restriction has to hold on this route too, not just the scoped one.
+
+    ``other_owner`` lives in a different organization, so it must not appear
+    regardless of any role it holds.
+    """
+    response = await client.get(
+        "/api/v1/dept/assignable-teachers",
+        headers={"Authorization": f"Bearer {manager_bearer}"},
+    )
+    assert response.status_code == 200, response.text
+    ids = {row["user_id"] for row in response.json()}
+    assert str(scenario["other_owner"]) not in ids
+
+
+async def test_assignable_teachers_for_a_new_course_requires_staffing_permission(
+    client: httpx.AsyncClient,
+    teacher_bearer: str,
+) -> None:
+    response = await client.get(
+        "/api/v1/dept/assignable-teachers",
+        headers={"Authorization": f"Bearer {teacher_bearer}"},
+    )
+    assert response.status_code == 403, response.text
+
+
 async def test_readiness_reports_an_empty_course_as_not_publishable(
     client: httpx.AsyncClient,
     admin_bearer: str,
