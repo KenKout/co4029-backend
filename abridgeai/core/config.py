@@ -274,6 +274,20 @@ class Settings(BaseSettings):
     # message) for this many minutes, so a dropped/abandoned session can never
     # stay ``in_progress`` forever. Time-limited sessions are unaffected.
     interview_voice_idle_timeout_minutes: int = Field(default=30, ge=1, le=24 * 60)
+    # Machine-CPU fraction above which the agent worker reports itself
+    # unavailable, and LiveKit stops dispatching interviews to it. Every such
+    # window is a candidate meeting an interview with nobody in it.
+    #
+    # Measures the WHOLE machine (`psutil.cpu_percent()/100`, already normalised
+    # by core count), not the worker's own usage, so on a host shared with the
+    # API and the arq worker the SDK default of 0.7 is crossed by neighbours
+    # rather than by interviews: observed ~4100 flips, load swinging 0.10-0.95,
+    # with at most one interview running.
+    #
+    # Raising this creates no capacity; it stops the worker refusing work over
+    # load it does not own. A host truly saturated by interviews needs a second
+    # worker instead.
+    interview_voice_load_threshold: float = Field(default=0.9, gt=0.0, lt=1.0)
     # FR-4.5 / FR-5.3 — server-side lesson-gating enforcement (prerequisites,
     # SR coverage threshold τ, interview-pass locks). Emergency off-switch:
     # set LESSON_GATING_ENFORCED=false to stop blocking learner reads while
