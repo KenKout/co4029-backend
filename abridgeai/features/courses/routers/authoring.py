@@ -98,6 +98,23 @@ _ALLOWED_OUTLINE_ROLES: frozenset[str] = frozenset({"body", "summary", "review",
 
 router = APIRouter(prefix="/teacher", tags=["courses-authoring"])
 
+
+async def get_arq_pool() -> object | None:
+    """ARQ Redis pool dependency (email dispatch).
+
+    Returns ``None`` until the app factory overrides it with a real
+    ``ArqRedis`` pool; the notification path accepts ``None`` and simply skips
+    the email enqueue (the in-app notification is still written). Mirrors the
+    identical dependency in the assignment / materials / quizzes routers.
+
+    NOTE: the override in ``abridgeai.api`` is keyed on this function's
+    IDENTITY, so a new dependency here is inert until it is registered there
+    too — the in-app notification would still be written, but the email would
+    silently never send.
+    """
+    return None
+
+
 _REQUIRE_CREATE = require_permission("course.create")
 _REQUIRE_AUTHORING_LIST = require_any_permission("course.read.draft", "course.create")
 _REQUIRE_COURSE_UPDATE = require_course_permission("course_id", "course.update")
@@ -181,6 +198,7 @@ async def create_course(
     payload: CourseCreate,
     current_user: Annotated[CurrentUser, Depends(_REQUIRE_CREATE)],
     db: Annotated[AsyncSession, Depends(get_db)],
+    arq_pool: Annotated[object | None, Depends(get_arq_pool)] = None,
 ) -> CourseAuthoring:
     """Create a new course owned by the requesting principal.
 
@@ -189,7 +207,9 @@ async def create_course(
     :func:`require_course_permission`.
     """
     try:
-        course = await authoring_service.create_course(db, payload, current_user)
+        course = await authoring_service.create_course(
+            db, payload, current_user, arq_pool=arq_pool
+        )
     except ConflictError as exc:
         raise _conflict(str(exc)) from exc
     except AppError as exc:

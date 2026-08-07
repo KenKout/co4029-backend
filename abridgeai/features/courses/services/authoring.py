@@ -167,7 +167,11 @@ async def _require_module_item(db: AsyncSession, item_id: UUID) -> ModuleItem:
 
 
 async def create_course(
-    db: AsyncSession, payload: CourseCreate, owner: CurrentUser
+    db: AsyncSession,
+    payload: CourseCreate,
+    owner: CurrentUser,
+    *,
+    arq_pool: object | None = None,
 ) -> CourseAuthoring:
     """Create a new course owned by ``owner`` in their primary organization.
 
@@ -213,8 +217,50 @@ async def create_course(
                 organization_id=org_id,
                 granted_by=owner.user_id,
             )
+            # Notify on THIS path too, not just the explicit assign route.
+            # This branch writes a real teacher assignment, so skipping the
+            # notification made the outcome depend on how the row happened to
+            # be created: a manager assigning someone got a notification, a
+            # teacher creating their own course did not — same assignment,
+            # same inbox, different result, and nothing in the inbox to show
+            # the course was ever handed over.
+            #
+            # Best-effort inside `notify`, so a dispatch failure can never
+            # roll back the course that was just created.
+            await _notify_teacher_assigned(
+                db,
+                teacher_user_id=owner.user_id,
+                course_id=course.id,
+                course_title=course.title,
+                arq_pool=arq_pool,
+            )
 
     return CourseAuthoring.model_validate(course)
+
+
+async def _notify_teacher_assigned(
+    db: AsyncSession,
+    *,
+    teacher_user_id: UUID,
+    course_id: UUID,
+    course_title: str,
+    arq_pool: object | None,
+) -> None:
+    """Tell a teacher they now hold a course.
+
+    Lazy import for the same reason as :func:`_notify_course_published` — a
+    module-level ``courses.services -> notify`` edge would close an import
+    cycle through ``enrollments``.
+    """
+    from abridgeai.features.courses.services import notify  # noqa: PLC0415
+
+    await notify.notify_teacher_assigned(
+        db,
+        teacher_user_id=teacher_user_id,
+        course_id=course_id,
+        course_title=course_title,
+        arq_pool=arq_pool,
+    )
 
 
 async def _creator_is_teacher(db: AsyncSession, user_id: UUID) -> bool:

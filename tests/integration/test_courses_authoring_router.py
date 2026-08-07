@@ -2076,3 +2076,150 @@ async def test_manager_can_delete_course(
             text("UPDATE courses SET deleted_at = NULL, deleted_by = NULL WHERE id = :cid"),
             {"cid": scenario["course_a"]},
         )
+
+
+async def test_creator_holding_the_teacher_role_gets_a_notification(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    seeded_users: SeededUsers,
+    engine: AsyncEngine,
+) -> None:
+    """Creating a course auto-assigns a teacher-creator — and must notify them.
+
+    The regression: only the explicit ``POST /dept/courses/{id}/teachers``
+    route notified. ``create_course`` writes an identical teacher assignment
+    when the creator holds the teacher role, and said nothing — so whether a
+    teacher heard about a course they now own depended on which code path
+    happened to create the row.
+
+    Driven with the ADMIN token on purpose. ``course.create`` is not a teacher
+    permission, so a pure teacher cannot reach this path at all; the real
+    scenario is an account holding BOTH roles (admin/manager to create,
+    teacher to be auto-assigned), which is exactly how it was reported.
+    """
+    slug = f"notify-create-{uuid.uuid4().hex[:8]}"
+    # Give the admin the teacher role for this test — that dual-role account is
+    # the only way the auto-assign branch is reachable. The org membership goes
+    # with it: `create_course` resolves the owner's primary organization from
+    # the token, and the seeded admin has none.
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO organization_memberships "
+                "(user_id, organization_id, status) VALUES (:uid, :org, 'active') "
+                "ON CONFLICT DO NOTHING"
+            ),
+            {"uid": seeded_users.admin_id, "org": seeded_users.organization_id},
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO user_role_assignments "
+                "(user_id, role_id, scope_kind, organization_id, active_from, granted_by) "
+                "SELECT :uid, r.id, 'organization', :org, now(), :uid "
+                "FROM roles r WHERE r.code = 'teacher'"
+            ),
+            {"uid": seeded_users.admin_id, "org": seeded_users.organization_id},
+        )
+
+    response = await client.post(
+        "/api/v1/teacher/courses",
+        json={"title": "Notified On Create", "slug": slug},
+        headers={"Authorization": f"Bearer {admin_bearer}"},
+    )
+    assert response.status_code == 201, response.text
+    course_id = uuid.UUID(response.json()["id"])
+
+    try:
+        async with engine.begin() as conn:
+            # The assignment exists...
+            assigned = (
+                await conn.execute(
+                    text(
+                        "SELECT count(*) FROM user_role_assignments ura "
+                        "JOIN roles r ON r.id = ura.role_id "
+                        "WHERE ura.course_id = :cid AND ura.user_id = :uid "
+                        "AND r.code = 'teacher' AND ura.deleted_at IS NULL"
+                    ),
+                    {"cid": course_id, "uid": seeded_users.admin_id},
+                )
+            ).scalar_one()
+            assert assigned == 1, "creator holding the teacher role is auto-assigned"
+
+            # ...and so does the notification telling them about it.
+            rows = (
+                await conn.execute(
+                    text(
+                        "SELECT category, title FROM notifications "
+                        "WHERE user_id = :uid AND entity_id = :cid"
+                    ),
+                    {"uid": seeded_users.admin_id, "cid": course_id},
+                )
+            ).all()
+        assert len(rows) == 1, f"expected exactly one notification, got {rows}"
+        assert "Notified On Create" in rows[0][1]
+    finally:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("DELETE FROM notifications WHERE entity_id = :cid"), {"cid": course_id}
+            )
+            await conn.execute(
+                text("DELETE FROM user_role_assignments WHERE course_id = :cid"),
+                {"cid": course_id},
+            )
+            await conn.execute(text("DELETE FROM courses WHERE id = :cid"), {"cid": course_id})
+            # Drop the teacher grant added for this test so the shared admin
+            # fixture is left exactly as found.
+            await conn.execute(
+                text(
+                    "DELETE FROM user_role_assignments ura USING roles r "
+                    "WHERE ura.role_id = r.id AND r.code = 'teacher' "
+                    "AND ura.user_id = :uid AND ura.scope_kind = 'organization'"
+                ),
+                {"uid": seeded_users.admin_id},
+            )
+            await conn.execute(
+                text(
+                    "DELETE FROM organization_memberships "
+                    "WHERE user_id = :uid AND organization_id = :org"
+                ),
+                {"uid": seeded_users.admin_id, "org": seeded_users.organization_id},
+            )
+
+
+async def test_manager_creating_a_course_is_not_auto_assigned_or_notified(
+    client: httpx.AsyncClient,
+    manager_bearer: str,
+    seeded_users: SeededUsers,
+    engine: AsyncEngine,
+) -> None:
+    """A manager is not a teacher, so there is no assignment and nothing to say.
+
+    Pins the other half: the notification follows the ASSIGNMENT, not the act
+    of creating. A manager creating on someone's behalf must not accumulate as
+    a co-teacher, and must not be told they were handed teaching work.
+    """
+    slug = f"notify-mgr-{uuid.uuid4().hex[:8]}"
+    response = await client.post(
+        "/api/v1/teacher/courses",
+        json={"title": "Manager Created", "slug": slug},
+        headers={"Authorization": f"Bearer {manager_bearer}"},
+    )
+    assert response.status_code == 201, response.text
+    course_id = uuid.UUID(response.json()["id"])
+
+    try:
+        async with engine.begin() as conn:
+            count = (
+                await conn.execute(
+                    text("SELECT count(*) FROM notifications WHERE entity_id = :cid"),
+                    {"cid": course_id},
+                )
+            ).scalar_one()
+        assert count == 0, "manager creating a course is not being assigned to teach it"
+    finally:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("DELETE FROM user_role_assignments WHERE course_id = :cid"),
+                {"cid": course_id},
+            )
+            await conn.execute(text("DELETE FROM courses WHERE id = :cid"), {"cid": course_id})
