@@ -50,7 +50,7 @@ import abridgeai.features.identity.models  # noqa: F401  -- register users FK ta
 import abridgeai.features.interviews.models  # noqa: F401  -- T6.1 registers interview_* tables
 from abridgeai.core.config import get_settings
 from abridgeai.core.db import Base
-from abridgeai.core.exceptions import ConflictError
+from abridgeai.core.exceptions import AppError, ConflictError
 from abridgeai.core.security import CurrentUser
 from abridgeai.features.courses.schemas import (
     CourseCreate,
@@ -439,6 +439,102 @@ async def test_archive_course_sets_status_archived(
         archived = await authoring_service.archive_course(session, scenario["course_id"], owner)
         await session.commit()
     assert archived.status == "archived"
+
+
+async def test_archive_course_in_published_path_is_rejected(
+    session_factory: async_sessionmaker[AsyncSession],
+    engine: AsyncEngine,
+) -> None:
+    """Archiving a course that sits on a PUBLISHED path must be blocked —
+    it would silently remove the course from enrolled students' stages,
+    locking them forever (the same failure the add-time published check
+    prevents on entry; this guard maintains it on exit)."""
+    org_id = uuid.uuid4()
+    owner_id = uuid.uuid4()
+    course_id = uuid.uuid4()
+    path_id = uuid.uuid4()
+    stage_id = uuid.uuid4()
+    suffix = org_id.hex[:8]
+
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("INSERT INTO organizations (id, slug, name) VALUES (:id, :slug, :name)"),
+            {"id": org_id, "slug": f"arc-{suffix}", "name": "Archive Guard Org"},
+        )
+        await conn.execute(
+            text("INSERT INTO users (id, primary_email) VALUES (:id, :email)"),
+            {"id": owner_id, "email": f"arc-{suffix}@test.local"},
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO courses (id, organization_id, owner_user_id, slug, title, status) "
+                "VALUES (:id, :org, :owner, :slug, 'Guard Course', 'published')"
+            ),
+            {"id": course_id, "org": org_id, "owner": owner_id, "slug": f"guard-{suffix}"},
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO career_paths (id, organization_id, slug, name, status) "
+                "VALUES (:id, :org, :slug, 'Live Path', 'published')"
+            ),
+            {"id": path_id, "org": org_id, "slug": f"live-{suffix}"},
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO career_path_stages (id, career_path_id, position, title, unlock_policy) "
+                "VALUES (:id, :pid, 1, 'Stage 1', 'always')"
+            ),
+            {"id": stage_id, "pid": path_id},
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO career_course_items "
+                "(career_path_id, course_id, stage_id, position, is_required) "
+                "VALUES (:pid, :cid, :sid, 1, TRUE)"
+            ),
+            {"pid": path_id, "cid": course_id, "sid": stage_id},
+        )
+
+    try:
+        async with session_factory() as session:
+            owner = _actor(owner_id)
+            with pytest.raises(AppError) as excinfo:
+                await authoring_service.archive_course(session, course_id, owner)
+            # The affected path is named so the manager knows where to look.
+            assert "Live Path" in str(excinfo.value)
+        # A draft path is NOT a blocker — the course can still be archived.
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("UPDATE career_paths SET status = 'draft' WHERE id = :id"),
+                {"id": path_id},
+            )
+        async with session_factory() as session:
+            owner = _actor(owner_id)
+            archived = await authoring_service.archive_course(session, course_id, owner)
+            await session.commit()
+        assert archived.status == "archived"
+    finally:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("DELETE FROM career_course_items WHERE career_path_id = :pid"),
+                {"pid": path_id},
+            )
+            await conn.execute(
+                text("DELETE FROM career_path_stages WHERE career_path_id = :pid"),
+                {"pid": path_id},
+            )
+            await conn.execute(
+                text("DELETE FROM career_paths WHERE id = :id"), {"id": path_id}
+            )
+            await conn.execute(
+                text("DELETE FROM courses WHERE id = :id"), {"id": course_id}
+            )
+            await conn.execute(
+                text("DELETE FROM users WHERE id = :id"), {"id": owner_id}
+            )
+            await conn.execute(
+                text("DELETE FROM organizations WHERE id = :id"), {"id": org_id}
+            )
 
 
 async def test_set_module_prerequisites_clears_existing(

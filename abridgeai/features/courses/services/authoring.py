@@ -49,6 +49,9 @@ from abridgeai.features.courses.models import (
     ModuleItem,
 )
 from abridgeai.features.courses.queries import (
+    assignment as assignment_queries,
+)
+from abridgeai.features.courses.queries import (
     authoring as authoring_queries,
 )
 from abridgeai.features.courses.queries import (
@@ -454,6 +457,25 @@ async def _notify_course_published(db: AsyncSession, course: Course) -> None:
 async def archive_course(db: AsyncSession, course_id: UUID, actor: CurrentUser) -> CourseAuthoring:
     del actor
     course = await _require_course(db, course_id)
+    # Archiving a course that sits on a PUBLISHED path would silently remove
+    # it from enrolled students' stages — the permanent stage lock the
+    # add-time published check (add_course_to_path) exists to prevent. The
+    # invariant is enforced on entry, so it must be maintained on exit:
+    # block the archive and name the affected paths.
+    live_paths = [
+        p
+        for p in await assignment_queries.list_career_paths_containing_course(
+            db, course_id
+        )
+        if p["career_path_status"] == "published"
+    ]
+    if live_paths:
+        names = ", ".join(sorted({p["career_path_name"] for p in live_paths}))
+        raise AppError(
+            f"Course {course.title!r} is attached to published career path(s): {names}. "
+            "Remove it from those paths before archiving — archiving it would lock "
+            "the stage for every enrolled student."
+        )
     course.status = "archived"
     await db.flush()
     await db.refresh(course)
