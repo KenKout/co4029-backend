@@ -745,6 +745,58 @@ async def count_course_outcomes(db: AsyncSession, course_id: UUID) -> int:
     return (await db.execute(stmt)).scalar_one()
 
 
+async def count_questions_mapped_to_outcomes(
+    db: AsyncSession, course_id: UUID, outcome_ids: set[UUID]
+) -> dict[UUID, int]:
+    """Live quiz questions mapping to each of ``outcome_ids``.
+
+    Lazy import keeps the courses -> quizzes model edge out of module import
+    time (same pattern as the readiness helper above). Questions are counted
+    per-outcome so the delete confirmation can name exactly what loses its
+    mapping; questions are NOT deleted — the FK is ``ON DELETE SET NULL`` and
+    we soft-delete outcomes anyway, so a question's ``learning_outcome_id``
+    simply stops resolving.
+    """
+    if not outcome_ids:
+        return {}
+    from abridgeai.features.quizzes.models import Quiz, QuizQuestion  # noqa: PLC0415
+
+    stmt = (
+        select(QuizQuestion.learning_outcome_id, func.count())
+        .join(Quiz, Quiz.id == QuizQuestion.quiz_id)
+        .where(
+            Quiz.course_id == course_id,
+            QuizQuestion.learning_outcome_id.in_(outcome_ids),
+            QuizQuestion.deleted_at.is_(None),
+            Quiz.deleted_at.is_(None),
+        )
+        .group_by(QuizQuestion.learning_outcome_id)
+    )
+    rows = (await db.execute(stmt)).all()
+    return {outcome_id: count for outcome_id, count in rows}
+
+
+async def list_course_outcome_siblings(
+    db: AsyncSession, course_id: UUID, parent_id: UUID | None
+) -> list[CourseLearningOutcome]:
+    """All live outcomes sharing one parent, in position order.
+
+    ``parent_id`` NULL = top-level. ``IS NOT DISTINCT FROM`` handles the
+    NULL parent in a single predicate, mirroring
+    :func:`next_course_outcome_position`.
+    """
+    stmt = (
+        select(CourseLearningOutcome)
+        .where(
+            CourseLearningOutcome.course_id == course_id,
+            CourseLearningOutcome.parent_id.is_not_distinct_from(parent_id),
+            CourseLearningOutcome.deleted_at.is_(None),
+        )
+        .order_by(CourseLearningOutcome.position)
+    )
+    return list((await db.execute(stmt)).scalars().all())
+
+
 async def get_course_outcome(db: AsyncSession, outcome_id: UUID) -> CourseLearningOutcome | None:
     return await db.get(CourseLearningOutcome, outcome_id)
 

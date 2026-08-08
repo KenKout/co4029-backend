@@ -617,15 +617,53 @@ async def delete_course_outcome(
     outcome_id: UUID,
     current_user: Annotated[CurrentUser, Depends(_REQUIRE_OUTCOME)],
     db: Annotated[AsyncSession, Depends(get_db)],
+    promote_children: bool = False,
 ) -> None:
-    """Soft-delete an outcome and compact positions to 1..N (§LO-2)."""
+    """Soft-delete an outcome and compact positions to 1..N (§LO-2).
+
+    ``promote_children=true`` keeps the outcome's immediate children,
+    re-parenting them onto the outcome's own parent, instead of cascading
+    the delete down the whole subtree.
+    """
     try:
-        await authoring_service.delete_course_outcome(db, course_id, outcome_id, current_user)
+        await authoring_service.delete_course_outcome(
+            db,
+            course_id,
+            outcome_id,
+            current_user,
+            promote_children=promote_children,
+        )
     except NotFoundError as exc:
         raise _not_found(str(exc)) from exc
     except ConflictError as exc:
         raise _conflict(str(exc)) from exc
     await db.commit()
+
+
+@router.post(
+    "/courses/{course_id}/outcomes/{outcome_id}/duplicate",
+    response_model=CourseLearningOutcomeAuthoring,
+    status_code=status.HTTP_201_CREATED,
+)
+async def duplicate_course_outcome(
+    course_id: UUID,
+    outcome_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_OUTCOME)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> CourseLearningOutcomeAuthoring:
+    """Deep-copy an outcome (and its subtree) as its next sibling (§LO)."""
+    try:
+        outcome = await authoring_service.duplicate_course_outcome(
+            db, course_id, outcome_id, current_user
+        )
+    except NotFoundError as exc:
+        raise _not_found(str(exc)) from exc
+    except ConflictError as exc:
+        raise _conflict(str(exc)) from exc
+    except AppError as exc:
+        raise _bad_request(str(exc)) from exc
+    await db.commit()
+    return outcome
 
 
 @router.put("/modules/{module_id}/prerequisites", response_model=ModuleAuthoring)

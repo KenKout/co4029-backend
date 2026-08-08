@@ -1338,8 +1338,8 @@ def _assert_outcomes_editable(course: Course) -> None:
         )
 
 
-def _project_outcomes(
-    outcomes: list[CourseLearningOutcome],
+async def _project_outcomes(
+    db: AsyncSession, course_id: UUID, outcomes: list[CourseLearningOutcome]
 ) -> list[CourseLearningOutcomeAuthoring]:
     """Validate ORM rows into authoring DTOs with derived code + depth.
 
@@ -1349,12 +1349,16 @@ def _project_outcomes(
     can render the list top-to-bottom without re-sorting.
     """
     code_map = authoring_queries.build_outcome_code_map(outcomes)
+    question_counts = await authoring_queries.count_questions_mapped_to_outcomes(
+        db, course_id, {o.id for o in outcomes}
+    )
     dtos: dict[UUID, CourseLearningOutcomeAuthoring] = {}
     for o in outcomes:
         dto = CourseLearningOutcomeAuthoring.model_validate(o)
         code, depth = code_map.get(o.id, (str(o.position), 0))
         dto.code = code
         dto.depth = depth
+        dto.question_count = question_counts.get(o.id, 0)
         dtos[o.id] = dto
 
     # Tree order: sort by the dotted code split into ints so 1.2 < 1.10.
@@ -1364,8 +1368,11 @@ def _project_outcomes(
     return sorted(dtos.values(), key=sort_key)
 
 
-def _project_one(
-    outcomes: list[CourseLearningOutcome], outcome_id: UUID
+async def _project_one(
+    db: AsyncSession,
+    course_id: UUID,
+    outcomes: list[CourseLearningOutcome],
+    outcome_id: UUID,
 ) -> CourseLearningOutcomeAuthoring:
     """Project the whole course tree, then return the one DTO we care about.
 
@@ -1373,7 +1380,7 @@ def _project_one(
     derive the dotted code, since a code depends on the outcome's ancestor
     chain and sibling positions.
     """
-    for dto in _project_outcomes(outcomes):
+    for dto in await _project_outcomes(db, course_id, outcomes):
         if dto.id == outcome_id:
             return dto
     raise NotFoundError(f"Course outcome {outcome_id} not found")
@@ -1385,7 +1392,7 @@ async def list_course_outcomes(
     """All learning outcomes for a course in tree order with codes (§LO-1)."""
     await _require_course(db, course_id)
     outcomes = await authoring_queries.list_course_outcomes(db, course_id)
-    return _project_outcomes(outcomes)
+    return await _project_outcomes(db, course_id, outcomes)
 
 
 async def add_course_outcome(
@@ -1418,7 +1425,7 @@ async def add_course_outcome(
     db.add(outcome)
     await _flush_or_conflict(db)
     outcomes = await authoring_queries.list_course_outcomes(db, course_id)
-    return _project_one(outcomes, outcome.id)
+    return await _project_one(db, course_id, outcomes, outcome.id)
 
 
 async def update_course_outcome(
@@ -1428,22 +1435,34 @@ async def update_course_outcome(
     payload: CourseLearningOutcomeUpdate,
     actor: CurrentUser,
 ) -> CourseLearningOutcomeAuthoring:
-    """Edit text and/or re-parent an outcome (§LO-2).
+    """Edit text, re-parent and/or reorder an outcome (§LO-2).
 
     Re-parenting is guarded against cycles (an outcome may not become its
     own descendant, nor its own parent). When the parent changes, the
-    outcome is appended to the new parent's children and both the old and
-    new sibling groups are re-indexed so positions/codes stay contiguous.
+    outcome is inserted at ``position`` (default: append) among the new
+    parent's children and both the old and new sibling groups are
+    re-indexed so positions/codes stay contiguous.
+
+    Reordering without re-parenting (``position`` set, ``parent_id``
+    unchanged) slides the outcome to that 1-based slot among its existing
+    siblings — the outliner's "drop between rows" maps to this directly.
+
+    The dotted ``L.O.x.y`` code is display-only and derived at read time,
+    so a reorder merely changes what the code renders as; the outcome's
+    UUID identity never changes. External references key on the id.
     """
     del actor
     course = await _require_course(db, course_id)
     _assert_outcomes_editable(course)
     outcome = await _require_outcome(db, course_id, outcome_id)
     reparenting = "parent_id" in payload.model_fields_set
+    reordering = "position" in payload.model_fields_set
     new_parent_id = payload.parent_id if reparenting else outcome.parent_id
     old_parent_id = outcome.parent_id
 
-    if reparenting and new_parent_id != old_parent_id:
+    moved = reparenting and new_parent_id != old_parent_id
+
+    if moved:
         if new_parent_id is not None:
             if new_parent_id == outcome_id:
                 raise AppError("An outcome cannot be its own parent")
@@ -1455,50 +1474,208 @@ async def update_course_outcome(
             if new_parent_id in descendants.get(outcome_id, set()):
                 raise AppError("Cannot move an outcome under one of its own descendants")
         outcome.parent_id = new_parent_id
-        outcome.position = await authoring_queries.next_course_outcome_position(
-            db, course_id, new_parent_id
-        )
 
     if payload.outcome_text is not None:
         outcome.outcome_text = payload.outcome_text
 
-    await _flush_or_conflict(db)
+    # Apply the target slot: either explicit (reorder/reparent-with-slot)
+    # or append at the end of the (possibly new) sibling group.
+    if reordering or moved:
+        if payload.position is not None:
+            target_position = payload.position
+        else:
+            target_position = await authoring_queries.next_course_outcome_position(
+                db, course_id, new_parent_id
+            )
+        # Remove the outcome from its current sibling list, then insert at
+        # the target slot (1-based, clamped). This handles all four cases —
+        # move within same parent, move into a new parent, append, and
+        # move with no explicit slot — without double-counting the outcome.
+        siblings = [
+            o
+            for o in await authoring_queries.list_course_outcome_siblings(
+                db, course_id, new_parent_id
+            )
+            if o.id != outcome_id
+        ]
+        insert_at = max(1, min(target_position, len(siblings) + 1))
+        siblings.insert(insert_at - 1, outcome)
+        # Two-phase offset shift (same pattern as
+        # reindex_course_outcome_siblings): a plain 1..N renumber in place
+        # trips the per-parent unique constraint mid-update.
+        for idx, sibling in enumerate(siblings, start=1):
+            sibling.position = _OFFSET + idx
+        await _flush_or_conflict(db)
+        for pos, sibling in enumerate(siblings, start=1):
+            sibling.position = pos
+        await _flush_or_conflict(db)
 
-    if reparenting and new_parent_id != old_parent_id:
+    if moved:
         # Old siblings gapped by the move; compact them.
         await authoring_queries.reindex_course_outcome_siblings(db, course_id, old_parent_id)
         await _flush_or_conflict(db)
 
     outcomes = await authoring_queries.list_course_outcomes(db, course_id)
-    return _project_one(outcomes, outcome_id)
+    return await _project_one(db, course_id, outcomes, outcome_id)
 
 
 async def delete_course_outcome(
-    db: AsyncSession, course_id: UUID, outcome_id: UUID, actor: CurrentUser
+    db: AsyncSession,
+    course_id: UUID,
+    outcome_id: UUID,
+    actor: CurrentUser,
+    *,
+    promote_children: bool = False,
 ) -> None:
-    """Soft-delete an outcome + its whole subtree, then compact siblings (§LO-2).
+    """Soft-delete an outcome, then compact siblings (§LO-2).
 
-    Deleting a parent removes its descendants too (soft-delete cascade over
-    the subtree) so no child is orphaned to a dangling parent. The FK on
-    ``quiz_questions.learning_outcome_id`` is ``ON DELETE SET NULL`` but
-    fires only on hard DELETE; we soft-delete, so questions keep pointing
-    at the now-deleted rows. That's benign: the projection layer treats a
-    soft-deleted / missing outcome as "no outcome". Surviving siblings of
-    the removed node are re-indexed so codes never gap.
+    Default: the outcome's whole subtree goes with it (soft-delete cascade),
+    so no child is orphaned to a dangling parent. With ``promote_children``,
+    the outcome's immediate children are re-parented onto the outcome's own
+    parent (their relative order preserved) before the outcome is deleted —
+    the outliner's "keep children" delete. Deeper descendants stay nested
+    under their (promoted) parents.
+
+    The FK on ``quiz_questions.learning_outcome_id`` is ``ON DELETE SET
+    NULL`` but fires only on hard DELETE; we soft-delete, so questions keep
+    pointing at the now-deleted rows. That's benign: the projection layer
+    treats a soft-deleted / missing outcome as "no outcome", and the
+    question count shown in the confirmation UI tells the teacher exactly
+    which questions lose their mapping. Surviving siblings of the removed
+    node are re-indexed so codes never gap.
     """
     course = await _require_course(db, course_id)
     _assert_outcomes_editable(course)
     outcome = await _require_outcome(db, course_id, outcome_id)
     parent_id = outcome.parent_id
-    # Soft-delete the whole subtree (deepest first) so children aren't
-    # orphaned. Resolve the subtree from the current tree snapshot.
     all_outcomes = await authoring_queries.list_course_outcomes(db, course_id)
     descendants = authoring_queries.build_descendant_map(all_outcomes)
     by_id = {o.id: o for o in all_outcomes}
-    to_delete = [outcome, *(by_id[d] for d in descendants.get(outcome_id, set()) if d in by_id)]
-    for node in to_delete:
-        await soft_delete_cascade(db, node, actor_id=actor.user_id)
-    await authoring_queries.reindex_course_outcome_siblings(db, course_id, parent_id)
+    children = sorted(
+        (
+            by_id[d]
+            for d in descendants.get(outcome_id, set())
+            if d in by_id and by_id[d].parent_id == outcome_id
+        ),
+        key=lambda o: o.position,
+    )
+
+    if promote_children and children:
+        # Re-parent immediate children onto our parent, preserving their
+        # sibling order, then delete just this node. The children take the
+        # parent's own slot among the siblings — that is what "keep the
+        # children" means in an outliner (Workflowy/Notion promote in place).
+        # Positions collide across groups (a child's old 1..N and the
+        # parent's existing 1..N live in the SAME per-parent sequence once
+        # re-parented), so the whole target sibling group is offset together,
+        # then renumbered 1..N.
+        target_siblings = await authoring_queries.list_course_outcome_siblings(
+            db, course_id, parent_id
+        )
+        merged = []
+        inserted = False
+        for sibling in target_siblings:
+            if sibling.id == outcome_id:
+                merged.extend(children)
+                inserted = True
+            else:
+                merged.append(sibling)
+        if not inserted:
+            merged.extend(children)
+        for child in children:
+            child.parent_id = parent_id
+        for idx, sibling in enumerate(merged, start=1):
+            sibling.position = _OFFSET + idx
+        await _flush_or_conflict(db)
+        # Drop the parent BEFORE renumbering: it still occupies its old slot
+        # in this sibling group, and a 1..N renumber would collide with it.
+        await soft_delete_cascade(db, outcome, actor_id=actor.user_id)
+        await _flush_or_conflict(db)
+        for pos, sibling in enumerate(merged, start=1):
+            sibling.position = pos
+        await _flush_or_conflict(db)
+    else:
+        to_delete = [
+            outcome,
+            *(by_id[d] for d in descendants.get(outcome_id, set()) if d in by_id),
+        ]
+        for node in to_delete:
+            await soft_delete_cascade(db, node, actor_id=actor.user_id)
+        await authoring_queries.reindex_course_outcome_siblings(db, course_id, parent_id)
+
+
+async def duplicate_course_outcome(
+    db: AsyncSession,
+    course_id: UUID,
+    outcome_id: UUID,
+    actor: CurrentUser,
+) -> CourseLearningOutcomeAuthoring:
+    """Deep-copy an outcome and its subtree, inserted after the original (§LO).
+
+    The copy gets fresh UUIDs at every node, is inserted as the original's
+    next sibling (same parent, position = original + 1), and reuses the
+    exact outcome_text of each node. Question mappings are NOT copied —
+    questions reference outcomes by id, and a duplicate with the same
+    questions would double-grade; the teacher re-maps after duplicating.
+    """
+    del actor
+    course = await _require_course(db, course_id)
+    _assert_outcomes_editable(course)
+    source = await _require_outcome(db, course_id, outcome_id)
+    all_outcomes = await authoring_queries.list_course_outcomes(db, course_id)
+    descendants = authoring_queries.build_descendant_map(all_outcomes)
+    by_id = {o.id: o for o in all_outcomes}
+
+    # Map old id -> new ORM row (created but not yet added), preserving the
+    # subtree shape: parent references are remapped through the map.
+    new_by_old: dict[UUID, CourseLearningOutcome] = {}
+
+    def clone(node: CourseLearningOutcome) -> CourseLearningOutcome:
+        new_id = uuid4()
+        new_row = CourseLearningOutcome(
+            id=new_id,
+            course_id=course_id,
+            parent_id=None,  # remapped below by the caller
+            # Offset immediately: the copy shares its parent's position
+            # space, and the first flush must not trip the per-parent
+            # unique constraint before the re-slot below runs.
+            position=node.position + _OFFSET,
+            outcome_text=node.outcome_text,
+        )
+        new_by_old[node.id] = new_row
+        for child_id in sorted(descendants.get(node.id, set())):
+            child = by_id[child_id]
+            if child.parent_id == node.id:
+                clone(child)
+        return new_row
+
+    root_clone = clone(source)
+    # Remap parents through the clone map (topological: children cloned
+    # after parents, so new_by_old is fully populated).
+    for old_id, new_row in new_by_old.items():
+        old_row = by_id[old_id]
+        new_parent = new_by_old.get(old_row.parent_id) if old_row.parent_id else None
+        new_row.parent_id = new_parent.id if new_parent else None
+
+    # Position the root copy right after the original among its siblings.
+    siblings = await authoring_queries.list_course_outcome_siblings(
+        db, course_id, source.parent_id
+    )
+    insert_at = next((i for i, s in enumerate(siblings) if s.id == source.id), len(siblings)) + 1
+    db.add_all(new_by_old.values())
+    await _flush_or_conflict(db)
+    # Re-slot the whole sibling chain including the copy (offset-shift
+    # dodges the unique constraint, same as reindex_course_outcome_siblings).
+    all_siblings = await authoring_queries.list_course_outcome_siblings(
+        db, course_id, source.parent_id
+    )
+    all_siblings.insert(insert_at, root_clone)
+    for pos, sibling in enumerate(all_siblings, start=1):
+        sibling.position = pos
+    await _flush_or_conflict(db)
+
+    outcomes = await authoring_queries.list_course_outcomes(db, course_id)
+    return await _project_one(db, course_id, outcomes, root_clone.id)
 
 
 __all__ = [
@@ -1511,6 +1688,7 @@ __all__ = [
     "create_course",
     "delete_course_outcome",
     "delete_lesson_resource",
+    "duplicate_course_outcome",
     "delete_module_item",
     "get_authoring_content",
     "get_authoring_course",

@@ -2245,3 +2245,259 @@ async def test_manager_creating_a_course_is_not_auto_assigned_or_notified(
                 {"cid": course_id},
             )
             await conn.execute(text("DELETE FROM courses WHERE id = :cid"), {"cid": course_id})
+
+
+async def _fresh_draft_course(
+    engine: AsyncEngine,
+    seeded_users: SeededUsers,
+) -> tuple[str, str]:
+    """Create a throwaway draft course + its outcomes base URL.
+
+    Inserted via SQL, not the API: the seeded admin fixture has no org
+    membership, so ``POST /teacher/courses`` 400s for it. The shared seeded
+    course_a also gets published (one-way door) by
+    ``test_course_outcomes_frozen_once_published``, so LO mutation tests must
+    not depend on it staying a draft — they create their own course instead
+    and delete it in ``finally``.
+    """
+    course_id = uuid.uuid4()
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO courses (id, organization_id, owner_user_id, slug, title, status) "
+                "VALUES (:id, :org, :owner, :slug, 'LO Outliner Test', 'draft')"
+            ),
+            {
+                "id": course_id,
+                "org": seeded_users.organization_id,
+                "owner": seeded_users.admin_id,
+                "slug": f"lo-out-{course_id.hex[:8]}",
+            },
+        )
+    return str(course_id), f"/api/v1/teacher/courses/{course_id}/outcomes"
+
+
+async def _delete_course_hard(engine: AsyncEngine, course_id: str) -> None:
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("DELETE FROM course_learning_outcomes WHERE course_id = :cid"),
+            {"cid": course_id},
+        )
+        await conn.execute(
+            text("DELETE FROM user_role_assignments WHERE course_id = :cid"),
+            {"cid": course_id},
+        )
+        await conn.execute(text("DELETE FROM courses WHERE id = :cid"), {"cid": course_id})
+
+
+async def test_course_outcome_reorder_within_siblings(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    engine: AsyncEngine,
+    seeded_users: SeededUsers,
+) -> None:
+    """PATCH position moves an outcome to a 1-based slot among its siblings.
+
+    The outliner's "drop between rows 3 and 4" maps to position=4. Codes are
+    derived from positions at read time, so the display code follows the move
+    while the UUID identity stays put.
+    """
+    auth = {"Authorization": f"Bearer {admin_bearer}"}
+    course_id, base = await _fresh_draft_course(engine, seeded_users)
+    try:
+        created: list[dict[str, object]] = []
+        for text_val in ("One", "Two", "Three"):
+            resp = await client.post(base, json={"outcome_text": text_val}, headers=auth)
+            assert resp.status_code == 201, resp.text
+            created.append(resp.json())
+
+        # Move "Three" (position 3) to slot 1.
+        three_id = created[2]["id"]
+        moved = await client.patch(
+            f"{base}/{three_id}", json={"position": 1}, headers=auth
+        )
+        assert moved.status_code == 200, moved.text
+        assert moved.json()["position"] == 1
+        assert moved.json()["code"] == "1"
+
+        listed = (await client.get(base, headers=auth)).json()
+        assert [o["outcome_text"] for o in listed] == ["Three", "One", "Two"]
+        assert [o["position"] for o in listed] == [1, 2, 3]
+
+        # Reparent with an explicit slot: nest "One" under "Three" at slot 1.
+        one_id = created[0]["id"]
+        nested = await client.patch(
+            f"{base}/{one_id}",
+            json={"parent_id": three_id, "position": 2},
+            headers=auth,
+        )
+        assert nested.status_code == 200, nested.text
+        assert nested.json()["parent_id"] == str(three_id)
+        assert nested.json()["code"] == "1.1"
+        assert nested.json()["depth"] == 1
+
+        listed = (await client.get(base, headers=auth)).json()
+        assert [(o["outcome_text"], o["code"]) for o in listed] == [
+            ("Three", "1"),
+            ("One", "1.1"),
+            ("Two", "2"),
+        ]
+    finally:
+        await _delete_course_hard(engine, course_id)
+
+
+async def test_course_outcome_delete_promotes_children(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    engine: AsyncEngine,
+    seeded_users: SeededUsers,
+) -> None:
+    """promote_children=true keeps the kids, re-parenting them to the parent's
+    level, instead of cascading the delete down the subtree."""
+    auth = {"Authorization": f"Bearer {admin_bearer}"}
+    course_id, base = await _fresh_draft_course(engine, seeded_users)
+    try:
+        root = (await client.post(base, json={"outcome_text": "Root"}, headers=auth)).json()
+        child_a = (
+            await client.post(
+                base, json={"outcome_text": "Child A", "parent_id": root["id"]}, headers=auth
+            )
+        ).json()
+        await client.post(
+            base, json={"outcome_text": "Child B", "parent_id": root["id"]}, headers=auth
+        )
+        await client.post(
+            base,
+            json={"outcome_text": "Grandchild", "parent_id": child_a["id"]},
+            headers=auth,
+        )
+        await client.post(base, json={"outcome_text": "Sibling"}, headers=auth)
+
+        del_resp = await client.delete(
+            f"{base}/{root['id']}?promote_children=true", headers=auth
+        )
+        assert del_resp.status_code == 204, del_resp.text
+
+        listed = (await client.get(base, headers=auth)).json()
+        assert [(o["outcome_text"], o["code"], o["depth"]) for o in listed] == [
+            ("Child A", "1", 0),
+            ("Grandchild", "1.1", 1),
+            ("Child B", "2", 0),
+            ("Sibling", "3", 0),
+        ]
+    finally:
+        await _delete_course_hard(engine, course_id)
+
+
+async def test_course_outcome_delete_cascades_by_default(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    engine: AsyncEngine,
+    seeded_users: SeededUsers,
+) -> None:
+    """Without promote_children the whole subtree goes (legacy behaviour)."""
+    auth = {"Authorization": f"Bearer {admin_bearer}"}
+    course_id, base = await _fresh_draft_course(engine, seeded_users)
+    try:
+        root = (await client.post(base, json={"outcome_text": "Root"}, headers=auth)).json()
+        await client.post(
+            base, json={"outcome_text": "Kid", "parent_id": root["id"]}, headers=auth
+        )
+
+        del_resp = await client.delete(f"{base}/{root['id']}", headers=auth)
+        assert del_resp.status_code == 204, del_resp.text
+        listed = (await client.get(base, headers=auth)).json()
+        assert listed == []
+    finally:
+        await _delete_course_hard(engine, course_id)
+
+
+async def test_course_outcome_duplicate_deep_copies_subtree(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    engine: AsyncEngine,
+    seeded_users: SeededUsers,
+) -> None:
+    """Duplicate copies the subtree with fresh ids, inserted after the original."""
+    auth = {"Authorization": f"Bearer {admin_bearer}"}
+    course_id, base = await _fresh_draft_course(engine, seeded_users)
+    try:
+        root = (await client.post(base, json={"outcome_text": "Root"}, headers=auth)).json()
+        child = (
+            await client.post(
+                base, json={"outcome_text": "Kid", "parent_id": root["id"]}, headers=auth
+            )
+        ).json()
+
+        dup = await client.post(f"{base}/{root['id']}/duplicate", headers=auth)
+        assert dup.status_code == 201, dup.text
+        assert dup.json()["outcome_text"] == "Root"
+        assert dup.json()["id"] != root["id"]
+
+        listed = (await client.get(base, headers=auth)).json()
+        assert [(o["outcome_text"], o["code"]) for o in listed] == [
+            ("Root", "1"),
+            ("Kid", "1.1"),
+            ("Root", "2"),
+            ("Kid", "2.1"),
+        ]
+        assert listed[2]["id"] == dup.json()["id"]
+        assert listed[3]["id"] != child["id"]
+        assert listed[3]["parent_id"] == listed[2]["id"]
+    finally:
+        await _delete_course_hard(engine, course_id)
+
+
+async def test_course_outcome_question_count_surfaces_mappings(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    engine: AsyncEngine,
+    seeded_users: SeededUsers,
+) -> None:
+    """question_count tells the delete dialog exactly which outcomes have
+    quiz questions mapped, so the confirmation can say "will lose mapping"."""
+    auth = {"Authorization": f"Bearer {admin_bearer}"}
+    course_id, base = await _fresh_draft_course(engine, seeded_users)
+    quiz_id, module_id = uuid.uuid4(), uuid.uuid4()
+    try:
+        out = (await client.post(base, json={"outcome_text": "Mapped"}, headers=auth)).json()
+        await client.post(base, json={"outcome_text": "Plain"}, headers=auth)
+
+        async with engine.begin() as conn:
+            await conn.execute(
+                text(
+                    "INSERT INTO modules (id, course_id, title, position, status) "
+                    "VALUES (:id, :cid, 'M', 1, 'published')"
+                ),
+                {"id": module_id, "cid": course_id},
+            )
+            await conn.execute(
+                text(
+                    "INSERT INTO quizzes (id, course_id, module_id, title, status) "
+                    "VALUES (:id, :cid, :mid, 'Q', 'published')"
+                ),
+                {"id": quiz_id, "cid": course_id, "mid": module_id},
+            )
+            await conn.execute(
+                text(
+                    "INSERT INTO quiz_questions "
+                    "(id, quiz_id, position, question_type, prompt_text, learning_outcome_id, "
+                    "review_status) "
+                    "VALUES (:id, :qid, 1, 'multiple_choice', 'P?', :loid, 'approved')"
+                ),
+                {"id": uuid.uuid4(), "qid": quiz_id, "loid": out["id"]},
+            )
+
+        listed = (await client.get(base, headers=auth)).json()
+        by_text = {o["outcome_text"]: o["question_count"] for o in listed}
+        assert by_text["Mapped"] == 1
+        assert by_text["Plain"] == 0
+    finally:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("DELETE FROM quiz_questions WHERE quiz_id = :qid"),
+                {"qid": quiz_id},
+            )
+            await conn.execute(text("DELETE FROM quizzes WHERE id = :id"), {"id": quiz_id})
+            await conn.execute(text("DELETE FROM modules WHERE id = :id"), {"id": module_id})
+        await _delete_course_hard(engine, course_id)
