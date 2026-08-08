@@ -156,23 +156,37 @@ async def add_course_to_path(
     satisfied_by: str = "completion",
     actor: CurrentUser,
 ) -> CareerPathCourseAuthoring:
-    """Attach a published course to ONE stage of the path.
+    """Attach a course to ONE stage of the path.
 
     No enrollee backfill: under Pattern B (lazy enrollment) adding a required
     course to a path must not silently create course enrollments for everyone
     already on it. Students pick it up via the Start endpoint when its stage
     is unlocked for them. The eager fan-out that used to live here was
     removed with ``_autoenroll_required_courses``.
+
+    The published-course requirement applies ONLY to published paths: a draft
+    path has no enrolled students, so a draft/archived course cannot break
+    anything there — it lets the manager build the skeleton and slot draft
+    courses into stages before the path goes live. The publish gate
+    (``stage_course_not_published``) re-checks every link when the path is
+    published, so no integrity is lost on a live path.
     """
     del actor
     path = await _require_path(db, career_path_id)
     stage = await authoring_queries.get_stage(db, stage_id)
     if stage is None or stage.career_path_id != career_path_id:
         raise NotFoundError(f"Stage {stage_id} not found in career path {career_path_id}")
-    if not await authoring_queries.course_is_published_in_org(db, course_id, path.organization_id):
+    if not await authoring_queries.course_belongs_to_org(db, course_id, path.organization_id):
         raise AppError(
-            f"Course {course_id} does not belong to organization {path.organization_id} "
-            "or is not published — only published courses of this organization can be attached"
+            f"Course {course_id} does not belong to organization {path.organization_id} — "
+            "only courses of this organization can be attached"
+        )
+    if path.status == "published" and not await authoring_queries.course_is_published_in_org(
+        db, course_id, path.organization_id
+    ):
+        raise AppError(
+            f"Course {course_id} is not published — only published courses can be "
+            "attached to a published career path"
         )
     existing = await authoring_queries.get_path_course_link(db, career_path_id, course_id)
     if existing is not None:

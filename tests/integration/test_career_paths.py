@@ -707,15 +707,18 @@ async def test_create_career_path_duplicate_slug_returns_409(
             await conn.execute(text("DELETE FROM career_paths WHERE id = :id"), {"id": created_id})
 
 
-async def test_add_unpublished_course_to_path_is_rejected(
+async def test_add_unpublished_course_to_published_path_is_rejected(
     client: httpx.AsyncClient,
     manager_bearer: str,
     scenario: dict[str, object],
     engine: AsyncEngine,
 ) -> None:
-    """A draft course must not be attachable to a career path — the path is a
-    published surface and an invisible item would never appear for students
-    (guard on ``course.status == 'published'`` in add_course_to_path)."""
+    """A draft course must not be attachable to a PUBLISHED path — the path is
+    a live surface and an invisible item would never appear for students
+    (guard on ``path.status == 'published'`` in add_course_to_path). Draft
+    paths have no enrollees, so they may hold draft courses while the
+    manager builds the skeleton; the publish gate re-checks every link.
+    """
     suffix = uuid.uuid4().hex[:6]
     auth = {"Authorization": f"Bearer {manager_bearer}"}
 
@@ -738,7 +741,27 @@ async def test_add_unpublished_course_to_path_is_rejected(
     fresh_stage_id = stage_resp.json()["id"]
 
     try:
-        # Draft course -> rejected (409 AppError).
+        # The publish gate requires >= 1 course per stage, so seed the stage
+        # with a published course first (legal on the draft path), then take
+        # the path live.
+        seed = await client.post(
+            f"/api/v1/management/career-paths/{fresh_path_id}/courses",
+            json={
+                "stage_id": fresh_stage_id,
+                "course_id": str(scenario["pub_a_id"]),
+                "is_required": True,
+            },
+            headers=auth,
+        )
+        assert seed.status_code == 201, seed.text
+
+        pub = await client.post(
+            f"/api/v1/management/career-paths/{fresh_path_id}/publish",
+            headers=auth,
+        )
+        assert pub.status_code == 200, pub.text
+
+        # Draft course on the now-published path -> rejected (409 AppError).
         reject = await client.post(
             f"/api/v1/management/career-paths/{fresh_path_id}/courses",
             json={
@@ -753,19 +776,19 @@ async def test_add_unpublished_course_to_path_is_rejected(
         assert detail["error"] == "conflict"
         assert "not published" in detail["message"]
 
-        # Published course -> accepted.
+        # Published course -> still accepted.
         ok = await client.post(
             f"/api/v1/management/career-paths/{fresh_path_id}/courses",
             json={
                 "stage_id": fresh_stage_id,
-                "course_id": str(scenario["pub_a_id"]),
+                "course_id": str(scenario["pub_b_id"]),
                 "is_required": True,
             },
             headers=auth,
         )
         assert ok.status_code == 201, ok.text
 
-        # And the draft was never attached.
+        # And the draft was never attached — only the two published courses.
         async with engine.begin() as conn:
             rows = (
                 (
@@ -779,7 +802,74 @@ async def test_add_unpublished_course_to_path_is_rejected(
                 .scalars()
                 .all()
             )
-        assert [str(r) for r in rows] == [str(scenario["pub_a_id"])]
+        assert sorted(str(r) for r in rows) == sorted(
+            [str(scenario["pub_a_id"]), str(scenario["pub_b_id"])]
+        )
+    finally:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("DELETE FROM career_course_items WHERE career_path_id = :pid"),
+                {"pid": fresh_path_id},
+            )
+            await conn.execute(
+                text("DELETE FROM career_path_stages WHERE career_path_id = :pid"),
+                {"pid": fresh_path_id},
+            )
+            await conn.execute(
+                text("DELETE FROM career_paths WHERE id = :id"), {"id": fresh_path_id}
+            )
+
+
+async def test_add_draft_course_to_draft_path_is_allowed(
+    client: httpx.AsyncClient,
+    manager_bearer: str,
+    scenario: dict[str, object],
+    engine: AsyncEngine,
+) -> None:
+    """A draft path may hold draft courses — no enrollees exist yet, so
+    nothing can break; the manager builds the skeleton before the path goes
+    live. The published-course requirement applies only to published paths.
+    """
+    suffix = uuid.uuid4().hex[:6]
+    auth = {"Authorization": f"Bearer {manager_bearer}"}
+
+    create_resp = await client.post(
+        "/api/v1/management/career-paths",
+        json={"slug": f"draft-{suffix}", "name": "Draft Skeleton Path"},
+        headers=auth,
+    )
+    assert create_resp.status_code == 201, create_resp.text
+    fresh_path_id = create_resp.json()["id"]
+
+    stage_resp = await client.post(
+        f"/api/v1/management/career-paths/{fresh_path_id}/stages",
+        json={"title": "Stage 1", "unlock_policy": "always"},
+        headers=auth,
+    )
+    assert stage_resp.status_code == 201, stage_resp.text
+    fresh_stage_id = stage_resp.json()["id"]
+
+    try:
+        ok = await client.post(
+            f"/api/v1/management/career-paths/{fresh_path_id}/courses",
+            json={
+                "stage_id": fresh_stage_id,
+                "course_id": str(scenario["draft_id"]),
+                "is_required": True,
+            },
+            headers=auth,
+        )
+        assert ok.status_code == 201, ok.text
+
+        # Publishing the path now must fail: the stage holds a draft course
+        # (the publish gate's completeness check, not the mutation guard).
+        pub = await client.post(
+            f"/api/v1/management/career-paths/{fresh_path_id}/publish",
+            headers=auth,
+        )
+        assert pub.status_code == 400, pub.text
+        body = pub.json()["detail"]
+        assert "not a published course" in body["message"]
     finally:
         async with engine.begin() as conn:
             await conn.execute(
