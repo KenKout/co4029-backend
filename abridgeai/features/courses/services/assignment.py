@@ -16,6 +16,7 @@ T1.10 admin", which is the soft-revoke.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
 
@@ -29,11 +30,18 @@ from abridgeai.features.courses.queries import (
 )
 from abridgeai.features.courses.schemas import CourseAuthoring, InstructorAuthoring, InstructorRead
 from abridgeai.features.courses.services import notify
+from abridgeai.infrastructure.s3 import create_stream_url
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
     from abridgeai.features.courses.models import Course
+
+
+@dataclass
+class _StorageTarget:
+    bucket: str
+    object_key: str
 
 
 async def assign_teacher_to_course(
@@ -288,6 +296,11 @@ async def _attach_health_projections(
     list_instructors_for_courses` (owner profile block) — the same no-N+1
     pattern the "My courses" grid uses. Courses whose owner has no profile
     keep ``instructor=None`` so the SPA can render an "Unassigned" chip.
+
+    Instructors with an avatar get a presigned ``avatar_url`` minted here
+    (mirrors the public catalog path). The sign call is local-only (no
+    network/DB round-trip), so per-instructor minting does not reintroduce
+    N+1; a storage blip degrades to initials rather than failing the list.
     """
     counts = await authoring_queries.count_students_and_modules_for_courses(
         db, [c.id for c in courses]
@@ -301,6 +314,18 @@ async def _attach_health_projections(
         dto.module_count = modules
         instructor_data = instructors.get(orm.id)
         if instructor_data is not None:
+            bucket = instructor_data.pop("avatar_bucket", None)
+            object_key = instructor_data.pop("avatar_object_key", None)
+            avatar_url: str | None = None
+            if bucket and object_key:
+                try:
+                    url, _ = await create_stream_url(
+                        _StorageTarget(bucket=bucket, object_key=object_key)
+                    )
+                    avatar_url = url
+                except Exception:  # noqa: BLE001 — a storage blip must not break the list
+                    avatar_url = None
+            instructor_data["avatar_url"] = avatar_url
             dto.instructor = InstructorAuthoring.model_validate(instructor_data)
 
 

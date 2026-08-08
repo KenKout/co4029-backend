@@ -91,9 +91,8 @@ async def list_instructors_for_courses(
     Returns ``{course_id: {user_id, display_name, primary_email, headline,
     avatar_bucket, avatar_object_key}}`` for courses whose owner has a
     ``user_profiles`` row; courses with no owner profile are absent (caller
-    leaves ``instructor=None``). ``avatar_url`` is NOT minted here — the
-    presigned URL is per-instructor N+1 work the worklist does not need (the
-    SPA falls back to initials).
+    leaves ``instructor=None``). The service layer mints the presigned
+    ``avatar_url`` from the bucket/key — this query stays DB-only.
     """
     if not course_ids:
         return {}
