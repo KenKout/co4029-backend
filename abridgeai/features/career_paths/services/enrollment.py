@@ -416,6 +416,8 @@ async def start_course_in_path(
         created=created,
         over_concurrency_cap=cap is not None and active_in_path > cap,
         stage_locked_warning=stage_locked_warning,
+        active_in_path=active_in_path,
+        max_concurrent=cap,
     )
 
 

@@ -4,10 +4,15 @@
 -- the table is currently filtered by, and stay exact even when the window
 -- holds more jobs than the list endpoint's row cap.
 -- :since -- timestamptz lower bound on updated_at (required to bound the scan).
+-- :until -- timestamptz upper bound on updated_at (optional; NULL = no upper bound).
 WITH combined AS (
-    SELECT status FROM processing_jobs WHERE updated_at >= CAST(:since AS timestamptz)
+    SELECT status FROM processing_jobs
+    WHERE updated_at >= CAST(:since AS timestamptz)
+      AND (CAST(:until AS timestamptz) IS NULL OR updated_at <= CAST(:until AS timestamptz))
     UNION ALL
-    SELECT status FROM generation_runs WHERE updated_at >= CAST(:since AS timestamptz)
+    SELECT status FROM generation_runs
+    WHERE updated_at >= CAST(:since AS timestamptz)
+      AND (CAST(:until AS timestamptz) IS NULL OR updated_at <= CAST(:until AS timestamptz))
 )
 SELECT
     SUM(CASE WHEN status = 'pending'   THEN 1 ELSE 0 END) AS pending_count,

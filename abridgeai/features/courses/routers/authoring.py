@@ -98,10 +98,52 @@ _ALLOWED_OUTLINE_ROLES: frozenset[str] = frozenset({"body", "summary", "review",
 
 router = APIRouter(prefix="/teacher", tags=["courses-authoring"])
 
+
+async def get_arq_pool() -> object | None:
+    """ARQ Redis pool dependency (email dispatch).
+
+    Returns ``None`` until the app factory overrides it with a real
+    ``ArqRedis`` pool; the notification path accepts ``None`` and simply skips
+    the email enqueue (the in-app notification is still written). Mirrors the
+    identical dependency in the assignment / materials / quizzes routers.
+
+    NOTE: the override in ``abridgeai.api`` is keyed on this function's
+    IDENTITY, so a new dependency here is inert until it is registered there
+    too — the in-app notification would still be written, but the email would
+    silently never send.
+    """
+    return None
+
+
 _REQUIRE_CREATE = require_permission("course.create")
 _REQUIRE_AUTHORING_LIST = require_any_permission("course.read.draft", "course.create")
 _REQUIRE_COURSE_UPDATE = require_course_permission("course_id", "course.update")
 _REQUIRE_COURSE_PUBLISH = require_course_permission("course_id", "course.publish")
+
+# Fields on CourseUpdate a TEACHER (course.update) may patch: the course
+# description, the study-time estimate, and their own contact details.
+# User decision 2026-08-06.
+_TEACHER_PATCHABLE_COURSE_FIELDS: frozenset[str] = frozenset(
+    {
+        "description",
+        "estimated_minutes",
+        "contact_email",
+        "contact_phone",
+        "contact_website_url",
+        "contact_social_url",
+    }
+)
+
+# Everything else on CourseUpdate is manager-owned (needs course.delete):
+# title, slug, status, level, org_unit_id, thumbnail_object_id,
+# expected_completion_days, enrollment_cap.
+#
+# DERIVED from the schema rather than hand-listed, so a field added to
+# CourseUpdate later defaults to manager-only instead of silently becoming
+# teacher-writable — fail closed, not open.
+_MANAGER_ONLY_COURSE_FIELDS: frozenset[str] = (
+    frozenset(CourseUpdate.model_fields) - _TEACHER_PATCHABLE_COURSE_FIELDS
+)
 # Course deletion is manager-owned. ``allow_owner=False`` kills the ownership
 # short-circuit so a teacher who owns the course still cannot delete it —
 # ownership grants authoring access (course.update), NOT lifecycle control.
@@ -156,6 +198,7 @@ async def create_course(
     payload: CourseCreate,
     current_user: Annotated[CurrentUser, Depends(_REQUIRE_CREATE)],
     db: Annotated[AsyncSession, Depends(get_db)],
+    arq_pool: Annotated[object | None, Depends(get_arq_pool)] = None,
 ) -> CourseAuthoring:
     """Create a new course owned by the requesting principal.
 
@@ -164,7 +207,9 @@ async def create_course(
     :func:`require_course_permission`.
     """
     try:
-        course = await authoring_service.create_course(db, payload, current_user)
+        course = await authoring_service.create_course(
+            db, payload, current_user, arq_pool=arq_pool
+        )
     except ConflictError as exc:
         raise _conflict(str(exc)) from exc
     except AppError as exc:
@@ -296,15 +341,30 @@ async def update_course(
     current_user: Annotated[CurrentUser, Depends(_REQUIRE_COURSE_UPDATE)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> CourseAuthoring:
-    # Title/slug are course identity — manager-owned. A teacher (or a
-    # course-owning teacher via the owner short-circuit) may author content
-    # (course.update) but never rename the course; only ``course.delete``
-    # holders (manager/admin) change its identity. Checked before the patch
-    # so a mixed payload either fully applies or fully rejects.
-    if "title" in payload.model_fields_set or "slug" in payload.model_fields_set:
+    # Field ownership (user decision 2026-08-06). `course.update` is the
+    # CONTENT permission a teacher holds on a course assigned to them; it must
+    # not carry course identity, lifecycle, or delivery policy with it.
+    #
+    # Teacher may patch only: description, estimated_minutes and the four
+    # contact_* fields (their own contact details).
+    #
+    # Everything else needs `course.delete` (manager/admin). `status` in
+    # particular: without it a teacher could PATCH {"status": "published"} and
+    # publish their own course, bypassing the manager publish gate entirely —
+    # the POST /publish ROUTE is gated on `course.publish`, but this PATCH was
+    # not, so the gate had a hole straight through it.
+    #
+    # Checked before the patch so a mixed payload either fully applies or
+    # fully rejects.
+    manager_only = _MANAGER_ONLY_COURSE_FIELDS & payload.model_fields_set
+    if manager_only:
         course_perms = await load_course_permissions(db, current_user.user_id, course_id)
         if "course.delete" not in course_perms:
-            raise _forbidden("Only managers may change a course's title or slug.")
+            raise _forbidden(
+                "Only managers may change "
+                + ", ".join(sorted(manager_only))
+                + " on a course."
+            )
     try:
         course = await authoring_service.update_course(db, course_id, payload, current_user)
     except NotFoundError as exc:
@@ -319,7 +379,11 @@ async def update_course(
 async def upload_course_thumbnail(
     course_id: UUID,
     request: Request,
-    current_user: Annotated[CurrentUser, Depends(_REQUIRE_COURSE_UPDATE)],
+    # Manager-owned, matching `thumbnail_object_id` in the PATCH allow-list.
+    # Gating this on course.update would have left a side door: the teacher
+    # cannot set thumbnail_object_id via PATCH but could still replace the
+    # image by uploading through here.
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_COURSE_DELETE)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> CourseAuthoring:
     """Upload a course thumbnail image (JPEG/PNG/WebP/GIF, ≤ 5 MiB).
@@ -327,7 +391,8 @@ async def upload_course_thumbnail(
     The raw image bytes are sent as the request body with the image's MIME
     type in the ``Content-Type`` header (no multipart wrapper — matches the
     avatar upload pattern). Stores the image in object storage and points the
-    course at it. Requires ``course.update`` on the course.
+    course at it. Manager-owned: requires ``course.delete`` on the course,
+    the same gate as ``thumbnail_object_id`` in the PATCH allow-list.
     """
     data = await request.body()
     content_type = request.headers.get("content-type", "application/octet-stream")
@@ -360,6 +425,10 @@ async def publish_course(
         course = await authoring_service.publish_course(db, course_id, current_user)
     except NotFoundError as exc:
         raise _not_found(str(exc)) from exc
+    # ConflictError subclasses AppError, so it MUST be caught first or the
+    # gradeable-unit refusal degrades from 409 to a generic 400.
+    except ConflictError as exc:
+        raise _conflict(str(exc)) from exc
     except AppError as exc:
         raise _bad_request(str(exc)) from exc
     await db.commit()
@@ -548,15 +617,53 @@ async def delete_course_outcome(
     outcome_id: UUID,
     current_user: Annotated[CurrentUser, Depends(_REQUIRE_OUTCOME)],
     db: Annotated[AsyncSession, Depends(get_db)],
+    promote_children: bool = False,
 ) -> None:
-    """Soft-delete an outcome and compact positions to 1..N (§LO-2)."""
+    """Soft-delete an outcome and compact positions to 1..N (§LO-2).
+
+    ``promote_children=true`` keeps the outcome's immediate children,
+    re-parenting them onto the outcome's own parent, instead of cascading
+    the delete down the whole subtree.
+    """
     try:
-        await authoring_service.delete_course_outcome(db, course_id, outcome_id, current_user)
+        await authoring_service.delete_course_outcome(
+            db,
+            course_id,
+            outcome_id,
+            current_user,
+            promote_children=promote_children,
+        )
     except NotFoundError as exc:
         raise _not_found(str(exc)) from exc
     except ConflictError as exc:
         raise _conflict(str(exc)) from exc
     await db.commit()
+
+
+@router.post(
+    "/courses/{course_id}/outcomes/{outcome_id}/duplicate",
+    response_model=CourseLearningOutcomeAuthoring,
+    status_code=status.HTTP_201_CREATED,
+)
+async def duplicate_course_outcome(
+    course_id: UUID,
+    outcome_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_OUTCOME)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> CourseLearningOutcomeAuthoring:
+    """Deep-copy an outcome (and its subtree) as its next sibling (§LO)."""
+    try:
+        outcome = await authoring_service.duplicate_course_outcome(
+            db, course_id, outcome_id, current_user
+        )
+    except NotFoundError as exc:
+        raise _not_found(str(exc)) from exc
+    except ConflictError as exc:
+        raise _conflict(str(exc)) from exc
+    except AppError as exc:
+        raise _bad_request(str(exc)) from exc
+    await db.commit()
+    return outcome
 
 
 @router.put("/modules/{module_id}/prerequisites", response_model=ModuleAuthoring)

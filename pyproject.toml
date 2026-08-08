@@ -411,6 +411,12 @@ ignore_imports = [
     "abridgeai.features.courses.queries.** -> abridgeai.features.access_control.models",
     "abridgeai.features.courses.queries.** -> abridgeai.features.identity.models",
     "abridgeai.features.courses.queries.** -> abridgeai.features.enrollments.models",
+    # The manager's course readiness checklist answers "is this course on a
+    # career path, and is it required there?" — a question about the
+    # career_course_items / career_path_stages join, with no service-level
+    # entry point (career_paths has no api/public.py). Same unavoidable-JOIN
+    # allowance as the three above. Read-only.
+    "abridgeai.features.courses.queries.assignment -> abridgeai.features.career_paths.models",
     # FR-3 outline builder reads DocumentChunk rows to group lesson chunks
     # into sections. Read-only access to the materials model; writes still
     # go through materials' own services.

@@ -167,7 +167,11 @@ async def _require_module_item(db: AsyncSession, item_id: UUID) -> ModuleItem:
 
 
 async def create_course(
-    db: AsyncSession, payload: CourseCreate, owner: CurrentUser
+    db: AsyncSession,
+    payload: CourseCreate,
+    owner: CurrentUser,
+    *,
+    arq_pool: object | None = None,
 ) -> CourseAuthoring:
     """Create a new course owned by ``owner`` in their primary organization.
 
@@ -180,8 +184,14 @@ async def create_course(
     A duplicate ``(organization_id, slug)`` is mapped to :class:`ConflictError`
     (HTTP 409) instead of bubbling the raw ``IntegrityError`` up to a 500.
 
-    The creator is automatically assigned as a teacher on the new course so
-    the course appears in their "My Courses" list and the dept teachers tab.
+    The creator is auto-assigned as a teacher ONLY when they actually hold the
+    teacher role. A teacher self-creating a course wants it in their authoring
+    list; a manager creating one on a teacher's behalf does not — assignment is
+    purely additive (``assign_teacher_to_course`` never removes anyone), so
+    auto-assigning the manager left them as a permanent co-teacher on every
+    course they ever created, cluttering their authoring list and the dept
+    teachers tab. The manager's real handle on the course is ownership plus
+    ``course.delete``/``course.publish``, none of which depend on a teacher row.
     """
     org_id = await _resolve_owner_org(db, owner)
     data = payload.model_dump()
@@ -192,22 +202,78 @@ async def create_course(
     await _flush_or_conflict(db)
     await db.refresh(course)
 
-    # Auto-assign the creator as teacher so the course shows up in their
-    # authoring list and in the dept teachers tab immediately.
-    existing = await find_active_teacher_assignment(db, course_id=course.id, user_id=owner.user_id)
-    if existing is None:
-        role_id = await get_teacher_role_id(db)
-        await insert_teacher_assignment(
-            db,
-            assignment_id=uuid4(),
-            course_id=course.id,
-            user_id=owner.user_id,
-            role_id=role_id,
-            organization_id=org_id,
-            granted_by=owner.user_id,
+    if await _creator_is_teacher(db, owner.user_id):
+        existing = await find_active_teacher_assignment(
+            db, course_id=course.id, user_id=owner.user_id
         )
+        if existing is None:
+            role_id = await get_teacher_role_id(db)
+            await insert_teacher_assignment(
+                db,
+                assignment_id=uuid4(),
+                course_id=course.id,
+                user_id=owner.user_id,
+                role_id=role_id,
+                organization_id=org_id,
+                granted_by=owner.user_id,
+            )
+            # Notify on THIS path too, not just the explicit assign route.
+            # This branch writes a real teacher assignment, so skipping the
+            # notification made the outcome depend on how the row happened to
+            # be created: a manager assigning someone got a notification, a
+            # teacher creating their own course did not — same assignment,
+            # same inbox, different result, and nothing in the inbox to show
+            # the course was ever handed over.
+            #
+            # Best-effort inside `notify`, so a dispatch failure can never
+            # roll back the course that was just created.
+            await _notify_teacher_assigned(
+                db,
+                teacher_user_id=owner.user_id,
+                course_id=course.id,
+                course_title=course.title,
+                arq_pool=arq_pool,
+            )
 
     return CourseAuthoring.model_validate(course)
+
+
+async def _notify_teacher_assigned(
+    db: AsyncSession,
+    *,
+    teacher_user_id: UUID,
+    course_id: UUID,
+    course_title: str,
+    arq_pool: object | None,
+) -> None:
+    """Tell a teacher they now hold a course.
+
+    Lazy import for the same reason as :func:`_notify_course_published` — a
+    module-level ``courses.services -> notify`` edge would close an import
+    cycle through ``enrollments``.
+    """
+    from abridgeai.features.courses.services import notify  # noqa: PLC0415
+
+    await notify.notify_teacher_assigned(
+        db,
+        teacher_user_id=teacher_user_id,
+        course_id=course_id,
+        course_title=course_title,
+        arq_pool=arq_pool,
+    )
+
+
+async def _creator_is_teacher(db: AsyncSession, user_id: UUID) -> bool:
+    """Whether ``user_id`` holds the ``teacher`` role at any scope.
+
+    Lazy import: ``courses.services`` reaching ``access_control.api.public`` at
+    module level would add a cross-feature edge at import time; the same lazy
+    pattern is used by ``courses.services.catalog``.
+    """
+    from abridgeai.features.access_control.api import public as access_api  # noqa: PLC0415
+
+    codes = await access_api.get_role_codes_for_users(db, [user_id])
+    return "teacher" in codes.get(user_id, [])
 
 
 async def check_course_slug_available(db: AsyncSession, *, slug: str, owner: CurrentUser) -> bool:
@@ -251,31 +317,102 @@ async def update_course(
         and new_status == "draft"
     ):
         raise ConflictError(f"Course {course_id} is published and cannot be reverted to draft.")
+    # PATCH is the second door into `published`. `POST /publish` is the first.
+    # Both must apply the gradeable-unit gate or the gate is decorative — a
+    # manager could publish an empty course through whichever door is not
+    # guarded.
+    if new_status == "published" and course.status != "published":
+        await _require_gradeable_units(db, course_id)
     _apply_patch(course, payload)
     await _flush_or_conflict(db)
     await db.refresh(course)
     return CourseAuthoring.model_validate(course)
 
 
+async def _require_gradeable_units(db: AsyncSession, course_id: UUID) -> None:
+    """Refuse to publish a course no student could ever complete.
+
+    A gradeable unit is a published lesson, quiz or interview config. With
+    zero of them the completion writer can never promote an enrollment, so
+    ``satisfied`` stays false forever: as a required course on a career path
+    that locks its stage and every stage behind it permanently.
+
+    The same rule already guards career-path publication, but that fires only
+    once someone puts the course on a path — possibly weeks later, and with a
+    message pointing at the path rather than the course. Publishing the course
+    is the first moment the system can tell the manager, so it says it here.
+
+    Lazy import keeps the courses -> enrollments edge out of module import
+    time (same pattern as ``_notify_course_published``).
+    """
+    from abridgeai.features.enrollments.api import public as enrollments_api  # noqa: PLC0415
+
+    units = await enrollments_api.count_course_gradeable_units(db, course_id=course_id)
+    if units == 0:
+        raise ConflictError(
+            f"course_has_no_gradeable_units: course {course_id} has no published "
+            "lessons, quizzes or interviews, so no student could ever complete it. "
+            "Add and publish at least one before publishing the course."
+        )
+
+
+async def _require_learning_outcomes(db: AsyncSession, course_id: UUID) -> None:
+    """Refuse to publish a course that never states what it teaches.
+
+    Learning outcomes are what a student reads to decide whether to enrol and
+    what a manager maps onto a career path. Publishing without one ships a
+    course whose only description of itself is its title.
+
+    Deliberately a SEPARATE gate from :func:`_require_gradeable_units` rather
+    than one merged check: the two failures have different fixes and different
+    owners. Content is the teacher's job, outcomes are the manager's (see the
+    authoring ownership boundary), so a single blended message would send half
+    the readers to the wrong place.
+
+    Any outcome counts, at any depth. The hierarchy is an authoring
+    convenience, not a quality bar — demanding a top-level one would reject a
+    perfectly-stated course whose author happened to nest everything.
+    """
+    outcomes = await authoring_queries.count_course_outcomes(db, course_id)
+    if outcomes == 0:
+        raise ConflictError(
+            f"course_has_no_learning_outcomes: course {course_id} defines no "
+            "learning outcomes, so students cannot tell what it teaches. Add at "
+            "least one before publishing the course."
+        )
+
+
 async def publish_course(db: AsyncSession, course_id: UUID, actor: CurrentUser) -> CourseAuthoring:
     """Transition a course's status to ``published``.
 
-    The plan body suggests checking "all modules ready" before publish.
-    For T3.5 the gate is intentionally minimal (status transition only)
-    so the API surface is stable; tighter gates will land alongside
-    quizzes / interviews when those features can publish independently.
+    Two gates, both skipped when re-publishing an already-published course
+    (that is a no-op, and retro-actively blocking it would strand courses
+    published before either rule existed):
+
+    * At least one gradeable unit — a published lesson, quiz or interview
+      config. A course with none can never be completed by anyone (the
+      completion writer refuses to promote an empty course), and as a required
+      course on a career path it would lock its stage permanently. See
+      :func:`_require_gradeable_units`.
+    * At least one learning outcome — otherwise the course never states what
+      it teaches. See :func:`_require_learning_outcomes`.
+
+    Checked in that order so the first 409 a manager sees is the one that
+    blocks students outright, not the one about documentation.
 
     On an actual transition INTO ``published`` (not a re-publish), everyone
     already attached to the course is notified with a deep-link: assigned
-    teachers and actively-enrolled students. This back-fills the notifications
-    that assignment/enrolment skipped while the course was still a draft.
-    Notification failures never roll back the publish.
+    teachers and actively-enrolled students. Notification failures never roll
+    back the publish.
     """
     del actor
     course = await _require_course(db, course_id)
     if course.status == "archived":
         raise AppError(f"Cannot publish archived course {course_id}")
     was_published = course.status == "published"
+    if not was_published:
+        await _require_gradeable_units(db, course_id)
+        await _require_learning_outcomes(db, course_id)
     course.status = "published"
     await db.flush()
     await db.refresh(course)
@@ -1201,8 +1338,8 @@ def _assert_outcomes_editable(course: Course) -> None:
         )
 
 
-def _project_outcomes(
-    outcomes: list[CourseLearningOutcome],
+async def _project_outcomes(
+    db: AsyncSession, course_id: UUID, outcomes: list[CourseLearningOutcome]
 ) -> list[CourseLearningOutcomeAuthoring]:
     """Validate ORM rows into authoring DTOs with derived code + depth.
 
@@ -1212,12 +1349,16 @@ def _project_outcomes(
     can render the list top-to-bottom without re-sorting.
     """
     code_map = authoring_queries.build_outcome_code_map(outcomes)
+    question_counts = await authoring_queries.count_questions_mapped_to_outcomes(
+        db, course_id, {o.id for o in outcomes}
+    )
     dtos: dict[UUID, CourseLearningOutcomeAuthoring] = {}
     for o in outcomes:
         dto = CourseLearningOutcomeAuthoring.model_validate(o)
         code, depth = code_map.get(o.id, (str(o.position), 0))
         dto.code = code
         dto.depth = depth
+        dto.question_count = question_counts.get(o.id, 0)
         dtos[o.id] = dto
 
     # Tree order: sort by the dotted code split into ints so 1.2 < 1.10.
@@ -1227,8 +1368,11 @@ def _project_outcomes(
     return sorted(dtos.values(), key=sort_key)
 
 
-def _project_one(
-    outcomes: list[CourseLearningOutcome], outcome_id: UUID
+async def _project_one(
+    db: AsyncSession,
+    course_id: UUID,
+    outcomes: list[CourseLearningOutcome],
+    outcome_id: UUID,
 ) -> CourseLearningOutcomeAuthoring:
     """Project the whole course tree, then return the one DTO we care about.
 
@@ -1236,7 +1380,7 @@ def _project_one(
     derive the dotted code, since a code depends on the outcome's ancestor
     chain and sibling positions.
     """
-    for dto in _project_outcomes(outcomes):
+    for dto in await _project_outcomes(db, course_id, outcomes):
         if dto.id == outcome_id:
             return dto
     raise NotFoundError(f"Course outcome {outcome_id} not found")
@@ -1248,7 +1392,7 @@ async def list_course_outcomes(
     """All learning outcomes for a course in tree order with codes (§LO-1)."""
     await _require_course(db, course_id)
     outcomes = await authoring_queries.list_course_outcomes(db, course_id)
-    return _project_outcomes(outcomes)
+    return await _project_outcomes(db, course_id, outcomes)
 
 
 async def add_course_outcome(
@@ -1281,7 +1425,7 @@ async def add_course_outcome(
     db.add(outcome)
     await _flush_or_conflict(db)
     outcomes = await authoring_queries.list_course_outcomes(db, course_id)
-    return _project_one(outcomes, outcome.id)
+    return await _project_one(db, course_id, outcomes, outcome.id)
 
 
 async def update_course_outcome(
@@ -1291,22 +1435,34 @@ async def update_course_outcome(
     payload: CourseLearningOutcomeUpdate,
     actor: CurrentUser,
 ) -> CourseLearningOutcomeAuthoring:
-    """Edit text and/or re-parent an outcome (§LO-2).
+    """Edit text, re-parent and/or reorder an outcome (§LO-2).
 
     Re-parenting is guarded against cycles (an outcome may not become its
     own descendant, nor its own parent). When the parent changes, the
-    outcome is appended to the new parent's children and both the old and
-    new sibling groups are re-indexed so positions/codes stay contiguous.
+    outcome is inserted at ``position`` (default: append) among the new
+    parent's children and both the old and new sibling groups are
+    re-indexed so positions/codes stay contiguous.
+
+    Reordering without re-parenting (``position`` set, ``parent_id``
+    unchanged) slides the outcome to that 1-based slot among its existing
+    siblings — the outliner's "drop between rows" maps to this directly.
+
+    The dotted ``L.O.x.y`` code is display-only and derived at read time,
+    so a reorder merely changes what the code renders as; the outcome's
+    UUID identity never changes. External references key on the id.
     """
     del actor
     course = await _require_course(db, course_id)
     _assert_outcomes_editable(course)
     outcome = await _require_outcome(db, course_id, outcome_id)
     reparenting = "parent_id" in payload.model_fields_set
+    reordering = "position" in payload.model_fields_set
     new_parent_id = payload.parent_id if reparenting else outcome.parent_id
     old_parent_id = outcome.parent_id
 
-    if reparenting and new_parent_id != old_parent_id:
+    moved = reparenting and new_parent_id != old_parent_id
+
+    if moved:
         if new_parent_id is not None:
             if new_parent_id == outcome_id:
                 raise AppError("An outcome cannot be its own parent")
@@ -1318,50 +1474,208 @@ async def update_course_outcome(
             if new_parent_id in descendants.get(outcome_id, set()):
                 raise AppError("Cannot move an outcome under one of its own descendants")
         outcome.parent_id = new_parent_id
-        outcome.position = await authoring_queries.next_course_outcome_position(
-            db, course_id, new_parent_id
-        )
 
     if payload.outcome_text is not None:
         outcome.outcome_text = payload.outcome_text
 
-    await _flush_or_conflict(db)
+    # Apply the target slot: either explicit (reorder/reparent-with-slot)
+    # or append at the end of the (possibly new) sibling group.
+    if reordering or moved:
+        if payload.position is not None:
+            target_position = payload.position
+        else:
+            target_position = await authoring_queries.next_course_outcome_position(
+                db, course_id, new_parent_id
+            )
+        # Remove the outcome from its current sibling list, then insert at
+        # the target slot (1-based, clamped). This handles all four cases —
+        # move within same parent, move into a new parent, append, and
+        # move with no explicit slot — without double-counting the outcome.
+        siblings = [
+            o
+            for o in await authoring_queries.list_course_outcome_siblings(
+                db, course_id, new_parent_id
+            )
+            if o.id != outcome_id
+        ]
+        insert_at = max(1, min(target_position, len(siblings) + 1))
+        siblings.insert(insert_at - 1, outcome)
+        # Two-phase offset shift (same pattern as
+        # reindex_course_outcome_siblings): a plain 1..N renumber in place
+        # trips the per-parent unique constraint mid-update.
+        for idx, sibling in enumerate(siblings, start=1):
+            sibling.position = _OFFSET + idx
+        await _flush_or_conflict(db)
+        for pos, sibling in enumerate(siblings, start=1):
+            sibling.position = pos
+        await _flush_or_conflict(db)
 
-    if reparenting and new_parent_id != old_parent_id:
+    if moved:
         # Old siblings gapped by the move; compact them.
         await authoring_queries.reindex_course_outcome_siblings(db, course_id, old_parent_id)
         await _flush_or_conflict(db)
 
     outcomes = await authoring_queries.list_course_outcomes(db, course_id)
-    return _project_one(outcomes, outcome_id)
+    return await _project_one(db, course_id, outcomes, outcome_id)
 
 
 async def delete_course_outcome(
-    db: AsyncSession, course_id: UUID, outcome_id: UUID, actor: CurrentUser
+    db: AsyncSession,
+    course_id: UUID,
+    outcome_id: UUID,
+    actor: CurrentUser,
+    *,
+    promote_children: bool = False,
 ) -> None:
-    """Soft-delete an outcome + its whole subtree, then compact siblings (§LO-2).
+    """Soft-delete an outcome, then compact siblings (§LO-2).
 
-    Deleting a parent removes its descendants too (soft-delete cascade over
-    the subtree) so no child is orphaned to a dangling parent. The FK on
-    ``quiz_questions.learning_outcome_id`` is ``ON DELETE SET NULL`` but
-    fires only on hard DELETE; we soft-delete, so questions keep pointing
-    at the now-deleted rows. That's benign: the projection layer treats a
-    soft-deleted / missing outcome as "no outcome". Surviving siblings of
-    the removed node are re-indexed so codes never gap.
+    Default: the outcome's whole subtree goes with it (soft-delete cascade),
+    so no child is orphaned to a dangling parent. With ``promote_children``,
+    the outcome's immediate children are re-parented onto the outcome's own
+    parent (their relative order preserved) before the outcome is deleted —
+    the outliner's "keep children" delete. Deeper descendants stay nested
+    under their (promoted) parents.
+
+    The FK on ``quiz_questions.learning_outcome_id`` is ``ON DELETE SET
+    NULL`` but fires only on hard DELETE; we soft-delete, so questions keep
+    pointing at the now-deleted rows. That's benign: the projection layer
+    treats a soft-deleted / missing outcome as "no outcome", and the
+    question count shown in the confirmation UI tells the teacher exactly
+    which questions lose their mapping. Surviving siblings of the removed
+    node are re-indexed so codes never gap.
     """
     course = await _require_course(db, course_id)
     _assert_outcomes_editable(course)
     outcome = await _require_outcome(db, course_id, outcome_id)
     parent_id = outcome.parent_id
-    # Soft-delete the whole subtree (deepest first) so children aren't
-    # orphaned. Resolve the subtree from the current tree snapshot.
     all_outcomes = await authoring_queries.list_course_outcomes(db, course_id)
     descendants = authoring_queries.build_descendant_map(all_outcomes)
     by_id = {o.id: o for o in all_outcomes}
-    to_delete = [outcome, *(by_id[d] for d in descendants.get(outcome_id, set()) if d in by_id)]
-    for node in to_delete:
-        await soft_delete_cascade(db, node, actor_id=actor.user_id)
-    await authoring_queries.reindex_course_outcome_siblings(db, course_id, parent_id)
+    children = sorted(
+        (
+            by_id[d]
+            for d in descendants.get(outcome_id, set())
+            if d in by_id and by_id[d].parent_id == outcome_id
+        ),
+        key=lambda o: o.position,
+    )
+
+    if promote_children and children:
+        # Re-parent immediate children onto our parent, preserving their
+        # sibling order, then delete just this node. The children take the
+        # parent's own slot among the siblings — that is what "keep the
+        # children" means in an outliner (Workflowy/Notion promote in place).
+        # Positions collide across groups (a child's old 1..N and the
+        # parent's existing 1..N live in the SAME per-parent sequence once
+        # re-parented), so the whole target sibling group is offset together,
+        # then renumbered 1..N.
+        target_siblings = await authoring_queries.list_course_outcome_siblings(
+            db, course_id, parent_id
+        )
+        merged = []
+        inserted = False
+        for sibling in target_siblings:
+            if sibling.id == outcome_id:
+                merged.extend(children)
+                inserted = True
+            else:
+                merged.append(sibling)
+        if not inserted:
+            merged.extend(children)
+        for child in children:
+            child.parent_id = parent_id
+        for idx, sibling in enumerate(merged, start=1):
+            sibling.position = _OFFSET + idx
+        await _flush_or_conflict(db)
+        # Drop the parent BEFORE renumbering: it still occupies its old slot
+        # in this sibling group, and a 1..N renumber would collide with it.
+        await soft_delete_cascade(db, outcome, actor_id=actor.user_id)
+        await _flush_or_conflict(db)
+        for pos, sibling in enumerate(merged, start=1):
+            sibling.position = pos
+        await _flush_or_conflict(db)
+    else:
+        to_delete = [
+            outcome,
+            *(by_id[d] for d in descendants.get(outcome_id, set()) if d in by_id),
+        ]
+        for node in to_delete:
+            await soft_delete_cascade(db, node, actor_id=actor.user_id)
+        await authoring_queries.reindex_course_outcome_siblings(db, course_id, parent_id)
+
+
+async def duplicate_course_outcome(
+    db: AsyncSession,
+    course_id: UUID,
+    outcome_id: UUID,
+    actor: CurrentUser,
+) -> CourseLearningOutcomeAuthoring:
+    """Deep-copy an outcome and its subtree, inserted after the original (§LO).
+
+    The copy gets fresh UUIDs at every node, is inserted as the original's
+    next sibling (same parent, position = original + 1), and reuses the
+    exact outcome_text of each node. Question mappings are NOT copied —
+    questions reference outcomes by id, and a duplicate with the same
+    questions would double-grade; the teacher re-maps after duplicating.
+    """
+    del actor
+    course = await _require_course(db, course_id)
+    _assert_outcomes_editable(course)
+    source = await _require_outcome(db, course_id, outcome_id)
+    all_outcomes = await authoring_queries.list_course_outcomes(db, course_id)
+    descendants = authoring_queries.build_descendant_map(all_outcomes)
+    by_id = {o.id: o for o in all_outcomes}
+
+    # Map old id -> new ORM row (created but not yet added), preserving the
+    # subtree shape: parent references are remapped through the map.
+    new_by_old: dict[UUID, CourseLearningOutcome] = {}
+
+    def clone(node: CourseLearningOutcome) -> CourseLearningOutcome:
+        new_id = uuid4()
+        new_row = CourseLearningOutcome(
+            id=new_id,
+            course_id=course_id,
+            parent_id=None,  # remapped below by the caller
+            # Offset immediately: the copy shares its parent's position
+            # space, and the first flush must not trip the per-parent
+            # unique constraint before the re-slot below runs.
+            position=node.position + _OFFSET,
+            outcome_text=node.outcome_text,
+        )
+        new_by_old[node.id] = new_row
+        for child_id in sorted(descendants.get(node.id, set())):
+            child = by_id[child_id]
+            if child.parent_id == node.id:
+                clone(child)
+        return new_row
+
+    root_clone = clone(source)
+    # Remap parents through the clone map (topological: children cloned
+    # after parents, so new_by_old is fully populated).
+    for old_id, new_row in new_by_old.items():
+        old_row = by_id[old_id]
+        new_parent = new_by_old.get(old_row.parent_id) if old_row.parent_id else None
+        new_row.parent_id = new_parent.id if new_parent else None
+
+    # Position the root copy right after the original among its siblings.
+    siblings = await authoring_queries.list_course_outcome_siblings(
+        db, course_id, source.parent_id
+    )
+    insert_at = next((i for i, s in enumerate(siblings) if s.id == source.id), len(siblings)) + 1
+    db.add_all(new_by_old.values())
+    await _flush_or_conflict(db)
+    # Re-slot the whole sibling chain including the copy (offset-shift
+    # dodges the unique constraint, same as reindex_course_outcome_siblings).
+    all_siblings = await authoring_queries.list_course_outcome_siblings(
+        db, course_id, source.parent_id
+    )
+    all_siblings.insert(insert_at, root_clone)
+    for pos, sibling in enumerate(all_siblings, start=1):
+        sibling.position = pos
+    await _flush_or_conflict(db)
+
+    outcomes = await authoring_queries.list_course_outcomes(db, course_id)
+    return await _project_one(db, course_id, outcomes, root_clone.id)
 
 
 __all__ = [
@@ -1374,6 +1688,7 @@ __all__ = [
     "create_course",
     "delete_course_outcome",
     "delete_lesson_resource",
+    "duplicate_course_outcome",
     "delete_module_item",
     "get_authoring_content",
     "get_authoring_course",

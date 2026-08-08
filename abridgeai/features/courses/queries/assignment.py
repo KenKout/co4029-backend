@@ -13,12 +13,121 @@ from __future__ import annotations
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import func, literal, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from abridgeai.features.access_control.models import Role, UserRoleAssignment
+from abridgeai.features.access_control.models import (
+    CareerPath,
+    OrganizationMembership,
+    Role,
+    UserRoleAssignment,
+)
+from abridgeai.features.career_paths.models import CareerPathCourse, CareerPathStage
 from abridgeai.features.courses.models import Course
 from abridgeai.features.identity.models import User, UserProfile
+
+
+async def list_career_paths_containing_course(
+    db: AsyncSession, course_id: UUID
+) -> list[dict[str, Any]]:
+    """Career paths this course sits on, with the stage it occupies.
+
+    Backs the readiness checklist's "on a career path" row. A course nobody put
+    on a path is invisible to students — the paths are how they reach it — so a
+    manager finishing a course needs to know that before calling it done.
+
+    ``is_required`` matters for the warning's severity: a REQUIRED course with
+    no gradeable unit locks its stage and everything behind it, whereas an
+    optional one merely cannot be completed.
+    """
+    stmt = (
+        select(
+            CareerPath.id.label("career_path_id"),
+            CareerPath.name.label("career_path_name"),
+            CareerPath.status.label("career_path_status"),
+            CareerPathStage.id.label("stage_id"),
+            CareerPathStage.title.label("stage_title"),
+            CareerPathStage.position.label("stage_position"),
+            CareerPathCourse.is_required,
+        )
+        .join(CareerPathCourse, CareerPathCourse.career_path_id == CareerPath.id)
+        .join(CareerPathStage, CareerPathStage.id == CareerPathCourse.stage_id)
+        .where(
+            CareerPathCourse.course_id == course_id,
+            CareerPath.deleted_at.is_(None),
+            CareerPathStage.deleted_at.is_(None),
+        )
+        .order_by(CareerPath.name, CareerPathStage.position)
+    )
+    rows = (await db.execute(stmt)).mappings().all()
+    return [dict(row) for row in rows]
+
+
+async def list_assignable_teachers(
+    db: AsyncSession, *, organization_id: UUID, course_id: UUID | None = None
+) -> list[dict[str, Any]]:
+    """Users holding the ``teacher`` role who are members of ``organization_id``.
+
+    Backs the manager's teacher picker. Two filters matter and both are
+    server-side:
+
+    * **role** — the user must hold ``teacher`` at some scope. Filtering on
+      the role alone is not enough, which is why the org filter is a JOIN
+      here rather than a query parameter the client passes: a teacher of
+      another organization also "holds the teacher role".
+    * **organization membership** — an active, non-deleted membership row.
+
+    ``already_assigned`` marks users who already teach this course so the
+    picker can show them as chosen instead of offering a no-op. ``course_id``
+    is optional because the create-course wizard picks teachers BEFORE the
+    course exists; with no course there is nothing to be already assigned to,
+    so the flag is uniformly false.
+    """
+    assigned_subq = (
+        select(UserRoleAssignment.user_id)
+        .join(Role, Role.id == UserRoleAssignment.role_id)
+        .where(
+            UserRoleAssignment.course_id == course_id,
+            UserRoleAssignment.scope_kind == "course",
+            Role.code == "teacher",
+            UserRoleAssignment.deleted_at.is_(None),
+            (UserRoleAssignment.active_until.is_(None))
+            | (UserRoleAssignment.active_until > func.now()),
+        )
+        .scalar_subquery()
+    )
+    already_assigned = (
+        User.id.in_(assigned_subq) if course_id is not None else literal(False)  # noqa: FBT003
+    )
+    stmt = (
+        select(
+            User.id.label("user_id"),
+            User.primary_email,
+            UserProfile.display_name,
+            already_assigned.label("already_assigned"),
+        )
+        .join(OrganizationMembership, OrganizationMembership.user_id == User.id)
+        .join(UserRoleAssignment, UserRoleAssignment.user_id == User.id)
+        .join(Role, Role.id == UserRoleAssignment.role_id)
+        .outerjoin(UserProfile, UserProfile.user_id == User.id)
+        .where(
+            OrganizationMembership.organization_id == organization_id,
+            OrganizationMembership.status == "active",
+            OrganizationMembership.deleted_at.is_(None),
+            Role.code == "teacher",
+            UserRoleAssignment.deleted_at.is_(None),
+            (UserRoleAssignment.active_until.is_(None))
+            | (UserRoleAssignment.active_until > func.now()),
+            # `users` has no deleted_at (0002 skip-list); `status` is the
+            # lifecycle column, so an inactive/suspended account is excluded
+            # here rather than by a soft-delete filter.
+            User.status == "active",
+        )
+        .distinct()
+        .order_by(UserProfile.display_name, User.primary_email)
+    )
+    rows = (await db.execute(stmt)).mappings().all()
+    return [dict(row) for row in rows]
 
 
 async def list_teachers_for_course(db: AsyncSession, course_id: UUID) -> list[dict[str, Any]]:

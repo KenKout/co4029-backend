@@ -250,6 +250,12 @@ async def cleanup_courses(engine: AsyncEngine) -> AsyncIterator[set[uuid.UUID]]:
             text("DELETE FROM user_role_assignments WHERE course_id = ANY(:ids)"),
             {"ids": list(ids)},
         )
+        # Outcomes FK the course with ondelete=NO ACTION (soft-deleted in the
+        # service layer, never cascaded), so they must go before the course.
+        await conn.execute(
+            text("DELETE FROM course_learning_outcomes WHERE course_id = ANY(:ids)"),
+            {"ids": list(ids)},
+        )
         await conn.execute(
             text("DELETE FROM courses WHERE id = ANY(:ids)"),
             {"ids": list(ids)},
@@ -394,6 +400,16 @@ async def test_full_course_lifecycle_manager_teacher_student(
     )
     assert publish_lesson.status_code == 200, publish_lesson.text
     assert publish_lesson.json()["status"] == "published"
+
+    # 3c. Manager states the learning outcome — outcomes are manager-owned,
+    # and the publish gate now requires at least one, so the lifecycle cannot
+    # complete without this step.
+    outcome_response = await client.post(
+        f"/api/v1/teacher/courses/{course_id}/outcomes",
+        json={"outcome_text": "Explain the course topic"},
+        headers={"Authorization": f"Bearer {manager_bearer}"},
+    )
+    assert outcome_response.status_code == 201, outcome_response.text
 
     # 4. Manager publishes the course.
     course_publish = await client.post(

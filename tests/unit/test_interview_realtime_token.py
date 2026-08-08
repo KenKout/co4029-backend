@@ -35,7 +35,7 @@ class MockSettings:
     def __init__(
         self,
         livekit_api_key: str = "test-api-key",
-        livekit_api_secret: str = "test-api-secret",
+        livekit_api_secret: str = "test-api-secret",  # noqa: S107 -- fixture value, not a credential
         livekit_ws_url: str = "wss://test.livekit.cloud",
         livekit_agent_name: str = "interview-agent",
         interview_voice_token_ttl_seconds: int = 3600,
@@ -119,6 +119,56 @@ class TestMintParticipantToken:
         assert response.room_name == room_name
         assert isinstance(response.token, str)
         assert len(response.token) > 0
+
+    def test_mint_token_emits_livekit_field_names(self):
+        """Response also carries `server_url`/`participant_token`.
+
+        LiveKit's `TokenSource` parses a token response into the protobuf
+        message `livekit.TokenSourceResponse`, which declares exactly
+        `server_url` and `participant_token`, with unknown fields ignored. A
+        payload carrying only `url`/`token` therefore parses to two empty
+        strings rather than failing loudly, so this asserts the LiveKit-named
+        fields are present and mirror the originals.
+        """
+        session_id = uuid4()
+        student_id = uuid4()
+        room_name = build_room_name(session_id)
+        settings = MockSettings()
+
+        response = mint_participant_token(
+            session_id=session_id,
+            student_id=student_id,
+            room_name=room_name,
+            settings=settings,
+        )
+
+        assert response.server_url == response.url
+        assert response.participant_token == response.token
+
+        # Assert on the serialized payload, not the attributes: the wire JSON is
+        # what a TokenSource client reads, and only that catches a field lost to
+        # an exclude/alias change.
+        payload = response.model_dump()
+        assert payload["server_url"] == settings.livekit_ws_url
+        assert payload["participant_token"] == response.token
+        assert payload["url"] == settings.livekit_ws_url
+        assert payload["token"] == response.token
+
+    def test_livekit_field_names_derive_when_omitted(self):
+        """Constructing with only url/token still yields a complete payload.
+
+        The mirroring is a model validator rather than two extra arguments at
+        the call site, so a future construction site cannot emit half the
+        contract. This pins that behaviour.
+        """
+        response = RealtimeTokenResponse(
+            url="wss://example.livekit.cloud",
+            token="jwt-value",  # noqa: S106 -- fixture value, not a credential
+            room_name="interview-abc",
+        )
+
+        assert response.server_url == "wss://example.livekit.cloud"
+        assert response.participant_token == "jwt-value"  # noqa: S105
 
     def test_mint_token_jwt_claims(self):
         """Minted JWT contains correct identity, room, and video grants."""

@@ -1070,6 +1070,74 @@ async def test_start_in_unlocked_stage_sets_no_locked_warning(session_factory, s
 
 
 @pytest.mark.asyncio
+async def test_start_reports_active_in_path_count(session_factory, seed) -> None:
+    """Start must report the count its own cap warning is phrased around.
+
+    The FE toast interpolates `{{count}}`; StartCourseResult carried no
+    number, so the FE hardcoded 0 and the warning read "you have 0 courses
+    open in this path". The service already computes `active_in_path` right
+    there — it just was not returned.
+
+    Counted AFTER this Start, so the first Start reports 1, not 0.
+    """
+    await _enroll(session_factory, seed)
+    async with session_factory() as db:
+        first = await enrollment_service.start_course_in_path(
+            db,
+            career_path_id=seed["path_id"],
+            course_id=seed["req_course"],
+            student_id=seed["student"],
+        )
+        await db.commit()
+    assert first.active_in_path == 1, "the course just started must be counted"
+
+    async with session_factory() as db:
+        second = await enrollment_service.start_course_in_path(
+            db,
+            career_path_id=seed["path_id"],
+            course_id=seed["opt_course"],
+            student_id=seed["student"],
+        )
+        await db.commit()
+    assert second.active_in_path == 2
+    # No cap configured on the seed path, so nothing to warn about.
+    assert second.max_concurrent is None
+    assert second.over_concurrency_cap is False
+
+
+@pytest.mark.asyncio
+async def test_start_reports_cap_alongside_the_count(engine, session_factory, seed) -> None:
+    """With a cap set, the warning has both numbers it needs."""
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("UPDATE career_paths SET max_concurrent = 1 WHERE id = :p"),
+            {"p": seed["path_id"]},
+        )
+    await _enroll(session_factory, seed)
+    async with session_factory() as db:
+        await enrollment_service.start_course_in_path(
+            db,
+            career_path_id=seed["path_id"],
+            course_id=seed["req_course"],
+            student_id=seed["student"],
+        )
+        await db.commit()
+    async with session_factory() as db:
+        second = await enrollment_service.start_course_in_path(
+            db,
+            career_path_id=seed["path_id"],
+            course_id=seed["opt_course"],
+            student_id=seed["student"],
+        )
+        await db.commit()
+    assert second.max_concurrent == 1
+    assert second.active_in_path == 2
+    # Advisory only — the Start still succeeded.
+    assert second.over_concurrency_cap is True
+    assert second.created is True
+
+
+@pytest.mark.asyncio
 async def test_start_refuses_course_outside_the_path(session_factory, seed, engine) -> None:
     """A student cannot name an arbitrary course id."""
     async with engine.begin() as conn:

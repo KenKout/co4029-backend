@@ -1,6 +1,7 @@
 -- Failed (or any-status) processing_jobs + generation_runs filtered by status + since window.
 -- :status     -- string in ('pending','running','completed','failed','cancelled') or NULL for all.
 -- :since      -- timestamptz lower bound on updated_at (required to bound the scan).
+-- :until      -- timestamptz upper bound on updated_at (optional; NULL = no upper bound).
 -- :limit      -- row cap.
 SELECT
     pj.id               AS id,
@@ -17,6 +18,7 @@ SELECT
     pj.updated_at       AS updated_at
 FROM processing_jobs pj
 WHERE pj.updated_at >= CAST(:since AS timestamptz)
+  AND (CAST(:until AS timestamptz) IS NULL OR pj.updated_at <= CAST(:until AS timestamptz))
   AND (CAST(:status AS text) IS NULL OR pj.status = CAST(:status AS text))
 
 UNION ALL
@@ -40,6 +42,7 @@ SELECT
     gr.updated_at                            AS updated_at
 FROM generation_runs gr
 WHERE gr.updated_at >= CAST(:since AS timestamptz)
+  AND (CAST(:until AS timestamptz) IS NULL OR gr.updated_at <= CAST(:until AS timestamptz))
   AND (CAST(:status AS text) IS NULL OR gr.status = CAST(:status AS text))
 
 ORDER BY updated_at DESC

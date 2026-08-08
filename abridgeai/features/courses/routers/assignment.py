@@ -30,7 +30,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from abridgeai.core.db import get_db
-from abridgeai.core.exceptions import ConflictError, NotFoundError
+from abridgeai.core.exceptions import ConflictError, ForbiddenError, NotFoundError
 from abridgeai.core.security import CurrentUser
 from abridgeai.features.access_control.api import public as access_control_api
 from abridgeai.features.access_control.policies import (
@@ -39,8 +39,10 @@ from abridgeai.features.access_control.policies import (
     require_org_unit_permission,
 )
 from abridgeai.features.courses.schemas import (
+    AssignableTeacher,
     AssignTeacherRequest,
     CourseAuthoring,
+    CourseReadiness,
     CourseUpdate,
     RosterEntry,
     TeacherAssignmentCreated,
@@ -167,6 +169,10 @@ async def assign_teacher(
 
     When the course is already published, the teacher is notified with a
     deep-link to the course (see ``assignment_service.assign_teacher_to_course``).
+
+    The assignee must be a member of the course's organization — enforced
+    server-side, so the org restriction does not depend on the client only
+    offering in-org users to pick from. 403 otherwise.
     """
     try:
         result = await assignment_service.assign_teacher_to_course(
@@ -174,8 +180,83 @@ async def assign_teacher(
         )
     except NotFoundError as exc:
         raise _not_found(str(exc)) from exc
+    except ForbiddenError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"error": "forbidden", "message": str(exc)},
+        ) from exc
     await db.commit()
     return TeacherAssignmentCreated.model_validate(result)
+
+
+@router.get("/assignable-teachers", response_model=list[AssignableTeacher])
+async def list_assignable_teachers_for_new_course(
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_STAFFING)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> list[AssignableTeacher]:
+    """Teachers for a course that does not exist yet — the create wizard's picker.
+
+    Same list as the per-course endpoint, but the organization comes from the
+    CALLER's token instead of the course, because the wizard staffs the course
+    in the same form that creates it. That is the same org ``create_course``
+    stamps on the new row, so the picker cannot offer someone the follow-up
+    assignment would reject.
+
+    Guarded by the GLOBAL staffing dependency, not the per-course one: there is
+    no ``course_id`` path param to scope against, and asking for one would make
+    the policy layer 500 with ``policy_misconfigured``.
+
+    Declared BEFORE ``/courses/{course_id}/...`` deliberately — a literal path
+    segment must not be shadowed by a parameterised route.
+    """
+    rows = await assignment_service.list_assignable_teachers_for_creator(db, current_user)
+    return [AssignableTeacher.model_validate(row) for row in rows]
+
+
+@router.get(
+    "/courses/{course_id}/assignable-teachers",
+    response_model=list[AssignableTeacher],
+)
+async def list_assignable_teachers(
+    course_id: UUID,
+    _current_user: Annotated[CurrentUser, Depends(_REQUIRE_COURSE_STAFFING)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> list[AssignableTeacher]:
+    """Teachers this course can be assigned to — same organization, teacher role.
+
+    Backs the manager's teacher picker so assignment stops being "paste a
+    user UUID". The organization comes from the COURSE, not from a query
+    parameter: the restriction has to hold server-side, or it is only a UI
+    convention. POST /teachers re-checks membership for the same reason.
+
+    ``already_assigned`` flags current teachers so the picker can render them
+    as chosen instead of offering a no-op assignment.
+    """
+    try:
+        rows = await assignment_service.list_assignable_teachers(db, course_id)
+    except NotFoundError as exc:
+        raise _not_found(str(exc)) from exc
+    return [AssignableTeacher.model_validate(row) for row in rows]
+
+
+@router.get("/courses/{course_id}/readiness", response_model=CourseReadiness)
+async def get_course_readiness(
+    course_id: UUID,
+    _current_user: Annotated[CurrentUser, Depends(_REQUIRE_COURSE_STAFFING)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> CourseReadiness:
+    """Is this course actually deliverable? Asked before publish, not after.
+
+    Four checks: an assigned teacher, at least one gradeable unit, placement on
+    a career path, and the course's own status. `can_publish` mirrors the
+    publish gate's condition exactly, so the checklist cannot promise a publish
+    the gate then refuses with a 409.
+    """
+    try:
+        data = await assignment_service.get_course_readiness(db, course_id)
+    except NotFoundError as exc:
+        raise _not_found(str(exc)) from exc
+    return CourseReadiness.model_validate(data)
 
 
 @router.delete(

@@ -148,7 +148,7 @@ def remediation_body(*, resource_links: list[tuple[str, str]], locale: str | Non
 
 
 def course_teacher_assigned_title(*, course_title: str, locale: str | None) -> str:
-    """Title: a teacher was assigned to a (published) course."""
+    """Title: a teacher was assigned to a course (draft or published)."""
     lang = _norm(locale)
     if lang == "vi":
         return f"Bạn được phân công dạy: {course_title}"[:255]

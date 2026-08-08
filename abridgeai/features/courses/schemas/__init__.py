@@ -23,7 +23,10 @@ from abridgeai.features.courses.schemas.administration import (
     TopOwnerRow,
 )
 from abridgeai.features.courses.schemas.assignment import (
+    AssignableTeacher,
     AssignTeacherRequest,
+    CoursePathPlacement,
+    CourseReadiness,
     CourseRosterRead,
     RosterEntry,
     RosterStudentRead,
@@ -82,6 +85,9 @@ from abridgeai.features.courses.schemas.request import (
 __all__ = [
     "AdminCoursePage",
     "AssignTeacherRequest",
+    "AssignableTeacher",
+    "CoursePathPlacement",
+    "CourseReadiness",
     "CourseArchiveRequest",
     "CourseAuthoring",
     "TeacherDashboardStats",

@@ -181,6 +181,11 @@ def run() -> None:
         WorkerOptions(
             entrypoint_fnc=entrypoint,
             agent_name=settings.livekit_agent_name,
+            # Left at the SDK's 0.7 this worker spent much of its life marked
+            # unavailable because of CPU belonging to the API and arq processes
+            # beside it, and LiveKit does not dispatch to an unavailable worker.
+            # See `interview_voice_load_threshold` in core/config.py.
+            load_threshold=settings.interview_voice_load_threshold,
             ws_url=settings.livekit_ws_url or "",
             api_key=(
                 settings.livekit_api_key.get_secret_value() if settings.livekit_api_key else ""

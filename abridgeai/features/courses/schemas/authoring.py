@@ -82,6 +82,9 @@ class CourseLearningOutcomeAuthoring(CourseLearningOutcomePublic):
     """Authoring projection of a course learning outcome.
 
     Outcome rows carry the standard audit + soft-delete column set.
+    ``question_count`` is how many live quiz questions currently map to
+    this outcome (via ``quiz_questions.learning_outcome_id``) — surfaced
+    so the delete confirmation can say exactly what loses its mapping.
     """
 
     course_id: UUID
@@ -91,6 +94,7 @@ class CourseLearningOutcomeAuthoring(CourseLearningOutcomePublic):
     updated_at: datetime
     deleted_at: datetime | None = None
     deleted_by: UUID | None = None
+    question_count: int = 0
 
 
 class CourseLearningOutcomeCreate(BaseModel):
@@ -115,20 +119,29 @@ class CourseLearningOutcomeUpdate(BaseModel):
 
     ``outcome_text`` edits the statement. ``parent_id`` re-parents the
     outcome (move within the tree); pass null to promote it to top-level.
-    Position is managed by the server (append on create, contiguous
-    per-parent re-index on delete/move), and the code is display-only, so
-    neither is accepted from the client. Re-parenting is cycle-checked
-    server-side (an outcome may not become its own descendant).
+    ``position`` reorders it among its (possibly new) siblings — 1-based,
+    the slot the outcome should occupy after the move, so the outliner can
+    express "drop between rows 3 and 4" as ``position=4``.
 
-    ``parent_id`` uses a sentinel so "omitted" (leave parent unchanged) is
-    distinguishable from "explicitly null" (promote to top-level):
-    ``model_fields_set`` is consulted in the service layer.
+    The dotted ``L.O.x.y`` code is display-only: derived from the parent
+    chain and sibling positions at read time, never stored. All internal
+    references key on the stable UUID ``id``, so reorders and re-parents
+    change what a code *renders as* without ever changing identity — an
+    external syllabus quoting "L.O.2" points at the outcome's id, not at
+    a persisted code string.
+
+    ``parent_id`` and ``position`` use sentinels so "omitted" (leave
+    unchanged) is distinguishable from "explicit null" (promote to
+    top-level / append at the end): ``model_fields_set`` is consulted in
+    the service layer. Re-parenting is cycle-checked server-side (an
+    outcome may not become its own descendant).
     """
 
     model_config = ConfigDict(extra="forbid")
 
     outcome_text: Annotated[str | None, Field(min_length=1, max_length=1000)] = None
     parent_id: UUID | None = None
+    position: Annotated[int | None, Field(ge=1)] = None
 
 
 class CourseAuthoring(CoursePublic):

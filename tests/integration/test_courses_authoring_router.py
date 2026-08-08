@@ -331,6 +331,14 @@ async def scenario(
             text("DELETE FROM modules WHERE id = ANY(:ids)"),
             {"ids": [module_a, module_b]},
         )
+        # Outcomes reference courses with ondelete=NO ACTION (they are
+        # soft-deleted in the service layer, never cascaded), so they must go
+        # before the course row or the teardown trips the FK and poisons every
+        # later test in the session.
+        await conn.execute(
+            text("DELETE FROM course_learning_outcomes WHERE course_id = ANY(:ids)"),
+            {"ids": [seeded_users.course_id, course_b]},
+        )
         await conn.execute(text("DELETE FROM courses WHERE id = :id"), {"id": course_b})
         await conn.execute(text("DELETE FROM storage_objects WHERE id = :id"), {"id": storage_obj})
 
@@ -415,9 +423,10 @@ async def test_teacher_with_course_scope_can_update_assigned_course(
 ) -> None:
     """Seeded teacher has scope=course on Course-A → course.update passes.
 
-    Content fields (description, level, …) are editable; title/slug are
-    course identity and manager-owned — the teacher surface 403s on them
-    even with valid course scope (identity edits live on the dept page).
+    ``course.update`` is the CONTENT permission: description, the study-time
+    estimate and the teacher's own contact details. Course identity (title,
+    slug), lifecycle (status) and delivery policy (level, caps, thumbnail,
+    org_unit) are manager-owned and 403 even with valid course scope.
     """
     ok = await client.patch(
         f"/api/v1/teacher/courses/{scenario['course_a']}",
@@ -434,6 +443,132 @@ async def test_teacher_with_course_scope_can_update_assigned_course(
     )
     assert blocked.status_code == 403, blocked.text
     assert blocked.json()["detail"]["error"] == "permission_denied"
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("description", "teacher may write this"),
+        ("estimated_minutes", 42),
+        ("contact_email", "teach@example.test"),
+        ("contact_phone", "+84900000000"),
+        ("contact_website_url", "https://example.test/course"),
+        ("contact_social_url", "https://example.test/social"),
+    ],
+)
+async def test_teacher_may_patch_content_fields(
+    client: httpx.AsyncClient,
+    teacher_bearer: str,
+    scenario: dict[str, uuid.UUID | str],
+    field: str,
+    value: object,
+) -> None:
+    """The six fields a teacher owns (user decision 2026-08-06)."""
+    response = await client.patch(
+        f"/api/v1/teacher/courses/{scenario['course_a']}",
+        json={field: value},
+        headers={"Authorization": f"Bearer {teacher_bearer}"},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()[field] == value
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("title", "Renamed by teacher"),
+        ("slug", "teacher-renamed-slug"),
+        # The hole this closes: `status` rode in on course.update, so a teacher
+        # could publish their own course and skip the manager gate entirely.
+        ("status", "published"),
+        ("level", "advanced"),
+        ("enrollment_cap", 5),
+        ("expected_completion_days", 30),
+        ("thumbnail_object_id", "00000000-0000-0000-0000-000000000001"),
+    ],
+)
+async def test_teacher_cannot_patch_manager_owned_fields(
+    client: httpx.AsyncClient,
+    teacher_bearer: str,
+    scenario: dict[str, uuid.UUID | str],
+    field: str,
+    value: object,
+) -> None:
+    """Identity, lifecycle and delivery policy are manager-owned."""
+    response = await client.patch(
+        f"/api/v1/teacher/courses/{scenario['course_a']}",
+        json={field: value},
+        headers={"Authorization": f"Bearer {teacher_bearer}"},
+    )
+    assert response.status_code == 403, f"{field} must be manager-only: {response.text}"
+    assert response.json()["detail"]["error"] == "permission_denied"
+
+
+async def test_teacher_cannot_publish_via_mixed_patch(
+    client: httpx.AsyncClient,
+    teacher_bearer: str,
+    scenario: dict[str, uuid.UUID | str],
+    engine: AsyncEngine,
+) -> None:
+    """A payload mixing an allowed field with `status` must reject WHOLLY.
+
+    Otherwise the description lands and the publish is silently dropped (or
+    worse, applied) — the check runs before the patch so it is all-or-nothing.
+    """
+    before = await _course_status(engine, scenario["course_a"])
+    response = await client.patch(
+        f"/api/v1/teacher/courses/{scenario['course_a']}",
+        json={"description": "smuggled", "status": "published"},
+        headers={"Authorization": f"Bearer {teacher_bearer}"},
+    )
+    assert response.status_code == 403, response.text
+    assert await _course_status(engine, scenario["course_a"]) == before
+
+
+async def test_manager_may_patch_status(
+    client: httpx.AsyncClient,
+    manager_bearer: str,
+    scenario: dict[str, uuid.UUID | str],
+) -> None:
+    """The other side of the boundary: a manager still owns lifecycle."""
+    response = await client.patch(
+        f"/api/v1/teacher/courses/{scenario['course_a']}",
+        json={"level": "advanced"},
+        headers={"Authorization": f"Bearer {manager_bearer}"},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["level"] == "advanced"
+
+
+async def _course_status(engine: AsyncEngine, course_id: object) -> str:
+    async with engine.begin() as conn:
+        return (
+            await conn.execute(
+                text("SELECT status FROM courses WHERE id = :id"), {"id": course_id}
+            )
+        ).scalar_one()
+
+
+async def test_teacher_cannot_upload_a_thumbnail(
+    client: httpx.AsyncClient,
+    teacher_bearer: str,
+    scenario: dict[str, uuid.UUID | str],
+) -> None:
+    """The thumbnail's side door.
+
+    `thumbnail_object_id` is manager-only in the PATCH allow-list, but the
+    upload endpoint pointed the course at a new image itself — gated on
+    course.update it would have let a teacher change the artwork anyway.
+    """
+    response = await client.put(
+        f"/api/v1/teacher/courses/{scenario['course_a']}/thumbnail",
+        content=b"\x89PNG\r\n\x1a\n" + b"0" * 64,
+        headers={
+            "Authorization": f"Bearer {teacher_bearer}",
+            "Content-Type": "image/png",
+        },
+    )
+    assert response.status_code == 403, response.text
 
 
 async def test_teacher_403_on_sibling_course(
@@ -473,12 +608,48 @@ async def test_manager_org_propagation(
     assert response.status_code == 200, response.text
 
 
+async def _publish_ready(engine: AsyncEngine, course_id: object) -> None:
+    """Satisfy BOTH publish gates so a course can go live.
+
+    Publishing is gated on (a) at least one gradeable unit — published lesson,
+    quiz or interview, because a course with nothing to grade can never be
+    completed by a student, and (b) at least one learning outcome, because a
+    course that never says what it teaches should not be offered.
+
+    The scenario fixture seeds only DRAFT lessons and no outcomes, so any test
+    that publishes has to supply both. That mirrors the real flow: content is
+    authored and outcomes are stated before the course goes live.
+    """
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "UPDATE lessons SET status = 'published' WHERE id = ("
+                "  SELECT l.id FROM lessons l JOIN modules m ON m.id = l.module_id"
+                "  WHERE m.course_id = :cid LIMIT 1)"
+            ),
+            {"cid": course_id},
+        )
+        # Idempotent: several tests call this helper against the same course.
+        await conn.execute(
+            text(
+                "INSERT INTO course_learning_outcomes "
+                "(id, course_id, position, outcome_text) "
+                "SELECT gen_random_uuid(), :cid, 1, 'Publish-gate outcome' "
+                "WHERE NOT EXISTS ("
+                "  SELECT 1 FROM course_learning_outcomes "
+                "  WHERE course_id = :cid AND deleted_at IS NULL)"
+            ),
+            {"cid": course_id},
+        )
+
+
 async def test_publish_course_widens_status(
     client: httpx.AsyncClient,
     manager_bearer: str,
     scenario: dict[str, uuid.UUID | str],
     engine: AsyncEngine,
 ) -> None:
+    await _publish_ready(engine, scenario["course_b"])
     response = await client.post(
         f"/api/v1/teacher/courses/{scenario['course_b']}/publish",
         headers={"Authorization": f"Bearer {manager_bearer}"},
@@ -741,6 +912,133 @@ async def test_create_course_resolves_org_from_token(
                 {"id": body["id"]},
             )
             await conn.execute(text("DELETE FROM courses WHERE id = :id"), {"id": body["id"]})
+
+
+async def test_manager_creating_a_course_is_not_auto_assigned_as_teacher(
+    client: httpx.AsyncClient,
+    manager_bearer: str,
+    engine: AsyncEngine,
+) -> None:
+    """A manager creating a course on a teacher's behalf must NOT become a
+    co-teacher on it.
+
+    Create used to auto-assign the creator unconditionally. Since assignment is
+    purely additive (``assign_teacher_to_course`` returns early when a record
+    exists and never removes anyone), every course a manager ever created kept
+    them in its teacher list permanently — cluttering their authoring list and
+    the dept teachers tab. The manager keeps ownership and
+    ``course.delete``/``course.publish``; neither needs a teacher row.
+    """
+    suffix = uuid.uuid4().hex[:8]
+    response = await client.post(
+        "/api/v1/teacher/courses",
+        json={"slug": f"mgr-noassign-{suffix}", "title": f"Mgr {suffix}"},
+        headers={"Authorization": f"Bearer {manager_bearer}"},
+    )
+    assert response.status_code == 201, response.text
+    course_id = response.json()["id"]
+    try:
+        async with engine.begin() as conn:
+            count = (
+                await conn.execute(
+                    text(
+                        "SELECT count(*) FROM user_role_assignments "
+                        "WHERE course_id = :id AND deleted_at IS NULL"
+                    ),
+                    {"id": course_id},
+                )
+            ).scalar_one()
+        assert count == 0, "manager must not be auto-assigned as a teacher"
+    finally:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("DELETE FROM user_role_assignments WHERE course_id = :id"),
+                {"id": course_id},
+            )
+            await conn.execute(text("DELETE FROM courses WHERE id = :id"), {"id": course_id})
+
+
+async def test_teacher_cannot_create_a_course_at_all(
+    client: httpx.AsyncClient,
+    teacher_bearer: str,
+) -> None:
+    """Recorded because it is why the auto-assign was always wrong.
+
+    ``course.create`` is held by admin and manager only, so a teacher can never
+    reach create. The "reasonable for a teacher self-creating" justification for
+    auto-assigning the creator therefore described a case that cannot happen:
+    in practice the creator was always a manager or admin.
+    """
+    response = await client.post(
+        "/api/v1/teacher/courses",
+        json={"slug": f"tea-denied-{uuid.uuid4().hex[:8]}", "title": "Denied"},
+        headers={"Authorization": f"Bearer {teacher_bearer}"},
+    )
+    assert response.status_code == 403, response.text
+    assert response.json()["detail"]["required"] == ["course.create"]
+
+
+async def test_creator_holding_the_teacher_role_is_auto_assigned(
+    client: httpx.AsyncClient,
+    manager_bearer: str,
+    seeded_users: SeededUsers,
+    engine: AsyncEngine,
+) -> None:
+    """The surviving half of the rule: a creator who genuinely IS a teacher
+    still gets the row, so a dual-role user's own course stays in their
+    authoring list. Guards against "just delete the auto-assign" regressing
+    the case the feature was built for.
+    """
+    role_assignment_id = uuid.uuid4()
+    async with engine.begin() as conn:
+        teacher_role_id = (
+            await conn.execute(text("SELECT id FROM roles WHERE code = 'teacher'"))
+        ).scalar_one()
+        await conn.execute(
+            text(
+                "INSERT INTO user_role_assignments "
+                "(id, user_id, role_id, scope_kind, organization_id, granted_by) "
+                "VALUES (:id, :uid, :rid, 'organization', :org, :uid)"
+            ),
+            {
+                "id": role_assignment_id,
+                "uid": seeded_users.manager_id,
+                "rid": teacher_role_id,
+                "org": seeded_users.organization_id,
+            },
+        )
+    course_id: str | None = None
+    try:
+        response = await client.post(
+            "/api/v1/teacher/courses",
+            json={"slug": f"dual-{uuid.uuid4().hex[:8]}", "title": "Dual role"},
+            headers={"Authorization": f"Bearer {manager_bearer}"},
+        )
+        assert response.status_code == 201, response.text
+        course_id = response.json()["id"]
+        async with engine.begin() as conn:
+            rows = (
+                await conn.execute(
+                    text(
+                        "SELECT user_id FROM user_role_assignments "
+                        "WHERE course_id = :id AND deleted_at IS NULL"
+                    ),
+                    {"id": course_id},
+                )
+            ).all()
+        assert [r.user_id for r in rows] == [seeded_users.manager_id]
+    finally:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("DELETE FROM user_role_assignments WHERE id = :id"),
+                {"id": role_assignment_id},
+            )
+            if course_id is not None:
+                await conn.execute(
+                    text("DELETE FROM user_role_assignments WHERE course_id = :id"),
+                    {"id": course_id},
+                )
+                await conn.execute(text("DELETE FROM courses WHERE id = :id"), {"id": course_id})
 
 
 async def test_create_course_rejects_forged_organization_id(
@@ -1714,7 +2012,9 @@ async def test_course_outcomes_frozen_once_published(
     assert created.status_code == 201, created.text
     outcome_id = created.json()["id"]
 
-    # Publish the course (draft -> published).
+    # Publish the course (draft -> published). Needs a gradeable unit first:
+    # publishing is gated on one, and the fixture's lessons are drafts.
+    await _publish_ready(engine, course_a)
     pub = await client.post(f"/api/v1/teacher/courses/{course_a}/publish", headers=auth)
     assert pub.status_code == 200, pub.text
     assert pub.json()["status"] == "published"
@@ -1798,3 +2098,406 @@ async def test_manager_can_delete_course(
             text("UPDATE courses SET deleted_at = NULL, deleted_by = NULL WHERE id = :cid"),
             {"cid": scenario["course_a"]},
         )
+
+
+async def test_creator_holding_the_teacher_role_gets_a_notification(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    seeded_users: SeededUsers,
+    engine: AsyncEngine,
+) -> None:
+    """Creating a course auto-assigns a teacher-creator — and must notify them.
+
+    The regression: only the explicit ``POST /dept/courses/{id}/teachers``
+    route notified. ``create_course`` writes an identical teacher assignment
+    when the creator holds the teacher role, and said nothing — so whether a
+    teacher heard about a course they now own depended on which code path
+    happened to create the row.
+
+    Driven with the ADMIN token on purpose. ``course.create`` is not a teacher
+    permission, so a pure teacher cannot reach this path at all; the real
+    scenario is an account holding BOTH roles (admin/manager to create,
+    teacher to be auto-assigned), which is exactly how it was reported.
+    """
+    slug = f"notify-create-{uuid.uuid4().hex[:8]}"
+    # Give the admin the teacher role for this test — that dual-role account is
+    # the only way the auto-assign branch is reachable. The org membership goes
+    # with it: `create_course` resolves the owner's primary organization from
+    # the token, and the seeded admin has none.
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO organization_memberships "
+                "(user_id, organization_id, status) VALUES (:uid, :org, 'active') "
+                "ON CONFLICT DO NOTHING"
+            ),
+            {"uid": seeded_users.admin_id, "org": seeded_users.organization_id},
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO user_role_assignments "
+                "(user_id, role_id, scope_kind, organization_id, active_from, granted_by) "
+                "SELECT :uid, r.id, 'organization', :org, now(), :uid "
+                "FROM roles r WHERE r.code = 'teacher'"
+            ),
+            {"uid": seeded_users.admin_id, "org": seeded_users.organization_id},
+        )
+
+    response = await client.post(
+        "/api/v1/teacher/courses",
+        json={"title": "Notified On Create", "slug": slug},
+        headers={"Authorization": f"Bearer {admin_bearer}"},
+    )
+    assert response.status_code == 201, response.text
+    course_id = uuid.UUID(response.json()["id"])
+
+    try:
+        async with engine.begin() as conn:
+            # The assignment exists...
+            assigned = (
+                await conn.execute(
+                    text(
+                        "SELECT count(*) FROM user_role_assignments ura "
+                        "JOIN roles r ON r.id = ura.role_id "
+                        "WHERE ura.course_id = :cid AND ura.user_id = :uid "
+                        "AND r.code = 'teacher' AND ura.deleted_at IS NULL"
+                    ),
+                    {"cid": course_id, "uid": seeded_users.admin_id},
+                )
+            ).scalar_one()
+            assert assigned == 1, "creator holding the teacher role is auto-assigned"
+
+            # ...and so does the notification telling them about it.
+            rows = (
+                await conn.execute(
+                    text(
+                        "SELECT category, title FROM notifications "
+                        "WHERE user_id = :uid AND entity_id = :cid"
+                    ),
+                    {"uid": seeded_users.admin_id, "cid": course_id},
+                )
+            ).all()
+        assert len(rows) == 1, f"expected exactly one notification, got {rows}"
+        assert "Notified On Create" in rows[0][1]
+    finally:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("DELETE FROM notifications WHERE entity_id = :cid"), {"cid": course_id}
+            )
+            await conn.execute(
+                text("DELETE FROM user_role_assignments WHERE course_id = :cid"),
+                {"cid": course_id},
+            )
+            await conn.execute(text("DELETE FROM courses WHERE id = :cid"), {"cid": course_id})
+            # Drop the teacher grant added for this test so the shared admin
+            # fixture is left exactly as found.
+            await conn.execute(
+                text(
+                    "DELETE FROM user_role_assignments ura USING roles r "
+                    "WHERE ura.role_id = r.id AND r.code = 'teacher' "
+                    "AND ura.user_id = :uid AND ura.scope_kind = 'organization'"
+                ),
+                {"uid": seeded_users.admin_id},
+            )
+            await conn.execute(
+                text(
+                    "DELETE FROM organization_memberships "
+                    "WHERE user_id = :uid AND organization_id = :org"
+                ),
+                {"uid": seeded_users.admin_id, "org": seeded_users.organization_id},
+            )
+
+
+async def test_manager_creating_a_course_is_not_auto_assigned_or_notified(
+    client: httpx.AsyncClient,
+    manager_bearer: str,
+    seeded_users: SeededUsers,
+    engine: AsyncEngine,
+) -> None:
+    """A manager is not a teacher, so there is no assignment and nothing to say.
+
+    Pins the other half: the notification follows the ASSIGNMENT, not the act
+    of creating. A manager creating on someone's behalf must not accumulate as
+    a co-teacher, and must not be told they were handed teaching work.
+    """
+    slug = f"notify-mgr-{uuid.uuid4().hex[:8]}"
+    response = await client.post(
+        "/api/v1/teacher/courses",
+        json={"title": "Manager Created", "slug": slug},
+        headers={"Authorization": f"Bearer {manager_bearer}"},
+    )
+    assert response.status_code == 201, response.text
+    course_id = uuid.UUID(response.json()["id"])
+
+    try:
+        async with engine.begin() as conn:
+            count = (
+                await conn.execute(
+                    text("SELECT count(*) FROM notifications WHERE entity_id = :cid"),
+                    {"cid": course_id},
+                )
+            ).scalar_one()
+        assert count == 0, "manager creating a course is not being assigned to teach it"
+    finally:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("DELETE FROM user_role_assignments WHERE course_id = :cid"),
+                {"cid": course_id},
+            )
+            await conn.execute(text("DELETE FROM courses WHERE id = :cid"), {"cid": course_id})
+
+
+async def _fresh_draft_course(
+    engine: AsyncEngine,
+    seeded_users: SeededUsers,
+) -> tuple[str, str]:
+    """Create a throwaway draft course + its outcomes base URL.
+
+    Inserted via SQL, not the API: the seeded admin fixture has no org
+    membership, so ``POST /teacher/courses`` 400s for it. The shared seeded
+    course_a also gets published (one-way door) by
+    ``test_course_outcomes_frozen_once_published``, so LO mutation tests must
+    not depend on it staying a draft — they create their own course instead
+    and delete it in ``finally``.
+    """
+    course_id = uuid.uuid4()
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO courses (id, organization_id, owner_user_id, slug, title, status) "
+                "VALUES (:id, :org, :owner, :slug, 'LO Outliner Test', 'draft')"
+            ),
+            {
+                "id": course_id,
+                "org": seeded_users.organization_id,
+                "owner": seeded_users.admin_id,
+                "slug": f"lo-out-{course_id.hex[:8]}",
+            },
+        )
+    return str(course_id), f"/api/v1/teacher/courses/{course_id}/outcomes"
+
+
+async def _delete_course_hard(engine: AsyncEngine, course_id: str) -> None:
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("DELETE FROM course_learning_outcomes WHERE course_id = :cid"),
+            {"cid": course_id},
+        )
+        await conn.execute(
+            text("DELETE FROM user_role_assignments WHERE course_id = :cid"),
+            {"cid": course_id},
+        )
+        await conn.execute(text("DELETE FROM courses WHERE id = :cid"), {"cid": course_id})
+
+
+async def test_course_outcome_reorder_within_siblings(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    engine: AsyncEngine,
+    seeded_users: SeededUsers,
+) -> None:
+    """PATCH position moves an outcome to a 1-based slot among its siblings.
+
+    The outliner's "drop between rows 3 and 4" maps to position=4. Codes are
+    derived from positions at read time, so the display code follows the move
+    while the UUID identity stays put.
+    """
+    auth = {"Authorization": f"Bearer {admin_bearer}"}
+    course_id, base = await _fresh_draft_course(engine, seeded_users)
+    try:
+        created: list[dict[str, object]] = []
+        for text_val in ("One", "Two", "Three"):
+            resp = await client.post(base, json={"outcome_text": text_val}, headers=auth)
+            assert resp.status_code == 201, resp.text
+            created.append(resp.json())
+
+        # Move "Three" (position 3) to slot 1.
+        three_id = created[2]["id"]
+        moved = await client.patch(
+            f"{base}/{three_id}", json={"position": 1}, headers=auth
+        )
+        assert moved.status_code == 200, moved.text
+        assert moved.json()["position"] == 1
+        assert moved.json()["code"] == "1"
+
+        listed = (await client.get(base, headers=auth)).json()
+        assert [o["outcome_text"] for o in listed] == ["Three", "One", "Two"]
+        assert [o["position"] for o in listed] == [1, 2, 3]
+
+        # Reparent with an explicit slot: nest "One" under "Three" at slot 1.
+        one_id = created[0]["id"]
+        nested = await client.patch(
+            f"{base}/{one_id}",
+            json={"parent_id": three_id, "position": 2},
+            headers=auth,
+        )
+        assert nested.status_code == 200, nested.text
+        assert nested.json()["parent_id"] == str(three_id)
+        assert nested.json()["code"] == "1.1"
+        assert nested.json()["depth"] == 1
+
+        listed = (await client.get(base, headers=auth)).json()
+        assert [(o["outcome_text"], o["code"]) for o in listed] == [
+            ("Three", "1"),
+            ("One", "1.1"),
+            ("Two", "2"),
+        ]
+    finally:
+        await _delete_course_hard(engine, course_id)
+
+
+async def test_course_outcome_delete_promotes_children(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    engine: AsyncEngine,
+    seeded_users: SeededUsers,
+) -> None:
+    """promote_children=true keeps the kids, re-parenting them to the parent's
+    level, instead of cascading the delete down the subtree."""
+    auth = {"Authorization": f"Bearer {admin_bearer}"}
+    course_id, base = await _fresh_draft_course(engine, seeded_users)
+    try:
+        root = (await client.post(base, json={"outcome_text": "Root"}, headers=auth)).json()
+        child_a = (
+            await client.post(
+                base, json={"outcome_text": "Child A", "parent_id": root["id"]}, headers=auth
+            )
+        ).json()
+        await client.post(
+            base, json={"outcome_text": "Child B", "parent_id": root["id"]}, headers=auth
+        )
+        await client.post(
+            base,
+            json={"outcome_text": "Grandchild", "parent_id": child_a["id"]},
+            headers=auth,
+        )
+        await client.post(base, json={"outcome_text": "Sibling"}, headers=auth)
+
+        del_resp = await client.delete(
+            f"{base}/{root['id']}?promote_children=true", headers=auth
+        )
+        assert del_resp.status_code == 204, del_resp.text
+
+        listed = (await client.get(base, headers=auth)).json()
+        assert [(o["outcome_text"], o["code"], o["depth"]) for o in listed] == [
+            ("Child A", "1", 0),
+            ("Grandchild", "1.1", 1),
+            ("Child B", "2", 0),
+            ("Sibling", "3", 0),
+        ]
+    finally:
+        await _delete_course_hard(engine, course_id)
+
+
+async def test_course_outcome_delete_cascades_by_default(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    engine: AsyncEngine,
+    seeded_users: SeededUsers,
+) -> None:
+    """Without promote_children the whole subtree goes (legacy behaviour)."""
+    auth = {"Authorization": f"Bearer {admin_bearer}"}
+    course_id, base = await _fresh_draft_course(engine, seeded_users)
+    try:
+        root = (await client.post(base, json={"outcome_text": "Root"}, headers=auth)).json()
+        await client.post(
+            base, json={"outcome_text": "Kid", "parent_id": root["id"]}, headers=auth
+        )
+
+        del_resp = await client.delete(f"{base}/{root['id']}", headers=auth)
+        assert del_resp.status_code == 204, del_resp.text
+        listed = (await client.get(base, headers=auth)).json()
+        assert listed == []
+    finally:
+        await _delete_course_hard(engine, course_id)
+
+
+async def test_course_outcome_duplicate_deep_copies_subtree(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    engine: AsyncEngine,
+    seeded_users: SeededUsers,
+) -> None:
+    """Duplicate copies the subtree with fresh ids, inserted after the original."""
+    auth = {"Authorization": f"Bearer {admin_bearer}"}
+    course_id, base = await _fresh_draft_course(engine, seeded_users)
+    try:
+        root = (await client.post(base, json={"outcome_text": "Root"}, headers=auth)).json()
+        child = (
+            await client.post(
+                base, json={"outcome_text": "Kid", "parent_id": root["id"]}, headers=auth
+            )
+        ).json()
+
+        dup = await client.post(f"{base}/{root['id']}/duplicate", headers=auth)
+        assert dup.status_code == 201, dup.text
+        assert dup.json()["outcome_text"] == "Root"
+        assert dup.json()["id"] != root["id"]
+
+        listed = (await client.get(base, headers=auth)).json()
+        assert [(o["outcome_text"], o["code"]) for o in listed] == [
+            ("Root", "1"),
+            ("Kid", "1.1"),
+            ("Root", "2"),
+            ("Kid", "2.1"),
+        ]
+        assert listed[2]["id"] == dup.json()["id"]
+        assert listed[3]["id"] != child["id"]
+        assert listed[3]["parent_id"] == listed[2]["id"]
+    finally:
+        await _delete_course_hard(engine, course_id)
+
+
+async def test_course_outcome_question_count_surfaces_mappings(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    engine: AsyncEngine,
+    seeded_users: SeededUsers,
+) -> None:
+    """question_count tells the delete dialog exactly which outcomes have
+    quiz questions mapped, so the confirmation can say "will lose mapping"."""
+    auth = {"Authorization": f"Bearer {admin_bearer}"}
+    course_id, base = await _fresh_draft_course(engine, seeded_users)
+    quiz_id, module_id = uuid.uuid4(), uuid.uuid4()
+    try:
+        out = (await client.post(base, json={"outcome_text": "Mapped"}, headers=auth)).json()
+        await client.post(base, json={"outcome_text": "Plain"}, headers=auth)
+
+        async with engine.begin() as conn:
+            await conn.execute(
+                text(
+                    "INSERT INTO modules (id, course_id, title, position, status) "
+                    "VALUES (:id, :cid, 'M', 1, 'published')"
+                ),
+                {"id": module_id, "cid": course_id},
+            )
+            await conn.execute(
+                text(
+                    "INSERT INTO quizzes (id, course_id, module_id, title, status) "
+                    "VALUES (:id, :cid, :mid, 'Q', 'published')"
+                ),
+                {"id": quiz_id, "cid": course_id, "mid": module_id},
+            )
+            await conn.execute(
+                text(
+                    "INSERT INTO quiz_questions "
+                    "(id, quiz_id, position, question_type, prompt_text, learning_outcome_id, "
+                    "review_status) "
+                    "VALUES (:id, :qid, 1, 'multiple_choice', 'P?', :loid, 'approved')"
+                ),
+                {"id": uuid.uuid4(), "qid": quiz_id, "loid": out["id"]},
+            )
+
+        listed = (await client.get(base, headers=auth)).json()
+        by_text = {o["outcome_text"]: o["question_count"] for o in listed}
+        assert by_text["Mapped"] == 1
+        assert by_text["Plain"] == 0
+    finally:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("DELETE FROM quiz_questions WHERE quiz_id = :qid"),
+                {"qid": quiz_id},
+            )
+            await conn.execute(text("DELETE FROM quizzes WHERE id = :id"), {"id": quiz_id})
+            await conn.execute(text("DELETE FROM modules WHERE id = :id"), {"id": module_id})
+        await _delete_course_hard(engine, course_id)

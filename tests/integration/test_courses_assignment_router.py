@@ -56,8 +56,9 @@ import abridgeai.features.identity.models  # noqa: F401  -- register users FK ta
 import abridgeai.features.interviews.models  # noqa: F401  -- T6.1 registers interview_* tables
 from abridgeai.core.config import get_settings
 from abridgeai.core.db import Base, get_db
-from abridgeai.core.security import create_access_token, generate_token, hash_secret
+from abridgeai.core.security import CurrentUser, create_access_token, generate_token, hash_secret
 from abridgeai.features.courses.routers import assignment_router
+from abridgeai.features.courses.services import authoring as authoring_service
 
 for _stub_name in ("interview_configs",):
     if _stub_name not in Base.metadata.tables:
@@ -262,6 +263,23 @@ async def scenario(
             ),
             {"id": bob_id, "sid": stale_teacher_id, "eid": enrolled_student_id},
         )
+        # Org membership. Assignment requires the assignee to be a member of
+        # the course's organization (server-side, not a UI convention), so the
+        # fixture has to model what real users have: every teacher in the live
+        # database carries an active organization_memberships row.
+        await conn.execute(
+            text(
+                "INSERT INTO organization_memberships (user_id, organization_id, status) "
+                "VALUES (:bid, :org, 'active'), (:sid, :org, 'active'), "
+                "(:eid, :org, 'active')"
+            ),
+            {
+                "bid": bob_id,
+                "sid": stale_teacher_id,
+                "eid": enrolled_student_id,
+                "org": seeded_users.organization_id,
+            },
+        )
         await conn.execute(
             text(
                 "INSERT INTO courses (id, organization_id, org_unit_id, owner_user_id, "
@@ -351,6 +369,10 @@ async def scenario(
         await conn.execute(
             text("DELETE FROM org_units WHERE id = :id"),
             {"id": org_unit_b},
+        )
+        await conn.execute(
+            text("DELETE FROM organization_memberships WHERE user_id = ANY(:ids)"),
+            {"ids": [bob_id, stale_teacher_id, enrolled_student_id]},
         )
         await conn.execute(
             text("DELETE FROM user_profiles WHERE user_id = ANY(:ids)"),
@@ -504,17 +526,437 @@ async def test_manager_can_assign_org_wide(
     assert response.status_code == 403
 
 
-async def test_admin_can_assign_globally(
+async def test_admin_assign_still_requires_the_teacher_to_be_in_the_course_org(
     client: httpx.AsyncClient,
     admin_bearer: str,
     scenario: dict[str, uuid.UUID],
 ) -> None:
+    """Admin's global reach is about WHICH COURSES they may staff, not about
+    waiving org membership for the assignee.
+
+    This test previously asserted 201 for "admin assigns Bob (org A) to a
+    course in another org". Bob would have received course.update on a course
+    of an organization he is not a member of — cross-tenant access created by
+    a staffing action. Admin can still staff any course; they just have to
+    pick someone who belongs to that course's organization.
+    """
     response = await client.post(
         f"/api/v1/dept/courses/{scenario['course_other_org']}/teachers",
         json={"user_id": str(scenario["bob_id"])},
         headers={"Authorization": f"Bearer {admin_bearer}"},
     )
-    assert response.status_code == 201, response.text
+    assert response.status_code == 403, response.text
+    assert "teacher_not_in_course_org" in response.json()["detail"]["message"]
+
+
+async def test_admin_can_assign_a_teacher_of_that_org(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    scenario: dict[str, uuid.UUID],
+    engine: AsyncEngine,
+) -> None:
+    """The reach itself is intact: give the assignee membership in the other
+    org and the same admin assignment goes through."""
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO organization_memberships (user_id, organization_id, status) "
+                "VALUES (:uid, :org, 'active')"
+            ),
+            {"uid": scenario["bob_id"], "org": scenario["other_org"]},
+        )
+    try:
+        response = await client.post(
+            f"/api/v1/dept/courses/{scenario['course_other_org']}/teachers",
+            json={"user_id": str(scenario["bob_id"])},
+            headers={"Authorization": f"Bearer {admin_bearer}"},
+        )
+        assert response.status_code == 201, response.text
+    finally:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text(
+                    "DELETE FROM organization_memberships "
+                    "WHERE user_id = :uid AND organization_id = :org"
+                ),
+                {"uid": scenario["bob_id"], "org": scenario["other_org"]},
+            )
+
+
+async def test_assignable_teachers_lists_only_in_org_teachers(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    seeded_users: SeededUsers,
+    scenario: dict[str, uuid.UUID],
+) -> None:
+    """The picker's source of truth. Org comes from the COURSE, not the client.
+
+    Replaces "paste a user UUID" on the manager surface. The seeded teacher
+    holds the teacher role in org A, so they must appear for a course in org A
+    and NOT for the other-org course — otherwise the picker would offer an
+    assignment that the POST then 403s on.
+    """
+    headers = {"Authorization": f"Bearer {admin_bearer}"}
+    same_org = await client.get(
+        f"/api/v1/dept/courses/{scenario['course_a']}/assignable-teachers",
+        headers=headers,
+    )
+    assert same_org.status_code == 200, same_org.text
+    ids = {row["user_id"] for row in same_org.json()}
+    assert str(seeded_users.teacher_id) in ids
+
+    other_org = await client.get(
+        f"/api/v1/dept/courses/{scenario['course_other_org']}/assignable-teachers",
+        headers=headers,
+    )
+    assert other_org.status_code == 200, other_org.text
+    other_ids = {row["user_id"] for row in other_org.json()}
+    assert str(seeded_users.teacher_id) not in other_ids, (
+        "a teacher of another organization must not be offered"
+    )
+
+
+async def test_assignable_teachers_excludes_users_without_the_teacher_role(
+    client: httpx.AsyncClient,
+    scenario: dict[str, uuid.UUID],
+    admin_bearer: str,
+) -> None:
+    """Org membership alone is not enough — the picker offers TEACHERS.
+
+    Bob and the enrolled student are both active members of org A; neither
+    holds the teacher role, so neither may be staffed onto a course.
+    """
+    response = await client.get(
+        f"/api/v1/dept/courses/{scenario['course_a']}/assignable-teachers",
+        headers={"Authorization": f"Bearer {admin_bearer}"},
+    )
+    assert response.status_code == 200, response.text
+    ids = {row["user_id"] for row in response.json()}
+    assert str(scenario["enrolled_student_id"]) not in ids
+    assert str(scenario["bob_id"]) not in ids
+
+
+async def test_assignable_teachers_flags_already_assigned(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    seeded_users: SeededUsers,
+    scenario: dict[str, uuid.UUID],
+) -> None:
+    """So the picker can show current teachers as chosen instead of offering a
+    no-op assignment."""
+    headers = {"Authorization": f"Bearer {admin_bearer}"}
+    assign = await client.post(
+        f"/api/v1/dept/courses/{scenario['course_a']}/teachers",
+        json={"user_id": str(seeded_users.teacher_id)},
+        headers=headers,
+    )
+    assert assign.status_code == 201, assign.text
+
+    response = await client.get(
+        f"/api/v1/dept/courses/{scenario['course_a']}/assignable-teachers",
+        headers=headers,
+    )
+    assert response.status_code == 200, response.text
+    row = next(
+        r for r in response.json() if r["user_id"] == str(seeded_users.teacher_id)
+    )
+    assert row["already_assigned"] is True
+    # And carries something human-readable — the whole point of the selector.
+    assert row["primary_email"]
+
+
+async def test_assignable_teachers_requires_staffing_permission(
+    client: httpx.AsyncClient,
+    teacher_bearer: str,
+    scenario: dict[str, uuid.UUID],
+) -> None:
+    """A teacher cannot enumerate who else could be staffed."""
+    response = await client.get(
+        f"/api/v1/dept/courses/{scenario['course_a']}/assignable-teachers",
+        headers={"Authorization": f"Bearer {teacher_bearer}"},
+    )
+    assert response.status_code == 403, response.text
+
+
+async def test_assignable_teachers_for_a_new_course_uses_the_callers_org(
+    client: httpx.AsyncClient,
+    manager_bearer: str,
+    seeded_users: SeededUsers,
+) -> None:
+    """The create wizard picks teachers before any course exists.
+
+    Org comes from the caller's token, so the list must match what the
+    per-course endpoint would return for a course this manager creates.
+    """
+    response = await client.get(
+        "/api/v1/dept/assignable-teachers",
+        headers={"Authorization": f"Bearer {manager_bearer}"},
+    )
+    assert response.status_code == 200, response.text
+    rows = response.json()
+    ids = {row["user_id"] for row in rows}
+    assert str(seeded_users.teacher_id) in ids
+    # Nothing to be assigned to yet, so the flag must be uniformly false rather
+    # than leaking state from some other course.
+    assert all(row["already_assigned"] is False for row in rows)
+
+
+async def test_assignable_teachers_for_a_new_course_excludes_other_orgs(
+    client: httpx.AsyncClient,
+    manager_bearer: str,
+    scenario: dict[str, uuid.UUID],
+) -> None:
+    """The org restriction has to hold on this route too, not just the scoped one.
+
+    ``other_owner`` lives in a different organization, so it must not appear
+    regardless of any role it holds.
+    """
+    response = await client.get(
+        "/api/v1/dept/assignable-teachers",
+        headers={"Authorization": f"Bearer {manager_bearer}"},
+    )
+    assert response.status_code == 200, response.text
+    ids = {row["user_id"] for row in response.json()}
+    assert str(scenario["other_owner"]) not in ids
+
+
+async def test_assignable_teachers_for_a_new_course_requires_staffing_permission(
+    client: httpx.AsyncClient,
+    teacher_bearer: str,
+) -> None:
+    response = await client.get(
+        "/api/v1/dept/assignable-teachers",
+        headers={"Authorization": f"Bearer {teacher_bearer}"},
+    )
+    assert response.status_code == 403, response.text
+
+
+async def test_readiness_reports_an_empty_course_as_not_publishable(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    scenario: dict[str, uuid.UUID],
+) -> None:
+    """The checklist's whole purpose: say it BEFORE publish, not as a 409 after.
+
+    The scenario's course_b has no published lesson, no teacher and no career
+    path — the state a freshly created course is in.
+    """
+    response = await client.get(
+        f"/api/v1/dept/courses/{scenario['course_b']}/readiness",
+        headers={"Authorization": f"Bearer {admin_bearer}"},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["gradeable_unit_count"] == 0
+    assert body["can_publish"] is False
+    assert body["career_paths"] == []
+    assert body["status"] == "draft"
+
+
+def _service_actor(user_id: uuid.UUID) -> CurrentUser:
+    """Service-level actor for the one assertion that bypasses HTTP."""
+    return CurrentUser(user_id=user_id, session_id=uuid.uuid4())
+
+
+async def test_readiness_can_publish_matches_the_publish_gate(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    scenario: dict[str, uuid.UUID],
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    seeded_users: SeededUsers,
+) -> None:
+    """`can_publish` must agree with the gate, or the checklist lies.
+
+    Publish the course through the API right after the checklist says it can be
+    published: a green row followed by a 409 would be worse than no row at all.
+    """
+    headers = {"Authorization": f"Bearer {admin_bearer}"}
+    # course_a, not course_b: the publish route resolves through the course's
+    # org_unit, and course_b sits in a unit the admin has no path to (404).
+    course_id = scenario["course_a"]
+    # This fixture seeds courses with no curriculum at all, so create the one
+    # gradeable unit rather than promoting a lesson that does not exist.
+    module_id, lesson_id, outcome_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO modules (id, course_id, title, position, status) "
+                "VALUES (:id, :cid, 'M1', 1, 'published')"
+            ),
+            {"id": module_id, "cid": course_id},
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO lessons (id, module_id, slug, title, status, lesson_type) "
+                "VALUES (:id, :mid, :slug, 'L1', 'published', 'video')"
+            ),
+            {
+                "id": lesson_id,
+                "mid": module_id,
+                "slug": f"rl-{uuid.uuid4().hex[:8]}",
+            },
+        )
+
+    try:
+        # Content but no outcomes: the second gate is unmet, so the checklist
+        # must NOT show green. Asserted before satisfying it — a checklist that
+        # only ever gets checked in the ready state cannot catch disagreement.
+        partial = await client.get(
+            f"/api/v1/dept/courses/{course_id}/readiness", headers=headers
+        )
+        assert partial.status_code == 200, partial.text
+        assert partial.json()["gradeable_unit_count"] == 1
+        assert partial.json()["learning_outcome_count"] == 0
+        assert partial.json()["can_publish"] is False
+
+        async with engine.begin() as conn:
+            await conn.execute(
+                text(
+                    "INSERT INTO course_learning_outcomes "
+                    "(id, course_id, position, outcome_text) "
+                    "VALUES (:id, :cid, 1, 'State the outcome')"
+                ),
+                {"id": outcome_id, "cid": course_id},
+            )
+
+        readiness = await client.get(
+            f"/api/v1/dept/courses/{course_id}/readiness", headers=headers
+        )
+        assert readiness.status_code == 200, readiness.text
+        assert readiness.json()["gradeable_unit_count"] == 1
+        assert readiness.json()["learning_outcome_count"] == 1
+        assert readiness.json()["can_publish"] is True
+
+        # Cross-check against the gate itself. The publish ROUTE lives on the
+        # teacher router, which this test app does not mount (it mounts only
+        # the dept router), so call the gate directly: the point is that
+        # can_publish and the gate agree, not which URL carries it.
+        async with session_factory() as db:
+            published = await authoring_service.publish_course(
+                db, course_id, _service_actor(seeded_users.admin_id)
+            )
+            await db.commit()
+        assert published.status == "published"
+    finally:
+        async with engine.begin() as conn:
+            await conn.execute(text("DELETE FROM lessons WHERE id = :id"), {"id": lesson_id})
+            await conn.execute(text("DELETE FROM modules WHERE id = :id"), {"id": module_id})
+            await conn.execute(
+                text("DELETE FROM course_learning_outcomes WHERE id = :id"),
+                {"id": outcome_id},
+            )
+
+
+async def test_readiness_counts_assigned_teachers(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    seeded_users: SeededUsers,
+    scenario: dict[str, uuid.UUID],
+) -> None:
+    headers = {"Authorization": f"Bearer {admin_bearer}"}
+    before = await client.get(
+        f"/api/v1/dept/courses/{scenario['course_b']}/readiness", headers=headers
+    )
+    assert before.json()["teacher_count"] == 0
+
+    assign = await client.post(
+        f"/api/v1/dept/courses/{scenario['course_b']}/teachers",
+        json={"user_id": str(seeded_users.teacher_id)},
+        headers=headers,
+    )
+    assert assign.status_code == 201, assign.text
+
+    after = await client.get(
+        f"/api/v1/dept/courses/{scenario['course_b']}/readiness", headers=headers
+    )
+    assert after.json()["teacher_count"] == 1
+
+
+async def test_readiness_flags_a_required_course_that_locks_its_stage(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    scenario: dict[str, uuid.UUID],
+    engine: AsyncEngine,
+) -> None:
+    """The urgent case, separated from plain "no content".
+
+    A REQUIRED course with nothing to grade does not merely fail to complete: no
+    student can ever satisfy it, so its stage and every stage behind it stay
+    locked forever. That is worth shouting about; an optional empty course is
+    not.
+    """
+    path_id, stage_id = uuid.uuid4(), uuid.uuid4()
+    async with engine.begin() as conn:
+        org_id = (
+            await conn.execute(
+                text("SELECT organization_id FROM courses WHERE id = :c"),
+                {"c": scenario["course_b"]},
+            )
+        ).scalar_one()
+        await conn.execute(
+            text(
+                "INSERT INTO career_paths (id, organization_id, slug, name, status) "
+                "VALUES (:id, :org, :slug, 'Readiness Path', 'draft')"
+            ),
+            {
+                "id": path_id,
+                "org": org_id,
+                "slug": f"rp-{uuid.uuid4().hex[:8]}",
+            },
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO career_path_stages "
+                "(id, career_path_id, position, title, unlock_policy, enforcement) "
+                "VALUES (:id, :pid, 1, 'Stage 1', 'always', 'advisory')"
+            ),
+            {"id": stage_id, "pid": path_id},
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO career_course_items "
+                "(career_path_id, course_id, stage_id, position, is_required) "
+                "VALUES (:pid, :cid, :sid, 1, TRUE)"
+            ),
+            {"pid": path_id, "cid": scenario["course_b"], "sid": stage_id},
+        )
+    try:
+        response = await client.get(
+            f"/api/v1/dept/courses/{scenario['course_b']}/readiness",
+            headers={"Authorization": f"Bearer {admin_bearer}"},
+        )
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["blocks_required_stage"] is True
+        assert len(body["career_paths"]) == 1
+        placement = body["career_paths"][0]
+        assert placement["career_path_name"] == "Readiness Path"
+        assert placement["is_required"] is True
+        assert placement["stage_position"] == 1
+    finally:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("DELETE FROM career_course_items WHERE career_path_id = :p"),
+                {"p": path_id},
+            )
+            await conn.execute(
+                text("DELETE FROM career_path_stages WHERE career_path_id = :p"),
+                {"p": path_id},
+            )
+            await conn.execute(text("DELETE FROM career_paths WHERE id = :p"), {"p": path_id})
+
+
+async def test_readiness_requires_staffing_permission(
+    client: httpx.AsyncClient,
+    teacher_bearer: str,
+    scenario: dict[str, uuid.UUID],
+) -> None:
+    response = await client.get(
+        f"/api/v1/dept/courses/{scenario['course_b']}/readiness",
+        headers={"Authorization": f"Bearer {teacher_bearer}"},
+    )
+    assert response.status_code == 403, response.text
 
 
 async def test_remove_sets_active_until(
