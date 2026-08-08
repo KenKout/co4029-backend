@@ -27,11 +27,13 @@ from abridgeai.features.courses.queries import (
 from abridgeai.features.courses.queries import (
     authoring as authoring_queries,
 )
-from abridgeai.features.courses.schemas import CourseAuthoring, InstructorRead
+from abridgeai.features.courses.schemas import CourseAuthoring, InstructorAuthoring, InstructorRead
 from abridgeai.features.courses.services import notify
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
+
+    from abridgeai.features.courses.models import Course
 
 
 async def assign_teacher_to_course(
@@ -273,10 +275,41 @@ async def list_teachers_for_course(db: AsyncSession, course_id: UUID) -> list[In
     ]
 
 
+async def _attach_health_projections(
+    db: AsyncSession,
+    courses: list[Course],
+    dtos: list[CourseAuthoring],
+) -> None:
+    """Attach the manager worklist projections to course DTOs, batched.
+
+    One call to :func:`~abridgeai.features.courses.queries.authoring.
+    count_students_and_modules_for_courses` (student + module counts) and one
+    to :func:`~abridgeai.features.courses.queries.authoring.
+    list_instructors_for_courses` (owner profile block) — the same no-N+1
+    pattern the "My courses" grid uses. Courses whose owner has no profile
+    keep ``instructor=None`` so the SPA can render an "Unassigned" chip.
+    """
+    counts = await authoring_queries.count_students_and_modules_for_courses(
+        db, [c.id for c in courses]
+    )
+    instructors = await authoring_queries.list_instructors_for_courses(
+        db, [c.id for c in courses]
+    )
+    for dto, orm in zip(dtos, courses, strict=True):
+        students, modules = counts.get(orm.id, (0, 0))
+        dto.student_count = students
+        dto.module_count = modules
+        instructor_data = instructors.get(orm.id)
+        if instructor_data is not None:
+            dto.instructor = InstructorAuthoring.model_validate(instructor_data)
+
+
 async def list_courses_in_dept(db: AsyncSession, org_unit_id: UUID) -> list[CourseAuthoring]:
     """HOD overview — all courses scoped to ``org_unit_id``."""
     courses = await authoring_queries.list_courses_in_org_unit(db, org_unit_id)
-    return [CourseAuthoring.model_validate(course) for course in courses]
+    dtos = [CourseAuthoring.model_validate(course) for course in courses]
+    await _attach_health_projections(db, courses, dtos)
+    return dtos
 
 
 async def list_courses_for_organization(
@@ -284,7 +317,9 @@ async def list_courses_for_organization(
 ) -> list[CourseAuthoring]:
     """Manager/Admin overview — courses optionally filtered by organization."""
     courses = await assignment_queries.list_courses_by_organization(db, organization_id)
-    return [CourseAuthoring.model_validate(course) for course in courses]
+    dtos = [CourseAuthoring.model_validate(course) for course in courses]
+    await _attach_health_projections(db, courses, dtos)
+    return dtos
 
 
 async def list_teachers_with_emails(db: AsyncSession, course_id: UUID) -> list[dict[str, Any]]:

@@ -76,6 +76,58 @@ async def count_students_and_modules_for_courses(
     return result
 
 
+async def list_instructors_for_courses(
+    db: AsyncSession, course_ids: list[UUID]
+) -> dict[UUID, dict[str, Any]]:
+    """Batch instructor blocks for authoring list endpoints (drafts included).
+
+    Mirrors the public :func:`~abridgeai.features.courses.queries.published.
+    get_course_instructor` composition but (a) runs over MANY course ids in
+    one join (no N+1) and (b) drops the ``published_course_clause()`` filter
+    — the manager/dept worklist needs the owner on draft rows too, since
+    "no owner profile" is exactly the signal that turns a row into an
+    "Unassigned" work item.
+
+    Returns ``{course_id: {user_id, display_name, primary_email, headline,
+    avatar_bucket, avatar_object_key}}`` for courses whose owner has a
+    ``user_profiles`` row; courses with no owner profile are absent (caller
+    leaves ``instructor=None``). ``avatar_url`` is NOT minted here — the
+    presigned URL is per-instructor N+1 work the worklist does not need (the
+    SPA falls back to initials).
+    """
+    if not course_ids:
+        return {}
+
+    stmt = (
+        select(
+            Course.id.label("course_id"),
+            User.id.label("user_id"),
+            User.primary_email,
+            UserProfile.display_name,
+            UserProfile.bio,
+            StorageObject.bucket.label("avatar_bucket"),
+            StorageObject.object_key.label("avatar_object_key"),
+        )
+        .join(User, User.id == Course.owner_user_id)
+        .outerjoin(UserProfile, UserProfile.user_id == User.id)
+        .outerjoin(StorageObject, StorageObject.id == UserProfile.avatar_object_id)
+        .where(Course.id.in_(course_ids))
+    )
+    result: dict[UUID, dict[str, Any]] = {}
+    for row in (await db.execute(stmt)).all():
+        if row.display_name is None:
+            continue
+        result[row.course_id] = {
+            "user_id": row.user_id,
+            "display_name": row.display_name,
+            "avatar_bucket": row.avatar_bucket,
+            "avatar_object_key": row.avatar_object_key,
+            "headline": row.bio,
+            "primary_email": row.primary_email,
+        }
+    return result
+
+
 async def count_pending_grading_for_courses(
     db: AsyncSession, course_ids: list[UUID]
 ) -> tuple[int, int]:
