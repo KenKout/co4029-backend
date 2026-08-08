@@ -10,6 +10,7 @@ from abridgeai.core.db.conflict_mapper import (
 )
 from abridgeai.core.db.recursive_delete import soft_delete_cascade
 from abridgeai.core.exceptions import ConflictError, NotFoundError
+from abridgeai.features.access_control.api import public as access_control_api
 from abridgeai.features.courses.api import public as courses_api
 from abridgeai.features.enrollments.models import Enrollment, InvitationCode
 from abridgeai.features.enrollments.queries import authoring as authoring_queries
@@ -324,7 +325,23 @@ async def bulk_import_students_from_csv(
     Each row is validated independently; bad rows do not abort the
     batch. Returns per-row error details so the Manager UI can show
     which rows failed and why.
+
+    Newly created users are also granted an ACTIVE membership in the
+    course's organization with the org-scoped ``student`` role (same
+    least-privilege grant as domain auto-provisioning). Without this,
+    an imported student could be enrolled yet unable to read ANY
+    course content — every learner-catalog read resolves the user's
+    primary org from ``organization_memberships`` and 400s/404s when
+    the membership is missing. The grant is idempotent per user: users
+    who already belong to the course's org are left untouched (their
+    existing membership may carry a different role and must not be
+    downgraded), and existing users from other orgs simply gain this
+    org as an additional membership.
     """
+    organization_id = await authoring_queries.get_course_organization_id(db, course_id)
+    if organization_id is None:
+        raise NotFoundError(f"Course {course_id} not found")
+
     enrolled: list[UUID] = []
     created_users: list[UUID] = []
     failures: list[CSVImportFailure] = []
@@ -358,6 +375,15 @@ async def bulk_import_students_from_csv(
                 display_name=parsed.display_name,
             )
             created_users.append(user_id)
+
+        # Org access for the enrolled student (see docstring). Check-then-
+        # grant so an already-active member is never re-assigned.
+        if not await access_control_api.is_user_member_of_org(
+            db, user_id=user_id, org_id=organization_id
+        ):
+            await access_control_api.grant_default_student_access(
+                db, user_id=user_id, organization_id=organization_id
+            )
 
         existing = await authoring_queries.find_enrollment(db, course_id, user_id)
         if existing is not None and existing.status != "dropped":
