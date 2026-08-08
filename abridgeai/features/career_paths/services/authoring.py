@@ -373,6 +373,33 @@ async def move_course_to_stage(
     return [CareerPathCourseAuthoring.model_validate(row) for row in rows]
 
 
+async def update_path_course(
+    db: AsyncSession,
+    career_path_id: UUID,
+    course_id: UUID,
+    *,
+    is_required: bool | None = None,
+    satisfied_by: str | None = None,
+) -> list[CareerPathCourseAuthoring]:
+    """Patch the policy flags on an attached course."""
+    await _require_path(db, career_path_id)
+    link = await authoring_queries.get_path_course_link(db, career_path_id, course_id)
+    if link is None:
+        raise NotFoundError(f"Course {course_id} not attached to career path {career_path_id}")
+
+    if is_required is not None:
+        link.is_required = is_required
+    if satisfied_by is not None:
+        link.satisfied_by = satisfied_by
+    await flush_or_conflict(db)
+
+    # Must run AFTER the flush: optional -> required shrinks optional_count.
+    await _validate_stage_integrity(db, link.stage_id)
+
+    rows = await authoring_queries.list_authoring_career_path_courses(db, career_path_id)
+    return [CareerPathCourseAuthoring.model_validate(row) for row in rows]
+
+
 # --- stage CRUD -------------------------------------------------------
 
 
@@ -605,11 +632,6 @@ async def _validate_stage_integrity(db: AsyncSession, stage_id: UUID) -> None:
     ``min_optional_to_complete`` above the number of optional courses
     actually in the stage can never be satisfied, so the stage can never
     complete and every later stage stays locked forever.
-
-    Completeness checks ("this stage is empty", "the path has no stages")
-    are NOT here — those are merely *unfinished*, they are the normal state
-    of a path mid-authoring, and enforcing them per-mutation makes the
-    authoring flow impossible. They live on the publish gate.
     """
     stage = await authoring_queries.get_stage(db, stage_id)
     if stage is None:

@@ -1290,3 +1290,76 @@ async def test_hard_enforcement_only_blocks_when_locked(session_factory, seed) -
         )
     # Stage 1 is unlocked, so even 'hard' must not block.
     assert stage_service.stage_is_hard_locked(evals[0]) is False
+
+
+# --- required/optional is editable after attach -----------------------
+
+
+@pytest.mark.asyncio
+async def test_update_path_course_flips_required_to_optional(
+    session_factory, seed
+) -> None:
+    """`is_required` used to be write-once at attach time, which meant a stage
+    could never hold an optional course and `min_optional_to_complete` could
+    only ever be 0. It is now patchable in place."""
+    async with session_factory() as db:
+        rows = await authoring_service.update_path_course(
+            db, seed["path_id"], seed["req_course"], is_required=False
+        )
+        await db.commit()
+    link = next(r for r in rows if r.course_id == seed["req_course"])
+    assert link.is_required is False
+    # Position is preserved — the old remove + re-add workaround re-appended.
+    assert link.stage_id == seed["stage1"]
+
+
+@pytest.mark.asyncio
+async def test_update_path_course_omitted_field_is_untouched(
+    session_factory, seed
+) -> None:
+    """A patch carrying only `is_required` must not reset `satisfied_by`."""
+    async with session_factory() as db:
+        rows = await authoring_service.update_path_course(
+            db, seed["path_id"], seed["req_course"], is_required=False
+        )
+        await db.commit()
+    link = next(r for r in rows if r.course_id == seed["req_course"])
+    assert link.satisfied_by == "completion"
+
+
+@pytest.mark.asyncio
+async def test_flip_to_required_rejected_when_it_breaks_optional_quota(
+    engine, session_factory, seed
+) -> None:
+    """Flipping optional -> required LOWERS optional_count. When that pushes
+    the count below `min_optional_to_complete` the stage could never complete,
+    so the patch must be rejected rather than leaving it uncompletable."""
+    async with engine.begin() as conn:
+        opt, _ = await _course_with_lesson(
+            conn, org=seed["org"], owner=seed["manager"], slug=f"q-{uuid.uuid4().hex[:6]}"
+        )
+    async with session_factory() as db:
+        await authoring_service.add_course_to_path(
+            db,
+            seed["path_id"],
+            opt,
+            stage_id=seed["stage1"],
+            position=None,
+            is_required=False,
+            actor=_actor(seed["manager"]),
+        )
+        await authoring_service.update_stage(
+            db,
+            seed["path_id"],
+            seed["stage1"],
+            CareerPathStageUpdate(min_optional_to_complete=1),
+            _actor(seed["manager"]),
+        )
+        await db.commit()
+
+    # The stage's only optional course cannot become required: min is 1.
+    async with session_factory() as db:
+        with pytest.raises(AppError, match="min_optional"):
+            await authoring_service.update_path_course(
+                db, seed["path_id"], opt, is_required=True
+            )

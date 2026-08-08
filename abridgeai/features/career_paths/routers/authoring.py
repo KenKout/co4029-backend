@@ -20,6 +20,7 @@ from abridgeai.features.career_paths.schemas import (
     CareerPathCourseAuthoring,
     CareerPathCourseCandidate,
     CareerPathCourseMove,
+    CareerPathCoursePatch,
     CareerPathCourseReorder,
     CareerPathCreate,
     CareerPathStageAuthoring,
@@ -443,6 +444,42 @@ async def move_course_to_stage(
             course_id,
             stage_id=payload.stage_id,
             position=payload.position,
+        )
+    except NotFoundError as exc:
+        raise _not_found(str(exc)) from exc
+    except AppError as exc:
+        raise _bad_request(str(exc)) from exc
+    await db.commit()
+    return result
+
+
+@management_router.patch(
+    "/{career_path_id}/courses/{course_id}",
+    response_model=list[CareerPathCourseAuthoring],
+)
+async def update_course_in_path(
+    career_path_id: UUID,
+    course_id: UUID,
+    payload: CareerPathCoursePatch,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_PATH_MANAGE)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> list[CareerPathCourseAuthoring]:
+    """Patch an attached course's policy flags (required / satisfied-by).
+
+    Separate from the move + reorder routes because those mutate whole
+    ``(stage_id, position)`` sequences while this touches one row. Flipping a
+    course to required re-runs the stage integrity check, so a change that
+    would push ``min_optional_to_complete`` above the remaining optional
+    count is rejected instead of leaving an uncompletable stage.
+    """
+    try:
+        await _ensure_caller_in_path_org(db, current_user, career_path_id)
+        result = await authoring_service.update_path_course(
+            db,
+            career_path_id,
+            course_id,
+            is_required=payload.is_required,
+            satisfied_by=payload.satisfied_by,
         )
     except NotFoundError as exc:
         raise _not_found(str(exc)) from exc

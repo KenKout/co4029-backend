@@ -172,6 +172,15 @@ class CareerPathCourseAdd(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class CareerPathCoursePatch(BaseModel):
+    """Partial update of an existing course-in-stage link."""
+
+    is_required: bool | None = None
+    satisfied_by: Literal["completion", "pass"] | None = None
+
+    model_config = ConfigDict(extra="forbid")
+
+
 class CareerPathCourseReorder(BaseModel):
     course_ids: list[UUID]
 
@@ -236,6 +245,7 @@ __all__ = [
     "CareerPathCourseAdd",
     "CareerPathCourseAuthoring",
     "CareerPathCourseMove",
+    "CareerPathCoursePatch",
     "CareerPathCourseReorder",
     "CareerPathCreate",
     "CareerPathStageAuthoring",
