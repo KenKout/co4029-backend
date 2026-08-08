@@ -40,6 +40,20 @@ class CareerPathCourseAuthoring(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class CareerPathCourseCandidate(BaseModel):
+    """A course the manager may attach to a path (picker row).
+
+    The full org catalogue, ANY status: a draft path may hold draft/archived
+    courses (the publish gate re-checks every link), so the picker must not
+    hide them the way the learner ``/courses`` catalogue does.
+    """
+
+    id: UUID
+    title: str
+    slug: str
+    status: str
+
+
 UnlockPolicy = Literal["always", "after_previous", "after_previous_required"]
 StageEnforcement = Literal["hard", "soft", "advisory"]
 

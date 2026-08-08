@@ -22,6 +22,7 @@ from abridgeai.features.career_paths.queries.published import (
 from abridgeai.features.career_paths.schemas import (
     CareerPathAuthoring,
     CareerPathCourseAuthoring,
+    CareerPathCourseCandidate,
     CareerPathCreate,
     CareerPathStageAuthoring,
     CareerPathStageCreate,
@@ -30,6 +31,7 @@ from abridgeai.features.career_paths.schemas import (
     CareerPathUpdate,
     StageReorderWarning,
 )
+from abridgeai.features.courses.api import public as courses_api
 from abridgeai.features.enrollments.api import public as enrollments_api
 
 if TYPE_CHECKING:
@@ -127,6 +129,27 @@ async def create_career_path(
     await flush_or_conflict(db)
     await db.refresh(path)
     return _to_authoring(path)
+
+
+async def list_course_candidates(
+    db: AsyncSession, career_path_id: UUID
+) -> list[CareerPathCourseCandidate]:
+    """Full org course catalogue (ANY status) for the attach-to-path picker.
+
+    The learner ``/courses`` endpoint returns only published courses, but a
+    draft path may hold draft/archived courses — the publish gate
+    (``validate_path_for_publish``) re-checks every link when the path goes
+    live. So the picker shows the path's whole organization, letting the
+    manager build the skeleton before courses are published.
+    """
+    path = await _require_path(db, career_path_id)
+    courses = await courses_api.list_courses_by_org(db, path.organization_id)
+    return [
+        CareerPathCourseCandidate(
+            id=c.id, title=c.title, slug=c.slug, status=c.status
+        )
+        for c in courses
+    ]
 
 
 async def update_career_path(
@@ -704,6 +727,7 @@ __all__ = [
     "get_career_path",
     "list_career_path_courses",
     "list_career_paths_for_org",
+    "list_course_candidates",
     "list_path_stages",
     "move_course_to_stage",
     "publish_path",

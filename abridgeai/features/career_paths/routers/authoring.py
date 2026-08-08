@@ -18,6 +18,7 @@ from abridgeai.features.career_paths.schemas import (
     CareerPathAuthoring,
     CareerPathCourseAdd,
     CareerPathCourseAuthoring,
+    CareerPathCourseCandidate,
     CareerPathCourseMove,
     CareerPathCourseReorder,
     CareerPathCreate,
@@ -276,6 +277,29 @@ async def add_course_to_path(
         raise _conflict(str(exc)) from exc
     await db.commit()
     return result
+
+
+@management_router.get(
+    "/{career_path_id}/course-candidates",
+    response_model=list[CareerPathCourseCandidate],
+)
+async def list_course_candidates(
+    career_path_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_PATH_MANAGE)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> list[CareerPathCourseCandidate]:
+    """Full org course catalogue (ANY status) for the attach-to-path picker.
+
+    The learner ``/courses`` endpoint returns only published courses, but a
+    draft path may hold draft/archived courses — the publish gate re-checks
+    every link. This returns the path's whole organization so the manager can
+    build the skeleton before courses are published.
+    """
+    try:
+        await _ensure_caller_in_path_org(db, current_user, career_path_id)
+        return await authoring_service.list_course_candidates(db, career_path_id)
+    except NotFoundError as exc:
+        raise _not_found(str(exc)) from exc
 
 
 # --- stages ------------------------------------------------------------

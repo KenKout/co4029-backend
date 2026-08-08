@@ -43,6 +43,17 @@ async def get_course_by_id(db: AsyncSession, course_id: UUID) -> CourseDTO | Non
     return CourseDTO.model_validate(course) if course else None
 
 
+async def list_courses_by_org(db: AsyncSession, organization_id: UUID) -> list[CourseDTO]:
+    """All non-deleted courses of an organization (any status), newest first.
+
+    Unlike the learner catalogue this deliberately includes draft/archived
+    courses: career-path authoring attaches courses to draft paths before
+    publishing, so its picker needs the full org catalogue.
+    """
+    courses = await queries.list_courses_by_org(db, organization_id)
+    return [CourseDTO.model_validate(course) for course in courses]
+
+
 async def list_course_outcome_texts(db: AsyncSession, course_id: UUID) -> list[str]:
     """Course-level learning-outcome statements, ordered by position.
 
