@@ -138,8 +138,11 @@ async def get_course_readiness(db: AsyncSession, course_id: UUID) -> dict[str, A
 
     * **teacher** — nobody is going to author the content otherwise.
     * **content** — at least one published lesson / quiz / interview. This is
-      the publish gate; showing it here is the difference between "fix it now"
+      a publish gate; showing it here is the difference between "fix it now"
       and a 409 weeks later.
+    * **learning outcomes** — at least one. Also a publish gate, and the one
+      most easily forgotten: unlike missing content, a course with no stated
+      outcomes looks finished from the authoring screens.
     * **career path** — a course on no path is unreachable for students; the
       paths are how they enrol. Not a publish blocker, but it means done-looking
       work that nobody can see.
@@ -156,6 +159,7 @@ async def get_course_readiness(db: AsyncSession, course_id: UUID) -> dict[str, A
 
     teachers = await assignment_queries.list_teachers_for_course(db, course_id)
     units = await enrollments_api.count_course_gradeable_units(db, course_id=course_id)
+    outcomes = await authoring_queries.count_course_outcomes(db, course_id)
     paths = await assignment_queries.list_career_paths_containing_course(db, course_id)
 
     return {
@@ -163,6 +167,7 @@ async def get_course_readiness(db: AsyncSession, course_id: UUID) -> dict[str, A
         "status": course.status,
         "teacher_count": len(teachers),
         "gradeable_unit_count": units,
+        "learning_outcome_count": outcomes,
         "career_paths": paths,
         # A REQUIRED course with no gradeable unit does not merely fail to
         # complete: it locks its stage and every stage behind it, for every
@@ -170,7 +175,10 @@ async def get_course_readiness(db: AsyncSession, course_id: UUID) -> dict[str, A
         # in a way the plain "no content" row is not.
         "blocks_required_stage": units == 0
         and any(path["is_required"] for path in paths),
-        "can_publish": units > 0 and course.status != "archived",
+        # Must stay the EXACT conjunction publish_course gates on. A checklist
+        # that says "ready" and a publish that answers 409 is worse than no
+        # checklist: the manager trusts the green tick and blames the button.
+        "can_publish": units > 0 and outcomes > 0 and course.status != "archived",
     }
 
 

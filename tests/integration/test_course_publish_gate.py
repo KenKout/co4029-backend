@@ -126,6 +126,12 @@ async def seed(engine: AsyncEngine) -> AsyncIterator[dict]:
             {"c": course_id},
         )
         await conn.execute(text("DELETE FROM modules WHERE course_id = :c"), {"c": course_id})
+        # Outcomes FK the course with ondelete=NO ACTION (soft-deleted in the
+        # service layer, never cascaded), so they go before the course row.
+        await conn.execute(
+            text("DELETE FROM course_learning_outcomes WHERE course_id = :c"),
+            {"c": course_id},
+        )
         await conn.execute(text("DELETE FROM courses WHERE id = :c"), {"c": course_id})
         await conn.execute(text("DELETE FROM users WHERE id = :u"), {"u": manager})
         await conn.execute(text("DELETE FROM organizations WHERE id = :o"), {"o": org})
@@ -146,6 +152,26 @@ async def _add_published_lesson(engine: AsyncEngine, seed: dict) -> uuid.UUID:
             {"id": lesson_id, "mid": seed["module_id"], "slug": f"l-{seed['slug_suffix']}"},
         )
     return lesson_id
+
+
+async def _add_outcome(engine: AsyncEngine, seed: dict) -> uuid.UUID:
+    """Satisfy the learning-outcome gate.
+
+    Kept separate from :func:`_add_published_lesson` on purpose: this file
+    exists to prove each gate independently, and a helper that quietly
+    satisfied both would make every "blocked" test pass for the wrong reason.
+    """
+    outcome_id = uuid.uuid4()
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO course_learning_outcomes "
+                "(id, course_id, position, outcome_text) "
+                "VALUES (:id, :cid, 1, 'State an outcome')"
+            ),
+            {"id": outcome_id, "cid": seed["course_id"]},
+        )
+    return outcome_id
 
 
 async def _status(engine: AsyncEngine, course_id: uuid.UUID) -> str:
@@ -175,6 +201,7 @@ async def test_publish_allows_course_with_one_published_lesson(
 ) -> None:
     """One unit is enough — the gate is a floor, not a quality bar."""
     await _add_published_lesson(engine, seed)
+    await _add_outcome(engine, seed)
     async with session_factory() as db:
         course = await authoring_service.publish_course(
             db, seed["course_id"], _actor(seed["manager"])
@@ -276,3 +303,40 @@ async def test_patching_other_fields_on_a_draft_never_hits_the_gate(
         await db.commit()
     assert course.description == "still drafting"
     assert course.status == "draft"
+
+
+async def test_publish_blocked_when_content_exists_but_no_outcome(
+    session_factory, seed, engine
+) -> None:
+    """The outcome gate is independent of the content gate.
+
+    Content present, outcomes absent: the failure must name outcomes. A merged
+    check would either let this through or blame the wrong thing, and the
+    manager would go looking in the curriculum editor for a problem that lives
+    on the settings screen.
+    """
+    await _add_published_lesson(engine, seed)
+    async with session_factory() as db:
+        with pytest.raises(ConflictError, match="course_has_no_learning_outcomes"):
+            await authoring_service.publish_course(
+                db, seed["course_id"], _actor(seed["manager"])
+            )
+    assert await _status(engine, seed["course_id"]) == "draft"
+
+
+async def test_content_gate_reports_first_when_both_are_unmet(
+    session_factory, seed, engine
+) -> None:
+    """With neither gate met, the manager hears about content first.
+
+    Order matters for a checklist a human reads one 409 at a time: no content
+    means no student can ever finish the course, while no outcomes means it is
+    merely undocumented. Fix the blocking one first.
+    """
+    await _add_outcome(engine, seed)
+    async with session_factory() as db:
+        with pytest.raises(ConflictError, match="course_has_no_gradeable_units"):
+            await authoring_service.publish_course(
+                db, seed["course_id"], _actor(seed["manager"])
+            )
+    assert await _status(engine, seed["course_id"]) == "draft"

@@ -731,6 +731,20 @@ async def list_course_outcomes(db: AsyncSession, course_id: UUID) -> list[Course
     return list((await db.execute(stmt)).scalars().all())
 
 
+async def count_course_outcomes(db: AsyncSession, course_id: UUID) -> int:
+    """Number of live learning outcomes on ``course_id``, at any depth.
+
+    A COUNT rather than ``len(await list_course_outcomes(...))``: the publish
+    gate and the readiness checklist only ever ask "any?", and the list query
+    orders and materialises every row to answer it.
+    """
+    stmt = select(func.count()).where(
+        CourseLearningOutcome.course_id == course_id,
+        CourseLearningOutcome.deleted_at.is_(None),
+    )
+    return (await db.execute(stmt)).scalar_one()
+
+
 async def get_course_outcome(db: AsyncSession, outcome_id: UUID) -> CourseLearningOutcome | None:
     return await db.get(CourseLearningOutcome, outcome_id)
 

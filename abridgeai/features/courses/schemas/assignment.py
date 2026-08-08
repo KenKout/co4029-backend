@@ -49,14 +49,15 @@ class CourseReadiness(BaseModel):
     """Whether a course is actually deliverable, before publish rather than after.
 
     The manager's checklist. `can_publish` mirrors the publish gate's condition
-    exactly (at least one gradeable unit, not archived), so the checklist and
-    the 409 cannot disagree.
+    exactly (at least one gradeable unit, at least one learning outcome, not
+    archived), so the checklist and the 409 cannot disagree.
     """
 
     course_id: UUID
     status: str
     teacher_count: int
     gradeable_unit_count: int
+    learning_outcome_count: int = 0
     career_paths: list[CoursePathPlacement] = []
     blocks_required_stage: bool = False
     """True when this course has no gradeable unit AND is required on a path —

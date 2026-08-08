@@ -22,6 +22,7 @@ import uuid
 from collections.abc import AsyncIterator
 from pathlib import Path
 
+import pytest
 import pytest_asyncio
 from alembic import command
 from alembic.config import Config
@@ -49,6 +50,7 @@ import abridgeai.features.identity.models  # noqa: F401  -- register users FK ta
 import abridgeai.features.interviews.models  # noqa: F401  -- T6.1 registers interview_* tables
 from abridgeai.core.config import get_settings
 from abridgeai.core.db import Base
+from abridgeai.core.exceptions import ConflictError
 from abridgeai.core.security import CurrentUser
 from abridgeai.features.courses.schemas import (
     CourseCreate,
@@ -410,6 +412,19 @@ async def test_publish_course_widens_status(
         )
         await session.commit()
 
+        # Second gate: a course must also state what it teaches. Added here
+        # rather than in a separate test because this one asserts the happy
+        # path, and the happy path now needs both.
+        await session.execute(
+            text(
+                "INSERT INTO course_learning_outcomes "
+                "(id, course_id, position, outcome_text) "
+                "VALUES (:id, :cid, 1, 'Explain the thing')"
+            ),
+            {"id": uuid.uuid4(), "cid": new_course.id},
+        )
+        await session.commit()
+
         published = await authoring_service.publish_course(session, new_course.id, owner)
         await session.commit()
         assert published.status == "published"
@@ -617,3 +632,138 @@ def test_no_sqlalchemy_imports_in_services() -> None:
     for path in services_dir.glob("*.py"):
         for line in path.read_text().splitlines():
             assert not pattern.match(line), f"sqlalchemy import found in {path}: {line!r}"
+
+
+async def test_publish_requires_at_least_one_learning_outcome(
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict,
+) -> None:
+    """Content alone is not enough — the course must also say what it teaches.
+
+    Pins the gate as SEPARATE from the gradeable-unit one: this course has a
+    published lesson, so it clears that check and fails only on outcomes. A
+    merged check would pass this case or report the wrong reason.
+    """
+    async with session_factory() as session:
+        owner = _actor(scenario["owner_id"])
+        suffix = uuid.uuid4().hex[:8]
+        course = await authoring_service.create_course(
+            session,
+            CourseCreate(slug=f"lo-gate-{suffix}", title="Outcome Gate"),
+            owner,
+        )
+        await session.commit()
+
+        module_id, lesson_id = uuid.uuid4(), uuid.uuid4()
+        await session.execute(
+            text(
+                "INSERT INTO modules (id, course_id, title, position, status) "
+                "VALUES (:id, :cid, 'M1', 1, 'published')"
+            ),
+            {"id": module_id, "cid": course.id},
+        )
+        await session.execute(
+            text(
+                "INSERT INTO lessons (id, module_id, slug, title, status, lesson_type) "
+                "VALUES (:id, :mid, :slug, 'L1', 'published', 'video')"
+            ),
+            {"id": lesson_id, "mid": module_id, "slug": f"lesson-{suffix}"},
+        )
+        await session.commit()
+
+        with pytest.raises(ConflictError, match="course_has_no_learning_outcomes"):
+            await authoring_service.publish_course(session, course.id, owner)
+        await session.rollback()
+
+        # Adding one outcome — at any depth — unblocks it.
+        await session.execute(
+            text(
+                "INSERT INTO course_learning_outcomes "
+                "(id, course_id, position, outcome_text) "
+                "VALUES (:id, :cid, 1, 'Describe the thing')"
+            ),
+            {"id": uuid.uuid4(), "cid": course.id},
+        )
+        await session.commit()
+
+        published = await authoring_service.publish_course(session, course.id, owner)
+        await session.commit()
+        assert published.status == "published"
+
+
+async def test_soft_deleted_outcomes_do_not_satisfy_the_publish_gate(
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict,
+) -> None:
+    """Deleting the last outcome must re-block publish, not leave a ghost pass.
+
+    Outcomes are soft-deleted, so a gate counting rows without filtering
+    `deleted_at` would keep passing on outcomes the manager already removed —
+    the exact failure that is invisible until a student reads the course page.
+    """
+    async with session_factory() as session:
+        owner = _actor(scenario["owner_id"])
+        suffix = uuid.uuid4().hex[:8]
+        course = await authoring_service.create_course(
+            session,
+            CourseCreate(slug=f"lo-del-{suffix}", title="Deleted Outcome"),
+            owner,
+        )
+        module_id, lesson_id, outcome_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+        await session.execute(
+            text(
+                "INSERT INTO modules (id, course_id, title, position, status) "
+                "VALUES (:id, :cid, 'M1', 1, 'published')"
+            ),
+            {"id": module_id, "cid": course.id},
+        )
+        await session.execute(
+            text(
+                "INSERT INTO lessons (id, module_id, slug, title, status, lesson_type) "
+                "VALUES (:id, :mid, :slug, 'L1', 'published', 'video')"
+            ),
+            {"id": lesson_id, "mid": module_id, "slug": f"lesson-{suffix}"},
+        )
+        await session.execute(
+            text(
+                "INSERT INTO course_learning_outcomes "
+                "(id, course_id, position, outcome_text, deleted_at) "
+                "VALUES (:id, :cid, 1, 'Removed outcome', now())"
+            ),
+            {"id": outcome_id, "cid": course.id},
+        )
+        await session.commit()
+
+        with pytest.raises(ConflictError, match="course_has_no_learning_outcomes"):
+            await authoring_service.publish_course(session, course.id, owner)
+        await session.rollback()
+
+
+async def test_republishing_a_published_course_skips_the_outcome_gate(
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict,
+) -> None:
+    """Courses published before this rule existed must not become un-editable.
+
+    Re-publish is a no-op, and both gates sit behind `was_published`. Applying
+    a new rule retro-actively would strand every already-live course with no
+    outcomes — one exists in production today.
+    """
+    async with session_factory() as session:
+        owner = _actor(scenario["owner_id"])
+        suffix = uuid.uuid4().hex[:8]
+        course = await authoring_service.create_course(
+            session,
+            CourseCreate(slug=f"lo-re-{suffix}", title="Already Live"),
+            owner,
+        )
+        await session.commit()
+        await session.execute(
+            text("UPDATE courses SET status = 'published' WHERE id = :cid"),
+            {"cid": course.id},
+        )
+        await session.commit()
+
+        again = await authoring_service.publish_course(session, course.id, owner)
+        await session.commit()
+        assert again.status == "published"

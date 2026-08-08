@@ -777,7 +777,7 @@ async def test_readiness_can_publish_matches_the_publish_gate(
     course_id = scenario["course_a"]
     # This fixture seeds courses with no curriculum at all, so create the one
     # gradeable unit rather than promoting a lesson that does not exist.
-    module_id, lesson_id = uuid.uuid4(), uuid.uuid4()
+    module_id, lesson_id, outcome_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
     async with engine.begin() as conn:
         await conn.execute(
             text(
@@ -799,11 +799,33 @@ async def test_readiness_can_publish_matches_the_publish_gate(
         )
 
     try:
+        # Content but no outcomes: the second gate is unmet, so the checklist
+        # must NOT show green. Asserted before satisfying it — a checklist that
+        # only ever gets checked in the ready state cannot catch disagreement.
+        partial = await client.get(
+            f"/api/v1/dept/courses/{course_id}/readiness", headers=headers
+        )
+        assert partial.status_code == 200, partial.text
+        assert partial.json()["gradeable_unit_count"] == 1
+        assert partial.json()["learning_outcome_count"] == 0
+        assert partial.json()["can_publish"] is False
+
+        async with engine.begin() as conn:
+            await conn.execute(
+                text(
+                    "INSERT INTO course_learning_outcomes "
+                    "(id, course_id, position, outcome_text) "
+                    "VALUES (:id, :cid, 1, 'State the outcome')"
+                ),
+                {"id": outcome_id, "cid": course_id},
+            )
+
         readiness = await client.get(
             f"/api/v1/dept/courses/{course_id}/readiness", headers=headers
         )
         assert readiness.status_code == 200, readiness.text
         assert readiness.json()["gradeable_unit_count"] == 1
+        assert readiness.json()["learning_outcome_count"] == 1
         assert readiness.json()["can_publish"] is True
 
         # Cross-check against the gate itself. The publish ROUTE lives on the
@@ -820,6 +842,10 @@ async def test_readiness_can_publish_matches_the_publish_gate(
         async with engine.begin() as conn:
             await conn.execute(text("DELETE FROM lessons WHERE id = :id"), {"id": lesson_id})
             await conn.execute(text("DELETE FROM modules WHERE id = :id"), {"id": module_id})
+            await conn.execute(
+                text("DELETE FROM course_learning_outcomes WHERE id = :id"),
+                {"id": outcome_id},
+            )
 
 
 async def test_readiness_counts_assigned_teachers(

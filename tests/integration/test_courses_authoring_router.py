@@ -331,6 +331,14 @@ async def scenario(
             text("DELETE FROM modules WHERE id = ANY(:ids)"),
             {"ids": [module_a, module_b]},
         )
+        # Outcomes reference courses with ondelete=NO ACTION (they are
+        # soft-deleted in the service layer, never cascaded), so they must go
+        # before the course row or the teardown trips the FK and poisons every
+        # later test in the session.
+        await conn.execute(
+            text("DELETE FROM course_learning_outcomes WHERE course_id = ANY(:ids)"),
+            {"ids": [seeded_users.course_id, course_b]},
+        )
         await conn.execute(text("DELETE FROM courses WHERE id = :id"), {"id": course_b})
         await conn.execute(text("DELETE FROM storage_objects WHERE id = :id"), {"id": storage_obj})
 
@@ -601,14 +609,16 @@ async def test_manager_org_propagation(
 
 
 async def _publish_ready(engine: AsyncEngine, course_id: object) -> None:
-    """Give a course one PUBLISHED lesson so it can pass the publish gate.
+    """Satisfy BOTH publish gates so a course can go live.
 
-    Publishing is gated on at least one gradeable unit (published lesson, quiz
-    or interview) — a course with nothing to grade can never be completed by a
-    student, so it cannot go live. The scenario fixture seeds only DRAFT
-    lessons, which deliberately do not count, so any test that publishes has to
-    promote one first. That mirrors the real flow: content is authored and
-    published before the course is.
+    Publishing is gated on (a) at least one gradeable unit — published lesson,
+    quiz or interview, because a course with nothing to grade can never be
+    completed by a student, and (b) at least one learning outcome, because a
+    course that never says what it teaches should not be offered.
+
+    The scenario fixture seeds only DRAFT lessons and no outcomes, so any test
+    that publishes has to supply both. That mirrors the real flow: content is
+    authored and outcomes are stated before the course goes live.
     """
     async with engine.begin() as conn:
         await conn.execute(
@@ -616,6 +626,18 @@ async def _publish_ready(engine: AsyncEngine, course_id: object) -> None:
                 "UPDATE lessons SET status = 'published' WHERE id = ("
                 "  SELECT l.id FROM lessons l JOIN modules m ON m.id = l.module_id"
                 "  WHERE m.course_id = :cid LIMIT 1)"
+            ),
+            {"cid": course_id},
+        )
+        # Idempotent: several tests call this helper against the same course.
+        await conn.execute(
+            text(
+                "INSERT INTO course_learning_outcomes "
+                "(id, course_id, position, outcome_text) "
+                "SELECT gen_random_uuid(), :cid, 1, 'Publish-gate outcome' "
+                "WHERE NOT EXISTS ("
+                "  SELECT 1 FROM course_learning_outcomes "
+                "  WHERE course_id = :cid AND deleted_at IS NULL)"
             ),
             {"cid": course_id},
         )

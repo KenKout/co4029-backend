@@ -356,15 +356,49 @@ async def _require_gradeable_units(db: AsyncSession, course_id: UUID) -> None:
         )
 
 
+async def _require_learning_outcomes(db: AsyncSession, course_id: UUID) -> None:
+    """Refuse to publish a course that never states what it teaches.
+
+    Learning outcomes are what a student reads to decide whether to enrol and
+    what a manager maps onto a career path. Publishing without one ships a
+    course whose only description of itself is its title.
+
+    Deliberately a SEPARATE gate from :func:`_require_gradeable_units` rather
+    than one merged check: the two failures have different fixes and different
+    owners. Content is the teacher's job, outcomes are the manager's (see the
+    authoring ownership boundary), so a single blended message would send half
+    the readers to the wrong place.
+
+    Any outcome counts, at any depth. The hierarchy is an authoring
+    convenience, not a quality bar — demanding a top-level one would reject a
+    perfectly-stated course whose author happened to nest everything.
+    """
+    outcomes = await authoring_queries.count_course_outcomes(db, course_id)
+    if outcomes == 0:
+        raise ConflictError(
+            f"course_has_no_learning_outcomes: course {course_id} defines no "
+            "learning outcomes, so students cannot tell what it teaches. Add at "
+            "least one before publishing the course."
+        )
+
+
 async def publish_course(db: AsyncSession, course_id: UUID, actor: CurrentUser) -> CourseAuthoring:
     """Transition a course's status to ``published``.
 
-    Gated on at least one gradeable unit — a published lesson, quiz or
-    interview config. A course with none can never be completed by anyone (the
-    completion writer refuses to promote an empty course), and as a required
-    course on a career path it would lock its stage permanently. See
-    :func:`_require_gradeable_units`. Re-publishing an already-published course
-    is a no-op and skips the gate.
+    Two gates, both skipped when re-publishing an already-published course
+    (that is a no-op, and retro-actively blocking it would strand courses
+    published before either rule existed):
+
+    * At least one gradeable unit — a published lesson, quiz or interview
+      config. A course with none can never be completed by anyone (the
+      completion writer refuses to promote an empty course), and as a required
+      course on a career path it would lock its stage permanently. See
+      :func:`_require_gradeable_units`.
+    * At least one learning outcome — otherwise the course never states what
+      it teaches. See :func:`_require_learning_outcomes`.
+
+    Checked in that order so the first 409 a manager sees is the one that
+    blocks students outright, not the one about documentation.
 
     On an actual transition INTO ``published`` (not a re-publish), everyone
     already attached to the course is notified with a deep-link: assigned
@@ -378,6 +412,7 @@ async def publish_course(db: AsyncSession, course_id: UUID, actor: CurrentUser) 
     was_published = course.status == "published"
     if not was_published:
         await _require_gradeable_units(db, course_id)
+        await _require_learning_outcomes(db, course_id)
     course.status = "published"
     await db.flush()
     await db.refresh(course)
