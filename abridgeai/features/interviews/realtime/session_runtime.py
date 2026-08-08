@@ -249,8 +249,7 @@ class InterviewAgent(Agent):
                 await self.session.interrupt()
             except RuntimeError:
                 logger.warning(
-                    "typed turn could not interrupt current speech (session=%s); "
-                    "grading anyway",
+                    "typed turn could not interrupt current speech (session=%s); grading anyway",
                     self._interview_session_id,
                 )
             await self._process_turn(

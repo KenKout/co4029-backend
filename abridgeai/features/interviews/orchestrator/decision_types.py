@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from enum import Enum
 
+from abridgeai.features.interviews.orchestrator.intent import StudentIntent
+
 
 class InterviewerActionType(str, Enum):  # noqa: UP042 -- match codebase convention
     OPENING = "opening"
@@ -86,6 +88,9 @@ class ReasonCode(str, Enum):  # noqa: UP042 -- match codebase convention
     CLOSING_REQUIRED = "closing_required"
     OFF_TOPIC_REDIRECT = "off_topic_redirect"
     CANNOT_ANSWER_TRANSITION = "cannot_answer_transition"
+    # Assistance laddering on "I don't know" (Slice 11, v2): a hint was offered
+    # on the SAME question instead of abandoning it on the first non-answer.
+    CANNOT_ANSWER_HINT_OFFERED = "cannot_answer_hint_offered"
     # End-confirmation gate (Slice 4).
     END_CONFIRMATION_REQUESTED = "end_confirmation_requested"
     END_CONFIRMED = "end_confirmed"
@@ -100,7 +105,39 @@ class ReasonCode(str, Enum):  # noqa: UP042 -- match codebase convention
     CANDIDATE_QUESTION_DEFERRED = "candidate_question_deferred"
 
 
+# Non-academic intents map to a fixed action that NEVER scores. Each entry is
+# (action, reason_code, internal_rationale). Handled before any answer analysis.
+SIMPLE_INTENT_ACTIONS: dict[StudentIntent, tuple[InterviewerActionType, ReasonCode, str]] = {
+    StudentIntent.TECHNICAL_ISSUE: (
+        InterviewerActionType.HANDLE_TECHNICAL_ISSUE,
+        ReasonCode.TECHNICAL_ISSUE,
+        "Student reported a technical issue; not scored.",
+    ),
+    StudentIntent.ASK_TO_REPEAT: (
+        InterviewerActionType.REPEAT_QUESTION,
+        ReasonCode.STUDENT_REQUESTED_REPEAT,
+        "Student asked to repeat the question.",
+    ),
+    StudentIntent.ASK_FOR_CLARIFICATION: (
+        InterviewerActionType.CLARIFY_WITHOUT_REVEALING_ANSWER,
+        ReasonCode.STUDENT_REQUESTED_CLARIFICATION,
+        "Student asked for clarification; do not leak answer.",
+    ),
+    StudentIntent.ASK_FOR_HINT: (
+        InterviewerActionType.PROVIDE_NEUTRAL_HINT,
+        ReasonCode.STUDENT_REQUESTED_HINT,
+        "Student asked for a neutral scaffold; do not leak answer content.",
+    ),
+    StudentIntent.ASK_FOR_MORE_TIME: (
+        InterviewerActionType.OFFER_BRIEF_PAUSE,
+        ReasonCode.STUDENT_REQUESTED_CLARIFICATION,
+        "Student asked for more time.",
+    ),
+}
+
+
 __all__ = [
+    "SIMPLE_INTENT_ACTIONS",
     "AcknowledgementStyle",
     "InterviewerActionType",
     "ReasonCode",

@@ -55,6 +55,10 @@ EV_TTS_INTERRUPTED = "voice.tts_interrupted"
 EV_THINKING_FILLER = "voice.thinking_filler"
 # Per-turn decision (emitted by the bridge)
 EV_DECISION = "voice.decision"
+# The deterministic policy run beside the LLM on the native path. Carries the
+# ReasonCode the audit trail needs and the divergence rate that says how far
+# the conversational agent drifts from the audited policy.
+EV_SHADOW = "voice.shadow"
 EV_FALLBACK = "voice.fallback_activated"
 EV_CLOSING_EMITTED = "voice.closing_emitted"
 EV_DEFAULT_CLOSING_SUPPRESSED = "voice.default_closing_suppressed"
@@ -69,6 +73,23 @@ EV_TURN_ERROR = "voice.turn_error"
 # attributes, or a guard (another turn in flight / session already closing).
 # Distinct from EV_TURN_ERROR, which means the brain itself raised.
 EV_TEXT_TURN_REJECTED = "voice.text_turn_rejected"
+
+# A server-authoritative tool refused the model (advance-while-uncovered, or
+# end-while-required-outcomes-remain). The native path produces no ReasonCode, so
+# this is the only record of WHY an interview stayed where it was — without it a
+# refused advance, a model that never asked, and broken grading all look the same.
+EV_TOOL_REFUSED = "voice.tool_refused"
+
+# A conversation turn could not be persisted. The evaluation and the gap report
+# read `interview_session_messages`, so every one of these is an answer the grader
+# will never see — alert on it rather than discovering it from an empty transcript.
+EV_TRANSCRIPT_WRITE_FAILED = "interview.transcript_write_failed"
+
+# The SERVER moved the interview to the next question because the live one was
+# resolved, rather than waiting for the model to call `interview_next_question`.
+# Paired with the absence of `voice.tool_refused`, this is what distinguishes "the
+# model narrated an advance it never requested" from "the gate held it back".
+EV_SERVER_ADVANCED = "voice.server_advanced"
 
 # Shared prompt-injection/output-integrity events. These use the same compact,
 # transcript-free emitter for REST, hybrid, and voice paths.
@@ -92,6 +113,7 @@ ALL_EVENTS = frozenset(
         EV_TTS_INTERRUPTED,
         EV_THINKING_FILLER,
         EV_DECISION,
+        EV_SHADOW,
         EV_FALLBACK,
         EV_CLOSING_EMITTED,
         EV_DEFAULT_CLOSING_SUPPRESSED,
@@ -99,6 +121,10 @@ ALL_EVENTS = frozenset(
         EV_SESSION_SUBMITTED,
         EV_EVALUATION_ENQUEUED,
         EV_TURN_ERROR,
+        EV_TEXT_TURN_REJECTED,
+        EV_SERVER_ADVANCED,
+        EV_TOOL_REFUSED,
+        EV_TRANSCRIPT_WRITE_FAILED,
         EV_SECURITY_ASSESSED,
         EV_SECURITY_BLOCKED,
         EV_SECURITY_OUTPUT_LEAKAGE_BLOCKED,
@@ -148,6 +174,7 @@ __all__ = [
     "EV_CLOSING_EMITTED",
     "EV_CLOSING_PLAYOUT",
     "EV_DECISION",
+    "EV_SHADOW",
     "EV_DEFAULT_CLOSING_SUPPRESSED",
     "EV_DISCONNECT",
     "EV_EVALUATION_ENQUEUED",
@@ -165,6 +192,10 @@ __all__ = [
     "EV_TURN_COMPLETED",
     "EV_TURN_ERROR",
     "EV_TURN_STARTED",
+    "EV_TEXT_TURN_REJECTED",
+    "EV_SERVER_ADVANCED",
+    "EV_TOOL_REFUSED",
+    "EV_TRANSCRIPT_WRITE_FAILED",
     "emit",
     "latency_ms",
     "monotonic",

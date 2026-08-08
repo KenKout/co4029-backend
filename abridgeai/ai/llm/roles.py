@@ -85,6 +85,14 @@ class LLMRole(str, Enum):  # noqa: UP042 - StrEnum changes value coercion; prese
     # into a handful of bounded claims is not a reasoning task, and it replaces
     # the intent call rather than adding to the per-turn budget.
     INTERVIEW_EXTRACTION = "interview_extraction"
+    # Fast sufficiency probe. The ONLY analysis call left on the blocking turn
+    # path: it answers one question — did this answer move the current outcome
+    # toward sufficiency — in a ~30-token verdict, and the full evidence
+    # extraction (INTERVIEW_ANALYSIS) is reconciled in afterwards off the turn
+    # path. Interactive (the candidate is waiting) and SMALL tier, deliberately:
+    # on this deployment the standard model spends 700-1000 hidden reasoning
+    # tokens per call, and a one-bit judgement does not need them.
+    INTERVIEW_SUFFICIENCY = "interview_sufficiency"
     # Chunk boundary decision (chunking Stage B'). Reads a list of window
     # digests — never the full text — and returns which consecutive windows
     # form one chunk. Batch/background. Small tier: judging "does this slide
@@ -142,6 +150,10 @@ ROLE_TO_TIER: dict[LLMRole, Literal["small", "standard", "large"]] = {
     # Quarantined extraction — see the role docstring. Small tier: it subsumes
     # the intent call, which was already small, and holds no protected content.
     LLMRole.INTERVIEW_EXTRACTION: "small",
+    # Fast sufficiency probe — see the role docstring. Small tier is the whole
+    # point: it exists to get a one-bit coverage signal off the reasoning-token
+    # path so the candidate is not waiting on the full evidence extraction.
+    LLMRole.INTERVIEW_SUFFICIENCY: "small",
     # Boundary decision over window digests — see the role docstring.
     LLMRole.CHUNK_BOUNDARY: "small",
 }
@@ -167,6 +179,7 @@ INTERACTIVE_LLM_ROLES: frozenset[LLMRole] = frozenset(
         LLMRole.INTERVIEW_ANALYSIS,
         LLMRole.INTERVIEW_SECURITY,
         LLMRole.INTERVIEW_EXTRACTION,
+        LLMRole.INTERVIEW_SUFFICIENCY,
     }
 )
 
@@ -320,7 +333,9 @@ async def resolve_binding_overrides(
     on a database error, so the AI call path stays up even if the settings
     table is unreachable.
     """
-    from abridgeai.core.runtime_settings import resolve_settings  # noqa: PLC0415 - avoid import cycle
+    from abridgeai.core.runtime_settings import (
+        resolve_settings,  # noqa: PLC0415 - avoid import cycle
+    )
 
     resolved = await resolve_settings(db, organization_id)
 

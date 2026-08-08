@@ -86,12 +86,23 @@ class ControlStatus(StrEnum):
     ACCEPTED = "accepted"
     # The brain finished. Carries the same structured state REST `/respond`
     # returns (next question, finished flag, ...).
+    #
+    # ROUTED PATH ONLY. A native agent streams, so a turn has no single moment
+    # where one structured result becomes true; SNAPSHOT replaces this there.
     COMPLETED = "completed"
     # Refused before processing; `rejection` says why. The client keeps the draft.
     REJECTED = "rejected"
     # Processing raised. The client keeps the draft and may retry with the SAME
     # turn_key — `take_session_step` is idempotent on it.
     FAILED = "failed"
+    # Server-authoritative session state, NOT scoped to a turn. Published
+    # whenever that state actually changes — a tool advanced the question, the
+    # session finished — and once on join so a rejoining client can rebuild.
+    #
+    # Absolute, never a delta: the client replaces its view wholesale, so there
+    # is no field-level merge to get wrong and a dropped snapshot self-heals on
+    # the next one. `turn_key` is null because no single turn owns it.
+    SNAPSHOT = "snapshot"
 
 
 class InboundTurnError(ValueError):
@@ -168,6 +179,42 @@ def parse_inbound_attributes(
     return InboundTurn(text=cleaned, turn_action=turn_action, turn_key=turn_key)
 
 
+@dataclass(frozen=True)
+class StateSnapshot:
+    """The server's whole view of a session, for a :attr:`ControlStatus.SNAPSHOT`.
+
+    ``has_time_limit`` exists because ``time_remaining_seconds is None`` is
+    otherwise ambiguous: an untimed session and a backend that simply stopped
+    sending the field look identical, and a client that guesses wrong either
+    invents a deadline or silently disables its own timer.
+    """
+
+    current_question_id: str | None
+    current_question_text: str | None
+    question_number: int
+    questions_remaining: int
+    questions_total: int
+    outcomes_covered: int
+    outcomes_required: int
+    is_finished: bool
+    has_time_limit: bool
+    time_remaining_seconds: int | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "current_question_id": self.current_question_id,
+            "current_question_text": self.current_question_text,
+            "question_number": self.question_number,
+            "questions_remaining": self.questions_remaining,
+            "questions_total": self.questions_total,
+            "outcomes_covered": self.outcomes_covered,
+            "outcomes_required": self.outcomes_required,
+            "is_finished": self.is_finished,
+            "has_time_limit": self.has_time_limit,
+            "time_remaining_seconds": self.time_remaining_seconds,
+        }
+
+
 @dataclass
 class ControlEvent:
     """One outbound control message.
@@ -197,6 +244,10 @@ class ControlEvent:
     # Present on FAILED. An allowlisted class name, never a raw exception
     # message — those can contain prompt or DB detail.
     error_class: str | None = None
+    # Present on SNAPSHOT only. Kept in its own field rather than reusing
+    # `state`, which means "a serialized InterviewSubmitAnswerResponse" and is
+    # produced by a code path the native agent does not have.
+    snapshot: StateSnapshot | None = None
 
     def to_json(self) -> str:
         payload: dict[str, Any] = {
@@ -213,6 +264,8 @@ class ControlEvent:
             payload["state"] = self.state
         if self.error_class is not None:
             payload["error_class"] = self.error_class
+        if self.snapshot is not None:
+            payload["snapshot"] = self.snapshot.to_dict()
         return json.dumps(payload, separators=(",", ":"), sort_keys=True)
 
 
@@ -229,6 +282,7 @@ __all__ = [
     "ControlEvent",
     "ControlStatus",
     "InboundTurn",
+    "StateSnapshot",
     "TurnRejection",
     "parse_inbound_attributes",
 ]

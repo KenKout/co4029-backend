@@ -59,6 +59,7 @@ WARMTH_LOW = "low"
 WARMTH_MID = "mid"
 WARMTH_HIGH = "high"
 
+
 # Trait scale is 0-4 (see persona.py). Bands: 0-1 = low (cold/sparse),
 # 2 = mid (balanced), 3-4 = high (warm). Chosen so the preset warmth values
 # (strict=0, neutral=2, supportive=4) land in low/mid/high respectively.
@@ -166,9 +167,7 @@ _TRANSITION: dict[tuple[str, str], str] = {
     (WARMTH_MID, "en"): "Now let's move on to the next question.",
     (WARMTH_MID, "vi"): "Bây giờ chúng ta chuyển sang câu hỏi tiếp theo.",
     (WARMTH_HIGH, "en"): ("Now let's move on to the next question together."),
-    (WARMTH_HIGH, "vi"): (
-        "Bây giờ chúng ta cùng chuyển sang câu hỏi tiếp theo nhé."
-    ),
+    (WARMTH_HIGH, "vi"): ("Bây giờ chúng ta cùng chuyển sang câu hỏi tiếp theo nhé."),
 }
 
 # Final-question transition (spec §ending): a short acknowledgment that the
@@ -460,11 +459,15 @@ def _generic_probe(action: InterviewerActionType, persona: Persona, lang: str) -
         (InterviewerActionType.RESOLVE_CONTRADICTION, "vi"): (
             "Trước đó bạn nói điều có vẻ khác — bạn có thể dung hòa hai ý đó không?"
         ),
+        # Rephrase FOR the candidate rather than asking them which part to
+        # rephrase: someone who has just said "I don't understand" cannot name the
+        # part they are missing, and being asked to is what made the interview
+        # feel like an interrogation instead of guidance.
         (InterviewerActionType.CLARIFY_WITHOUT_REVEALING_ANSWER, "en"): (
-            "Which part of the question would you like me to rephrase?"
+            "Let me put that in simpler terms, and we can take it one step at a time."
         ),
         (InterviewerActionType.CLARIFY_WITHOUT_REVEALING_ANSWER, "vi"): (
-            "Bạn muốn tôi diễn đạt lại phần nào của câu hỏi?"
+            "Để tôi diễn đạt lại đơn giản hơn, và mình đi từng bước một nhé."
         ),
         (InterviewerActionType.PROVIDE_NEUTRAL_HINT, "en"): (
             "A small hint: organize your answer around the main concepts in the question "
@@ -600,8 +603,14 @@ _RECOVERY_LEAD_IN: dict[str, str] = {
 }
 
 
+# Affects whose lead-in INVITES the candidate to say more. Contradictory on a
+# turn that advances — the chance to say more has just closed. Observed live as
+# "Feel free to expand. Thank you. Now let's move on to the next question."
+_EXPAND_INVITING_AFFECTS: frozenset[str] = frozenset({"terse"})
+
+
 def _polish_lead_in(
-    *, recovery: bool, time_pressure: bool, affect_value: str | None, lang: str
+    *, recovery: bool, time_pressure: bool, affect_value: str | None, lang: str, advancing: bool
 ) -> str:
     """Pick the single lead-in to prepend (Slice 20, v2).
 
@@ -609,11 +618,19 @@ def _polish_lead_in(
     prepended so the tones never stack (a struggling candidate is rebuilt, not
     also told "we're short on time" and "you're doing fine"). With neither new
     signal set, this falls through to the existing affect lead-in → v1 wording.
+
+    ``advancing`` suppresses an expand-inviting affect lead-in: the ack table and
+    the transition table are chosen independently, so without this a terse answer
+    on an advancing turn produced an invite to elaborate immediately followed by
+    "now let's move on". Reassuring lead-ins (nervous) are unaffected — they read
+    correctly either way.
     """
     if recovery:
         return _RECOVERY_LEAD_IN.get(lang, "")
     if time_pressure:
         return _TIME_PRESSURE_LEAD_IN.get(lang, "")
+    if advancing and affect_value in _EXPAND_INVITING_AFFECTS:
+        return ""
     return _affect_lead_in(affect_value, lang)
 
 
@@ -658,6 +675,7 @@ def build_fallback_utterance(
         time_pressure=time_pressure,
         affect_value=affect_value if isinstance(affect_value, str) else None,
         lang=lang,
+        advancing=decision.should_advance_question,
     )
     ack = _combine(lead_in, "", ack) if lead_in else ack
     return Utterance(

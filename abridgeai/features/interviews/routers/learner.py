@@ -1168,12 +1168,21 @@ def _build_session_history(  # noqa: C901 -- explicit transcript merge is easier
     question_rows: list[tuple[InterviewSessionQuestion, InterviewQuestion | None]],
     messages: list[InterviewSessionMessage],
 ) -> list[InterviewSessionHistoryTurn]:
-    """Merge persisted ceremony/messages with every revealed question."""
+    """Merge persisted ceremony/messages with every revealed question.
+
+    The ``ready_transition`` handoff is deliberately withheld. Its row still exists
+    — ``orchestration_bridge`` reads it as the marker that the REST ceremony already
+    introduced the interviewer — but nobody ever SAYS it: the agent owns its own
+    opening and speaks the question itself. Replaying it here put a line the
+    candidate never heard back on screen every time the page reloaded mid-session.
+    """
     history: list[InterviewSessionHistoryTurn] = []
     visible_messages = [
         message
         for message in messages
-        if message.role in {"ai", "user"} and bool((message.content_text or "").strip())
+        if message.role in {"ai", "user"}
+        and bool((message.content_text or "").strip())
+        and (message.metadata_json or {}).get("ceremony_key") != "ready_transition"
     ]
 
     def append_message(message: InterviewSessionMessage) -> None:

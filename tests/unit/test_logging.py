@@ -129,3 +129,44 @@ def test_get_logger_returns_bound_logger(monkeypatch: pytest.MonkeyPatch) -> Non
     _set_format(monkeypatch, "json")
     log = get_logger("abridgeai.smoke").bind()
     assert isinstance(log, structlog.stdlib.BoundLogger)
+
+
+def test_relayed_structlog_record_still_formats(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A record formatted in one process and re-dispatched in another must print.
+
+    livekit-agents relays its job subprocess' logs by formatting the record,
+    replacing ``msg`` with the resulting string and pickling it
+    (``ipc/log_queue.py``), then re-dispatching in the parent. Both of structlog's
+    ``_logger`` / ``_name`` markers survive that trip, so without the repair
+    filter ``ProcessorFormatter`` calls ``.copy()`` on a ``str`` and every agent
+    log line becomes an ``AttributeError`` traceback.
+    """
+    _set_format(monkeypatch, "json")
+    log = get_logger("abridgeai.test")
+
+    grabbed: list[logging.LogRecord] = []
+
+    class _Grab(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            grabbed.append(record)
+
+    logging.getLogger("abridgeai.test").addHandler(_Grab())
+    log.info("voice.agent_dispatch", native=True)
+    assert grabbed, "expected the emitted record to be observable"
+
+    handler = logging.getLogger().handlers[0]
+    relayed = logging.makeLogRecord(grabbed[0].__dict__)
+    relayed.msg = handler.format(grabbed[0])
+    relayed.args = None
+
+    assert hasattr(relayed, "_logger"), "structlog's marker must survive the relay"
+
+    errors: list[logging.LogRecord] = []
+    monkeypatch.setattr(handler, "handleError", errors.append)
+    logging.getLogger(relayed.name).callHandlers(relayed)
+
+    assert not errors, "the relayed record failed to format"
+    assert capsys.readouterr().out.strip(), "the relayed record produced no output"

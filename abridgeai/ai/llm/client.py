@@ -46,6 +46,29 @@ _RATE_LIMIT_MAX_ATTEMPTS = 4  # 1 initial + 3 retries
 _RATE_LIMIT_BASE_DELAY_S = 1.0
 _RATE_LIMIT_MAX_DELAY_S = 30.0
 
+# Shared keep-alive pools, keyed by timeout because the per-role timeout is
+# fixed at client construction. An interview turn runs several LLM stages
+# back-to-back against the same gateway, so reusing connections removes a TCP
+# (and TLS, on a remote gateway) handshake from each one. Deliberately never
+# closed: process-lifetime, like a DB pool.
+_POOLS: dict[float, httpx.AsyncClient] = {}
+_POOL_LOCK = asyncio.Lock()
+
+_POOL_LIMITS = httpx.Limits(max_connections=64, max_keepalive_connections=32)
+
+
+async def _pooled_client(timeout_s: float) -> httpx.AsyncClient:
+    existing = _POOLS.get(timeout_s)
+    if existing is not None and not existing.is_closed:
+        return existing
+    async with _POOL_LOCK:
+        current = _POOLS.get(timeout_s)
+        if current is not None and not current.is_closed:
+            return current
+        created = httpx.AsyncClient(timeout=timeout_s, limits=_POOL_LIMITS)
+        _POOLS[timeout_s] = created
+        return created
+
 
 def _parse_retry_after(header_value: str | None) -> float | None:
     """Parse the standard ``Retry-After`` header. Either an int (seconds)
@@ -141,8 +164,8 @@ class OpenAICompatibleClient:
             attempt += 1
             started = time.perf_counter()
             try:
-                async with httpx.AsyncClient(timeout=self._binding.timeout_s) as client:
-                    response = await client.post(url, headers=headers, json=payload)
+                client = await _pooled_client(self._binding.timeout_s)
+                response = await client.post(url, headers=headers, json=payload)
             except httpx.HTTPError as exc:
                 raise ProviderError(
                     f"HTTP error calling {url}: {type(exc).__name__}: {exc}"

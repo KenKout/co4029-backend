@@ -376,6 +376,8 @@ async def run_adaptive_turn(
             rambling_redirect_enabled=rambling_redirect_enabled,
             frustration_deescalation_enabled=frustration_deescalation_enabled,
             question_deferral_enabled=question_deferral_enabled,
+            hint_ladder_enabled=hint_ladder_enabled,
+            hint_level=data.hint_level,
         )
     )
 
@@ -437,6 +439,7 @@ async def run_adaptive_turn(
         persona=persona,
         language=language,
         question_text=probe_or_question_text,
+        grounding_question=turn_state.grounding_question_text(selected_orm, current_question),
         persona_profile=resolved_persona_profile,
         identity=resolved_identity,
         use_llm=use_llm,

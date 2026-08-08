@@ -56,6 +56,7 @@ async def generate_utterance(
     persona: Persona,
     language: str | None,
     question_text: str | None = None,
+    grounding_question: str | None = None,
     persona_profile: object | None = None,
     identity: object | None = None,
     use_llm: bool = True,
@@ -89,7 +90,16 @@ async def generate_utterance(
         return fallback, "fallback"
 
     try:
-        system_prompt = render_prompt("prompts/utterance_system.j2", language=(language or "en"))
+        # An assistance turn carries a placeholder scaffold, not exam content, so
+        # the prompt lets it be reworded for the current question. Keyed off the
+        # SAME condition as `require_verbatim` below (inverted) so the prompt and
+        # the validator can never disagree about which mode this turn is in.
+        assistance_turn = not _requires_verbatim(fallback, question_text)
+        system_prompt = render_prompt(
+            "prompts/utterance_system.j2",
+            language=(language or "en"),
+            assistance=assistance_turn,
+        )
         # Resolve the persona label to its trait profile and hand the phrasing
         # model explicit tone numbers (warmth / directness / verbosity /
         # formality / ack_frequency + opening_style) instead of a bare word it
@@ -112,17 +122,16 @@ async def generate_utterance(
         # by tests/unit/test_interviewer_identity.py). Absent identity → the key
         # is omitted entirely so an unnamed config's prompt is byte-identical to
         # what it was before identity existed.
-        prompt_payload: dict[str, object] = {
-            "persona": persona.value,
-            "persona_traits": profile.as_prompt_traits(),
-            "language": language or "en",
-            "action": decision.action.value,
-            "approved_parts": {
-                "acknowledgement": fallback.acknowledgement,
-                "transition": fallback.transition,
-                "question_or_probe": fallback.question_or_probe,
-            },
-        }
+        prompt_payload = build_prompt_payload(
+            decision,
+            fallback=fallback,
+            persona_value=persona.value,
+            persona_traits=profile.as_prompt_traits(),
+            language=language,
+            question_text=question_text,
+            grounding_question=grounding_question,
+            hint_level=hint_level,
+        )
         if isinstance(identity, InterviewerIdentity) and identity.is_named():
             prompt_payload["interviewer"] = as_prompt_identity(identity, language)
         user_prompt = json.dumps(prompt_payload, ensure_ascii=False)
@@ -137,7 +146,10 @@ async def generate_utterance(
                 pipeline_run_id=pipeline_run_id,
             )
         payload = llm_result.content_json if isinstance(llm_result.content_json, dict) else None
-        rewritten = _validated_rewrite(payload, fallback)
+        # Preserve the text verbatim ONLY when it is the authoritative bank
+        # question. On an assistance turn `question_or_probe` is a canned template
+        # and rewriting it is the whole point of the call.
+        rewritten = validated_rewrite(payload, fallback, require_verbatim=not assistance_turn)
         if rewritten is not None:
             return rewritten, "llm"
     except Exception:  # noqa: BLE001 — phrasing is best-effort; never bubble
@@ -146,13 +158,89 @@ async def generate_utterance(
     return fallback, "fallback"
 
 
-def _validated_rewrite(payload: object, fallback: Utterance) -> Utterance | None:
-    """Accept an LLM rewrite only if it preserves the question and adds no bulk.
+def _requires_verbatim(fallback: Utterance, question_text: str | None) -> bool:
+    """Whether ``question_or_probe`` is authoritative exam content.
 
-    Returns None to signal "reject → use fallback". The question/probe text must
-    survive verbatim (the decision is authoritative); acknowledgement/transition
-    may be rephrased. An answer-leak guard rejects a rewrite that balloons in
-    length (a proxy for the model injecting expected-answer content).
+    True only when it IS the text the caller declared authoritative — the selected
+    bank question, or a re-spoken question on REPEAT. Anything else is a generated
+    scaffold (hint / clarify / reframe), which the model may reword.
+
+    Single source of truth for BOTH the prompt mode and the validator: if they
+    disagreed, one of the two failure modes below would ship silently.
+      * prompt says "reword", validator demands verbatim → every rewrite rejected
+      * prompt says "keep", validator allows changes → generic boilerplate stays
+    """
+    if not question_text:
+        return False
+    return fallback.question_or_probe.strip() == question_text.strip()
+
+
+def build_prompt_payload(
+    decision: InterviewerDecision,
+    *,
+    fallback: Utterance,
+    persona_value: str,
+    persona_traits: object,
+    language: str | None,
+    question_text: str | None,
+    grounding_question: str | None = None,
+    hint_level: int,
+) -> dict[str, object]:
+    """Assemble the phrasing prompt body.
+
+    Two different questions are in play and conflating them is what made hints
+    generic:
+
+    * ``question_text`` — the AUTHORITATIVE text that must survive verbatim (the
+      selected bank question, or a re-spoken question on REPEAT). It is None on a
+      hint / clarify / reframe turn, because ``probe_seed_text`` only yields a
+      value for REPEAT_QUESTION.
+    * ``grounding_question`` — the question the candidate is currently working on,
+      supplied so the model can write a hint ABOUT something. Always pass it when
+      a current question exists.
+
+    ``current_question`` in the payload takes the grounding question, falling back
+    to the authoritative text (identical on an advance). It is the question PROMPT
+    only — never expected answers or rubric content — so it cannot leak an answer.
+    """
+    payload: dict[str, object] = {
+        "persona": persona_value,
+        "persona_traits": persona_traits,
+        "language": language or "en",
+        "action": decision.action.value,
+        "approved_parts": {
+            "acknowledgement": fallback.acknowledgement,
+            "transition": fallback.transition,
+            "question_or_probe": fallback.question_or_probe,
+        },
+    }
+    grounding = grounding_question or question_text
+    if grounding:
+        payload["current_question"] = grounding
+    if hint_level > 0:
+        payload["hint_level"] = hint_level
+    return payload
+
+
+def validated_rewrite(
+    payload: object,
+    fallback: Utterance,
+    *,
+    require_verbatim: bool,
+) -> Utterance | None:
+    """Accept an LLM rewrite only if it is answer-safe.
+
+    Returns None to signal "reject → use fallback".
+
+    ``require_verbatim`` must be True when ``fallback.question_or_probe`` is an
+    authoritative question from the bank: the selector chose it, and a model that
+    rewords it changes difficulty and fairness. It must be False when that field
+    holds a generated template (hint / clarify / reframe), because replacing that
+    wording with something grounded in the question is the purpose of the call.
+
+    The length-based answer-leak guard applies in BOTH modes — it is the defence
+    against the model volunteering the expected answer, and exempting the
+    verbatim check must never exempt that.
     """
     if not isinstance(payload, dict):
         return None
@@ -162,9 +250,8 @@ def _validated_rewrite(payload: object, fallback: Utterance) -> Utterance | None
     if not combined:
         return None
 
-    # The authoritative question/probe MUST appear unchanged in the rewrite.
     qp = fallback.question_or_probe.strip()
-    if qp and qp not in combined:
+    if require_verbatim and qp and qp not in combined:
         return None
 
     # Answer-leak guard: reject a rewrite materially longer than the source
@@ -187,4 +274,9 @@ def _clean(value: object, *, limit: int) -> str:
     return ""
 
 
-__all__ = ["UTTERANCE_STAGE_NAME", "generate_utterance"]
+__all__ = [
+    "UTTERANCE_STAGE_NAME",
+    "build_prompt_payload",
+    "generate_utterance",
+    "validated_rewrite",
+]

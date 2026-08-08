@@ -39,6 +39,7 @@ from abridgeai.features.interviews.orchestrator.coverage import (
 # them here so existing ``from ...decision import ReasonCode`` imports (21 sites)
 # keep working unchanged.
 from abridgeai.features.interviews.orchestrator.decision_types import (  # noqa: E402
+    SIMPLE_INTENT_ACTIONS,
     AcknowledgementStyle,
     InterviewerActionType,
     ReasonCode,
@@ -54,6 +55,12 @@ from abridgeai.features.interviews.orchestrator.state import InterviewPhase
 # in authoring. Kept here as the single source of truth until then.
 DEFAULT_MAX_FOLLOWUPS_PER_QUESTION = 2
 DEFAULT_MAX_TOTAL_FOLLOWUPS = 12
+
+# How many escalating hints a candidate may receive on ONE question before a
+# non-answer advances anyway (Slice 11, v2). Bounded so the hint ladder can
+# never hold the interview on a single question: at this level the CANNOT_ANSWER
+# branch falls through to the v1 advance.
+MAX_CANNOT_ANSWER_HINTS = 2
 
 
 @dataclass
@@ -168,10 +175,68 @@ class DecisionInputs:
     # is ASK_INTERVIEWER_QUESTION OUTSIDE the closing phase, briefly defer and
     # resume the current question. Off → the intent falls through to v1 handling.
     question_deferral_enabled: bool = False
+    # Assistance laddering on a non-answer (Slice 11, v2). When enabled, a
+    # CANNOT_ANSWER intent offers an escalating hint on the SAME question for the
+    # first ``MAX_CANNOT_ANSWER_HINTS`` attempts instead of advancing on the very
+    # first "I don't know". ``hint_level`` is the ladder position carried in
+    # runtime state (reset to 0 on every advance, so escalation is per-question).
+    # Off → CANNOT_ANSWER advances immediately (byte-for-byte v1).
+    hint_ladder_enabled: bool = False
+    hint_level: int = 0
 
 
 # Below this fraction of time remaining, stop probing and head for closing.
 _LOW_TIME_FRACTION = 0.2
+
+
+def _below_closing_threshold(inputs: DecisionInputs) -> bool:
+    return (
+        inputs.time_fraction_remaining is not None
+        and inputs.time_fraction_remaining <= inputs.closing_time_fraction
+    )
+
+
+def _cannot_answer_decision(inputs: DecisionInputs) -> InterviewerDecision:
+    """Resolve a CANNOT_ANSWER turn: hint ladder first, then v1 advance.
+
+    A CANNOT_ANSWER intent gets an escalating neutral hint on the SAME question
+    (Slice 11, v2) while the ladder AND the follow-up budgets AND the closing-
+    time threshold allow it; once any gate trips, the turn falls through to the
+    exact v1 behaviour (record insufficient evidence and advance). The budgets
+    keep the loop-freedom invariant: a candidate who keeps saying "I don't know"
+    gets at most MAX_CANNOT_ANSWER_HINTS hints before the interview moves on.
+    """
+    if (
+        inputs.hint_ladder_enabled
+        and inputs.hint_level < MAX_CANNOT_ANSWER_HINTS
+        and inputs.current_question_follow_up_count < inputs.max_follow_ups_per_question
+        and inputs.total_follow_up_count < inputs.max_total_follow_ups
+        and not _below_closing_threshold(inputs)
+    ):
+        return InterviewerDecision(
+            action=InterviewerActionType.PROVIDE_NEUTRAL_HINT,
+            reason_code=ReasonCode.CANNOT_ANSWER_HINT_OFFERED,
+            # Assistance, not assessment: the candidate has not answered yet, so
+            # there is nothing to score. Evidence is recorded on the advance turn
+            # once the ladder is exhausted.
+            should_record_academic_evidence=False,
+            should_advance_question=False,
+            # NOT positive: the ack table renders POSITIVE as praise ("That's
+            # helpful."), and nothing was answered here. The hint IS the response;
+            # warmth belongs to the affect lead-in, not to praising a non-answer.
+            acknowledgement_style=AcknowledgementStyle.NONE,
+            internal_rationale=(
+                "Candidate cannot answer; offer a hint on the same question "
+                f"(ladder level {inputs.hint_level})."
+            ),
+            tags=["hint_ladder", "cannot_answer"],
+        )
+    decision = _advance_or_close(inputs, ReasonCode.CANNOT_ANSWER_TRANSITION)
+    decision.acknowledgement_style = AcknowledgementStyle.NEUTRAL
+    decision.should_record_academic_evidence = True
+    decision.internal_rationale = "Student cannot answer; record insufficient evidence and move on."
+    decision.tags = ["insufficient_evidence"]
+    return decision
 
 
 def _probe_action(probe: ProbeType) -> InterviewerActionType:
@@ -441,37 +506,6 @@ def _advance_or_close(inputs: DecisionInputs, reason: ReasonCode) -> Interviewer
     )
 
 
-# Non-academic intents map to a fixed action that NEVER scores. Each entry is
-# (action, reason_code, internal_rationale). Handled before any answer analysis.
-_SIMPLE_INTENT_ACTIONS: dict[StudentIntent, tuple[InterviewerActionType, ReasonCode, str]] = {
-    StudentIntent.TECHNICAL_ISSUE: (
-        InterviewerActionType.HANDLE_TECHNICAL_ISSUE,
-        ReasonCode.TECHNICAL_ISSUE,
-        "Student reported a technical issue; not scored.",
-    ),
-    StudentIntent.ASK_TO_REPEAT: (
-        InterviewerActionType.REPEAT_QUESTION,
-        ReasonCode.STUDENT_REQUESTED_REPEAT,
-        "Student asked to repeat the question.",
-    ),
-    StudentIntent.ASK_FOR_CLARIFICATION: (
-        InterviewerActionType.CLARIFY_WITHOUT_REVEALING_ANSWER,
-        ReasonCode.STUDENT_REQUESTED_CLARIFICATION,
-        "Student asked for clarification; do not leak answer.",
-    ),
-    StudentIntent.ASK_FOR_HINT: (
-        InterviewerActionType.PROVIDE_NEUTRAL_HINT,
-        ReasonCode.STUDENT_REQUESTED_HINT,
-        "Student asked for a neutral scaffold; do not leak answer content.",
-    ),
-    StudentIntent.ASK_FOR_MORE_TIME: (
-        InterviewerActionType.OFFER_BRIEF_PAUSE,
-        ReasonCode.STUDENT_REQUESTED_CLARIFICATION,
-        "Student asked for more time.",
-    ),
-}
-
-
 def _decide_from_intent_request(inputs: DecisionInputs) -> InterviewerDecision | None:
     """Handle student *requests* (rules 1-8) that pre-empt answer analysis.
 
@@ -552,7 +586,7 @@ def _decide_from_intent_request(inputs: DecisionInputs) -> InterviewerDecision |
     if intent in (StudentIntent.CONFIRM_END, StudentIntent.CANCEL_END):
         return None
 
-    simple = _SIMPLE_INTENT_ACTIONS.get(intent)
+    simple = SIMPLE_INTENT_ACTIONS.get(intent)
     if simple is not None:
         action, reason, rationale = simple
         return InterviewerDecision(
@@ -574,16 +608,11 @@ def _decide_from_intent_request(inputs: DecisionInputs) -> InterviewerDecision |
         decision.tags = ["skipped"]
         return decision
 
-    # Cannot answer — acknowledge, record insufficient evidence, advance.
+    # Cannot answer — hint ladder first (Slice 11, v2); when it does not apply
+    # the helper falls through to the v1 behaviour (record insufficient evidence
+    # and advance).
     if intent is StudentIntent.CANNOT_ANSWER:
-        decision = _advance_or_close(inputs, ReasonCode.CANNOT_ANSWER_TRANSITION)
-        decision.acknowledgement_style = AcknowledgementStyle.NEUTRAL
-        decision.should_record_academic_evidence = True
-        decision.internal_rationale = (
-            "Student cannot answer; record insufficient evidence and move on."
-        )
-        decision.tags = ["insufficient_evidence"]
-        return decision
+        return _cannot_answer_decision(inputs)
 
     # Off-topic — redirect once, then advance if it persists.
     analysis = inputs.analysis
@@ -634,10 +663,7 @@ def decide_next_action(inputs: DecisionInputs) -> InterviewerDecision:
     analysis = inputs.analysis
     # From here the intent is a genuine (partial) answer → we CAN record evidence.
     # 9. Time low → stop probing, advance / close.
-    if (
-        inputs.time_fraction_remaining is not None
-        and inputs.time_fraction_remaining <= inputs.closing_time_fraction
-    ):
+    if _below_closing_threshold(inputs):
         decision = _advance_or_close(inputs, ReasonCode.TIME_RUNNING_LOW)
         decision.should_record_academic_evidence = True
         decision.internal_rationale = "Closing-threshold time reached; wrap up."
@@ -719,6 +745,7 @@ def decide_next_action(inputs: DecisionInputs) -> InterviewerDecision:
 __all__ = [
     "DEFAULT_MAX_FOLLOWUPS_PER_QUESTION",
     "DEFAULT_MAX_TOTAL_FOLLOWUPS",
+    "MAX_CANNOT_ANSWER_HINTS",
     "AcknowledgementStyle",
     "DecisionInputs",
     "InterviewerActionType",

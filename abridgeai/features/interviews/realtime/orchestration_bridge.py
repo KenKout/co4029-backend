@@ -510,6 +510,76 @@ async def handle_student_turn(
         return TurnResult(speak_text=None, is_finished=True, **control_fields)
 
 
+async def get_onboarding_turns(session_id: UUID) -> list[tuple[str, str]]:
+    """The REST onboarding exchange as ``(role, text)`` pairs for chat seeding.
+
+    Filters to messages with no ``session_question_id`` — the same split
+    ``routers/learner._build_session_history`` uses to separate the ceremony
+    exchange from question turns. Question turns are deliberately NOT replayed:
+    the agent re-asks the pending question itself, and a long graded transcript
+    replayed as live conversation would crowd out the exchange it is meant to
+    support.
+
+    ``ai`` becomes ``assistant`` because the LLM chat context has no ``ai`` role;
+    ``agent_context.seed_onboarding_history`` drops anything it does not know.
+    """
+    from abridgeai.features.interviews.queries import sessions as sessions_queries  # noqa: PLC0415
+
+    async with get_sessionmaker()() as db:
+        messages = await sessions_queries.list_session_messages(db, session_id)
+    turns: list[tuple[str, str]] = []
+    for message in messages:
+        if message.session_question_id is not None:
+            continue
+        text = (message.content_text or "").strip()
+        if not text:
+            continue
+        turns.append(("assistant" if message.role == "ai" else message.role, text))
+    return turns
+
+
+async def finalize_session(
+    session_id: UUID,
+    student_id: UUID,
+    *,
+    language: str = "en",
+    reason: str = "natural",
+) -> str | None:
+    """Submit the session for evaluation and return the canonical closing text.
+
+    The submit + ceremony pairing is the same one :func:`handle_student_turn`
+    runs on a finished turn — extracted so the native agent's
+    ``interview_end_interview`` tool and its hard-stop timer both end a session
+    through this one path instead of each growing their own.
+
+    ``ensure_ceremony_message`` is idempotent on ``ceremony_key``, and
+    ``submit_session`` already writes the closing internally; the call here reads
+    that one message back so the caller has something to speak.
+    """
+    actor = _build_actor(student_id)
+    pool = await _get_arq_pool()
+    async with get_sessionmaker()() as db:
+        session = await submit_session(
+            db,
+            session_id,
+            actor,
+            arq_pool=pool,
+            reason=reason,  # type: ignore[arg-type]  # FinishReason is a str Literal
+            language=language,
+        )
+        closing_message = await ensure_ceremony_message(
+            db,
+            session=session,
+            kind="closing",
+            language=language,
+            reason=reason,  # type: ignore[arg-type]  # FinishReason is a str Literal
+        )
+        await db.commit()
+    obs.emit(obs.EV_SESSION_SUBMITTED, session_id=session_id, reason=reason)
+    obs.emit(obs.EV_EVALUATION_ENQUEUED, session_id=session_id, reason=reason)
+    return closing_message.content_text
+
+
 async def record_integrity_event(
     session_id: UUID,
     student_id: UUID,
@@ -550,7 +620,9 @@ async def record_integrity_event(
 
 __all__ = [
     "TurnResult",
+    "finalize_session",
     "get_current_question_text",
+    "get_onboarding_turns",
     "get_opening_text",
     "handle_student_turn",
     "record_integrity_event",
