@@ -87,6 +87,7 @@ class FakeLocalParticipant:
 class FakeSession:
     def __init__(self) -> None:
         self.said: list[str] = []
+        self.generated: list[dict[str, Any]] = []
         self.started_with: dict[str, Any] = {}
         self.local = FakeLocalParticipant()
         self.handlers: dict[str, list[Any]] = {}
@@ -111,6 +112,10 @@ class FakeSession:
 
     def say(self, text: str, **kwargs: Any) -> FakeSpeechHandle:
         self.said.append(text)
+        return FakeSpeechHandle()
+
+    def generate_reply(self, **kwargs: Any) -> FakeSpeechHandle:
+        self.generated.append(kwargs)
         return FakeSpeechHandle()
 
     async def start(self, agent: Any, **kwargs: Any) -> None:
@@ -478,13 +483,18 @@ async def test_run_native_interview_wires_room_options_and_arms_the_stop(
         hard_stop.cancel()
 
 
-async def test_on_enter_speaks_the_pending_question_verbatim(
+async def test_on_enter_asks_question_one_in_the_interviewer_s_own_words(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Question one is the bank's words, not a paraphrase.
+    """The opening is generated, not read out.
 
-    The model has heard nothing yet, so it has no conversation to ground a
-    rewording in — and the candidate was just told "here is your first question".
+    Reading the bank text verbatim made question one the ONLY question missing
+    from the candidate's transcript: a verbatim reading is indistinguishable from
+    the card pinned above it, so the client drops it as a duplicate, while every
+    paraphrased later question is shown.
+
+    The question must still reach the model — as the CONTENT of the instruction,
+    never as a tool call, since opening with `next_question` would skip it.
     """
     setup = _setup()
     agent = _agent(setup)
@@ -492,7 +502,27 @@ async def test_on_enter_speaks_the_pending_question_verbatim(
     monkeypatch.setattr(type(agent), "session", property(lambda _self: fake_session))
 
     await agent.on_enter()
-    assert fake_session.said == ["What is an index?"]
+
+    assert fake_session.said == [], "the bank text must not be spoken verbatim"
+    assert len(fake_session.generated) == 1
+    generated = fake_session.generated[0]
+    assert "What is an index?" in generated["instructions"]
+    assert generated["tool_choice"] == "none"
+
+
+async def test_on_enter_stays_silent_when_no_question_is_pending(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    setup = _setup()
+    setup.userdata.current_question_text = None
+    agent = _agent(setup)
+    fake_session = FakeSession()
+    monkeypatch.setattr(type(agent), "session", property(lambda _self: fake_session))
+
+    await agent.on_enter()
+
+    assert fake_session.generated == []
+    assert fake_session.said == []
 
 
 # ── the session really has an LLM ────────────────────────────────────────────

@@ -254,17 +254,36 @@ class NativeInterviewAgent(InterviewToolsMixin, Agent):
         return self._setup.userdata
 
     async def on_enter(self) -> None:
-        """Speak the question the session is already on, verbatim from the bank.
+        """Open the interview in the interviewer's OWN words.
 
-        The model paraphrases every LATER question (the instructions invite it
-        to), but question one is spoken as written: the candidate has just been
-        handed off from the REST ceremony with "here is your first question", and
-        a paraphrase generated before the model has heard a single word is the
-        one place it has no conversation to ground the rewording in.
+        This used to ``say()`` the bank text verbatim, on the grounds that the REST
+        ceremony had just announced "here is your first question" and the model had
+        no conversation yet to ground a rewording in. That ceremony line is gone —
+        the agent owns its opening now — and reading the bank text back was the one
+        place the interviewer sounded like a form being read aloud.
+
+        It also made question one the ONLY question missing from the transcript: a
+        verbatim reading is indistinguishable from the card pinned above it, so the
+        client drops it as a duplicate. Every later question is paraphrased and
+        therefore shown, which left question one looking broken.
+
+        ``tool_choice="none"``: the opening needs no tool, and a model that opens by
+        calling ``next_question`` would skip the question it was about to ask.
         """
         question = self._setup.userdata.current_question_text
-        if question:
-            await self.session.say(question, allow_interruptions=False)
+        if not question:
+            return
+        self.session.generate_reply(
+            instructions=(
+                "Open the interview. Greet the candidate warmly in ONE short "
+                "sentence, then put this question to them in your own words, "
+                f'assessing exactly what it assesses: "{question}". Do not '
+                "re-introduce yourself, do not read the question out as written, "
+                "and do not add anything after it."
+            ),
+            tool_choice="none",
+            allow_interruptions=False,
+        )
 
     async def on_user_turn_completed(self, turn_ctx: ChatContext, new_message: ChatMessage) -> None:
         """Refresh the server's state note, then let the LLM reply.
