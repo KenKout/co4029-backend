@@ -722,13 +722,22 @@ async def replace_module_prerequisites(
 
 
 async def list_course_roster(db: AsyncSession, course_id: UUID) -> list[dict[str, Any]]:
-    """Enrolled students for a course with user profile info."""
+    """Enrolled students for a course with user profile info.
+
+    Projects the avatar object's ``bucket``/``object_key`` (never a URL); the
+    service layer mints the presigned ``avatar_url``, matching
+    :func:`list_course_roster_with_progress`. The thin ``/dept`` roster drew
+    every student as initials while the teacher Students page showed their
+    photo — same person, two renderings one click apart.
+    """
     stmt = (
         select(
             Enrollment.id.label("enrollment_id"),
             Enrollment.student_id,
             User.primary_email,
             UserProfile.display_name,
+            StorageObject.bucket.label("avatar_bucket"),
+            StorageObject.object_key.label("avatar_object_key"),
             Enrollment.status,
             Enrollment.enrolled_at,
             Enrollment.completed_at,
@@ -736,6 +745,7 @@ async def list_course_roster(db: AsyncSession, course_id: UUID) -> list[dict[str
         )
         .join(User, User.id == Enrollment.student_id)
         .outerjoin(UserProfile, UserProfile.user_id == User.id)
+        .outerjoin(StorageObject, StorageObject.id == UserProfile.avatar_object_id)
         .where(Enrollment.course_id == course_id)
         .order_by(Enrollment.enrolled_at.desc())
     )

@@ -27,6 +27,10 @@ class TeacherAssignmentRead(BaseModel):
     assignment_id: UUID | None = None
     active_from: datetime | None = None
     active_until: datetime | None = None
+    # Short-TTL presigned GET URL for the teacher's uploaded avatar, minted by
+    # the service layer. ``None`` when no avatar is set (SPA falls back to
+    # initials). Not persisted — a projection.
+    avatar_url: str | None = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -120,6 +124,10 @@ class RosterEntry(BaseModel):
     enrolled_at: datetime
     completed_at: datetime | None = None
     dropped_at: datetime | None = None
+    # Short-TTL presigned GET URL for the student's uploaded avatar, minted by
+    # the service layer. ``None`` when no avatar is set (SPA falls back to
+    # initials). Not persisted — a projection.
+    avatar_url: str | None = None
 
     model_config = ConfigDict(from_attributes=True)
 
