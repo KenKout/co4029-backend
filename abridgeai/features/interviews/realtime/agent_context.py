@@ -2,16 +2,17 @@
 
 Two jobs, both about what the agent can SEE:
 
-* :func:`inject_state_reminder` pushes the server's view of progress into the
-  conversation after each candidate answer, so the common turn (probe / follow-up)
-  needs no tool round-trip. It is injected as a SYSTEM message and the previous
-  copy is removed first — see the function docs for why both matter.
-
 * :func:`seed_onboarding_history` replays the REST onboarding exchange into the
   agent's context. Onboarding cannot run through the agent (the backend refuses to
   dispatch it until ``onboarding_stage == "completed"``, because the language
   choice made during onboarding is what shapes the dispatch), so without seeding
   the agent starts blind and re-asks for the candidate's name.
+
+* :func:`end_on_user_turn` trims the seeded history so the join request ends with
+  the candidate speaking, which this gateway requires.
+
+The state note is NOT here. It belongs in the agent's SYSTEM instructions —
+see :meth:`NativeInterviewAgent.refresh_state_note`.
 """
 
 from __future__ import annotations
@@ -19,17 +20,9 @@ from __future__ import annotations
 from collections.abc import Iterable, Sequence
 from typing import TYPE_CHECKING
 
-from abridgeai.features.interviews.realtime.agent_session import build_state_reminder
-
 if TYPE_CHECKING:
     from livekit.agents import ChatContext
 
-    from abridgeai.features.interviews.realtime.agent_userdata import InterviewUserdata
-
-# Marker that identifies a reminder so the previous one can be found and dropped.
-# Part of the injected text (not metadata) because it must survive any context
-# copy the SDK performs — `chat_ctx.copy()` preserves content, not side channels.
-REMINDER_PREFIX = "[interview state]"
 
 # Roles that may be replayed from a stored transcript. `system` is deliberately
 # EXCLUDED: a stored system row would become a live instruction the model obeys,
@@ -37,35 +30,31 @@ REMINDER_PREFIX = "[interview state]"
 _REPLAYABLE_ROLES = frozenset({"user", "assistant"})
 
 
-def inject_state_reminder(chat_ctx: ChatContext, data: InterviewUserdata) -> None:
-    """Append the current progress note, replacing any earlier one.
+def end_on_user_turn(chat_ctx: ChatContext) -> None:
+    """Drop trailing messages until the context ends with the candidate speaking.
 
-    SYSTEM role, not user: as a user message the model would read its own budget
-    as something the candidate said — and a candidate could then type the same
-    words to grant themselves an advance.
+    Gemini — and therefore the gateway in front of it — refuses any request whose
+    last message is not a user turn: "Requests ending with a model turn are not
+    supported" (a 400, and a trailing SYSTEM message counts too). Verified against
+    the live gateway.
 
-    The previous note is removed first because these are appended every turn. Left
-    to accumulate, the context ends up holding several contradictory budgets and
-    there is no reason the model should prefer the newest.
+    Every mid-interview turn satisfies this for free, because the SDK appends the
+    candidate's message AFTER ``on_user_turn_completed`` has injected the state
+    note. The JOIN is the exception: nothing is arriving, so the context ends with
+    the onboarding ceremony's last line plus the note, and the opening generation
+    failed with a 400 — the candidate confirmed they were ready and then heard
+    nothing at all.
 
-    A missing runtime state produces no note at all rather than a guess: the agent
-    acting on a fabricated budget is worse than it having to call
-    ``interview_get_progress``.
+    What gets dropped is exactly what should not be there anyway: the
+    ``ready_transition`` line ("here is your first question"), which is withheld
+    from the candidate everywhere else and which left the model believing it had
+    already announced the question. The note is re-injected on the first real turn.
     """
-    note = build_state_reminder(data)
-    if not note:
-        return
-
-    chat_ctx.items = [
-        item
-        for item in chat_ctx.items
-        if not (
-            item.type == "message"
-            and item.role == "system"
-            and REMINDER_PREFIX in (item.text_content or "")
-        )
-    ]
-    chat_ctx.add_message(role="system", content=f"{REMINDER_PREFIX} {note}")
+    while chat_ctx.items:
+        last = chat_ctx.items[-1]
+        if last.type == "message" and last.role == "user":
+            return
+        chat_ctx.items.pop()
 
 
 def seed_onboarding_history(
@@ -94,4 +83,7 @@ def seed_onboarding_history(
         existing.add((role, content))
 
 
-__all__ = ["REMINDER_PREFIX", "inject_state_reminder", "seed_onboarding_history"]
+__all__ = [
+    "end_on_user_turn",
+    "seed_onboarding_history",
+]

@@ -80,16 +80,12 @@ class _Agent:
     def __init__(self) -> None:
         self.chat_ctx = _Ctx()
         self.folded: list[str] = []
-        self.updated: list[_Ctx] = []
         self.on_fold: Callable[[str], Awaitable[None]] | None = None
 
-    async def fold_turn(self, chat_ctx: _Ctx, *, answer_text: str) -> None:
+    async def fold_turn(self, *, answer_text: str) -> None:
         self.folded.append(answer_text)
         if self.on_fold is not None:
             await self.on_fold(answer_text)
-
-    async def update_chat_ctx(self, chat_ctx: _Ctx) -> None:
-        self.updated.append(chat_ctx)
 
 
 class _Event:
@@ -117,7 +113,6 @@ async def test_typed_answer_is_graded() -> None:
     await cb(sess, _Event("An index is a B-tree.", {"turn_key": "tk-abcd1234"}))
 
     assert agent.folded == ["An index is a B-tree."]
-    assert agent.updated, "the refreshed state note was never written back to the context"
     assert sess.replies == [{"user_input": "An index is a B-tree."}]
 
 

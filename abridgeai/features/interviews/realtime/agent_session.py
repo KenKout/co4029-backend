@@ -29,8 +29,16 @@ if TYPE_CHECKING:
     from abridgeai.core.config import Settings
 
 
-def build_state_reminder(data: InterviewUserdata) -> str:
-    """The state note appended to the agent's context after each answer.
+def build_state_reminder(data: InterviewUserdata, *, opening: bool = False) -> str:
+    """The state note folded into the agent's SYSTEM instructions each turn.
+
+    It used to be appended to ``chat_ctx`` as a mid-conversation system message.
+    Gemini — the model behind this gateway — effectively ignores those: probed
+    with the same note at ``messages[0]`` the model asked the question it names,
+    and with the note mid-conversation it produced a generic greeting instead. So
+    the note that pins the live question, the budgets and the permitted next move
+    was being silently discarded, which is the likeliest reason the model kept
+    announcing its own questions rather than calling ``next_question``.
 
     Returns "" when runtime state has not been loaded: a session that cannot
     compute the note must say nothing rather than assert something plausible, or
@@ -49,6 +57,7 @@ def build_state_reminder(data: InterviewUserdata) -> str:
         time_remaining_seconds=data.time_remaining_seconds,
         current_question_text=data.current_question_text,
         server_advanced=data.pending_new_question,
+        opening=opening,
     )
 
 

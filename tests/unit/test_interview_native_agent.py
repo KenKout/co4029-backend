@@ -41,7 +41,6 @@ from abridgeai.features.interviews.orchestrator.tools import (  # noqa: E402
 )
 from abridgeai.features.interviews.realtime import agent as agent_module  # noqa: E402
 from abridgeai.features.interviews.realtime import native_bridge, native_runtime  # noqa: E402
-from abridgeai.features.interviews.realtime.agent_context import REMINDER_PREFIX  # noqa: E402
 from abridgeai.features.interviews.realtime.agent_session import (  # noqa: E402
     build_state_reminder,
 )
@@ -293,21 +292,26 @@ def test_native_agent_has_the_userdata_the_tools_read_through() -> None:
 # ── the turn hook ────────────────────────────────────────────────────────────
 
 
-async def test_on_user_turn_completed_injects_a_reminder() -> None:
+async def test_on_user_turn_completed_folds_the_note_into_the_instructions() -> None:
+    """The note goes to the SYSTEM instructions, never into the conversation.
+
+    This gateway is Gemini-backed: probed live, the same note at `messages[0]`
+    produced the question it names, while the note as a mid-conversation system
+    message produced a generic greeting — the model was discarding it. A trailing
+    system message is refused outright ("Requests ending with a model turn are not
+    supported"), which is what silenced the opening.
+    """
     agent = _agent(_setup())
     turn_ctx = ChatContext.empty()
     turn_ctx.add_message(role="user", content="An index speeds up lookups.")
 
     await agent.on_user_turn_completed(turn_ctx, SimpleNamespace(text_content="…"))
 
-    notes = [
-        item
-        for item in turn_ctx.items
-        if item.type == "message"
-        and item.role == "system"
-        and REMINDER_PREFIX in (item.text_content or "")
-    ]
-    assert len(notes) == 1
+    assert not [
+        item for item in turn_ctx.items if item.type == "message" and item.role == "system"
+    ], "the note must not be added to the conversation"
+    assert "What is an index?" in agent.instructions
+    assert agent.instructions.startswith("test instructions")
 
 
 async def test_on_user_turn_completed_does_not_raise_stop_response() -> None:
@@ -505,9 +509,14 @@ async def test_on_enter_asks_question_one_in_the_interviewer_s_own_words(
 
     assert fake_session.said == [], "the bank text must not be spoken verbatim"
     assert len(fake_session.generated) == 1
-    generated = fake_session.generated[0]
-    assert "What is an index?" in generated["instructions"]
-    assert generated["tool_choice"] == "none"
+    assert fake_session.generated[0]["tool_choice"] == "none"
+    # The question rides in the SYSTEM instructions, which the SDK keeps at
+    # `messages[0]`. Passing it as a per-call `instructions=` would append a
+    # trailing system message (`agent_activity._pipeline_reply_task_impl`), and
+    # this gateway rejects any request that does not end on a user turn.
+    assert "instructions" not in fake_session.generated[0]
+    assert "What is an index?" in agent.instructions
+    assert "OPEN THE INTERVIEW NOW" in agent.instructions
 
 
 async def test_on_enter_stays_silent_when_no_question_is_pending(
@@ -587,8 +596,8 @@ async def test_grading_failure_does_not_break_the_turn() -> None:
     ctx = ChatContext.empty()
     # Must not raise: the LLM still has to reply to the candidate.
     await agent.on_user_turn_completed(ctx, ChatMessage(role="user", content=["An answer."]))
-    # And the note must still be injected, so the model is not left blind.
-    assert any(i.type == "message" and i.role == "system" for i in ctx.items), (
+    # And the note must still reach the instructions, so the model is not left blind.
+    assert "What is an index?" in agent.instructions, (
         "state note missing after a grading failure"
     )
 
@@ -604,18 +613,14 @@ async def test_grading_runs_before_the_note_is_built() -> None:
     setup.grade_turn = _grade  # type: ignore[misc]
     agent = _agent(setup)
 
-    ctx = ChatContext.empty()
-    original = native_runtime.inject_state_reminder
-
-    def _spy(chat_ctx: Any, userdata: Any) -> None:
+    async def _spy(**_kwargs: Any) -> None:
         order.append("note")
-        original(chat_ctx, userdata)
 
-    native_runtime.inject_state_reminder = _spy  # type: ignore[assignment]
-    try:
-        await agent.on_user_turn_completed(ctx, ChatMessage(role="user", content=["A."]))
-    finally:
-        native_runtime.inject_state_reminder = original  # type: ignore[assignment]
+    agent.refresh_state_note = _spy  # type: ignore[assignment,method-assign]
+
+    await agent.on_user_turn_completed(
+        ChatContext.empty(), ChatMessage(role="user", content=["A."])
+    )
 
     assert order == ["grade", "note"], f"wrong order: {order}"
 
@@ -891,7 +896,7 @@ async def test_a_resolved_question_advances_without_the_model_calling_the_tool(
     _grades_to(setup, COVERAGE_SUFFICIENT_POINTS)
     fake_session, agent, hard_stop = await _run(monkeypatch, job_ctx, setup)
     try:
-        await agent.fold_turn(ChatContext.empty(), answer_text="An index speeds up lookups.")
+        await agent.fold_turn(answer_text="An index speeds up lookups.")
 
         assert setup.userdata.current_question_text == "What is a covering index?"
         assert setup.userdata.questions_remaining == 1
@@ -917,7 +922,7 @@ async def test_an_unresolved_question_holds_and_charges_a_follow_up(
     _grades_to(setup, 0)
     fake_session, agent, hard_stop = await _run(monkeypatch, job_ctx, setup)
     try:
-        await agent.fold_turn(ChatContext.empty(), answer_text="I'm not sure.")
+        await agent.fold_turn(answer_text="I'm not sure.")
 
         state = setup.userdata.state
         assert state is not None
@@ -941,7 +946,7 @@ async def test_a_spent_follow_up_budget_forces_the_advance(
     state.current_question_follow_up_count = setup.userdata.max_follow_ups_per_question
     _fake, agent, hard_stop = await _run(monkeypatch, job_ctx, setup)
     try:
-        await agent.fold_turn(ChatContext.empty(), answer_text="Still not sure.")
+        await agent.fold_turn(answer_text="Still not sure.")
 
         assert setup.userdata.current_question_text == "What is a covering index?"
         assert state.current_question_follow_up_count == 0, "the budget belongs to ONE question"
@@ -960,7 +965,7 @@ async def test_the_server_does_not_advance_at_the_buzzer(
     _grades_to(setup, COVERAGE_SUFFICIENT_POINTS)
     _fake, agent, hard_stop = await _run(monkeypatch, job_ctx, setup)
     try:
-        await agent.fold_turn(ChatContext.empty(), answer_text="An index speeds up lookups.")
+        await agent.fold_turn(answer_text="An index speeds up lookups.")
 
         assert setup.userdata.current_question_text == "What is an index?"
         assert setup.userdata.pending_new_question is False
@@ -978,7 +983,7 @@ async def test_an_empty_bank_advances_nowhere(
     _grades_to(setup, COVERAGE_SUFFICIENT_POINTS)
     _fake, agent, hard_stop = await _run(monkeypatch, job_ctx, setup)
     try:
-        await agent.fold_turn(ChatContext.empty(), answer_text="An index speeds up lookups.")
+        await agent.fold_turn(answer_text="An index speeds up lookups.")
 
         assert setup.userdata.questions_remaining == 0
         assert setup.userdata.pending_new_question is False
@@ -994,7 +999,7 @@ async def test_the_advance_tool_is_a_no_op_right_after_a_server_advance(
     _grades_to(setup, COVERAGE_SUFFICIENT_POINTS)
     _fake, agent, hard_stop = await _run(monkeypatch, job_ctx, setup)
     try:
-        await agent.fold_turn(ChatContext.empty(), answer_text="An index speeds up lookups.")
+        await agent.fold_turn(answer_text="An index speeds up lookups.")
         state = setup.userdata.state
         assert state is not None
         asked_after_advance = list(state.asked_question_ids)
@@ -1061,7 +1066,7 @@ async def test_an_answer_is_filed_under_the_question_it_answered_not_the_next_on
     )
     try:
         agent = fake_session.started_with["agent"]
-        await agent.fold_turn(ChatContext.empty(), answer_text="An index speeds up lookups.")
+        await agent.fold_turn(answer_text="An index speeds up lookups.")
         # The fold advanced the interview to question two; the answer item lands
         # AFTER that advance, as in production. Emitted inside a task so the
         # handler's `asyncio.create_task` runs on an active loop.

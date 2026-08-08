@@ -42,12 +42,13 @@ from abridgeai.features.interviews.orchestrator.intent import (
 from abridgeai.features.interviews.orchestrator.shadow import shadow_check_turn
 from abridgeai.features.interviews.realtime import observability as obs
 from abridgeai.features.interviews.realtime.agent_context import (
-    inject_state_reminder,
+    end_on_user_turn,
     seed_onboarding_history,
 )
 from abridgeai.features.interviews.realtime.agent_instructions import build_instructions
 from abridgeai.features.interviews.realtime.agent_session import (
     build_native_session,
+    build_state_reminder,
     room_options_for_mode,
 )
 from abridgeai.features.interviews.realtime.agent_tools import InterviewToolsMixin
@@ -248,10 +249,35 @@ class NativeInterviewAgent(InterviewToolsMixin, Agent):
     def __init__(self, *, instructions: str, chat_ctx: ChatContext, setup: NativeSetup) -> None:
         super().__init__(instructions=instructions, chat_ctx=chat_ctx)
         self._setup = setup
+        self._base_instructions = instructions
 
     @property
     def userdata(self) -> InterviewUserdata:
         return self._setup.userdata
+
+    async def refresh_state_note(self, *, opening: bool = False) -> None:
+        """Rewrite the SYSTEM instructions to carry the current state note.
+
+        The note has to live at ``messages[0]``. Appended to ``chat_ctx`` as a
+        mid-conversation system message — which is what this used to do — Gemini
+        effectively discards it: probed against the live gateway, the same note at
+        ``messages[0]`` produced the question it names while mid-conversation it
+        produced a generic greeting. Everything the note enforces (which question
+        is live, the budgets, whether advancing is permitted) was being thrown away.
+
+        Never allowed to fail the turn: a stale note is recoverable, a dropped
+        reply is not.
+        """
+        note = build_state_reminder(self._setup.userdata, opening=opening)
+        if not note:
+            return
+        try:
+            await self.update_instructions(f"{self._base_instructions}\n\n{note}")
+        except Exception:  # noqa: BLE001 -- a stale note must not cost the reply
+            logger.exception(
+                "refreshing the state note failed (session=%s)",
+                self._setup.userdata.interview_session_id,
+            )
 
     async def on_enter(self) -> None:
         """Open the interview in the interviewer's OWN words.
@@ -259,31 +285,23 @@ class NativeInterviewAgent(InterviewToolsMixin, Agent):
         This used to ``say()`` the bank text verbatim, on the grounds that the REST
         ceremony had just announced "here is your first question" and the model had
         no conversation yet to ground a rewording in. That ceremony line is gone —
-        the agent owns its opening now — and reading the bank text back was the one
-        place the interviewer sounded like a form being read aloud.
-
-        It also made question one the ONLY question missing from the transcript: a
+        the agent owns its opening — and reading the bank text back was the one
+        place the interviewer sounded like a form being read aloud. It also made
+        question one the ONLY question missing from the candidate's transcript: a
         verbatim reading is indistinguishable from the card pinned above it, so the
-        client drops it as a duplicate. Every later question is paraphrased and
-        therefore shown, which left question one looking broken.
+        client drops it as a duplicate, while every paraphrased later question shows.
 
-        ``tool_choice="none"``: the opening needs no tool, and a model that opens by
-        calling ``next_question`` would skip the question it was about to ask.
+        The question travels in the SYSTEM instructions (``opening=True``), not as a
+        per-call instruction: this gateway takes system content only at
+        ``messages[0]``, and a trailing system message is rejected outright.
+
+        ``tool_choice="none"`` — an opening that called ``next_question`` would skip
+        the very question it was about to ask.
         """
-        question = self._setup.userdata.current_question_text
-        if not question:
+        if not self._setup.userdata.current_question_text:
             return
-        self.session.generate_reply(
-            instructions=(
-                "Open the interview. Greet the candidate warmly in ONE short "
-                "sentence, then put this question to them in your own words, "
-                f'assessing exactly what it assesses: "{question}". Do not '
-                "re-introduce yourself, do not read the question out as written, "
-                "and do not add anything after it."
-            ),
-            tool_choice="none",
-            allow_interruptions=False,
-        )
+        await self.refresh_state_note(opening=True)
+        self.session.generate_reply(tool_choice="none", allow_interruptions=False)
 
     async def on_user_turn_completed(self, turn_ctx: ChatContext, new_message: ChatMessage) -> None:
         """Refresh the server's state note, then let the LLM reply.
@@ -299,15 +317,14 @@ class NativeInterviewAgent(InterviewToolsMixin, Agent):
         :meth:`fold_turn` for those. Any work added here that must apply to every
         turn belongs in ``fold_turn``, not in this method.
         """
-        await self.fold_turn(turn_ctx, answer_text=(new_message.text_content or ""))
+        await self.fold_turn(answer_text=(new_message.text_content or ""))
 
-    async def fold_turn(self, chat_ctx: ChatContext, *, answer_text: str) -> None:
-        """Grade one candidate answer and refresh the state note in ``chat_ctx``.
+    async def fold_turn(self, *, answer_text: str) -> None:
+        """Grade one candidate answer, then refresh the state note.
 
-        The single graded path, shared by the spoken and typed doors. ``chat_ctx``
-        must be MUTABLE — the SDK's temporary per-turn copy on the spoken path, or
-        a ``chat_ctx.copy()`` the caller writes back with ``update_chat_ctx`` on
-        the typed path.
+        The single graded path, shared by the spoken and typed doors. Takes no
+        chat context: the note lives in the SYSTEM instructions now, so neither
+        door has to mutate a per-turn copy and write it back.
         """
         userdata = self._setup.userdata
         # Belongs to the PREVIOUS turn: the model has had its chance to ask the
@@ -351,7 +368,7 @@ class NativeInterviewAgent(InterviewToolsMixin, Agent):
         # to the question it actually answered.
         userdata.answered_question_id = answered_question_id
         self._record_shadow(userdata, advanced=outcome.advanced)
-        inject_state_reminder(chat_ctx, userdata)
+        await self.refresh_state_note()
 
     def _record_shadow(self, userdata: InterviewUserdata, *, advanced: bool) -> None:
         """Run the audited policy beside the model and log both.
@@ -397,7 +414,10 @@ async def run_native_interview(
     userdata = setup.userdata
     chat_ctx = ChatContext.empty()
     seed_onboarding_history(chat_ctx, setup.onboarding_turns)
-    inject_state_reminder(chat_ctx, userdata)
+    # The opening is GENERATED, so the join request must satisfy the gateway's
+    # "must end with a user turn" rule — verified: an assistant OR a system
+    # message last is a 400, and the candidate heard nothing at all.
+    end_on_user_turn(chat_ctx)
 
     agent = NativeInterviewAgent(
         instructions=build_instructions(

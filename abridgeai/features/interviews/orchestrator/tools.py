@@ -177,6 +177,7 @@ def build_turn_reminder(
     time_remaining_seconds: int | None = None,
     current_question_text: str | None = None,
     server_advanced: bool = False,
+    opening: bool = False,
 ) -> str:
     """A one-paragraph state note appended to the agent's context each turn.
 
@@ -201,7 +202,9 @@ def build_turn_reminder(
     unticked = [oid for oid in required_outcome_ids if not _is_ticked(data, oid)]
 
     parts: list[str] = []
-    if current_question_text:
+    if current_question_text and opening:
+        parts.append(_opening_clause(current_question_text))
+    elif current_question_text:
         parts.append(_live_question_clause(current_question_text, server_advanced))
     if current_outcome_id is not None:
         current = data.outcome_coverage.get(current_outcome_id)
@@ -218,7 +221,7 @@ def build_turn_reminder(
         f"Follow-ups used here: {data.current_question_follow_up_count}"
         f"/{max_follow_ups_per_question}. Hints left: {hints_left}."
     )
-    if not server_advanced:
+    if not server_advanced and not opening:
         parts.append(
             "You MAY call next_question when this exchange is finished."
             if advance.allowed
@@ -246,6 +249,17 @@ def build_turn_reminder(
         if below_closing_threshold:
             parts.append("Time is nearly up — wrap up and move to closing now.")
     return " ".join(parts)
+
+
+def _opening_clause(current_question_text: str) -> str:
+    """The join turn: nothing has been asked in the room yet."""
+    return (
+        "OPEN THE INTERVIEW NOW. Greet the candidate warmly in ONE short sentence, "
+        "then put this question to them in your own words, assessing exactly what "
+        f'it assesses: "{current_question_text}". Do not read it out verbatim, do '
+        "not re-introduce yourself, do not call any tool, and do not add anything "
+        "after the question."
+    )
 
 
 def _live_question_clause(current_question_text: str, server_advanced: bool) -> str:

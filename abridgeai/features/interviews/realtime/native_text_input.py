@@ -106,10 +106,9 @@ def make_text_input_cb(
 async def _fold_typed_answer(sess: Any, text: str) -> None:  # noqa: ANN401 - see _on_text_input
     """Run the graded fold a spoken turn gets from ``on_user_turn_completed``.
 
-    ``agent.chat_ctx`` is a read-only view, so the SDK's prescribed
-    copy → mutate → ``update_chat_ctx`` sequence is the only way to land the
-    refreshed state note on the context the reply will actually be generated
-    from.
+    No chat-context handling: the state note lives in the agent's SYSTEM
+    instructions, so ``fold_turn`` refreshes it directly and there is no per-turn
+    copy to mutate and write back.
 
     Never raises: a failure here must cost the grade, not the candidate's reply.
     """
@@ -119,9 +118,7 @@ async def _fold_typed_answer(sess: Any, text: str) -> None:  # noqa: ANN401 - se
         logger.warning("typed turn on an agent with no fold_turn; answer not graded")
         return
     try:
-        chat_ctx = agent.chat_ctx.copy()
-        await fold(chat_ctx, answer_text=text)
-        await agent.update_chat_ctx(chat_ctx)
+        await fold(answer_text=text)
     except Exception:  # noqa: BLE001 -- grading must never cost the reply
         logger.exception("typed turn fold failed")
 
