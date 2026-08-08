@@ -14,7 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from abridgeai.core.pagination import Page, paginate
-from abridgeai.features.identity.models import AuthIdentity, User, UserProfile
+from abridgeai.features.identity.models import AuthIdentity, StorageObject, User, UserProfile
 
 
 async def get_user(db: AsyncSession, user_id: UUID) -> User | None:
@@ -117,3 +117,15 @@ async def list_profiles(db: AsyncSession, user_ids: Sequence[UUID]) -> list[User
         return []
     result = await db.execute(select(UserProfile).where(UserProfile.user_id.in_(user_ids)))
     return list(result.scalars().all())
+
+
+async def list_storage_objects(
+    db: AsyncSession, object_ids: Sequence[UUID]
+) -> dict[UUID, StorageObject]:
+    """Batch-load ``storage_objects`` rows by id (one query for a whole page)."""
+    if not object_ids:
+        return {}
+    result = await db.execute(
+        select(StorageObject).where(StorageObject.id.in_(list(object_ids)))
+    )
+    return {obj.id: obj for obj in result.scalars().all()}

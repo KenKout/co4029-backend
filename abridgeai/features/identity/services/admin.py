@@ -23,9 +23,56 @@ from abridgeai.features.access_control.api import public as access_control_api
 from abridgeai.features.identity.queries import users as user_queries
 from abridgeai.features.identity.schemas import UserListPage, UserRead
 from abridgeai.features.identity.services.profile import serialize_user
+from abridgeai.infrastructure.s3 import create_stream_url
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
+
+    from abridgeai.features.access_control.api._dto import OrgDTO
+    from abridgeai.features.identity.models import StorageObject, User, UserProfile
+
+
+async def _mint_avatar_url(
+    storage_map: dict[UUID, StorageObject],
+    profile: UserProfile | None,
+) -> str | None:
+    """Presign a profile's avatar object from the page's batch-loaded map.
+
+    The sign call is local-only (no network/DB round-trip), so minting one
+    URL per row does not reintroduce an N+1; a storage blip drops that one
+    avatar (FE falls back to initials) rather than failing the page.
+    """
+    if profile is None or profile.avatar_object_id is None:
+        return None
+    storage = storage_map.get(profile.avatar_object_id)
+    if storage is None:
+        return None
+    try:
+        url, _ = await create_stream_url(storage)
+    except Exception:  # noqa: BLE001 — never let a storage blip break the list
+        return None
+    return url
+
+
+async def _serialize_search_row(
+    user: User,
+    profile: UserProfile | None,
+    storage_map: dict[UUID, StorageObject],
+    role_map: dict[UUID, list[str]],
+    org: OrgDTO | None,
+) -> UserRead:
+    """Serialize one search row with minted avatar URL + role/org aggregates."""
+    avatar_url = await _mint_avatar_url(storage_map, profile)
+    row = serialize_user(user, profile)
+    if avatar_url is not None and row.profile is not None:
+        row.profile.avatar_url = avatar_url
+    return row.model_copy(
+        update={
+            "roles": role_map.get(user.id, []),
+            "organization_id": org.id if org else None,
+            "organization_name": org.name if org else None,
+        }
+    )
 
 
 _DEFAULT_LIMIT = 50
@@ -132,18 +179,22 @@ async def search_users(
     profiles = {
         p.user_id: p for p in await user_queries.list_profiles(db, user_ids)
     }
+    # Batch-load avatar storage objects for the page, then presign each (the
+    # sign call is local-only, so minting stays O(1) network for the page).
+    avatar_ids = [
+        p.avatar_object_id
+        for p in profiles.values()
+        if p.avatar_object_id is not None
+    ]
+    storage_map = await user_queries.list_storage_objects(db, avatar_ids)
     role_map = await access_control_api.get_role_codes_for_users(db, user_ids)
     org_map = await access_control_api.get_primary_orgs_for_users(db, user_ids)
     items = []
     for u in result.items:
         org = org_map.get(u.id)
         items.append(
-            serialize_user(u, profiles.get(u.id)).model_copy(
-                update={
-                    "roles": role_map.get(u.id, []),
-                    "organization_id": org.id if org else None,
-                    "organization_name": org.name if org else None,
-                }
+            await _serialize_search_row(
+                u, profiles.get(u.id), storage_map, role_map, org
             )
         )
     return Page(

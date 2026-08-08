@@ -30,6 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from abridgeai.core.db import get_db
 from abridgeai.core.pagination import PageResponse
 from abridgeai.core.security import CurrentUser
+from abridgeai.features.access_control.api import public as access_control_api
 from abridgeai.features.access_control.policies import require_permission
 from abridgeai.features.identity.schemas import UserListPage, UserRead
 from abridgeai.features.identity.services import admin as admin_service
@@ -71,7 +72,7 @@ async def list_users(
 # ``GET /users`` above — this one backs the page-numbered DataTable.
 @router.get("/search", response_model=PageResponse[UserRead])
 async def search_users(
-    _user: Annotated[CurrentUser, Depends(_REQUIRE_USER_READ)],
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_USER_READ)],
     db: Annotated[AsyncSession, Depends(get_db)],
     search: Annotated[str | None, Query(max_length=200)] = None,
     user_status: Annotated[str | None, Query(alias="status")] = None,
@@ -86,7 +87,27 @@ async def search_users(
     display name), optional ``status`` / ``role`` / ``organization`` filters,
     and whitelisted sort (``email`` / ``status`` / ``created_at``). ``role``
     filters to users holding that role code at any scope; ``organization``
-    filters to members of that org."""
+    filters to members of that org.
+
+    Org scope: callers holding ``system.administer`` may search globally and
+    pick any ``organization``. Everyone else (e.g. a manager with
+    ``user.read``) is forced to their own primary organization — the
+    ``organization`` query param is ignored and replaced with the caller's
+    org, so a manager can never enumerate users outside their org.
+    """
+    if not current_user.has_permission("system.administer"):
+        caller_org = await access_control_api.get_user_primary_org(
+            db, current_user.user_id
+        )
+        if caller_org is None:
+            return PageResponse[UserRead](
+                items=[],
+                total=0,
+                page=page,
+                page_size=page_size,
+                total_pages=0,
+            )
+        organization = caller_org.id
     result = await admin_service.search_users(
         db,
         status=user_status,
