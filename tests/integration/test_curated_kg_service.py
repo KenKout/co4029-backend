@@ -49,6 +49,7 @@ from abridgeai.features.materials.services.authoring import (
     get_or_seed_draft,
     publish,
     save_draft,
+    unpublish,
 )
 from pydantic import ValidationError
 
@@ -247,7 +248,10 @@ async def test_seeded_draft_is_not_publishable_until_saved(
     was showing a perfectly good graph.
 
     The frontend therefore has to save first — see ``handlePublishCurated`` in
-    material-hub.tsx, which is what "Save and publish" does.
+    material-hub.tsx, which is what "Save and publish" does. AND a placeholder
+    seed (the single "Main concept" node used when the AI graph is empty) can
+    never be published even after saving: it has no real content, so it would
+    show students a meaningless one-node graph.
     """
     lesson_id = scenario["lesson_id"]
     owner_id = scenario["owner_id"]
@@ -257,6 +261,7 @@ async def test_seeded_draft_is_not_publishable_until_saved(
         seeded = await get_or_seed_draft(session, lesson_id)
     assert seeded.exists is False
     assert seeded.seeded is True
+    assert seeded.seeded_placeholder is True  # no AI KG in this test env
     assert len(seeded.nodes) > 0, "seed must yield a publishable-looking graph"
 
     # 2) Publishing right now fails — this is the exact 409 the teacher saw.
@@ -264,7 +269,10 @@ async def test_seeded_draft_is_not_publishable_until_saved(
         with pytest.raises(CuratedKGEmptyError):
             await publish(session, lesson_id, actor_id=owner_id)
 
-    # 3) Save the seeded graph, then publish: succeeds.
+    # 3) Save the seeded graph. When the seed was the placeholder (this test's
+    #    AI graph is empty), publishing must STILL fail — the placeholder is
+    #    not real content (the saved row no longer says "seeded", but publish
+    #    re-detects the placeholder node shape server-side).
     async with session_factory() as session:
         saved = await save_draft(
             session,
@@ -276,17 +284,73 @@ async def test_seeded_draft_is_not_publishable_until_saved(
     assert saved.exists is True
 
     async with session_factory() as session:
+        with pytest.raises(CuratedKGEmptyError):
+            await publish(session, lesson_id, actor_id=owner_id)
+
+    # 4) Replace the placeholder with a real graph, then publish succeeds.
+    async with session_factory() as session:
+        await save_draft(
+            session,
+            lesson_id,
+            _draft(),
+            actor_id=owner_id,
+        )
+        await session.commit()
+
+    async with session_factory() as session:
         published = await publish(session, lesson_id, actor_id=owner_id)
         await session.commit()
     assert published.is_published is True
     assert published.has_unpublished_changes is False
-    assert {n.id for n in published.nodes} == {n.id for n in seeded.nodes}
+    assert {n.id for n in published.nodes} == {"root", "child"}
 
-    # 4) Students can now see it.
+    # 5) Students can now see it.
     async with session_factory() as session:
         pub = await catalog_service.get_published_kg_for_learner(session, lesson_id)
     assert pub.published is True
-    assert len(pub.nodes) == len(seeded.nodes)
+    assert {n.id for n in pub.nodes} == {"root", "child"}
+
+
+async def test_unpublish_hides_graph_from_learners(
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict,
+) -> None:
+    """Unpublish rolls the publish back: students lose the panel, the draft
+    stays intact for the teacher to re-publish after fixing it."""
+    lesson_id = scenario["lesson_id"]
+    owner_id = scenario["owner_id"]
+
+    async with session_factory() as session:
+        await save_draft(session, lesson_id, _draft(), actor_id=owner_id)
+        await session.commit()
+
+    async with session_factory() as session:
+        published = await publish(session, lesson_id, actor_id=owner_id)
+        await session.commit()
+    assert published.is_published is True
+
+    async with session_factory() as session:
+        pub = await catalog_service.get_published_kg_for_learner(session, lesson_id)
+    assert pub.published is True
+
+    # Unpublish → learner sees nothing again, draft survives.
+    async with session_factory() as session:
+        rolled = await unpublish(session, lesson_id, actor_id=owner_id)
+        await session.commit()
+    assert rolled.is_published is False
+    assert rolled.published_at is None
+    assert {n.id for n in rolled.nodes} == {"root", "child"}  # draft intact
+
+    async with session_factory() as session:
+        pub = await catalog_service.get_published_kg_for_learner(session, lesson_id)
+    assert pub.published is False
+    assert pub.nodes == []
+
+    # Re-publishing the untouched draft works.
+    async with session_factory() as session:
+        repub = await publish(session, lesson_id, actor_id=owner_id)
+        await session.commit()
+    assert repub.is_published is True
 
 
 async def test_republish_after_edit_needs_no_extra_save(

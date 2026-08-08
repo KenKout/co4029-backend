@@ -89,17 +89,20 @@ def test_resume_history_restores_onboarding_questions_and_answers_in_order() -> 
         messages,
     )
 
+    # The `ready_transition` handoff ("Let us begin.") is withheld: its row is only
+    # the marker that the REST ceremony introduced the interviewer, and nobody ever
+    # says it — the agent speaks its own opening. Replaying it here put a line the
+    # candidate never heard back on screen on every mid-session reload.
     assert [(turn.role, turn.kind, turn.content_text) for turn in history] == [
         ("ai", "opening", "Welcome. Please confirm your identity."),
         ("user", "answer", "Yes, that is me."),
-        ("ai", "transition", "Let us begin."),
         ("ai", "question", "Explain dependency injection."),
         ("user", "answer", "It supplies dependencies from outside a class."),
         ("ai", "question", "When would you use it?"),
     ]
-    assert [turn.elapsed_seconds for turn in history] == [None, None, 0, 0, 60, 65]
-    assert history[3].question_type == "technical"
-    assert history[5].question_type == "situational"
+    assert [turn.elapsed_seconds for turn in history] == [None, None, 0, 60, 65]
+    assert history[2].question_type == "technical"
+    assert history[4].question_type == "situational"
 
 
 def test_resume_history_keeps_greeting_questions_hidden_until_assessment() -> None:

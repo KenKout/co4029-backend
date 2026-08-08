@@ -401,3 +401,97 @@ def test_closing_substeps_render_bilingual_and_answer_safe() -> None:
         for text in (en.ai_turn_text.lower(), vi.ai_turn_text.lower()):
             for banned in ("the answer is", "correct answer", "rubric", "score is"):
                 assert banned not in text
+
+
+# ── terse lead-in must not contradict an advance (live-transcript bug) ────────
+
+
+def test_terse_lead_in_suppressed_when_the_turn_advances() -> None:
+    # Observed live: "Feel free to expand. Thank you. Now let's move on to the
+    # next question." — the terse lead-in invites elaboration on a turn that has
+    # already closed the chance to elaborate. The ack table and the transition
+    # table do not know about each other; suppress the invite when advancing.
+    from abridgeai.features.interviews.orchestrator.affect import Affect
+
+    d = _decision(
+        InterviewerActionType.TRANSITION_TOPIC,
+        ack=AcknowledgementStyle.NEUTRAL,
+        reason=ReasonCode.OUTCOME_NOT_COVERED,
+    )
+    d.should_advance_question = True
+    advancing = build_fallback_utterance(
+        d, persona=Persona.NEUTRAL, language="en", question_text="Q?", affect=Affect.TERSE
+    )
+    assert "Feel free to expand" not in advancing.ai_turn_text
+    for lang, phrase in (("en", "Feel free to expand"), ("vi", "trình bày thêm")):
+        out = build_fallback_utterance(
+            d, persona=Persona.NEUTRAL, language=lang, question_text="Q?", affect=Affect.TERSE
+        )
+        assert phrase not in out.ai_turn_text
+
+
+def test_terse_lead_in_kept_when_staying_on_the_same_question() -> None:
+    # Staying on the question is exactly when "say more" is useful — must survive.
+    from abridgeai.features.interviews.orchestrator.affect import Affect
+
+    d = _decision(InterviewerActionType.PROBE_DEEPER, ack=AcknowledgementStyle.NEUTRAL)
+    d.should_advance_question = False
+    staying = build_fallback_utterance(
+        d, persona=Persona.NEUTRAL, language="en", question_text="Q?", affect=Affect.TERSE
+    )
+    assert "Feel free to expand" in staying.ai_turn_text
+
+
+def test_other_affect_lead_ins_survive_an_advance() -> None:
+    # Only the "expand" invite contradicts an advance. Reassurance does not.
+    from abridgeai.features.interviews.orchestrator.affect import Affect
+
+    d = _decision(
+        InterviewerActionType.TRANSITION_TOPIC,
+        ack=AcknowledgementStyle.NEUTRAL,
+        reason=ReasonCode.OUTCOME_NOT_COVERED,
+    )
+    d.should_advance_question = True
+    nervous = build_fallback_utterance(
+        d, persona=Persona.NEUTRAL, language="en", question_text="Q?", affect=Affect.NERVOUS
+    )
+    assert "No rush" in nervous.ai_turn_text
+
+
+# ── clarify must rephrase, not interrogate the confused candidate ─────────────
+
+
+def test_clarify_does_not_ask_the_candidate_which_part() -> None:
+    # Live transcript: candidate said "I don't understand the question" and got
+    # "Which part of the question would you like me to clarify?" — twice. Asking a
+    # confused candidate to self-diagnose is the opposite of guiding them. The
+    # scaffold must offer a rephrasing instead.
+    for lang, banned in (
+        ("en", ("which part", "which specific part")),
+        ("vi", ("phần nào",)),
+    ):
+        d = _decision(
+            InterviewerActionType.CLARIFY_WITHOUT_REVEALING_ANSWER,
+            reason=ReasonCode.STUDENT_REQUESTED_CLARIFICATION,
+        )
+        out = build_fallback_utterance(
+            d, persona=Persona.NEUTRAL, language=lang, question_text=None
+        )
+        lowered = out.ai_turn_text.lower()
+        for phrase in banned:
+            assert phrase not in lowered, f"{lang}: still asking the candidate to self-diagnose"
+        assert lowered.strip(), f"{lang}: clarify produced no text"
+
+
+def test_clarify_stays_answer_safe() -> None:
+    d = _decision(
+        InterviewerActionType.CLARIFY_WITHOUT_REVEALING_ANSWER,
+        reason=ReasonCode.STUDENT_REQUESTED_CLARIFICATION,
+    )
+    for lang in ("en", "vi"):
+        out = build_fallback_utterance(
+            d, persona=Persona.NEUTRAL, language=lang, question_text=None
+        )
+        lowered = out.ai_turn_text.lower()
+        for banned in ("the answer is", "correct answer", "rubric", "score is"):
+            assert banned not in lowered

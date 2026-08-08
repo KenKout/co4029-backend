@@ -142,6 +142,38 @@ def apply_evidence_to_coverage(
         coverage.supporting_turn_ids.append(evidence.turn_id)
 
 
+def revoke_evidence_from_coverage(
+    coverage: OutcomeCoverageState,
+    evidence: OutcomeEvidence,
+    *,
+    now: str | None = None,
+    secondary: bool = False,
+) -> int:
+    """Undo one previously-applied evidence item (in place); return points removed.
+
+    The exact inverse of :func:`apply_evidence_to_coverage`, sharing its weighting
+    so a revocation can never remove a different number of points than the
+    application added. This exists for the async reconciliation path: the fast
+    sufficiency probe establishes provisional coverage on the turn, and when the
+    full extraction later disagrees, the probe's contribution has to come back
+    out. A tick CAN therefore be revoked mid-session, which is legitimate —
+    coverage is runtime selection guidance only and the post-session evaluator
+    re-judges the transcript independently.
+
+    ``supporting_turn_ids`` is deliberately NOT pruned here: only the caller
+    knows whether the replacement evidence re-cites the same turn.
+    """
+    removed = evidence_points(evidence, secondary=secondary)
+    coverage.evidence_count = max(0, coverage.evidence_count - 1)
+    coverage.coverage_points = max(0, coverage.coverage_points - removed)
+    coverage.status = _coverage_status_for(
+        coverage.coverage_points, had_evidence=coverage.evidence_count > 0
+    )
+    if now is not None:
+        coverage.last_updated_at = now
+    return removed
+
+
 # ── strong / weak answer classification ──────────────────────────────────────
 
 
@@ -218,4 +250,5 @@ __all__ = [
     "is_provisionally_sufficient",
     "is_strong_answer",
     "is_weak_answer",
+    "revoke_evidence_from_coverage",
 ]

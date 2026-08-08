@@ -40,6 +40,20 @@ class CareerPathCourseAuthoring(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class CareerPathCourseCandidate(BaseModel):
+    """A course the manager may attach to a path (picker row).
+
+    The full org catalogue, ANY status: a draft path may hold draft/archived
+    courses (the publish gate re-checks every link), so the picker must not
+    hide them the way the learner ``/courses`` catalogue does.
+    """
+
+    id: UUID
+    title: str
+    slug: str
+    status: str
+
+
 UnlockPolicy = Literal["always", "after_previous", "after_previous_required"]
 StageEnforcement = Literal["hard", "soft", "advisory"]
 
@@ -131,7 +145,15 @@ class CareerPathCreate(BaseModel):
 
 
 class CareerPathUpdate(BaseModel):
-    org_unit_id: UUID | None = None
+    """Editable metadata for an existing path.
+
+    ``org_unit_id`` is deliberately ABSENT: a path's organization is fixed at
+    creation (server-derived from the actor's primary org), the column is not
+    consumed by any backend read path, and a stray unit write on a locked-org
+    path would silently re-scope metadata nothing reads. The create schema
+    keeps the field for completeness; updates never touch it.
+    """
+
     name: str | None = Field(default=None, min_length=1, max_length=255)
     description: str | None = None
     max_concurrent: int | None = Field(default=None, gt=0)

@@ -84,7 +84,7 @@ class PersonaProfile:
         """The legacy enum the fallback tables key on."""
         return persona_from(self.key)
 
-    def clamped(self) -> "PersonaProfile":
+    def clamped(self) -> PersonaProfile:
         """Return a copy with every trait clamped into ``[TRAIT_MIN, TRAIT_MAX]``."""
         return replace(
             self,

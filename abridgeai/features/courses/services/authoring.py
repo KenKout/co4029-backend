@@ -1301,8 +1301,27 @@ async def get_authoring_resource_download_url(
 
 
 async def list_course_roster(db: AsyncSession, course_id: UUID) -> list[dict[str, Any]]:
-    """Enrolled students for a course (teacher or HOD view)."""
-    return await authoring_queries.list_course_roster(db, course_id)
+    """Enrolled students for a course (teacher or HOD view), with presigned avatars.
+
+    Same bucket/key → ``avatar_url`` swap as
+    :func:`list_course_roster_with_progress`; the raw storage coordinates must
+    not reach the response body.
+    """
+    rows = await authoring_queries.list_course_roster(db, course_id)
+    for row in rows:
+        bucket = row.pop("avatar_bucket", None)
+        object_key = row.pop("avatar_object_key", None)
+        avatar_url: str | None = None
+        if bucket and object_key:
+            try:
+                url, _ = await create_stream_url(
+                    _AuthoringStorageTarget(bucket=bucket, object_key=object_key)
+                )
+                avatar_url = url
+            except Exception:  # noqa: BLE001 — a storage blip must not break the roster
+                avatar_url = None
+        row["avatar_url"] = avatar_url
+    return rows
 
 
 async def list_course_roster_with_progress(

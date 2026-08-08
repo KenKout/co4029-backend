@@ -64,6 +64,7 @@ from abridgeai.features.materials.services.authoring._curated_kg import (
     get_published,
     publish,
     save_draft,
+    unpublish,
 )
 from abridgeai.features.materials.services.authoring._reads import (
     get_authoring_material,
@@ -101,6 +102,7 @@ __all__ = [
     "get_published",
     "publish",
     "save_draft",
+    "unpublish",
     "MaterialUploadInitResponse",
     "MultipartPartsResponse",
     "ReprocessResponse",

@@ -267,6 +267,22 @@ async def remove_teacher_from_course(
     await assignment_queries.revoke_teacher_assignment(db, assignment_id)
 
 
+async def _mint_avatar_url(bucket: str | None, object_key: str | None) -> str | None:
+    """Presign an avatar object, degrading to ``None`` rather than failing the list.
+
+    The sign call is local-only (no network/DB round-trip), so calling it once
+    per row does not reintroduce an N+1; a storage blip drops that one avatar
+    back to initials instead of 500-ing the whole staffing table.
+    """
+    if not bucket or not object_key:
+        return None
+    try:
+        url, _ = await create_stream_url(_StorageTarget(bucket=bucket, object_key=object_key))
+    except Exception:  # noqa: BLE001 — a storage blip must not break the list
+        return None
+    return url
+
+
 async def list_teachers_for_course(db: AsyncSession, course_id: UUID) -> list[InstructorRead]:
     """Return ``InstructorRead`` rows for the active teachers of ``course_id``."""
     rows = await assignment_queries.list_teachers_for_course(db, course_id)
@@ -275,7 +291,9 @@ async def list_teachers_for_course(db: AsyncSession, course_id: UUID) -> list[In
             {
                 "user_id": row["user_id"],
                 "display_name": row["display_name"] or row["primary_email"],
-                "avatar_url": None,
+                "avatar_url": await _mint_avatar_url(
+                    row.get("avatar_bucket"), row.get("avatar_object_key")
+                ),
                 "headline": None,
             }
         )
@@ -348,13 +366,32 @@ async def list_courses_for_organization(
 
 
 async def list_teachers_with_emails(db: AsyncSession, course_id: UUID) -> list[dict[str, Any]]:
-    """Active teachers for a course with email + display_name."""
-    return await assignment_queries.list_teachers_for_course(db, course_id)
+    """Active teachers for a course with email + display_name + presigned avatar.
+
+    The avatar bucket/key the query projects are swapped for a short-TTL
+    ``avatar_url`` here, so the staffing tab renders the same photo the manager
+    worklist does instead of falling back to initials for everyone.
+    """
+    rows = await assignment_queries.list_teachers_for_course(db, course_id)
+    for row in rows:
+        bucket = row.pop("avatar_bucket", None)
+        object_key = row.pop("avatar_object_key", None)
+        row["avatar_url"] = await _mint_avatar_url(bucket, object_key)
+    return rows
 
 
 async def list_course_roster(db: AsyncSession, course_id: UUID) -> list[dict[str, Any]]:
-    """Enrolled students for a course (HOD/Manager view)."""
-    return await authoring_queries.list_course_roster(db, course_id)
+    """Enrolled students for a course (HOD/Manager view), with presigned avatars.
+
+    Pops the query's raw bucket/key so they never reach the response body — the
+    SPA only ever sees a short-TTL ``avatar_url`` (or ``None`` → initials).
+    """
+    rows = await authoring_queries.list_course_roster(db, course_id)
+    for row in rows:
+        bucket = row.pop("avatar_bucket", None)
+        object_key = row.pop("avatar_object_key", None)
+        row["avatar_url"] = await _mint_avatar_url(bucket, object_key)
+    return rows
 
 
 __all__ = [

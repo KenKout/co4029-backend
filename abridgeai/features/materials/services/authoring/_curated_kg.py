@@ -75,6 +75,18 @@ def _json_from_graph(nodes: list[CuratedKGNode], edges: list[CuratedKGEdge]) -> 
     }
 
 
+def _is_placeholder_graph(nodes: list[CuratedKGNode]) -> bool:
+    """True when ``nodes`` is exactly the fallback one-node seed.
+
+    The seed produced when the AI graph is off/empty/unreachable is a single
+    "Main concept" primary node. Publishing it shows students a meaningless
+    one-node graph, so publish must refuse it — the UI hides the action based
+    on ``seeded_placeholder``, this is the server-side backstop for a draft
+    that was saved and then published directly via API.
+    """
+    return len(nodes) == 1 and nodes[0].id == "primary" and nodes[0].label == "Main concept"
+
+
 async def _get_row(
     db: AsyncSession, lesson_id: UUID
 ) -> LessonKnowledgeGraphCurated | None:
@@ -87,11 +99,14 @@ async def _get_row(
 
 async def _seed_nodes_from_ai(
     db: AsyncSession, lesson_id: UUID
-) -> tuple[list[CuratedKGNode], list[CuratedKGEdge]]:
+) -> tuple[list[CuratedKGNode], list[CuratedKGEdge], bool]:
     """Build a starting draft from the AI concept graph, if available.
 
     Returns a single placeholder primary node when the AI KG is off / empty /
-    unreachable, so the caller always gets a valid one-primary seed.
+    unreachable, so the caller always gets a valid one-primary seed. The
+    third element flags that placeholder case: publishing such a draft would
+    show students a meaningless one-node "Main concept" graph, so the caller
+    must refuse to publish it (the UI also hides the publish action).
     """
     from abridgeai.features.materials.services.authoring._reads import (  # noqa: PLC0415
         get_lesson_knowledge_graph,
@@ -100,6 +115,7 @@ async def _seed_nodes_from_ai(
     placeholder = (
         [CuratedKGNode(id="primary", label="Main concept", type="Concept", weight=10, is_primary=True)],
         [],
+        True,
     )
     try:
         ai = await get_lesson_knowledge_graph(db, lesson_id, limit=24)
@@ -127,7 +143,7 @@ async def _seed_nodes_from_ai(
         for e in ai.edges
         if e.source in node_ids and e.target in node_ids and e.source != e.target
     ]
-    return nodes, edges
+    return nodes, edges, False
 
 
 def _has_unpublished_changes(row: LessonKnowledgeGraphCurated) -> bool:
@@ -162,12 +178,13 @@ async def get_or_seed_draft(db: AsyncSession, lesson_id: UUID) -> CuratedKGDraft
         )
 
     # No row yet — seed from AI (not persisted until save).
-    nodes, edges = await _seed_nodes_from_ai(db, lesson_id)
+    nodes, edges, seeded_placeholder = await _seed_nodes_from_ai(db, lesson_id)
     primary = next((n.id for n in nodes if n.is_primary), None)
     return CuratedKGDraft(
         lesson_id=lesson_id,
         exists=False,
         seeded=True,
+        seeded_placeholder=seeded_placeholder,
         nodes=nodes,
         edges=edges,
         primary_node_id=primary,
@@ -229,14 +246,25 @@ async def publish(
     """Snapshot the current draft into the published slot (students see this).
 
     Publishing an empty / never-saved draft is a no-op guarded by the caller
-    (router returns 409 when there's nothing to publish). Copies draft_json →
-    published_json and stamps published_at.
+    (router returns 409 when there's nothing to publish). A placeholder draft
+    (the single "Main concept" seed produced when the AI graph is empty) is
+    refused the same way: it carries no real content, so publishing it would
+    show students a meaningless one-node graph — exactly what happened before
+    the guard existed (a lesson could be "published with an empty KG" before
+    any material was uploaded). Copies draft_json → published_json and stamps
+    published_at.
     """
     row = await _get_row(db, lesson_id)
     if row is None or not (row.draft_json or {}).get("nodes"):
         raise CuratedKGEmptyError(
             "Cannot publish an empty knowledge graph — save a draft with at "
             "least one primary node first"
+        )
+    nodes, _edges = _graph_from_json(row.draft_json)
+    if _is_placeholder_graph(nodes):
+        raise CuratedKGEmptyError(
+            "Cannot publish a placeholder knowledge graph — upload and process "
+            "material first so the graph has real concepts to show"
         )
     row.published_json = dict(row.draft_json)
     row.published_primary_node_id = row.primary_node_id
@@ -256,6 +284,55 @@ async def publish(
         is_published=True,
         published_at=row.published_at,
         has_unpublished_changes=False,
+    )
+
+
+async def unpublish(
+    db: AsyncSession,
+    lesson_id: UUID,
+    actor_id: UUID | None,
+) -> CuratedKGDraft:
+    """Roll back a publish: clear the student-visible snapshot.
+
+    The inverse of :func:`publish`. Publish is one-way today, so a graph
+    published by mistake (or one whose material was later deleted) stays on
+    the student reading view forever with no way to remove it. This clears
+    ``published_json`` / ``published_primary_node_id`` / ``published_at``;
+    the draft is untouched, so the teacher can re-publish after fixing it.
+    Students immediately see the knowledge-map panel disappear
+    (``published=False`` hides it). No-op when nothing is published.
+    """
+    row = await _get_row(db, lesson_id)
+    if row is None or row.published_json is None:
+        return CuratedKGDraft(
+            lesson_id=lesson_id,
+            exists=row is not None,
+            seeded=False,
+            nodes=[],
+            edges=[],
+            primary_node_id=row.primary_node_id if row is not None else None,
+            is_published=False,
+            published_at=None,
+            has_unpublished_changes=False,
+        )
+    row.published_json = None
+    row.published_primary_node_id = None
+    row.published_at = None
+    row.updated_by = actor_id
+    await db.flush()
+    await db.refresh(row)
+
+    nodes, edges = _graph_from_json(row.draft_json)
+    return CuratedKGDraft(
+        lesson_id=lesson_id,
+        exists=True,
+        seeded=False,
+        nodes=nodes,
+        edges=edges,
+        primary_node_id=row.primary_node_id,
+        is_published=False,
+        published_at=None,
+        has_unpublished_changes=bool(nodes),
     )
 
 
@@ -289,4 +366,5 @@ __all__ = [
     "get_published",
     "publish",
     "save_draft",
+    "unpublish",
 ]

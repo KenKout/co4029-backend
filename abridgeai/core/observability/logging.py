@@ -51,6 +51,27 @@ def _shared_processors() -> list[Processor]:
     ]
 
 
+class _RepairRelayedStructlogRecords(logging.Filter):
+    """Let ``ProcessorFormatter`` recognise a cross-process record as foreign.
+
+    ``ProcessorFormatter`` picks its structlog branch on the presence of the
+    ``_logger`` / ``_name`` attributes and then calls ``.copy()`` on
+    ``record.msg``, trusting it to be the event dict. A relay that formats the
+    record before pickling it — livekit-agents' ``ipc/log_queue.py`` does, and it
+    keeps both attributes — leaves those markers on a record whose ``msg`` is now
+    a ``str``, and every such log line raises ``AttributeError`` instead of
+    printing. Dropping the markers routes the record through
+    ``foreign_pre_chain``, which renders a plain message correctly.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if not isinstance(record.msg, dict):
+            for marker in ("_logger", "_name"):
+                if hasattr(record, marker):
+                    delattr(record, marker)
+        return True
+
+
 def configure_structlog() -> None:
     """Wire structlog + stdlib logging once per process.
 
@@ -93,6 +114,7 @@ def configure_structlog() -> None:
 
     handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(formatter)
+    handler.addFilter(_RepairRelayedStructlogRecords())
 
     root = logging.getLogger()
     for existing in list(root.handlers):

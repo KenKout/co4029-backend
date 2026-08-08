@@ -127,6 +127,22 @@ class Settings(BaseSettings):
     # embedding and a wrong graph edge. Overridable so the tier can be tuned
     # per deployment without a code change.
     llm_model_page_ocr: str | None = None
+    # Answer analysis runs on the BLOCKING turn path — the candidate is waiting.
+    # Overridable because the tier choice is a latency/quality trade the gateway
+    # decides, not the code: on this deployment the `standard` model spends
+    # 700-1000 hidden reasoning tokens per call (5.2s median) while the `small`
+    # model returns a schema-valid analysis in 1.3s with none. Safe to downgrade:
+    # coverage points are runtime SELECTION GUIDANCE only — the post-session
+    # evaluator (INTERVIEW_EVALUATION, large tier) re-judges the transcript
+    # independently and is never bound by them (see orchestrator/coverage.py).
+    llm_model_interview_analysis: str | None = None
+    # The fast sufficiency probe is the only analysis call left on the blocking
+    # turn path, so its model choice IS its latency budget. Overridable for the
+    # same reason as the analysis role above, and pinned separately because the
+    # `small` tier may legitimately move for other roles without this one
+    # inheriting a reasoning-token regime that would put the candidate back on a
+    # multi-second wait.
+    llm_model_interview_sufficiency: str | None = None
 
     # Derived field, populated by ``_populate_extra_headers`` from
     # ``llm_extra_headers_json``. Always a dict (possibly empty).
@@ -288,6 +304,17 @@ class Settings(BaseSettings):
     # load it does not own. A host truly saturated by interviews needs a second
     # worker instead.
     interview_voice_load_threshold: float = Field(default=0.9, gt=0.0, lt=1.0)
+    # Native (multiturn) interview agent. OFF runs the ROUTED path verbatim (no
+    # LLM in the AgentSession; every turn routed to
+    # ``orchestration_bridge.handle_student_turn``). ON gives the agent one
+    # ``chat_ctx`` and its own words, with server authority kept in the four
+    # ``@function_tool``s of ``realtime/agent_tools.py``.
+    #
+    # A DEPLOY flag, not a second architecture: the end state is ONE brain and
+    # this flag is deleted when the migration completes. It exists only because
+    # an untested conversational agent must not meet a live GRADED interview
+    # without a credential-free instant rollback.
+    interview_native_agent_enabled: bool = False
     # FR-4.5 / FR-5.3 — server-side lesson-gating enforcement (prerequisites,
     # SR coverage threshold τ, interview-pass locks). Emergency off-switch:
     # set LESSON_GATING_ENFORCED=false to stop blocking learner reads while

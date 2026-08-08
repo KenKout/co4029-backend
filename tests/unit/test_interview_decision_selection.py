@@ -15,6 +15,8 @@ from abridgeai.features.interviews.orchestrator.analysis import (
     Relevance,
 )
 from abridgeai.features.interviews.orchestrator.decision import (
+    DEFAULT_MAX_FOLLOWUPS_PER_QUESTION,
+    MAX_CANNOT_ANSWER_HINTS,
     DecisionInputs,
     InterviewerActionType,
     ReasonCode,
@@ -545,6 +547,98 @@ def test_cannot_answer_records_insufficient_and_advances() -> None:
     assert "insufficient_evidence" in d.tags
 
 
+# ── hint ladder on "I don't know" (Slice 11, v2) ─────────────────────────────
+
+
+def test_cannot_answer_with_hint_ladder_hints_before_advancing() -> None:
+    # The reported bug: "I don't know" jumped straight to the next question with
+    # no guidance. With the ladder on and budget left, offer a hint on the SAME
+    # question instead of abandoning it.
+    d = decide_next_action(
+        _inputs(
+            intent=_intent(StudentIntent.CANNOT_ANSWER),
+            hint_ladder_enabled=True,
+            hint_level=0,
+        )
+    )
+    assert d.action is InterviewerActionType.PROVIDE_NEUTRAL_HINT
+    assert d.reason_code is ReasonCode.CANNOT_ANSWER_HINT_OFFERED
+    assert d.should_advance_question is False
+    # Assistance, not assessment: nothing is scored while we are still helping.
+    assert d.should_record_academic_evidence is False
+    assert "hint_ladder" in d.tags
+
+
+def test_cannot_answer_hint_ladder_escalates_then_advances_when_exhausted() -> None:
+    # Each successive "I don't know" on the same question escalates the ladder;
+    # once the ladder is spent the turn advances exactly as v1 did, so the
+    # interview can never loop on one question.
+    for level in range(MAX_CANNOT_ANSWER_HINTS):
+        d = decide_next_action(
+            _inputs(
+                intent=_intent(StudentIntent.CANNOT_ANSWER),
+                hint_ladder_enabled=True,
+                hint_level=level,
+            )
+        )
+        assert d.action is InterviewerActionType.PROVIDE_NEUTRAL_HINT, (
+            f"ladder gave up early at level {level}"
+        )
+        assert d.should_advance_question is False
+
+    exhausted = decide_next_action(
+        _inputs(
+            intent=_intent(StudentIntent.CANNOT_ANSWER),
+            hint_ladder_enabled=True,
+            hint_level=MAX_CANNOT_ANSWER_HINTS,
+        )
+    )
+    assert exhausted.should_advance_question is True
+    assert exhausted.reason_code is ReasonCode.CANNOT_ANSWER_TRANSITION
+    assert exhausted.should_record_academic_evidence is True
+    assert "insufficient_evidence" in exhausted.tags
+
+
+def test_cannot_answer_hint_ladder_respects_low_time() -> None:
+    # Below the closing threshold we stop helping and wrap up — the hint ladder
+    # must never hold the interview open past its time budget.
+    d = decide_next_action(
+        _inputs(
+            intent=_intent(StudentIntent.CANNOT_ANSWER),
+            hint_ladder_enabled=True,
+            hint_level=0,
+            time_fraction_remaining=0.05,
+        )
+    )
+    assert d.should_advance_question is True
+    assert d.action is not InterviewerActionType.PROVIDE_NEUTRAL_HINT
+
+
+def test_cannot_answer_hint_ladder_respects_followup_budget() -> None:
+    # A spent per-question follow-up budget also ends the hinting: the loop-
+    # freedom invariant outranks the guidance feature.
+    d = decide_next_action(
+        _inputs(
+            intent=_intent(StudentIntent.CANNOT_ANSWER),
+            hint_ladder_enabled=True,
+            hint_level=0,
+            current_question_follow_up_count=DEFAULT_MAX_FOLLOWUPS_PER_QUESTION,
+        )
+    )
+    assert d.should_advance_question is True
+    assert d.action is not InterviewerActionType.PROVIDE_NEUTRAL_HINT
+
+
+def test_cannot_answer_hint_ladder_off_is_byte_for_byte_v1() -> None:
+    # Parity: with the flag off, "I don't know" advances exactly as before even
+    # when a hint_level happens to be carried in state.
+    off = decide_next_action(_inputs(intent=_intent(StudentIntent.CANNOT_ANSWER), hint_level=0))
+    v1 = decide_next_action(_inputs(intent=_intent(StudentIntent.CANNOT_ANSWER)))
+    assert off.action is v1.action
+    assert off.reason_code is v1.reason_code
+    assert off.should_advance_question is v1.should_advance_question is True
+
+
 def test_end_request_asks_for_confirmation_then_closes_on_confirm() -> None:
     # End-confirmation gate (Slice 4): a fresh end request no longer closes
     # immediately — it asks the candidate to confirm.
@@ -964,3 +1058,24 @@ def test_backtrack_off_is_byte_for_byte_v1() -> None:
     picked = select_next_question(candidates, ctx)
     assert picked is not None
     assert picked.candidate.question_id == "q_covered"
+
+
+def test_cannot_answer_hint_never_praises_the_non_answer() -> None:
+    from abridgeai.features.interviews.orchestrator.decision import AcknowledgementStyle
+
+    # Live transcript: candidate said "Ugh, I can't answer this question" and the
+    # interviewer replied "That's helpful." — the POSITIVE ack renders as praise
+    # (utterance.py WARMTH_MID/POSITIVE), which is tone-deaf on a turn where
+    # nothing was answered. The hint itself is the response; no ack is warranted.
+    for level in range(MAX_CANNOT_ANSWER_HINTS):
+        d = decide_next_action(
+            _inputs(
+                intent=_intent(StudentIntent.CANNOT_ANSWER),
+                hint_ladder_enabled=True,
+                hint_level=level,
+            )
+        )
+        assert d.action is InterviewerActionType.PROVIDE_NEUTRAL_HINT
+        assert d.acknowledgement_style is not AcknowledgementStyle.POSITIVE, (
+            "a non-answer must not be praised"
+        )

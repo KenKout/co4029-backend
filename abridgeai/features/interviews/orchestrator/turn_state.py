@@ -261,6 +261,22 @@ def probe_seed_text(decision: Any, current_question: InterviewQuestion | None) -
     return None
 
 
+def grounding_question_text(
+    selected: InterviewQuestion | None, current_question: InterviewQuestion | None
+) -> str | None:
+    """The question a phrasing model should write ABOUT.
+
+    Counterpart to :func:`probe_seed_text`, and the distinction matters: that one
+    returns the text that must be reproduced verbatim (None on a hint / clarify /
+    reframe turn), whereas this one returns the question under discussion so an
+    assistance utterance has a subject. Without it hints came out as generic
+    boilerplate that never referenced the question being asked.
+    """
+    if selected is not None:
+        return selected.prompt_text
+    return current_question.prompt_text if current_question is not None else None
+
+
 def compact_scores(scored: Any) -> list[dict[str, Any]]:  # noqa: ANN401
     """At most the top candidate's compact score (safeguard #8 — bounded audit)."""
     if scored is None:

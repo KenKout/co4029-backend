@@ -33,6 +33,7 @@ from livekit.agents.voice.room_io import (
 )
 
 from abridgeai.core.config import get_settings
+from abridgeai.features.interviews.realtime import native_bridge, native_runtime
 from abridgeai.features.interviews.realtime import observability as obs
 from abridgeai.features.interviews.realtime import orchestration_bridge as bridge
 from abridgeai.features.interviews.realtime.session_runtime import (
@@ -98,6 +99,16 @@ async def entrypoint(ctx: JobContext) -> None:
             )
 
     ctx.room.on("participant_disconnected", _on_participant_disconnected)
+
+    # The native agent owns its own session, room options, turn hook and
+    # shutdown, so the flag branches ONCE here and returns. Keep it that way:
+    # a second branch further down is how the OFF path stops being identical.
+    if settings.interview_native_agent_enabled:
+        setup = await native_bridge.load_native_setup(
+            interview_session_id, student_id, language=language
+        )
+        await native_runtime.run_native_interview(ctx, settings=settings, setup=setup)
+        return
 
     first_question_text = await bridge.get_current_question_text(
         interview_session_id, language=language

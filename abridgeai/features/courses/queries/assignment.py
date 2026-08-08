@@ -24,7 +24,7 @@ from abridgeai.features.access_control.models import (
 )
 from abridgeai.features.career_paths.models import CareerPathCourse, CareerPathStage
 from abridgeai.features.courses.models import Course
-from abridgeai.features.identity.models import User, UserProfile
+from abridgeai.features.identity.models import StorageObject, User, UserProfile
 
 
 async def list_career_paths_containing_course(
@@ -131,12 +131,21 @@ async def list_assignable_teachers(
 
 
 async def list_teachers_for_course(db: AsyncSession, course_id: UUID) -> list[dict[str, Any]]:
-    """Active teachers for a course with profile info."""
+    """Active teachers for a course with profile info.
+
+    Projects the avatar object's ``bucket``/``object_key`` (never a URL) —
+    the service layer mints the short-TTL presigned ``avatar_url`` from them,
+    the same split used by ``authoring.list_instructors_for_courses`` and the
+    roster query. Without it the staffing tables drew the same teacher as
+    initials while the worklist one click away drew their photo.
+    """
     stmt = (
         select(
             User.id.label("user_id"),
             User.primary_email,
             UserProfile.display_name,
+            StorageObject.bucket.label("avatar_bucket"),
+            StorageObject.object_key.label("avatar_object_key"),
             UserRoleAssignment.id.label("assignment_id"),
             UserRoleAssignment.active_from,
             UserRoleAssignment.active_until,
@@ -144,6 +153,7 @@ async def list_teachers_for_course(db: AsyncSession, course_id: UUID) -> list[di
         .join(Role, Role.id == UserRoleAssignment.role_id)
         .join(User, User.id == UserRoleAssignment.user_id)
         .outerjoin(UserProfile, UserProfile.user_id == User.id)
+        .outerjoin(StorageObject, StorageObject.id == UserProfile.avatar_object_id)
         .where(
             UserRoleAssignment.course_id == course_id,
             UserRoleAssignment.scope_kind == "course",

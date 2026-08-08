@@ -420,6 +420,7 @@ async def test_csv_import_partial_failure(
     manager_bearer: str,
     scenario: dict[str, object],
     engine: AsyncEngine,
+    seeded_users: SeededUsers,
 ) -> None:
     course_id = scenario["course_id"]
     suffix = uuid.uuid4().hex[:6]
@@ -453,6 +454,32 @@ async def test_csv_import_partial_failure(
                 {"cid": course_id},
             )
         ).one()
+        # The CSV-import gap fix: every created user must also get an ACTIVE
+        # membership in the course's org + the org-scoped student role —
+        # otherwise they're enrolled but cannot read ANY content (learner
+        # catalog 400s "no organization membership").
+        membership_count = (
+            await conn.execute(
+                text(
+                    "SELECT COUNT(*) FROM organization_memberships "
+                    "WHERE user_id = ANY(:ids) AND organization_id = :org AND status = 'active'"
+                ),
+                {"ids": body["created_users"], "org": str(seeded_users.organization_id)},
+            )
+        ).one()
+        assert membership_count[0] == 5
+        role_count = (
+            await conn.execute(
+                text(
+                    "SELECT COUNT(*) FROM user_role_assignments "
+                    "WHERE user_id = ANY(:ids) AND scope_kind = 'organization' "
+                    "AND organization_id = :org AND role_id = "
+                    "(SELECT id FROM roles WHERE code = 'student' AND deleted_at IS NULL)"
+                ),
+                {"ids": body["created_users"], "org": str(seeded_users.organization_id)},
+            )
+        ).one()
+        assert role_count[0] == 5
         await conn.execute(
             text("DELETE FROM course_enrollments WHERE course_id = :cid"),
             {"cid": course_id},

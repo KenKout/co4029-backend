@@ -28,6 +28,22 @@ async def get_course(db: AsyncSession, course_id: UUID) -> Course | None:
     return await db.get(Course, course_id)
 
 
+async def list_courses_by_org(db: AsyncSession, organization_id: UUID) -> list[Course]:
+    """All non-deleted courses of an organization, newest first.
+
+    No status filter on purpose: career-path authoring lets a draft path
+    carry draft/archived courses (the publish gate re-checks every link),
+    so the course picker must offer the full org catalogue, not just the
+    published subset the learner ``/courses`` endpoint returns.
+    """
+    stmt = (
+        select(Course)
+        .where(Course.organization_id == organization_id)
+        .order_by(Course.created_at.desc())
+    )
+    return list((await db.execute(stmt)).scalars().all())
+
+
 async def get_course_org(db: AsyncSession, course_id: UUID) -> UUID | None:
     """Resolve the course's owning organization id (None when absent)."""
     stmt = select(Course.organization_id).where(Course.id == course_id)
