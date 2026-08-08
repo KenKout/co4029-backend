@@ -60,6 +60,9 @@ permissions:
   - code: user.read
     description: Read user profiles within scope
     category: user
+  - code: user.disable
+    description: Disable or re-enable user accounts within scope (org-scoped)
+    category: user
   - code: user.bulk_import
     description: Bulk-import users via CSV/job
     category: user
