@@ -79,6 +79,10 @@ async def get_processing_summary(
     _user: Annotated[CurrentUser, Depends(_REQUIRE_READ)],
     db: Annotated[AsyncSession, Depends(get_db)],
     since: Annotated[datetime, Query(description="Lower bound on updated_at (required).")],
+    until: Annotated[
+        datetime | None,
+        Query(description="Optional upper bound on updated_at (custom range 'to' date)."),
+    ] = None,
 ) -> QueueDepthOut:
     """Per-status job counts over the same ``since`` window as ``GET /jobs``.
 
@@ -88,7 +92,13 @@ async def get_processing_summary(
     client-side derivation from an unfiltered list would additionally be
     wrong once a window holds more rows than the list endpoint's cap.
     """
-    return QueueDepthOut(**(await processing_service.status_counts_since(db, since=since)))
+    return QueueDepthOut(
+        **(
+            await processing_service.status_counts_since(
+                db, since=since, until=until
+            )
+        )
+    )
 
 
 @router.get("/jobs", response_model=list[ProcessingJobOut])
@@ -96,6 +106,10 @@ async def list_jobs(
     _user: Annotated[CurrentUser, Depends(_REQUIRE_READ)],
     db: Annotated[AsyncSession, Depends(get_db)],
     since: Annotated[datetime, Query(description="Lower bound on updated_at (required).")],
+    until: Annotated[
+        datetime | None,
+        Query(description="Optional upper bound on updated_at (custom range 'to' date)."),
+    ] = None,
     job_status: Annotated[
         str | None,
         Query(
@@ -105,7 +119,9 @@ async def list_jobs(
     ] = None,
     limit: Annotated[int, Query(ge=1, le=500)] = 100,
 ) -> list[ProcessingJobOut]:
-    rows = await processing_service.list_jobs(db, status=job_status, since=since, limit=limit)
+    rows = await processing_service.list_jobs(
+        db, status=job_status, since=since, until=until, limit=limit
+    )
     return [ProcessingJobOut.model_validate(r) for r in rows]
 
 

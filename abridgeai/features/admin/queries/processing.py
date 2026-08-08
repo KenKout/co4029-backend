@@ -36,14 +36,18 @@ async def queue_depth(db: AsyncSession) -> dict[str, int]:
     }
 
 
-async def status_counts_since(db: AsyncSession, *, since: datetime) -> dict[str, int]:
+async def status_counts_since(
+    db: AsyncSession, *, since: datetime, until: datetime | None = None
+) -> dict[str, int]:
     """Per-status counts over the same ``since`` window as :func:`list_jobs`.
 
     The admin processing page's tab badges read from here — deriving them
     client-side from the status-filtered jobs list made every other tab's
     count collapse to zero the moment one status was selected.
     """
-    row = (await db.execute(_SUMMARY_SQL, {"since": since})).mappings().one()
+    row = (
+        await db.execute(_SUMMARY_SQL, {"since": since, "until": until})
+    ).mappings().one()
     return {
         "pending": int(row["pending_count"] or 0),
         "running": int(row["running_count"] or 0),
@@ -59,12 +63,13 @@ async def list_jobs(
     *,
     status: str | None,
     since: datetime,
+    until: datetime | None = None,
     limit: int,
 ) -> list[dict[str, Any]]:
     rows = (
         await db.execute(
             _LIST_JOBS_SQL,
-            {"status": status, "since": since, "limit": limit},
+            {"status": status, "since": since, "until": until, "limit": limit},
         )
     ).mappings()
     return [dict(r) for r in rows]

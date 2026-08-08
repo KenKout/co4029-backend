@@ -464,6 +464,46 @@ async def test_list_processing_jobs_smoke(
     assert all(row["status"] == "failed" for row in with_filter.json())
 
 
+async def test_list_processing_jobs_honors_until_bound(
+    client: httpx.AsyncClient,
+    engine: AsyncEngine,
+    seeded_users: SeededUsers,
+    failed_job: uuid.UUID,
+) -> None:
+    """``until`` (custom-range upper bound) narrows both ``/jobs`` and
+    ``/summary``; omitting it keeps the old lower-bound-only behaviour.
+    """
+    token, _ = await _bearer(engine, seeded_users.admin_id)
+    since = quote_plus((datetime.now(tz=UTC) - timedelta(days=7)).isoformat())
+    yesterday = quote_plus((datetime.now(tz=UTC) - timedelta(days=1)).isoformat())
+    tomorrow = quote_plus((datetime.now(tz=UTC) + timedelta(days=1)).isoformat())
+    try:
+        before = await client.get(
+            f"/api/v1/admin/processing/jobs?since={since}&until={yesterday}&limit=500",
+            headers=_auth(token),
+        )
+        after = await client.get(
+            f"/api/v1/admin/processing/jobs?since={since}&until={tomorrow}&limit=500",
+            headers=_auth(token),
+        )
+        summary_before = await client.get(
+            f"/api/v1/admin/processing/summary?since={since}&until={yesterday}",
+            headers=_auth(token),
+        )
+    finally:
+        await _purge_sessions(engine, seeded_users.admin_id)
+    assert before.status_code == 200, before.text
+    assert after.status_code == 200, after.text
+    assert summary_before.status_code == 200, summary_before.text
+    # The seeded job has updated_at = now, so a yesterday upper bound must
+    # exclude it while a tomorrow bound keeps it. (Other tests may leave
+    # older jobs behind, so assert on the seed's own id, not on emptiness.)
+    before_ids = {row["id"] for row in before.json()}
+    after_ids = {row["id"] for row in after.json()}
+    assert str(failed_job) not in before_ids
+    assert str(failed_job) in after_ids
+
+
 async def test_processing_summary_matches_unfiltered_list(
     client: httpx.AsyncClient,
     engine: AsyncEngine,
