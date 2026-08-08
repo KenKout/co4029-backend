@@ -107,6 +107,10 @@ class CuratedKGDraft(BaseModel):
     ``seeded`` is True when the draft was auto-populated from the AI concept
     graph on first open (so the UI can show a "seeded from AI" hint). ``exists``
     is False when no curated graph row exists yet for the lesson.
+    ``seeded_placeholder`` is True when the seed was the fallback single
+    "Main concept" node (AI graph off / empty / unreachable) — such a draft
+    is NOT publishable: it has no real content and would show students a
+    meaningless one-node graph.
     """
 
     model_config = ConfigDict(from_attributes=True)
@@ -114,6 +118,7 @@ class CuratedKGDraft(BaseModel):
     lesson_id: UUID
     exists: bool = True
     seeded: bool = False
+    seeded_placeholder: bool = False
     nodes: list[CuratedKGNode] = []
     edges: list[CuratedKGEdge] = []
     primary_node_id: str | None = None

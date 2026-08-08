@@ -725,7 +725,9 @@ async def publish_curated_knowledge_graph(
     """Publish the current draft to the student reading-lesson view.
 
     Snapshots ``draft_json`` into the published slot. 409 when there is no
-    saved draft with at least one node to publish.
+    saved draft with at least one node to publish (including a placeholder
+    one-node "Main concept" draft — a graph with no real content must not
+    reach students).
     """
     try:
         result = await authoring_service.publish(
@@ -735,6 +737,29 @@ async def publish_curated_knowledge_graph(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT, detail=str(exc)
         ) from exc
+    await db.commit()
+    return result
+
+
+@router.post(
+    "/lessons/{lesson_id}/curated-knowledge-graph/unpublish",
+    response_model=CuratedKGDraft,
+)
+async def unpublish_curated_knowledge_graph(
+    lesson_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_LESSON)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> CuratedKGDraft:
+    """Roll back a publish: clear the student-visible snapshot.
+
+    Publish is otherwise one-way — a graph published by mistake (or one
+    whose material was later deleted) would stay on the student reading
+    view forever. Unpublishing hides the knowledge-map panel for students
+    while leaving the draft intact for the teacher to re-publish later.
+    """
+    result = await authoring_service.unpublish(
+        db, lesson_id, actor_id=current_user.user_id
+    )
     await db.commit()
     return result
 
