@@ -26,6 +26,7 @@ from abridgeai.core.observability.logging import (
     clear_request_context,
     get_logger,
 )
+from abridgeai.core.security import TokenPayload, decode_access_token
 
 _REQUEST_ID_HEADER: Final[str] = "X-Request-ID"
 
@@ -105,19 +106,33 @@ def _client_ip(request: Request) -> str | None:
 
 
 def _user_id(request: Request) -> uuid.UUID | None:
-    user = getattr(request.state, "user", None)
-    if user is None:
-        return None
-    candidate = getattr(user, "id", None)
-    return candidate if isinstance(candidate, uuid.UUID) else None
+    """User id from the bearer token, resolved in-process.
+
+    BaseHTTPMiddleware runs the inner app in a separate task, so
+    ``request.state.user`` (set by ``get_current_user`` inside the route
+    layer) never propagates back to this dispatch scope — reading it
+    silently logged NULL for every authenticated request. Decoding the
+    token here is the same trust boundary (same secret, same validation
+    via ``decode_access_token``) without the task-copy problem.
+    """
+    payload = _token_payload(request)
+    return payload.sub if payload is not None else None
 
 
 def _session_id(request: Request) -> uuid.UUID | None:
-    session = getattr(request.state, "session", None)
-    if session is None:
+    payload = _token_payload(request)
+    return payload.sid if payload is not None else None
+
+
+def _token_payload(request: Request) -> TokenPayload | None:
+    """Decode the bearer access token, or None when absent/invalid."""
+    header = request.headers.get("authorization", "")
+    if not header.lower().startswith("bearer "):
         return None
-    candidate = getattr(session, "id", None)
-    return candidate if isinstance(candidate, uuid.UUID) else None
+    try:
+        return decode_access_token(header.split(" ", 1)[1].strip())
+    except (ValueError, IndexError):
+        return None
 
 
 def _body_size(request: Request) -> int | None:

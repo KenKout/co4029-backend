@@ -328,4 +328,10 @@ async def test_admin_audit_http_endpoint_now_returns_200(
     rows = resp.json()
     assert isinstance(rows, list)
     assert len(rows) >= 1
-    assert any(r["path"] == "/api/v1/me" for r in rows)
+    me_rows = [r for r in rows if r["path"] == "/api/v1/me"]
+    assert me_rows, "the warmup /api/v1/me request must be in the window"
+    # The warmup hit was authenticated: user_id + session_id must be logged
+    # (regression — the middleware read CurrentUser.id which doesn't exist,
+    # so every row's user_id was NULL).
+    assert me_rows[0]["user_id"] == str(seeded_users.admin_id)
+    assert me_rows[0]["session_id"] == str(sid)
