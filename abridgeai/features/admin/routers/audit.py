@@ -101,6 +101,47 @@ async def get_role_changes(
     return [RoleChangeRow.model_validate(r) for r in rows]
 
 
+@router.get("/data-changes/list", response_model=list[DataChangeOut])
+async def list_data_changes(
+    _user: Annotated[CurrentUser, Depends(_REQUIRE_AUDIT)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    table: Annotated[
+        str,
+        Query(
+            description=(
+                "Entity table to audit. One of: "
+                f"{', '.join(audit_service.SUPPORTED_DATA_CHANGE_TABLES)}."
+            ),
+        ),
+    ],
+    since: Annotated[
+        datetime, Query(description="Lower bound on updated_at (required).")
+    ],
+    limit: Annotated[int, Query(ge=1, le=500)] = 100,
+) -> list[DataChangeOut]:
+    """Every row in ``table`` changed since ``since``, newest first.
+
+    The sibling of the single-entity ``GET /data-changes`` lookup — lets the
+    audit screen show a recent-changes table per entity kind, then drill
+    into one row with the existing detail lookup.
+    """
+    if table not in audit_service.SUPPORTED_DATA_CHANGE_TABLES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "error": "unsupported_table",
+                "message": (
+                    "data-changes lookup supports table in "
+                    f"{list(audit_service.SUPPORTED_DATA_CHANGE_TABLES)}"
+                ),
+            },
+        )
+    rows = await audit_service.data_changes_list(
+        db, table=table, since=since, limit=limit
+    )
+    return [DataChangeOut.model_validate(r) for r in rows]
+
+
 @router.get("/data-changes", response_model=DataChangeOut)
 async def get_data_changes(
     _user: Annotated[CurrentUser, Depends(_REQUIRE_AUDIT)],

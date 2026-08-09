@@ -732,6 +732,47 @@ async def test_data_changes_lookup(
     assert body["organization_id"] == str(seeded_users.organization_id)
 
 
+async def test_data_changes_list(
+    client: httpx.AsyncClient,
+    engine: AsyncEngine,
+    seeded_users: SeededUsers,
+) -> None:
+    """FR-6.7 — recent-changes list per table, newest first."""
+    token, _ = await _bearer(engine, seeded_users.admin_id)
+    try:
+        resp = await client.get(
+            "/api/v1/admin/audit/data-changes/list?table=courses&since=2000-01-01T00:00:00Z&limit=50",
+            headers=_auth(token),
+        )
+    finally:
+        await _purge_sessions(engine, seeded_users.admin_id)
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert isinstance(body, list)
+    assert any(row["entity_id"] == str(seeded_users.course_id) for row in body)
+    # Newest first: updated_at must be non-increasing.
+    stamps = [row["updated_at"] for row in body]
+    assert stamps == sorted(stamps, reverse=True)
+
+
+async def test_data_changes_list_unsupported_table_400(
+    client: httpx.AsyncClient,
+    engine: AsyncEngine,
+    seeded_users: SeededUsers,
+) -> None:
+    """The list endpoint validates ``table`` the same way as the lookup."""
+    token, _ = await _bearer(engine, seeded_users.admin_id)
+    try:
+        resp = await client.get(
+            "/api/v1/admin/audit/data-changes/list?table=quizzes&since=2000-01-01T00:00:00Z",
+            headers=_auth(token),
+        )
+    finally:
+        await _purge_sessions(engine, seeded_users.admin_id)
+    assert resp.status_code == 400, resp.text
+    assert resp.json()["detail"]["error"] == "unsupported_table"
+
+
 async def test_data_changes_lookup_users(
     client: httpx.AsyncClient,
     engine: AsyncEngine,

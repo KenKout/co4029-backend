@@ -38,6 +38,16 @@ _DATA_CHANGES_SQL: dict[str, TextClause] = {
     "role_assignments": _load("audit/data_changes_role_assignments.sql"),
 }
 
+# LIST variants — same projection, but every row updated within a window
+# instead of one row by id. Kept in a parallel map so the single-lookup
+# statements stay untouched.
+_DATA_CHANGES_LIST_SQL: dict[str, TextClause] = {
+    "courses": _load("audit/data_changes_courses_list.sql"),
+    "materials": _load("audit/data_changes_materials_list.sql"),
+    "users": _load("audit/data_changes_users_list.sql"),
+    "role_assignments": _load("audit/data_changes_role_assignments_list.sql"),
+}
+
 # Public tuple of the tables ``data_changes`` accepts — the router validates
 # against this so a bad ``table`` value 400s before touching the DB.
 SUPPORTED_DATA_CHANGE_TABLES: tuple[str, ...] = tuple(_DATA_CHANGES_SQL)
@@ -98,9 +108,27 @@ async def data_changes(db: AsyncSession, *, table: str, entity_id: UUID) -> dict
     return dict(row) if row is not None else None
 
 
+async def data_changes_list(
+    db: AsyncSession,
+    *,
+    table: str,
+    since: datetime,
+    limit: int,
+) -> list[dict[str, Any]]:
+    """Every row in ``table`` updated since ``since``, newest first."""
+    rows = (
+        await db.execute(
+            _DATA_CHANGES_LIST_SQL[table],
+            {"since": since, "limit": limit},
+        )
+    ).mappings()
+    return [dict(r) for r in rows]
+
+
 __all__ = [
     "SUPPORTED_DATA_CHANGE_TABLES",
     "data_changes",
+    "data_changes_list",
     "http_audit_search",
     "http_audit_table_exists",
     "role_changes",

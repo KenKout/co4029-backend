@@ -64,10 +64,24 @@ async def data_changes(db: AsyncSession, *, table: str, entity_id: UUID) -> dict
     return await audit_queries.data_changes(db, table=table, entity_id=entity_id)
 
 
+async def data_changes_list(
+    db: AsyncSession,
+    *,
+    table: str,
+    since: datetime,
+    limit: int,
+) -> list[dict[str, Any]]:
+    """Every row in ``table`` changed since ``since``, newest first."""
+    return await audit_queries.data_changes_list(
+        db, table=table, since=since, limit=limit
+    )
+
+
 __all__ = [
     "SUPPORTED_DATA_CHANGE_TABLES",
     "HttpAuditUnavailableError",
     "data_changes",
+    "data_changes_list",
     "http_audit_search",
     "role_changes",
 ]
