@@ -34,6 +34,9 @@ from abridgeai.features.access_control.queries import (
     load_org_permissions,
     load_user_permissions,
 )
+from abridgeai.features.access_control.services.organizations import (
+    delete_membership,
+)
 
 pytestmark = pytest.mark.asyncio
 
@@ -164,3 +167,85 @@ async def test_expired_assignment_is_not_counted(db_session) -> None:
     await db_session.flush()
 
     assert "course.update" not in await load_org_permissions(db_session, user, org_b)
+
+
+async def test_delete_membership_marks_left_and_stamps_left_at(db_session) -> None:
+    """Removing a member sets status='left' + left_at (not a soft delete).
+
+    The row stays visible (deleted_at stays NULL) so the roster keeps the
+    history, but org access is gone: the primary-org resolver and the
+    membership check both filter on status='active'.
+    """
+    org_a, org_b, user = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    await _seed(db_session, org_a=org_a, org_b=org_b, user=user)
+    await db_session.flush()
+
+    membership_id = (
+        await db_session.execute(
+            text(
+                "SELECT id FROM organization_memberships "
+                "WHERE user_id = :u AND organization_id = :a"
+            ),
+            {"u": user, "a": org_a},
+        )
+    ).scalar_one()
+
+    await delete_membership(db_session, membership_id, actor_id=None)
+    await db_session.flush()
+
+    row = (
+        await db_session.execute(
+            text(
+                "SELECT status, left_at, deleted_at FROM organization_memberships "
+                "WHERE id = :mid"
+            ),
+            {"mid": membership_id},
+        )
+    ).one()
+    assert row.status == "left", "delete should transition to 'left'"
+    assert row.left_at is not None, "'left' must stamp left_at"
+    assert row.deleted_at is None, "'left' is a state, not a soft delete"
+
+    # Org access is gone immediately.
+    from abridgeai.features.access_control.api import public as access_control_api
+
+    assert not await access_control_api.is_user_member_of_org(
+        db_session, user_id=user, org_id=org_a
+    )
+
+
+async def test_delete_membership_keeps_left_at_on_repeat(db_session) -> None:
+    """Calling delete twice is idempotent — left_at is stamped only once."""
+    org_a, org_b, user = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    await _seed(db_session, org_a=org_a, org_b=org_b, user=user)
+    await db_session.flush()
+
+    membership_id = (
+        await db_session.execute(
+            text(
+                "SELECT id FROM organization_memberships "
+                "WHERE user_id = :u AND organization_id = :a"
+            ),
+            {"u": user, "a": org_a},
+        )
+    ).scalar_one()
+
+    await delete_membership(db_session, membership_id, actor_id=None)
+    await db_session.flush()
+    first_left_at = (
+        await db_session.execute(
+            text("SELECT left_at FROM organization_memberships WHERE id = :mid"),
+            {"mid": membership_id},
+        )
+    ).scalar_one()
+
+    await delete_membership(db_session, membership_id, actor_id=None)
+    await db_session.flush()
+    second_left_at = (
+        await db_session.execute(
+            text("SELECT left_at FROM organization_memberships WHERE id = :mid"),
+            {"mid": membership_id},
+        )
+    ).scalar_one()
+
+    assert first_left_at == second_left_at

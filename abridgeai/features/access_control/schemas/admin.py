@@ -11,7 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field
 ScopeKind = Literal["global", "organization", "org_unit", "course"]
 OrganizationStatus = Literal["active", "inactive", "archived"]
 UnitType = Literal["faculty", "department", "office", "program", "campus", "other"]
-MembershipStatus = Literal["active", "invited", "inactive", "suspended", "left"]
+MembershipStatus = Literal["active", "inactive", "suspended"]
 
 
 class _ORM(BaseModel):

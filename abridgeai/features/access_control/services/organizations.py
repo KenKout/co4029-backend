@@ -12,7 +12,7 @@ parameter is annotated under ``TYPE_CHECKING`` only.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from abridgeai.core.exceptions import AppError, NotFoundError
@@ -411,10 +411,23 @@ async def delete_membership(
     *,
     actor_id: UUID | None,
 ) -> None:
-    deleted = await org_queries.soft_delete_membership(
-        db, membership_id, actor_id=actor_id
-    )
-    if not deleted:
+    """Mark a membership as ``left`` instead of soft-deleting it.
+
+    ``left`` is a business state, not a deletion: the row stays visible in
+    the roster with its ``left_at`` timestamp, and every org-scope check in
+    the codebase filters on ``status == 'active'``, so a left member loses
+    all org access immediately (same effect as the old soft-delete, but
+    with the history preserved). ``actor_id`` is accepted for call-site
+    compatibility; the leave is attributed via ``left_at``.
+    """
+    current = await org_queries.get_membership(db, membership_id)
+    if current is None or current.deleted_at is not None:
+        raise NotFoundError("Membership not found")
+    fields: dict[str, Any] = {"status": "left"}
+    if current.left_at is None:
+        fields["left_at"] = org_queries.now_utc()
+    updated = await org_queries.update_membership(db, membership_id, fields=fields)
+    if updated is None:
         raise NotFoundError("Membership not found")
 
 
