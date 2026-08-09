@@ -14,9 +14,13 @@ from .auth import (
     TokenResponse,
 )
 from .profile import (
+    AssignedCourseRead,
     AuthSessionRead,
+    CareerPathProgressRead,
+    CourseProgressRead,
     UserCreate,
     UserListPage,
+    UserOverviewRead,
     UserPermissionsRead,
     UserProfileLinkIn,
     UserProfileLinkRead,
@@ -26,7 +30,10 @@ from .profile import (
 )
 
 __all__ = [
+    "AssignedCourseRead",
     "AuthSessionRead",
+    "CareerPathProgressRead",
+    "CourseProgressRead",
     "GoogleLoginResponse",
     "LogoutRequest",
     "MfaChallengeResponse",
@@ -40,6 +47,7 @@ __all__ = [
     "TokenResponse",
     "UserCreate",
     "UserListPage",
+    "UserOverviewRead",
     "UserPermissionsRead",
     "UserProfileLinkIn",
     "UserProfileLinkRead",

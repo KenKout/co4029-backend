@@ -28,12 +28,17 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from abridgeai.core.db import get_db
-from abridgeai.core.exceptions import ConflictError
+from abridgeai.core.exceptions import ConflictError, NotFoundError
 from abridgeai.core.pagination import PageResponse
 from abridgeai.core.security import CurrentUser
 from abridgeai.features.access_control.api import public as access_control_api
 from abridgeai.features.access_control.policies import require_permission
-from abridgeai.features.identity.schemas import UserCreate, UserListPage, UserRead
+from abridgeai.features.identity.schemas import (
+    UserCreate,
+    UserListPage,
+    UserOverviewRead,
+    UserRead,
+)
 from abridgeai.features.identity.services import admin as admin_service
 
 router = APIRouter(prefix="/users", tags=["users", "admin"])
@@ -198,6 +203,52 @@ async def get_users_by_ids(
         if user is not None:
             users.append(user)
     return users
+
+
+async def _assert_can_view_user(
+    db: AsyncSession,
+    current_user: CurrentUser,
+    user_id: UUID,
+) -> None:
+    """Org-scope guard for the manager/HOD user-detail route.
+
+    ``system.administer`` bypasses (global view). Everyone else must share
+    the caller's primary organization with the target; a cross-org (or
+    missing) lookup 404s so the endpoint cannot be used to enumerate
+    another org's users. Unlike disable/enable there is NO peer block —
+    managers and HODs may view peer accounts, they just get identity-only
+    data (the service attaches learning sections only for students and
+    teachers).
+    """
+    if current_user.has_permission("system.administer"):
+        return
+    caller_org = await access_control_api.get_user_primary_org(db, current_user.user_id)
+    if caller_org is None:
+        raise _not_found(user_id)
+    if not await access_control_api.is_user_member_of_org(
+        db, user_id=user_id, org_id=caller_org.id
+    ):
+        raise _not_found(user_id)
+
+
+@router.get("/{user_id}/overview", response_model=UserOverviewRead)
+async def get_user_overview(
+    user_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_USER_READ)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> UserOverviewRead:
+    """Org-scoped user detail for managers / HODs.
+
+    Basic identity always; students additionally get enrolled courses with
+    per-course progress, career-path enrolments with progress, and the
+    latest activity time; teachers get their assigned courses. Manager /
+    HOD / admin targets return identity only. Cross-org lookups 404.
+    """
+    await _assert_can_view_user(db, current_user, user_id)
+    try:
+        return await admin_service.get_user_overview(db, user_id=user_id)
+    except NotFoundError as exc:
+        raise _not_found(user_id) from exc
 
 
 @router.get("/{user_id}", response_model=UserRead)

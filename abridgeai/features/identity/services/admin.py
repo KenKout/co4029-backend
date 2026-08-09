@@ -15,15 +15,24 @@ Future work may add timestamp-based opaque cursors per Reconciliation §A10.
 from __future__ import annotations
 
 import base64
+from datetime import datetime
 from typing import TYPE_CHECKING
 from uuid import UUID
 
-from abridgeai.core.exceptions import ConflictError
+from abridgeai.core.exceptions import ConflictError, NotFoundError
 from abridgeai.core.pagination import Page
 from abridgeai.features.access_control.api import public as access_control_api
 from abridgeai.features.identity.models import User, UserProfile
 from abridgeai.features.identity.queries import users as user_queries
-from abridgeai.features.identity.schemas import UserCreate, UserListPage, UserRead
+from abridgeai.features.identity.schemas import (
+    AssignedCourseRead,
+    CareerPathProgressRead,
+    CourseProgressRead,
+    UserCreate,
+    UserListPage,
+    UserOverviewRead,
+    UserRead,
+)
 from abridgeai.features.identity.services.profile import serialize_user
 from abridgeai.infrastructure.s3 import create_stream_url
 
@@ -208,6 +217,133 @@ async def search_users(
     )
 
 
+async def get_user_overview(
+    db: AsyncSession, *, user_id: UUID
+) -> UserOverviewRead:
+    """Assemble the manager/HOD user-detail payload for ``user_id``.
+
+    Starts from the user's identity (same ``UserRead`` the list rows use),
+    then adds role-dependent sections:
+
+    * ``student`` — enrolled courses with per-course progress, career-path
+      enrolments with progress, and the latest activity timestamp.
+    * ``teacher`` — courses the user is actively assigned to teach.
+    * manager / HOD / admin — identity only (no learning surface).
+
+    All cross-feature reads go through the sibling ``api.public`` surfaces
+    (enrollments, progress, career_paths, courses); this service only
+    assembles. The caller (router) is responsible for the org-scope guard.
+    """
+    user = await user_queries.get_user(db, user_id)
+    if user is None:
+        raise NotFoundError(f"user {user_id} not found")
+    profile = await user_queries.get_profile(db, user_id)
+    role_map = await access_control_api.get_role_codes_for_users(db, [user_id])
+    org_map = await access_control_api.get_primary_orgs_for_users(db, [user_id])
+    org = org_map.get(user_id)
+    user_read = await _serialize_search_row(user, profile, {}, role_map, org)
+
+    role_codes = role_map.get(user_id, [])
+    overview = UserOverviewRead(user=user_read)
+
+    if "student" in role_codes:
+        await _attach_student_sections(db, overview, user_id)
+    if "teacher" in role_codes:
+        from abridgeai.features.courses.api import public as courses_api
+
+        assigned = await courses_api.list_courses_for_teacher(db, user_id)
+        overview.assigned_courses = [
+            AssignedCourseRead(
+                course_id=c.id, title=c.title, slug=c.slug, status=c.status
+            )
+            for c in assigned
+        ]
+    return overview
+
+
+async def _attach_student_sections(
+    db: AsyncSession, overview: UserOverviewRead, student_id: UUID
+) -> None:
+    """Fill ``courses`` / ``career_paths`` / ``last_active_at`` for a student."""
+    from abridgeai.features.career_paths.api import public as career_paths_api
+    from abridgeai.features.courses.api import public as courses_api
+    from abridgeai.features.enrollments.api import public as enrollments_api
+    from abridgeai.features.progress.api import public as progress_api
+
+    active_at: datetime | None = overview.user.last_login_at
+
+    enrollments = await enrollments_api.list_user_course_enrollments(
+        db, user_id=student_id
+    )
+    courses: list[CourseProgressRead] = []
+    for enrollment in enrollments:
+        if enrollment.status == "dropped":
+            continue
+        course = await courses_api.get_course_by_id(db, enrollment.course_id)
+        if course is None:
+            continue
+        progress = await progress_api.get_course_progress_for_user(
+            db, user_id=student_id, course_id=enrollment.course_id
+        )
+        completion = float(progress.get("completion_percent") or 0)
+        last = progress.get("last_activity_at")
+        if last is not None:
+            last_dt = (
+                last if isinstance(last, datetime) else datetime.fromisoformat(str(last))
+            )
+            active_at = max(active_at, last_dt) if active_at else last_dt
+        courses.append(
+            CourseProgressRead(
+                course_id=enrollment.course_id,
+                title=course.title,
+                slug=course.slug,
+                status=course.status,
+                enrollment_status=enrollment.status,
+                enrolled_at=enrollment.enrolled_at,
+                completion_percent=completion,
+                completed_lessons=int(progress.get("completed_lessons") or 0),
+                total_lessons=int(progress.get("total_lessons") or 0),
+            )
+        )
+    overview.courses = courses
+
+    path_rows = await career_paths_api.list_user_career_enrollments(
+        db, student_id=student_id
+    )
+    paths: list[CareerPathProgressRead] = []
+    for row in path_rows:
+        career_path_id = UUID(str(row["career_path_id"]))
+        course_rows = await career_paths_api.get_path_course_progress_for_user(
+            db, career_path_id=career_path_id, student_id=student_id
+        )
+        completed = sum(1 for r in course_rows if r.get("satisfied"))
+        total = len(course_rows)
+        percent = (
+            round(
+                sum(float(r.get("completion_percent") or 0) for r in course_rows)
+                / total,
+                2,
+            )
+            if total
+            else 0.0
+        )
+        paths.append(
+            CareerPathProgressRead(
+                career_path_id=career_path_id,
+                name=str(row["name"]),
+                slug=str(row["slug"]),
+                status=str(row["status"]),
+                started_at=row["started_at"],  # type: ignore[arg-type]
+                completed_at=row.get("completed_at"),  # type: ignore[arg-type]
+                completed_courses=completed,
+                course_count=total,
+                completion_percent=percent,
+            )
+        )
+    overview.career_paths = paths
+    overview.last_active_at = active_at
+
+
 async def create_user_account(
     db: AsyncSession,
     *,
@@ -255,4 +391,10 @@ async def create_user_account(
     return serialize_user(user, profile)
 
 
-__all__ = ["create_user_account", "get_user_with_profile", "list_users", "search_users"]
+__all__ = [
+    "create_user_account",
+    "get_user_overview",
+    "get_user_with_profile",
+    "list_users",
+    "search_users",
+]

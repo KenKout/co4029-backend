@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from abridgeai.features.progress.models import LessonProgress
 from abridgeai.features.progress.queries.analytics import list_at_risk_rows
+from abridgeai.features.progress.services import reporting
 
 from ._dto import AtRiskStudentDTO, LessonProgressDTO
 
@@ -67,9 +68,31 @@ async def get_at_risk_students(
     ]
 
 
+async def get_course_progress_for_user(
+    db: AsyncSession,
+    *,
+    user_id: UUID,
+    course_id: UUID,
+) -> dict[str, object]:
+    """Per-user course progress summary for a (course, student) pair.
+
+    Cross-feature read backing the manager/HOD user-detail page: how far a
+    student is through a course (completed / in-progress / not-started
+    lessons, completion percent, last activity). The learner endpoint
+    serves the signed-in student; this is the same projection for any
+    user, exposed through the public API so sibling features never reach
+    into progress internals.
+    """
+    summary = await reporting.get_my_course_progress_summary(
+        db, user_id=user_id, course_id=course_id
+    )
+    return summary.model_dump()
+
+
 __all__ = [
     "AtRiskStudentDTO",
     "LessonProgressDTO",
     "get_at_risk_students",
+    "get_course_progress_for_user",
     "get_lesson_progress",
 ]

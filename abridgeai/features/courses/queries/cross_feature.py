@@ -13,7 +13,7 @@ from uuid import UUID
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from abridgeai.features.access_control.models import UserRoleAssignment
+from abridgeai.features.access_control.models import Role, UserRoleAssignment
 from abridgeai.features.courses.models import (
     Course,
     CourseLearningOutcome,
@@ -26,6 +26,37 @@ from abridgeai.features.courses.models import (
 
 async def get_course(db: AsyncSession, course_id: UUID) -> Course | None:
     return await db.get(Course, course_id)
+
+
+async def list_courses_for_teacher(
+    db: AsyncSession, teacher_id: UUID
+) -> list[Course]:
+    """Courses ``teacher_id`` is actively assigned to teach.
+
+    Teacher assignment is a ``user_role_assignments`` row with
+    ``scope_kind='course'`` + role ``teacher`` pointing at the course.
+    Returns the non-deleted courses behind those rows, newest first.
+    Backs the manager/HOD user-detail "assigned courses" section.
+    """
+    stmt = (
+        select(Course)
+        .join(
+            UserRoleAssignment,
+            UserRoleAssignment.course_id == Course.id,
+        )
+        .join(Role, Role.id == UserRoleAssignment.role_id)
+        .where(
+            UserRoleAssignment.user_id == teacher_id,
+            UserRoleAssignment.scope_kind == "course",
+            UserRoleAssignment.deleted_at.is_(None),
+            Role.code == "teacher",
+            Role.deleted_at.is_(None),
+            (UserRoleAssignment.active_until.is_(None))
+            | (UserRoleAssignment.active_until > func.now()),
+        )
+        .order_by(Course.created_at.desc())
+    )
+    return list((await db.execute(stmt)).scalars().all())
 
 
 async def list_courses_by_org(db: AsyncSession, organization_id: UUID) -> list[Course]:
@@ -201,6 +232,7 @@ __all__ = [
     "list_lesson_ids_for_modules",
     "get_user_primary_org_id",
     "insert_module_item",
+    "list_courses_for_teacher",
     "next_module_item_position",
     "walk_resource_to_course",
 ]

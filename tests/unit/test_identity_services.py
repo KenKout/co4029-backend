@@ -322,8 +322,16 @@ def test_services_have_no_cross_feature_imports() -> None:
         Path(__file__).resolve().parents[2] / "abridgeai" / "features" / "identity" / "services"
     )
     forbidden_prefixes = (
-        "from abridgeai.features.access_control",
-        "from abridgeai.features.courses",
+        # api.public is the sanctioned cross-feature surface; anything deeper
+        # (queries/services/models) is forbidden.
+        "from abridgeai.features.access_control.queries",
+        "from abridgeai.features.access_control.services",
+        "from abridgeai.features.access_control.models",
+        "from abridgeai.features.courses.queries",
+        "from abridgeai.features.courses.services",
+        "from abridgeai.features.courses.models",
+        "from abridgeai.features.courses.routers",
+        "from abridgeai.features.courses.schemas",
         "from abridgeai.features.assessments",
         "from app.routes.users",
     )

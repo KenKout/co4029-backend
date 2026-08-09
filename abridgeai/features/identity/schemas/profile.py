@@ -112,3 +112,60 @@ class UserListPage(BaseModel):
 
     items: list[UserRead]
     next_cursor: str | None = None
+
+
+class CourseProgressRead(BaseModel):
+    """Per-course progress for the manager/HOD user-detail page."""
+
+    course_id: UUID
+    title: str
+    slug: str
+    status: str
+    enrollment_status: str
+    enrolled_at: datetime
+    completion_percent: float
+    completed_lessons: int
+    total_lessons: int
+
+
+class CareerPathProgressRead(BaseModel):
+    """Career-path enrolment + progress for the manager/HOD user-detail page."""
+
+    career_path_id: UUID
+    name: str
+    slug: str
+    status: str
+    started_at: datetime
+    completed_at: datetime | None = None
+    completed_courses: int
+    course_count: int
+    completion_percent: float
+
+
+class AssignedCourseRead(BaseModel):
+    """A course assigned to a teacher (manager/HOD user-detail page)."""
+
+    course_id: UUID
+    title: str
+    slug: str
+    status: str
+
+
+class UserOverviewRead(BaseModel):
+    """Org-scoped user detail for managers / HODs (``GET /users/{id}/overview``).
+
+    The caller must hold ``user.read`` and the target must belong to the
+    caller's organization (cross-org lookups 404). What is populated depends
+    on the target's role:
+
+    * ``student`` — ``courses`` (enrolments + per-course progress),
+      ``career_paths`` (enrolments + progress) and ``last_active_at``.
+    * ``teacher`` — ``assigned_courses``.
+    * manager / HOD / admin — basic identity only (``user``).
+    """
+
+    user: UserRead
+    courses: list[CourseProgressRead] = Field(default_factory=list)
+    career_paths: list[CareerPathProgressRead] = Field(default_factory=list)
+    assigned_courses: list[AssignedCourseRead] = Field(default_factory=list)
+    last_active_at: datetime | None = None

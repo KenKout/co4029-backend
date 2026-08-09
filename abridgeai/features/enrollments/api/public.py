@@ -124,6 +124,25 @@ async def list_active_student_ids(db: AsyncSession, *, course_id: UUID) -> list[
     return list((await db.execute(stmt)).scalars().all())
 
 
+async def list_user_course_enrollments(
+    db: AsyncSession, *, user_id: UUID
+) -> list[EnrollmentDTO]:
+    """Return every course enrollment row for ``user_id``, newest first.
+
+    Cross-feature read backing the manager/HOD user-detail page: which
+    courses a student has attended or is in. Includes all lifecycle
+    statuses (``active``, ``completed``, ``dropped``, ``waitlisted``) —
+    callers filter on ``status`` as needed.
+    """
+    stmt = (
+        select(Enrollment)
+        .where(Enrollment.student_id == user_id)
+        .order_by(Enrollment.enrolled_at.desc())
+    )
+    rows = (await db.execute(stmt)).scalars().all()
+    return [EnrollmentDTO.model_validate(row) for row in rows]
+
+
 async def sync_course_completion_for_lesson(
     db: AsyncSession,
     *,
@@ -217,6 +236,7 @@ __all__ = [
     "has_active_or_completed_enrollment",
     "is_user_enrolled",
     "list_active_student_ids",
+    "list_user_course_enrollments",
     "resync_stale_course_completions",
     "sync_course_completion",
     "sync_course_completion_for_lesson",

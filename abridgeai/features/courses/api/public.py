@@ -140,6 +140,20 @@ async def get_lesson_title(db: AsyncSession, lesson_id: UUID) -> str | None:
     return await queries.get_lesson_title(db, lesson_id)
 
 
+async def list_courses_for_teacher(
+    db: AsyncSession, teacher_id: UUID
+) -> list[CourseDTO]:
+    """Courses ``teacher_id`` is actively assigned to teach.
+
+    Cross-feature read backing the manager/HOD user-detail "assigned
+    courses" section. Teacher assignment is a ``user_role_assignments``
+    row with ``scope_kind='course'`` + role ``teacher`` pointing at the
+    course; see the query for the active-window filter.
+    """
+    rows = await queries.list_courses_for_teacher(db, teacher_id)
+    return [CourseDTO.model_validate(row) for row in rows]
+
+
 async def get_course_slug(db: AsyncSession, course_id: UUID) -> str | None:
     return await queries.get_course_slug(db, course_id)
 
@@ -218,6 +232,7 @@ __all__ = [
     "get_user_primary_org",
     "insert_module_item",
     "list_course_outcome_texts",
+    "list_courses_for_teacher",
     "list_lesson_ids_for_modules",
     "next_module_item_position",
     "notify_student_enrolled",
