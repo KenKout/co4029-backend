@@ -225,6 +225,41 @@ async def test_get_user_by_id_404_for_unknown(
     assert response.status_code == 404
 
 
+async def test_get_users_by_ids_batch(
+    client: httpx.AsyncClient,
+    admin_auth: tuple[uuid.UUID, str],
+    seeded_users: SeededUsers,
+) -> None:
+    """Batch lookup resolves a comma-separated id list; missing ids skipped."""
+    _, token = admin_auth
+    ids = f"{seeded_users.teacher_id},{seeded_users.hod_id},{uuid.uuid4()}"
+    response = await client.get(
+        f"/api/v1/users/by-ids?ids={ids}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert isinstance(body, list)
+    found = {u["id"] for u in body}
+    assert str(seeded_users.teacher_id) in found
+    assert str(seeded_users.hod_id) in found
+    # The unknown uuid is simply absent (no 404 for the batch).
+    assert len(body) == 2
+
+
+async def test_get_users_by_ids_rejects_garbage(
+    client: httpx.AsyncClient,
+    admin_auth: tuple[uuid.UUID, str],
+) -> None:
+    """Non-UUID segments 422 instead of crashing."""
+    _, token = admin_auth
+    response = await client.get(
+        "/api/v1/users/by-ids?ids=not-a-uuid,also-bad",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert response.status_code == 422
+
+
 async def test_users_pagination_cursor_works(
     client: httpx.AsyncClient,
     admin_auth: tuple[uuid.UUID, str],

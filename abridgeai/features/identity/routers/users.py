@@ -156,6 +156,50 @@ async def search_users(
     )
 
 
+@router.get("/by-ids", response_model=list[UserRead])
+async def get_users_by_ids(
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_USER_READ)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    ids: Annotated[str, Query(description="Comma-separated user UUIDs (max 100).")],
+) -> list[UserRead]:
+    """Batch user lookup — resolve a set of UUIDs to displayable users.
+
+    Powers the audit screens, which show actor/subject names instead of raw
+    UUIDs. Returns one entry per resolvable id (missing ids are simply
+    absent, matching the underlying batch API); non-admin callers are
+    restricted to their own org exactly like ``GET /users/search``.
+    """
+    raw = [part for part in ids.split(",") if part.strip()]
+    try:
+        user_ids = [UUID(part.strip()) for part in raw]
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={"error": "invalid_ids", "message": "ids must be UUIDs"},
+        ) from exc
+    if len(user_ids) > 100:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={"error": "too_many_ids", "message": "at most 100 ids"},
+        )
+    if not current_user.has_permission("system.administer"):
+        caller_org = await access_control_api.get_user_primary_org(
+            db, current_user.user_id
+        )
+        if caller_org is None:
+            return []
+        org_members = set(
+            await access_control_api.list_user_ids_in_org(db, caller_org.id)
+        )
+        user_ids = [uid for uid in user_ids if uid in org_members]
+    users = []
+    for uid in user_ids:
+        user = await admin_service.get_user_with_profile(db, uid)
+        if user is not None:
+            users.append(user)
+    return users
+
+
 @router.get("/{user_id}", response_model=UserRead)
 async def get_user(
     user_id: UUID,
