@@ -79,6 +79,99 @@ async def list_assignments_for_user(db: AsyncSession, user_id: UUID) -> list[Use
     return list(result.scalars().all())
 
 
+async def get_assignment_by_id(
+    db: AsyncSession, assignment_id: UUID
+) -> tuple[UserRoleAssignment, str] | None:
+    """Return ``(assignment, role_code)`` for a live assignment, else ``None``.
+
+    The role code is needed by the revoke guard to re-assert the caller's
+    permission against the *revoked role's* requirements (HOD-gated vs
+    plain ``user.role_assign``) — not just the caller's global permission
+    set, which flattens scope.
+    """
+    result = await db.execute(
+        select(UserRoleAssignment, Role.code)
+        .join(Role, Role.id == UserRoleAssignment.role_id)
+        .where(
+            UserRoleAssignment.id == assignment_id,
+            UserRoleAssignment.deleted_at.is_(None),
+        )
+    )
+    row = result.first()
+    if row is None:
+        return None
+    return row[0], row[1]
+
+
+async def org_ids_for_user(db: AsyncSession, user_id: UUID) -> set[UUID]:
+    """Set of org ids the user belongs to.
+
+    Membership is derived from two sources (either suffices):
+    * active ``organization_memberships`` rows, and
+    * any live role assignment that carries an ``organization_id``
+      (organization / org_unit / course scoped).
+
+    Used by the role-assignment guards to answer "may this caller act on
+    this target?" without leaking org membership checks into services.
+    """
+    memberships = await db.execute(
+        select(OrganizationMembership.organization_id).where(
+            OrganizationMembership.user_id == user_id,
+            OrganizationMembership.status == "active",
+        )
+    )
+    assignments = await db.execute(
+        select(UserRoleAssignment.organization_id).where(
+            UserRoleAssignment.user_id == user_id,
+            UserRoleAssignment.deleted_at.is_(None),
+            UserRoleAssignment.organization_id.is_not(None),
+        )
+    )
+    return {row[0] for row in memberships.all()} | {
+        row[0] for row in assignments.all() if row[0] is not None
+    }
+
+
+async def assign_org_ids_for_user(
+    db: AsyncSession, user_id: UUID
+) -> tuple[set[UUID], bool]:
+    """Orgs where the user may assign roles, plus a global-assign flag.
+
+    Returns ``(org_ids, has_global)``:
+    * ``org_ids`` — distinct ``organization_id`` of live role assignments
+      whose role grants ``user.role_assign`` or ``user.role_assign.hod``.
+    * ``has_global`` — True when the user holds one of those permissions
+      via a ``scope_kind='global'`` assignment (platform-wide authority).
+
+    This is the *actor-authority* counterpart of :func:`org_ids_for_user`
+    (which answers "which orgs does this user belong to"). The two are
+    deliberately separate: a teacher belongs to orgs without gaining any
+    assign authority there.
+    """
+    result = await db.execute(
+        select(
+            UserRoleAssignment.organization_id,
+            UserRoleAssignment.scope_kind,
+        )
+        .join(RolePermission, RolePermission.role_id == UserRoleAssignment.role_id)
+        .join(Permission, Permission.id == RolePermission.permission_id)
+        .where(
+            UserRoleAssignment.user_id == user_id,
+            UserRoleAssignment.deleted_at.is_(None),
+            Permission.deleted_at.is_(None),
+            Permission.code.in_(("user.role_assign", "user.role_assign.hod")),
+        )
+    )
+    orgs: set[UUID] = set()
+    has_global = False
+    for org_id, scope_kind in result.all():
+        if scope_kind == "global":
+            has_global = True
+        elif org_id is not None:
+            orgs.add(org_id)
+    return orgs, has_global
+
+
 async def insert_assignment(
     db: AsyncSession,
     *,

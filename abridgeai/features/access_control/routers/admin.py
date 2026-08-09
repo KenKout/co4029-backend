@@ -108,10 +108,15 @@ async def list_roles(
 )
 async def list_user_assignments(
     user_id: UUID,
-    _user: Annotated[CurrentUser, Depends(_REQUIRE_ASSIGN)],
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_ASSIGN)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> list[RoleAssignmentRead]:
-    rows = await admin_service.list_user_assignments(db, user_id)
+    rows = await admin_service.list_user_assignments(
+        db,
+        user_id,
+        actor_id=current_user.user_id,
+        actor_permissions=current_user.permissions,
+    )
     return [RoleAssignmentRead.model_validate(r) for r in rows]
 
 
@@ -156,9 +161,16 @@ async def revoke_user_assignment(
 ) -> None:
     del user_id
     try:
-        await admin_service.revoke_role_assignment(db, assignment_id, actor_id=current_user.user_id)
+        await admin_service.revoke_role_assignment(
+            db,
+            assignment_id,
+            actor_id=current_user.user_id,
+            actor_permissions=current_user.permissions,
+        )
     except NotFoundError as exc:
         raise _not_found(str(exc)) from exc
+    except ForbiddenError as exc:
+        raise _forbidden(str(exc)) from exc
     await db.commit()
 
 

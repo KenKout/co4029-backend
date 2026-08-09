@@ -347,6 +347,287 @@ async def test_manager_cannot_promote_to_hod_admin_can(
         )
 
 
+@pytest.mark.asyncio
+async def test_manager_cannot_promote_to_manager_hod_can(
+    http_client: AsyncClient, scenario: _AdminScenario, engine: AsyncEngine
+) -> None:
+    """manager may not grant the manager role (HOD-gated); HOD may."""
+    manager_token = _token_for(scenario.manager_id, scenario.auth_sessions[scenario.manager_id])
+    hod_token = _token_for(scenario.hod_id, scenario.auth_sessions[scenario.hod_id])
+
+    payload = {
+        "role_code": "manager",
+        "scope_kind": "organization",
+        "organization_id": str(scenario.organization_id),
+    }
+    r_mgr = await http_client.post(
+        f"/api/v1/admin/users/{scenario.teacher_id}/assignments",
+        headers=_hdr(manager_token),
+        json=payload,
+    )
+    assert r_mgr.status_code == 403, r_mgr.text
+
+    r_hod = await http_client.post(
+        f"/api/v1/admin/users/{scenario.teacher_id}/assignments",
+        headers=_hdr(hod_token),
+        json=payload,
+    )
+    assert r_hod.status_code == 201, r_hod.text
+    assignment_id = uuid.UUID(r_hod.json()["id"])
+
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("DELETE FROM user_role_assignments WHERE id = :id"),
+            {"id": assignment_id},
+        )
+
+
+@pytest.mark.asyncio
+async def test_manager_cannot_assign_outside_org(
+    http_client: AsyncClient, scenario: _AdminScenario, engine: AsyncEngine
+) -> None:
+    """Org-scope: a manager can only assign in orgs where they hold
+    ``user.role_assign``. Creating a second org and assigning there → 403."""
+    other_org_id = uuid.uuid4()
+    other_teacher_id = uuid.uuid4()
+
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO organizations (id, slug, name, status) "
+                "VALUES (:id, :slug, :name, 'active')"
+            ),
+            {
+                "id": other_org_id,
+                "slug": f"crossorg-{other_org_id.hex[:8]}",
+                "name": "Cross-Org Test",
+            },
+        )
+        await conn.execute(
+            text("INSERT INTO users (id, primary_email, status) VALUES (:id, :em, 'active')"),
+            {"id": other_teacher_id, "em": f"cross-{other_teacher_id.hex[:6]}@test.local"},
+        )
+
+    manager_token = _token_for(scenario.manager_id, scenario.auth_sessions[scenario.manager_id])
+    r = await http_client.post(
+        f"/api/v1/admin/users/{other_teacher_id}/assignments",
+        headers=_hdr(manager_token),
+        json={
+            "role_code": "teacher",
+            "scope_kind": "organization",
+            "organization_id": str(other_org_id),
+        },
+    )
+    assert r.status_code == 403, r.text
+
+    # Admin can — cross-org assignment is an admin privilege.
+    admin_token = _token_for(scenario.admin_id, scenario.auth_sessions[scenario.admin_id])
+    r_adm = await http_client.post(
+        f"/api/v1/admin/users/{other_teacher_id}/assignments",
+        headers=_hdr(admin_token),
+        json={
+            "role_code": "teacher",
+            "scope_kind": "organization",
+            "organization_id": str(other_org_id),
+        },
+    )
+    assert r_adm.status_code == 201, r_adm.text
+    assignment_id = uuid.UUID(r_adm.json()["id"])
+
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("DELETE FROM user_role_assignments WHERE id = :id"),
+            {"id": assignment_id},
+        )
+
+
+@pytest.mark.asyncio
+async def test_non_admin_cannot_assign_global_scope(
+    http_client: AsyncClient, scenario: _AdminScenario
+) -> None:
+    manager_token = _token_for(scenario.manager_id, scenario.auth_sessions[scenario.manager_id])
+    r = await http_client.post(
+        f"/api/v1/admin/users/{scenario.teacher_id}/assignments",
+        headers=_hdr(manager_token),
+        json={"role_code": "teacher", "scope_kind": "global"},
+    )
+    assert r.status_code == 403, r.text
+
+
+@pytest.mark.asyncio
+async def test_cannot_assign_role_to_self(
+    http_client: AsyncClient, scenario: _AdminScenario
+) -> None:
+    manager_token = _token_for(scenario.manager_id, scenario.auth_sessions[scenario.manager_id])
+    r = await http_client.post(
+        f"/api/v1/admin/users/{scenario.manager_id}/assignments",
+        headers=_hdr(manager_token),
+        json={
+            "role_code": "teacher",
+            "scope_kind": "organization",
+            "organization_id": str(scenario.organization_id),
+        },
+    )
+    assert r.status_code == 403, r.text
+
+
+@pytest.mark.asyncio
+async def test_manager_cannot_revoke_manager_role(
+    http_client: AsyncClient, scenario: _AdminScenario, engine: AsyncEngine
+) -> None:
+    """Revoke mirrors the HOD gate: a manager cannot strip a manager role."""
+    admin_token = _token_for(scenario.admin_id, scenario.auth_sessions[scenario.admin_id])
+    manager_token = _token_for(scenario.manager_id, scenario.auth_sessions[scenario.manager_id])
+
+    r = await http_client.post(
+        f"/api/v1/admin/users/{scenario.teacher_id}/assignments",
+        headers=_hdr(admin_token),
+        json={
+            "role_code": "manager",
+            "scope_kind": "organization",
+            "organization_id": str(scenario.organization_id),
+        },
+    )
+    assert r.status_code == 201, r.text
+    assignment_id = uuid.UUID(r.json()["id"])
+
+    r_revoke = await http_client.delete(
+        f"/api/v1/admin/users/{scenario.teacher_id}/assignments/{assignment_id}",
+        headers=_hdr(manager_token),
+    )
+    assert r_revoke.status_code == 403, r_revoke.text
+
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("DELETE FROM user_role_assignments WHERE id = :id"),
+            {"id": assignment_id},
+        )
+
+
+@pytest.mark.asyncio
+async def test_list_assignments_org_scoped_for_manager(
+    http_client: AsyncClient, scenario: _AdminScenario, engine: AsyncEngine
+) -> None:
+    """A manager listing a user's assignments only sees the org they manage."""
+    other_org_id = uuid.uuid4()
+    other_teacher_id = uuid.uuid4()
+
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO organizations (id, slug, name, status) "
+                "VALUES (:id, :slug, :name, 'active')"
+            ),
+            {
+                "id": other_org_id,
+                "slug": f"listorg-{other_org_id.hex[:8]}",
+                "name": "List Org Test",
+            },
+        )
+        await conn.execute(
+            text("INSERT INTO users (id, primary_email, status) VALUES (:id, :em, 'active')"),
+            {"id": other_teacher_id, "em": f"list-{other_teacher_id.hex[:6]}@test.local"},
+        )
+
+    # Admin puts the teacher in BOTH orgs.
+    admin_token = _token_for(scenario.admin_id, scenario.auth_sessions[scenario.admin_id])
+    for org_id in (scenario.organization_id, other_org_id):
+        r = await http_client.post(
+            f"/api/v1/admin/users/{other_teacher_id}/assignments",
+            headers=_hdr(admin_token),
+            json={
+                "role_code": "teacher",
+                "scope_kind": "organization",
+                "organization_id": str(org_id),
+            },
+        )
+        assert r.status_code == 201, r.text
+
+    manager_token = _token_for(scenario.manager_id, scenario.auth_sessions[scenario.manager_id])
+    r = await http_client.get(
+        f"/api/v1/admin/users/{other_teacher_id}/assignments",
+        headers=_hdr(manager_token),
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    # Only the assignment in the manager's own org is visible.
+    assert len(body) == 1
+    assert body[0]["organization_id"] == str(scenario.organization_id)
+
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("DELETE FROM user_role_assignments WHERE user_id = :uid"),
+            {"uid": other_teacher_id},
+        )
+
+
+@pytest.mark.asyncio
+async def test_hod_cannot_assign_or_revoke_hod(
+    http_client: AsyncClient, scenario: _AdminScenario, engine: AsyncEngine
+) -> None:
+    """Only admin may create/revoke HOD roles — a HOD manages managers."""
+    hod_token = _token_for(scenario.hod_id, scenario.auth_sessions[scenario.hod_id])
+    admin_token = _token_for(scenario.admin_id, scenario.auth_sessions[scenario.admin_id])
+
+    payload = {
+        "role_code": "hod",
+        "scope_kind": "organization",
+        "organization_id": str(scenario.organization_id),
+    }
+    r_hod = await http_client.post(
+        f"/api/v1/admin/users/{scenario.teacher_id}/assignments",
+        headers=_hdr(hod_token),
+        json=payload,
+    )
+    assert r_hod.status_code == 403, r_hod.text
+
+    r_adm = await http_client.post(
+        f"/api/v1/admin/users/{scenario.teacher_id}/assignments",
+        headers=_hdr(admin_token),
+        json=payload,
+    )
+    assert r_adm.status_code == 201, r_adm.text
+    assignment_id = uuid.UUID(r_adm.json()["id"])
+
+    r_revoke_hod = await http_client.delete(
+        f"/api/v1/admin/users/{scenario.teacher_id}/assignments/{assignment_id}",
+        headers=_hdr(hod_token),
+    )
+    assert r_revoke_hod.status_code == 403, r_revoke_hod.text
+
+    r_revoke_adm = await http_client.delete(
+        f"/api/v1/admin/users/{scenario.teacher_id}/assignments/{assignment_id}",
+        headers=_hdr(admin_token),
+    )
+    assert r_revoke_adm.status_code == 204, r_revoke_adm.text
+
+
+@pytest.mark.asyncio
+async def test_hod_can_revoke_manager_they_granted(
+    http_client: AsyncClient, scenario: _AdminScenario, engine: AsyncEngine
+) -> None:
+    """HOD grants manager, then revokes it — the happy path."""
+    hod_token = _token_for(scenario.hod_id, scenario.auth_sessions[scenario.hod_id])
+
+    r = await http_client.post(
+        f"/api/v1/admin/users/{scenario.teacher_id}/assignments",
+        headers=_hdr(hod_token),
+        json={
+            "role_code": "manager",
+            "scope_kind": "organization",
+            "organization_id": str(scenario.organization_id),
+        },
+    )
+    assert r.status_code == 201, r.text
+    assignment_id = uuid.UUID(r.json()["id"])
+
+    r_revoke = await http_client.delete(
+        f"/api/v1/admin/users/{scenario.teacher_id}/assignments/{assignment_id}",
+        headers=_hdr(hod_token),
+    )
+    assert r_revoke.status_code == 204, r_revoke.text
+
+
 def _walk_dependants(dependant: object, names: list[str]) -> None:
     call = getattr(dependant, "call", None)
     if call is not None:
