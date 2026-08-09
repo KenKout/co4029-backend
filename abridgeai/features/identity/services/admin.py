@@ -18,10 +18,12 @@ import base64
 from typing import TYPE_CHECKING
 from uuid import UUID
 
+from abridgeai.core.exceptions import ConflictError
 from abridgeai.core.pagination import Page
 from abridgeai.features.access_control.api import public as access_control_api
+from abridgeai.features.identity.models import User, UserProfile
 from abridgeai.features.identity.queries import users as user_queries
-from abridgeai.features.identity.schemas import UserListPage, UserRead
+from abridgeai.features.identity.schemas import UserCreate, UserListPage, UserRead
 from abridgeai.features.identity.services.profile import serialize_user
 from abridgeai.infrastructure.s3 import create_stream_url
 
@@ -29,7 +31,7 @@ if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
     from abridgeai.features.access_control.api._dto import OrgDTO
-    from abridgeai.features.identity.models import StorageObject, User, UserProfile
+    from abridgeai.features.identity.models import StorageObject
 
 
 async def _mint_avatar_url(
@@ -206,4 +208,51 @@ async def search_users(
     )
 
 
-__all__ = ["get_user_with_profile", "list_users", "search_users"]
+async def create_user_account(
+    db: AsyncSession,
+    *,
+    payload: UserCreate,
+    actor_id: UUID,
+) -> UserRead:
+    """Admin invite: create a user with profile + org membership + role.
+
+    The account is created ``active`` so the invited email can sign in via
+    Google OAuth right away (the pre-registration gate accepts existing
+    ``users`` rows), and it is attached to ``payload.organization_id`` with
+    an org-scoped ``payload.role_code`` assignment via
+    :func:`abridgeai.features.access_control.api.public.grant_org_role_access`
+    — the same least-privilege default path auto-provisioning uses, but with
+    the admin-chosen role recorded in ``granted_by``.
+
+    Raises :class:`ConflictError` when the email already exists.
+    """
+    existing = await user_queries.get_user_by_email(db, payload.primary_email)
+    if existing is not None:
+        raise ConflictError(
+            f"user with email '{payload.primary_email}' already exists"
+        )
+
+    user = User(primary_email=payload.primary_email, status="active")
+    db.add(user)
+    await db.flush()
+
+    profile = UserProfile(
+        user_id=user.id,
+        given_name=payload.given_name,
+        family_name=payload.family_name,
+        display_name=payload.display_name or payload.primary_email.split("@")[0],
+    )
+    db.add(profile)
+
+    await access_control_api.grant_org_role_access(
+        db,
+        user_id=user.id,
+        organization_id=payload.organization_id,
+        role_code=payload.role_code,
+        granted_by=actor_id,
+    )
+
+    return serialize_user(user, profile)
+
+
+__all__ = ["create_user_account", "get_user_with_profile", "list_users", "search_users"]

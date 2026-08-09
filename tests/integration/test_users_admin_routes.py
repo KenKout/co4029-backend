@@ -377,3 +377,110 @@ async def test_search_users_role_and_org_filter_intersect(
     for item in response.json()["items"]:
         assert "teacher" in item["roles"]
         assert item["organization_id"] == str(org_id)
+
+
+async def test_create_user_as_admin_201(
+    client: httpx.AsyncClient,
+    admin_auth: tuple[uuid.UUID, str],
+    seeded_users: SeededUsers,
+) -> None:
+    """Admin invite: creates active user + profile + org membership + role."""
+    _, token = admin_auth
+    email = f"invite-{uuid.uuid4().hex[:8]}@test.local"
+    response = await client.post(
+        "/api/v1/users",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "primary_email": email,
+            "given_name": "Invited",
+            "family_name": "User",
+            "display_name": "Invited User",
+            "organization_id": str(seeded_users.organization_id),
+            "role_code": "student",
+        },
+    )
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["primary_email"] == email
+    assert body["status"] == "active"
+    assert body["profile"]["display_name"] == "Invited User"
+
+    # The new user shows up in search with the invited role + org.
+    search = await client.get(
+        f"/api/v1/users/search?search={email}&page_size=10",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert search.status_code == 200, search.text
+    items = search.json()["items"]
+    assert len(items) == 1
+    assert "student" in items[0]["roles"]
+    assert items[0]["organization_id"] == str(seeded_users.organization_id)
+
+
+async def test_create_user_with_manager_role_201(
+    client: httpx.AsyncClient,
+    admin_auth: tuple[uuid.UUID, str],
+    seeded_users: SeededUsers,
+) -> None:
+    """Admin may invite with a non-student role (manager) in one shot."""
+    _, token = admin_auth
+    email = f"invite-mgr-{uuid.uuid4().hex[:8]}@test.local"
+    response = await client.post(
+        "/api/v1/users",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "primary_email": email,
+            "display_name": "Manager Invite",
+            "organization_id": str(seeded_users.organization_id),
+            "role_code": "manager",
+        },
+    )
+    assert response.status_code == 201, response.text
+    search = await client.get(
+        f"/api/v1/users/search?search={email}&page_size=10",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert search.status_code == 200, search.text
+    items = search.json()["items"]
+    assert len(items) == 1
+    assert "manager" in items[0]["roles"]
+
+
+async def test_create_user_duplicate_email_409(
+    client: httpx.AsyncClient,
+    admin_auth: tuple[uuid.UUID, str],
+    seeded_users: SeededUsers,
+) -> None:
+    """Inviting an email that already exists conflicts (409)."""
+    _, token = admin_auth
+    headers = {"Authorization": f"Bearer {token}"}
+    email = f"duplicate-{uuid.uuid4().hex[:8]}@test.local"
+    payload = {
+        "primary_email": email,
+        "display_name": "Dup",
+        "organization_id": str(seeded_users.organization_id),
+    }
+    first = await client.post("/api/v1/users", headers=headers, json=payload)
+    assert first.status_code == 201, first.text
+    second = await client.post("/api/v1/users", headers=headers, json=payload)
+    assert second.status_code == 409, second.text
+    assert second.json()["detail"]["error"] == "conflict"
+
+
+async def test_create_user_student_token_403(
+    client: httpx.AsyncClient,
+    student_auth: tuple[uuid.UUID, str],
+    seeded_users: SeededUsers,
+) -> None:
+    """Inviting is admin-only — a student is rejected (403)."""
+    _, token = student_auth
+    response = await client.post(
+        "/api/v1/users",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "primary_email": f"nope-{uuid.uuid4().hex[:8]}@test.local",
+            "display_name": "Nope",
+            "organization_id": str(seeded_users.organization_id),
+        },
+    )
+    assert response.status_code == 403, response.text

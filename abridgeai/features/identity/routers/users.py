@@ -28,16 +28,18 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from abridgeai.core.db import get_db
+from abridgeai.core.exceptions import ConflictError
 from abridgeai.core.pagination import PageResponse
 from abridgeai.core.security import CurrentUser
 from abridgeai.features.access_control.api import public as access_control_api
 from abridgeai.features.access_control.policies import require_permission
-from abridgeai.features.identity.schemas import UserListPage, UserRead
+from abridgeai.features.identity.schemas import UserCreate, UserListPage, UserRead
 from abridgeai.features.identity.services import admin as admin_service
 
 router = APIRouter(prefix="/users", tags=["users", "admin"])
 
 _REQUIRE_USER_READ = require_permission("user.read")
+_REQUIRE_SYSTEM_ADMINISTER = require_permission("system.administer")
 
 
 def _not_found(user_id: UUID) -> HTTPException:
@@ -65,6 +67,32 @@ async def list_users(
         return await admin_service.list_users(db, cursor=cursor, limit=limit)
     except ValueError as exc:
         raise _bad_cursor() from exc
+
+
+@router.post("", response_model=UserRead, status_code=status.HTTP_201_CREATED)
+async def create_user(
+    payload: UserCreate,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_SYSTEM_ADMINISTER)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> UserRead:
+    """Admin invite — create a user + profile + org membership + role.
+
+    Only a platform admin (``system.administer``) may provision accounts
+    manually: this bypasses the invite-only pre-registration gate by
+    design, so the audience is deliberately narrow. The created account
+    is ``active`` and can sign in via Google OAuth immediately.
+    """
+    try:
+        result = await admin_service.create_user_account(
+            db, payload=payload, actor_id=current_user.user_id
+        )
+    except ConflictError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"error": "conflict", "message": str(exc)},
+        ) from exc
+    await db.commit()
+    return result
 
 
 # Declared before ``/{user_id}`` so ``/users/search`` isn't captured by the

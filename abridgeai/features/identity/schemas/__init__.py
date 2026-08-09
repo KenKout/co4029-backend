@@ -15,6 +15,7 @@ from .auth import (
 )
 from .profile import (
     AuthSessionRead,
+    UserCreate,
     UserListPage,
     UserPermissionsRead,
     UserProfileLinkIn,
@@ -37,6 +38,7 @@ __all__ = [
     "MfaVerifyRequest",
     "RefreshTokenRequest",
     "TokenResponse",
+    "UserCreate",
     "UserListPage",
     "UserPermissionsRead",
     "UserProfileLinkIn",

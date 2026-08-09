@@ -273,6 +273,44 @@ async def grant_default_student_access(
     await db.flush()
 
 
+async def grant_org_role_access(
+    db: AsyncSession,
+    *,
+    user_id: UUID,
+    organization_id: UUID,
+    role_code: str,
+    granted_by: UUID | None = None,
+) -> None:
+    """Attach an existing user to an org with a chosen role (admin invite).
+
+    Same shape as :func:`grant_default_student_access` but the role is
+    selected by code (``student`` / ``teacher`` / ``manager`` / ...) and
+    ``granted_by`` records the admin who invited the account. Used by the
+    admin ``POST /users`` invite flow. Raises ``NoResultFound`` when
+    ``role_code`` does not exist.
+    """
+    role_id = (
+        await db.execute(select(Role.id).where(Role.code == role_code, Role.deleted_at.is_(None)))
+    ).scalar_one()
+    db.add(
+        OrganizationMembership(
+            user_id=user_id,
+            organization_id=organization_id,
+            status="active",
+        )
+    )
+    db.add(
+        UserRoleAssignment(
+            user_id=user_id,
+            role_id=role_id,
+            scope_kind="organization",
+            organization_id=organization_id,
+            granted_by=granted_by,
+        )
+    )
+    await db.flush()
+
+
 async def get_active_permissions(
     db: AsyncSession, user_id: UUID, *, at: datetime | None = None
 ) -> list[PermissionDTO]:
@@ -411,6 +449,7 @@ __all__ = [
     "get_role_codes_for_users",
     "get_primary_orgs_for_users",
     "grant_default_student_access",
+    "grant_org_role_access",
     "get_user_primary_org",
     "is_user_member_of_org",
     "list_user_ids_in_org",

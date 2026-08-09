@@ -54,6 +54,26 @@ class UserProfileUpdate(BaseModel):
     locale: Literal["en", "vi"] | None = None
 
 
+class UserCreate(BaseModel):
+    """Admin invite payload — create a user and attach them to an org.
+
+    The account is created ``active`` with an org-scoped role assignment
+    (``role_code``, default ``student``) plus an active membership, so the
+    invited email can sign in via Google OAuth immediately (the
+    pre-registration gate accepts existing ``users`` rows) and is already
+    scoped to its organization.
+    """
+
+    primary_email: str = Field(min_length=3, max_length=320)
+    given_name: str | None = Field(default=None, max_length=100)
+    family_name: str | None = Field(default=None, max_length=100)
+    display_name: str | None = Field(default=None, max_length=200)
+    organization_id: UUID
+    role_code: str = Field(default="student", min_length=1, max_length=50)
+    student_code: str | None = Field(default=None, max_length=50)
+    employee_code: str | None = Field(default=None, max_length=50)
+
+
 class UserProfileLinkIn(BaseModel):
     link_type: str = Field(max_length=30)
     url: str
