@@ -48,6 +48,7 @@ teacher_router = APIRouter(prefix="/teacher/career-paths", tags=["career-paths-a
 # "was it granted for the organization that owns this path". Passing different
 # code sets to the two would make the second check pass on the wrong grant.
 _PATH_MANAGE_CODES = ("course.create", "course.update", "system.administer")
+_PATH_READ_CODES = ("course.read", "system.administer")
 _PATH_PUBLISH_CODES = ("course.publish", "system.administer")
 _PATH_DELETE_CODES = ("course.delete", "system.administer")
 _PATH_ENROLL_CODES = ("course.enrollment.create", "system.administer")
@@ -59,6 +60,7 @@ _PATH_ROSTER_READ_CODES = (
 )
 
 _REQUIRE_PATH_MANAGE = require_any_permission(*_PATH_MANAGE_CODES)
+_REQUIRE_PATH_READ = require_any_permission(*_PATH_READ_CODES)
 _REQUIRE_PATH_PUBLISH = require_any_permission(*_PATH_PUBLISH_CODES)
 _REQUIRE_PATH_DELETE = require_any_permission(*_PATH_DELETE_CODES)
 _REQUIRE_PATH_ENROLL = require_any_permission(*_PATH_ENROLL_CODES)
@@ -151,14 +153,16 @@ async def create_career_path(
     response_model=list[CareerPathAuthoring],
 )
 async def list_career_paths(
-    current_user: Annotated[CurrentUser, Depends(_REQUIRE_PATH_MANAGE)],
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_PATH_READ)],
     db: Annotated[AsyncSession, Depends(get_db)],
     organization_id: UUID | None = None,
     include_archived: bool = False,
 ) -> list[CareerPathAuthoring]:
     """List career paths for an organization.
 
-    ``organization_id`` is OPTIONAL: when omitted the caller's primary
+    Read-only: gated on ``course.read`` (HODs can view the pathway
+    catalogue) rather than the manage set. ``organization_id`` is
+    OPTIONAL: when omitted the caller's primary
     org is resolved from the bearer token, matching the contract used by
     POST. Managers without a primary org and no override get a 400 instead
     of a confusing empty list.
@@ -187,7 +191,7 @@ async def list_career_paths(
             organization_id,
             resource="organization",
             resource_id=organization_id,
-            permissions=_PATH_MANAGE_CODES,
+            permissions=_PATH_READ_CODES,
         )
     return await authoring_service.list_career_paths_for_org(
         db, organization_id, include_archived=include_archived
@@ -200,11 +204,13 @@ async def list_career_paths(
 )
 async def get_career_path(
     career_path_id: UUID,
-    current_user: Annotated[CurrentUser, Depends(_REQUIRE_PATH_MANAGE)],
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_PATH_READ)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> CareerPathAuthoring:
     try:
-        await _ensure_caller_in_path_org(db, current_user, career_path_id)
+        await _ensure_caller_in_path_org(
+            db, current_user, career_path_id, _PATH_READ_CODES
+        )
         return await authoring_service.get_career_path(db, career_path_id)
     except NotFoundError as exc:
         raise _not_found(str(exc)) from exc
@@ -239,11 +245,13 @@ async def update_career_path(
 )
 async def list_career_path_courses(
     career_path_id: UUID,
-    current_user: Annotated[CurrentUser, Depends(_REQUIRE_PATH_MANAGE)],
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_PATH_READ)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> list[CareerPathCourseAuthoring]:
     try:
-        await _ensure_caller_in_path_org(db, current_user, career_path_id)
+        await _ensure_caller_in_path_org(
+            db, current_user, career_path_id, _PATH_READ_CODES
+        )
         return await authoring_service.list_career_path_courses(db, career_path_id)
     except NotFoundError as exc:
         raise _not_found(str(exc)) from exc
@@ -286,7 +294,7 @@ async def add_course_to_path(
 )
 async def list_course_candidates(
     career_path_id: UUID,
-    current_user: Annotated[CurrentUser, Depends(_REQUIRE_PATH_MANAGE)],
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_PATH_READ)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> list[CareerPathCourseCandidate]:
     """Full org course catalogue (ANY status) for the attach-to-path picker.
@@ -297,7 +305,9 @@ async def list_course_candidates(
     build the skeleton before courses are published.
     """
     try:
-        await _ensure_caller_in_path_org(db, current_user, career_path_id)
+        await _ensure_caller_in_path_org(
+            db, current_user, career_path_id, _PATH_READ_CODES
+        )
         return await authoring_service.list_course_candidates(db, career_path_id)
     except NotFoundError as exc:
         raise _not_found(str(exc)) from exc
@@ -312,11 +322,13 @@ async def list_course_candidates(
 )
 async def list_path_stages(
     career_path_id: UUID,
-    current_user: Annotated[CurrentUser, Depends(_REQUIRE_PATH_MANAGE)],
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_PATH_READ)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> list[CareerPathStageAuthoring]:
     try:
-        await _ensure_caller_in_path_org(db, current_user, career_path_id)
+        await _ensure_caller_in_path_org(
+            db, current_user, career_path_id, _PATH_READ_CODES
+        )
         return await authoring_service.list_path_stages(db, career_path_id)
     except NotFoundError as exc:
         raise _not_found(str(exc)) from exc
