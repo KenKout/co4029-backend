@@ -526,6 +526,30 @@ def _laddered_hint(hint_level: int, lang: str) -> str:
     return rungs[idx]
 
 
+_HINT_LADDER_SPENT: dict[str, str] = {
+    "en": (
+        "You've used all the hints available on this question. Give me whatever "
+        "part of it you're confident about, even if it's partial — or say you'd "
+        "like to move on."
+    ),
+    "vi": (
+        "Bạn đã dùng hết số gợi ý cho câu hỏi này. Hãy trả lời phần nào bạn thấy "
+        "chắc nhất, dù chưa đầy đủ — hoặc cho tôi biết nếu bạn muốn sang câu tiếp."
+    ),
+}
+
+
+def hint_ladder_exhausted_text(language: str | None) -> str:
+    """Answer-safe reply when the hint ladder is spent on the current question.
+
+    Names the limit and points at the way forward instead of stonewalling: the
+    candidate can still answer partially, and a partial answer earns coverage
+    where silence earns none.
+    """
+    lang = _lang(language)
+    return _HINT_LADDER_SPENT.get(lang, _HINT_LADDER_SPENT["en"])
+
+
 def laddered_hint(hint_level: int, language: str | None) -> str:
     """Public answer-safe laddered hint (Slice 11 upgrade).
 
@@ -690,6 +714,7 @@ __all__ = [
     "Persona",
     "Utterance",
     "build_fallback_utterance",
+    "hint_ladder_exhausted_text",
     "laddered_hint",
     "persona_from",
     "transition_text",

@@ -46,6 +46,7 @@ from abridgeai.features.interviews.orchestrator.assistance_logic import (
     generate_question_assistance,
     is_term_selection_reply,
 )
+from abridgeai.features.interviews.orchestrator.decision import MAX_CANNOT_ANSWER_HINTS
 from abridgeai.features.interviews.orchestrator.security import (
     SecurityAction,
     SecurityAssessment,
@@ -62,6 +63,9 @@ from abridgeai.features.interviews.orchestrator.security_logic import (
     safe_closing,
     safe_security_response,
     should_flag_session,
+)
+from abridgeai.features.interviews.orchestrator.utterance import (
+    hint_ladder_exhausted_text,
 )
 from abridgeai.features.interviews.queries import authoring as authoring_queries
 from abridgeai.features.interviews.queries import sessions as sessions_queries
@@ -1116,10 +1120,24 @@ async def _run_security_stage(  # noqa: C901 -- precedence is kept explicit and 
     # request, render at the CURRENT shared level then advance it (before the
     # save below), so a repeated hint on the same question escalates — unified
     # with the adaptive decision path, which reads/resets the same counter.
+    #
+    # The ladder's depth is ENFORCED here, not just reflected in the UI: the
+    # learner client disables its hint control at the cap, but a caller hitting
+    # the API directly used to keep getting hints forever (the counter only ever
+    # incremented). How much help a candidate can draw on one question decides
+    # what their grade means, so a client-side limit is not a limit — two
+    # candidates in the same cohort could sit on different ladders.
+    #
+    # Past the cap the request is refused rather than served, and the counter is
+    # left alone so it cannot drift away from the adaptive path's view of it.
     hint_render_level: int | None = None
+    hint_ladder_spent = False
     if hint_ladder_enabled and action is SecurityAction.HINT_CURRENT_QUESTION:
-        hint_render_level = data.hint_level
-        data.hint_level += 1
+        if data.hint_level >= MAX_CANNOT_ANSWER_HINTS:
+            hint_ladder_spent = True
+        else:
+            hint_render_level = data.hint_level
+            data.hint_level += 1
 
     security_handled = explicit_end or action is not SecurityAction.ALLOW
     await state_repo.save(
@@ -1202,6 +1220,7 @@ async def _run_security_stage(  # noqa: C901 -- precedence is kept explicit and 
             attempt_count=data.security_attempt_count,
             academic_text=academic_text or None,
             hint_render_level=hint_render_level,
+            hint_ladder_spent=hint_ladder_spent,
         )
 
     return _SecurityStageResult(
@@ -1305,6 +1324,7 @@ async def _security_action_result(
     academic_text: str | None = None,
     persist_messages: bool = True,
     hint_render_level: int | None = None,
+    hint_ladder_spent: bool = False,
 ) -> dict[str, Any]:
     assistance_kind = {
         SecurityAction.REPEAT_CURRENT_QUESTION: "repeat",
@@ -1325,7 +1345,13 @@ async def _security_action_result(
         current_question=(current_question.prompt_text if current_question else None),
         custom_refusal=custom,
     )
-    if (
+    if hint_ladder_spent and action is SecurityAction.HINT_CURRENT_QUESTION:
+        # Ladder spent on this question: say so instead of serving another rung.
+        # Deliberately NOT the persisted-reuse path below — replaying the last
+        # hint would read as a fresh grant and hide the limit from the candidate.
+        # Answer-safe by construction: it carries no content from the question.
+        response = hint_ladder_exhausted_text(language)
+    elif (
         hint_render_level is not None
         and action is SecurityAction.HINT_CURRENT_QUESTION
         and current_question is not None
