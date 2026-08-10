@@ -116,7 +116,20 @@ async def _resolve_user_ids(
                 continue
             if user_id not in resolved:
                 resolved.append(user_id)
-    return resolved, failures
+    if not resolved:
+        return [], failures
+
+    # Enrollments are student-only: drop every account that does not carry an
+    # active ``student`` role (teachers, managers, HODs, admins) and report
+    # each as a per-identifier failure so the UI can show why it was skipped.
+    role_codes = await access_control_api.get_role_codes_for_users(db, resolved)
+    student_ids = [uid for uid in resolved if "student" in role_codes.get(uid, ())]
+    for uid in resolved:
+        if uid not in student_ids:
+            failures.append(
+                BulkEnrollFailure(identifier=str(uid), reason="not_student")
+            )
+    return student_ids, failures
 
 
 async def _create_enrollment(
@@ -364,6 +377,21 @@ async def bulk_import_students_from_csv(
         existing_users = await authoring_queries.lookup_users_by_email(db, [email])
         if existing_users:
             user_id = UUID(str(existing_users[0]["id"]))
+            # Enrollments are student-only: an existing account that is not a
+            # student (teacher/manager/hod/admin) is rejected for this row
+            # instead of silently enrolling staff into a learner course.
+            role_codes = await access_control_api.get_role_codes_for_users(
+                db, [user_id]
+            )
+            if "student" not in role_codes.get(user_id, ()):
+                failures.append(
+                    CSVImportFailure(
+                        row_number=row_number,
+                        identifier=email,
+                        reason="not_student",
+                    )
+                )
+                continue
         else:
             user_id = uuid4()
             await authoring_queries.insert_user_with_profile(

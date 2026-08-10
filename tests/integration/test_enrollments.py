@@ -188,6 +188,17 @@ async def scenario(
                 ),
                 {"uid": sid_, "dn": f"Enr Student {sid_.hex[:6]}"},
             )
+            # Bulk enrollments are student-only: give each fixture user the
+            # org-scoped student role so they pass the not_student gate.
+            await conn.execute(
+                text(
+                    "INSERT INTO user_role_assignments "
+                    "(user_id, role_id, scope_kind, organization_id) "
+                    "VALUES (:uid, (SELECT id FROM roles WHERE code = 'student' AND deleted_at IS NULL), "
+                    "'organization', :org)"
+                ),
+                {"uid": sid_, "org": seeded_users.organization_id},
+            )
 
     yield {
         "course_id": course_id,
