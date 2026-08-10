@@ -141,16 +141,28 @@ _NOTHING = SufficiencyVerdict(sufficient=False, outcome_ids_touched=[], confiden
 
 
 async def test_repeated_non_answers_escalate_hints_then_move_on() -> None:
-    iv = _interview()
+    # The follow-up budget is a SEPARATE gate that also stops a non-answer loop,
+    # and an agent-offered hint spends one (only STUDENT_REQUESTED_HINT is exempt
+    # — see turn_state.py). With the default budget of 2 it, not the ladder, is
+    # what trips first, so give the question enough budget for the ladder to be
+    # the binding constraint — which is what this test is about.
+    iv = _interview(max_follow_ups=MAX_CANNOT_ANSWER_HINTS)
+    # Not abandoned at the FIRST refusal: that is the property this guards. How
+    # long the question is held is bounded by MAX_ADVANCE_REFUSALS, a gate that
+    # is deliberately independent of the ladder's depth, so this asserts the
+    # first turn rather than every turn (with a ladder deeper than the refusal
+    # budget, the budget is what releases the question — by design).
+    assert iv.may_advance() is False, "abandoned the question at the first refusal"
+
     rungs = []
     for _ in range(MAX_CANNOT_ANSWER_HINTS):
-        assert iv.may_advance() is False, "abandoned the question at the first refusal"
         grant = resolve_hint_request(iv.state)
         assert grant.granted is True
         rungs.append(grant.level)
         await iv.answer("I don't know", _NOTHING)
 
     assert rungs == sorted(set(rungs)), f"the ladder did not escalate: {rungs}"
+    assert len(rungs) == MAX_CANNOT_ANSWER_HINTS, "the ladder ran short of its cap"
     # Ladder spent: the interview MUST be able to move on, or the candidate is
     # trapped on one question forever.
     assert iv.may_advance() is True

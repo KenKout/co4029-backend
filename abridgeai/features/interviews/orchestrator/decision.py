@@ -60,7 +60,10 @@ DEFAULT_MAX_TOTAL_FOLLOWUPS = 12
 # non-answer advances anyway (Slice 11, v2). Bounded so the hint ladder can
 # never hold the interview on a single question: at this level the CANNOT_ANSWER
 # branch falls through to the v1 advance.
-MAX_CANNOT_ANSWER_HINTS = 2
+# Per QUESTION: ``hint_level`` resets on advance (turn_state.py). Mirrored in the
+# learner UI as MAX_HINTS_PER_QUESTION (frontend/src/lib/interview/hint-ladder.ts)
+# — change both together. Reaching the deepest rung needs follow-up budget too.
+MAX_CANNOT_ANSWER_HINTS = 3
 
 
 @dataclass
