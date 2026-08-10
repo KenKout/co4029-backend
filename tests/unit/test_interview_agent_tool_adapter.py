@@ -152,6 +152,63 @@ async def test_request_hint_escalates_then_refuses(tools: InterviewToolsMixin) -
     assert "next_question" in str(excinfo.value).lower()
 
 
+async def test_request_hint_refunds_the_follow_up_charge(
+    tools: InterviewToolsMixin,
+) -> None:
+    """A granted hint does not consume the academic follow-up budget.
+
+    `fold_turn` charges one follow-up for every turn that does not advance —
+    including a TYPED hint request, which arrives as an `answer` turn when the
+    candidate types "give me a hint" instead of using a hint button. Without
+    this refund the follow-up budget (2) exhausts before the hint ladder (3):
+    the candidate gets one rung, then the question advances with no transition
+    (production session fb204f73). The refund mirrors the routed path's
+    STUDENT_REQUESTED_HINT exemption in turn_state.py.
+    """
+    data = _userdata(points=0)
+    assert data.state is not None
+    data.state.current_question_follow_up_count = 2  # what fold_turn already charged
+    await _call(tools.interview_request_hint, _Ctx(data))
+    assert data.state.current_question_follow_up_count == 1, (
+        "a granted hint request must give the follow-up back"
+    )
+
+
+async def test_request_hint_refund_never_goes_below_zero(
+    tools: InterviewToolsMixin,
+) -> None:
+    """The refund clamps at zero — a hint turn must not mint budget."""
+    data = _userdata(points=0)
+    assert data.state is not None
+    data.state.current_question_follow_up_count = 0
+    await _call(tools.interview_request_hint, _Ctx(data))
+    assert data.state.current_question_follow_up_count == 0
+
+
+async def test_request_hint_does_not_refund_when_spent(
+    tools: InterviewToolsMixin,
+) -> None:
+    """A REFUSED hint (ladder spent) is not a hint turn — no refund.
+
+    When the ladder is exhausted the request fails, so the follow-up charged by
+    `fold_turn` stands: the refusal itself is a probe of why the candidate is
+    still stuck, and refunding it would let a hint-spamming candidate escape
+    the follow-up gate entirely.
+    """
+    data = _userdata(points=0)
+    assert data.state is not None
+    for _ in range(MAX_CANNOT_ANSWER_HINTS):
+        await _call(tools.interview_request_hint, _Ctx(data))
+    # Set the charge AFTER the granting loop: those granted hints legitimately
+    # refunded. This one is the refusal — its charge must stand.
+    data.state.current_question_follow_up_count = 1
+    with pytest.raises(ToolError):
+        await _call(tools.interview_request_hint, _Ctx(data))
+    assert data.state.current_question_follow_up_count == 1, (
+        "a refused hint request keeps its follow-up charge"
+    )
+
+
 # ── end_interview ────────────────────────────────────────────────────────────
 
 

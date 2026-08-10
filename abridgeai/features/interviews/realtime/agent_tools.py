@@ -139,6 +139,16 @@ class InterviewToolsMixin:
                 "No hints remain for this question. Probe the candidate's answer "
                 "or call interview_next_question."
             )
+        # Mirror of the routed path's STUDENT_REQUESTED_HINT exemption
+        # (turn_state.py: a hint request "does not consume the academic probe
+        # budget"). On the native path `fold_turn` charges one follow-up for
+        # EVERY turn that does not advance — including a typed hint request,
+        # which arrives as an `answer` turn when the candidate types it instead
+        # of using a hint button. Without this refund the follow-up budget (2)
+        # exhausts before the hint ladder (3), the question advances with no
+        # transition, and the candidate never gets the rungs they asked for.
+        if data.current_question_follow_up_count > 0:
+            data.current_question_follow_up_count -= 1
         if question:
             return (
                 f"Hint rung {grant.level} for the current question. "
