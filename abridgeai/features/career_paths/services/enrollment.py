@@ -11,6 +11,7 @@ from abridgeai.core.pagination import (
     decode_composite_cursor,
     encode_composite_cursor,
 )
+from abridgeai.features.access_control.api import public as access_control_api
 from abridgeai.features.career_paths.models import StudentCareerEnrollment
 from abridgeai.features.career_paths.queries import authoring as authoring_queries
 from abridgeai.features.career_paths.queries import student as student_queries
@@ -107,6 +108,16 @@ async def enroll_student_in_path(
     )
     if existing is not None and existing.status != "dropped":
         raise AppError(f"Student {student_id} already enrolled in path {career_path_id}")
+    # Career-path enrolments are student-only, mirroring the course
+    # bulk-enroll guard (enrollments/services/manager.py::_resolve_student_ids):
+    # a teacher, manager, HOD or admin must not be attached to a learner
+    # pathway. The picker already filters to students; this is the backend
+    # backstop so a crafted request gets a clear 409 instead of a weird row.
+    role_codes = await access_control_api.get_role_codes_for_users(db, [student_id])
+    if "student" not in role_codes.get(student_id, ()):
+        raise AppError(
+            f"User {student_id} is not a student and cannot be enrolled in a career path"
+        )
     if existing is not None and existing.status == "dropped":
         existing.status = "active"
         existing.completed_at = None

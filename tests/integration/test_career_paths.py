@@ -387,6 +387,26 @@ async def test_manager_enroll_student(
     assert row.status == "active"
 
 
+async def test_manager_enroll_teacher_rejected(
+    client: httpx.AsyncClient,
+    manager_bearer: str,
+    seeded_users: SeededUsers,
+    scenario: dict[str, object],
+) -> None:
+    """Career-path enrolments are student-only: a teacher target 409s.
+
+    The picker filters to students; this asserts the backend backstop so a
+    crafted request cannot attach a teacher/manager/HOD/admin to a pathway.
+    """
+    response = await client.post(
+        f"/api/v1/management/career-paths/{scenario['path_id']}/students",
+        json={"student_id": str(seeded_users.teacher_id)},
+        headers={"Authorization": f"Bearer {manager_bearer}"},
+    )
+    assert response.status_code == 409, response.text
+    assert "not a student" in response.text
+
+
 async def test_progress_aggregate(
     client: httpx.AsyncClient,
     manager_bearer: str,
