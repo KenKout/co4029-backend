@@ -14,7 +14,7 @@ Org-scoping is resolved via :func:`resolve_admin_scope`.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Query
@@ -44,6 +44,15 @@ class ActiveUsersOut(BaseModel):
     dau: int
     wau: int
     mau: int
+
+
+class ActiveUsersTrendPoint(BaseModel):
+    date: date
+    count: int
+
+
+class ActiveUsersTrendOut(BaseModel):
+    points: list[ActiveUsersTrendPoint]
 
 
 class HealthOut(BaseModel):
@@ -119,6 +128,26 @@ async def get_active_users(
     org_id = await resolve_admin_scope(db, user)
     counts = await stats_service.active_users(db, organization_id=org_id)
     return ActiveUsersOut(**counts)
+
+
+@router.get("/active-users/trend", response_model=ActiveUsersTrendOut)
+async def get_active_users_trend(
+    user: Annotated[CurrentUser, Depends(_REQUIRE_STATS)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    days: Annotated[int, Query(ge=1, le=365)] = 30,
+) -> ActiveUsersTrendOut:
+    """Daily active users over the lookback window (distinct logins/day).
+
+    Drives the trend chart on the Active Users tab, mirroring the AI-cost
+    trend. ``days`` defaults to 30; every day in the window is returned
+    (zero-activity days included) so the chart is continuous.
+    """
+    org_id = await resolve_admin_scope(db, user)
+    raw = await stats_service.active_users_trend(
+        db, organization_id=org_id, days=days
+    )
+    points = [ActiveUsersTrendPoint(date=d, count=n) for d, n in raw]
+    return ActiveUsersTrendOut(points=points)
 
 
 @router.get("/content", response_model=ContentOut)

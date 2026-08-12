@@ -878,6 +878,65 @@ async def test_unbounded_scan_requires_since(
     assert resp.status_code == 422
 
 
+async def test_active_users_trend(
+    engine: AsyncEngine,
+    client: httpx.AsyncClient,
+    seeded_users: SeededUsers,
+) -> None:
+    """Trend returns one point per day with distinct-login counts.
+
+    Every login creates an auth_sessions row, so the series counts distinct
+    users whose session was created that calendar day. The admin bearer
+    session lands today; two more sessions are pinned 3 days back.
+    """
+    token, _ = await _bearer(engine, seeded_users.admin_id)
+    three_days_ago = datetime.now(tz=UTC) - timedelta(days=3)
+    for uid in (seeded_users.student_id, seeded_users.manager_id):
+        async with engine.begin() as conn:
+            await conn.execute(
+                text(
+                    "INSERT INTO auth_sessions "
+                    "(id, user_id, refresh_token_hash, expires_at, created_at) "
+                    "VALUES (:id, :uid, :h, :exp, :created)"
+                ),
+                {
+                    "id": uuid.uuid4(),
+                    "uid": uid,
+                    "h": hash_secret(generate_token()),
+                    "exp": three_days_ago + timedelta(hours=1),
+                    "created": three_days_ago,
+                },
+            )
+    try:
+        resp = await client.get(
+            "/api/v1/admin/stats/active-users/trend?days=7",
+            headers=_auth(token),
+        )
+    finally:
+        for uid in (
+            seeded_users.admin_id,
+            seeded_users.student_id,
+            seeded_users.manager_id,
+        ):
+            await _purge_sessions(engine, uid)
+    assert resp.status_code == 200, resp.text
+    points = {p["date"]: p["count"] for p in resp.json()["points"]}
+    assert len(points) == 7
+    # Dates come from ::date casts in the DB session timezone; resolve the
+    # expected day labels the same way instead of assuming UTC.
+    async with engine.begin() as conn:
+        labels = (
+            await conn.execute(
+                text(
+                    "SELECT now()::date AS today, "
+                    "(now() - interval '3 days')::date AS d3"
+                )
+            )
+        ).mappings().one()
+    assert points[str(labels["today"])] >= 1  # the admin bearer session
+    assert points[str(labels["d3"])] == 2  # student + manager pinned sessions
+
+
 def test_router_metadata() -> None:
     assert stats_router.prefix == "/admin/stats"
     assert audit_router.prefix == "/admin/audit"
@@ -886,6 +945,7 @@ def test_router_metadata() -> None:
     expected = {
         "/admin/stats/overview",
         "/admin/stats/active-users",
+        "/admin/stats/active-users/trend",
         "/admin/stats/content",
         "/admin/stats/health",
         "/admin/stats/dashboard",

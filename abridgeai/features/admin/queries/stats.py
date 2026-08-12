@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from importlib import resources
 from typing import Any
 from uuid import UUID
@@ -20,6 +20,7 @@ def _load(name: str) -> TextClause:
 
 _OVERVIEW_SQL = _load("stats/overview.sql")
 _ACTIVE_USERS_SQL = _load("stats/active_users.sql")
+_ACTIVE_USERS_TREND_SQL = _load("stats/active_users_trend.sql")
 _CONTENT_SQL = _load("stats/content.sql")
 _HEALTH_SQL = _load("stats/health.sql")
 _DASHBOARD_SQL = _load("stats/dashboard.sql")
@@ -54,6 +55,22 @@ async def active_users(
         "wau": int(row["wau"] or 0),
         "mau": int(row["mau"] or 0),
     }
+
+
+async def active_users_trend(
+    db: AsyncSession,
+    *,
+    organization_id: UUID | None,
+    days: int,
+    now: datetime,
+) -> list[tuple[date, int]]:
+    rows = (
+        await db.execute(
+            _ACTIVE_USERS_TREND_SQL,
+            {"organization_id": organization_id, "days": days, "now": now},
+        )
+    ).mappings()
+    return [(row["day"], int(row["count"] or 0)) for row in rows]
 
 
 async def content_breakdown(

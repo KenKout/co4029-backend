@@ -9,7 +9,7 @@ otherwise an empty result is returned (no leak across tenants).
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
@@ -32,6 +32,21 @@ async def active_users(
     return await stats_queries.active_users(
         db,
         organization_id=organization_id,
+        now=now or datetime.now(tz=UTC),
+    )
+
+
+async def active_users_trend(
+    db: AsyncSession,
+    *,
+    organization_id: UUID | None,
+    days: int,
+    now: datetime | None = None,
+) -> list[tuple[date, int]]:
+    return await stats_queries.active_users_trend(
+        db,
+        organization_id=organization_id,
+        days=days,
         now=now or datetime.now(tz=UTC),
     )
 
