@@ -16,6 +16,11 @@ class CareerPathAuthoring(BaseModel):
     description: str | None = None
     status: str
     max_concurrent: int | None = None
+    # List-surface enrichment (authoring service): how many stages the path
+    # has and how many courses are attached across them, so the management
+    # table can show depth without N+1 detail fetches. 0 for a fresh path.
+    stage_count: int = 0
+    course_count: int = 0
     created_at: datetime
     updated_at: datetime
     created_by: UUID | None = None

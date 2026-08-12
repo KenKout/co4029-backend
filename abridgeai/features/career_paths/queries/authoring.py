@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
@@ -30,6 +31,37 @@ async def list_career_paths_for_org(
     if not include_archived:
         stmt = stmt.where(CareerPath.status != "archived")
     return list((await db.execute(stmt.order_by(CareerPath.created_at.desc()))).scalars().all())
+
+
+async def list_path_stage_counts(
+    db: AsyncSession, career_path_ids: Sequence[UUID]
+) -> dict[UUID, int]:
+    """Live (non-deleted) stage count per path, for the management list."""
+    if not career_path_ids:
+        return {}
+    rows = await db.execute(
+        select(CareerPathStage.career_path_id, func.count(CareerPathStage.id))
+        .where(
+            CareerPathStage.career_path_id.in_(career_path_ids),
+            CareerPathStage.deleted_at.is_(None),
+        )
+        .group_by(CareerPathStage.career_path_id)
+    )
+    return {path_id: count for path_id, count in rows.all()}
+
+
+async def list_path_course_counts(
+    db: AsyncSession, career_path_ids: Sequence[UUID]
+) -> dict[UUID, int]:
+    """Attached-course count per path (career_course_items rows)."""
+    if not career_path_ids:
+        return {}
+    rows = await db.execute(
+        select(CareerPathCourse.career_path_id, func.count(CareerPathCourse.course_id))
+        .where(CareerPathCourse.career_path_id.in_(career_path_ids))
+        .group_by(CareerPathCourse.career_path_id)
+    )
+    return {path_id: count for path_id, count in rows.all()}
 
 
 async def get_career_path_for_authoring(

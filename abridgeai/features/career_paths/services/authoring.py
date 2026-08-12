@@ -54,7 +54,9 @@ register_conflict_mappings(
 )
 
 
-def _to_authoring(path: CareerPath) -> CareerPathAuthoring:
+def _to_authoring(
+    path: CareerPath, *, stage_count: int = 0, course_count: int = 0
+) -> CareerPathAuthoring:
     return CareerPathAuthoring(
         id=path.id,
         organization_id=path.organization_id,
@@ -63,6 +65,8 @@ def _to_authoring(path: CareerPath) -> CareerPathAuthoring:
         name=path.name,
         description=path.description,
         status=path.status,
+        stage_count=stage_count,
+        course_count=course_count,
         created_at=path.created_at,
         updated_at=path.updated_at,
         created_by=path.created_by,
@@ -85,12 +89,28 @@ async def list_career_paths_for_org(
     rows = await authoring_queries.list_career_paths_for_org(
         db, organization_id, include_archived=include_archived
     )
-    return [_to_authoring(row) for row in rows]
+    path_ids = [row.id for row in rows]
+    stage_counts = await authoring_queries.list_path_stage_counts(db, path_ids)
+    course_counts = await authoring_queries.list_path_course_counts(db, path_ids)
+    return [
+        _to_authoring(
+            row,
+            stage_count=stage_counts.get(row.id, 0),
+            course_count=course_counts.get(row.id, 0),
+        )
+        for row in rows
+    ]
 
 
 async def get_career_path(db: AsyncSession, career_path_id: UUID) -> CareerPathAuthoring:
     path = await _require_path(db, career_path_id)
-    return _to_authoring(path)
+    stage_counts = await authoring_queries.list_path_stage_counts(db, [path.id])
+    course_counts = await authoring_queries.list_path_course_counts(db, [path.id])
+    return _to_authoring(
+        path,
+        stage_count=stage_counts.get(path.id, 0),
+        course_count=course_counts.get(path.id, 0),
+    )
 
 
 async def list_career_path_courses(

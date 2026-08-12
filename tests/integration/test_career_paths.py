@@ -407,6 +407,27 @@ async def test_manager_enroll_teacher_rejected(
     assert "not a student" in response.text
 
 
+async def test_manager_list_includes_stage_course_counts(
+    client: httpx.AsyncClient,
+    manager_bearer: str,
+    scenario: dict[str, object],
+) -> None:
+    """The management list enriches every row with stage/course counts.
+
+    The scenario path has exactly one stage and three attached courses —
+    the numbers the management table now shows instead of N+1 detail calls.
+    """
+    response = await client.get(
+        "/api/v1/management/career-paths",
+        headers={"Authorization": f"Bearer {manager_bearer}"},
+    )
+    assert response.status_code == 200, response.text
+    rows = {p["id"]: p for p in response.json()}
+    row = rows[str(scenario["path_id"])]
+    assert row["stage_count"] == 1
+    assert row["course_count"] == 3
+
+
 async def test_progress_aggregate(
     client: httpx.AsyncClient,
     manager_bearer: str,
