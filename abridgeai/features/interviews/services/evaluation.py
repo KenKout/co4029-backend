@@ -31,7 +31,6 @@ from abridgeai.core.db.conflict_mapper import flush_or_conflict
 from abridgeai.core.exceptions import NotFoundError
 from abridgeai.core.observability import get_logger
 from abridgeai.core.security import utcnow
-from abridgeai.features.interviews import practice
 from abridgeai.features.interviews.ai.stages.evaluation import evaluate_outcomes, evaluate_session
 from abridgeai.features.interviews.ai.stages.evaluation.outcome_verdicts import (
     OutcomeVerdict,
@@ -83,22 +82,18 @@ _logger = get_logger(__name__)
 def _ungradeable_reason(session: object) -> str | None:
     """Why this run may not be graded, or None when it may.
 
-    Two refusals, both defence in depth against the same class of damage:
-    ``evaluate_and_generate_report`` is the ONLY writer of ``pass_verdict``, so a
-    missed guard at any enqueue site must not be able to reach that write.
+    A single refusal: ``evaluate_and_generate_report`` is the ONLY writer of
+    ``pass_verdict``, so a missed guard at any enqueue site must not be able to
+    reach that write.
 
-    * ``"practice"`` — a rehearsal. A verdict on it would unlock the SR lesson
-      and quiz gates that read ``pass_verdict``.
-    * ``"never_started_assessment"`` — still in onboarding (identity check /
-      audio check / readiness), so there are no answers to judge: answering is
-      gated on ``onboarding_stage == 'completed'`` in ``taking.record_answer``,
-      making ``assessment_started_at IS NULL`` equivalent to "no answer can
-      exist". Grading one fabricated outcome verdicts and a pass/fail from
-      onboarding chatter alone, against a student who never saw a question, and
-      consumed one of their attempts.
+    ``"never_started_assessment"`` — still in onboarding (identity check /
+    audio check / readiness), so there are no answers to judge: answering is
+    gated on ``onboarding_stage == 'completed'`` in ``taking.record_answer``,
+    making ``assessment_started_at IS NULL`` equivalent to "no answer can
+    exist". Grading one fabricated outcome verdicts and a pass/fail from
+    onboarding chatter alone, against a student who never saw a question, and
+    consumed one of their attempts.
     """
-    if practice.is_practice(getattr(session, "session_mode", None)):
-        return "practice"
     if getattr(session, "assessment_started_at", None) is None:
         return "never_started_assessment"
     return None
@@ -157,17 +152,9 @@ async def evaluate_and_generate_report(
 
     try:
         outcomes = await authoring_queries.list_outcomes_for_config(db, session.interview_config_id)
-        # Partitioned by session mode, and this is the highest-consequence of the
-        # partition filters — it is not about leaking questions. This query takes
-        # every review state, and the questions it returns become
-        # ``expected_question_ids``: a question from the other partition would be
-        # counted as unanswered, inflate ``questions_total``, and hard-fail any
-        # outcome linked to it via ``_fail_unanswered_outcomes``. Unfiltered, the
-        # partition would corrupt real grades rather than merely reveal a bank.
         all_questions = await authoring_queries.list_questions_for_config(
             db,
             session.interview_config_id,
-            practice_only=practice.partition_for_mode(session.session_mode),
         )
         candidate_answers = await _list_candidate_answers(db, session_id)
         snapshot = await sessions_queries.get_session_with_responses(db, session_id)
@@ -308,15 +295,11 @@ async def evaluate_and_generate_report(
         )
 
         # An interview is a gradeable course unit, completed by a passing
-        # verdict on a non-practice attempt. `_stamp_session_summary` above just
-        # wrote `pass_verdict`, so this is the moment the unit can change state
-        # — fire the D2 course-completion writer before the commit below so the
-        # student's last interview unlocks the next career-path stage now
-        # instead of at the nightly drift sweep.
-        #
-        # No practice check needed here: `_ungradeable_reason` already returned
-        # early for practice sessions, so reaching this line means the session
-        # is a graded attempt.
+        # verdict. `_stamp_session_summary` above just wrote `pass_verdict`, so
+        # this is the moment the unit can change state — fire the D2
+        # course-completion writer before the commit below so the student's last
+        # interview unlocks the next career-path stage now instead of at the
+        # nightly drift sweep.
         await _sync_course_completion(db, student_id=session.student_id, course_id=course_id)
 
         # Mark the evaluation run completed now that all work has committed.
@@ -372,97 +355,6 @@ async def _list_candidate_answers(
         and getattr(m, "session_question_id", None) is not None
         and (getattr(m, "metadata_json", None) or {}).get("kind") != "onboarding"
     ]
-
-
-async def generate_practice_feedback(db: AsyncSession, session_id: UUID) -> None:
-    """Judge a practice run against the criteria, without grading it.
-
-    A deliberately separate function rather than a branch inside
-    :func:`evaluate_and_generate_report`. That function is the only writer of
-    ``pass_verdict``, and ``pass_verdict = TRUE`` is what opens the SR-lesson
-    and quiz gates — keeping the two apart makes "a rehearsal can never unlock
-    anything" a structural property instead of a conditional someone could
-    later invert. Each function refuses the other's mode outright.
-
-    What it runs, and what it deliberately does not:
-
-    * ``evaluate_outcomes`` — per-criterion met/not-met. This is the whole
-      point: the student saw those criteria before the run, so the feedback
-      that closes the loop is which ones they actually demonstrated.
-    * NOT ``evaluate_session`` — that produces numeric rubric scores, which
-      thesis §4.3 keeps away from students in any mode.
-    * NOT ``generate_gap_report`` — it writes a ``gap_reports`` row that the
-      results screen reads as a graded outcome, and it needs the learner-facing
-      output guard. A rehearsal should not manufacture either.
-    * NOT ``_derive_pass_verdict`` / ``_stamp_session_summary`` — no verdict,
-      no score, no ``questions_total`` that a teacher view would read as a
-      graded attempt.
-
-    Failures are recorded rather than raised. Unlike a real evaluation there is
-    no verdict anyone is blocked on, nothing downstream is gated on this, and
-    the recovery sweep skips practice — so there is nothing for a retry loop to
-    repair. But the failure IS stamped, because the alternative is a client that
-    cannot tell "still thinking" from "never coming" and spins forever.
-    """
-    session = await sessions_queries.get_session(db, session_id)
-    if session is None:
-        raise NotFoundError(f"Interview session {session_id} not found")
-    if not practice.is_practice(session.session_mode):
-        # The mirror of the refusal in evaluate_and_generate_report. A graded
-        # session reaching here would get outcome rows written without the
-        # verdict, score and gap report that make them meaningful.
-        return
-
-    try:
-        outcomes = await authoring_queries.list_outcomes_for_config(db, session.interview_config_id)
-        all_questions = await authoring_queries.list_questions_for_config(
-            db,
-            session.interview_config_id,
-            practice_only=True,
-        )
-        candidate_answers = await _list_candidate_answers(db, session_id)
-        snapshot = await sessions_queries.get_session_with_responses(db, session_id)
-        if snapshot is None:
-            raise NotFoundError(f"Interview session {session_id} not found")
-        _, session_questions, _ = snapshot
-        questions, question_prompts, _expected, answered_question_ids = (
-            _build_question_evaluation_context(all_questions, session_questions, candidate_answers)
-        )
-
-        verdicts = await evaluate_outcomes(
-            db,
-            session=session,
-            outcomes=outcomes,
-            questions=questions,
-            answers=candidate_answers,
-            question_prompts=question_prompts,
-            pipeline_run_id=None,
-        )
-        # Same honesty as the graded path: a criterion whose question was never
-        # answered was not demonstrated, whatever the judge inferred elsewhere.
-        verdicts = _fail_unanswered_outcomes(
-            verdicts,
-            questions=questions,
-            answered_question_ids=answered_question_ids,
-        )
-
-        await _persist_outcome_evaluations(db, session_id=session_id, verdicts=verdicts)
-        session.internal_summary_json = dict(session.internal_summary_json or {}) | {
-            "practice": {
-                "outcomes_met": verdicts.met_count,
-                "outcomes_total": verdicts.total,
-                "evaluated_at": utcnow().isoformat(),
-            }
-        }
-        await db.commit()
-    except Exception as exc:  # noqa: BLE001 -- see the docstring: recorded, not raised
-        await db.rollback()
-        fresh = await db.get(InterviewSession, session_id)
-        if fresh is not None:
-            fresh.internal_summary_json = dict(fresh.internal_summary_json or {}) | {
-                "practice": {"failed": True, "message": str(exc), "at": utcnow().isoformat()}
-            }
-            await db.commit()
 
 
 def _build_question_evaluation_context(
@@ -689,7 +581,7 @@ async def _sync_course_completion(db: AsyncSession, *, student_id: UUID, course_
     """Fire the D2 course-completion writer for this interview's course.
 
     Course completion counts interview units, and an interview unit is done
-    only when a non-practice attempt has ``pass_verdict = TRUE``. Since
+    only when an attempt has ``pass_verdict = TRUE``. Since
     ``course_enrollments.status`` is what career-path stage unlock reads as
     ``satisfied``, the verdict write above has to be followed by this call or
     passing the last interview leaves the next stage locked until the nightly

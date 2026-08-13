@@ -194,16 +194,10 @@ async def get_session_attempt_number(
     Used by ``services/lifecycle.py::start_session`` to allocate the
     next attempt number that satisfies
     ``uq_interview_sessions_number``.
-
-    Practice rows are excluded from the MAX. They are numbered 0, so including
-    them would be harmless today — the filter is here so that a student who has
-    only ever rehearsed still gets attempt 1 for their first real run, whatever
-    number the practice space uses later.
     """
     stmt = select(func.coalesce(func.max(InterviewSession.attempt_number), 0)).where(
         InterviewSession.interview_config_id == config_id,
         InterviewSession.student_id == user_id,
-        InterviewSession.session_mode != "practice",
     )
     return int((await db.execute(stmt)).scalar_one()) + 1
 
@@ -224,29 +218,6 @@ async def count_terminal_sessions(
         InterviewSession.interview_config_id == config_id,
         InterviewSession.student_id == user_id,
         InterviewSession.status.in_(terminal_statuses),
-        InterviewSession.session_mode != "practice",
-    )
-    return int((await db.execute(stmt)).scalar_one())
-
-
-async def count_practice_sessions(
-    db: AsyncSession,
-    user_id: UUID,
-    config_id: UUID,
-    terminal_statuses: tuple[str, ...],
-) -> int:
-    """Count the student's finished practice runs for a config.
-
-    The mirror of :func:`count_terminal_sessions` on the other side of the mode
-    split, powering the separate practice ceiling. Kept separate rather than
-    parameterising one query by mode so that neither ceiling can be widened by
-    accident when the other is edited.
-    """
-    stmt = select(func.count(InterviewSession.id)).where(
-        InterviewSession.interview_config_id == config_id,
-        InterviewSession.student_id == user_id,
-        InterviewSession.status.in_(terminal_statuses),
-        InterviewSession.session_mode == "practice",
     )
     return int((await db.execute(stmt)).scalar_one())
 
@@ -270,7 +241,6 @@ async def get_last_terminal_ended_at(
         InterviewSession.interview_config_id == config_id,
         InterviewSession.student_id == user_id,
         InterviewSession.status.in_(terminal_statuses),
-        InterviewSession.session_mode != "practice",
     )
     return (await db.execute(stmt)).scalar_one_or_none()
 
@@ -358,18 +328,12 @@ async def list_pending_evaluation_sessions(
     The grace cutoff keeps an actively running evaluation job out of the
     recovery scan. ``failed`` and ``abandoned`` rows are intentionally
     excluded because they are already terminal from the grader's perspective.
-
-    Practice rows are excluded, and that exclusion is what makes an ungraded run
-    possible at all: this scan treats "terminal with no verdict" as a stranded
-    evaluation, so without the mode filter every rehearsal would be re-enqueued
-    for grading forever.
     """
     stmt = select(InterviewSession).where(
         InterviewSession.status.in_(("completed", "timed_out")),
         InterviewSession.pass_verdict.is_(None),
         InterviewSession.ended_at.is_not(None),
         InterviewSession.ended_at <= ended_before,
-        InterviewSession.session_mode != "practice",
     )
     return list((await db.execute(stmt)).scalars().all())
 
@@ -427,7 +391,6 @@ async def list_integrity_events_for_session(db: AsyncSession, session_id: UUID) 
 
 
 __all__ = [
-    "count_practice_sessions",
     "count_terminal_sessions",
     "count_user_messages",
     "get_last_activity_at",

@@ -230,18 +230,17 @@ class _Builder:
             )
 
     async def interview_attempt(
-        self, config_id: uuid.UUID, *, passed: bool | None, mode: str = "assessment", num: int = 1
+        self, config_id: uuid.UUID, *, passed: bool | None, num: int = 1
     ) -> None:
         await self._exec(
             "INSERT INTO interview_sessions (id, interview_config_id, student_id, "
-            "attempt_number, status, input_mode, session_mode, pass_verdict) "
-            "VALUES (:i,:c,:s,:n,'completed','text',:m,:v)",
+            "attempt_number, status, input_mode, pass_verdict) "
+            "VALUES (:i,:c,:s,:n,'completed','text',:v)",
             {
                 "i": uuid.uuid4(),
                 "c": config_id,
                 "s": self.student,
                 "n": num,
-                "m": mode,
                 "v": passed,
             },
         )
@@ -359,18 +358,6 @@ async def test_failed_interview_blocks_but_exhausted_quiz_does_not(
 
 
 @pytest.mark.asyncio
-async def test_practice_interview_never_completes_a_unit(session_factory, builder) -> None:
-    """Cohort fairness: rehearsing must not tick a graded milestone."""
-    fx = await builder.course(slug="prac", interviews=1)
-    await builder.interview_attempt(fx["interviews"][0], passed=True, mode="practice")
-
-    async with session_factory() as db:
-        tally = await get_course_unit_tally(db, course_id=fx["course"], student_id=builder.student)
-    assert tally.interviews_total == 1
-    assert tally.interviews_done == 0
-
-
-@pytest.mark.asyncio
 async def test_draft_units_are_invisible_and_uncounted(session_factory, builder) -> None:
     """A unit the student cannot see must never become an unsatisfiable unit.
 
@@ -478,7 +465,7 @@ async def test_interview_parity_with_learner_progress(session_factory, builder) 
     fx = await builder.course(slug="ipar", interviews=3, draft_interviews=1)
     await builder.interview_attempt(fx["interviews"][0], passed=True)
     await builder.interview_attempt(fx["interviews"][1], passed=False)
-    await builder.interview_attempt(fx["interviews"][2], passed=True, mode="practice")
+    await builder.interview_attempt(fx["interviews"][2], passed=False)
 
     async with session_factory() as db:
         per_item = await list_my_interview_progress(

@@ -22,11 +22,6 @@ attempt keeps the item pending. Two consequences worth stating out loud:
 * Failing therefore leaves the item as the "next thing to do", which is the
   intended reading: the interview is not done until it is passed.
 
-Practice runs never count, mirroring the attempt gate
-(``queries/sessions.py`` filters ``session_mode != 'practice'`` everywhere).
-Rehearsing must not be able to tick off a graded milestone — that would be a
-cohort-fairness hole, not a convenience.
-
 Layering: services -> queries. Owns its own DB reads, matching the quiz
 counterpart (``quizzes/services/learner_progress.py``) and the local
 precedent of ``services/taking.py``.
@@ -76,13 +71,10 @@ ORDER BY m.position, mi.position
 
 # Per-config attempt rollup for one student.
 #
-# ``passed`` is the whole point: a single TRUE verdict on any non-practice
-# attempt completes the item. ``in_flight`` and ``attempts_used`` are reported
-# for parity with the quiz payload (the UI shows "attempt N" affordances), and
-# because a live attempt is useful context for a pending item.
-#
-# session_mode is filtered here rather than in Python so the practice exclusion
-# cannot be lost by a later refactor of the loop below.
+# ``passed`` is the whole point: a single TRUE verdict on any attempt completes
+# the item. ``in_flight`` and ``attempts_used`` are reported for parity with the
+# quiz payload (the UI shows "attempt N" affordances), and because a live
+# attempt is useful context for a pending item.
 _ATTEMPT_ROLLUP_SQL = """
 SELECT s.interview_config_id AS config_id,
        COUNT(*) AS attempts_used,
@@ -92,7 +84,6 @@ SELECT s.interview_config_id AS config_id,
 FROM interview_sessions s
 WHERE s.student_id = :user_id
   AND s.interview_config_id = ANY(:config_ids)
-  AND s.session_mode <> 'practice'
 GROUP BY s.interview_config_id
 """
 

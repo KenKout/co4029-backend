@@ -186,7 +186,6 @@ interview_units AS (
                BOOL_OR(pass_verdict IS TRUE) AS passed
         FROM interview_sessions
         WHERE student_id = :student_id
-          AND session_mode <> 'practice'
         GROUP BY interview_config_id
     ) s ON s.interview_config_id = ic.id
     WHERE m.course_id = :course_id

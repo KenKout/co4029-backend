@@ -367,7 +367,7 @@ async def load_native_setup(
         loaded_version = loaded.version if loaded is not None else None
 
         candidates, orm_by_id = await turn_perception.load_candidates(
-            db, config.id, session_mode=session.session_mode
+            db, config.id
         )
         asked_ids = await turn_perception.persisted_question_ids(db, session_id)
         # Merges the REST transcript into state that the agent path never wrote,

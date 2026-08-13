@@ -214,14 +214,6 @@ class InterviewConfigUpdate(BaseModel):
     cooldown_hours: int | None = Field(default=None, ge=1)
     min_outcomes_to_pass: int | None = Field(default=None, ge=1)
     lock_quiz_ef_until_pass: bool | None = None
-    practice_mode_enabled: bool | None = None
-    """Offer students an ungraded rehearsal.
-
-    Two consequences the authoring UI must state, because neither is obvious
-    from the label: it also discloses the criterion TEXT to students (weights and
-    the pass threshold stay hidden), and it does nothing until at least one
-    question is marked ``practice_only`` — the practice partition starts empty.
-    """
     supplementary_instructions: str | None = None
     security_response_policy: SecurityResponsePolicyLiteral | None = None
     security_max_consecutive_attempts: int | None = Field(default=None, ge=2, le=20)
@@ -374,13 +366,6 @@ class InterviewQuestionCreate(BaseModel):
     model_answer: str | None = None
     linked_outcome_id: UUID | None = None
     position: int | None = Field(default=None, ge=1)
-    practice_only: bool = False
-    """Create the question straight into the practice partition.
-
-    Defaults to False so every existing caller keeps producing gradable
-    questions. Unlike the PATCH body this schema forbids extras and the service
-    reads fields explicitly, so it has to be named here to be settable at all.
-    """
 
 
 class InterviewQuestionDuplicateCheckRequest(BaseModel):
@@ -426,10 +411,6 @@ class InterviewQuestionAuthoring(InterviewQuestionPublic):
     model_answer: str | None = None
     review_status: ReviewStatusLiteral
     ai_generated: bool
-    # Bank partition — see ``InterviewQuestion.practice_only``. Teacher-editable
-    # through the untyped PATCH body, so it needs to appear here to round-trip in
-    # the response the UI reads back after a toggle.
-    practice_only: bool = False
     source_refs_json: list[Any] = []
     source_module_ids: list[UUID] = []
     reviewed_by: UUID | None = None

@@ -160,13 +160,12 @@ async def _seed_attempt(
     attempt_number: int,
     status: str = "completed",
     pass_verdict: bool | None = None,
-    session_mode: str = "assessment",
 ) -> None:
     await conn.execute(
         text(
             "INSERT INTO interview_sessions (id, interview_config_id, student_id, "
-            "attempt_number, status, input_mode, pass_verdict, session_mode) "
-            "VALUES (:id, :c, :s, :n, :st, 'hybrid', :pv, :sm)"
+            "attempt_number, status, input_mode, pass_verdict) "
+            "VALUES (:id, :c, :s, :n, :st, 'hybrid', :pv)"
         ),
         {
             "id": uuid.uuid4(),
@@ -175,7 +174,6 @@ async def _seed_attempt(
             "n": attempt_number,
             "st": status,
             "pv": pass_verdict,
-            "sm": session_mode,
         },
     )
 
@@ -225,7 +223,6 @@ async def test_interview_progress_completion_matrix(
         "all_failed": uuid.uuid4(),      # 3 FALSE verdicts -> PENDING (vs quiz)
         "ungraded": uuid.uuid4(),        # verdict NULL (ARQ pending) -> pending
         "in_flight": uuid.uuid4(),       # live attempt -> pending
-        "practice_pass": uuid.uuid4(),   # practice TRUE -> pending (fairness)
         "never": uuid.uuid4(),           # untouched -> pending
     }
     student = seeded_users.student_id
@@ -270,13 +267,6 @@ async def test_interview_progress_completion_matrix(
             conn, config_id=configs["in_flight"], student_id=student,
             attempt_number=1, status="in_progress", pass_verdict=None,
         )
-        await _seed_attempt(
-            conn, config_id=configs["practice_pass"], student_id=student,
-            # attempt_number must be > 0 (DB check constraint) — the "practice is
-            # numbered 0" note in queries/sessions.py describes intent, not the
-            # schema. Practice rows are separated by session_mode, not number.
-            attempt_number=1, pass_verdict=True, session_mode="practice",
-        )
         await _enroll(conn, course_id=seeded_users.course_id, student_id=student)
 
     sid = await _seed_session(engine, student)
@@ -317,12 +307,6 @@ async def test_interview_progress_completion_matrix(
         in_flight = by_id[str(configs["in_flight"])]
         assert in_flight["attempts_in_flight"] == 1
         assert in_flight["completed"] is False
-
-        # Cohort fairness: rehearsing must never tick off a graded milestone.
-        practice = by_id[str(configs["practice_pass"])]
-        assert practice["attempts_used"] == 0
-        assert practice["passed"] is False
-        assert practice["completed"] is False
 
         never = by_id[str(configs["never"])]
         assert never["attempts_used"] == 0

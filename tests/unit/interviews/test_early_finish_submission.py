@@ -24,7 +24,6 @@ def _session(*, assessment_started_at: datetime | None) -> SimpleNamespace:
         interview_config_id=uuid4(),
         student_id=uuid4(),
         status="in_progress",
-        session_mode="assessment",
         interview_language="en",
         ended_at=None,
         assessment_started_at=assessment_started_at,

@@ -33,7 +33,6 @@ from abridgeai.core.config import get_settings
 from abridgeai.core.db.conflict_mapper import flush_or_conflict
 from abridgeai.core.exceptions import AppError, ForbiddenError, NotFoundError
 from abridgeai.core.security import CurrentUser, utcnow
-from abridgeai.features.interviews import practice
 from abridgeai.features.interviews.ai.stages.followup import maybe_generate_followup
 from abridgeai.features.interviews.models import (
     InterviewConfig,
@@ -87,7 +86,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _EVALUATE_INTERVIEW_SESSION_TASK = "evaluate_interview_session_task"
-_PRACTICE_FEEDBACK_TASK = "generate_practice_feedback_task"
 
 # Terminal session statuses — an attempt in any of these has been "used up"
 # and its ``ended_at`` anchors the retake cooldown (FR-5.3). ``in_progress``
@@ -123,35 +121,6 @@ class InterviewMaxAttemptsReached(AppError):  # noqa: N818  # mirrors quiz MaxAt
         self.max_attempts = max_attempts
 
 
-class InterviewPracticeUnavailable(AppError):  # noqa: N818  # matches the two above
-    """Student asked for a practice run this interview cannot serve.
-
-    Either the teacher has not enabled practice, or they enabled it without
-    marking any question ``practice_only`` so the practice partition is empty.
-    Mapped to HTTP 409. ``reason`` distinguishes the two for the UI, because the
-    fix differs and neither is the student's to make.
-    """
-
-    def __init__(self, config_id: UUID, reason: str) -> None:
-        super().__init__("Practice mode is not available for this interview")
-        self.config_id = config_id
-        self.reason = reason
-
-
-class InterviewPracticeLimitReached(AppError):  # noqa: N818  # matches the two above
-    """Student has used their practice run(s) for this interview.
-
-    Separate from :class:`InterviewMaxAttemptsReached` on purpose: practice runs
-    consume no graded attempt, so hitting this ceiling must not read as "you are
-    out of tries". Mapped to HTTP 409.
-    """
-
-    def __init__(self, config_id: UUID, max_runs: int) -> None:
-        super().__init__("Practice run limit reached")
-        self.config_id = config_id
-        self.max_runs = max_runs
-
-
 async def _require_session(db: AsyncSession, session_id: UUID) -> InterviewSession:
     session = await sessions_queries.get_session(db, session_id)
     if session is None:
@@ -165,13 +134,12 @@ def _assert_owns_session(session: InterviewSession, actor: CurrentUser) -> None:
 
 
 async def _first_published_question(
-    db: AsyncSession, config_id: UUID, *, session_mode: str
+    db: AsyncSession, config_id: UUID
 ) -> InterviewQuestion | None:
     questions = await authoring_queries.list_questions_for_config(
         db,
         config_id,
         review_status="approved",
-        practice_only=practice.partition_for_mode(session_mode),
     )
     return questions[0] if questions else None
 
@@ -180,14 +148,11 @@ async def _next_published_question_after(
     db: AsyncSession,
     config_id: UUID,
     asked_question_ids: set[UUID],
-    *,
-    session_mode: str,
 ) -> InterviewQuestion | None:
     questions = await authoring_queries.list_questions_for_config(
         db,
         config_id,
         review_status="approved",
-        practice_only=practice.partition_for_mode(session_mode),
     )
     for question in questions:
         if question.id not in asked_question_ids:
@@ -318,63 +283,6 @@ async def _enforce_retake_policy(
             raise InterviewMaxAttemptsReached(config_id, max_attempts)
 
 
-async def count_practice_questions(db: AsyncSession, config_id: UUID) -> int:
-    """Approved questions in the practice partition.
-
-    Zero means practice cannot run even if the teacher enabled it — which is why
-    the authoring UI surfaces this count rather than letting a student discover
-    the empty partition at start time.
-    """
-    questions = await authoring_queries.list_questions_for_config(
-        db, config_id, review_status="approved", practice_only=True
-    )
-    return len(questions)
-
-
-async def count_practice_runs_used(db: AsyncSession, student_id: UUID, config_id: UUID) -> int:
-    """Practice runs this student has already finished for this config.
-
-    Wraps the terminal-status tuple so callers outside this module do not have
-    to reach for a private to ask a public question.
-    """
-    return await sessions_queries.count_practice_sessions(
-        db, student_id, config_id, _TERMINAL_SESSION_STATUSES
-    )
-
-
-async def _resolve_session_mode(
-    db: AsyncSession,
-    *,
-    config: Any,  # noqa: ANN401  -- InterviewConfig; imported lazily by callers.
-    config_id: UUID,
-    student_id: UUID,
-    requested: dict[str, Any],
-) -> str:
-    """Decide whether a new session is a rehearsal, and gate it.
-
-    Defaults to assessment whenever the client says nothing — an omitted or
-    unknown value must never silently produce an ungraded run.
-
-    Three gates, all raised rather than downgraded. Quietly starting a graded
-    session for a student who asked to practise is the one outcome worth failing
-    the request over.
-    """
-    if not practice.is_practice(requested.get("session_mode")):
-        return practice.MODE_ASSESSMENT
-
-    if config is None or not config.practice_mode_enabled:
-        raise InterviewPracticeUnavailable(config_id, "not_enabled")
-
-    if await count_practice_questions(db, config_id) == 0:
-        raise InterviewPracticeUnavailable(config_id, "no_practice_questions")
-
-    used = await count_practice_runs_used(db, student_id, config_id)
-    if used >= practice.PRACTICE_MAX_RUNS:
-        raise InterviewPracticeLimitReached(config_id, practice.PRACTICE_MAX_RUNS)
-
-    return practice.MODE_PRACTICE
-
-
 async def start_session(
     db: AsyncSession,
     config_id: UUID,
@@ -418,9 +326,7 @@ async def start_session(
 
     existing = await sessions_queries.get_active_session(db, actor.user_id, config_id)
     if existing is not None:
-        await _ensure_first_question_attached(
-            db, existing.id, config_id, session_mode=existing.session_mode
-        )
+        await _ensure_first_question_attached(db, existing.id, config_id)
         await _maybe_upgrade_input_mode(db, existing, config_id, requested_input_mode)
         await ensure_ceremony_message(
             db,
@@ -434,29 +340,14 @@ async def start_session(
 
     new_config = await db.get(InterviewConfig, config_id)
 
-    # Unlike ``input_mode`` (which the server overrides with the config's
-    # canonical ``supported_modes``), the practice/assessment split IS the
-    # student's call — the teacher only decides whether the choice is offered.
-    # Same shape as ``interview_language``: a session-scoped, student-chosen,
-    # CHECK-constrained column.
-    session_mode = await _resolve_session_mode(
-        db, config=new_config, config_id=config_id, student_id=actor.user_id, requested=data
+    # FR-5.3 retake policy — gate a *new* attempt on the config's
+    # ``max_attempts`` ceiling and ``cooldown_hours`` window. Only reached
+    # when there is no live session (the idempotent short-circuit above
+    # returns the in-progress row without consuming a fresh attempt).
+    await _enforce_retake_policy(db, config_id=config_id, student_id=actor.user_id)
+    attempt_number = await sessions_queries.get_session_attempt_number(
+        db, actor.user_id, config_id
     )
-
-    if practice.is_practice(session_mode):
-        # A rehearsal consumes no attempt and anchors no cooldown, so the retake
-        # gate is skipped entirely and the row is numbered outside the 1..n space
-        # real attempts occupy. Its own ceiling was already enforced above.
-        attempt_number = practice.PRACTICE_ATTEMPT_NUMBER
-    else:
-        # FR-5.3 retake policy — gate a *new* attempt on the config's
-        # ``max_attempts`` ceiling and ``cooldown_hours`` window. Only reached
-        # when there is no live session (the idempotent short-circuit above
-        # returns the in-progress row without consuming a fresh attempt).
-        await _enforce_retake_policy(db, config_id=config_id, student_id=actor.user_id)
-        attempt_number = await sessions_queries.get_session_attempt_number(
-            db, actor.user_id, config_id
-        )
 
     # A new session runs at the config's canonical mode, not the client value.
     session_input_mode = (
@@ -466,7 +357,6 @@ async def start_session(
         interview_config_id=config_id,
         student_id=actor.user_id,
         attempt_number=attempt_number,
-        session_mode=session_mode,
         status="in_progress",
         input_mode=session_input_mode,
         onboarding_stage="identity_check",
@@ -475,7 +365,7 @@ async def start_session(
     db.add(session)
     await flush_or_conflict(db)
 
-    first_question = await _first_published_question(db, config_id, session_mode=session_mode)
+    first_question = await _first_published_question(db, config_id)
     if first_question is not None:
         db.add(
             InterviewSessionQuestion(
@@ -528,7 +418,7 @@ async def _maybe_upgrade_input_mode(
 
 
 async def _ensure_first_question_attached(
-    db: AsyncSession, session_id: UUID, config_id: UUID, *, session_mode: str
+    db: AsyncSession, session_id: UUID, config_id: UUID
 ) -> None:
     """Attach question #1 to ``session_id`` if it has none yet.
 
@@ -548,7 +438,7 @@ async def _ensure_first_question_attached(
     ).scalar_one()
     if int(count) > 0:
         return
-    first_question = await _first_published_question(db, config_id, session_mode=session_mode)
+    first_question = await _first_published_question(db, config_id)
     if first_question is None:
         return
     db.add(
@@ -2024,7 +1914,7 @@ async def _legacy_advance(
 
     asked_ids = await _asked_question_ids(db, session.id)
     next_question = await _next_published_question_after(
-        db, session.interview_config_id, asked_ids, session_mode=session.session_mode
+        db, session.interview_config_id, asked_ids
     )
     if next_question is None:
         # No further question: persist the short final-question transition as
@@ -2249,29 +2139,17 @@ async def submit_session(
     await db.commit()
     await db.refresh(session)
 
-    # A practice run is never graded. It gets the criterion-level feedback task
-    # instead, which writes no ``pass_verdict`` — that NULL is safe only because
-    # ``session_mode`` keeps the stalled-evaluation sweep from reading it as
-    # "stranded", and only because the two tasks are separate functions.
     # Reaching the assessment is the line, not answering: a candidate who got to
     # the questions and skipped them HAS been assessed and is still graded
     # (unanswered questions score zero).
     has_content = not never_reached_assessment and (user_message_count > 0 or reason != "timed_out")
     if arq_pool is not None and has_content:
-        if practice.is_practice(session.session_mode):
-            await arq_pool.enqueue_job(  # type: ignore[attr-defined]
-                _PRACTICE_FEEDBACK_TASK,
-                actor.user_id,
-                session.id,
-                _job_id=f"interview-practice-feedback:{session.id}",
-            )
-        else:
-            await arq_pool.enqueue_job(  # type: ignore[attr-defined]
-                _EVALUATE_INTERVIEW_SESSION_TASK,
-                actor.user_id,
-                session.id,
-                _job_id=f"interview-evaluation:{session.id}",
-            )
+        await arq_pool.enqueue_job(  # type: ignore[attr-defined]
+            _EVALUATE_INTERVIEW_SESSION_TASK,
+            actor.user_id,
+            session.id,
+            _job_id=f"interview-evaluation:{session.id}",
+        )
     return session
 
 

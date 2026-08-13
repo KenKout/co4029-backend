@@ -45,8 +45,6 @@ from abridgeai.features.interviews.schemas import (
     InterviewForTakingPublic,
     InterviewOnboardingRespondRequest,
     InterviewOnboardingRespondResponse,
-    InterviewPracticeFeedback,
-    InterviewPracticeInfo,
     InterviewProgressRead,
     InterviewQuestionPublic,
     InterviewSessionFinishRequest,
@@ -172,9 +170,6 @@ async def get_interview_for_taking(
                 select(func.count(InterviewSession.id)).where(
                     InterviewSession.interview_config_id == config_id,
                     InterviewSession.student_id == current_user.user_id,
-                    # Practice runs consume no attempt, so they must not be able
-                    # to hide the interview from the student who rehearsed.
-                    InterviewSession.session_mode != "practice",
                 )
             )
         ).scalar_one()
@@ -193,7 +188,6 @@ async def get_interview_for_taking(
             .where(
                 InterviewQuestion.interview_config_id == config_id,
                 InterviewQuestion.review_status == "approved",
-                InterviewQuestion.practice_only.is_(False),
             )
             .order_by(InterviewQuestion.position)
             .limit(1)
@@ -218,67 +212,6 @@ async def get_interview_for_taking(
             else None
         ),
         outcome_count=int(outcome_count),
-    )
-
-
-@router.get(
-    "/interview-configs/{config_id}/practice",
-    response_model=InterviewPracticeInfo,
-)
-async def get_practice_info(
-    config_id: UUID,
-    current_user: Annotated[CurrentUser, Depends(get_current_user)],
-    db: Annotated[AsyncSession, Depends(get_db)],
-) -> InterviewPracticeInfo:
-    """Whether this student may rehearse, and the criteria they are judged on.
-
-    Its own route rather than fields on the taking payload: that payload's
-    contract test pins an exact key set, and it is the right place for the
-    learner contract to be pinned literally.
-
-    Returning criterion text here is a deliberate, teacher-gated disclosure and
-    the only learner-facing use of ``InterviewOutcomePublic``. It stays clear of
-    everything that makes a rubric gameable — no ``importance_weight``, no
-    ``min_outcomes_to_pass``, no model answers, and no question from either
-    partition. It also does not relax the output guard: the interviewer still
-    cannot utter rubric text, in practice exactly as in assessment.
-    """
-    from abridgeai.features.interviews import practice  # noqa: PLC0415
-    from abridgeai.features.interviews.models import InterviewConfig  # noqa: PLC0415
-    from abridgeai.features.interviews.queries import (
-        authoring as authoring_queries,  # noqa: PLC0415
-    )
-    from abridgeai.features.interviews.schemas import InterviewOutcomePublic  # noqa: PLC0415
-
-    config = await db.get(InterviewConfig, config_id)
-    if config is None or config.status != "published":
-        raise _not_found("interview_config", config_id)
-    await _ensure_config_course_enrolled(db, current_user, config)
-
-    if not config.practice_mode_enabled:
-        # No criteria either: rubric visibility is part of what the teacher opts
-        # into, so an interview without practice discloses exactly what it did
-        # before this feature existed.
-        return InterviewPracticeInfo(available=False, unavailable_reason="not_enabled")
-
-    outcomes = await authoring_queries.list_outcomes_for_config(db, config_id)
-    criteria = [InterviewOutcomePublic.model_validate(o) for o in outcomes]
-
-    if await taking_service.count_practice_questions(db, config_id) == 0:
-        # Enabled but unusable — the teacher marked no question practice-only.
-        # Reported honestly rather than as a generic "unavailable" so the student
-        # knows it is not their doing, and so support can tell the two apart.
-        return InterviewPracticeInfo(
-            available=False, unavailable_reason="no_practice_questions", criteria=criteria
-        )
-
-    used = await taking_service.count_practice_runs_used(db, current_user.user_id, config_id)
-    remaining = max(0, practice.PRACTICE_MAX_RUNS - used)
-    return InterviewPracticeInfo(
-        available=remaining > 0,
-        unavailable_reason=None if remaining > 0 else "limit_reached",
-        runs_remaining=remaining,
-        criteria=criteria,
     )
 
 
@@ -328,29 +261,6 @@ async def start_session(
     except taking_service.InterviewMaxAttemptsReached as exc:
         # FR-5.3 — attempt ceiling reached.
         raise _conflict(str(exc)) from exc
-    except taking_service.InterviewPracticeUnavailable as exc:
-        # The student asked to rehearse an interview that cannot serve one. The
-        # reason travels with the 409 because the two cases have different fixes
-        # and neither belongs to the student.
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={
-                "error": "practice_unavailable",
-                "message": str(exc),
-                "reason": exc.reason,
-            },
-        ) from exc
-    except taking_service.InterviewPracticeLimitReached as exc:
-        # Distinct from the attempt ceiling: no graded attempt was consumed, so
-        # this must not read as "you are out of tries".
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={
-                "error": "practice_limit_reached",
-                "message": str(exc),
-                "max_runs": exc.max_runs,
-            },
-        ) from exc
     except AppError as exc:
         raise _bad_request(str(exc)) from exc
     await db.commit()
@@ -376,7 +286,6 @@ async def start_session(
         question_count_remaining=None,
         onboarding_stage=session.onboarding_stage,
         interview_language=session.interview_language,
-        session_mode=session.session_mode,
         assessment_started_at=session.assessment_started_at,
         history=history,
     )
@@ -818,7 +727,6 @@ async def get_session(
         assessment_started_at=session.assessment_started_at,
         onboarding_stage=session.onboarding_stage,
         interview_language=session.interview_language,
-        session_mode=session.session_mode,
         ended_at=session.ended_at,
         resume_deadline_at=session.resume_deadline_at,
         current_question_index=None,
@@ -991,59 +899,6 @@ async def finish_session(
     )
 
 
-@router.get(
-    "/interview-sessions/{session_id}/practice-feedback",
-    response_model=InterviewPracticeFeedback,
-)
-async def get_practice_feedback(
-    session_id: UUID,
-    current_user: Annotated[CurrentUser, Depends(_REQUIRE_SESSION_OWNER)],
-    db: Annotated[AsyncSession, Depends(get_db)],
-) -> InterviewPracticeFeedback:
-    """Which criteria a rehearsal demonstrated. Practice sessions only.
-
-    A graded session returns 404 rather than its outcome verdicts: those are
-    the raw material of a pass/fail decision, and thesis §4.3 gives students the
-    binary verdict plus prose remediation, never the per-criterion breakdown.
-    Practice can show it precisely because there is no verdict to leak.
-    """
-    from abridgeai.features.interviews import practice  # noqa: PLC0415
-    from abridgeai.features.interviews.queries import (
-        authoring as authoring_queries,  # noqa: PLC0415
-    )
-    from abridgeai.features.interviews.queries import sessions as sessions_queries  # noqa: PLC0415
-    from abridgeai.features.interviews.schemas import (  # noqa: PLC0415
-        InterviewPracticeCriterionResult,
-    )
-
-    session = await taking_service.get_session_for_user(db, session_id, current_user.user_id)
-    if session is None or not practice.is_practice(session.session_mode):
-        raise _not_found("interview_session", session_id)
-
-    evaluations = await sessions_queries.get_outcome_evaluations(db, session_id)
-    if not evaluations:
-        # Not yet, or never. The task stamps a failure marker precisely so the
-        # client can stop polling instead of spinning on a result that is not
-        # coming.
-        marker = (session.internal_summary_json or {}).get("practice") or {}
-        return InterviewPracticeFeedback(ready=False, failed=bool(marker.get("failed")))
-
-    outcomes = await authoring_queries.list_outcomes_for_config(db, session.interview_config_id)
-    text_by_id = {o.id: o.outcome_text for o in outcomes}
-    return InterviewPracticeFeedback(
-        ready=True,
-        criteria=[
-            InterviewPracticeCriterionResult(
-                outcome_id=e.outcome_id,
-                outcome_text=text_by_id.get(e.outcome_id, ""),
-                met=bool(e.verdict_met),
-            )
-            for e in evaluations
-            if e.outcome_id in text_by_id
-        ],
-    )
-
-
 @router.get("/interview-sessions/{session_id}/gap-report", response_model=GapReportRead)
 async def get_gap_report(
     session_id: UUID,
@@ -1105,7 +960,6 @@ async def list_my_sessions(
             assessment_started_at=s.assessment_started_at,
             onboarding_stage=s.onboarding_stage,
             interview_language=s.interview_language,
-            session_mode=s.session_mode,
             ended_at=s.ended_at,
             resume_deadline_at=s.resume_deadline_at,
             current_question_index=None,

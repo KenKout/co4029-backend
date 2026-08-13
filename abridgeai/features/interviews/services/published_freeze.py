@@ -40,10 +40,10 @@ from abridgeai.features.interviews.models import InterviewConfig
 # sitting the same published interview", and the second is the one that matters.
 #
 # Everything else is frozen: time_limit_minutes, min_outcomes_to_pass, persona,
-# persona_profile, supported_modes, tts_voice, supplementary_instructions,
-# practice_mode_enabled and the security response knobs are all read by
-# ``services/taking.py`` / ``orchestrator/`` while an interview runs, or by
-# ``services/evaluation.py`` when it is graded.
+# persona_profile, supported_modes, tts_voice, supplementary_instructions and
+# the security response knobs are all read by ``services/taking.py`` /
+# ``orchestrator/`` while an interview runs, or by ``services/evaluation.py``
+# when it is graded.
 PUBLISHED_EDITABLE_CONFIG_FIELDS = frozenset(
     {
         "title",

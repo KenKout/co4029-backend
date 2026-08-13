@@ -93,26 +93,16 @@ async def list_questions_for_config(
     config_id: UUID,
     *,
     review_status: str | None = None,
-    practice_only: bool | None = None,
 ) -> list[InterviewQuestion]:
     """Questions for any interview config, optionally filtered by review.
 
     ``review_status`` is one of ``pending`` / ``approved`` / ``edited``
     / ``rejected``; ``None`` returns every state (default — the
     teacher review queue needs to see pending + edited side-by-side).
-
-    ``practice_only`` selects a bank partition: ``False`` for a graded run,
-    ``True`` for a rehearsal, ``None`` for both (default — teacher-facing
-    listings must see the whole bank). Both filters default to "no filter" so
-    that every existing caller keeps its current result set; callers that pick a
-    question for a running session pass the partition explicitly. See
-    :mod:`abridgeai.features.interviews.practice`.
     """
     stmt = select(InterviewQuestion).where(InterviewQuestion.interview_config_id == config_id)
     if review_status is not None:
         stmt = stmt.where(InterviewQuestion.review_status == review_status)
-    if practice_only is not None:
-        stmt = stmt.where(InterviewQuestion.practice_only == practice_only)
     stmt = stmt.order_by(InterviewQuestion.position)
     return list((await db.execute(stmt)).scalars().all())
 

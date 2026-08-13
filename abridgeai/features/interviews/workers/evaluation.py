@@ -168,36 +168,7 @@ async def evaluate_interview_session_task(
         clear_request_context()
 
 
-async def generate_practice_feedback_task(
-    ctx: dict[str, Any],
-    actor_id: UUID,
-    session_id: UUID,
-) -> None:
-    """ARQ task: judge a practice run against its criteria, without grading it.
-
-    Registered with the default single try, unlike the evaluation task above.
-    That task retries because a student is blocked on a verdict and the session
-    is stamped ``failed`` if it never lands. None of that applies here: a
-    rehearsal has no verdict, nothing downstream is gated on the feedback, and
-    the stalled-evaluation sweep skips practice — so a retry budget would buy
-    nothing, and the service already swallows its own failures.
-
-    ``ctx`` is unused for the same reason: there is no ``job_try`` to branch on.
-    """
-    del ctx
-    set_worker_actor(actor_id)
-    bind_request_context(session_id=str(session_id), actor_id=str(actor_id))
-    sessionmaker = get_sessionmaker()
-    try:
-        async with sessionmaker() as db:
-            await evaluation_service.generate_practice_feedback(db, session_id)
-    finally:
-        current_actor_var.set(None)
-        clear_request_context()
-
-
 __all__ = [
     "EVALUATION_MAX_TRIES",
     "evaluate_interview_session_task",
-    "generate_practice_feedback_task",
 ]

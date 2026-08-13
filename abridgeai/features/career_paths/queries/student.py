@@ -140,7 +140,7 @@ _PATH_COURSE_PROGRESS_SQL = text(
         LEFT JOIN (
             SELECT interview_config_id, BOOL_OR(pass_verdict IS TRUE) AS passed
             FROM interview_sessions
-            WHERE student_id = :student_id AND session_mode <> 'practice'
+            WHERE student_id = :student_id
             GROUP BY interview_config_id
         ) s ON s.interview_config_id = ic.id
         GROUP BY pc.course_id

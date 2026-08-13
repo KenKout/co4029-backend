@@ -34,7 +34,6 @@ FROZEN_FIELDS = [
     "tts_voice",
     "time_limit_minutes",
     "min_outcomes_to_pass",
-    "practice_mode_enabled",
     "supplementary_instructions",
     "security_response_policy",
     "security_max_consecutive_attempts",

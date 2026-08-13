@@ -235,12 +235,8 @@ async def publish_interview_config(
     config = await _require_config(db, config_id)
     if config.status == "archived":
         raise AppError(f"Cannot publish archived interview config {config_id}")
-    # Graded partition only. A config whose approved questions are all marked
-    # practice-only has nothing to assess with, so counting the whole bank here
-    # would let it publish into an interview that immediately runs out of
-    # questions.
     approved = await authoring_queries.list_questions_for_config(
-        db, config_id, review_status="approved", practice_only=False
+        db, config_id, review_status="approved"
     )
     if not approved:
         raise AppError(
@@ -328,11 +324,8 @@ async def adaptive_readiness(db: AsyncSession, config_id: UUID) -> dict[str, Any
     )
 
     config = await _require_config(db, config_id)
-    # Readiness measures the graded interview, so practice questions are out:
-    # counting them would report coverage and difficulty spread the assessment
-    # does not actually have.
     approved = await authoring_queries.list_questions_for_config(
-        db, config_id, review_status="approved", practice_only=False
+        db, config_id, review_status="approved"
     )
     outcomes = await authoring_queries.list_outcomes_for_config(db, config_id)
 
@@ -390,7 +383,6 @@ async def add_question(
         model_answer=(data.get("model_answer") or "").strip() or None,
         review_status="approved",
         ai_generated=False,
-        practice_only=bool(data.get("practice_only", False)),
         source_refs_json=data.get("source_refs_json", []) or [],
         reviewed_by=actor.user_id,
         reviewed_at=utcnow(),

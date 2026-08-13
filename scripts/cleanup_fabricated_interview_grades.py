@@ -98,7 +98,6 @@ _SELECT_AFFECTED = text("""
              WHERE m.session_id = s.id AND m.role = 'user')  AS user_msgs_any
     FROM interview_sessions s
     WHERE s.assessment_started_at IS NULL
-      AND s.session_mode <> 'practice'
       AND (
             s.pass_verdict IS NOT NULL
             OR EXISTS (SELECT 1 FROM gap_reports g
