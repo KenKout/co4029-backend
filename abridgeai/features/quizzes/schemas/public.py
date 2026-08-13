@@ -106,6 +106,26 @@ class QuizQuestionOptionPublic(_ORMModel):
     option_format: str = "plain"
 
 
+def _extract_fill_blank_bank(options: object, payload: object) -> list[str]:
+    """Return the fill_blank word bank: option texts when present, else the
+    answer words from ``original_generated_payload.correct_answer``."""
+    bank: list[str] = []
+    if isinstance(options, list):
+        for opt in options:
+            text = (
+                opt.get("option_text")
+                if isinstance(opt, dict)
+                else getattr(opt, "option_text", None)
+            )
+            if isinstance(text, str) and text.strip():
+                bank.append(text.strip())
+    if not bank:
+        correct = payload.get("correct_answer") if isinstance(payload, dict) else None
+        if isinstance(correct, list):
+            bank = [b.strip() for b in correct if isinstance(b, str) and b.strip()]
+    return bank
+
+
 class QuizQuestionPublic(_ORMModel):
     """Student-facing projection of one ``QuizQuestion`` row.
 
@@ -173,6 +193,10 @@ class QuizQuestionPublic(_ORMModel):
     match_prompts: list[str] = []
     match_choices: list[str] = []
     ordering_items: list[str] = []
+    # fill_blank word bank: the answer words (or the AI-generated option bank
+    # with distractors) served SHUFFLED so the positional answer key never
+    # leaks to a learner. Derived in ``_derive_no_leak_type_fields``.
+    fill_blank_choices: list[str] = []
 
     @model_validator(mode="before")
     @classmethod
@@ -245,15 +269,33 @@ class QuizQuestionPublic(_ORMModel):
                     break
             derived["ordering_items"] = items
 
+        if _get("question_type") == "fill_blank":
+            bank = _extract_fill_blank_bank(
+                _get("options"), _get("original_generated_payload")
+            )
+            if bank:
+                rng = random.Random(seed ^ 0x51ED270B)
+                shuffled = list(bank)
+                for _ in range(8):
+                    rng.shuffle(shuffled)
+                    if len(shuffled) <= 1 or shuffled != bank:
+                        break
+                derived["fill_blank_choices"] = shuffled
+
         if not derived:
             return data
 
         # Merge derived fields with the source. For an ORM object we build a
         # dict of the declared fields so Pydantic still reads the rest. The
-        # three derived list fields are only injected when computed; otherwise
-        # we omit them so their schema default (``[]``) applies (a raw getattr
+        # derived list fields are only injected when computed; otherwise we
+        # omit them so their schema default (``[]``) applies (a raw getattr
         # would return None on the ORM row and break list validation).
-        _DERIVED_FIELDS = {"match_prompts", "match_choices", "ordering_items"}
+        _DERIVED_FIELDS = {
+            "match_prompts",
+            "match_choices",
+            "ordering_items",
+            "fill_blank_choices",
+        }
         if isinstance(data, dict):
             return {**data, **derived}
         merged: dict[str, Any] = {}
