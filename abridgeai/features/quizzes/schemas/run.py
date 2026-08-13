@@ -203,6 +203,12 @@ class QuizGenerationRequest(BaseModel):
     based on bloom + position. Strict ``easy/medium/hard`` pin every
     generated question to that band."""
 
+    expected_response_time_ms: Annotated[int | None, Field(gt=0, le=86_400_000)] = None
+    """Hard-set ``expected_response_time_ms`` on every generated question so
+    the teacher doesn't have to save each question's expected time after
+    generation. ``None`` leaves it unset (legacy behaviour); the SPA sends
+    60_000 ms (60 s) by default."""
+
     bloom_distribution: dict[BloomLevel, int] = Field(default_factory=dict)
     """Optional per-bloom question budget. Sum must be ``<= question_count``;
     enforced by :meth:`_check_bloom_distribution_total` so the AI stage

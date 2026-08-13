@@ -206,6 +206,7 @@ async def persist_questions(
     # correct outcome tag. Empty list → learning_outcome_id stays NULL and the
     # teacher assigns manually. Invalid UUID strings are skipped defensively.
     target_outcome_ids = _parse_target_outcome_ids(run.config_json)
+    config_expected_ms = (run.config_json or {}).get("expected_response_time_ms")
 
     persisted: list[QuizQuestion] = []
     for offset, payload in enumerate(questions, start=1):
@@ -235,7 +236,8 @@ async def persist_questions(
             difficulty=payload.get("difficulty"),
             bloom_level=payload.get("bloom_level"),
             review_status="pending",
-            expected_response_time_ms=payload.get("expected_response_time_ms"),
+            expected_response_time_ms=payload.get("expected_response_time_ms")
+            or config_expected_ms,
             learning_outcome_id=learning_outcome_id,
             source_refs=structured_refs,
             original_generated_payload=payload.get("original_generated_payload"),
@@ -298,7 +300,9 @@ async def replace_question_in_place(
     question.difficulty = payload.get("difficulty")
     question.bloom_level = payload.get("bloom_level")
     question.review_status = "pending"
-    question.expected_response_time_ms = payload.get("expected_response_time_ms")
+    question.expected_response_time_ms = payload.get("expected_response_time_ms") or (
+        run.config_json or {}
+    ).get("expected_response_time_ms")
     question.source_refs = structured_refs if structured_refs is not None else []
     question.original_generated_payload = payload.get("original_generated_payload")
     question.reviewed_by = None

@@ -449,9 +449,14 @@ async def start_attempt(
 
     questions = await _load_quiz_questions_for_taking(db, quiz_id)
 
-    cooldown_map = await _load_cooldown_map(
-        db, actor.user_id, [question.id for question in questions]
-    )
+    # Card-level (SR) cooldown only applies when the quiz itself sets a
+    # cooldown. A quiz with no ``cooldown_hours`` must not inherit the SR
+    # failure cooldown as a hidden default — the student can retry immediately.
+    cooldown_map: dict[UUID, datetime] = {}
+    if quiz.cooldown_hours:
+        cooldown_map = await _load_cooldown_map(
+            db, actor.user_id, [question.id for question in questions]
+        )
     if questions and len(cooldown_map) == len(questions):
         cards_due_at = sorted(cooldown_map.items(), key=lambda item: item[1])
         retry_available_at = cards_due_at[0][1]

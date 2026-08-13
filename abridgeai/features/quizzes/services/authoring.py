@@ -1056,6 +1056,7 @@ async def start_generation_run(
         "question_count": payload.question_count,
         "question_types": list(payload.question_types),
         "difficulty": payload.difficulty,
+        "expected_response_time_ms": payload.expected_response_time_ms,
         "bloom_distribution": dict(payload.bloom_distribution),
         "include_prerequisites": payload.include_prerequisites,
         "model_preference": payload.model_preference,
