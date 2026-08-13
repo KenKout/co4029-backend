@@ -114,9 +114,7 @@ class InterviewPassRequiredError(AppError):
         self.interview_config_id = interview_config_id
 
 
-async def _ensure_interview_pass_lock(
-    db: AsyncSession, *, quiz_id: UUID, student_id: UUID
-) -> None:
+async def _ensure_interview_pass_lock(db: AsyncSession, *, quiz_id: UUID, student_id: UUID) -> None:
     """FR-5.3 server-side gate: block a quiz attempt when the quiz's module has a
     published interview with ``lock_quiz_ef_until_pass`` the student hasn't passed.
 
@@ -421,8 +419,12 @@ async def start_attempt(
         else None
     )
     quiz = await published_queries.get_quiz_for_taking(
-        db, quiz_id, actor.user_id, effective=effective,
-        password=password, client_ip=client_ip,
+        db,
+        quiz_id,
+        actor.user_id,
+        effective=effective,
+        password=password,
+        client_ip=client_ip,
     )
     if quiz is None:
         raise NotFoundError(f"Quiz {quiz_id} not found")
@@ -867,6 +869,19 @@ async def get_attempt_review(
         if not vis.show_correct_answers:
             for opt in review_options:
                 opt.is_correct = False
+        # Structured correct answers (matching pairs / ordering sequence) are
+        # disclosed under the same visibility flag as option correctness.
+        show_correct = vis.show_correct_answers
+        matching_correct = (
+            [dict(p) for p in (question.match_pairs or [])]
+            if show_correct and question.match_pairs
+            else None
+        )
+        ordering_correct = (
+            list(question.ordering_sequence)
+            if show_correct and question.ordering_sequence
+            else None
+        )
         review_questions.append(
             QuizAttemptReviewQuestion(
                 question_id=question.id,
@@ -884,6 +899,8 @@ async def get_attempt_review(
                 else Decimal("0"),
                 hint_used=ans.hint_used if ans else False,
                 t_actual_ms=ans.t_actual_ms if ans else None,
+                matching_correct=matching_correct,
+                ordering_correct=ordering_correct,
             )
         )
 

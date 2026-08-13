@@ -148,6 +148,13 @@ class QuizAttemptReviewQuestion(BaseModel):
     hint_used: bool = False
     t_actual_ms: int | None = None
 
+    # Correct answers for structured non-option types, disclosed only when
+    # review visibility allows correct answers (None otherwise / for other
+    # types): matching → the authored [{left, right}] pairs, ordering → the
+    # correct sequence.
+    matching_correct: list[dict[str, str]] | None = None
+    ordering_correct: list[str] | None = None
+
 
 class ReviewVisibilityFlags(BaseModel):
     """Phase 2: resolved per-window review-visibility flags echoed to the client.
