@@ -28,7 +28,6 @@ to keep this orchestrator focused on run-state bookkeeping.
 from __future__ import annotations
 
 import json
-import logging
 from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
@@ -37,6 +36,7 @@ from uuid import UUID
 from sqlalchemy import text
 
 from abridgeai.core.exceptions import NotFoundError
+from abridgeai.core.observability import get_logger
 from abridgeai.core.security import utcnow
 from abridgeai.features.interviews.ai.pipelines.backfill import (
     generate_with_backfill,
@@ -63,7 +63,7 @@ if TYPE_CHECKING:
     )
 
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 @dataclass
@@ -125,6 +125,12 @@ async def run_interview_generation(
             run=state,
             config=config,
             pipeline_run_id=state.id,
+        )
+        logger.info(
+            "interview_retrieval_complete",
+            chunk_count=len(context.chunks),
+            kg_concept_count=len(context.kg_concepts),
+            weak_topic_count=len(context.weak_topic_chunks),
         )
         state.config_json = state.config_json | {
             "retrieval": _retrieval_summary(context),
@@ -393,10 +399,10 @@ async def _persist_questions(
     )
     if stored:
         logger.info(
-            "interview generation: embedded %d/%d question(s) for config %s",
-            stored,
-            len(created),
-            config.id,
+            "interview_generation_embedded",
+            embedded=stored,
+            total=len(created),
+            config_id=str(config.id),
         )
 
 

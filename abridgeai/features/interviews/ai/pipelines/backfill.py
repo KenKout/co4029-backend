@@ -13,6 +13,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any, cast
 
+from abridgeai.core.observability import get_logger
 from abridgeai.features.interviews.ai.stages.generation import (
     generate_interview_questions,
 )
@@ -36,6 +37,8 @@ if TYPE_CHECKING:
 # protects LLM spend/latency on a source that genuinely cannot support the
 # requested count (e.g. too few indexed chunks to ground more questions).
 MAX_BACKFILL_ATTEMPTS = 3
+
+logger = get_logger(__name__)
 
 
 def accepted_drafts(
@@ -123,11 +126,34 @@ async def generate_with_backfill(
         all_verdicts.extend(round_verdicts)
         accepted.extend(round_accepted)
 
+        round_summary = validation_summary(round_verdicts)
+        logger.info(
+            "interview_generation_round",
+            round=attempt,
+            requested=request_count,
+            produced=len(round_drafts),
+            validation_accepted=round_summary["accepted"],
+            validation_rejected=round_summary["rejected"],
+            failure_codes=round_summary["failures"],
+            new_accepted=len(round_accepted),
+            accepted_total=len(accepted),
+            target=target_count,
+        )
+
         if on_progress is not None:
             await on_progress(min(len(accepted), target_count), target_count)
 
         if not round_drafts or not round_accepted:
             break
+
+    logger.info(
+        "interview_generation_backfill_complete",
+        accepted=len(accepted),
+        target=target_count,
+        backfill_rounds=backfill_rounds,
+        drafts_total=len(all_drafts),
+        rejected_total=len(all_drafts) - len(accepted),
+    )
 
     return all_drafts, all_verdicts, accepted, backfill_rounds
 
