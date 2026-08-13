@@ -151,9 +151,12 @@ class QuizAttemptReviewQuestion(BaseModel):
     # Correct answers for structured non-option types, disclosed only when
     # review visibility allows correct answers (None otherwise / for other
     # types): matching → the authored [{left, right}] pairs, ordering → the
-    # correct sequence.
+    # correct sequence, fill_blank → the positional correct answers,
+    # short_answer → the accepted answer string.
     matching_correct: list[dict[str, str]] | None = None
     ordering_correct: list[str] | None = None
+    fill_blank_correct: list[str] | None = None
+    short_answer_correct: str | None = None
 
 
 class ReviewVisibilityFlags(BaseModel):

@@ -882,6 +882,18 @@ async def get_attempt_review(
             if show_correct and question.ordering_sequence
             else None
         )
+        # fill_blank / short_answer carry their answer in
+        # original_generated_payload.correct_answer (a positional list for
+        # fill_blank, a plain string for short_answer).
+        payload = question.original_generated_payload or {}
+        fill_blank_correct: list[str] | None = None
+        short_answer_correct: str | None = None
+        if show_correct and isinstance(payload, dict):
+            correct = payload.get("correct_answer")
+            if question.question_type == "fill_blank" and isinstance(correct, list):
+                fill_blank_correct = [str(b) for b in correct if isinstance(b, str)]
+            elif question.question_type == "short_answer" and isinstance(correct, str):
+                short_answer_correct = correct
         review_questions.append(
             QuizAttemptReviewQuestion(
                 question_id=question.id,
@@ -901,6 +913,8 @@ async def get_attempt_review(
                 t_actual_ms=ans.t_actual_ms if ans else None,
                 matching_correct=matching_correct,
                 ordering_correct=ordering_correct,
+                fill_blank_correct=fill_blank_correct,
+                short_answer_correct=short_answer_correct,
             )
         )
 

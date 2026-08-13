@@ -361,6 +361,10 @@ class QuizPublic(_ORMModel):
     available_from: datetime | None = None
     available_until: datetime | None = None
     due_at: datetime | None = None
+    # Phase 2: teacher-configured review-visibility matrix (3 time-windows ×
+    # 5 flags), exposed so the client can gate the "Review" affordance. The
+    # resolved per-attempt flags still come from the review payload.
+    review_options: dict[str, Any] = {}
     # SAFE expectation-setting signal: how many approved questions the student
     # will face. Exposes only the COUNT, never the question text / options /
     # is_correct flags — those remain in QuizQuestionPublic and are served
