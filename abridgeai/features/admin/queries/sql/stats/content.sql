@@ -35,4 +35,27 @@ SELECT
             FROM processing_jobs pj
             GROUP BY pj.status
         ) t
-    ) AS processing_jobs_by_status;
+    ) AS processing_jobs_by_status,
+    (
+        SELECT COUNT(*)
+        FROM courses c
+        WHERE c.deleted_at IS NULL
+          AND c.created_at >= now() - interval '7 days'
+          AND (CAST(:organization_id AS uuid) IS NULL
+               OR c.organization_id = CAST(:organization_id AS uuid))
+    ) AS courses_created_7d,
+    (
+        SELECT COUNT(*)
+        FROM learning_materials lm
+        JOIN lessons l ON l.id = lm.lesson_id AND l.deleted_at IS NULL
+        JOIN modules m ON m.id = l.module_id AND m.deleted_at IS NULL
+        JOIN courses c ON c.id = m.course_id AND c.deleted_at IS NULL
+        WHERE lm.created_at >= now() - interval '7 days'
+          AND (CAST(:organization_id AS uuid) IS NULL
+               OR c.organization_id = CAST(:organization_id AS uuid))
+    ) AS materials_created_7d,
+    (
+        SELECT COUNT(*)
+        FROM processing_jobs pj
+        WHERE pj.created_at >= date_trunc('day', now())
+    ) AS processing_jobs_created_today;

@@ -73,14 +73,15 @@ async def active_users_trend(
     return [(row["day"], int(row["count"] or 0)) for row in rows]
 
 
-async def content_breakdown(
-    db: AsyncSession, *, organization_id: UUID | None
-) -> dict[str, list[dict[str, Any]]]:
+async def content_breakdown(db: AsyncSession, *, organization_id: UUID | None) -> dict[str, Any]:
     row = (await db.execute(_CONTENT_SQL, {"organization_id": organization_id})).mappings().one()
     return {
         "courses_by_status": list(row["courses_by_status"] or []),
         "materials_by_type": list(row["materials_by_type"] or []),
         "processing_jobs_by_status": list(row["processing_jobs_by_status"] or []),
+        "courses_created_7d": int(row["courses_created_7d"] or 0),
+        "materials_created_7d": int(row["materials_created_7d"] or 0),
+        "processing_jobs_created_today": int(row["processing_jobs_created_today"] or 0),
     }
 
 

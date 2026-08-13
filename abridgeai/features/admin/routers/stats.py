@@ -65,6 +65,11 @@ class ContentOut(BaseModel):
     courses_by_status: list[dict[str, Any]]
     materials_by_type: list[dict[str, Any]]
     processing_jobs_by_status: list[dict[str, Any]]
+    # Analytics deltas for the content page's summary cards. Courses /
+    # materials are org-scoped; processing jobs carry no org edge (global).
+    courses_created_7d: int = 0
+    materials_created_7d: int = 0
+    processing_jobs_created_today: int = 0
 
 
 class DashboardOut(BaseModel):
@@ -143,9 +148,7 @@ async def get_active_users_trend(
     (zero-activity days included) so the chart is continuous.
     """
     org_id = await resolve_admin_scope(db, user)
-    raw = await stats_service.active_users_trend(
-        db, organization_id=org_id, days=days
-    )
+    raw = await stats_service.active_users_trend(db, organization_id=org_id, days=days)
     points = [ActiveUsersTrendPoint(date=d, count=n) for d, n in raw]
     return ActiveUsersTrendOut(points=points)
 
