@@ -294,6 +294,14 @@ def _normalize_question_type(raw: Any) -> str:  # noqa: ANN401 -- arbitrary DTO 
     return _LEGACY_TYPE_ALIASES.get(cleaned, cleaned)
 
 
+def _validate_fill_blank_options(options: list[Any]) -> None:
+    """fill_blank word bank: every entry needs text. The correct/distractor
+    split is the caller's job (the AI path validates it more strictly in
+    ``shape_validators.validate_fill_blank``)."""
+    if any(not str(option.option_text).strip() for option in options):
+        raise AppError("Question option text is required")
+
+
 def _validate_question_options(
     question_type: str, options: list[Any], *, single_answer: bool = True
 ) -> None:
@@ -305,8 +313,10 @@ def _validate_question_options(
     * ``multiple_choice`` — 2..10 options; single_answer → exactly 1 correct,
       else ≥1 correct (Phase 7 multi-select).
     * ``true_false`` — exactly 2 options keyed T/F, exactly 1 correct.
-    * ``short_answer`` / ``fill_blank`` / ``numerical`` — no options (the
-      expected answer is carried on the question's own columns / payload).
+    * ``short_answer`` / ``numerical`` — no options (the expected answer is
+      carried on the question's own columns / payload).
+    * ``fill_blank`` — ``options`` is the WORD BANK: the correct entries (one
+      per distinct blank) plus any teacher-declared distractors.
     """
     if question_type == "multiple_choice":
         if len(options) < 2 or len(options) > 10:
@@ -326,6 +336,8 @@ def _validate_question_options(
             raise AppError("true_false option keys must be T, F")
         if sum(1 for option in options if option.is_correct) != 1:
             raise AppError("true_false questions must have exactly one correct option")
+    elif question_type == "fill_blank":
+        _validate_fill_blank_options(options)
     elif options:
         raise AppError(f"{question_type} questions do not support options")
 
@@ -736,13 +748,51 @@ async def bulk_approve_questions(
     return updated
 
 
-async def _update_question_options(
+async def _replace_fill_blank_options(
     db: AsyncSession,
     question: QuizQuestion,
     option_payloads: list[Any],
 ) -> None:
-    if question.question_type not in {"multiple_choice", "true_false"}:
-        raise AppError("Only multiple_choice and true_false questions support option editing")
+    """Replace a fill_blank word bank in full (delete + insert). Option ids
+    aren't referenced anywhere (the grader reads
+    ``original_generated_payload.correct_answer``; the student word bank reads
+    ``option_text``), so this is safe and lets the teacher add/remove
+    distractors freely."""
+    from sqlalchemy import delete as sa_delete  # noqa: PLC0415
+
+    await db.execute(
+        sa_delete(QuizQuestionOption).where(
+            QuizQuestionOption.question_id == question.id
+        )
+    )
+    for position, option_payload in enumerate(option_payloads, start=1):
+        db.add(
+            QuizQuestionOption(
+                question_id=question.id,
+                option_key=str(
+                    getattr(option_payload, "option_key", None)
+                    or f"O{position:02d}"
+                ).strip().upper(),
+                option_text=str(getattr(option_payload, "option_text", "")).strip(),
+                is_correct=bool(getattr(option_payload, "is_correct", False)),
+                position=position,
+            )
+        )
+
+
+async def _update_question_options(  # noqa: C901 -- MCQ/TF option-sync is inherently branchy (pre-existing)
+    db: AsyncSession,
+    question: QuizQuestion,
+    option_payloads: list[Any],
+) -> None:
+    if question.question_type not in {"multiple_choice", "true_false", "fill_blank"}:
+        raise AppError(
+            "Only multiple_choice, true_false and fill_blank questions support option editing"
+        )
+
+    if question.question_type == "fill_blank":
+        await _replace_fill_blank_options(db, question, option_payloads)
+        return
 
     from sqlalchemy import select  # noqa: PLC0415
 
