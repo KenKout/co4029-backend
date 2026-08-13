@@ -111,6 +111,28 @@ def normalize_text(text: str) -> str:
     return _MULTI_NEWLINE_RE.sub("\n\n", out)
 
 
+def sanitize_json_value(value: object) -> object:
+    """Recursively strip control characters so ``value`` is JSONB-safe.
+
+    PostgreSQL's ``jsonb`` rejects ``\u0000`` and psycopg raises
+    ``UntranslatableCharacter`` when a broken PDF text layer or OCR output
+    smuggles one into ``extracted_metadata``. Dicts and lists are mutated in
+    place (so a frozen ``ExtractedContent.metadata`` dict stays usable);
+    strings pass through :func:`_strip_controls`.
+    """
+    if isinstance(value, dict):
+        for key, item in value.items():
+            value[key] = sanitize_json_value(item)
+        return value
+    if isinstance(value, list):
+        for index, item in enumerate(value):
+            value[index] = sanitize_json_value(item)
+        return value
+    if isinstance(value, str):
+        return _strip_controls(value)
+    return value
+
+
 def build_hyphen_vocab(text: str) -> set[str]:
     """Collect hyphenated compounds the document writes intact.
 
@@ -156,4 +178,4 @@ def dehyphenate(text: str, vocab: set[str] | None = None) -> tuple[str, int]:
     return _LINE_HYPHEN_RE.sub(_replace, text), joins
 
 
-__all__ = ["build_hyphen_vocab", "dehyphenate", "normalize_text"]
+__all__ = ["build_hyphen_vocab", "dehyphenate", "normalize_text", "sanitize_json_value"]

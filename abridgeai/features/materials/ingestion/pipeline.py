@@ -69,6 +69,7 @@ from abridgeai.ai.knowledge_graph import (
 from abridgeai.ai.llm import EmbeddingClient, LLMGateway
 from abridgeai.ai.models import ProcessingJob
 from abridgeai.ai.preprocessing.dedup import link_semantic_duplicates
+from abridgeai.ai.preprocessing.normalize import sanitize_json_value
 from abridgeai.core.config import get_settings
 from abridgeai.core.db import get_sessionmaker
 from abridgeai.core.runtime_settings import resolve_settings
@@ -568,6 +569,11 @@ async def _run_stages(
             mode=getattr(ctx.material, "preprocess_mode", "full") or "full",
             runtime=runtime_settings,
         )
+
+        # PostgreSQL jsonb rejects \u0000 (psycopg raises
+        # UntranslatableCharacter); strip control chars from the persisted
+        # metadata so a stray NUL in a broken PDF text layer can't fail ingest.
+        sanitize_json_value(extracted.metadata)
 
         stage_label = "chunking"
         ctx.version.processing_status = "chunking"
