@@ -83,6 +83,7 @@ from abridgeai.features.courses.schemas import (
     ModuleReorder,
     ModuleUpdate,
     OutlineSection,
+    ReviewQueueItem,
     RosterStudentRead,
     SlugAvailability,
     StreamUrlResponse,
@@ -272,6 +273,24 @@ async def get_teacher_dashboard_stats(
     enforced in the service via owner/assignment match.
     """
     return await authoring_service.get_teacher_dashboard_stats(db, user=current_user)
+
+
+@router.get(
+    "/dashboard/review-queue/{kind}",
+    response_model=list[ReviewQueueItem],
+)
+async def list_review_queue_items(
+    kind: Literal["quiz-cards", "interview-questions", "materials"],
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_AUTHORING_LIST)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> list[ReviewQueueItem]:
+    """Drill-down rows behind one "Needs your review" category."""
+    try:
+        return await authoring_service.list_review_queue_items(
+            db, user=current_user, kind=kind
+        )
+    except NotFoundError as exc:
+        raise _not_found(str(exc)) from exc
 
 
 @router.get("/courses/{course_id}", response_model=CourseAuthoring)

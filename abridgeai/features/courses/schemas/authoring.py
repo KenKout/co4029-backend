@@ -235,6 +235,18 @@ class TeacherDashboardStats(BaseModel):
     cards_overdue: int = 0
 
 
+class ReviewQueueItem(BaseModel):
+    """One navigable group inside a review-queue category."""
+
+    course_id: UUID
+    course_title: str
+    module_id: UUID | None = None
+    module_title: str | None = None
+    target_id: UUID
+    target_title: str
+    count: int
+
+
 class ModuleAuthoring(ModulePublic):
     description: str | None = None
     status: Literal["draft", "published", "archived"]

@@ -77,6 +77,7 @@ from abridgeai.features.courses.schemas import (
     ModuleItemAuthoring,
     ModuleItemUpdate,
     ModuleUpdate,
+    ReviewQueueItem,
     TeacherDashboardStats,
 )
 from abridgeai.features.identity.models import StorageObject
@@ -1038,6 +1039,41 @@ async def get_teacher_dashboard_stats(
         avg_retention_ef=review.avg_retention_ef,
         cards_overdue=review.cards_overdue,
     )
+
+
+_REVIEW_QUEUE_LISTERS = {
+    "quiz-cards": authoring_queries.list_pending_quiz_cards_for_courses,
+    "interview-questions": authoring_queries.list_pending_interview_questions_for_courses,
+    "materials": authoring_queries.list_materials_ready_for_courses,
+}
+
+
+async def list_review_queue_items(
+    db: AsyncSession, *, user: CurrentUser, kind: str
+) -> list[ReviewQueueItem]:
+    """Drill-down rows behind one "Needs your review" category."""
+    lister = _REVIEW_QUEUE_LISTERS.get(kind)
+    if lister is None:
+        raise NotFoundError(f"Unknown review queue kind {kind!r}")
+
+    owned = await authoring_queries.list_courses_for_owner(db, user.user_id, include_archived=False)
+    assigned = await authoring_queries.list_courses_assigned_to_teacher(
+        db, user.user_id, include_archived=False
+    )
+    course_ids = list({course.id for course in (*owned, *assigned)})
+    rows = await lister(db, course_ids)
+    return [
+        ReviewQueueItem(
+            course_id=row.course_id,
+            course_title=row.course_title,
+            module_id=row.module_id,
+            module_title=row.module_title,
+            target_id=row.target_id,
+            target_title=row.target_title,
+            count=row.count,
+        )
+        for row in rows
+    ]
 
 
 async def get_authoring_course(db: AsyncSession, course_id: UUID) -> CourseAuthoring:

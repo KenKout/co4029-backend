@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from importlib import resources
 from typing import Any, NamedTuple
 from uuid import UUID
@@ -447,6 +448,150 @@ async def count_review_queue_and_retention_for_courses(
         avg_retention_ef=float(avg_ef) if card_count and avg_ef is not None else 0.0,
         cards_overdue=int(cards_overdue),
     )
+
+
+class ReviewQueueDrilldownRow(NamedTuple):
+    """One navigable group inside a review-queue category."""
+
+    course_id: UUID
+    course_title: str
+    module_id: UUID | None
+    module_title: str | None
+    target_id: UUID
+    target_title: str
+    count: int
+
+
+async def list_pending_quiz_cards_for_courses(
+    db: AsyncSession, course_ids: Sequence[UUID]
+) -> list[ReviewQueueDrilldownRow]:
+    """Quizzes holding ``review_status='pending'`` questions, one row each.
+
+    Grouped by quiz rather than by question: the teacher approves cards on
+    the quiz page, so a per-question list would just be many links to the
+    same place.
+    """
+    from abridgeai.features.quizzes.models import Quiz, QuizQuestion
+
+    if not course_ids:
+        return []
+    stmt = (
+        select(
+            Course.id,
+            Course.title,
+            Module.id,
+            Module.title,
+            Quiz.id,
+            Quiz.title,
+            func.count(QuizQuestion.id),
+        )
+        .select_from(QuizQuestion)
+        .join(Quiz, Quiz.id == QuizQuestion.quiz_id)
+        .join(Course, Course.id == Quiz.course_id)
+        .join(Module, Module.id == Quiz.module_id, isouter=True)
+        .where(
+            Quiz.course_id.in_(course_ids),
+            Quiz.deleted_at.is_(None),
+            QuizQuestion.deleted_at.is_(None),
+            QuizQuestion.review_status == "pending",
+        )
+        .group_by(Course.id, Course.title, Module.id, Module.title, Quiz.id, Quiz.title)
+        .order_by(Course.title, Module.title, Quiz.title)
+    )
+    return [ReviewQueueDrilldownRow(*row) for row in (await db.execute(stmt)).all()]
+
+
+async def list_pending_interview_questions_for_courses(
+    db: AsyncSession, course_ids: Sequence[UUID]
+) -> list[ReviewQueueDrilldownRow]:
+    """Interview configs holding pending questions, one row each."""
+    from abridgeai.features.interviews.models import InterviewConfig, InterviewQuestion
+
+    if not course_ids:
+        return []
+    stmt = (
+        select(
+            Course.id,
+            Course.title,
+            Module.id,
+            Module.title,
+            InterviewConfig.id,
+            InterviewConfig.title,
+            func.count(InterviewQuestion.id),
+        )
+        .select_from(InterviewQuestion)
+        .join(InterviewConfig, InterviewConfig.id == InterviewQuestion.interview_config_id)
+        .join(Course, Course.id == InterviewConfig.course_id)
+        .join(Module, Module.id == InterviewConfig.module_id, isouter=True)
+        .where(
+            InterviewConfig.course_id.in_(course_ids),
+            InterviewConfig.deleted_at.is_(None),
+            InterviewQuestion.deleted_at.is_(None),
+            InterviewQuestion.review_status == "pending",
+        )
+        .group_by(
+            Course.id,
+            Course.title,
+            Module.id,
+            Module.title,
+            InterviewConfig.id,
+            InterviewConfig.title,
+        )
+        .order_by(Course.title, Module.title, InterviewConfig.title)
+    )
+    return [ReviewQueueDrilldownRow(*row) for row in (await db.execute(stmt)).all()]
+
+
+async def list_materials_ready_for_courses(
+    db: AsyncSession, course_ids: Sequence[UUID]
+) -> list[ReviewQueueDrilldownRow]:
+    """Lessons whose ingested materials have no quiz yet, one row each."""
+    from abridgeai.ai.models import ProcessingJob
+    from abridgeai.features.materials.models import LearningMaterial, LearningMaterialVersion
+    from abridgeai.features.quizzes.models import Quiz, QuizSourceLesson
+
+    if not course_ids:
+        return []
+    lesson_has_quiz = (
+        select(QuizSourceLesson.lesson_id)
+        .join(Quiz, Quiz.id == QuizSourceLesson.quiz_id)
+        .where(QuizSourceLesson.lesson_id == Lesson.id, Quiz.deleted_at.is_(None))
+        .exists()
+    )
+    stmt = (
+        select(
+            Course.id,
+            Course.title,
+            Module.id,
+            Module.title,
+            Lesson.id,
+            Lesson.title,
+            func.count(func.distinct(LearningMaterialVersion.id)),
+        )
+        .select_from(LearningMaterialVersion)
+        .join(LearningMaterial, LearningMaterial.id == LearningMaterialVersion.material_id)
+        .join(Lesson, Lesson.id == LearningMaterial.lesson_id)
+        .join(Module, Module.id == Lesson.module_id)
+        .join(Course, Course.id == Module.course_id)
+        .join(
+            ProcessingJob,
+            (ProcessingJob.entity_id == LearningMaterialVersion.id)
+            & (ProcessingJob.entity_type == "material_version")
+            & (ProcessingJob.job_type == "full_pipeline")
+            & (ProcessingJob.status == "completed"),
+        )
+        .where(
+            Module.course_id.in_(course_ids),
+            Module.deleted_at.is_(None),
+            Lesson.deleted_at.is_(None),
+            LearningMaterial.deleted_at.is_(None),
+            LearningMaterialVersion.deleted_at.is_(None),
+            ~lesson_has_quiz,
+        )
+        .group_by(Course.id, Course.title, Module.id, Module.title, Lesson.id, Lesson.title)
+        .order_by(Course.title, Module.title, Lesson.title)
+    )
+    return [ReviewQueueDrilldownRow(*row) for row in (await db.execute(stmt)).all()]
 
 
 async def list_courses_for_owner(
