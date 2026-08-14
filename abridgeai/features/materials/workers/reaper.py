@@ -64,6 +64,9 @@ from abridgeai.core.observability import (
     clear_request_context,
     get_logger,
 )
+from abridgeai.features.interviews.services.completion_notify import (
+    notify_interview_generation_outcome,
+)
 from abridgeai.features.materials.ingestion.progress import publish_progress
 from abridgeai.features.materials.models import LearningMaterialVersion
 from abridgeai.features.materials.services.completion_notify import (
@@ -112,6 +115,10 @@ async def reconcile_orphaned_ingests_task(ctx: dict[str, Any]) -> None:
         # stays status='running' forever — the "stuck at 25%" symptom). Run
         # the quiz reconciler in the same tick so both recover automatically.
         await _run_reconcile_quiz(arq_pool=redis)
+        # Interview generation runs share the identical orphan failure mode
+        # (worker restart mid-run drops the ARQ job while the generation_runs
+        # row stays 'running'). Recover them in the same tick.
+        await _run_reconcile_interview(arq_pool=redis)
     finally:
         clear_request_context()
 
@@ -522,6 +529,200 @@ async def _run_reconcile_quiz(*, arq_pool: Any) -> None:
 
     _logger.info(
         "reaper_quiz_run_completed",
+        orphans_inspected=inspected,
+        requeued=requeued,
+        failed=failed,
+        live_runs=len(live_run_ids),
+    )
+
+
+# --- Interview generation-run reconciliation ---------------------------------
+
+# generation_runs has no retry_count column, so the durable re-enqueue budget
+# is tracked inside config_json under this key (mirrors the quiz reaper).
+_INTERVIEW_REAP_KEY = "reap_count"
+_INTERVIEW_MAX_REQUEUE_ATTEMPTS = 2
+# An interview run legitimately runs for minutes (several sequential LLM calls).
+# Only consider a run orphaned once it's older than this AND absent from the
+# live ARQ set — long enough that a healthy in-flight run is never reaped.
+_INTERVIEW_ORPHAN_GRACE_SECONDS = 300
+_INTERVIEW_STUCK_STATUSES = ("pending", "running")
+
+
+async def _live_interview_run_ids(redis: Any) -> set[UUID]:
+    """Run IDs that currently have a live ARQ ``run_interview_generation_task``.
+
+    Same liveness contract as the quiz scan: the run id is ``args[1]`` of the
+    stored ``(actor_id, generation_run_id)`` args. On any Redis error we re-raise
+    so the caller aborts rather than reaping live runs.
+    """
+    from arq.jobs import deserialize_job_raw  # noqa: PLC0415
+
+    live: set[UUID] = set()
+    if redis is None:
+        return live
+    keys = await redis.keys("arq:job:*")
+    for key in keys:
+        raw = await redis.get(key)
+        if raw is None:
+            continue
+        try:
+            fn, args, _kwargs, *_ = deserialize_job_raw(raw)
+        except Exception:  # noqa: BLE001 -- a malformed job shouldn't break the sweep
+            continue
+        if fn != "run_interview_generation_task":
+            continue
+        if len(args) >= 2:
+            try:
+                live.add(args[1] if isinstance(args[1], UUID) else UUID(str(args[1])))
+            except (TypeError, ValueError):
+                continue
+    return live
+
+
+async def _run_reconcile_interview(*, arq_pool: Any) -> None:
+    """Re-enqueue or fail interview ``generation_runs`` stuck with no live ARQ job.
+
+    Mirrors the quiz reaper. An interview run only writes its terminal state
+    (questions + ``status='completed'``) in a single commit at the very end, so
+    an orphaned run has persisted nothing and is safe to re-enqueue: the re-run
+    starts cleanly from retrieval.
+    """
+    cutoff = datetime.now(tz=UTC) - timedelta(seconds=_INTERVIEW_ORPHAN_GRACE_SECONDS)
+
+    try:
+        live_run_ids = await _live_interview_run_ids(arq_pool)
+    except Exception:  # noqa: BLE001 -- Redis down: abort rather than reap live runs
+        _logger.warning("reaper_interview_aborted_live_scan_unavailable", exc_info=True)
+        return
+
+    requeued = 0
+    failed = 0
+    inspected = 0
+    # (recipient_user_id, course_id, config_id) for each run the reaper gives up
+    # on this tick. Notifications are dispatched AFTER the terminal commit so a
+    # notify failure can't roll back the fail-state write.
+    to_notify: list[tuple[UUID | None, UUID | None, UUID | None]] = []
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as db:
+        # A still-zombie run row may be lock-held by an orphaned transaction
+        # that hasn't been cleaned up yet. Use a short lock_timeout so the
+        # reaper never blocks on it — a locked row is skipped this tick and
+        # retried next tick (by which point the idle-in-transaction backstop
+        # will have released it).
+        await db.execute(text("SET LOCAL lock_timeout = '3s'"))
+        stuck = (
+            (
+                await db.execute(
+                    select(GenerationRun).where(
+                        GenerationRun.generation_type == "interview",
+                        GenerationRun.status.in_(_INTERVIEW_STUCK_STATUSES),
+                        GenerationRun.updated_at < cutoff,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+        for run in stuck:
+            if run.id in live_run_ids:
+                continue  # backed by a live ARQ job — leave it alone
+
+            # Staleness is measured from the last activity timestamp, not
+            # created_at: a re-enqueued run's row can be hours old while the
+            # current attempt only just started. started_at (set when the
+            # dispatcher marks the run 'running') is the truthful "work began"
+            # signal; fall back to updated_at / created_at when it's unset
+            # (still 'pending').
+            started = run.started_at or run.updated_at or run.created_at
+            if started is not None and started >= cutoff:
+                continue
+
+            inspected += 1
+            config = dict(run.config_json or {})
+            reap_count = int(config.get(_INTERVIEW_REAP_KEY) or 0)
+
+            if reap_count >= _INTERVIEW_MAX_REQUEUE_ATTEMPTS:
+                run.status = "failed"
+                run.finished_at = datetime.now(tz=UTC)
+                run.config_json = config | {
+                    "failure": {
+                        "message": (
+                            f"interview generation could not be recovered after "
+                            f"{reap_count} automatic re-enqueue attempts; "
+                            "please retry generation"
+                        )
+                    }
+                }
+                failed += 1
+                # interview_config_id (from config_json) + course_id (on the run)
+                # feed the notification deep-link.
+                to_notify.append(
+                    (
+                        run.requested_by,
+                        run.course_id,
+                        _coerce_uuid(config.get("interview_config_id")),
+                    )
+                )
+                _logger.warning(
+                    "reaper_interview_run_failed_exhausted",
+                    generation_run_id=str(run.id),
+                    reap_count=reap_count,
+                )
+                continue
+
+            # Re-enqueue: bump the durable counter, reset to a clean pending
+            # state, commit BEFORE enqueuing so the worker never races a
+            # not-yet-committed row.
+            run.status = "pending"
+            run.started_at = None
+            run.config_json = config | {_INTERVIEW_REAP_KEY: reap_count + 1}
+            actor_id = run.requested_by
+            await db.commit()
+
+            if arq_pool is None:
+                continue
+            try:
+                await arq_pool.enqueue_job(  # type: ignore[attr-defined]
+                    "run_interview_generation_task", actor_id, run.id
+                )
+            except Exception:  # noqa: BLE001 -- log + continue; next run retries
+                _logger.exception(
+                    "reaper_interview_requeue_enqueue_failed",
+                    generation_run_id=str(run.id),
+                )
+                continue
+
+            requeued += 1
+            _logger.info(
+                "reaper_interview_run_requeued",
+                generation_run_id=str(run.id),
+                attempt=reap_count + 1,
+            )
+
+        await db.commit()
+
+    # Notify each teacher whose run the reaper gave up on (best-effort; a fresh
+    # session so it's fully decoupled from the reaper's terminal commit above).
+    if to_notify:
+        async with sessionmaker() as notify_db:
+            for recipient_id, course_id, config_id in to_notify:
+                await notify_interview_generation_outcome(
+                    notify_db,
+                    recipient_user_id=recipient_id,
+                    config_id=config_id,
+                    course_id=course_id,
+                    interview_title=None,
+                    succeeded=False,
+                    error_message="Automatic recovery gave up; please retry generation.",
+                    arq_pool=arq_pool,
+                )
+            await notify_db.commit()
+
+    _logger.info(
+        "reaper_interview_run_completed",
         orphans_inspected=inspected,
         requeued=requeued,
         failed=failed,

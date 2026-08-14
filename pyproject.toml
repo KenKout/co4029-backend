@@ -405,6 +405,12 @@ ignore_imports = [
     # query for the last SR reminder per student). Same side-effect-channel
     # rationale as the dispatch/messages carve-outs above.
     "abridgeai.features.spaced_repetition.workers.scan_due_cards -> abridgeai.features.notifications.models",
+    # Generation completion/failure notifications are a side-effect channel:
+    # the reaper (materials) reaches into quizzes/interviews completion_notify
+    # to tell a teacher their run was recovered or failed, exactly like the
+    # spaced_repetition → notifications carve-outs above. No public API exists.
+    "abridgeai.features.materials.workers.reaper -> abridgeai.features.quizzes.services.completion_notify",
+    "abridgeai.features.materials.workers.reaper -> abridgeai.features.interviews.services.completion_notify",
     # Courses queries JOIN cross-feature models for ORM-hydrated reads.
     # These are read-only JOINs (no writes to foreign tables); the ORM
     # approach replaces raw SQL that previously bypassed the linter.
