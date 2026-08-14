@@ -27,6 +27,7 @@ to keep this orchestrator focused on run-state bookkeeping.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass
 from datetime import datetime
@@ -220,6 +221,11 @@ async def run_interview_generation(
             arq_pool=arq_pool,
         )
         await db.commit()
+    except asyncio.CancelledError:
+        # CancelledError (BaseException) bypasses `except Exception`; roll back
+        # so a cancelled run doesn't hold its row lock "idle in transaction".
+        await db.rollback()
+        raise
     except Exception as exc:
         await db.rollback()
         fresh = await quizzes_public.get_generation_run(db, generation_run_id)
