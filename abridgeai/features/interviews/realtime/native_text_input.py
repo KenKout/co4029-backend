@@ -98,7 +98,7 @@ def make_text_input_cb(
         if turn.turn_action == tp.DEFAULT_TURN_ACTION:
             await _fold_typed_answer(sess, turn.text)
 
-        await _reply(sess, turn)
+        await _reply(sess, turn, publisher)
 
     return _on_text_input
 
@@ -123,22 +123,52 @@ async def _fold_typed_answer(sess: Any, text: str) -> None:  # noqa: ANN401 - se
         logger.exception("typed turn fold failed")
 
 
-async def _reply(sess: Any, turn: tp.InboundTurn) -> None:  # noqa: ANN401 - see _on_text_input
+async def _reply(
+    sess: Any,  # noqa: ANN401 - see _on_text_input
+    turn: tp.InboundTurn,
+    publisher: ControlPublisher,
+) -> None:
     """The SDK default's three steps, with the action's framing applied.
 
     ``generate_reply`` is deliberately NOT awaited: it returns a handle and
     awaiting it would hold the text-stream handler open for the whole spoken
     reply.
+
+    For the assistance actions the reply IS assistance: the pending-kind marker
+    and the client notice are set here, so the utterance is badged as
+    clarification live and persisted as one across a reload. ``repeat`` is
+    conversation rather than help, but it renders best in the same nested rail,
+    so it shares the clarification kind.
     """
+    userdata = getattr(sess, "userdata", None)
     kwargs: dict[str, Any] = {"user_input": turn.text}
     if turn.turn_action == "hint":
         kwargs["tools"] = [_HINT_TOOL]
     elif (framing := _ACTION_INSTRUCTIONS.get(turn.turn_action)) is not None:
         kwargs["instructions"] = framing
+        if userdata is not None and turn.turn_action in _ASSISTANCE_KINDS:
+            userdata.pending_assistant_kind = _ASSISTANCE_KINDS[turn.turn_action]
+            await publisher.agent_action(kind=turn.turn_action)
 
     async with sess._claim_user_turn():  # noqa: SLF001 - the SDK's own default callback does this
-        await sess.interrupt()
+        # force=True: the opening and the rejoin re-read deliberately run
+        # with allow_interruptions=False, and a candidate typing an answer
+        # while the question is being read must cut through them. A plain
+        # interrupt() raises on those handles and the exception killed the
+        # WHOLE reply — the candidate's turn was graded but never answered
+        # (production: "Sending your answer…" spinning at the opening).
+        try:
+            await sess.interrupt(force=True)
+        except RuntimeError:
+            logger.warning("interrupt before typed reply failed; replying anyway")
         sess.generate_reply(**kwargs)
+
+
+_ASSISTANCE_KINDS: dict[str, str] = {
+    "repeat": "clarification",
+    "clarify": "clarification",
+    "explain_term": "clarification",
+}
 
 
 def _session_id(sess: Any) -> Any:  # noqa: ANN401 - see _on_text_input

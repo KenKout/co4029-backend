@@ -33,6 +33,19 @@ class _Question:
         self.prompt_text = prompt_text
 
 
+class _Selector:
+    """Callable stand-in for ``BankSelector``: selecting consumes the pool."""
+
+    def __init__(self, *questions: _Question) -> None:
+        self._questions = list(questions)
+
+    def __call__(self) -> _Question | None:
+        return self._questions.pop(0) if self._questions else None
+
+    def remaining(self) -> int:
+        return len(self._questions)
+
+
 class _Ctx:
     """Minimal stand-in for ``RunContext`` — the tools only touch ``userdata``."""
 
@@ -51,7 +64,7 @@ def _userdata(*, points: int = 0, **kw: object) -> InterviewUserdata:
         required_outcome_ids=["o1"],
         outcome_titles={"o1": "Explain index selection"},
         questions_remaining=3,
-        select_next=lambda: _Question("o2", "What is a covering index?"),
+        select_next=_Selector(_Question("o2", "What is a covering index?")),
     )
     for key, value in kw.items():
         setattr(data, key, value)
@@ -120,6 +133,23 @@ async def test_next_question_moves_the_question_the_grader_reads(
     assert data.current_question_text == "What is a covering index?"
 
 
+async def test_next_question_syncs_the_questions_remaining_counter(
+    tools: InterviewToolsMixin,
+) -> None:
+    """The snapshot published inside the advance must renumber the header.
+
+    ``question_number`` is derived as ``total - questions_remaining``, and only
+    ``fold_turn`` recomputed that plain int — so between a tool advance and the
+    next graded answer the client card showed the NEW question while the header
+    still said "Question 1 of 3".
+    """
+    data = _userdata(points=COVERAGE_SUFFICIENT_POINTS)
+    assert data.questions_remaining == 3
+    await _call(tools.interview_next_question, _Ctx(data))
+
+    assert data.questions_remaining == 0, "remaining was not resynced at the advance"
+
+
 async def test_hint_scaffolds_the_question_after_an_advance(
     tools: InterviewToolsMixin,
 ) -> None:
@@ -183,6 +213,29 @@ async def test_request_hint_refund_never_goes_below_zero(
     data.state.current_question_follow_up_count = 0
     await _call(tools.interview_request_hint, _Ctx(data))
     assert data.state.current_question_follow_up_count == 0
+
+
+async def test_request_hint_refunds_at_most_once_per_question(
+    tools: InterviewToolsMixin,
+) -> None:
+    """A second granted hint must not give the follow-up budget back again.
+
+    The model calls the hint tool on its own scaffolding instinct too, and an
+    unbounded refund let those calls cancel one charge every turn: the count
+    ping-ponged below its threshold and the question could never auto-advance
+    (production session 13e0b4c4: three follow-ups, count stuck at 1).
+    """
+    data = _userdata(points=0)
+    assert data.state is not None
+    data.state.current_question_follow_up_count = 1
+    await _call(tools.interview_request_hint, _Ctx(data))
+    assert data.state.current_question_follow_up_count == 0, "first refund stands"
+
+    data.state.current_question_follow_up_count = 2
+    await _call(tools.interview_request_hint, _Ctx(data))
+    assert data.state.current_question_follow_up_count == 2, (
+        "the second hint on one question must not refund again"
+    )
 
 
 async def test_request_hint_does_not_refund_when_spent(

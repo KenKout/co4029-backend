@@ -103,6 +103,12 @@ class ControlStatus(StrEnum):
     # is no field-level merge to get wrong and a dropped snapshot self-heals on
     # the next one. `turn_key` is null because no single turn owns it.
     SNAPSHOT = "snapshot"
+    # The agent is about to deliver assistance (a hint, a clarification, ...).
+    # `turn_action` carries which kind. Published when the server grants it, so
+    # the client can badge the agent's NEXT live utterance correctly instead of
+    # guessing from the preceding turn — a typed "give me a hint" arrives as an
+    # answer and gives the labeler nothing to read.
+    AGENT_ACTION = "agent_action"
 
 
 class InboundTurnError(ValueError):

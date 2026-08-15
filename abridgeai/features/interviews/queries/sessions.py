@@ -82,18 +82,25 @@ async def get_user_interview_sessions(
     user_id: UUID,
     *,
     status: str | None = None,
+    interview_config_id: UUID | None = None,
     limit: int = 20,
 ) -> list[InterviewSession]:
     """Recent sessions for a user, newest first.
 
     ``status`` filters to one of the five session states
     (``in_progress`` / ``completed`` / ``timed_out`` / ``abandoned``
-    / ``failed``); ``None`` returns every state. ``limit`` caps the
-    result count for the user's history page.
+    / ``failed``); ``None`` returns every state. ``interview_config_id``
+    scopes the list to one config's sessions (the live-interview page needs
+    exactly those and nothing else); ``None`` returns every config.
+    ``limit`` caps the result count for the user's history page.
     """
     stmt = select(InterviewSession).where(InterviewSession.student_id == user_id)
     if status is not None:
         stmt = stmt.where(InterviewSession.status == status)
+    if interview_config_id is not None:
+        stmt = stmt.where(
+            InterviewSession.interview_config_id == interview_config_id
+        )
     stmt = stmt.order_by(InterviewSession.started_at.desc()).limit(limit)
     return list((await db.execute(stmt)).scalars().all())
 

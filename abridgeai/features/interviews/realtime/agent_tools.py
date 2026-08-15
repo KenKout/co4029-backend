@@ -111,6 +111,12 @@ class InterviewToolsMixin:
         # ladder below. Left unwritten it pins both to question ONE for the whole
         # session.
         _set_current_question_text(ctx, selected.prompt_text)
+        # The plain int on the userdata does not follow the pool on its own —
+        # only `fold_turn` and `native_advance` recomputed it. Left stale here,
+        # the snapshot published below said `total - remaining` for the PREVIOUS
+        # question: the card moved to the new question while the header stayed
+        # "Question 1 of 3" until the next graded answer.
+        _sync_questions_remaining(ctx)
         # The client learns the question changed ONLY from here. The model's spoken
         # words arrive as transcription, which carries no question identity, so
         # without this the UI stays on the previous question card for the rest of
@@ -147,8 +153,23 @@ class InterviewToolsMixin:
         # of using a hint button. Without this refund the follow-up budget (2)
         # exhausts before the hint ladder (3), the question advances with no
         # transition, and the candidate never gets the rungs they asked for.
-        if data.current_question_follow_up_count > 0:
+        #
+        # Bounded to ONE per question: the model also calls this tool on its
+        # own scaffolding instinct, and an unbounded refund let those calls
+        # cancel the budget every turn — the count ping-ponged below its
+        # threshold and the question could never auto-advance.
+        if (
+            data.current_question_follow_up_count > 0
+            and data.current_question_hint_refunds < 1
+        ):
             data.current_question_follow_up_count -= 1
+            data.current_question_hint_refunds += 1
+        # The next thing the model says IS the hint: mark it for the transcript
+        # recorder (so a reload renders kind="hint", not FOLLOW-UP) and tell the
+        # client (so the live utterance gets the HINT badge). A refused hint
+        # sets neither — the refusal speech is an ordinary probe.
+        ctx.userdata.pending_assistant_kind = "hint"  # type: ignore[attr-defined]
+        await ctx.userdata.publish_agent_action("hint")  # type: ignore[attr-defined]
         if question:
             return (
                 f"Hint rung {grant.level} for the current question. "
@@ -236,6 +257,11 @@ def _select_question(ctx: RunContext[object]) -> object | None:
     # selection logic stays where the property tests can reach it.
     selector = ctx.userdata.select_next  # type: ignore[attr-defined]
     return selector()
+
+
+def _sync_questions_remaining(ctx: RunContext[object]) -> None:
+    selector = ctx.userdata.select_next  # type: ignore[attr-defined]
+    ctx.userdata.questions_remaining = selector.remaining()  # type: ignore[attr-defined]
 
 
 async def _finalize_session(ctx: RunContext[object]) -> None:

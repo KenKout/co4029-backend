@@ -43,6 +43,7 @@ class _Session:
         self.userdata = type("_U", (), {"interview_session_id": uuid4()})()
         self.room_io = type("_RIO", (), {"room": type("_R", (), {"local_participant": local})})
         self.interrupted = False
+        self.interrupt_forced = False
         self.replies: list[dict[str, Any]] = []
         self.claimed = 0
 
@@ -58,8 +59,9 @@ class _Session:
 
         return _Guard()
 
-    async def interrupt(self) -> None:
+    async def interrupt(self, *, force: bool = False) -> None:
         self.interrupted = True
+        self.interrupt_forced = force
 
     def generate_reply(self, **kwargs: Any) -> object:
         self.replies.append(kwargs)
@@ -205,3 +207,19 @@ async def test_the_sdk_default_three_steps_still_run() -> None:
     assert sess.claimed == 1, "the user turn must be claimed"
     assert sess.interrupted is True
     assert sess.replies, "generate_reply must still be called"
+
+
+async def test_typed_answer_cuts_through_a_non_interruptible_speech() -> None:
+    """A typed answer must interrupt the opening / rejoin re-read by force.
+
+    Those speeches deliberately run ``allow_interruptions=False``; a plain
+    interrupt() raises on them and the exception killed the whole reply — the
+    candidate's turn was graded but never answered (production: "Sending your
+    answer…" spinning while the opening was still playing).
+    """
+    sess, agent, local, cb = _harness()
+
+    await cb(sess, _Event("my answer", {"turn_key": "tk-abcd1234"}))
+
+    assert sess.interrupt_forced is True, "the interrupt must be forced"
+    assert sess.replies == [{"user_input": "my answer"}]

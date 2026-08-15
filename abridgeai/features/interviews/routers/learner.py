@@ -29,7 +29,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Annotated, Any, cast
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from abridgeai.core.db import get_db
@@ -221,12 +221,15 @@ async def get_gap_report(
 async def list_my_sessions(
     current_user: Annotated[CurrentUser, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
+    config_id: Annotated[UUID | None, Query()] = None,
 ) -> list[InterviewSessionPublic]:
     from sqlalchemy import select  # noqa: PLC0415
 
     from abridgeai.features.interviews.models import InterviewConfig  # noqa: PLC0415
 
-    sessions = await taking_service.get_user_sessions(db, current_user.user_id)
+    sessions = await taking_service.get_user_sessions(
+        db, current_user.user_id, interview_config_id=config_id
+    )
     # Batch-fetch the parent config title + course for each distinct config so the
     # student history list is self-describing (the session row only carries the id).
     config_ids = {s.interview_config_id for s in sessions}

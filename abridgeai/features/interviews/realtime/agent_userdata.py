@@ -93,6 +93,13 @@ class InterviewUserdata:
     # only that one flag marks the point of no return for both.
     finished: bool = False
 
+    # The assistance kind the agent's NEXT assistant utterance delivers
+    # ("hint" / "clarification"), set when the server grants assistance and
+    # consumed by the transcript recorder. Persisted rows otherwise all carry
+    # kind="question", so after a reload every hint in the history rendered as a
+    # FOLLOW-UP. None means the next utterance is ordinary interview speech.
+    pending_assistant_kind: str | None = None
+
     # Injected by the runtime. `select_next` runs the deterministic scorer
     # (selection.py) and returns the chosen question, or None when the bank is
     # exhausted — the model never picks.
@@ -100,9 +107,13 @@ class InterviewUserdata:
     finalize_session: Callable[[], Awaitable[None]] = _no_finalize
     # Persist runtime state, then publish a snapshot. Injected by the runtime
     # after `session.start`, because the room the snapshot rides on does not
-    # exist before that. A no-op default keeps the tools usable in tests and in a
-    # partially-wired diagnostic harness.
+    # exist before that. A no-op default keeps the tools usable in tests and in
+    # a partially-wired diagnostic harness.
     publish_state: Callable[[], Awaitable[None]] = _no_publish
+    # Tell the client the agent's next utterance is assistance of this kind, so
+    # the live transcript can badge it. Same injection/no-op pattern as
+    # `publish_state`.
+    publish_agent_action: Callable[[str], Awaitable[None]] = lambda kind: _no_publish()
 
 
 __all__ = ["InterviewUserdata", "SelectedQuestion"]

@@ -192,6 +192,17 @@ class InterviewRuntimeStateData:
     hint_level: int = 0
     reframe_count: int = 0
 
+    # How many follow-up charges the hint path has given back on the CURRENT
+    # question. The refund exists for a candidate who TYPES "give me a hint" —
+    # that turn arrives as an answer and is charged before the model grants the
+    # hint. But the model may also call the hint tool on its own scaffolding
+    # instinct, and an unbounded refund let that cancel the follow-up budget
+    # every turn: the count ping-ponged below its threshold and the question
+    # could never auto-advance (production: three follow-ups, count stuck at 1).
+    # One refund per question covers the typed-hint case without reopening that
+    # hole; resets with the rest of the per-question counters.
+    current_question_hint_refunds: int = 0
+
     # How many times the server has refused the agent's `end_interview` call
     # because required outcomes were still uncovered. Persisted (not per-process)
     # so a rejoin cannot reset it and hand a stubborn model a fresh budget — the
@@ -253,6 +264,7 @@ class InterviewRuntimeStateData:
             "completed_question_ids": list(self.completed_question_ids),
             "current_question_follow_up_count": self.current_question_follow_up_count,
             "total_follow_up_count": self.total_follow_up_count,
+            "current_question_hint_refunds": self.current_question_hint_refunds,
             "turns_in_phase": self.turns_in_phase,
             "warmup_turns_target": self.warmup_turns_target,
             "hint_level": self.hint_level,
@@ -308,6 +320,7 @@ class InterviewRuntimeStateData:
             completed_question_ids=list(data.get("completed_question_ids", []) or []),
             current_question_follow_up_count=int(data.get("current_question_follow_up_count", 0)),
             total_follow_up_count=int(data.get("total_follow_up_count", 0)),
+            current_question_hint_refunds=int(data.get("current_question_hint_refunds", 0)),
             turns_in_phase=int(data.get("turns_in_phase", 0)),
             warmup_turns_target=int(data.get("warmup_turns_target", 1)),
             hint_level=int(data.get("hint_level", 0)),

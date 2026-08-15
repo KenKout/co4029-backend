@@ -398,6 +398,7 @@ def reset_for_new_question(data: InterviewRuntimeStateData) -> None:
     data.hint_level = 0
     data.reframe_count = 0
     data.current_question_follow_up_count = 0
+    data.current_question_hint_refunds = 0
     data.advance_refusal_count = 0
 
 

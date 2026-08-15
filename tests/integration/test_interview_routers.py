@@ -1446,6 +1446,66 @@ async def test_my_sessions_carries_title_and_no_leakage(
             )
 
 
+async def test_my_sessions_scoped_by_config_id(
+    client: httpx.AsyncClient,
+    engine: AsyncEngine,
+    scenario: dict[str, uuid.UUID],
+    seeded_users: SeededUsers,
+) -> None:
+    """`?config_id=` returns only that config's sessions.
+
+    The live-interview page asks for its OWN config's sessions (resume
+    detection + past attempts). Unscoped, the list mixes every config and is
+    capped at 20 rows — a student with a fuller history silently loses the
+    in-progress session the page is trying to resume.
+    """
+    config_a = await _seed_published_config(
+        engine,
+        course_id=scenario["course_id"],
+        module_id=scenario["module_id"],
+        actor_id=seeded_users.admin_id,
+    )
+    config_b = await _seed_published_config(
+        engine,
+        course_id=scenario["course_id"],
+        module_id=scenario["module_id"],
+        actor_id=seeded_users.admin_id,
+    )
+    student_sid = await _seed_session(engine, seeded_users.student_id)
+    student_token = create_access_token(user_id=seeded_users.student_id, session_id=student_sid)
+    try:
+        for cfg in (config_a, config_b):
+            start_resp = await client.post(
+                f"/api/v1/interview-configs/{cfg}/sessions",
+                json={"input_mode": "text"},
+                headers=_auth(student_token),
+            )
+            assert start_resp.status_code == 201, start_resp.text
+
+        scoped = await client.get(
+            f"/api/v1/me/interview-sessions?config_id={config_a}",
+            headers=_auth(student_token),
+        )
+        assert scoped.status_code == 200, scoped.text
+        rows = scoped.json()
+        assert rows, "scoped query returned nothing for a config with a live session"
+        assert {row["interview_config_id"] for row in rows} == {str(config_a)}
+
+        unscoped = await client.get(
+            "/api/v1/me/interview-sessions", headers=_auth(student_token)
+        )
+        unscoped_ids = {row["interview_config_id"] for row in unscoped.json()}
+        assert {str(config_a), str(config_b)} <= unscoped_ids, (
+            "unscoped list dropped a config the student has sessions in"
+        )
+    finally:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("DELETE FROM auth_sessions WHERE id = :id"),
+                {"id": student_sid},
+            )
+
+
 async def test_teacher_lists_config_sessions_and_blocks_non_owner(
     client: httpx.AsyncClient,
     admin_bearer: str,

@@ -127,6 +127,16 @@ class ControlPublisher:
             )
         )
 
+    async def agent_action(self, *, kind: str) -> None:
+        await self._publish(
+            tp.ControlEvent(
+                status=tp.ControlStatus.AGENT_ACTION,
+                turn_key=None,
+                seq=0,
+                turn_action=kind,
+            )
+        )
+
     async def _publish(self, event: tp.ControlEvent) -> None:
         """Number and send one event. Never raises.
 

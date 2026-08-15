@@ -2181,8 +2181,11 @@ async def get_user_sessions(
     user_id: UUID,
     *,
     status: str | None = None,
+    interview_config_id: UUID | None = None,
 ) -> list[InterviewSession]:
-    return await sessions_queries.get_user_interview_sessions(db, user_id, status=status)
+    return await sessions_queries.get_user_interview_sessions(
+        db, user_id, status=status, interview_config_id=interview_config_id
+    )
 
 
 async def _current_session_question(

@@ -10,7 +10,6 @@ from abridgeai.features.career_paths.models import (
     CareerPath,
     CareerPathCourse,
     CareerPathStage,
-    StudentCareerEnrollment,
     StudentStageProgress,
 )
 from abridgeai.features.courses.api import public as courses_api

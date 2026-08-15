@@ -88,6 +88,16 @@ def room_options_for_mode(
             text_input_cb=text_input,
             audio_enabled=audio,
             video_enabled=False,
+            # A refresh disconnects the student for a few seconds. The SDK
+            # default tears the AgentSession down on that, but the JOB stays in
+            # the room: the rejoin then lands on a dead session whose text
+            # callback is detached ("no callback attached") and whose say()
+            # raises — every typed turn after the reload hangs forever, and no
+            # new dispatch happens because an agent is still in the room.
+            # Keeping the session open makes the rejoin resume the SAME job:
+            # state, note, re-read and lk.chat all alive. The hard-stop timer
+            # still bounds the job if the student never returns.
+            close_on_disconnect=False,
         ),
         RoomOutputOptions(transcription_enabled=True, audio_enabled=audio),
     )

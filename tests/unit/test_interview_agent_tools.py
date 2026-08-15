@@ -380,6 +380,7 @@ def test_reset_for_new_question_clears_the_per_question_counters() -> None:
     data.hint_level = 2
     data.reframe_count = 1
     data.current_question_follow_up_count = 2
+    data.current_question_hint_refunds = 1
     data.advance_refusal_count = 2
     data.end_refusal_count = 1
 
@@ -388,6 +389,7 @@ def test_reset_for_new_question_clears_the_per_question_counters() -> None:
     assert data.hint_level == 0
     assert data.reframe_count == 0
     assert data.current_question_follow_up_count == 0
+    assert data.current_question_hint_refunds == 0
     assert data.advance_refusal_count == 0
     # Ending is a SESSION decision, so its budget must NOT reset per question —
     # otherwise a model that wants to quit early gets a fresh argument every time.

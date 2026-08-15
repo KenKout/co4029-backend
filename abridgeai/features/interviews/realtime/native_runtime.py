@@ -474,6 +474,7 @@ async def run_native_interview(
     # Safe because the publisher resolves the room lazily on each publish.
     publisher = ControlPublisher(session, interview_session_id=userdata.interview_session_id)
     userdata.publish_state = _make_state_publisher(userdata, publisher, save=setup.save_state)
+    userdata.publish_agent_action = partial(publisher.agent_action)
     hard_stop.on_finalized = _make_finish_marker(userdata)
 
     # Route the tool's finalizer through the same once-only guard, so the model
@@ -522,7 +523,16 @@ async def run_native_interview(
             return
         student_disconnected = False
         question = userdata.current_question_text
-        if not question or userdata.finished:
+        if userdata.finished:
+            return
+        # A reloaded client resubscribes to the control topic from scratch, so
+        # its first render is the REST history — which may already lag the
+        # server's latest advance. A fresh snapshot re-syncs the card, the
+        # "n of m" counter and the deadline before the re-read finishes.
+        asyncio.create_task(  # noqa: RUF006 - fire-and-forget; publish_state never raises
+            userdata.publish_state()
+        )
+        if not question:
             return
         logger.info(
             "re-reading current question after rejoin (session=%s)",
@@ -625,13 +635,23 @@ def _record_conversation(session: AgentSession, userdata: InterviewUserdata) -> 
                 question_id = UUID(str(raw_question_id))
             except (ValueError, AttributeError, TypeError):
                 question_id = None
+        # An assistant item consumes the pending assistance kind set when the
+        # server granted a hint / clarification: this utterance IS that
+        # assistance. Everything else keeps the ordinary "question" kind, and
+        # the user turn before it stays an "answer" — the pending kind never
+        # applies to the candidate's own words.
+        if str(role) == "assistant":
+            kind = userdata.pending_assistant_kind or "question"
+            userdata.pending_assistant_kind = None
+        else:
+            kind = "answer"
         asyncio.create_task(  # noqa: RUF006 - fire-and-forget; record_turn never raises
             record_turn(
                 userdata.interview_session_id,
                 role=str(role),
                 text=text,
                 session_question_id=question_id,
-                kind="closing" if is_closing else ("answer" if str(role) == "user" else "question"),
+                kind="closing" if is_closing else kind,
             )
         )
 
