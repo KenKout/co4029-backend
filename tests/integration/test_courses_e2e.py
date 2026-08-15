@@ -236,6 +236,10 @@ async def cleanup_courses(engine: AsyncEngine) -> AsyncIterator[set[uuid.UUID]]:
             {"ids": list(ids)},
         )
         await conn.execute(
+            text("DELETE FROM course_enrollments WHERE course_id = ANY(:ids)"),
+            {"ids": list(ids)},
+        )
+        await conn.execute(
             text(
                 "DELETE FROM lessons WHERE module_id IN ("
                 "SELECT id FROM modules WHERE course_id = ANY(:ids))"
@@ -428,7 +432,17 @@ async def test_full_course_lifecycle_manager_teacher_student(
     assert by_slug.json()["id"] == str(course_id)
     assert by_slug.json()["status"] == "published"
 
-    # 5b. Student fetches the content tree -- the published module is present.
+    # 5b. Enroll the student first — the learner BR gate (learner.py) requires
+    # an active/completed enrollment before ANY course item is readable.
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO course_enrollments (id, student_id, course_id) "
+                "VALUES (gen_random_uuid(), :s, :c)"
+            ),
+            {"s": seeded_users.student_id, "c": course_id},
+        )
+    # 5c. Student fetches the content tree -- the published module is present.
     content = await client.get(
         f"/api/v1/courses/{course_id}/content",
         headers={"Authorization": f"Bearer {student_bearer}"},
@@ -626,6 +640,16 @@ async def test_draft_module_excluded_from_student_content_tree(
         await conn.execute(
             text("UPDATE courses SET status = 'published' WHERE id = :id"),
             {"id": course_id},
+        )
+
+    # Learner BR gate: content reads need an active enrollment.
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO course_enrollments (id, student_id, course_id) "
+                "VALUES (gen_random_uuid(), :s, :c)"
+            ),
+            {"s": seeded_users.student_id, "c": course_id},
         )
 
     content = await client.get(

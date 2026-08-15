@@ -55,7 +55,9 @@ class _FakeSessionmaker:
 
 
 def test_jobs_export() -> None:
-    assert len(JOBS) == 4
+    # Was 4 before commit 4a3fffd removed the practice-mode job alongside the
+    # 0072 feature drop; 3 tasks remain (generation, evaluation, turn-reconcile).
+    assert len(JOBS) == 3
     assert reconcile_turn_analysis_task in JOBS
     assert run_interview_generation_task in JOBS
     evaluation_job = next(job for job in JOBS if getattr(job, "coroutine", None))

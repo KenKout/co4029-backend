@@ -128,6 +128,20 @@ async def quiz_with_questions(engine: AsyncEngine) -> AsyncIterator[dict]:
             text("INSERT INTO users (id, primary_email) VALUES (:id, :email)"),
             {"id": student_id, "email": f"qc-student-{suffix}@test.local"},
         )
+        # start_attempt's tenancy gate (taking.py) 404s quizzes whose course
+        # org the caller is not a member of — the fixture student needs an
+        # active membership row or every start_attempt call reads "not found".
+        await conn.execute(
+            text(
+                "INSERT INTO organization_memberships "
+                "(id, user_id, organization_id, org_unit_id, status) "
+                "VALUES (gen_random_uuid(), :uid, :org, NULL, 'active')"
+            ),
+            {"uid": student_id, "org": org_id},
+        )
+        # can_view_course_content (courses.api.public) additionally requires an
+        # active enrollment — the quiz router 404s without one. Inserted AFTER
+        # the course row (FK course_id -> courses).
         await conn.execute(
             text(
                 "INSERT INTO courses "
@@ -140,6 +154,13 @@ async def quiz_with_questions(engine: AsyncEngine) -> AsyncIterator[dict]:
                 "owner": owner_id,
                 "slug": f"course-{suffix}",
             },
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO course_enrollments (id, student_id, course_id) "
+                "VALUES (gen_random_uuid(), :s, :c)"
+            ),
+            {"s": student_id, "c": course_id},
         )
         await conn.execute(
             text(
@@ -217,7 +238,14 @@ async def quiz_with_questions(engine: AsyncEngine) -> AsyncIterator[dict]:
         )
         await conn.execute(text("DELETE FROM quizzes WHERE id = :id"), {"id": quiz_id})
         await conn.execute(text("DELETE FROM modules WHERE course_id = :c"), {"c": course_id})
+        await conn.execute(
+            text("DELETE FROM course_enrollments WHERE course_id = :c"), {"c": course_id}
+        )
         await conn.execute(text("DELETE FROM courses WHERE id = :id"), {"id": course_id})
+        await conn.execute(
+            text("DELETE FROM organization_memberships WHERE user_id IN (:o, :s)"),
+            {"o": owner_id, "s": student_id},
+        )
         await conn.execute(
             text("DELETE FROM users WHERE id IN (:o, :s)"),
             {"o": owner_id, "s": student_id},
@@ -278,6 +306,9 @@ async def test_some_in_cooldown_filtered_out(
     surfaces the two in ``cards_in_cooldown``."""
     student_id = quiz_with_questions["student_id"]
     question_ids = quiz_with_questions["question_ids"]
+    # Card-level SR cooldown only applies when the quiz opts in (user rule:
+    # empty cooldown_hours = no cooldown, no inherited default).
+    await _set_quiz_policy(engine, quiz_with_questions["quiz_id"], cooldown_hours=24)
     future = datetime.now(tz=UTC) + timedelta(hours=12)
     await _seed_card_state(engine, student_id, question_ids[0], future)
     await _seed_card_state(engine, student_id, question_ids[1], future)
@@ -309,6 +340,9 @@ async def test_all_in_cooldown_raises(
     :class:`AllCardsInCooldownError` carrying the earliest due_at."""
     student_id = quiz_with_questions["student_id"]
     question_ids = quiz_with_questions["question_ids"]
+    # Card-level SR cooldown only applies when the quiz opts in (user rule:
+    # empty cooldown_hours = no cooldown, no inherited default).
+    await _set_quiz_policy(engine, quiz_with_questions["quiz_id"], cooldown_hours=24)
     base = datetime.now(tz=UTC) + timedelta(hours=1)
     for index, qid in enumerate(question_ids):
         await _seed_card_state(engine, student_id, qid, base + timedelta(hours=index))
@@ -335,6 +369,8 @@ async def test_expired_cooldown_card_returns(
     student_id = quiz_with_questions["student_id"]
     question_ids = quiz_with_questions["question_ids"]
     past = datetime.now(tz=UTC) - timedelta(hours=1)
+    # Opt in so the cooldown map is actually consulted (see user rule above).
+    await _set_quiz_policy(engine, quiz_with_questions["quiz_id"], cooldown_hours=24)
     await _seed_card_state(engine, student_id, question_ids[0], past)
 
     async with session_factory() as session, session.begin():
@@ -358,6 +394,9 @@ async def test_unattempted_cards_no_cooldown(
     student_id = quiz_with_questions["student_id"]
     question_ids = quiz_with_questions["question_ids"]
     future = datetime.now(tz=UTC) + timedelta(hours=12)
+    # Card-level SR cooldown only applies when the quiz opts in (user rule:
+    # empty cooldown_hours = no cooldown, no inherited default).
+    await _set_quiz_policy(engine, quiz_with_questions["quiz_id"], cooldown_hours=24)
     await _seed_card_state(engine, student_id, question_ids[0], future)
 
     async with session_factory() as session, session.begin():
@@ -428,6 +467,9 @@ async def test_all_in_cooldown_returns_429(
     quiz_id = quiz_with_questions["quiz_id"]
     question_ids = quiz_with_questions["question_ids"]
     base = datetime.now(tz=UTC) + timedelta(hours=2)
+    # Card-level SR cooldown only applies when the quiz opts in (user rule:
+    # empty cooldown_hours = no cooldown, no inherited default).
+    await _set_quiz_policy(engine, quiz_id, cooldown_hours=24)
     for index, qid in enumerate(question_ids):
         await _seed_card_state(engine, student_id, qid, base + timedelta(hours=index))
 

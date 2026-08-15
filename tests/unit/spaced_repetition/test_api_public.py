@@ -95,6 +95,21 @@ async def _seed_sr_scaffold(
         ),
         {"id": str(quiz_id), "course": str(course_id), "module": str(module_id)},
     )
+    # get_due_card_count counts only REVIEWABLE cards: the question must be
+    # 'approved' AND the quiz linked to a lesson via quiz_source_lessons.
+    # Without the link the JOIN drops every card and the count reads 0.
+    lesson_id = uuid4()
+    await session.execute(
+        text(
+            "INSERT INTO lessons (id, module_id, slug, title, status) "
+            "VALUES (:id, :module, :slug, 'L', 'published')"
+        ),
+        {"id": str(lesson_id), "module": str(module_id), "slug": f"sr-lesson-{suffix}"},
+    )
+    await session.execute(
+        text("INSERT INTO quiz_source_lessons (quiz_id, lesson_id) VALUES (:q, :l)"),
+        {"q": str(quiz_id), "l": str(lesson_id)},
+    )
 
 
 async def _seed_question(
@@ -215,7 +230,7 @@ async def test_get_card_state_found(test_engine: AsyncEngine) -> None:
                 student_id=student_id,
                 question_id=question_id,
                 due_at=due_at,
-                ef=Decimal("2.700"),
+                ef=Decimal("2.500"),
             )
             await session.flush()
 
@@ -229,7 +244,8 @@ async def test_get_card_state_found(test_engine: AsyncEngine) -> None:
     assert isinstance(state, CardStateDTO)
     assert state.student_id == student_id
     assert state.question_id == question_id
-    assert state.ef == Decimal("2.700")
+    # EF must sit inside [1.3, 2.5] (ck_student_card_state_ef_range, 0069).
+    assert state.ef == Decimal("2.500")
     assert state.interval_days == 1
     assert state.repetition_count == 0
     assert state.calibration_active is True

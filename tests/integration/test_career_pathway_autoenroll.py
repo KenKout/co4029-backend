@@ -135,6 +135,17 @@ async def seed(engine: AsyncEngine) -> AsyncIterator[dict]:
                 text("INSERT INTO users (id, primary_email) VALUES (:id, :email)"),
                 {"id": uid, "email": email},
             )
+        # enroll_student_in_path is student-only: grant the org-scoped student
+        # role or the fixture's enrollments are rejected as "not a student".
+        await conn.execute(
+            text(
+                "INSERT INTO user_role_assignments "
+                "(user_id, role_id, scope_kind, organization_id) "
+                "VALUES (:uid, (SELECT id FROM roles WHERE code = 'student' "
+                "AND deleted_at IS NULL), 'organization', :org)"
+            ),
+            {"uid": student, "org": org},
+        )
         req_course, req_lesson = await _course_with_lesson(
             conn, org=org, owner=manager, slug=f"req-{s}"
         )
@@ -223,6 +234,10 @@ async def seed(engine: AsyncEngine) -> AsyncIterator[dict]:
         await conn.execute(
             text("DELETE FROM courses WHERE organization_id = :org"),
             {"org": org},
+        )
+        await conn.execute(
+            text("DELETE FROM user_role_assignments WHERE user_id = :s"),
+            {"s": student},
         )
         await conn.execute(
             text("DELETE FROM users WHERE id = ANY(CAST(:ids AS uuid[]))"),

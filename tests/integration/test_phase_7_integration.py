@@ -444,6 +444,32 @@ async def test_career_path_lifecycle(
                     "title": title,
                 },
             )
+            # The publish gate requires at least one gradeable unit per staged
+            # course (published lesson/quiz/interview behind a live
+            # module_items row) — bare courses can never be published.
+            module_id = uuid.uuid4()
+            lesson_id = uuid.uuid4()
+            await conn.execute(
+                text(
+                    "INSERT INTO modules (id, course_id, title, position, status) "
+                    "VALUES (:id, :cid, 'M', 1, 'published')"
+                ),
+                {"id": module_id, "cid": cid},
+            )
+            await conn.execute(
+                text(
+                    "INSERT INTO lessons (id, module_id, slug, title, status, lesson_type) "
+                    "VALUES (:id, :mid, :slug, 'L', 'published', 'video')"
+                ),
+                {"id": lesson_id, "mid": module_id, "slug": f"{slug}-l1"},
+            )
+            await conn.execute(
+                text(
+                    "INSERT INTO module_items (id, module_id, item_type, lesson_id, position) "
+                    "VALUES (gen_random_uuid(), :mid, 'lesson', :lid, 1)"
+                ),
+                {"mid": module_id, "lid": lesson_id},
+            )
 
     create_resp = await client.post(
         "/api/v1/management/career-paths",
@@ -457,11 +483,22 @@ async def test_career_path_lifecycle(
     assert create_resp.status_code == 201, create_resp.text
     path_id = uuid.UUID(create_resp.json()["id"])
 
+    # Stage authoring precedes course authoring: CareerPathCourseAdd requires
+    # a stage_id, so create the first stage up front.
+    stage_resp = await client.post(
+        f"/api/v1/management/career-paths/{path_id}/stages",
+        json={"title": "Phase 7 Stage", "unlock_policy": "always"},
+        headers={"Authorization": f"Bearer {manager_bearer}"},
+    )
+    assert stage_resp.status_code == 201, stage_resp.text
+    stage_id = uuid.UUID(stage_resp.json()["id"])
+
     for course_id, position in ((course_a, 1), (course_b, 2)):
         add_resp = await client.post(
             f"/api/v1/management/career-paths/{path_id}/courses",
             json={
                 "course_id": str(course_id),
+                "stage_id": str(stage_id),
                 "position": position,
                 "is_required": True,
             },
@@ -504,11 +541,22 @@ async def test_career_path_lifecycle(
 
     async with engine.begin() as conn:
         await conn.execute(
+            text(
+                "DELETE FROM student_stage_progress WHERE enrollment_id IN "
+                "(SELECT id FROM student_career_enrollments WHERE career_path_id = :p)"
+            ),
+            {"p": path_id},
+        )
+        await conn.execute(
             text("DELETE FROM student_career_enrollments WHERE career_path_id = :p"),
             {"p": path_id},
         )
         await conn.execute(
             text("DELETE FROM career_course_items WHERE career_path_id = :p"),
+            {"p": path_id},
+        )
+        await conn.execute(
+            text("DELETE FROM career_path_stages WHERE career_path_id = :p"),
             {"p": path_id},
         )
         await conn.execute(
@@ -519,6 +567,25 @@ async def test_career_path_lifecycle(
         # those rows FK the courses (NO ACTION) and must go first.
         await conn.execute(
             text("DELETE FROM course_enrollments WHERE course_id = ANY(:ids)"),
+            {"ids": [course_a, course_b]},
+        )
+        # Fixture gradeable units (module + published lesson + module_items).
+        await conn.execute(
+            text(
+                "DELETE FROM module_items WHERE module_id IN "
+                "(SELECT id FROM modules WHERE course_id = ANY(:ids))"
+            ),
+            {"ids": [course_a, course_b]},
+        )
+        await conn.execute(
+            text(
+                "DELETE FROM lessons WHERE module_id IN "
+                "(SELECT id FROM modules WHERE course_id = ANY(:ids))"
+            ),
+            {"ids": [course_a, course_b]},
+        )
+        await conn.execute(
+            text("DELETE FROM modules WHERE course_id = ANY(:ids)"),
             {"ids": [course_a, course_b]},
         )
         await conn.execute(

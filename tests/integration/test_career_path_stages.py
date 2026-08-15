@@ -141,6 +141,18 @@ async def seed(engine: AsyncEngine) -> AsyncIterator[dict]:
                 text("INSERT INTO users (id, primary_email) VALUES (:id, :email)"),
                 {"id": uid, "email": email},
             )
+        # Career-path enrolments are student-only: enroll_student_in_path
+        # (enrollment.py) rejects users without the 'student' role. Give the
+        # fixture student the org-scoped role, mirroring test_enrollments.py.
+        await conn.execute(
+            text(
+                "INSERT INTO user_role_assignments "
+                "(user_id, role_id, scope_kind, organization_id) "
+                "VALUES (:uid, (SELECT id FROM roles WHERE code = 'student' "
+                "AND deleted_at IS NULL), 'organization', :org)"
+            ),
+            {"uid": student, "org": org},
+        )
         req_course, req_lesson = await _course_with_lesson(
             conn, org=org, owner=manager, slug=f"req-{s}"
         )
@@ -227,6 +239,10 @@ async def seed(engine: AsyncEngine) -> AsyncIterator[dict]:
             {"org": org},
         )
         await conn.execute(text("DELETE FROM courses WHERE organization_id = :org"), {"org": org})
+        await conn.execute(
+            text("DELETE FROM user_role_assignments WHERE user_id = :s"),
+            {"s": student},
+        )
         await conn.execute(
             text("DELETE FROM users WHERE id = ANY(CAST(:ids AS uuid[]))"),
             {"ids": [str(manager), str(student)]},
@@ -1352,12 +1368,15 @@ async def test_flip_to_required_rejected_when_it_breaks_optional_quota(
             db,
             seed["path_id"],
             seed["stage1"],
-            CareerPathStageUpdate(min_optional_to_complete=1),
+            # The stage holds TWO optional courses (the fixture's opt_course
+            # plus the one added below); min=1 would still be satisfiable
+            # after a single flip, so the quota must demand both.
+            CareerPathStageUpdate(min_optional_to_complete=2),
             _actor(seed["manager"]),
         )
         await db.commit()
 
-    # The stage's only optional course cannot become required: min is 1.
+    # The last remaining optional course cannot become required: min is 2.
     async with session_factory() as db:
         with pytest.raises(AppError, match="min_optional"):
             await authoring_service.update_path_course(
