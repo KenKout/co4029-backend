@@ -140,6 +140,10 @@ async def get_path_impact(db: AsyncSession, career_path_id: UUID) -> CareerPathI
     )
 
 
+# Gap 3 §2.2: enforcement loosen/tighten ordering (advisory < soft < hard).
+_ENFORCEMENT_RANK = {"advisory": 0, "soft": 1, "hard": 2}
+
+
 def classify_path_edit(
     *,
     mutation: str,
@@ -182,39 +186,44 @@ def classify_path_edit(
     if mutation == "add_course":
         # Optional adds are extra work the student may ignore; required adds
         # to a stage they still must pass are imposed work.
-        if is_required and (stage_students_not_completed or 0) > 0:
-            return "breaking"
-        return "safe"
+        return "breaking" if is_required and (stage_students_not_completed or 0) > 0 else "safe"
 
     if mutation == "update_course":
-        # is_required flip is the only course-level policy change.
-        if is_required is not None and is_required_before is not None:
-            if is_required and not is_required_before:
-                if (stage_students_not_completed or 0) > 0:
-                    return "breaking"
-            else:
-                return "safe"
-        return "safe"
+        flipped_to_required = is_required is True and is_required_before is False
+        return (
+            "breaking"
+            if flipped_to_required and (stage_students_not_completed or 0) > 0
+            else "safe"
+        )
 
     if mutation == "update_stage":
-        if min_optional_before is not None and min_optional_after is not None:
-            if min_optional_after > min_optional_before and (stage_students_not_completed or 0) > 0:
-                return "breaking"
-        if enforcement_before is not None and enforcement_after is not None:
-            _RANK = {"advisory": 0, "soft": 1, "hard": 2}
-            if _RANK[enforcement_after] > _RANK[enforcement_before]:
-                if (stage_students_not_completed or 0) > 0:
-                    return "breaking"
+        quota_raised = (
+            min_optional_before is not None
+            and min_optional_after is not None
+            and min_optional_after > min_optional_before
+        )
+        tightened = (
+            enforcement_before is not None
+            and enforcement_after is not None
+            and _ENFORCEMENT_RANK[enforcement_after] > _ENFORCEMENT_RANK[enforcement_before]
+        )
         # Title/description edits and any loosening are safe.
-        return "safe"
+        return (
+            "breaking"
+            if (quota_raised or tightened) and (stage_students_not_completed or 0) > 0
+            else "safe"
+        )
 
     if mutation == "create_stage":
         # Appending past every student's current position does not move their
         # goal; inserting at/before it does.
-        if max_student_stage_position is not None and new_stage_position is not None:
-            if new_stage_position <= max_student_stage_position:
-                return "breaking"
-        return "safe"
+        return (
+            "breaking"
+            if max_student_stage_position is not None
+            and new_stage_position is not None
+            and new_stage_position <= max_student_stage_position
+            else "safe"
+        )
 
     if mutation in ("delete_stage", "reorder_stages"):
         # Deleting or reordering always rewrites the sequence under students
