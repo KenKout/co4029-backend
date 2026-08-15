@@ -172,7 +172,7 @@ class CareerPathCourseAdd(BaseModel):
     course_id: UUID
     position: int | None = Field(default=None, gt=0)
     is_required: bool = True
-    satisfied_by: Literal["completion", "pass"] = "completion"
+    satisfied_by: Literal["completion"] = "completion"
 
     model_config = ConfigDict(extra="forbid")
 
@@ -181,7 +181,7 @@ class CareerPathCoursePatch(BaseModel):
     """Partial update of an existing course-in-stage link."""
 
     is_required: bool | None = None
-    satisfied_by: Literal["completion", "pass"] | None = None
+    satisfied_by: Literal["completion"] | None = None
 
     model_config = ConfigDict(extra="forbid")
 

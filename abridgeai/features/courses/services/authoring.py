@@ -1045,6 +1045,7 @@ _REVIEW_QUEUE_LISTERS = {
     "quiz-cards": authoring_queries.list_pending_quiz_cards_for_courses,
     "interview-questions": authoring_queries.list_pending_interview_questions_for_courses,
     "materials": authoring_queries.list_materials_ready_for_courses,
+    "missing-texp": authoring_queries.list_published_quizzes_missing_texp_for_courses,
 }
 
 

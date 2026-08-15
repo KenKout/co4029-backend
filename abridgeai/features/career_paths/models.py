@@ -120,7 +120,7 @@ class CareerPathCourse(CreatedAtMixin, Base):
         ),
         CheckConstraint("position > 0", name="career_course_items_position_check"),
         CheckConstraint(
-            "satisfied_by IN ('completion','pass')",
+            "satisfied_by IN ('completion')",
             name="career_course_items_satisfied_by_check",
         ),
     )
@@ -151,10 +151,10 @@ class CareerPathCourse(CreatedAtMixin, Base):
     )
     """How this item becomes ``satisfied``.
 
-    ``completion`` (the only behaviour implemented) ⟺
-    ``course_enrollments.status = 'completed'``. ``pass`` is accepted by the
-    CHECK so the column can carry a graded variant later without a
-    migration; until that evaluator exists it is treated as ``completion``.
+    ``completion`` (the only value the schema allows) ⟺
+    ``course_enrollments.status = 'completed'``. ``'pass'`` was accepted
+    by the original CHECK for a graded variant that never shipped and was
+    removed in migration 0073; the evaluator has always been completion-only.
     """
 
     career_path: Mapped[CareerPath] = relationship()

@@ -280,7 +280,7 @@ async def get_teacher_dashboard_stats(
     response_model=list[ReviewQueueItem],
 )
 async def list_review_queue_items(
-    kind: Literal["quiz-cards", "interview-questions", "materials"],
+    kind: Literal["quiz-cards", "interview-questions", "materials", "missing-texp"],
     current_user: Annotated[CurrentUser, Depends(_REQUIRE_AUTHORING_LIST)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> list[ReviewQueueItem]:

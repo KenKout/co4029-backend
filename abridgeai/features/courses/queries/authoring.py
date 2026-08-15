@@ -594,6 +594,53 @@ async def list_materials_ready_for_courses(
     return [ReviewQueueDrilldownRow(*row) for row in (await db.execute(stmt)).all()]
 
 
+async def list_published_quizzes_missing_texp_for_courses(
+    db: AsyncSession, course_ids: Sequence[UUID]
+) -> list[ReviewQueueDrilldownRow]:
+    """Published quizzes holding approved questions with no usable t_exp.
+
+    One row per DISTINCT quiz, mirroring the badge semantics
+    (``published_quizzes_missing_texp`` counts quizzes, not questions), so
+    ``len(rows) == badge``. The per-row ``count`` is the number of approved
+    questions inside that quiz still missing ``expected_response_time_ms``
+    (NULL or ``<= 0``) — the work the teacher actually clears via the
+    bulk-set-expected-time action on the quiz page.
+    """
+    from abridgeai.features.quizzes.models import Quiz, QuizQuestion
+
+    if not course_ids:
+        return []
+    stmt = (
+        select(
+            Course.id,
+            Course.title,
+            Module.id,
+            Module.title,
+            Quiz.id,
+            Quiz.title,
+            func.count(QuizQuestion.id),
+        )
+        .select_from(Quiz)
+        .join(QuizQuestion, QuizQuestion.quiz_id == Quiz.id)
+        .join(Course, Course.id == Quiz.course_id)
+        .join(Module, Module.id == Quiz.module_id, isouter=True)
+        .where(
+            Quiz.course_id.in_(course_ids),
+            Quiz.deleted_at.is_(None),
+            Quiz.status == "published",
+            QuizQuestion.deleted_at.is_(None),
+            QuizQuestion.review_status == "approved",
+            or_(
+                QuizQuestion.expected_response_time_ms.is_(None),
+                QuizQuestion.expected_response_time_ms <= 0,
+            ),
+        )
+        .group_by(Course.id, Course.title, Module.id, Module.title, Quiz.id, Quiz.title)
+        .order_by(Course.title, Module.title, Quiz.title)
+    )
+    return [ReviewQueueDrilldownRow(*row) for row in (await db.execute(stmt)).all()]
+
+
 async def list_courses_for_owner(
     db: AsyncSession,
     user_id: UUID,
