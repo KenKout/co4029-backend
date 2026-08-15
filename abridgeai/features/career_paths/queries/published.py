@@ -59,7 +59,7 @@ _PUBLISHED_PATH_COURSES_SQL = text(
     JOIN career_path_stages s ON s.id = cci.stage_id
         AND s.deleted_at IS NULL
     JOIN courses c ON c.id = cci.course_id
-    WHERE cci.career_path_id = :career_path_id
+    WHERE cci.version_id = :version_id
       AND c.status = 'published'
       AND c.deleted_at IS NULL
     ORDER BY s.position, cci.position
@@ -68,10 +68,12 @@ _PUBLISHED_PATH_COURSES_SQL = text(
 
 
 async def list_published_career_path_courses(
-    db: AsyncSession, career_path_id: UUID
+    db: AsyncSession, version_id: UUID
 ) -> list[dict[str, Any]]:
+    """Courses of a path's LATEST PUBLISHED version (what prospective
+    students see; enrolled students' progress resolves their own pin)."""
     rows = (
-        await db.execute(_PUBLISHED_PATH_COURSES_SQL, {"career_path_id": career_path_id})
+        await db.execute(_PUBLISHED_PATH_COURSES_SQL, {"version_id": version_id})
     ).mappings()
     return [dict(row) for row in rows]
 

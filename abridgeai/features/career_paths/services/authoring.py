@@ -14,6 +14,7 @@ from abridgeai.features.career_paths.models import (
     CareerPath,
     CareerPathCourse,
     CareerPathStage,
+    CareerPathVersion,
 )
 from abridgeai.features.career_paths.queries import authoring as authoring_queries
 from abridgeai.features.career_paths.queries.published import (
@@ -31,6 +32,7 @@ from abridgeai.features.career_paths.schemas import (
     CareerPathStageReorderResult,
     CareerPathStageUpdate,
     CareerPathUpdate,
+    CareerPathVersionRead,
     StageReorderWarning,
 )
 from abridgeai.features.courses.api import public as courses_api
@@ -83,6 +85,36 @@ async def _require_path(db: AsyncSession, career_path_id: UUID) -> CareerPath:
     if path is None or path.deleted_at is not None:
         raise NotFoundError(f"CareerPath {career_path_id} not found")
     return path
+
+
+async def _require_draft_version(db: AsyncSession, version_id: UUID) -> CareerPathVersion:
+    """A stage/item mutation may only touch a DRAFT version.
+
+    Gap 3 (D1b pinned): a published version is frozen — its stages and
+    course items are the route students are walking, so mutating them
+    would change the promise mid-walk. Managers edit the draft (created by
+    the explicit fork, D2a) and publish that.
+    """
+    version = await authoring_queries.get_version(db, version_id)
+    if version is None:
+        raise NotFoundError(f"CareerPathVersion {version_id} not found")
+    if version.status == "published":
+        raise ConflictError(
+            "career_path_version_published: this version is published and frozen — "
+            "create a new version to edit the path (Gap 3 versioning)"
+        )
+    return version
+
+
+async def _require_authoring_version(
+    db: AsyncSession, career_path_id: UUID
+) -> CareerPathVersion:
+    """The version authoring reads/writes for this path (latest draft, else
+    the latest published pre-fork)."""
+    version = await authoring_queries.get_current_authoring_version(db, career_path_id)
+    if version is None:
+        raise NotFoundError(f"No version found for career path {career_path_id}")
+    return version
 
 
 async def list_career_paths_for_org(
@@ -234,6 +266,15 @@ def classify_path_edit(
     return "safe"
 
 
+async def list_path_versions(
+    db: AsyncSession, career_path_id: UUID
+) -> list[CareerPathVersionRead]:
+    """All versions of a path, newest first (Gap 3 manager surface)."""
+    await _require_path(db, career_path_id)
+    versions = await authoring_queries.list_versions(db, career_path_id)
+    return [CareerPathVersionRead.model_validate(v) for v in versions]
+
+
 async def list_career_path_courses(
     db: AsyncSession, career_path_id: UUID
 ) -> list[CareerPathCourseAuthoring]:
@@ -269,6 +310,17 @@ async def create_career_path(
     db.add(path)
     await flush_or_conflict(db)
     await db.refresh(path)
+    # Gap 3 (0074): a new path starts with a draft v1 — stages/items always
+    # hang off a version, and publishing freezes it.
+    version = CareerPathVersion(
+        career_path_id=path.id,
+        version_no=1,
+        status="draft",
+        created_by=actor.user_id,
+        updated_by=actor.user_id,
+    )
+    db.add(version)
+    await flush_or_conflict(db)
     return _to_authoring(path)
 
 
@@ -337,8 +389,10 @@ async def add_course_to_path(
     """
     del actor
     path = await _require_path(db, career_path_id)
+    version = await _require_authoring_version(db, career_path_id)
+    await _require_draft_version(db, version.id)
     stage = await authoring_queries.get_stage(db, stage_id)
-    if stage is None or stage.career_path_id != career_path_id:
+    if stage is None or stage.version_id != version.id:
         raise NotFoundError(f"Stage {stage_id} not found in career path {career_path_id}")
     if not await authoring_queries.course_belongs_to_org(db, course_id, path.organization_id):
         raise AppError(
@@ -362,7 +416,7 @@ async def add_course_to_path(
         await _make_room_for_position(db, stage_id, target_position)
 
     link = CareerPathCourse(
-        career_path_id=career_path_id,
+        version_id=version.id,
         course_id=course_id,
         stage_id=stage_id,
         position=target_position,
@@ -404,6 +458,8 @@ async def remove_course_from_path(
 ) -> None:
     del actor
     await _require_path(db, career_path_id)
+    version = await _require_authoring_version(db, career_path_id)
+    await _require_draft_version(db, version.id)
     link = await authoring_queries.get_path_course_link(db, career_path_id, course_id)
     if link is None:
         raise NotFoundError(f"Course {course_id} not attached to career path {career_path_id}")
@@ -428,6 +484,8 @@ async def reorder_courses_in_path(
     """
     del actor
     await _require_path(db, career_path_id)
+    version = await _require_authoring_version(db, career_path_id)
+    await _require_draft_version(db, version.id)
     existing_links = await authoring_queries.list_path_course_links(db, career_path_id)
     existing_by_course = {link.course_id: link for link in existing_links}
     if set(course_ids) != set(existing_by_course):
@@ -468,8 +526,10 @@ async def move_course_to_stage(
     A same-stage call is a plain reposition and is handled by the same code.
     """
     await _require_path(db, career_path_id)
+    version = await _require_authoring_version(db, career_path_id)
+    await _require_draft_version(db, version.id)
     stage = await authoring_queries.get_stage(db, stage_id)
-    if stage is None or stage.career_path_id != career_path_id:
+    if stage is None or stage.version_id != version.id:
         raise NotFoundError(f"Stage {stage_id} not found in career path {career_path_id}")
     link = await authoring_queries.get_path_course_link(db, career_path_id, course_id)
     if link is None:
@@ -524,6 +584,8 @@ async def update_path_course(
 ) -> list[CareerPathCourseAuthoring]:
     """Patch the policy flags on an attached course."""
     await _require_path(db, career_path_id)
+    version = await _require_authoring_version(db, career_path_id)
+    await _require_draft_version(db, version.id)
     link = await authoring_queries.get_path_course_link(db, career_path_id, course_id)
     if link is None:
         raise NotFoundError(f"Course {course_id} not attached to career path {career_path_id}")
@@ -553,9 +615,12 @@ async def list_path_stages(
 
 
 async def _to_stage_authoring(db: AsyncSession, stage: CareerPathStage) -> CareerPathStageAuthoring:
+    # career_path_id is identity-level, living on the version — resolved via
+    # the version row (the stage relationship is not eager-loaded in async).
+    version = await db.get(CareerPathVersion, stage.version_id)
     return CareerPathStageAuthoring(
         id=stage.id,
-        career_path_id=stage.career_path_id,
+        career_path_id=version.career_path_id if version is not None else stage.version_id,
         position=stage.position,
         title=stage.title,
         description=stage.description,
@@ -579,6 +644,8 @@ async def create_stage(
     it here you could never add a second stage to a published path.
     """
     await _require_path(db, career_path_id)
+    version = await _require_authoring_version(db, career_path_id)
+    await _require_draft_version(db, version.id)
     target_position = payload.position
     if target_position is None:
         target_position = await authoring_queries.next_stage_position(db, career_path_id)
@@ -586,7 +653,7 @@ async def create_stage(
         await _make_room_for_stage_position(db, career_path_id, target_position)
 
     stage = CareerPathStage(
-        career_path_id=career_path_id,
+        version_id=version.id,
         position=target_position,
         title=payload.title,
         description=payload.description,
@@ -619,7 +686,10 @@ async def _make_room_for_stage_position(
 
 async def _require_stage(db: AsyncSession, career_path_id: UUID, stage_id: UUID) -> CareerPathStage:
     stage = await authoring_queries.get_stage(db, stage_id)
-    if stage is None or stage.career_path_id != career_path_id:
+    if stage is None:
+        raise NotFoundError(f"Stage {stage_id} not found in career path {career_path_id}")
+    version = await _require_authoring_version(db, career_path_id)
+    if stage.version_id != version.id:
         raise NotFoundError(f"Stage {stage_id} not found in career path {career_path_id}")
     return stage
 
@@ -632,6 +702,8 @@ async def update_stage(
     actor: CurrentUser,
 ) -> CareerPathStageAuthoring:
     await _require_path(db, career_path_id)
+    version = await _require_authoring_version(db, career_path_id)
+    await _require_draft_version(db, version.id)
     stage = await _require_stage(db, career_path_id, stage_id)
     data = payload.model_dump(exclude_unset=True)
     for key, value in data.items():
@@ -660,6 +732,8 @@ async def delete_stage(
     a student's bar jumps or slides backward without them doing anything.
     """
     await _require_path(db, career_path_id)
+    version = await _require_authoring_version(db, career_path_id)
+    await _require_draft_version(db, version.id)
     stage = await _require_stage(db, career_path_id, stage_id)
 
     if await authoring_queries.count_stage_courses(db, stage_id) > 0:
@@ -712,6 +786,8 @@ async def reorder_stages(
     """
     del actor
     await _require_path(db, career_path_id)
+    version = await _require_authoring_version(db, career_path_id)
+    await _require_draft_version(db, version.id)
     stages = await authoring_queries.list_path_stages(db, career_path_id)
     by_id = {stage.id: stage for stage in stages}
     if set(stage_ids) != set(by_id):
@@ -851,16 +927,99 @@ async def publish_path(
     This is where "every path has >= 1 stage" and "every stage has >= 1
     course" are enforced — not on the mutation path, where they would make
     create-then-fill authoring impossible.
+
+    Gap 3: publishing freezes the path's authoring VERSION (status →
+    published, published_at = now). Existing enrollments stay pinned to
+    whatever version they started on; new enrollments pin to this one.
     """
     path = await _require_path(db, career_path_id)
     if path.status == "archived":
         raise AppError(f"Cannot publish archived career path {career_path_id}")
     await validate_path_for_publish(db, career_path_id)
+    version = await _require_authoring_version(db, career_path_id)
+    if version.status != "published":
+        version.status = "published"
+        version.published_at = datetime.now(tz=UTC)
+        version.updated_by = actor.user_id
     path.status = "published"
     path.updated_by = actor.user_id
     await db.flush()
     await db.refresh(path)
     return _to_authoring(path)
+
+
+async def create_path_version(
+    db: AsyncSession, career_path_id: UUID, actor: CurrentUser
+) -> CareerPathVersion:
+    """Copy-on-write fork (Gap 3 D2a explicit): clone the latest PUBLISHED
+    version's stages + course items into a new DRAFT version.
+
+    Only one draft may be in flight per path — a second fork while one
+    exists is a 409 (editing two drafts at once is a merge problem nobody
+    wants). New version_no = max + 1.
+    """
+    await _require_path(db, career_path_id)
+    source = await authoring_queries.get_published_version(db, career_path_id)
+    if source is None:
+        raise ConflictError(
+            "career_path_version_no_source: this path has no published version to fork — "
+            "publish it first"
+        )
+    versions = await authoring_queries.list_versions(db, career_path_id)
+    if any(v.status == "draft" for v in versions):
+        raise ConflictError(
+            "career_path_version_draft_exists: a draft version is already being edited — "
+            "publish or discard it before forking again"
+        )
+
+    new_version = CareerPathVersion(
+        career_path_id=career_path_id,
+        version_no=await authoring_queries.next_version_no(db, career_path_id),
+        status="draft",
+        created_by=actor.user_id,
+        updated_by=actor.user_id,
+    )
+    db.add(new_version)
+    await db.flush()
+
+    source_stages = await authoring_queries.list_stages_for_version(db, source.id)
+    stage_id_map: dict[UUID, UUID] = {}
+    for source_stage in source_stages:
+        clone_stage = CareerPathStage(
+            version_id=new_version.id,
+            position=source_stage.position,
+            title=source_stage.title,
+            description=source_stage.description,
+            min_optional_to_complete=source_stage.min_optional_to_complete,
+            unlock_policy=source_stage.unlock_policy,
+            enforcement=source_stage.enforcement,
+            created_by=actor.user_id,
+            updated_by=actor.user_id,
+        )
+        db.add(clone_stage)
+        await db.flush()
+        stage_id_map[source_stage.id] = clone_stage.id
+
+    source_items = await authoring_queries.list_items_for_version(db, source.id)
+    for item in source_items:
+        if item.stage_id not in stage_id_map:
+            # Item points at a stage deleted from the source version; it
+            # cannot be cloned (defensive — published versions normally
+            # cannot lose stages while holding items).
+            continue
+        db.add(
+            CareerPathCourse(
+                version_id=new_version.id,
+                course_id=item.course_id,
+                stage_id=stage_id_map[item.stage_id],
+                position=item.position,
+                is_required=item.is_required,
+                satisfied_by=item.satisfied_by,
+            )
+        )
+    await db.flush()
+    await db.refresh(new_version)
+    return new_version
 
 
 async def archive_path(
@@ -885,6 +1044,7 @@ __all__ = [
     "add_course_to_path",
     "archive_path",
     "create_career_path",
+    "create_path_version",
     "create_stage",
     "delete_stage",
     "get_career_path",

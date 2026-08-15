@@ -10,12 +10,73 @@ from abridgeai.features.career_paths.models import (
     CareerPath,
     CareerPathCourse,
     CareerPathStage,
+    CareerPathVersion,
     StudentStageProgress,
 )
 from abridgeai.features.courses.api import public as courses_api
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
+
+
+async def list_versions(
+    db: AsyncSession, career_path_id: UUID
+) -> list[CareerPathVersion]:
+    """All non-deleted versions of a path, newest first (Gap 3)."""
+    stmt = (
+        select(CareerPathVersion)
+        .where(
+            CareerPathVersion.career_path_id == career_path_id,
+            CareerPathVersion.deleted_at.is_(None),
+        )
+        .order_by(CareerPathVersion.version_no.desc())
+    )
+    return list((await db.execute(stmt)).scalars().all())
+
+
+async def get_current_authoring_version(
+    db: AsyncSession, career_path_id: UUID
+) -> CareerPathVersion | None:
+    """The version authoring reads/writes: the latest DRAFT if one exists,
+    else the latest version (published). Post-fork there is exactly one
+    draft; pre-fork the published version is the editable surface until the
+    manager chooses to fork (Gap 3 D2a explicit)."""
+    versions = await list_versions(db, career_path_id)
+    for version in versions:
+        if version.status == "draft":
+            return version
+    return versions[0] if versions else None
+
+
+async def get_published_version(
+    db: AsyncSession, career_path_id: UUID
+) -> CareerPathVersion | None:
+    """The latest PUBLISHED version of a path (what new enrollments pin to)."""
+    stmt = (
+        select(CareerPathVersion)
+        .where(
+            CareerPathVersion.career_path_id == career_path_id,
+            CareerPathVersion.status == "published",
+            CareerPathVersion.deleted_at.is_(None),
+        )
+        .order_by(CareerPathVersion.version_no.desc())
+        .limit(1)
+    )
+    return (await db.execute(stmt)).scalar_one_or_none()
+
+
+async def get_version(db: AsyncSession, version_id: UUID) -> CareerPathVersion | None:
+    version = await db.get(CareerPathVersion, version_id)
+    if version is None or version.deleted_at is not None:
+        return None
+    return version
+
+
+async def next_version_no(db: AsyncSession, career_path_id: UUID) -> int:
+    stmt = select(func.coalesce(func.max(CareerPathVersion.version_no), 0)).where(
+        CareerPathVersion.career_path_id == career_path_id
+    )
+    return int((await db.execute(stmt)).scalar_one()) + 1
 
 
 async def get_path_impact(
@@ -51,6 +112,10 @@ async def get_path_impact(
         ).scalar_one()
     )
 
+    version = await get_current_authoring_version(db, career_path_id)
+    if version is None:
+        return active, []
+
     rows = (
         await db.execute(
             sa_text(
@@ -66,7 +131,7 @@ async def get_path_impact(
                            -- unlatch'd stage, i.e. the student is ON it.
                            AND NOT EXISTS (
                              SELECT 1 FROM career_path_stages s3
-                             WHERE s3.career_path_id = s.career_path_id
+                             WHERE s3.version_id = s.version_id
                                AND s3.deleted_at IS NULL
                                AND s3.position < s.position
                                AND NOT EXISTS (
@@ -85,14 +150,14 @@ async def get_path_impact(
                        ) AS students_not_completed
                 FROM career_path_stages s
                 JOIN student_career_enrollments e
-                  ON e.career_path_id = s.career_path_id
-                WHERE s.career_path_id = CAST(:pid AS uuid)
+                  ON e.career_path_id = :pid
+                WHERE s.version_id = CAST(:vid AS uuid)
                   AND s.deleted_at IS NULL
                 GROUP BY s.id, s.position, s.title
                 ORDER BY s.position
                 """
             ),
-            {"pid": str(career_path_id)},
+            {"pid": str(career_path_id), "vid": str(version.id)},
         )
     ).all()
 
@@ -126,32 +191,54 @@ async def list_career_paths_for_org(
 async def list_path_stage_counts(
     db: AsyncSession, career_path_ids: Sequence[UUID]
 ) -> dict[UUID, int]:
-    """Live (non-deleted) stage count per path, for the management list."""
+    """Live (non-deleted) stage count per path's authoring version."""
     if not career_path_ids:
         return {}
+    version_ids: dict[UUID, UUID] = {}
+    for path_id in career_path_ids:
+        version = await get_current_authoring_version(db, path_id)
+        if version is not None:
+            version_ids[path_id] = version.id
+    if not version_ids:
+        return {}
     rows = await db.execute(
-        select(CareerPathStage.career_path_id, func.count(CareerPathStage.id))
+        select(CareerPathStage.version_id, func.count(CareerPathStage.id))
         .where(
-            CareerPathStage.career_path_id.in_(career_path_ids),
+            CareerPathStage.version_id.in_(version_ids.values()),
             CareerPathStage.deleted_at.is_(None),
         )
-        .group_by(CareerPathStage.career_path_id)
+        .group_by(CareerPathStage.version_id)
     )
-    return {path_id: count for path_id, count in rows.all()}
+    by_version = {version_id: count for version_id, count in rows.all()}
+    return {
+        path_id: by_version.get(version_id, 0)
+        for path_id, version_id in version_ids.items()
+    }
 
 
 async def list_path_course_counts(
     db: AsyncSession, career_path_ids: Sequence[UUID]
 ) -> dict[UUID, int]:
-    """Attached-course count per path (career_course_items rows)."""
+    """Attached-course count per path (its authoring version's items)."""
     if not career_path_ids:
         return {}
+    version_ids: dict[UUID, UUID] = {}
+    for path_id in career_path_ids:
+        version = await get_current_authoring_version(db, path_id)
+        if version is not None:
+            version_ids[path_id] = version.id
+    if not version_ids:
+        return {}
     rows = await db.execute(
-        select(CareerPathCourse.career_path_id, func.count(CareerPathCourse.course_id))
-        .where(CareerPathCourse.career_path_id.in_(career_path_ids))
-        .group_by(CareerPathCourse.career_path_id)
+        select(CareerPathCourse.version_id, func.count(CareerPathCourse.course_id))
+        .where(CareerPathCourse.version_id.in_(version_ids.values()))
+        .group_by(CareerPathCourse.version_id)
     )
-    return {path_id: count for path_id, count in rows.all()}
+    by_version = {version_id: count for version_id, count in rows.all()}
+    return {
+        path_id: by_version.get(version_id, 0)
+        for path_id, version_id in version_ids.items()
+    }
 
 
 async def get_career_path_for_authoring(
@@ -163,9 +250,12 @@ async def get_career_path_for_authoring(
 async def list_authoring_career_path_courses(
     db: AsyncSession, career_path_id: UUID
 ) -> list[dict[str, Any]]:
+    version = await get_current_authoring_version(db, career_path_id)
+    if version is None:
+        return []
     link_stmt = (
         select(CareerPathCourse)
-        .where(CareerPathCourse.career_path_id == career_path_id)
+        .where(CareerPathCourse.version_id == version.id)
         .order_by(CareerPathCourse.stage_id, CareerPathCourse.position)
     )
     links = (await db.execute(link_stmt)).scalars().all()
@@ -176,7 +266,7 @@ async def list_authoring_career_path_courses(
             continue
         rows.append(
             {
-                "career_path_id": link.career_path_id,
+                "career_path_id": version.career_path_id,
                 "course_id": link.course_id,
                 "stage_id": link.stage_id,
                 "position": link.position,
@@ -190,20 +280,37 @@ async def list_authoring_career_path_courses(
     return rows
 
 
+async def get_version_course_link(
+    db: AsyncSession, version_id: UUID, course_id: UUID
+) -> CareerPathCourse | None:
+    """Course item of ONE VERSION (learner pin resolution, Gap 3)."""
+    stmt = select(CareerPathCourse).where(
+        CareerPathCourse.version_id == version_id,
+        CareerPathCourse.course_id == course_id,
+    )
+    return (await db.execute(stmt)).scalar_one_or_none()
+
+
 async def get_path_course_link(
     db: AsyncSession, career_path_id: UUID, course_id: UUID
 ) -> CareerPathCourse | None:
+    version = await get_current_authoring_version(db, career_path_id)
+    if version is None:
+        return None
     stmt = select(CareerPathCourse).where(
-        CareerPathCourse.career_path_id == career_path_id,
+        CareerPathCourse.version_id == version.id,
         CareerPathCourse.course_id == course_id,
     )
     return (await db.execute(stmt)).scalar_one_or_none()
 
 
 async def list_path_course_links(db: AsyncSession, career_path_id: UUID) -> list[CareerPathCourse]:
+    version = await get_current_authoring_version(db, career_path_id)
+    if version is None:
+        return []
     stmt = (
         select(CareerPathCourse)
-        .where(CareerPathCourse.career_path_id == career_path_id)
+        .where(CareerPathCourse.version_id == version.id)
         .order_by(CareerPathCourse.position)
     )
     return list((await db.execute(stmt)).scalars().all())
@@ -219,11 +326,36 @@ async def list_stage_course_links(db: AsyncSession, stage_id: UUID) -> list[Care
     return list((await db.execute(stmt)).scalars().all())
 
 
+async def list_stages_for_version(
+    db: AsyncSession, version_id: UUID, *, include_deleted: bool = False
+) -> list[CareerPathStage]:
+    """Stages of ONE version in position order."""
+    stmt = select(CareerPathStage).where(CareerPathStage.version_id == version_id)
+    if not include_deleted:
+        stmt = stmt.where(CareerPathStage.deleted_at.is_(None))
+    return list((await db.execute(stmt.order_by(CareerPathStage.position))).scalars().all())
+
+
+async def list_items_for_version(
+    db: AsyncSession, version_id: UUID
+) -> list[CareerPathCourse]:
+    """Course items of ONE version (all stages), for copy-on-write forks."""
+    stmt = (
+        select(CareerPathCourse)
+        .where(CareerPathCourse.version_id == version_id)
+        .order_by(CareerPathCourse.stage_id, CareerPathCourse.position)
+    )
+    return list((await db.execute(stmt)).scalars().all())
+
+
 async def list_path_stages(
     db: AsyncSession, career_path_id: UUID, *, include_deleted: bool = False
 ) -> list[CareerPathStage]:
-    """Stages of a path in position order (soft-deleted excluded by default)."""
-    stmt = select(CareerPathStage).where(CareerPathStage.career_path_id == career_path_id)
+    """Stages of a path's authoring version in position order."""
+    version = await get_current_authoring_version(db, career_path_id)
+    if version is None:
+        return []
+    stmt = select(CareerPathStage).where(CareerPathStage.version_id == version.id)
     if not include_deleted:
         stmt = stmt.where(CareerPathStage.deleted_at.is_(None))
     return list((await db.execute(stmt.order_by(CareerPathStage.position))).scalars().all())
@@ -238,8 +370,11 @@ async def get_stage(db: AsyncSession, stage_id: UUID) -> CareerPathStage | None:
 
 
 async def next_stage_position(db: AsyncSession, career_path_id: UUID) -> int:
+    version = await get_current_authoring_version(db, career_path_id)
+    if version is None:
+        return 1
     stmt = select(func.coalesce(func.max(CareerPathStage.position), 0)).where(
-        CareerPathStage.career_path_id == career_path_id,
+        CareerPathStage.version_id == version.id,
         CareerPathStage.deleted_at.is_(None),
     )
     return int((await db.execute(stmt)).scalar_one()) + 1
@@ -262,8 +397,11 @@ async def count_stage_courses(db: AsyncSession, stage_id: UUID) -> int:
 
 
 async def next_path_course_position(db: AsyncSession, career_path_id: UUID) -> int:
+    version = await get_current_authoring_version(db, career_path_id)
+    if version is None:
+        return 1
     stmt = select(func.coalesce(func.max(CareerPathCourse.position), 0)).where(
-        CareerPathCourse.career_path_id == career_path_id
+        CareerPathCourse.version_id == version.id
     )
     return int((await db.execute(stmt)).scalar_one()) + 1
 
@@ -309,15 +447,22 @@ __all__ = [
     "course_belongs_to_org",
     "course_is_published_in_org",
     "get_career_path_for_authoring",
+    "get_current_authoring_version",
     "get_path_course_link",
+    "get_published_version",
     "get_stage",
+    "get_version",
     "has_latched_stage_progress",
     "list_authoring_career_path_courses",
     "list_career_paths_for_org",
+    "list_items_for_version",
     "list_path_course_links",
     "list_path_stages",
     "list_stage_course_links",
+    "list_stages_for_version",
+    "list_versions",
     "next_path_course_position",
     "next_stage_course_position",
     "next_stage_position",
+    "next_version_no",
 ]

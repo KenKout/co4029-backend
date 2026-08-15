@@ -159,22 +159,35 @@ async def seed(engine: AsyncEngine) -> AsyncIterator[dict]:
             ),
             {"id": path_id, "org": org, "slug": f"path-{s}"},
         )
+        # Gap 3 (0074): stages/items hang off a version (draft — the tests
+        # mutate this fixture path directly).
+        version_id = (
+            await conn.execute(
+                text(
+                    "INSERT INTO career_path_versions "
+                    "(id, career_path_id, version_no, status) "
+                    "VALUES (gen_random_uuid(), :pid, 1, 'draft') "
+                    "RETURNING id"
+                ),
+                {"pid": path_id},
+            )
+        ).scalar_one()
         await conn.execute(
             text(
                 "INSERT INTO career_path_stages "
-                "(id, career_path_id, position, unlock_policy, enforcement) "
-                "VALUES (:sid, :pid, 1, 'always', 'advisory')"
+                "(id, version_id, position, unlock_policy, enforcement) "
+                "VALUES (:sid, :vid, 1, 'always', 'advisory')"
             ),
-            {"sid": stage_id, "pid": path_id},
+            {"sid": stage_id, "vid": version_id},
         )
         for pos, (cid, req) in enumerate(((req_course, True), (opt_course, False)), start=1):
             await conn.execute(
                 text(
                     "INSERT INTO career_course_items "
-                    "(career_path_id, course_id, stage_id, position, is_required) "
-                    "VALUES (:pid, :cid, :sid, :pos, :req)"
+                    "(version_id, course_id, stage_id, position, is_required) "
+                    "VALUES (:vid, :cid, :sid, :pos, :req)"
                 ),
-                {"pid": path_id, "cid": cid, "sid": stage_id, "pos": pos, "req": req},
+                {"vid": version_id, "cid": cid, "sid": stage_id, "pos": pos, "req": req},
             )
 
     yield {
@@ -206,10 +219,18 @@ async def seed(engine: AsyncEngine) -> AsyncIterator[dict]:
             {"p": path_id},
         )
         await conn.execute(
-            text("DELETE FROM career_course_items WHERE career_path_id = :p"), {"p": path_id}
+            text(
+                "DELETE FROM career_course_items WHERE version_id IN "
+                "(SELECT id FROM career_path_versions WHERE career_path_id = :p)"
+            ),
+            {"p": path_id}
         )
         await conn.execute(
-            text("DELETE FROM career_path_stages WHERE career_path_id = :p"), {"p": path_id}
+            text(
+                "DELETE FROM career_path_stages WHERE version_id IN "
+                "(SELECT id FROM career_path_versions WHERE career_path_id = :p)"
+            ),
+            {"p": path_id}
         )
         await conn.execute(text("DELETE FROM career_paths WHERE id = :p"), {"p": path_id})
         # Scoped by organization_id (not the fixed [req_course, opt_course] ids)

@@ -15,9 +15,13 @@ from __future__ import annotations
 
 from decimal import ROUND_HALF_UP, Decimal
 from typing import TYPE_CHECKING
+from uuid import UUID
 
+from abridgeai.core.exceptions import AppError
 from abridgeai.core.observability import get_logger
+from abridgeai.features.career_paths.queries import authoring as authoring_queries
 from abridgeai.features.career_paths.queries import readiness as readiness_queries
+from abridgeai.features.career_paths.queries import student as student_queries
 from abridgeai.features.career_paths.schemas.authoring import (
     PathReadinessOverview,
     StudentReadinessRead,
@@ -26,8 +30,6 @@ from abridgeai.features.career_paths.schemas.public import CareerReadinessSnapsh
 from abridgeai.features.career_paths.services import enrollment as enrollment_service
 
 if TYPE_CHECKING:
-    from uuid import UUID
-
     from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = get_logger(__name__)
@@ -68,10 +70,24 @@ async def snapshot_enrollment(
     score, formula_version = await compute_readiness_score(
         db, career_path_id=career_path_id, student_id=student_id
     )
+    # Gap 3: the snapshot records which version produced the score — the
+    # student's pin, or the latest published version when unenrolled.
+    enrollment = await student_queries.get_my_career_enrollment(
+        db, student_id=student_id, career_path_id=career_path_id
+    )
+    version_id = enrollment.version_id if enrollment is not None else None
+    if version_id is None:
+        published = await authoring_queries.get_published_version(db, career_path_id)
+        if published is None:
+            raise AppError(
+                f"Career path {career_path_id} has no published version to snapshot against"
+            )
+        version_id = published.id
     await readiness_queries.insert_snapshot(
         db,
         student_id=student_id,
         career_path_id=career_path_id,
+        version_id=version_id,
         readiness_score=score,
         formula_version=formula_version,
     )
@@ -92,7 +108,7 @@ async def snapshot_all_active_enrollments(db: AsyncSession) -> int:
     """
     pairs = await readiness_queries.list_active_enrollment_pairs(db)
     written = 0
-    for student_id, career_path_id in pairs:
+    for student_id, career_path_id, _version_id in pairs:
         try:
             # SAVEPOINT per pair: a DB-level error (FK violation etc.)
             # rolls back only this pair instead of poisoning the session

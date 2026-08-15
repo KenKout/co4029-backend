@@ -12,7 +12,7 @@ Windows (mirroring Moodle's review-options matrix):
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from abridgeai.features.quizzes.schemas.review_options import (
     ReviewOptions,
@@ -32,7 +32,7 @@ def _coerce_options(raw: object) -> ReviewOptions:
 
 def _as_aware(dt: datetime) -> datetime:
     if dt.tzinfo is None:
-        return dt.replace(tzinfo=timezone.utc)
+        return dt.replace(tzinfo=UTC)
     return dt
 
 

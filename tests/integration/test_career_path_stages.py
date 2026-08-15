@@ -166,22 +166,36 @@ async def seed(engine: AsyncEngine) -> AsyncIterator[dict]:
             ),
             {"id": path_id, "org": org, "slug": f"path-{s}"},
         )
+        # Gap 3 (0074): stages/items hang off a VERSION. The fixture path is
+        # 'published' (for the path-status guards) but its v1 is a DRAFT —
+        # the pre-fork authoring surface the tests mutate directly.
+        version_id = (
+            await conn.execute(
+                text(
+                    "INSERT INTO career_path_versions "
+                    "(id, career_path_id, version_no, status) "
+                    "VALUES (gen_random_uuid(), :pid, 1, 'draft') "
+                    "RETURNING id"
+                ),
+                {"pid": path_id},
+            )
+        ).scalar_one()
         await conn.execute(
             text(
                 "INSERT INTO career_path_stages "
-                "(id, career_path_id, position, unlock_policy, enforcement) "
-                "VALUES (:id, :pid, 1, 'always', 'soft')"
+                "(id, version_id, position, unlock_policy, enforcement) "
+                "VALUES (:id, :vid, 1, 'always', 'soft')"
             ),
-            {"id": stage1, "pid": path_id},
+            {"id": stage1, "vid": version_id},
         )
         for pos, (cid, req) in enumerate(((req_course, True), (opt_course, False)), start=1):
             await conn.execute(
                 text(
                     "INSERT INTO career_course_items "
-                    "(career_path_id, course_id, stage_id, position, is_required) "
-                    "VALUES (:pid, :cid, :sid, :pos, :req)"
+                    "(version_id, course_id, stage_id, position, is_required) "
+                    "VALUES (:vid, :cid, :sid, :pos, :req)"
                 ),
-                {"pid": path_id, "cid": cid, "sid": stage1, "pos": pos, "req": req},
+                {"vid": version_id, "cid": cid, "sid": stage1, "pos": pos, "req": req},
             )
 
     yield {
@@ -189,6 +203,7 @@ async def seed(engine: AsyncEngine) -> AsyncIterator[dict]:
         "manager": manager,
         "student": student,
         "path_id": path_id,
+        "version_id": version_id,
         "stage1": stage1,
         "req_course": req_course,
         "opt_course": opt_course,
@@ -217,11 +232,20 @@ async def seed(engine: AsyncEngine) -> AsyncIterator[dict]:
             {"p": path_id},
         )
         await conn.execute(
-            text("DELETE FROM career_course_items WHERE career_path_id = :p"), {"p": path_id}
+            text(
+                "DELETE FROM career_course_items WHERE version_id IN "
+                "(SELECT id FROM career_path_versions WHERE career_path_id = :p)"
+            ),
+            {"p": path_id},
         )
         await conn.execute(
-            text("DELETE FROM career_path_stages WHERE career_path_id = :p"), {"p": path_id}
+            text(
+                "DELETE FROM career_path_stages WHERE version_id IN "
+                "(SELECT id FROM career_path_versions WHERE career_path_id = :p)"
+            ),
+            {"p": path_id},
         )
+        await conn.execute(text("DELETE FROM career_path_versions WHERE career_path_id = :p"), {"p": path_id})
         await conn.execute(text("DELETE FROM career_paths WHERE id = :p"), {"p": path_id})
         await conn.execute(
             text(
@@ -400,7 +424,8 @@ async def test_cross_stage_move_offsets_both_sequences(engine, session_factory, 
             await conn.execute(
                 text(
                     "SELECT stage_id, course_id, position FROM career_course_items "
-                    "WHERE career_path_id = :p ORDER BY stage_id, position"
+                    "WHERE version_id IN (SELECT id FROM career_path_versions "
+                    "WHERE career_path_id = :p) ORDER BY stage_id, position"
                 ),
                 {"p": seed["path_id"]},
             )
@@ -850,7 +875,10 @@ async def test_concurrency_cap_warns_but_never_blocks(engine, session_factory, s
             {"p": seed["path_id"]},
         )
         await conn.execute(
-            text("UPDATE career_path_stages SET enforcement='hard' WHERE career_path_id = :p"),
+            text(
+                "UPDATE career_path_stages SET enforcement='hard' WHERE version_id IN "
+                "(SELECT id FROM career_path_versions WHERE career_path_id = :p)"
+            ),
             {"p": seed["path_id"]},
         )
     await _enroll(session_factory, seed)
@@ -1042,7 +1070,7 @@ async def test_start_allows_locked_stage_under_non_hard_enforcement(
     async with session_factory() as db:
         evals = await stage_service.evaluate_stages(
             db,
-            career_path_id=seed["path_id"],
+            version_id=seed["version_id"],
             student_id=seed["student"],
             enrollment_id=None,
         )
@@ -1300,7 +1328,7 @@ async def test_hard_enforcement_only_blocks_when_locked(session_factory, seed) -
     async with session_factory() as db:
         evals = await stage_service.evaluate_stages(
             db,
-            career_path_id=seed["path_id"],
+            version_id=seed["version_id"],
             student_id=seed["student"],
             enrollment_id=None,
         )

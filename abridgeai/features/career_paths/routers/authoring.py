@@ -31,6 +31,7 @@ from abridgeai.features.career_paths.schemas import (
     CareerPathStageUpdate,
     CareerPathStudentEnroll,
     CareerPathUpdate,
+    CareerPathVersionRead,
     PathReadinessOverview,
     StudentCareerEnrollmentAuthoring,
     StudentPathProgressAuthoring,
@@ -238,6 +239,53 @@ async def get_path_impact(
         return await authoring_service.get_path_impact(db, career_path_id)
     except NotFoundError as exc:
         raise _not_found(str(exc)) from exc
+
+
+@management_router.get(
+    "/{career_path_id}/versions",
+    response_model=list[CareerPathVersionRead],
+)
+async def list_path_versions(
+    career_path_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_PATH_READ)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> list[CareerPathVersionRead]:
+    """Versions of the path, newest first (Gap 3). A published version is
+    frozen; the draft (if any) is what manager edits land on."""
+    try:
+        await _ensure_caller_in_path_org(
+            db, current_user, career_path_id, _PATH_READ_CODES
+        )
+        return await authoring_service.list_path_versions(db, career_path_id)
+    except NotFoundError as exc:
+        raise _not_found(str(exc)) from exc
+
+
+@management_router.post(
+    "/{career_path_id}/versions",
+    response_model=CareerPathVersionRead,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_path_version(
+    career_path_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_PATH_MANAGE)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> CareerPathVersionRead:
+    """Copy-on-write fork (Gap 3 D2a explicit): clone the latest published
+    version into a new DRAFT. Subsequent stage/course edits land on the
+    draft; publishing it freezes it and leaves existing enrollments pinned
+    to their own versions."""
+    try:
+        await _ensure_caller_in_path_org(db, current_user, career_path_id)
+        version = await authoring_service.create_path_version(
+            db, career_path_id, current_user
+        )
+    except NotFoundError as exc:
+        raise _not_found(str(exc)) from exc
+    except ConflictError as exc:
+        raise _conflict(str(exc)) from exc
+    await db.commit()
+    return CareerPathVersionRead.model_validate(version)
 
 
 @management_router.patch(

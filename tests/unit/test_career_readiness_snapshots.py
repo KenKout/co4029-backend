@@ -84,9 +84,15 @@ def _db_with_savepoints() -> MagicMock:
 
 
 class TestSnapshotBatch:
+    _VERSION = uuid.uuid4()
+
     async def test_snapshot_all_active_counts_and_survives_failures(self) -> None:
         """A mid-batch failure must not poison later pairs (SAVEPOINT per pair)."""
-        pairs = [(_STUDENT, _PATH), (uuid.uuid4(), _PATH), (uuid.uuid4(), _PATH)]
+        pairs = [
+            (_STUDENT, _PATH, self._VERSION),
+            (uuid.uuid4(), _PATH, self._VERSION),
+            (uuid.uuid4(), _PATH, self._VERSION),
+        ]
         snapshot = AsyncMock(side_effect=[Decimal("10"), RuntimeError("boom"), Decimal("30")])
         db = _db_with_savepoints()
         with (
@@ -116,6 +122,11 @@ class TestSnapshotBatch:
                 "sync_enrollment_completion",
                 new=AsyncMock(return_value=False),
             ),
+            patch.object(
+                readiness_service.student_queries,
+                "get_my_career_enrollment",
+                new=AsyncMock(return_value=SimpleNamespace(version_id=self._VERSION)),
+            ),
             patch.object(readiness_service.readiness_queries, "insert_snapshot", new=insert),
         ):
             score = await readiness_service.snapshot_enrollment(
@@ -124,6 +135,8 @@ class TestSnapshotBatch:
         assert score == Decimal("42.00")
         insert.assert_awaited_once()
         assert insert.await_args.kwargs["readiness_score"] == Decimal("42.00")
+        # Gap 3: the snapshot records which VERSION produced the score.
+        assert insert.await_args.kwargs["version_id"] == self._VERSION
 
     async def test_snapshot_stamps_the_version_actually_used(self) -> None:
         """Guards review point #2: the write must pass ``formula_version``
@@ -141,12 +154,18 @@ class TestSnapshotBatch:
                 "sync_enrollment_completion",
                 new=AsyncMock(return_value=False),
             ),
+            patch.object(
+                readiness_service.student_queries,
+                "get_my_career_enrollment",
+                new=AsyncMock(return_value=SimpleNamespace(version_id=self._VERSION)),
+            ),
             patch.object(readiness_service.readiness_queries, "insert_snapshot", new=insert),
         ):
             await readiness_service.snapshot_enrollment(
                 AsyncMock(), career_path_id=_PATH, student_id=_STUDENT
             )
         assert insert.await_args.kwargs["formula_version"] == 2
+        assert insert.await_args.kwargs["version_id"] == self._VERSION
 
 
 class TestOverview:

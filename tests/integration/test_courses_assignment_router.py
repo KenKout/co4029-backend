@@ -907,17 +907,27 @@ async def test_readiness_flags_a_required_course_that_locks_its_stage(
         )
         await conn.execute(
             text(
+                "INSERT INTO career_path_versions "
+                "(id, career_path_id, version_no, status) "
+                "VALUES (gen_random_uuid(), :pid, 1, 'draft')"
+            ),
+            {"pid": path_id},
+        )
+        await conn.execute(
+            text(
                 "INSERT INTO career_path_stages "
-                "(id, career_path_id, position, title, unlock_policy, enforcement) "
-                "VALUES (:id, :pid, 1, 'Stage 1', 'always', 'advisory')"
+                "(id, version_id, position, title, unlock_policy, enforcement) "
+                "VALUES (:id, (SELECT id FROM career_path_versions "
+                "WHERE career_path_id = :pid AND version_no = 1), 1, 'Stage 1', 'always', 'advisory')"
             ),
             {"id": stage_id, "pid": path_id},
         )
         await conn.execute(
             text(
                 "INSERT INTO career_course_items "
-                "(career_path_id, course_id, stage_id, position, is_required) "
-                "VALUES (:pid, :cid, :sid, 1, TRUE)"
+                "(version_id, course_id, stage_id, position, is_required) "
+                "VALUES ((SELECT id FROM career_path_versions "
+                "WHERE career_path_id = :pid AND version_no = 1), :cid, :sid, 1, TRUE)"
             ),
             {"pid": path_id, "cid": scenario["course_b"], "sid": stage_id},
         )
@@ -937,11 +947,17 @@ async def test_readiness_flags_a_required_course_that_locks_its_stage(
     finally:
         async with engine.begin() as conn:
             await conn.execute(
-                text("DELETE FROM career_course_items WHERE career_path_id = :p"),
+                text(
+                    "DELETE FROM career_course_items WHERE version_id IN "
+                    "(SELECT id FROM career_path_versions WHERE career_path_id = :p)"
+                ),
                 {"p": path_id},
             )
             await conn.execute(
-                text("DELETE FROM career_path_stages WHERE career_path_id = :p"),
+                text(
+                    "DELETE FROM career_path_stages WHERE version_id IN "
+                    "(SELECT id FROM career_path_versions WHERE career_path_id = :p)"
+                ),
                 {"p": path_id},
             )
             await conn.execute(text("DELETE FROM career_paths WHERE id = :p"), {"p": path_id})

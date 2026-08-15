@@ -244,22 +244,37 @@ async def scenario(
         )
         # Migration 0070: every course item belongs to a stage. One 'always'
         # stage reproduces the pre-stage flat-list behaviour these tests assert.
+        # Gap 3 (0074): stages/items hang off a published v1.
+        # NOTE: kept DRAFT — several suites mutate this path directly, and
+        # published versions are frozen (the pinned promise). Path status is
+        # 'published' so the path-level guards still apply.
+        version_id = (
+            await conn.execute(
+                text(
+                    "INSERT INTO career_path_versions "
+                    "(id, career_path_id, version_no, status) "
+                    "VALUES (gen_random_uuid(), :pid, 1, 'draft') "
+                    "RETURNING id"
+                ),
+                {"pid": path_id},
+            )
+        ).scalar_one()
         await conn.execute(
             text(
                 "INSERT INTO career_path_stages "
-                "(id, career_path_id, position, unlock_policy, enforcement) "
-                "VALUES (:sid, :pid, 1, 'always', 'advisory')"
+                "(id, version_id, position, unlock_policy, enforcement) "
+                "VALUES (:sid, :vid, 1, 'always', 'advisory')"
             ),
-            {"sid": stage_id, "pid": path_id},
+            {"sid": stage_id, "vid": version_id},
         )
         for position, course_id in enumerate([pub_a_id, pub_b_id, draft_id], start=1):
             await conn.execute(
                 text(
                     "INSERT INTO career_course_items "
-                    "(career_path_id, course_id, stage_id, position, is_required) "
-                    "VALUES (:pid, :cid, :sid, :pos, TRUE)"
+                    "(version_id, course_id, stage_id, position, is_required) "
+                    "VALUES (:vid, :cid, :sid, :pos, TRUE)"
                 ),
-                {"pid": path_id, "cid": course_id, "sid": stage_id, "pos": position},
+                {"vid": version_id, "cid": course_id, "sid": stage_id, "pos": position},
             )
 
     yield {
@@ -290,11 +305,17 @@ async def scenario(
             {"pid": path_id},
         )
         await conn.execute(
-            text("DELETE FROM career_course_items WHERE career_path_id = :pid"),
+            text(
+                "DELETE FROM career_course_items WHERE version_id IN "
+                "(SELECT id FROM career_path_versions WHERE career_path_id = :pid)"
+            ),
             {"pid": path_id},
         )
         await conn.execute(
-            text("DELETE FROM career_path_stages WHERE career_path_id = :pid"),
+            text(
+                "DELETE FROM career_path_stages WHERE version_id IN "
+                "(SELECT id FROM career_path_versions WHERE career_path_id = :pid)"
+            ),
             {"pid": path_id},
         )
         await conn.execute(
@@ -404,23 +425,34 @@ async def test_path_impact_reports_active_students_per_stage(
             ),
             {"id": path_id, "org": seeded_users.organization_id, "slug": f"impact-{suffix}"},
         )
+        version_id = (
+            await conn.execute(
+                text(
+                    "INSERT INTO career_path_versions "
+                    "(id, career_path_id, version_no, status, published_at) "
+                    "VALUES (gen_random_uuid(), :pid, 1, 'published', NOW()) "
+                    "RETURNING id"
+                ),
+                {"pid": path_id},
+            )
+        ).scalar_one()
         for sid, pos in ((stage1, 1), (stage2, 2)):
             await conn.execute(
                 text(
                     "INSERT INTO career_path_stages "
-                    "(id, career_path_id, position, unlock_policy, enforcement) "
-                    "VALUES (:sid, :pid, :pos, 'always', 'advisory')"
+                    "(id, version_id, position, unlock_policy, enforcement) "
+                    "VALUES (:sid, :vid, :pos, 'always', 'advisory')"
                 ),
-                {"sid": sid, "pid": path_id, "pos": pos},
+                {"sid": sid, "vid": version_id, "pos": pos},
             )
         for cid, sid, pos in ((course_a, stage1, 1), (course_b, stage2, 1)):
             await conn.execute(
                 text(
                     "INSERT INTO career_course_items "
-                    "(career_path_id, course_id, stage_id, position, is_required) "
-                    "VALUES (:pid, :cid, :sid, :pos, TRUE)"
+                    "(version_id, course_id, stage_id, position, is_required) "
+                    "VALUES (:vid, :cid, :sid, :pos, TRUE)"
                 ),
-                {"pid": path_id, "cid": cid, "sid": sid, "pos": pos},
+                {"vid": version_id, "cid": cid, "sid": sid, "pos": pos},
             )
         for uid, status in (
             (on_stage1, "active"),
@@ -435,10 +467,10 @@ async def test_path_impact_reports_active_students_per_stage(
             await conn.execute(
                 text(
                     "INSERT INTO student_career_enrollments "
-                    "(id, career_path_id, student_id, status) "
-                    "VALUES (gen_random_uuid(), :pid, :sid, :status)"
+                    "(id, career_path_id, version_id, student_id, status) "
+                    "VALUES (gen_random_uuid(), :pid, :vid, :sid, :status)"
                 ),
-                {"pid": path_id, "sid": uid, "status": status},
+                {"pid": path_id, "vid": version_id, "sid": uid, "status": status},
             )
         # on_stage2 latched Stage 1 → currently walking Stage 2.
         await conn.execute(
@@ -482,11 +514,17 @@ async def test_path_impact_reports_active_students_per_stage(
             {"pid": path_id},
         )
         await conn.execute(
-            text("DELETE FROM career_course_items WHERE career_path_id = :pid"),
+            text(
+                "DELETE FROM career_course_items WHERE version_id IN "
+                "(SELECT id FROM career_path_versions WHERE career_path_id = :pid)"
+            ),
             {"pid": path_id},
         )
         await conn.execute(
-            text("DELETE FROM career_path_stages WHERE career_path_id = :pid"),
+            text(
+                "DELETE FROM career_path_stages WHERE version_id IN "
+                "(SELECT id FROM career_path_versions WHERE career_path_id = :pid)"
+            ),
             {"pid": path_id},
         )
         await conn.execute(text("DELETE FROM career_paths WHERE id = :pid"), {"pid": path_id})
@@ -674,7 +712,8 @@ async def test_reorder_courses_in_path(
             await conn.execute(
                 text(
                     "SELECT course_id, position FROM career_course_items "
-                    "WHERE career_path_id = :pid ORDER BY position"
+                    "WHERE version_id IN (SELECT id FROM career_path_versions "
+                    "WHERE career_path_id = :pid) ORDER BY position"
                 ),
                 {"pid": scenario["path_id"]},
             )
@@ -792,10 +831,18 @@ async def test_create_publish_lifecycle(
 
     async with engine.begin() as conn:
         await conn.execute(
-            text("DELETE FROM career_course_items WHERE career_path_id = :id"), {"id": path_id}
+            text(
+                "DELETE FROM career_course_items WHERE version_id IN "
+                "(SELECT id FROM career_path_versions WHERE career_path_id = :id)"
+            ),
+            {"id": path_id}
         )
         await conn.execute(
-            text("DELETE FROM career_path_stages WHERE career_path_id = :id"), {"id": path_id}
+            text(
+                "DELETE FROM career_path_stages WHERE version_id IN "
+                "(SELECT id FROM career_path_versions WHERE career_path_id = :id)"
+            ),
+            {"id": path_id}
         )
         await conn.execute(text("DELETE FROM career_paths WHERE id = :id"), {"id": path_id})
         await conn.execute(text("DELETE FROM lessons WHERE id = :id"), {"id": lesson_id})
@@ -945,7 +992,8 @@ async def test_add_unpublished_course_to_published_path_is_rejected(
         )
         assert pub.status_code == 200, pub.text
 
-        # Draft course on the now-published path -> rejected (409 AppError).
+        # Gap 3 (D1b pinned): the published version is FROZEN — adding any
+        # course now requires a fork first (409 version_published).
         reject = await client.post(
             f"/api/v1/management/career-paths/{fresh_path_id}/courses",
             json={
@@ -957,14 +1005,44 @@ async def test_add_unpublished_course_to_published_path_is_rejected(
         )
         assert reject.status_code == 409, reject.text
         detail = reject.json()["detail"]
+        assert "version" in detail["message"]
+
+        # Fork (copy-on-write) -> the draft course is still rejected on the
+        # published path (path-level guard: only published courses attach),
+        # while a published course is accepted on the draft version.
+        fork_resp = await client.post(
+            f"/api/v1/management/career-paths/{fresh_path_id}/versions",
+            headers=auth,
+        )
+        assert fork_resp.status_code == 201, fork_resp.text
+
+        # The fork cloned the stages — resolve the DRAFT version's stage id.
+        draft_stages = await client.get(
+            f"/api/v1/management/career-paths/{fresh_path_id}/stages",
+            headers=auth,
+        )
+        assert draft_stages.status_code == 200, draft_stages.text
+        draft_stage_id = draft_stages.json()[0]["id"]
+
+        reject = await client.post(
+            f"/api/v1/management/career-paths/{fresh_path_id}/courses",
+            json={
+                "stage_id": draft_stage_id,
+                "course_id": str(scenario["draft_id"]),
+                "is_required": True,
+            },
+            headers=auth,
+        )
+        assert reject.status_code == 409, reject.text
+        detail = reject.json()["detail"]
         assert detail["error"] == "conflict"
         assert "not published" in detail["message"]
 
-        # Published course -> still accepted.
+        # Published course -> still accepted (on the draft version).
         ok = await client.post(
             f"/api/v1/management/career-paths/{fresh_path_id}/courses",
             json={
-                "stage_id": fresh_stage_id,
+                "stage_id": draft_stage_id,
                 "course_id": str(scenario["pub_b_id"]),
                 "is_required": True,
             },
@@ -972,13 +1050,15 @@ async def test_add_unpublished_course_to_published_path_is_rejected(
         )
         assert ok.status_code == 201, ok.text
 
-        # And the draft was never attached — only the two published courses.
+        # And the draft was never attached — only the two published courses
+        # (across both versions: v1 published + v2 draft clone).
         async with engine.begin() as conn:
             rows = (
                 (
                     await conn.execute(
                         text(
-                            "SELECT course_id FROM career_course_items WHERE career_path_id = :pid"
+                            "SELECT course_id FROM career_course_items WHERE version_id IN "
+                            "(SELECT id FROM career_path_versions WHERE career_path_id = :pid)"
                         ),
                         {"pid": fresh_path_id},
                     )
@@ -986,17 +1066,24 @@ async def test_add_unpublished_course_to_published_path_is_rejected(
                 .scalars()
                 .all()
             )
-        assert sorted(str(r) for r in rows) == sorted(
-            [str(scenario["pub_a_id"]), str(scenario["pub_b_id"])]
-        )
+        assert set(str(r) for r in rows) == {
+            str(scenario["pub_a_id"]),
+            str(scenario["pub_b_id"]),
+        }
     finally:
         async with engine.begin() as conn:
             await conn.execute(
-                text("DELETE FROM career_course_items WHERE career_path_id = :pid"),
+                text(
+                "DELETE FROM career_course_items WHERE version_id IN "
+                "(SELECT id FROM career_path_versions WHERE career_path_id = :pid)"
+            ),
                 {"pid": fresh_path_id},
             )
             await conn.execute(
-                text("DELETE FROM career_path_stages WHERE career_path_id = :pid"),
+                text(
+                "DELETE FROM career_path_stages WHERE version_id IN "
+                "(SELECT id FROM career_path_versions WHERE career_path_id = :pid)"
+            ),
                 {"pid": fresh_path_id},
             )
             await conn.execute(
@@ -1057,11 +1144,17 @@ async def test_add_draft_course_to_draft_path_is_allowed(
     finally:
         async with engine.begin() as conn:
             await conn.execute(
-                text("DELETE FROM career_course_items WHERE career_path_id = :pid"),
+                text(
+                "DELETE FROM career_course_items WHERE version_id IN "
+                "(SELECT id FROM career_path_versions WHERE career_path_id = :pid)"
+            ),
                 {"pid": fresh_path_id},
             )
             await conn.execute(
-                text("DELETE FROM career_path_stages WHERE career_path_id = :pid"),
+                text(
+                "DELETE FROM career_path_stages WHERE version_id IN "
+                "(SELECT id FROM career_path_versions WHERE career_path_id = :pid)"
+            ),
                 {"pid": fresh_path_id},
             )
             await conn.execute(

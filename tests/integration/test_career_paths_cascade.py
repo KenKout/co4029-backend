@@ -22,7 +22,11 @@ from abridgeai.features.access_control.models import (
     CareerPath,
     StudentCareerEnrollment,
 )
-from abridgeai.features.career_paths.models import CareerPathCourse, CareerPathStage
+from abridgeai.features.career_paths.models import (
+    CareerPathCourse,
+    CareerPathStage,
+    CareerPathVersion,
+)
 
 
 def _async_url(database_url: str) -> str:
@@ -99,15 +103,17 @@ async def seeded_scope(engine: AsyncEngine):
         )
         await conn.execute(
             text(
-                "DELETE FROM career_course_items WHERE career_path_id IN "
-                "(SELECT id FROM career_paths WHERE organization_id = :org)"
+                "DELETE FROM career_course_items WHERE version_id IN "
+                "(SELECT id FROM career_path_versions WHERE career_path_id IN "
+                "(SELECT id FROM career_paths WHERE organization_id = :org))"
             ),
             {"org": org_id},
         )
         await conn.execute(
             text(
-                "DELETE FROM career_path_stages WHERE career_path_id IN "
-                "(SELECT id FROM career_paths WHERE organization_id = :org)"
+                "DELETE FROM career_path_stages WHERE version_id IN "
+                "(SELECT id FROM career_path_versions WHERE career_path_id IN "
+                "(SELECT id FROM career_paths WHERE organization_id = :org))"
             ),
             {"org": org_id},
         )
@@ -139,9 +145,18 @@ async def test_career_path_enrollment_pair_loads_bidirectionally(
         )
         session.add(path)
         await session.flush()
+        # Gap 3 (0074): stages/items hang off a version; enrollments pin to it.
+        version = CareerPathVersion(
+            career_path_id=path.id,
+            version_no=1,
+            status="draft",
+        )
+        session.add(version)
+        await session.flush()
 
         enrollment = StudentCareerEnrollment(
             career_path_id=path.id,
+            version_id=version.id,
             student_id=student_id,
             status="active",
         )
@@ -149,7 +164,7 @@ async def test_career_path_enrollment_pair_loads_bidirectionally(
 
         # Migration 0070: course items hang off a stage, not the path directly.
         stage = CareerPathStage(
-            career_path_id=path.id,
+            version_id=version.id,
             position=1,
             unlock_policy="always",
             enforcement="advisory",
@@ -158,7 +173,7 @@ async def test_career_path_enrollment_pair_loads_bidirectionally(
         await session.flush()
 
         path_course = CareerPathCourse(
-            career_path_id=path.id,
+            version_id=version.id,
             course_id=course_id,
             stage_id=stage.id,
             position=1,
@@ -194,12 +209,12 @@ async def test_career_path_enrollment_pair_loads_bidirectionally(
         loaded_path_course = (
             await session.execute(
                 select(CareerPathCourse)
-                .where(CareerPathCourse.career_path_id == path_id)
-                .options(selectinload(CareerPathCourse.career_path))
+                .where(CareerPathCourse.version_id == version.id)
+                .options(selectinload(CareerPathCourse.version))
             )
         ).scalar_one()
-        assert loaded_path_course.career_path is not None
-        assert loaded_path_course.career_path.id == path_id
+        assert loaded_path_course.version is not None
+        assert loaded_path_course.version.career_path_id == path_id
 
 
 async def test_soft_delete_cascade_walks_enrollments(
@@ -218,9 +233,17 @@ async def test_soft_delete_cascade_walks_enrollments(
         )
         session.add(path)
         await session.flush()
+        version = CareerPathVersion(
+            career_path_id=path.id,
+            version_no=1,
+            status="draft",
+        )
+        session.add(version)
+        await session.flush()
 
         enrollment = StudentCareerEnrollment(
             career_path_id=path.id,
+            version_id=version.id,
             student_id=student_id,
             status="active",
         )

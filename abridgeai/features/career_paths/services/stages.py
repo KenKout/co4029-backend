@@ -115,21 +115,22 @@ class StageEval:
 async def evaluate_stages(
     db: AsyncSession,
     *,
-    career_path_id: UUID,
+    version_id: UUID,
     student_id: UUID,
     enrollment_id: UUID | None,
 ) -> list[StageEval]:
-    """Evaluate every stage of a path for one student, in position order.
+    """Evaluate every stage of ONE VERSION for one student, in position order.
 
-    ``enrollment_id`` may be ``None`` for a student who is not enrolled (a
-    manager previewing, or a published-path browse). Nothing is latched in
-    that case — there is no enrollment to latch against — but unlock and
-    completion still evaluate so the preview matches what a student would
-    see.
+    ``version_id`` is the version the student's enrollment is pinned to
+    (Gap 3: their route never changes under them). ``enrollment_id`` may be
+    ``None`` for a student who is not enrolled (a manager previewing, or a
+    published-path browse). Nothing is latched in that case — there is no
+    enrollment to latch against — but unlock and completion still evaluate
+    so the preview matches what a student would see.
     """
-    stages = await authoring_queries.list_path_stages(db, career_path_id)
+    stages = await authoring_queries.list_stages_for_version(db, version_id)
     rows = await student_queries.get_path_course_progress(
-        db, career_path_id=career_path_id, student_id=student_id
+        db, version_id=version_id, student_id=student_id
     )
     latched = (
         await student_queries.list_latched_stage_ids(db, enrollment_id)

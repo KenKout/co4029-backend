@@ -32,7 +32,7 @@ stay HTTP-agnostic.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Annotated, Any
 from uuid import UUID
 
@@ -52,6 +52,11 @@ from abridgeai.features.quizzes.routers._deps import (
     require_quiz_authoring_access,
 )
 from abridgeai.features.quizzes.schemas import (
+    FeedbackBandIn,
+    FeedbackBandRead,
+    ManualGradeIn,
+    ManualGradeRead,
+    NeedsGradingRow,
     QuestionBankEntry,
     QuestionBankImportRequest,
     QuestionBankPage,
@@ -65,25 +70,18 @@ from abridgeai.features.quizzes.schemas import (
     QuizGenerationProgress,
     QuizGenerationRequest,
     QuizGenerationRunRead,
+    QuizGradeRow,
     QuizOptionDistribution,
+    QuizOverrideIn,
+    QuizOverrideRead,
     QuizPerStudentRow,
     QuizQuestionAuthoring,
     QuizQuestionBreakdown,
     QuizResultsRead,
-    FeedbackBandIn,
-    FeedbackBandRead,
-    QuizGradeRow,
-    ResponsesReportRead,
-    StatisticsReportRead,
-    ManualGradeIn,
-    ManualGradeRead,
-    NeedsGradingRow,
-    QuizOverrideIn,
-    QuizOverrideRead,
-    RegradeRunRead,
-    RegradeScopeIn,
     QuizResultsSummary,
     QuizScoreBucket,
+    RegradeRunRead,
+    RegradeScopeIn,
 )
 from abridgeai.features.quizzes.services import (
     authoring as authoring_service,
@@ -1424,11 +1422,11 @@ def _report_download(
     filename_stem: str,
 ) -> Response:
     """Serialize a flattened report table to a CSV or XLSX download response."""
-    from datetime import datetime, timezone  # noqa: PLC0415
+    from datetime import datetime  # noqa: PLC0415
 
     from abridgeai.features.quizzes.services import reports_export as _exp  # noqa: PLC0415
 
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%d")
+    stamp = datetime.now(UTC).strftime("%Y%m%d")
     if fmt == "xlsx":
         content = _exp.build_xlsx(headers, rows)
         return Response(
@@ -1589,7 +1587,7 @@ async def export_quiz_questions(
 ) -> Response:
     """Export a quiz's questions to GIFT or Moodle XML (teacher-only download)."""
     del current_user
-    from datetime import datetime, timezone  # noqa: PLC0415
+    from datetime import datetime  # noqa: PLC0415
 
     from abridgeai.features.quizzes.services import quiz_io as _io  # noqa: PLC0415
 
@@ -1599,7 +1597,7 @@ async def export_quiz_questions(
         content = await _io.export_quiz_questions(db, quiz_id=quiz_id, fmt=format)
     except AppError as exc:
         raise _bad_request(str(exc)) from exc
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%d")
+    stamp = datetime.now(UTC).strftime("%Y%m%d")
     ext = "txt" if format == "gift" else "xml"
     media = "text/plain" if format == "gift" else "application/xml"
     return Response(

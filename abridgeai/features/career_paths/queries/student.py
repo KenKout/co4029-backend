@@ -17,9 +17,10 @@ if TYPE_CHECKING:
 _LIST_MY_CAREER_ENROLLMENTS_SQL = text(
     """
     SELECT sce.career_path_id, sce.status, sce.started_at, sce.completed_at,
-           cp.slug, cp.name
+           sce.version_id, cpv.version_no, cp.slug, cp.name
     FROM student_career_enrollments sce
     JOIN career_paths cp ON cp.id = sce.career_path_id
+    JOIN career_path_versions cpv ON cpv.id = sce.version_id
     WHERE sce.student_id = :student_id
       AND sce.deleted_at IS NULL
       AND cp.deleted_at IS NULL
@@ -65,7 +66,7 @@ _PATH_COURSE_PROGRESS_SQL = text(
         JOIN career_path_stages s ON s.id = cci.stage_id
             AND s.deleted_at IS NULL
         JOIN courses c ON c.id = cci.course_id
-        WHERE cci.career_path_id = :career_path_id
+        WHERE cci.version_id = :version_id
           AND c.status = 'published'
           AND c.deleted_at IS NULL
     ),
@@ -181,12 +182,12 @@ _PATH_COURSE_PROGRESS_SQL = text(
 
 
 async def get_path_course_progress(
-    db: AsyncSession, *, career_path_id: UUID, student_id: UUID
+    db: AsyncSession, *, version_id: UUID, student_id: UUID
 ) -> list[dict[str, Any]]:
     rows = (
         await db.execute(
             _PATH_COURSE_PROGRESS_SQL,
-            {"career_path_id": career_path_id, "student_id": student_id},
+            {"version_id": version_id, "student_id": student_id},
         )
     ).mappings()
     return [dict(row) for row in rows]
@@ -233,7 +234,7 @@ _ROSTER_PROGRESS_SQL = text(
         SELECT cci.course_id
         FROM career_course_items cci
         JOIN courses c ON c.id = cci.course_id
-        WHERE cci.career_path_id = :career_path_id
+        WHERE cci.version_id = :version_id
           AND c.status = 'published'
           AND c.deleted_at IS NULL
     ),
@@ -285,8 +286,8 @@ _ROSTER_PROGRESS_SQL = text(
 )
 
 
-async def get_roster_path_progress(db: AsyncSession, career_path_id: UUID) -> list[dict[str, Any]]:
-    rows = (await db.execute(_ROSTER_PROGRESS_SQL, {"career_path_id": career_path_id})).mappings()
+async def get_roster_path_progress(db: AsyncSession, version_id: UUID) -> list[dict[str, Any]]:
+    rows = (await db.execute(_ROSTER_PROGRESS_SQL, {"version_id": version_id})).mappings()
     return [dict(row) for row in rows]
 
 

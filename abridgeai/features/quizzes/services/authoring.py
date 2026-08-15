@@ -41,15 +41,12 @@ from abridgeai.core.security import CurrentUser, utcnow
 from abridgeai.features.courses.api import public as courses_api
 from abridgeai.features.quizzes.models import (
     Quiz,
-    QuizAttemptAnswer,
     QuizQuestion,
     QuizQuestionOption,
     QuizQuestionRevision,
     QuizSourceLesson,
 )
 from abridgeai.features.quizzes.queries import authoring as authoring_queries
-from abridgeai.features.quizzes.schemas import QuizGenerationRequest
-
 from abridgeai.features.quizzes.services.generation_runs import (  # noqa: F401
     regenerate_question,
     start_generation_run,

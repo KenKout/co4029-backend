@@ -82,6 +82,26 @@ def _to_authoring_enrollment(
     )
 
 
+async def _resolve_pin_version(
+    db: AsyncSession, career_path_id: UUID
+) -> UUID:
+    """The version a NEW enrollment pins to (Gap 3 D3a).
+
+    Latest published version; a draft path with no published version pins
+    to its authoring version (it will be published before any student can
+    meaningfully walk it).
+    """
+    published = await authoring_queries.get_published_version(db, career_path_id)
+    if published is not None:
+        return published.id
+    authoring = await authoring_queries.get_current_authoring_version(db, career_path_id)
+    if authoring is None:
+        raise AppError(
+            f"Career path {career_path_id} has no version to enroll against"
+        )
+    return authoring.id
+
+
 async def enroll_student_in_path(
     db: AsyncSession,
     *,
@@ -122,6 +142,9 @@ async def enroll_student_in_path(
         existing.status = "active"
         existing.completed_at = None
         existing.started_at = datetime.now(tz=UTC)
+        # Re-activation is a fresh start: pin to the CURRENT latest
+        # published version, not the one the dropped enrollment used.
+        existing.version_id = await _resolve_pin_version(db, career_path_id)
         existing.updated_by = actor.user_id
         await flush_or_conflict(db)
         await db.refresh(existing)
@@ -129,6 +152,7 @@ async def enroll_student_in_path(
 
     enrollment = StudentCareerEnrollment(
         career_path_id=career_path_id,
+        version_id=await _resolve_pin_version(db, career_path_id),
         student_id=student_id,
         status="active",
         created_by=actor.user_id,
@@ -233,15 +257,26 @@ async def get_my_path_progress(
     used is returned so the readiness snapshot can stamp exactly what it
     measured.
     """
-    rows = await student_queries.get_path_course_progress(
-        db, career_path_id=career_path_id, student_id=student_id
-    )
     enrollment = await student_queries.get_my_career_enrollment(
         db, student_id=student_id, career_path_id=career_path_id
     )
+    # Gap 3: an enrolled student's progress reads their PINNED version — the
+    # route they started. A preview (no enrollment) reads the latest
+    # published version.
+    if enrollment is not None:
+        version_id = enrollment.version_id
+    else:
+        published = await authoring_queries.get_published_version(db, career_path_id)
+        if published is None:
+            raise NotFoundError(f"CareerPath {career_path_id} not found")
+        version_id = published.id
+
+    rows = await student_queries.get_path_course_progress(
+        db, version_id=version_id, student_id=student_id
+    )
     evals = await stage_service.evaluate_stages(
         db,
-        career_path_id=career_path_id,
+        version_id=version_id,
         student_id=student_id,
         enrollment_id=enrollment.id if enrollment is not None else None,
     )
@@ -371,13 +406,17 @@ async def start_course_in_path(
             f"enrolled in career path {career_path_id}"
         )
 
-    link = await authoring_queries.get_path_course_link(db, career_path_id, course_id)
+    # Gap 3: the reachable route is the VERSION this enrollment is pinned
+    # to — never the path's current authoring version.
+    link = await authoring_queries.get_version_course_link(
+        db, enrollment.version_id, course_id
+    )
     if link is None:
         raise NotFoundError(f"Course {course_id} is not part of career path {career_path_id}")
 
     evals = await stage_service.evaluate_stages(
         db,
-        career_path_id=career_path_id,
+        version_id=enrollment.version_id,
         student_id=student_id,
         enrollment_id=enrollment.id,
     )
@@ -413,7 +452,7 @@ async def start_course_in_path(
     course_ids = [
         row["course_id"]
         for row in await student_queries.get_path_course_progress(
-            db, career_path_id=career_path_id, student_id=student_id
+            db, version_id=enrollment.version_id, student_id=student_id
         )
     ]
     path = await authoring_queries.get_career_path_for_authoring(db, career_path_id)
@@ -443,7 +482,16 @@ async def get_published_path_with_courses(
     path = await get_published_career_path_by_slug(db, slug=slug, organization_id=organization_id)
     if path is None:
         return None
-    courses = await list_published_career_path_courses(db, path.id)
+    from abridgeai.features.career_paths.queries import authoring as authoring_queries
+
+    published = await authoring_queries.get_published_version(db, path.id)
+    if published is None:
+        # Published path with only a draft version (transient pre-publish
+        # state): browse the authoring version rather than 404.
+        published = await authoring_queries.get_current_authoring_version(db, path.id)
+    if published is None:
+        return None
+    courses = await list_published_career_path_courses(db, published.id)
     return _to_path_public(path, courses)
 
 
@@ -489,7 +537,12 @@ async def list_published_paths(
     )
     results: list[CareerPathPublic] = []
     for path in paths:
-        courses = await list_published_career_path_courses(db, path.id)
+        published = await authoring_queries.get_published_version(db, path.id)
+        if published is None:
+            published = await authoring_queries.get_current_authoring_version(db, path.id)
+        if published is None:
+            continue
+        courses = await list_published_career_path_courses(db, published.id)
         results.append(_to_path_public(path, courses))
     next_cursor = (
         encode_composite_cursor(paths[-1].created_at, paths[-1].id) if len(paths) == limit else None
@@ -517,7 +570,13 @@ async def list_published_paths_for_user(
 async def get_roster_progress(
     db: AsyncSession, career_path_id: UUID
 ) -> list[StudentPathProgressAuthoring]:
-    rows = await student_queries.get_roster_path_progress(db, career_path_id)
+    # Gap 3: the roster measures the route students are actually on — the
+    # path's current PUBLISHED version (each student's pin resolves their
+    # own; the published version is the shared denominator managers track).
+    published = await authoring_queries.get_published_version(db, career_path_id)
+    if published is None:
+        return []
+    rows = await student_queries.get_roster_path_progress(db, published.id)
     return [
         StudentPathProgressAuthoring.model_validate(
             {

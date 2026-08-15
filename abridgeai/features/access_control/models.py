@@ -452,6 +452,15 @@ class StudentCareerEnrollment(
         ForeignKey("career_paths.id", ondelete="NO ACTION"),
         nullable=False,
     )
+    # Gap 3 (0074): THE version pin. D3(a) — the student finishes the
+    # version they started on; a manager editing the path edits a NEW
+    # version, so this enrollment's route never changes under them.
+    version_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("career_path_versions.id", ondelete="NO ACTION"),
+        nullable=False,
+        index=True,
+    )
     student_id: Mapped[uuid.UUID] = mapped_column(
         PGUUID(as_uuid=True),
         ForeignKey("users.id", ondelete="CASCADE"),

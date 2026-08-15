@@ -529,17 +529,27 @@ async def test_publish_gate_rejects_course_with_no_gradeable_units(
         )
         await conn.execute(
             text(
+                "INSERT INTO career_path_versions "
+                "(id, career_path_id, version_no, status) "
+                "VALUES (gen_random_uuid(), :p, 1, 'draft')"
+            ),
+            {"p": path_id},
+        )
+        await conn.execute(
+            text(
                 "INSERT INTO career_path_stages "
-                "(id, career_path_id, position, unlock_policy, enforcement) "
-                "VALUES (:i,:p,1,'always','hard')"
+                "(id, version_id, position, unlock_policy, enforcement) "
+                "VALUES (:i,(SELECT id FROM career_path_versions "
+                "WHERE career_path_id = :p AND version_no = 1),1,'always','hard')"
             ),
             {"i": stage_id, "p": path_id},
         )
         await conn.execute(
             text(
                 "INSERT INTO career_course_items "
-                "(career_path_id, course_id, stage_id, position, is_required) "
-                "VALUES (:p,:c,:s,1,TRUE)"
+                "(version_id, course_id, stage_id, position, is_required) "
+                "VALUES ((SELECT id FROM career_path_versions "
+                "WHERE career_path_id = :p AND version_no = 1),:c,:s,1,TRUE)"
             ),
             {"p": path_id, "c": fx["course"], "s": stage_id},
         )
@@ -551,10 +561,10 @@ async def test_publish_gate_rejects_course_with_no_gradeable_units(
     finally:
         async with engine.begin() as conn:
             await conn.execute(
-                text("DELETE FROM career_course_items WHERE career_path_id=:p"), {"p": path_id}
+                text("DELETE FROM career_course_items WHERE version_id IN (SELECT id FROM career_path_versions WHERE career_path_id=:p)"), {"p": path_id}
             )
             await conn.execute(
-                text("DELETE FROM career_path_stages WHERE career_path_id=:p"), {"p": path_id}
+                text("DELETE FROM career_path_stages WHERE version_id IN (SELECT id FROM career_path_versions WHERE career_path_id=:p)"), {"p": path_id}
             )
             await conn.execute(text("DELETE FROM career_paths WHERE id=:p"), {"p": path_id})
 
@@ -576,17 +586,27 @@ async def test_publish_gate_accepts_a_course_whose_only_unit_is_a_quiz(
         )
         await conn.execute(
             text(
+                "INSERT INTO career_path_versions "
+                "(id, career_path_id, version_no, status) "
+                "VALUES (gen_random_uuid(), :p, 1, 'draft')"
+            ),
+            {"p": path_id},
+        )
+        await conn.execute(
+            text(
                 "INSERT INTO career_path_stages "
-                "(id, career_path_id, position, unlock_policy, enforcement) "
-                "VALUES (:i,:p,1,'always','soft')"
+                "(id, version_id, position, unlock_policy, enforcement) "
+                "VALUES (:i,(SELECT id FROM career_path_versions "
+                "WHERE career_path_id = :p AND version_no = 1),1,'always','soft')"
             ),
             {"i": stage_id, "p": path_id},
         )
         await conn.execute(
             text(
                 "INSERT INTO career_course_items "
-                "(career_path_id, course_id, stage_id, position, is_required) "
-                "VALUES (:p,:c,:s,1,TRUE)"
+                "(version_id, course_id, stage_id, position, is_required) "
+                "VALUES ((SELECT id FROM career_path_versions "
+                "WHERE career_path_id = :p AND version_no = 1),:c,:s,1,TRUE)"
             ),
             {"p": path_id, "c": fx["course"], "s": stage_id},
         )
@@ -596,10 +616,10 @@ async def test_publish_gate_accepts_a_course_whose_only_unit_is_a_quiz(
     finally:
         async with engine.begin() as conn:
             await conn.execute(
-                text("DELETE FROM career_course_items WHERE career_path_id=:p"), {"p": path_id}
+                text("DELETE FROM career_course_items WHERE version_id IN (SELECT id FROM career_path_versions WHERE career_path_id=:p)"), {"p": path_id}
             )
             await conn.execute(
-                text("DELETE FROM career_path_stages WHERE career_path_id=:p"), {"p": path_id}
+                text("DELETE FROM career_path_stages WHERE version_id IN (SELECT id FROM career_path_versions WHERE career_path_id=:p)"), {"p": path_id}
             )
             await conn.execute(text("DELETE FROM career_paths WHERE id=:p"), {"p": path_id})
 

@@ -89,6 +89,24 @@ class CareerPathImpactRead(BaseModel):
     stages: list[CareerPathImpactStage] = []
 
 
+class CareerPathVersionRead(BaseModel):
+    """One frozen revision of a path's route (Gap 3).
+
+    ``status`` is ``draft`` (being edited) or ``published`` (frozen — what
+    enrollments are pinned to). Newest-first list order.
+    """
+
+    id: UUID
+    career_path_id: UUID
+    version_no: int
+    status: str
+    published_at: datetime | None = None
+    created_at: datetime
+    created_by: UUID | None = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
 UnlockPolicy = Literal["always", "after_previous", "after_previous_required"]
 StageEnforcement = Literal["hard", "soft", "advisory"]
 

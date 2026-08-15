@@ -736,13 +736,24 @@ async def _insert_student_career_enrollment(conn: AsyncConnection) -> PrimaryKey
     career_path_id = await _new_career_path(conn)
     student_id = await _new_user(conn)
     eid = uuid.uuid4()
+    version_id = (
+        await conn.execute(
+            text(
+                "INSERT INTO career_path_versions "
+                "(id, career_path_id, version_no, status) "
+                "VALUES (gen_random_uuid(), :cpid, 1, 'draft') "
+                "RETURNING id"
+            ),
+            {"cpid": career_path_id},
+        )
+    ).scalar_one()
     await conn.execute(
         text(
             "INSERT INTO student_career_enrollments "
-            "(id, career_path_id, student_id, status) "
-            "VALUES (:id, :cpid, :uid, 'active')"
+            "(id, career_path_id, version_id, student_id, status) "
+            "VALUES (:id, :cpid, :vid, :uid, 'active')"
         ),
-        {"id": eid, "cpid": career_path_id, "uid": student_id},
+        {"id": eid, "cpid": career_path_id, "vid": version_id, "uid": student_id},
     )
     return {"id": eid}
 

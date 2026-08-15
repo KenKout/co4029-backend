@@ -188,28 +188,27 @@ async def _enrich_one_isolated(
     # connection pool (``QueuePool limit ... reached``). Acquiring FIRST caps
     # concurrent open sessions at ``parallelism``. The inner ``_enrich_one``
     # then runs with an unbounded semaphore so it does not double-gate.
-    async with semaphore:
-        async with session_factory() as session:
-            cache = ChunkingCache(session)
-            enrichment = await _enrich_one(
-                window=window,
-                llm_gateway=llm_gateway,
-                db=session,
-                cache=cache,
-                document_title=document_title,
-                pipeline_run_id=pipeline_run_id,
-                parent_job_id=parent_job_id,
-                semaphore=_UNBOUNDED_SEMAPHORE,
+    async with semaphore, session_factory() as session:
+        cache = ChunkingCache(session)
+        enrichment = await _enrich_one(
+            window=window,
+            llm_gateway=llm_gateway,
+            db=session,
+            cache=cache,
+            document_title=document_title,
+            pipeline_run_id=pipeline_run_id,
+            parent_job_id=parent_job_id,
+            semaphore=_UNBOUNDED_SEMAPHORE,
+        )
+        try:
+            await session.commit()
+        except Exception as exc:  # noqa: BLE001 -- audit persistence must not break ingest
+            logger.warning(
+                "chunking enrichment session commit failed (group=%s): %s",
+                window.metadata.get("glue_group_id"),
+                exc,
             )
-            try:
-                await session.commit()
-            except Exception as exc:  # noqa: BLE001 -- audit persistence must not break ingest
-                logger.warning(
-                    "chunking enrichment session commit failed (group=%s): %s",
-                    window.metadata.get("glue_group_id"),
-                    exc,
-                )
-            return enrichment
+        return enrichment
 
 
 async def _enrich_one(

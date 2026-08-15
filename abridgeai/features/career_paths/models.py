@@ -34,6 +34,56 @@ from abridgeai.features.access_control.models import (
 )
 
 
+class CareerPathVersion(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftDeleteMixin, Base):
+    """A frozen revision of a career path's route (Gap 3, migration 0074).
+
+    ``career_paths`` keeps identity only (slug, name, org, status); the
+    STAGES and COURSE ITEMS hang off a version, so editing a published
+    path no longer rewrites the route under students already walking it
+    (D3(a): an enrollment stays pinned to the version it started on).
+
+    ``version_no`` is monotonically increasing per path. ``status`` is
+    ``draft`` (being edited) or ``published`` (frozen — the only state an
+    enrollment may pin to); ``published_at`` is set when the version goes
+    live.
+
+    Immutability rule (service-enforced, plus the audit columns): once a
+    version is published, its stages and course items are frozen. Editing
+    means creating a new draft version (copy-on-write) and publishing it.
+    """
+
+    __tablename__ = "career_path_versions"
+    __table_args__ = (
+        UniqueConstraint(
+            "career_path_id",
+            "version_no",
+            name="career_path_versions_path_version_key",
+        ),
+        CheckConstraint(
+            "status IN ('draft', 'published')",
+            name="ck_career_path_versions_status",
+        ),
+        CheckConstraint(
+            "version_no > 0",
+            name="career_path_versions_version_no_check",
+        ),
+    )
+
+    career_path_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("career_paths.id", ondelete="NO ACTION"),
+        nullable=False,
+        index=True,
+    )
+    version_no: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(20), nullable=False, server_default=text("'draft'")
+    )
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    career_path: Mapped[CareerPath] = relationship()
+
+
 class CareerPathStage(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftDeleteMixin, Base):
     """An ordered group of courses inside a career path (migration 0070).
 
@@ -84,9 +134,9 @@ class CareerPathStage(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftD
         ),
     )
 
-    career_path_id: Mapped[uuid.UUID] = mapped_column(
+    version_id: Mapped[uuid.UUID] = mapped_column(
         PGUUID(as_uuid=True),
-        ForeignKey("career_paths.id", ondelete="NO ACTION"),
+        ForeignKey("career_path_versions.id", ondelete="NO ACTION"),
         nullable=False,
         index=True,
     )
@@ -103,7 +153,7 @@ class CareerPathStage(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftD
         String(20), nullable=False, server_default=text("'soft'")
     )
 
-    career_path: Mapped[CareerPath] = relationship()
+    version: Mapped[CareerPathVersion] = relationship()
 
 
 class CareerPathCourse(CreatedAtMixin, Base):
@@ -125,12 +175,13 @@ class CareerPathCourse(CreatedAtMixin, Base):
         ),
     )
 
-    # PRIMARY KEY (career_path_id, course_id) is KEPT deliberately: it is
-    # what makes "the same course in two stages of one path" structurally
-    # impossible. Re-keying on (stage_id, course_id) would permit it.
-    career_path_id: Mapped[uuid.UUID] = mapped_column(
+    # PRIMARY KEY (version_id, course_id) is KEPT deliberately: it is
+    # what makes "the same course in two stages of one VERSION" structurally
+    # impossible. Re-keying on (stage_id, course_id) would permit it. The
+    # same course MAY appear in two versions of one path (v2 forks v1).
+    version_id: Mapped[uuid.UUID] = mapped_column(
         PGUUID(as_uuid=True),
-        ForeignKey("career_paths.id", ondelete="CASCADE"),
+        ForeignKey("career_path_versions.id", ondelete="CASCADE"),
         primary_key=True,
     )
     course_id: Mapped[uuid.UUID] = mapped_column(
@@ -157,8 +208,8 @@ class CareerPathCourse(CreatedAtMixin, Base):
     removed in migration 0073; the evaluator has always been completion-only.
     """
 
-    career_path: Mapped[CareerPath] = relationship()
     stage: Mapped[CareerPathStage] = relationship()
+    version: Mapped[CareerPathVersion] = relationship()
 
 
 class StudentStageProgress(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
@@ -241,6 +292,14 @@ class CareerReadinessSnapshot(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
         ForeignKey("career_paths.id", ondelete="CASCADE"),
         nullable=False,
     )
+    # Gap 3 (0074): THE version pin. D3(a) — an enrollment stays on the
+    # version it started on forever; managers edit a NEW version instead.
+    version_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("career_path_versions.id", ondelete="NO ACTION"),
+        nullable=False,
+        index=True,
+    )
     readiness_score: Mapped[Decimal] = mapped_column(Numeric(5, 2), nullable=False)
     captured_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("NOW()")
@@ -265,6 +324,7 @@ __all__ = [
     "CareerPath",
     "CareerPathCourse",
     "CareerPathStage",
+    "CareerPathVersion",
     "CareerReadinessSnapshot",
     "StudentCareerEnrollment",
     "StudentStageProgress",

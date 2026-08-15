@@ -29,6 +29,7 @@ async def insert_snapshot(
     *,
     student_id: UUID,
     career_path_id: UUID,
+    version_id: UUID,
     readiness_score: Decimal,
     formula_version: int = 1,
 ) -> CareerReadinessSnapshot:
@@ -38,10 +39,14 @@ async def insert_snapshot(
     version that actually produced ``readiness_score``. The default of 1
     matches the column default and the setting's default, but a caller that
     relies on it during a cutover would mislabel its snapshots.
+
+    ``version_id`` (Gap 3) records WHICH version of the path the score
+    measures — a score's meaning is version-dependent.
     """
     snapshot = CareerReadinessSnapshot(
         student_id=student_id,
         career_path_id=career_path_id,
+        version_id=version_id,
         readiness_score=readiness_score,
         formula_version=formula_version,
     )
@@ -50,17 +55,20 @@ async def insert_snapshot(
     return snapshot
 
 
-async def list_active_enrollment_pairs(db: AsyncSession) -> list[tuple[UUID, UUID]]:
-    """All ``(student_id, career_path_id)`` pairs with an active enrollment."""
+async def list_active_enrollment_pairs(db: AsyncSession) -> list[tuple[UUID, UUID, UUID]]:
+    """All ``(student_id, career_path_id, version_id)`` triples with an active
+    enrollment — the version pin so snapshots record which route produced
+    the score (Gap 3)."""
     stmt = select(
         StudentCareerEnrollment.student_id,
         StudentCareerEnrollment.career_path_id,
+        StudentCareerEnrollment.version_id,
     ).where(
         StudentCareerEnrollment.status == "active",
         StudentCareerEnrollment.deleted_at.is_(None),
     )
     rows = (await db.execute(stmt)).all()
-    return [(row.student_id, row.career_path_id) for row in rows]
+    return [(row.student_id, row.career_path_id, row.version_id) for row in rows]
 
 
 async def list_my_snapshots(

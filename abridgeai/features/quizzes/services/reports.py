@@ -14,7 +14,6 @@ here rather than touching queries.
 
 from __future__ import annotations
 
-from decimal import Decimal
 from typing import TYPE_CHECKING
 from uuid import UUID
 

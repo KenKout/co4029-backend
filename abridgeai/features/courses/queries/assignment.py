@@ -22,7 +22,11 @@ from abridgeai.features.access_control.models import (
     Role,
     UserRoleAssignment,
 )
-from abridgeai.features.career_paths.models import CareerPathCourse, CareerPathStage
+from abridgeai.features.career_paths.models import (
+    CareerPathCourse,
+    CareerPathStage,
+    CareerPathVersion,
+)
 from abridgeai.features.courses.models import Course
 from abridgeai.features.identity.models import StorageObject, User, UserProfile
 
@@ -50,11 +54,14 @@ async def list_career_paths_containing_course(
             CareerPathStage.position.label("stage_position"),
             CareerPathCourse.is_required,
         )
-        .join(CareerPathCourse, CareerPathCourse.career_path_id == CareerPath.id)
+        # Gap 3 (0074): items hang off a VERSION; join through it to the path.
+        .join(CareerPathVersion, CareerPathVersion.id == CareerPathCourse.version_id)
+        .join(CareerPath, CareerPath.id == CareerPathVersion.career_path_id)
         .join(CareerPathStage, CareerPathStage.id == CareerPathCourse.stage_id)
         .where(
             CareerPathCourse.course_id == course_id,
             CareerPath.deleted_at.is_(None),
+            CareerPathVersion.deleted_at.is_(None),
             CareerPathStage.deleted_at.is_(None),
         )
         .order_by(CareerPath.name, CareerPathStage.position)

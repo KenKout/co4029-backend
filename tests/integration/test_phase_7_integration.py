@@ -552,11 +552,17 @@ async def test_career_path_lifecycle(
             {"p": path_id},
         )
         await conn.execute(
-            text("DELETE FROM career_course_items WHERE career_path_id = :p"),
+            text(
+                "DELETE FROM career_course_items WHERE version_id IN "
+                "(SELECT id FROM career_path_versions WHERE career_path_id = :p)"
+            ),
             {"p": path_id},
         )
         await conn.execute(
-            text("DELETE FROM career_path_stages WHERE career_path_id = :p"),
+            text(
+                "DELETE FROM career_path_stages WHERE version_id IN "
+                "(SELECT id FROM career_path_versions WHERE career_path_id = :p)"
+            ),
             {"p": path_id},
         )
         await conn.execute(
