@@ -254,6 +254,11 @@ class ControlEvent:
     # `state`, which means "a serialized InterviewSubmitAnswerResponse" and is
     # produced by a code path the native agent does not have.
     snapshot: StateSnapshot | None = None
+    # Present on AGENT_ACTION only: the exact text the agent is about to speak
+    # for this announced beat (the rejoin re-read). Lets the client dedupe that
+    # utterance against the pinned card by payload rather than by guessing the
+    # server's lead-in wording.
+    action_text: str | None = None
 
     def to_json(self) -> str:
         payload: dict[str, Any] = {
@@ -272,6 +277,8 @@ class ControlEvent:
             payload["error_class"] = self.error_class
         if self.snapshot is not None:
             payload["snapshot"] = self.snapshot.to_dict()
+        if self.action_text is not None:
+            payload["action_text"] = self.action_text
         return json.dumps(payload, separators=(",", ":"), sort_keys=True)
 
 

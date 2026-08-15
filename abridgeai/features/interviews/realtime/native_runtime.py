@@ -255,14 +255,26 @@ def _rejoin_question_text(question: str, language: str) -> str:
     return f"Let me repeat the question: {question}"
 
 
-async def _re_read_question(session: AgentSession, question: str, language: str) -> None:
+async def _re_read_question(
+    session: AgentSession,
+    question: str,
+    language: str,
+    announce: Callable[[str], Awaitable[None]] | None = None,
+) -> None:
     """Re-speak the current question after a rejoin. Best-effort.
 
-    Fire-and-forget from the participant-connect handler; a failed TTS must not
-    take the session down.
+    The exact spoken text is announced on the control topic FIRST, so the
+    client can dedupe this utterance against the pinned card by payload
+    instead of pattern-matching the lead-in wording.
     """
+    text = _rejoin_question_text(question, language)
     try:
-        handle = session.say(_rejoin_question_text(question, language), allow_interruptions=False)
+        if announce is not None:
+            await announce(text)
+    except Exception:  # noqa: BLE001 -- the announcement is convenience only
+        logger.warning("announcing the re-read failed; speaking it anyway")
+    try:
+        handle = session.say(text, allow_interruptions=False)
         await handle
     except Exception:  # noqa: BLE001 -- a failed re-read must not cost the session
         logger.exception("re-read question on rejoin failed")
@@ -537,8 +549,11 @@ async def run_native_interview(
             "re-reading current question after rejoin (session=%s)",
             userdata.interview_session_id,
         )
+        async def _announce_re_read(text: str) -> None:
+            await userdata.publish_agent_action(kind="repeat", text=text)  # type: ignore[call-arg]
+
         asyncio.create_task(  # noqa: RUF006 - fire-and-forget best-effort
-            _re_read_question(session, question, userdata.language)
+            _re_read_question(session, question, userdata.language, _announce_re_read)
         )
 
     ctx.room.on("participant_connected", _on_connected)

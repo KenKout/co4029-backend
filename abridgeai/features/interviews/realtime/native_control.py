@@ -128,13 +128,14 @@ class ControlPublisher:
             )
         )
 
-    async def agent_action(self, *, kind: str) -> None:
+    async def agent_action(self, *, kind: str, text: str | None = None) -> None:
         await self._publish(
             tp.ControlEvent(
                 status=tp.ControlStatus.AGENT_ACTION,
                 turn_key=None,
                 seq=0,
                 turn_action=kind,
+                action_text=text,
             )
         )
 
