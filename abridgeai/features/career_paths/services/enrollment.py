@@ -576,7 +576,9 @@ async def get_roster_progress(
     published = await authoring_queries.get_published_version(db, career_path_id)
     if published is None:
         return []
-    rows = await student_queries.get_roster_path_progress(db, published.id)
+    rows = await student_queries.get_roster_path_progress(
+        db, version_id=published.id, career_path_id=career_path_id
+    )
     return [
         StudentPathProgressAuthoring.model_validate(
             {

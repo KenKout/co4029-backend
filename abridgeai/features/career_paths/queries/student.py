@@ -286,8 +286,18 @@ _ROSTER_PROGRESS_SQL = text(
 )
 
 
-async def get_roster_path_progress(db: AsyncSession, version_id: UUID) -> list[dict[str, Any]]:
-    rows = (await db.execute(_ROSTER_PROGRESS_SQL, {"version_id": version_id})).mappings()
+async def get_roster_path_progress(
+    db: AsyncSession, *, version_id: UUID, career_path_id: UUID
+) -> list[dict[str, Any]]:
+    """Roster progress: every ACTIVE enrollment of the path (any version
+    pin), measured against ``version_id``'s course list (Gap 3: the
+    manager's shared denominator is the current published version)."""
+    rows = (
+        await db.execute(
+            _ROSTER_PROGRESS_SQL,
+            {"version_id": version_id, "career_path_id": career_path_id},
+        )
+    ).mappings()
     return [dict(row) for row in rows]
 
 
