@@ -300,20 +300,12 @@ async def start_session(
     first approved question now so the learner doesn't get stuck on an
     empty session forever.
 
-    Input-mode upgrade: if the caller specifies an ``input_mode`` that
-    differs from the existing session's recorded mode AND the parent
-    config allows it, update the session in-place. Without this, a
-    student whose first ``start`` request landed as ``text`` could never
-    escalate to ``voice``/``hybrid`` — the realtime-token endpoint then
-    rejects them with HTTP 409 "session is not a voice interview".
+    Input mode: every session is a hybrid native-agent room (mic is an
+    in-room toggle, typed turns ride ``lk.chat``). The request body may
+    still carry ``input_mode`` for older clients; it is ignored.
     """
     data = payload.model_dump(exclude_unset=True) if payload is not None else {}
-    # The client MAY name an input_mode, but the session's mode is a property of
-    # the interview config (``supported_modes``), not a per-request toggle — the
-    # AI's speak+write capability is fixed by the interview. ``requested`` is
-    # only used to reconcile a pre-existing session below; a NEW session derives
-    # its mode from the config's canonical ``supported_modes``.
-    requested_input_mode = data.get("input_mode") or "text"
+    del data  # accepted-and-ignored (see docstring); no field is read
 
     # Thesis §4.3: the pass/fail verdict is judged per learning outcome. Starting
     # an interview whose config has no outcomes guarantees an automatic fail with
@@ -325,7 +317,12 @@ async def start_session(
     existing = await sessions_queries.get_active_session(db, actor.user_id, config_id)
     if existing is not None:
         await _ensure_first_question_attached(db, existing.id, config_id)
-        await _maybe_upgrade_input_mode(db, existing, config_id, requested_input_mode)
+        # A live session created before the mode unification may be recorded
+        # "text"/"voice"; it now runs as the unified hybrid room too, so align
+        # the row once (analytics read it, nothing branches on it any more).
+        if existing.input_mode != "hybrid":
+            existing.input_mode = "hybrid"
+            await flush_or_conflict(db)
         await ensure_ceremony_message(
             db,
             session=existing,
@@ -334,10 +331,6 @@ async def start_session(
         )
         return existing
 
-    from abridgeai.features.interviews.models import InterviewConfig  # noqa: PLC0415
-
-    new_config = await db.get(InterviewConfig, config_id)
-
     # FR-5.3 retake policy — gate a *new* attempt on the config's
     # ``max_attempts`` ceiling and ``cooldown_hours`` window. Only reached
     # when there is no live session (the idempotent short-circuit above
@@ -345,16 +338,12 @@ async def start_session(
     await _enforce_retake_policy(db, config_id=config_id, student_id=actor.user_id)
     attempt_number = await sessions_queries.get_session_attempt_number(db, actor.user_id, config_id)
 
-    # A new session runs at the config's canonical mode, not the client value.
-    session_input_mode = (
-        new_config.supported_modes if new_config is not None else requested_input_mode
-    )
     session = InterviewSession(
         interview_config_id=config_id,
         student_id=actor.user_id,
         attempt_number=attempt_number,
         status="in_progress",
-        input_mode=session_input_mode,
+        input_mode="hybrid",
         onboarding_stage="identity_check",
         interview_language=normalize_language(language),
     )
@@ -380,37 +369,6 @@ async def start_session(
         language=session.interview_language,
     )
     return session
-
-
-async def _maybe_upgrade_input_mode(
-    db: AsyncSession,
-    session: InterviewSession,
-    config_id: UUID,
-    requested: str,
-) -> None:
-    """Sync ``session.input_mode`` to the parent config's canonical mode.
-
-    Interviews run at the mode the *config* declares (``supported_modes``),
-    NOT whatever the client asks for — the AI's speak+write capability is a
-    property of the interview, not a per-request toggle. So a session's mode
-    is reconciled to ``config.supported_modes``: a ``hybrid`` config always
-    yields a ``hybrid`` session (even if a stale row or client payload said
-    ``text``/``voice``), and a ``text`` config can never be flipped to voice.
-
-    ``requested`` is retained for signature compatibility but is deliberately
-    ignored — trusting it was the defect that let a client-supplied value
-    diverge the session from its config. No-op when already in sync.
-    """
-    from abridgeai.features.interviews.models import InterviewConfig  # noqa: PLC0415
-
-    config = await db.get(InterviewConfig, config_id)
-    if config is None:
-        return
-    canonical = config.supported_modes
-    if session.input_mode == canonical:
-        return
-    session.input_mode = canonical
-    await flush_or_conflict(db)
 
 
 async def _ensure_first_question_attached(

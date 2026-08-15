@@ -20,7 +20,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from abridgeai.features.interviews.orchestrator.coverage import COVERAGE_SUFFICIENT_POINTS
-from abridgeai.features.interviews.orchestrator.decision import MAX_CANNOT_ANSWER_HINTS
+from abridgeai.features.interviews.orchestrator.decision import (
+    DEFAULT_MAX_TOTAL_FOLLOWUPS,
+    MAX_CANNOT_ANSWER_HINTS,
+)
 from abridgeai.features.interviews.orchestrator.state import (
     InterviewRuntimeStateData,
     OutcomeCoverageState,
@@ -55,6 +58,11 @@ class Interview:
     below_closing_threshold: bool = False
     max_follow_ups: int = 2
     probes_spent: int = 0
+    finished: bool = False
+    last_advance_monotonic: float | None = None
+    max_hints: int = 3
+    interview_session_id: str = "test-session"
+    publish_agent_action_calls: list[str] = field(default_factory=list)
 
     async def answer(self, text: str, verdict: SufficiencyVerdict | None) -> None:
         """One candidate turn, graded exactly as the live path grades it."""
@@ -348,3 +356,96 @@ async def test_an_unlinked_question_with_required_outcomes_still_ends() -> None:
     for _ in range(MAX_END_REFUSALS):
         assert iv.try_end()[0] is False
     assert iv.try_end()[0] is True, "a misconfigured config trapped the candidate"
+
+
+# ── (e) the session-wide follow-up budget ─────────────────────────────────────
+
+
+async def test_the_session_wide_follow_up_budget_releases_the_question() -> None:
+    """The native path used to ignore ``total_follow_up_count`` entirely.
+
+    Only the per-question budget bounded probing, so a long interview whose
+    outcome never ticks and whose ladder never runs dry could spend its whole
+    clock on question one. The routed path has always released the question at
+    ``DEFAULT_MAX_TOTAL_FOLLOWUPS`` — this pins the same escape hatch on the
+    native gates, and that the reminder TELLS the model the budget is spent (a
+    silent release reads as the gate malfunctioning).
+    """
+    iv = _interview()
+    iv.state.current_question_follow_up_count = 0
+    iv.state.total_follow_up_count = DEFAULT_MAX_TOTAL_FOLLOWUPS
+    assert iv.may_advance() is True, "the session-wide budget did not release the question"
+    assert "session-wide follow-up budget is spent" in iv.reminder()
+
+    # Below the budget, the per-question gate is unchanged.
+    iv.state.total_follow_up_count = DEFAULT_MAX_TOTAL_FOLLOWUPS - 1
+    assert iv.may_advance() is False
+
+
+# ── (f) fragments of one spoken answer cannot double-advance ─────────────────
+
+
+def _covered(outcome_id: str, points: int):
+    from abridgeai.features.interviews.orchestrator.state import OutcomeCoverageState
+    return OutcomeCoverageState(outcome_id=outcome_id, coverage_points=points)
+
+
+async def test_fragments_inside_the_coalesce_window_do_not_advance_again() -> None:
+    """The recognizer emits a final per pause, so one answer commits in pieces.
+
+    Production df269681: fragments 0.8-6.9s apart produced TWO advances in 24
+    seconds — the second fired on the tail of the candidate's own sentence,
+    and the card jumped to "3 of 3" while the interviewer was still reading
+    question two. A freshly-advanced question makes every fragment look
+    "resolved" (its outcome was ticked by the fragment that legitimately
+    advanced), so the window — not the resolver — is the guard.
+    """
+    from abridgeai.features.interviews.realtime.native_advance import (
+        ADVANCE_COALESCE_WINDOW_S,
+        advance_if_resolved,
+    )
+
+    class _Q:
+        outcome_id = "o2"
+        prompt_text = "What is a covering index?"
+
+    class _Sel:
+        calls = 0
+
+        def remaining(self) -> int:
+            return 1
+
+        def __call__(self):
+            _Sel.calls += 1
+            return _Q()
+
+    iv = _interview()
+    iv.state.outcome_coverage["o1"].coverage_points = COVERAGE_SUFFICIENT_POINTS
+    sel = _Sel()
+
+    iv.max_follow_ups_per_question = iv.max_follow_ups
+    iv.max_hints_per_question = iv.max_hints
+    iv.select_next = sel
+
+    async def _pub() -> None: ...
+
+    async def _action(kind: str, text: str | None = None) -> None:
+        iv.publish_agent_action_calls.append(kind)
+
+    iv.publish_state = _pub
+    iv.publish_agent_action = _action
+    first = await advance_if_resolved(iv, sel)
+    assert first.advanced, "the legitimate advance must still fire"
+
+    # The very next fragment — same answer, seconds later, outcome now ticked
+    # on the NEW question's coverage row is irrelevant: the window refuses.
+    iv.state.outcome_coverage["o2"] = _covered("o2", COVERAGE_SUFFICIENT_POINTS)
+    iv.state.current_outcome_id = "o2"
+    iv.state.outcome_coverage["o2"].coverage_points = COVERAGE_SUFFICIENT_POINTS
+    second = await advance_if_resolved(iv, sel)
+    assert second.advanced is False, "a fragment inside the window advanced again"
+
+    # Outside the window, a genuinely answered new question advances normally.
+    iv.last_advance_monotonic -= ADVANCE_COALESCE_WINDOW_S + 1
+    third = await advance_if_resolved(iv, sel)
+    assert third.advanced is True

@@ -248,8 +248,8 @@ async def review_scenario(
         # --- Interview config A: 2 pending ---------------------------------
         await conn.execute(
             text(
-                "INSERT INTO interview_configs (id, course_id, module_id, title, status, "
-                "supported_modes) VALUES (:ia, :ca, :ma, 'IC A', 'draft', 'text')"
+                "INSERT INTO interview_configs (id, course_id, module_id, title, status) "
+                "VALUES (:ia, :ca, :ma, 'IC A', 'draft')"
             ),
             {"ia": cfg_a, "ca": course_a, "ma": module_a},
         )
@@ -265,8 +265,8 @@ async def review_scenario(
         # --- Interview config B (sibling): 1 pending — must NOT count ------
         await conn.execute(
             text(
-                "INSERT INTO interview_configs (id, course_id, module_id, title, status, "
-                "supported_modes) VALUES (:ib, :cb, :mb, 'IC B', 'draft', 'text')"
+                "INSERT INTO interview_configs (id, course_id, module_id, title, status) "
+                "VALUES (:ib, :cb, :mb, 'IC B', 'draft')"
             ),
             {"ib": cfg_b, "cb": course_b, "mb": module_b},
         )

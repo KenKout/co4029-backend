@@ -81,6 +81,15 @@ class InterviewUserdata:
     # calling the tool right after a server advance must not skip a question.
     pending_new_question: bool = False
 
+    # When the server LAST advanced (monotonic seconds). A spoken answer
+    # arrives as several end-of-turn commits (the recognizer emits a final per
+    # pause), and a freshly-advanced question makes every one of them look
+    # "resolved" — the tail of the candidate's own sentence then advanced the
+    # interview AGAIN within seconds (production df269681: two advances in 24s,
+    # both while the candidate was mid-sentence). `fold_turn` reads this to
+    # refuse a second advance inside the window.
+    last_advance_monotonic: float | None = None
+
     # The bank question the candidate's CURRENT answer is answering, snapshotted at
     # fold time — BEFORE the server advances. The transcript handler reads this for
     # user items because `state.current_question_id` has already moved on by then;

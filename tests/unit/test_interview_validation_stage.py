@@ -76,7 +76,6 @@ def _config() -> SimpleNamespace:
     return SimpleNamespace(
         title="Designing distributed systems",
         persona="neutral",
-        supported_modes="hybrid",
     )
 
 

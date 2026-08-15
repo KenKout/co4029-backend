@@ -18,11 +18,18 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from livekit.agents import RunContext, ToolError, function_tool
+from livekit.agents import (
+    ChatContext,
+    ChatMessage,
+    RunContext,
+    ToolError,
+    function_tool,
+)
 
 from abridgeai.features.interviews.orchestrator.tools import (
     EndInterviewVerdict,
     NextQuestionVerdict,
+    _is_ticked,
     build_progress_report,
     reset_for_new_question,
     resolve_end_interview,
@@ -208,6 +215,20 @@ class InterviewToolsMixin:
         finalizes the session; say a short closing line to the candidate first.
         """
         data = _runtime_state(ctx)
+        # A question the SERVER selected but the model has not asked yet is a
+        # question that remains — even when the bank behind it is empty. The
+        # empty-bank branch of the end gate exists to prevent a deadlock when
+        # coverage can never be completed, but right after an advance there IS
+        # something to ask, and letting the model end here throws the selected
+        # question away (session e972fade: end_interview fired 0.8s after the
+        # advance selected Q3, the gate saw remaining=0 and allowed it, and Q3
+        # was never asked).
+        userdata = ctx.userdata  # type: ignore[attr-defined]
+        if getattr(userdata, "pending_new_question", False):
+            raise ToolError(
+                "A question has already been selected and has NOT been asked "
+                "yet — ask it before ending the interview."
+            )
         verdict = resolve_end_interview(
             data,
             required_outcome_ids=_required_outcomes(ctx),
@@ -216,6 +237,7 @@ class InterviewToolsMixin:
             outcome_titles=_outcome_titles(ctx),
         )
         if not verdict.allowed:
+            await _inject_todo_note(ctx)
             raise _refused(ctx, "interview_end_interview", verdict)
         await _finalize_session(ctx)
         return "Interview finalized and submitted for evaluation. Deliver the closing message now."
@@ -297,6 +319,55 @@ async def _finalize_session(ctx: RunContext[object]) -> None:
 async def _publish_state(ctx: RunContext[object]) -> None:
     publish = ctx.userdata.publish_state  # type: ignore[attr-defined]
     await publish()
+
+
+async def _inject_todo_note(ctx: RunContext[object]) -> None:
+    """Pin the remaining-work list into the chat context on an end refusal.
+
+    The ToolError already tells the model why it was refused, but a tool error
+    is one turn old by the time the model acts on it — and a model that just
+    tried to quit is exactly the model whose attention drifts. A user-role
+    message is the only mid-conversation channel the gateway honours (system
+    content is only merged at the head of the context), and it persists for
+    every later turn, not just this one.
+
+    Never raises: the refusal below is the load-bearing half; a note that
+    fails to land must not cost the model the reason.
+    """
+    try:
+        data = _runtime_state(ctx)
+        titles = _outcome_titles(ctx)
+        unticked = [
+            titles.get(oid, oid)
+            for oid in _required_outcomes(ctx)
+            if not _is_ticked(data, oid)
+        ]
+        remaining = _questions_remaining(ctx)
+        lines = ["[interview checklist — not spoken by the candidate]"]
+        if unticked:
+            shown = "; ".join(unticked[:5])
+            more = f" (+{len(unticked) - 5} more)" if len(unticked) > 5 else ""
+            lines.append(f"Still to assess: {shown}{more}.")
+        if remaining > 0:
+            lines.append(
+                f"{remaining} question(s) left in the bank — call "
+                "interview_next_question rather than ending now."
+            )
+        agent = ctx.session.current_agent  # type: ignore[attr-defined]
+        note = ChatMessage(role="user", content=["\n".join(lines)])
+        # REPLACE the previous checklist note: appending stacked a stale
+        # checklist under the fresh one, and the model had to guess which one
+        # described reality. The advance directive is replaced the same way
+        # (see native_runtime._control_notes_removed).
+        from abridgeai.features.interviews.realtime.native_runtime import (
+            _control_notes_removed,
+        )
+
+        await agent.update_chat_ctx(
+            ChatContext(items=[*_control_notes_removed(agent.chat_ctx), note])
+        )
+    except Exception:  # noqa: BLE001 -- the note is reinforcement, never the gate
+        logger.warning("end-refusal todo note could not be injected", exc_info=True)
 
 
 def _refused(

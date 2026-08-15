@@ -128,7 +128,6 @@ async def test_soft_delete_cascade_walks_questions_and_outcomes(
             course_id=course_id,
             module_id=module_id,
             title="Cascade Test Config",
-            supported_modes="text",
         )
         session.add(config)
         await session.flush()

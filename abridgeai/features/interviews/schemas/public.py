@@ -56,7 +56,6 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict
 
 PersonaLiteral = Literal["strict", "neutral", "supportive"]
-SupportedModesLiteral = Literal["voice", "text", "hybrid"]
 QuestionTypeLiteral = Literal[
     "conceptual",
     "behavioral",
@@ -139,7 +138,6 @@ class InterviewConfigPublic(_ORMModel):
     # to expose: it only names the spoken voice, nothing gameable. Vietnamese
     # sessions ignore it (browser voice), so the UI shows it for English only.
     tts_voice: str | None = None
-    supported_modes: SupportedModesLiteral
     time_limit_minutes: int | None = None
     max_attempts: int | None = None
     cooldown_hours: int | None = None
@@ -219,5 +217,4 @@ __all__ = [
     "OutcomeTypeLiteral",
     "PersonaLiteral",
     "QuestionTypeLiteral",
-    "SupportedModesLiteral",
 ]

@@ -120,8 +120,8 @@ async def live_session(engine: AsyncEngine) -> AsyncIterator[dict[str, Any]]:
         await conn.execute(
             text(
                 "INSERT INTO interview_configs "
-                "(id, course_id, module_id, title, status, supported_modes, created_by) "
-                "VALUES (:id, :course, :module, 'PP Interview', 'published', 'text', :teacher)"
+                "(id, course_id, module_id, title, status, created_by) "
+                "VALUES (:id, :course, :module, 'PP Interview', 'published', :teacher)"
             ),
             {"id": config_id, "course": course_id, "module": module_id, "teacher": teacher_id},
         )

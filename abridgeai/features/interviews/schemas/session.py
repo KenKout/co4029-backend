@@ -127,7 +127,10 @@ class InterviewSessionStartRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    input_mode: InputModeLiteral
+    # Accepted for backward compatibility and IGNORED: every session runs the
+    # unified hybrid room (migration 0077). Remove once no old client bundle
+    # can be mid-flight.
+    input_mode: InputModeLiteral | None = None
     idempotency_key: UUID | None = None
 
 

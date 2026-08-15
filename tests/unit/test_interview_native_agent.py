@@ -1111,3 +1111,266 @@ async def _emit_now(fake_session: FakeSession, payload: Any) -> None:
     await asyncio.sleep(0)
     fake_session.emit("conversation_item_added", payload)
     await asyncio.sleep(0)
+
+
+# ── an end refusal pins the todo list into the chat context ──────────────────
+
+
+async def test_end_refusal_injects_a_user_role_todo_note() -> None:
+    """The refusal error is one turn old by the time the model acts on it.
+
+    A user-role message persists for every later turn, and user content is the
+    only mid-conversation channel the gateway honours (system content is merged
+    at the head only). The note must list the uncovered outcomes by TITLE and
+    name the questions left, so a model that just tried to quit is handed its
+    checklist rather than a generic "keep going".
+    """
+    from livekit.agents import ToolError
+
+    setup = _setup()
+    agent = _agent(setup)
+    updates: list[ChatContext] = []
+
+    async def _update_ctx(chat_ctx: ChatContext, **_kw: Any) -> None:
+        updates.append(chat_ctx)
+
+    fake_agent = SimpleNamespace(
+        chat_ctx=agent.chat_ctx, update_chat_ctx=_update_ctx
+    )
+    ctx = SimpleNamespace(
+        userdata=setup.userdata,
+        session=SimpleNamespace(current_agent=fake_agent),
+    )
+
+    with pytest.raises(ToolError):
+        await agent.interview_end_interview(ctx)
+
+    assert len(updates) == 1, "the refusal must inject exactly one note"
+    note = updates[0].items[-1]
+    text = note.text_content or ""
+    assert getattr(note, "role", None) == "user", (
+        "system content cannot be merged mid-conversation; user is the gate"
+    )
+    assert "Covering indexes" in text, "the note must name the unticked outcome by title"
+    assert "2 question(s) left" in text
+    assert "not spoken by the candidate" in text, (
+        "without the marker the model may mistake the note for candidate speech"
+    )
+
+
+async def test_end_refusal_note_never_blocks_the_refusal_itself() -> None:
+    """A note that fails to land must not cost the model the reason.
+
+    The tool error is the load-bearing half; the injection is reinforcement.
+    With no reachable session on the context, the refusal still raises.
+    """
+    from livekit.agents import ToolError
+
+    setup = _setup()
+    agent = _agent(setup)
+    ctx = SimpleNamespace(userdata=setup.userdata)  # no .session at all
+
+    with pytest.raises(ToolError):
+        await agent.interview_end_interview(ctx)
+
+
+# ── native turn handling: semantic detector for English, VAD for Vietnamese ───
+
+
+def test_native_turn_handling_enables_the_semantic_detector_for_english() -> None:
+    from abridgeai.features.interviews.realtime.agent_session import _native_turn_handling
+
+    options = _native_turn_handling("en")
+    assert "turn_detection" in options, "English sessions must get the semantic detector"
+    assert "endpointing" in options, "endpointing bounds are shared with the routed path"
+
+
+def test_native_turn_handling_keeps_vad_for_vietnamese() -> None:
+    """The detector's thresholds are English-tuned; a wrong verdict would
+    truncate a Vietnamese answer mid-sentence — worse than the VAD default."""
+    from abridgeai.features.interviews.realtime.agent_session import _native_turn_handling
+
+    options = _native_turn_handling("vi")
+    assert "turn_detection" not in options
+    assert "endpointing" in options
+
+
+# ── the session-wide follow-up counter is charged on the native path ─────────
+
+
+def test_count_follow_up_charges_both_budgets() -> None:
+    from abridgeai.features.interviews.realtime.native_advance import count_follow_up
+
+    setup = _setup()
+    assert setup.userdata.state is not None
+    before_total = setup.userdata.state.total_follow_up_count
+
+    count_follow_up(setup.userdata)
+
+    assert setup.userdata.state.current_question_follow_up_count == 1
+    assert setup.userdata.state.total_follow_up_count == before_total + 1
+
+
+# ── an advance pins "ask the new question" into the chat context ─────────────
+
+
+async def test_fold_turn_after_an_advance_injects_the_new_question_directive(
+    monkeypatch: pytest.MonkeyPatch, job_ctx: SimpleNamespace
+) -> None:
+    """The model kept debating the OLD question after the server moved on.
+
+    Production session 1d629118: the card advanced to Q2 at 1:27 while the
+    interviewer probed Q1 for three more exchanges and Q2 was never asked. The
+    state note alone was not enough for the model, so an advance now also pins
+    a user-role directive (the one mid-conversation channel this gateway
+    honours) naming the new question and forbidding the old one.
+    """
+    fake_session = FakeSession()
+    monkeypatch.setattr(native_runtime, "build_native_session", lambda *_a, **_kw: fake_session)
+    setup = _setup()
+    assert setup.userdata.state is not None
+    # Cover the outcome AND spend the per-question budget, so the post-grade
+    # advance fires on this fold.
+    setup.userdata.state.outcome_coverage["o1"].coverage_points = COVERAGE_SUFFICIENT_POINTS
+    setup.userdata.state.current_question_follow_up_count = 2
+
+    updates: list[ChatContext] = []
+
+    async def _update_ctx(_self: Any, chat_ctx: ChatContext, **_kw: Any) -> None:
+        updates.append(chat_ctx)
+
+    hard_stop = await native_runtime.run_native_interview(
+        job_ctx, settings=SimpleNamespace(), setup=setup
+    )
+    try:
+        agent = fake_session.started_with["agent"]
+        monkeypatch.setattr(
+            type(agent), "update_chat_ctx", _update_ctx, raising=False
+        )
+        # Not a property on the instance: attach a stub readable chat_ctx.
+        agent.__dict__.setdefault("chat_ctx", agent.chat_ctx)
+
+        await agent.fold_turn(answer_text="A covering index covers the query.")
+
+        directives = [
+            ctx.items[-1]
+            for ctx in updates
+            if "ALREADY moved" in (ctx.items[-1].text_content or "")
+        ]
+        assert directives, "the advance must pin the ask-the-new-question directive"
+        text = directives[0].text_content or ""
+        assert getattr(directives[0], "role", None) == "user"
+        assert "What is a covering index?" in text
+        assert "not spoken by the candidate" in text
+    finally:
+        hard_stop.cancel()
+
+
+async def test_end_is_refused_while_a_selected_question_is_still_unasked() -> None:
+    """The empty-bank branch of the end gate must not fire mid-transition.
+
+    Session e972fade: the advance selected Q3 (bank behind it now empty), the
+    model called end_interview 0.8s later, the gate saw remaining=0 and
+    allowed it — Q3 was never asked. A selected-but-unasked question is a
+    question that remains.
+    """
+    from livekit.agents import ToolError
+
+    setup = _setup()
+    setup.userdata.pending_new_question = True
+    setup.userdata.questions_remaining = 0
+    agent = _agent(setup)
+    ctx = SimpleNamespace(userdata=setup.userdata)  # no .session: note path is guarded
+
+    with pytest.raises(ToolError, match="has NOT been asked"):
+        await agent.interview_end_interview(ctx)
+    assert setup.userdata.finished is False
+
+
+async def test_advance_directive_replaces_the_previous_one(
+    monkeypatch: pytest.MonkeyPatch, job_ctx: SimpleNamespace
+) -> None:
+    """Stacked directives contradicted each other ("ask Q2" vs "ask Q3")."""
+
+    fake_session = FakeSession()
+    monkeypatch.setattr(native_runtime, "build_native_session", lambda *_a, **_kw: fake_session)
+    setup = _setup()
+    assert setup.userdata.state is not None
+    setup.userdata.state.outcome_coverage["o1"].coverage_points = COVERAGE_SUFFICIENT_POINTS
+    setup.userdata.state.current_question_follow_up_count = 2
+
+    updates: list[ChatContext] = []
+
+    async def _update_ctx(_self: Any, chat_ctx: ChatContext, **_kw: Any) -> None:
+        updates.append(chat_ctx)
+
+    hard_stop = await native_runtime.run_native_interview(
+        job_ctx, settings=SimpleNamespace(), setup=setup
+    )
+    try:
+        agent = fake_session.started_with["agent"]
+        monkeypatch.setattr(type(agent), "update_chat_ctx", _update_ctx, raising=False)
+
+        # First fold: advances to Q2 and injects a directive naming it.
+        await agent.fold_turn(answer_text="An index speeds up lookups.")
+        assert len(updates) == 1
+        # Seed the context with that first directive visible to the agent.
+        agent.__dict__.setdefault("chat_ctx", updates[0])
+
+        # Second fold on the (now resolved) next question: advances again.
+        setup.userdata.state.outcome_coverage["o2"] = setup.userdata.state.outcome_coverage.get(
+            "o2"
+        ) or type(setup.userdata.state.outcome_coverage["o1"])(outcome_id="o2", coverage_points=0)
+        setup.userdata.state.outcome_coverage["o2"].coverage_points = COVERAGE_SUFFICIENT_POINTS
+        setup.userdata.state.current_outcome_id = "o2"
+        setup.userdata.state.current_question_follow_up_count = 2
+        setup.userdata.last_advance_monotonic = None  # outside the coalesce window
+        setup.userdata.questions_remaining = 1
+
+        await agent.fold_turn(answer_text="A covering index covers the query.")
+
+        directives = [
+            [item for item in ctx.items if item.text_content and "ALREADY moved" in item.text_content]
+            for ctx in updates
+        ]
+        last = directives[-1]
+        assert len(last) == 1, "the stale directive must be replaced, not stacked"
+    finally:
+        hard_stop.cancel()
+
+
+def test_control_note_filter_tolerates_non_message_items() -> None:
+    """`update_instructions` appends AgentConfigUpdate items to the context.
+
+    Those have no ``text_content``; a direct attribute read raised
+    AttributeError and killed every directive injection after the first
+    state-note refresh (session 564334c0: Q3 selected, directive never landed,
+    interviewer went silent).
+    """
+    from types import SimpleNamespace
+
+    from livekit.agents import ChatMessage
+
+    from abridgeai.features.interviews.realtime.native_runtime import (
+        _control_notes_removed,
+    )
+
+    ctx = ChatContext(
+        items=[
+            ChatMessage(role="user", content=["hello"]),
+            SimpleNamespace(type="AgentConfigUpdate", instructions="new instructions"),
+            ChatMessage(
+                role="user",
+                content=[
+                    "[interview control — not spoken by the candidate] The "
+                    "server has ALREADY moved..."
+                ],
+            ),
+        ]
+    )
+    kept = _control_notes_removed(ctx)
+    texts = [getattr(i, "text_content", None) for i in kept]
+    assert "hello" in texts
+    assert not any(t and "ALREADY moved" in t for t in texts)
+    # The non-message item passes through untouched.
+    assert any(getattr(i, "type", None) == "AgentConfigUpdate" for i in kept)

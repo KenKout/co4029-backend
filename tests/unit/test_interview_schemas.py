@@ -173,7 +173,6 @@ def test_config_public_status_narrows_to_published() -> None:
             module_id=module_id,
             title="Draft",
             status="draft",  # type: ignore[arg-type]
-            supported_modes="text",
             lock_quiz_ef_until_pass=False,
         )
 
@@ -183,7 +182,6 @@ def test_config_public_status_narrows_to_published() -> None:
         module_id=module_id,
         title="Live",
         status="published",
-        supported_modes="hybrid",
         lock_quiz_ef_until_pass=False,
     )
     assert ok.status == "published"
@@ -200,7 +198,6 @@ def test_config_authoring_widens_status() -> None:
             module_id=module_id,
             title="x",
             status=status,  # type: ignore[arg-type]
-            supported_modes="text",
             lock_quiz_ef_until_pass=False,
             created_at=now,
             updated_at=now,
@@ -219,7 +216,6 @@ def test_persona_literal_rejects_friendly() -> None:
             title="x",
             status="published",
             persona="friendly",  # type: ignore[arg-type]
-            supported_modes="text",
             lock_quiz_ef_until_pass=False,
         )
 
@@ -231,7 +227,6 @@ def test_persona_literal_rejects_friendly() -> None:
             title="x",
             status="published",
             persona=persona,  # type: ignore[arg-type]
-            supported_modes="text",
             lock_quiz_ef_until_pass=False,
         )
         assert ok.persona == persona
@@ -300,7 +295,6 @@ def test_create_schemas_basic_validation() -> None:
         course_id=uuid4(),
         module_id=uuid4(),
         persona="strict",
-        supported_modes="text",
         time_limit_minutes=30,
         max_attempts=3,
         cooldown_hours=24,
@@ -438,7 +432,6 @@ def test_for_authoring_compose() -> None:
         module_id=module_id,
         title="x",
         status="draft",
-        supported_modes="hybrid",
         lock_quiz_ef_until_pass=False,
         created_at=now,
         updated_at=now,
@@ -454,7 +447,6 @@ def test_for_taking_compose() -> None:
         module_id=uuid4(),
         title="x",
         status="published",
-        supported_modes="hybrid",
         lock_quiz_ef_until_pass=False,
     )
     first_q = InterviewQuestionPublic(

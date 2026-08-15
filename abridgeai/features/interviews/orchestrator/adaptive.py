@@ -47,7 +47,7 @@ from abridgeai.features.interviews.models import (
 )
 from abridgeai.features.interviews.orchestrator import repository as state_repo
 from abridgeai.features.interviews.orchestrator import turn_perception, turn_state
-from abridgeai.features.interviews.orchestrator.affect import Affect, detect_affect
+from abridgeai.features.interviews.orchestrator.affect import detect_affect
 from abridgeai.features.interviews.orchestrator.analysis import AnswerAnalysis
 from abridgeai.features.interviews.orchestrator.coverage import is_provisionally_sufficient
 from abridgeai.features.interviews.orchestrator.decision import (
@@ -65,6 +65,10 @@ from abridgeai.features.interviews.orchestrator.intent import StudentIntent
 from abridgeai.features.interviews.orchestrator.intent_logic import classify_intent
 from abridgeai.features.interviews.orchestrator.mapping import canonical_step_result
 from abridgeai.features.interviews.orchestrator.phases import resolve_phase_and_level
+from abridgeai.features.interviews.orchestrator.realism import (
+    comms_polish_signals,
+    is_rambling,
+)
 from abridgeai.features.interviews.orchestrator.security import (
     SecurityAction,
     SecurityAssessment,
@@ -131,49 +135,9 @@ def _resolve_affect(
     return affect
 
 
-def _is_rambling(
-    *,
-    answer_text: str,
-    analysis: AnswerAnalysis | None,
-    enabled: bool,
-) -> bool:
-    """Whether the candidate is rambling (Slice 17, v2), gated on the flag.
-
-    Uses the same deterministic ``detect_affect`` as the tone layer (single
-    source of truth) so the decision-time signal and the tone lead-in never
-    disagree. Off → False → the decision is byte-for-byte v1.
-    """
-    if not enabled:
-        return False
-    return detect_affect(answer_text=answer_text, analysis=analysis) is Affect.RAMBLING
-
-
-# Communication-polish thresholds (Slice 20, v2).
-_COMMS_TIME_PRESSURE_FRACTION = 0.2  # signal to prioritise below this time fraction
-_COMMS_RECOVERY_WEAK_STREAK = 2  # rebuild after this many consecutive weak answers
-
-
-def _comms_polish_signals(
-    *,
-    time_fraction_remaining: float | None,
-    consecutive_weak_answers: int,
-    enabled: bool,
-) -> tuple[bool, bool]:
-    """Return ``(time_pressure, recovery)`` tone signals (Slice 20, v2).
-
-    ``time_pressure`` fires when little time remains so the interviewer can tell
-    the candidate to prioritise; ``recovery`` fires after a weak streak so a
-    rattled candidate gets an encouraging, scoped lead-in. TONE ONLY — these
-    feed the utterance lead-in, never the decision. Off → (False, False) → v1.
-    """
-    if not enabled:
-        return False, False
-    time_pressure = (
-        time_fraction_remaining is not None
-        and time_fraction_remaining <= _COMMS_TIME_PRESSURE_FRACTION
-    )
-    recovery = consecutive_weak_answers >= _COMMS_RECOVERY_WEAK_STREAK
-    return time_pressure, recovery
+# Realism-cluster tone signals live in realism.py (pure, sibling-extracted).
+_is_rambling = is_rambling
+_comms_polish_signals = comms_polish_signals
 
 
 async def run_adaptive_turn(
@@ -366,14 +330,12 @@ async def run_adaptive_turn(
             has_next_question=has_next,
             all_required_outcomes_covered=all_required_covered,
             max_follow_ups_per_question=(
-                config.max_follow_ups_per_question
-                if getattr(config, "max_follow_ups_per_question", None)
-                else DEFAULT_MAX_FOLLOWUPS_PER_QUESTION
+                getattr(config, "max_follow_ups_per_question", None)
+                or DEFAULT_MAX_FOLLOWUPS_PER_QUESTION
             ),
             max_hints_per_question=(
-                config.max_hints_per_question
-                if getattr(config, "max_hints_per_question", None)
-                else MAX_CANNOT_ANSWER_HINTS
+                getattr(config, "max_hints_per_question", None)
+                or MAX_CANNOT_ANSWER_HINTS
             ),
             pending_confirmation=data.pending_confirmation,
             depth_probe_enabled=depth_probe_enabled,

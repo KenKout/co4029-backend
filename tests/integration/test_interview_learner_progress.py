@@ -139,8 +139,8 @@ async def _seed_interview_item(
     await conn.execute(
         text(
             "INSERT INTO interview_configs "
-            "(id, course_id, module_id, title, supported_modes, status) "
-            "VALUES (:id, :c, :m, :t, 'hybrid', 'published')"
+            "(id, course_id, module_id, title, status) "
+            "VALUES (:id, :c, :m, :t, 'published')"
         ),
         {"id": config_id, "c": course_id, "m": module_id, "t": title},
     )

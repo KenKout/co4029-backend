@@ -26,10 +26,10 @@ Reconciliation directives applied (plan §266-585)
   - ``persona VARCHAR(20)`` CHECK ``{'strict', 'neutral', 'supportive'}``
     (baseline DDL line 784, NOT the plan-body's "{strict, friendly,
     neutral}" — baseline wins).
-  - ``supported_modes VARCHAR(20)`` CHECK
-    ``{'voice', 'text', 'hybrid'}`` (baseline DDL line 786). The legacy
-    ``input_mode`` rename note in inherited wisdom is for the *session*
-    column, not config — config keeps ``supported_modes``.
+  - ``supported_modes`` was dropped (migration 0077): every session runs
+    the native agent in one room, mic is an in-room toggle. The legacy
+    ``input_mode`` column belongs to the *session* row and survives for
+    analytics; new sessions are always written ``hybrid``.
   - ``min_outcomes_to_pass`` PRESERVED (legacy ORM line 199 + baseline
     line 781; plan body did not list it).
   - ``time_limit_minutes`` PRESERVED (baseline NOT ``time_limit_seconds``
@@ -214,10 +214,6 @@ class InterviewConfig(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftD
             name="ck_interview_configs_persona",
         ),
         CheckConstraint(
-            "supported_modes IN ('voice', 'text', 'hybrid')",
-            name="ck_interview_configs_supported_modes",
-        ),
-        CheckConstraint(
             "security_response_policy IN ('continue_and_log', 'warn_and_continue', 'end_and_flag')",
             name="ck_interview_configs_security_response_policy",
         ),
@@ -226,7 +222,7 @@ class InterviewConfig(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftD
             name="ck_interview_configs_security_max_attempts",
         ),
         CheckConstraint(
-            "max_follow_ups_per_question BETWEEN 0 AND 10",
+            "max_follow_ups_per_question BETWEEN 0 AND 50",
             name="ck_interview_configs_max_follow_ups",
         ),
         CheckConstraint(
@@ -281,9 +277,6 @@ class InterviewConfig(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftD
     # this only affects English sessions. Validated against a curated allow-list
     # in the authoring schema (see narration.ALLOWED_TTS_VOICES).
     tts_voice: Mapped[str | None] = mapped_column(String(40))
-    supported_modes: Mapped[str] = mapped_column(
-        String(20), nullable=False, server_default=text("'hybrid'")
-    )
     supplementary_instructions: Mapped[str | None] = mapped_column(Text)
     security_response_policy: Mapped[str] = mapped_column(
         String(30), nullable=False, server_default=text("'warn_and_continue'")

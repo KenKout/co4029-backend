@@ -286,8 +286,8 @@ async def _seed_passing_interview(
         await conn.execute(
             text(
                 "INSERT INTO interview_configs "
-                "(id, course_id, module_id, title, status, supported_modes) "
-                "VALUES (:id, :c, :m, 'Module Interview', 'published', 'text')"
+                "(id, course_id, module_id, title, status) "
+                "VALUES (:id, :c, :m, 'Module Interview', 'published')"
             ),
             {"id": config_id, "c": course_id, "m": module_id},
         )
@@ -311,8 +311,8 @@ async def _seed_only_interview_config(
         await conn.execute(
             text(
                 "INSERT INTO interview_configs "
-                "(id, course_id, module_id, title, status, supported_modes) "
-                "VALUES (:id, :c, :m, 'No-Pass Interview', 'published', 'text')"
+                "(id, course_id, module_id, title, status) "
+                "VALUES (:id, :c, :m, 'No-Pass Interview', 'published')"
             ),
             {"id": config_id, "c": course_id, "m": module_id},
         )

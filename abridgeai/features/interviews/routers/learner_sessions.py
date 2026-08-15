@@ -247,8 +247,6 @@ async def realtime_token(
     session = await db.get(InterviewSession, session_id)
     if session is None:  # pragma: no cover - dep already 404s; defensive
         raise _not_found("interview_session", session_id)
-    if session.input_mode not in ("voice", "hybrid"):
-        raise _conflict("session is not a voice interview")
     if session.status != "in_progress":
         raise _conflict(f"session is not in progress (status={session.status})")
     # Only the DISPATCHING mint waits for onboarding. A warm token starts
@@ -306,8 +304,6 @@ async def dispatch_realtime_agent(
     session = await db.get(InterviewSession, session_id)
     if session is None:  # pragma: no cover - dep already 404s; defensive
         raise _not_found("interview_session", session_id)
-    if session.input_mode not in ("voice", "hybrid"):
-        raise _conflict("session is not a voice interview")
     if session.status != "in_progress":
         raise _conflict(f"session is not in progress (status={session.status})")
     if session.onboarding_stage != "completed":

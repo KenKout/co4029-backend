@@ -37,7 +37,7 @@ from uuid import UUID, uuid4
 from livekit import (
     rtc,  # type: ignore[attr-defined]  # rtc is a lazy submodule; livekit ships no stubs
 )
-from livekit.agents import Agent, AgentSession, ChatContext, get_job_context
+from livekit.agents import Agent, AgentSession, ChatContext, ChatMessage, get_job_context
 
 from abridgeai.features.interviews.orchestrator.intent import (
     IntentClassification,
@@ -65,7 +65,7 @@ from abridgeai.features.interviews.realtime.native_text_input import make_text_i
 from abridgeai.features.interviews.realtime.native_transcript import record_turn
 
 if TYPE_CHECKING:
-    from livekit.agents import ChatMessage, JobContext
+    from livekit.agents import JobContext
 
     from abridgeai.core.config import Settings
     from abridgeai.features.interviews.realtime.agent_userdata import InterviewUserdata
@@ -225,6 +225,37 @@ class HardStopTimer:
         job = get_job_context(required=False)
         if job is not None:
             job.shutdown(reason="interview_hard_stop")
+
+
+# Markers identifying the server's injected control notes in the chat context.
+# Everything the server pins mid-conversation (the advance directive, the
+# end-refusal checklist) carries one, so a new note can REPLACE the stale ones
+# instead of stacking contradictory instructions for the model.
+_CONTROL_NOTE_MARKERS: tuple[str, ...] = (
+    "[interview control — not spoken by the candidate]",
+    "[interview checklist — not spoken by the candidate]",
+)
+
+
+def _control_notes_removed(chat_ctx: ChatContext) -> list[ChatMessage]:
+    """The context's items minus every injected control note (read-only view).
+
+    ``getattr`` on every field: the context carries more than messages —
+    ``update_instructions`` appends an ``AgentConfigUpdate`` item, which has no
+    ``text_content`` and must pass through untouched. A direct attribute read
+    raised ``AttributeError`` there and killed EVERY directive injection after
+    the first ``update_instructions`` (session 564334c0: the advance selected
+    Q3, the directive never landed, and the interviewer stopped responding).
+    """
+    kept: list[ChatMessage] = []
+    for item in chat_ctx.items:
+        text = getattr(item, "text_content", None)
+        if isinstance(text, str) and any(
+            text.startswith(marker) for marker in _CONTROL_NOTE_MARKERS
+        ):
+            continue
+        kept.append(item)
+    return kept
 
 
 async def _await_playout(handle: object) -> None:
@@ -403,13 +434,61 @@ class NativeInterviewAgent(InterviewToolsMixin, Agent):
         # Must run BEFORE the note is built: the note is the only thing that tells
         # the model which question it is now on.
         outcome = await advance_if_resolved(userdata, self._setup.selector)
-        if not outcome.advanced:
+        if outcome.advanced:
+            await self._inject_advance_directive()
+        else:
             count_follow_up(userdata)
         # Publish after the fold so the answer's transcript row can be attributed
         # to the question it actually answered.
         userdata.answered_question_id = answered_question_id
         self._record_shadow(userdata, advanced=outcome.advanced)
         await self.refresh_state_note()
+
+    async def _inject_advance_directive(self) -> None:
+        """Pin "ask the NEW question now" into the chat context on an advance.
+
+        The state note already says the server has moved — and the model kept
+        debating the OLD question anyway (production session 1d629118: the card
+        advanced to Q2 at 1:27 while the interviewer probed Q1 for three more
+        exchanges and Q2 was never asked). System instructions are only merged at
+        the head, so a user-role message is the one mid-conversation channel this
+        gateway honours — the same pattern the end-interview refusal note uses.
+
+        REPLACES the previous control notes rather than appending: directives
+        accumulate one per advance, and after two advances the context held
+        "ask Q2, do not ask anything else" next to "ask Q3, do not ask anything
+        else" — contradictory instructions the model resolved by calling
+        end_interview instead (session e972fade: the bank ran dry mid-race and
+        the gate, seeing remaining=0, allowed it — Q3 was never asked).
+
+        Never raises: the advance already happened; a directive that fails to
+        land must not cost the model its reply.
+        """
+        question = self._setup.userdata.current_question_text
+        if not question:
+            return
+        try:
+            note = ChatMessage(
+                role="user",
+                content=[
+                    "[interview control — not spoken by the candidate] The "
+                    "previous question is finished and the server has ALREADY "
+                    f'moved the interview to a NEW question: "{question}". In '
+                    "your next reply: acknowledge the candidate's last answer "
+                    "in ONE short sentence, then ask this question in your own "
+                    "words. Do NOT ask anything else and do NOT continue the "
+                    "previous question."
+                ],
+            )
+            await self.update_chat_ctx(
+                ChatContext(items=[*_control_notes_removed(self.chat_ctx), note])
+            )
+        except Exception:  # noqa: BLE001 -- reinforcement, never the gate
+            logger.warning(
+                "advance directive could not be injected (session=%s)",
+                self._setup.userdata.interview_session_id,
+                exc_info=True,
+            )
 
     def _record_shadow(self, userdata: InterviewUserdata, *, advanced: bool) -> None:
         """Run the audited policy beside the model and log both.

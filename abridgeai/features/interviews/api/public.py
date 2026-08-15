@@ -112,7 +112,6 @@ async def deep_clone_interview_config(
             else None
         ),
         tts_voice=source.tts_voice,
-        supported_modes=source.supported_modes,
         supplementary_instructions=source.supplementary_instructions,
         security_response_policy=source.security_response_policy,
         security_max_consecutive_attempts=source.security_max_consecutive_attempts,

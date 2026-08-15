@@ -30,7 +30,10 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from abridgeai.features.interviews.orchestrator.coverage import COVERAGE_SUFFICIENT_POINTS
-from abridgeai.features.interviews.orchestrator.decision import MAX_CANNOT_ANSWER_HINTS
+from abridgeai.features.interviews.orchestrator.decision import (
+    DEFAULT_MAX_TOTAL_FOLLOWUPS,
+    MAX_CANNOT_ANSWER_HINTS,
+)
 from abridgeai.features.interviews.orchestrator.state import InterviewRuntimeStateData
 
 # How many times the server refuses `end_interview` before giving way. Bounded so
@@ -174,6 +177,7 @@ def build_turn_reminder(
     questions_remaining: int,
     max_follow_ups_per_question: int,
     max_hints: int = MAX_CANNOT_ANSWER_HINTS,
+    max_total_follow_ups: int = DEFAULT_MAX_TOTAL_FOLLOWUPS,
     below_closing_threshold: bool,
     outcome_titles: dict[str, str] | None = None,
     time_remaining_seconds: int | None = None,
@@ -200,6 +204,7 @@ def build_turn_reminder(
         questions_remaining=questions_remaining,
         below_closing_threshold=below_closing_threshold,
         max_follow_ups_per_question=max_follow_ups_per_question,
+        max_total_follow_ups=max_total_follow_ups,
     )
     unticked = [oid for oid in required_outcome_ids if not _is_ticked(data, oid)]
 
@@ -223,6 +228,10 @@ def build_turn_reminder(
         f"Follow-ups used here: {data.current_question_follow_up_count}"
         f"/{max_follow_ups_per_question}. Hints left: {hints_left}."
     )
+    if data.total_follow_up_count >= max_total_follow_ups:
+        parts.append(
+            "The session-wide follow-up budget is spent — stop probing and move on."
+        )
     if not server_advanced and not opening:
         parts.append(
             "You MAY call next_question when this exchange is finished."
@@ -320,6 +329,7 @@ def resolve_next_question(
     below_closing_threshold: bool,
     max_follow_ups_per_question: int,
     max_hints: int = MAX_CANNOT_ANSWER_HINTS,
+    max_total_follow_ups: int = DEFAULT_MAX_TOTAL_FOLLOWUPS,
 ) -> NextQuestionVerdict:
     """Decide whether the agent may move to a NEW question.
 
@@ -330,6 +340,7 @@ def resolve_next_question(
     * its outcome is provisionally ticked (answered well enough), or
     * the hint ladder is spent (the candidate genuinely cannot answer), or
     * the per-question follow-up budget is spent (we have probed enough), or
+    * the SESSION-wide follow-up budget is spent (same, across all questions), or
     * there is no current question yet, or
     * time is past the closing threshold.
 
@@ -343,6 +354,8 @@ def resolve_next_question(
     if data.hint_level >= max_hints:
         return NextQuestionVerdict(True, "", data.advance_refusal_count)
     if data.current_question_follow_up_count >= max_follow_ups_per_question:
+        return NextQuestionVerdict(True, "", data.advance_refusal_count)
+    if data.total_follow_up_count >= max_total_follow_ups:
         return NextQuestionVerdict(True, "", data.advance_refusal_count)
 
     if data.advance_refusal_count >= MAX_ADVANCE_REFUSALS:
@@ -366,6 +379,7 @@ def current_question_resolved(
     current_outcome_id: str | None,
     max_follow_ups_per_question: int,
     max_hints: int = MAX_CANNOT_ANSWER_HINTS,
+    max_total_follow_ups: int = DEFAULT_MAX_TOTAL_FOLLOWUPS,
 ) -> bool:
     """True when the LIVE question has nothing left to give.
 
@@ -383,6 +397,7 @@ def current_question_resolved(
         _is_ticked(data, current_outcome_id)
         or data.hint_level >= max_hints
         or data.current_question_follow_up_count >= max_follow_ups_per_question
+        or data.total_follow_up_count >= max_total_follow_ups
     )
 
 

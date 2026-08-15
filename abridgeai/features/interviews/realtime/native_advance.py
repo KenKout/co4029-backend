@@ -28,6 +28,7 @@ double-spending one transition.
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
 
@@ -47,6 +48,16 @@ class PoolSizer(Protocol):
     """The one thing this module needs from ``BankSelector``."""
 
     def remaining(self) -> int: ...
+
+
+# A second advance closer together than this is the tail of ONE spoken answer,
+# not a new one: the recognizer emits a final per pause, so a hesitant candidate
+# produces several end-of-turn commits seconds apart (df269681: fragments at
+# 0.8s, 1.6s and 6.9s gaps; both "advances" fired while the candidate was
+# mid-sentence). The window is measured from the LAST advance and must cover
+# the model's acknowledge-and-ask reply too — anything shorter re-arms inside
+# the interviewer's own transition.
+ADVANCE_COALESCE_WINDOW_S = 45.0
 
 
 @dataclass(frozen=True)
@@ -79,6 +90,16 @@ async def advance_if_resolved(userdata: InterviewUserdata, selector: PoolSizer) 
     state = userdata.state
     if state is None or userdata.finished or userdata.below_closing_threshold:
         return AdvanceOutcome(advanced=False)
+    # Fragment guard: a spoken answer commits in pieces, and right after an
+    # advance every piece looks "resolved" (the outcome it targeted was ticked
+    # by the piece that legitimately advanced). Refuse a second advance inside
+    # the coalesce window; the fragments still count as follow-up probes below.
+    now = time.monotonic()
+    if (
+        userdata.last_advance_monotonic is not None
+        and now - userdata.last_advance_monotonic < ADVANCE_COALESCE_WINDOW_S
+    ):
+        return AdvanceOutcome(advanced=False)
     if not current_question_resolved(
         state,
         current_outcome_id=state.current_outcome_id,
@@ -98,6 +119,7 @@ async def advance_if_resolved(userdata: InterviewUserdata, selector: PoolSizer) 
     userdata.current_question_text = selected.prompt_text
     userdata.questions_remaining = selector.remaining()
     userdata.pending_new_question = True
+    userdata.last_advance_monotonic = time.monotonic()
     # Any assistance marker still pending belongs to the question just left —
     # the next utterance is the NEW question's reading, and a stale "hint"
     # marker mislabeled it in the persisted transcript.
@@ -142,11 +164,15 @@ def count_follow_up(userdata: InterviewUserdata) -> None:
     model actually makes.
 
     Charged when the turn did NOT advance, so the count measures probes the
-    interviewer has already spent on this question.
+    interviewer has already spent on this question. ``total_follow_up_count`` goes
+    up with it, matching the routed path's ``turn_state`` accounting: the
+    session-wide budget is what stops a long interview spending its whole clock
+    probing question one.
     """
     if userdata.state is None:
         return
     userdata.state.current_question_follow_up_count += 1
+    userdata.state.total_follow_up_count += 1
 
 
 __all__ = ["AdvanceOutcome", "advance_if_resolved", "count_follow_up"]

@@ -77,8 +77,12 @@ _THINKING_FILLER_VI = "Ừm."
 # That fairness point is not incidental. ASR endpointing is documented to cut
 # off disfluent and stuttered speech before it finishes, so this same knob is
 # the cheapest accessibility improvement available on a voice-first assessment.
-_ENDPOINTING_MIN_DELAY_S = 0.7
-_ENDPOINTING_MAX_DELAY_S = 4.0
+# Raised 0.7 → 1.2 after df269681: hesitant fragments 0.8-1.6s apart were each
+# committed as their own user turn (and the second one advanced the interview
+# mid-sentence); the semantic detector's low-confidence verdicts (0.37-0.53)
+# still fell through the dynamic window and committed at max_delay.
+_ENDPOINTING_MIN_DELAY_S = 1.2
+_ENDPOINTING_MAX_DELAY_S = 5.0
 
 
 class InterviewAgent(Agent):
@@ -607,7 +611,7 @@ def build_agent_session(
                 base_url=tts_base,
             ),
             vad=silero.VAD.load(),
-            turn_handling=_turn_handling(),
+            turn_handling=turn_handling_options(),
         )
 
     # Non-English (Vietnamese) — Deepgram cannot serve this locale; use the
@@ -631,11 +635,11 @@ def build_agent_session(
             speed=speech_rate_from_verbosity(verbosity if verbosity is not None else 2),
         ),
         vad=silero.VAD.load(),
-        turn_handling=_turn_handling(),
+        turn_handling=turn_handling_options(),
     )
 
 
-def _turn_handling() -> TurnHandlingOptions:
+def turn_handling_options() -> TurnHandlingOptions:
     """Turn-taking configuration shared by both language paths.
 
     Only endpointing is set. Interruption handling is deliberately left to the

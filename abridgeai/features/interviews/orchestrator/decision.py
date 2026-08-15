@@ -54,7 +54,7 @@ from abridgeai.features.interviews.orchestrator.state import InterviewPhase
 # will let a question override ``max_follow_ups`` and Phase 16 will expose these
 # in authoring. Kept here as the single source of truth until then.
 DEFAULT_MAX_FOLLOWUPS_PER_QUESTION = 2
-DEFAULT_MAX_TOTAL_FOLLOWUPS = 12
+DEFAULT_MAX_TOTAL_FOLLOWUPS = 60
 
 # How many escalating hints a candidate may receive on ONE question before a
 # non-answer advances anyway (Slice 11, v2). Bounded so the hint ladder can

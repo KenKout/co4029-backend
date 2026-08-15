@@ -176,14 +176,13 @@ async def fixture_data(engine: AsyncEngine) -> AsyncIterator[dict]:
         await conn.execute(
             text(
                 "INSERT INTO interview_configs ("
-                "id, course_id, module_id, title, status, max_attempts, "
-                "supported_modes) VALUES "
-                "(:p, :c, :m, 'Pub Interview', 'published', NULL, 'hybrid'), "
-                "(:d, :c, :m, 'Draft Interview', 'draft', NULL, 'hybrid'), "
-                "(:a, :c, :m, 'Archived Interview', 'archived', NULL, 'hybrid'), "
-                "(:sd, :c, :m, 'Deleted Interview', 'published', NULL, 'hybrid'), "
-                "(:cp, :c, :m, 'Capped Interview', 'published', 2, 'hybrid'), "
-                "(:mb, :c, :mb_id, 'Module B Interview', 'published', NULL, 'hybrid')"
+                "id, course_id, module_id, title, status, max_attempts) VALUES "
+                "(:p, :c, :m, 'Pub Interview', 'published', NULL), "
+                "(:d, :c, :m, 'Draft Interview', 'draft', NULL), "
+                "(:a, :c, :m, 'Archived Interview', 'archived', NULL), "
+                "(:sd, :c, :m, 'Deleted Interview', 'published', NULL), "
+                "(:cp, :c, :m, 'Capped Interview', 'published', 2), "
+                "(:mb, :c, :mb_id, 'Module B Interview', 'published', NULL)"
             ),
             {
                 "p": cfg_pub,

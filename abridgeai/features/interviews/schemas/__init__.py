@@ -66,7 +66,6 @@ from abridgeai.features.interviews.schemas.public import (
     OutcomeTypeLiteral,
     PersonaLiteral,
     QuestionTypeLiteral,
-    SupportedModesLiteral,
 )
 from abridgeai.features.interviews.schemas.real_time import (
     RealtimeTokenResponse,
@@ -160,5 +159,4 @@ __all__ = [
     "SecuritySessionSummary",
     "SessionStatusLiteral",
     "StudyPlanItem",
-    "SupportedModesLiteral",
 ]

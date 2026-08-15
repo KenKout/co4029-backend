@@ -360,7 +360,6 @@ async def test_generate_returns_202_and_enqueues_arq(
             "title": "Lifecycle Interview",
             "course_id": str(scenario["course_id"]),
             "module_id": str(scenario["module_id"]),
-            "supported_modes": "text",
         },
         headers=_auth(admin_bearer),
     )
@@ -415,8 +414,8 @@ async def _seed_published_config(
         await conn.execute(
             text(
                 "INSERT INTO interview_configs "
-                "(id, course_id, module_id, title, status, supported_modes, created_by) "
-                "VALUES (:id, :c, :m, 'Cross-user', 'published', 'text', :u)"
+                "(id, course_id, module_id, title, status, created_by) "
+                "VALUES (:id, :c, :m, 'Cross-user', 'published', :u)"
             ),
             {"id": config_id, "c": course_id, "m": module_id, "u": actor_id},
         )
@@ -695,7 +694,6 @@ async def test_get_interview_config_with_existing_questions_does_not_500(
             "title": "Has Questions",
             "course_id": str(scenario["course_id"]),
             "module_id": str(scenario["module_id"]),
-            "supported_modes": "text",
         },
         headers=_auth(admin_bearer),
     )
@@ -752,7 +750,6 @@ async def test_publish_rejects_when_no_approved_question(
             "title": "Pending Only",
             "course_id": str(scenario["course_id"]),
             "module_id": str(scenario["module_id"]),
-            "supported_modes": "text",
         },
         headers=_auth(admin_bearer),
     )
@@ -846,11 +843,11 @@ async def test_start_session_rejects_config_without_outcomes(
         await conn.execute(
             text(
                 "INSERT INTO interview_configs ("
-                "  id, course_id, module_id, title, status, supported_modes,"
+                "  id, course_id, module_id, title, status,"
                 "  created_by, published_at"
                 ") VALUES ("
                 "  :cid, :course, :module, 'No Outcomes Repro', 'published',"
-                "  'text', :uid, NOW()"
+                "  :uid, NOW()"
                 ")"
             ),
             {
@@ -921,11 +918,11 @@ async def test_start_session_self_heals_stale_empty_session(
         await conn.execute(
             text(
                 "INSERT INTO interview_configs ("
-                "  id, course_id, module_id, title, status, supported_modes,"
+                "  id, course_id, module_id, title, status,"
                 "  lock_quiz_ef_until_pass, created_by, published_at"
                 ") VALUES ("
                 "  :cid, :course, :module, 'Stale Session Repro', 'published',"
-                "  'text', false, :uid, NOW()"
+                "  false, :uid, NOW()"
                 ")"
             ),
             {
@@ -1033,11 +1030,11 @@ async def test_start_session_upgrades_input_mode_when_config_allows(
         await conn.execute(
             text(
                 "INSERT INTO interview_configs ("
-                "  id, course_id, module_id, title, status, supported_modes,"
+                "  id, course_id, module_id, title, status,"
                 "  lock_quiz_ef_until_pass, created_by, published_at"
                 ") VALUES ("
                 "  :cid, :course, :module, 'Mode Upgrade Repro', 'published',"
-                "  'hybrid', false, :uid, NOW()"
+                "  false, :uid, NOW()"
                 ")"
             ),
             {
@@ -1119,17 +1116,18 @@ async def test_start_session_upgrades_input_mode_when_config_allows(
             )
 
 
-async def test_start_session_does_not_upgrade_when_config_text_only(
+async def test_start_session_aligns_a_legacy_text_session_to_the_unified_mode(
     client: httpx.AsyncClient,
     scenario: dict[str, uuid.UUID],
     seeded_users: SeededUsers,
     engine: AsyncEngine,
 ) -> None:
-    """Regression: a text-only config must NOT silently flip a session to voice.
+    """Migration 0077 contract: every session runs the unified hybrid room.
 
-    Defence-in-depth: the realtime-token endpoint also gates on input_mode,
-    but the upgrade helper itself should refuse to grant a mode the config
-    forbids.
+    A live session recorded ``text`` before the mode unification is aligned
+    in-place on its next idempotent start, so the candidate can join the room
+    (mic toggle + typed turns) instead of being locked out by the old
+    "not a voice interview" gate.
     """
     config_id = uuid.uuid4()
     question_id = uuid.uuid4()
@@ -1139,11 +1137,11 @@ async def test_start_session_does_not_upgrade_when_config_text_only(
         await conn.execute(
             text(
                 "INSERT INTO interview_configs ("
-                "  id, course_id, module_id, title, status, supported_modes,"
+                "  id, course_id, module_id, title, status,"
                 "  lock_quiz_ef_until_pass, created_by, published_at"
                 ") VALUES ("
                 "  :cid, :course, :module, 'Text Only Repro', 'published',"
-                "  'text', false, :uid, NOW()"
+                "  false, :uid, NOW()"
                 ")"
             ),
             {
@@ -1204,7 +1202,7 @@ async def test_start_session_does_not_upgrade_when_config_text_only(
             json={"input_mode": "voice"},
             headers=_auth(student_bearer),
         )
-        # Idempotency still returns the existing session, but mode stays text.
+        # Idempotency still returns the existing session, now on the unified mode.
         assert start_resp.status_code == 201, start_resp.text
         async with engine.begin() as conn:
             row = (
@@ -1214,7 +1212,7 @@ async def test_start_session_does_not_upgrade_when_config_text_only(
                 )
             ).first()
         assert row is not None
-        assert row[0] == "text"
+        assert row[0] == "hybrid"
     finally:
         async with engine.begin() as conn:
             await conn.execute(
@@ -1900,7 +1898,6 @@ async def test_adaptive_readiness_reports_advisory_warnings_and_never_blocks(
             "title": "Readiness Check",
             "course_id": str(scenario["course_id"]),
             "module_id": str(scenario["module_id"]),
-            "supported_modes": "text",
         },
         headers=_auth(admin_bearer),
     )
@@ -1965,7 +1962,6 @@ async def _create_interview_config(
             "title": title,
             "course_id": str(scenario["course_id"]),
             "module_id": str(scenario["module_id"]),
-            "supported_modes": "text",
         },
         headers=_auth(admin_bearer),
     )

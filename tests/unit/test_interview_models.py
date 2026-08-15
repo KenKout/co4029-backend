@@ -15,7 +15,7 @@ Covers Reconciliation §A13 + plan §6.1 invariants:
   historical record — no soft-delete cols (plan §6.1 explicit).
 * Append-only models (``InterviewSessionQuestion``,
   ``AssessmentIntegrityEvent``) carry only ``created_at``.
-* Status / persona / supported_modes / question_type / role / etc.
+* Status / persona / question_type / role / etc.
   CHECK constraints match baseline DDL verbatim.
 * ``UNIQUE (interview_config_id, student_id, attempt_number)`` on
   sessions is preserved (one row per attempt).
@@ -141,10 +141,7 @@ def test_interview_config_persona_check_baseline_canon() -> None:
     )
 
 
-def test_interview_config_supported_modes_check() -> None:
-    sqltext = _check_constraint_text(InterviewConfig, "ck_interview_configs_supported_modes")
-    for value in ("voice", "text", "hybrid"):
-        assert f"'{value}'" in sqltext
+
 
 
 def test_interview_question_type_check_baseline_canon() -> None:

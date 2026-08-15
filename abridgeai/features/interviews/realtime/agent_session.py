@@ -17,12 +17,20 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from livekit.agents import NOT_GIVEN, AgentSession, RoomInputOptions, RoomOutputOptions
+from livekit.agents import (
+    NOT_GIVEN,
+    AgentSession,
+    RoomInputOptions,
+    RoomOutputOptions,
+    TurnHandlingOptions,
+    inference,
+)
 from livekit.agents.voice.room_io.types import TextInputCallback
 from livekit.plugins import deepgram, openai, silero
 
 from abridgeai.features.interviews.orchestrator import tools as gate
 from abridgeai.features.interviews.realtime.agent_userdata import InterviewUserdata
+from abridgeai.features.interviews.realtime.session_runtime import turn_handling_options
 from abridgeai.features.interviews.services import narration
 
 if TYPE_CHECKING:
@@ -113,6 +121,32 @@ def _sdk_default_text_input_cb() -> TextInputCallback:
     return RoomInputOptions().text_input_cb
 
 
+def _native_turn_handling(language: str) -> TurnHandlingOptions:
+    """Turn-taking for the native session, language-aware.
+
+    English (and any locale the detector serves): the semantic turn detector.
+    VAD endpointing cannot tell a finished answer from a mid-thought pause, so
+    a candidate who thinks before speaking gets cut off — or holds the floor
+    through dead air while the agent waits out the max delay. The detector
+    classifies the transcript tail (end / unlikely end / backchannel) and hands
+    over only on a real finish. Cloud credentials are already in the worker
+    env, so the SDK resolves to the hosted model; without them it falls back to
+    the local v1-mini in-process.
+
+    Vietnamese: the detector's thresholds are English-tuned, and a wrong
+    "unlikely end" verdict would truncate a Vietnamese answer mid-sentence —
+    worse than the VAD default it replaced. Vietnamese sessions keep VAD
+    endpointing with the same dynamic bounds the routed path uses.
+
+    Endpointing bounds are shared with the routed path either way so the two
+    runtimes cannot drift on pacing while the turn detector rolls out.
+    """
+    options = turn_handling_options()
+    if not language.startswith("vi"):
+        options["turn_detection"] = inference.TurnDetector()
+    return options
+
+
 def build_native_session(
     settings: Settings,
     userdata: InterviewUserdata,
@@ -147,6 +181,7 @@ def build_native_session(
                 voice=narration.voice_for_persona(None),
             ),
             vad=silero.VAD.load(),
+            turn_handling=_native_turn_handling(language),
         )
 
     dg_key = settings.deepgram_api_key.get_secret_value() if settings.deepgram_api_key else ""
@@ -165,6 +200,7 @@ def build_native_session(
             base_url=f"{settings.deepgram_tts_base_url.rstrip('/')}/speak",
         ),
         vad=silero.VAD.load(),
+        turn_handling=_native_turn_handling(language),
     )
 
 

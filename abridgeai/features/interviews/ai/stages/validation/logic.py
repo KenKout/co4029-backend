@@ -105,7 +105,6 @@ class InterviewConfig(Protocol):
 
     title: str
     persona: str | None
-    supported_modes: str
 
 
 async def validate_interview_questions(
@@ -316,9 +315,6 @@ def _config_summary(config: InterviewConfig) -> str:
     persona = getattr(config, "persona", None)
     if persona:
         parts.append(f"persona={persona}")
-    modes = getattr(config, "supported_modes", None)
-    if modes:
-        parts.append(f"modes={modes}")
     return ", ".join(parts)
 
 

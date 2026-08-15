@@ -923,7 +923,6 @@ async def test_full_interview_lifecycle_generate_take_submit_evaluate(
             "title": "E2E Recursion Interview",
             "course_id": str(scenario["course_id"]),
             "module_id": str(scenario["module_id"]),
-            "supported_modes": "text",
         },
         headers=_auth(admin_bearer),
     )
@@ -1171,8 +1170,8 @@ async def test_audio_object_id_persisted_without_transcription(
         await conn.execute(
             text(
                 "INSERT INTO interview_configs ("
-                "id, course_id, module_id, title, status, supported_modes, created_by) "
-                "VALUES (:id, :c, :m, 'Voice Future-Proof', 'published', 'hybrid', :u)"
+                "id, course_id, module_id, title, status, created_by) "
+                "VALUES (:id, :c, :m, 'Voice Future-Proof', 'published', :u)"
             ),
             {
                 "id": config_id,
@@ -1307,7 +1306,6 @@ async def test_create_interview_outcome_duplicate_position_returns_409(
             "title": "Outcome-409 Probe",
             "course_id": str(scenario["course_id"]),
             "module_id": str(scenario["module_id"]),
-            "supported_modes": "text",
         },
         headers=_auth(admin_bearer),
     )
@@ -1377,7 +1375,6 @@ async def test_delete_interview_outcome_removes_it(
             "title": "Outcome-Delete Probe",
             "course_id": str(scenario["course_id"]),
             "module_id": str(scenario["module_id"]),
-            "supported_modes": "text",
         },
         headers=_auth(admin_bearer),
     )

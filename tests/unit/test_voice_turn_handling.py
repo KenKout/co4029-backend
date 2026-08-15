@@ -97,4 +97,4 @@ async def test_false_interruption_resume_stays_on() -> None:
 
 def test_turn_handling_sets_only_endpointing() -> None:
     """Everything else is intentionally the SDK's choice, not ours."""
-    assert set(sr._turn_handling()) == {"endpointing"}
+    assert set(sr.turn_handling_options()) == {"endpointing"}

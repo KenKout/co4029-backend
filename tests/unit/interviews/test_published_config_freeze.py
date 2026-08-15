@@ -30,7 +30,6 @@ from abridgeai.features.interviews.services.published_freeze import (
 FROZEN_FIELDS = [
     "persona",
     "persona_profile",
-    "supported_modes",
     "tts_voice",
     "time_limit_minutes",
     "min_outcomes_to_pass",
@@ -45,6 +44,10 @@ FROZEN_FIELDS = [
     # than earlier ones got.
     "max_attempts",
     "cooldown_hours",
+    # The budgets are read into the session at dispatch; changing them mid-cohort
+    # changes how hard the interviewer presses for students who start later.
+    "max_follow_ups_per_question",
+    "max_hints_per_question",
 ]
 
 

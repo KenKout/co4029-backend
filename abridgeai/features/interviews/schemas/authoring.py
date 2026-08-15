@@ -55,7 +55,6 @@ from abridgeai.features.interviews.schemas.public import (
     OutcomeTypeLiteral,
     PersonaLiteral,
     QuestionTypeLiteral,
-    SupportedModesLiteral,
 )
 from abridgeai.features.interviews.schemas.session import (
     InputModeLiteral,
@@ -176,12 +175,11 @@ class InterviewConfigCreate(BaseModel):
     persona: PersonaLiteral | None = None
     # Optional per-trait overrides layered on the persona preset (Phase 3).
     persona_profile: PersonaProfileWrite | None = None
-    supported_modes: SupportedModesLiteral = "hybrid"
     tts_voice: TtsVoiceLiteral | None = None
     time_limit_minutes: int | None = Field(default=None, ge=1)
     max_attempts: int | None = Field(default=None, ge=1)
     cooldown_hours: int | None = Field(default=None, ge=1)
-    max_follow_ups_per_question: int = Field(default=2, ge=0, le=10)
+    max_follow_ups_per_question: int = Field(default=2, ge=0, le=50)
     max_hints_per_question: int = Field(default=3, ge=0, le=10)
     lock_quiz_ef_until_pass: bool = False
     supplementary_instructions: str | None = None
@@ -209,13 +207,12 @@ class InterviewConfigUpdate(BaseModel):
     # NOTE: send an explicit empty object {} would clear nothing here; the
     # router treats None as "unchanged" and a present object as "replace".
     persona_profile: PersonaProfileWrite | None = None
-    supported_modes: SupportedModesLiteral | None = None
     tts_voice: TtsVoiceLiteral | None = None
     time_limit_minutes: int | None = Field(default=None, ge=1)
     max_attempts: int | None = Field(default=None, ge=1)
     cooldown_hours: int | None = Field(default=None, ge=1)
     min_outcomes_to_pass: int | None = Field(default=None, ge=1)
-    max_follow_ups_per_question: int | None = Field(default=None, ge=0, le=10)
+    max_follow_ups_per_question: int | None = Field(default=None, ge=0, le=50)
     max_hints_per_question: int | None = Field(default=None, ge=0, le=10)
     lock_quiz_ef_until_pass: bool | None = None
     supplementary_instructions: str | None = None

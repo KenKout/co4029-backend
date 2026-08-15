@@ -297,9 +297,9 @@ async def _create_published_config(
         await conn.execute(
             text(
                 "INSERT INTO interview_configs "
-                "(id, course_id, module_id, title, status, supported_modes, created_by, "
+                "(id, course_id, module_id, title, status, created_by, "
                 "max_attempts, cooldown_hours) "
-                "VALUES (:id, :c, :m, 'Pub Interview', 'published', 'text', :t, "
+                "VALUES (:id, :c, :m, 'Pub Interview', 'published', :t, "
                 ":max_attempts, :cooldown_hours)"
             ),
             {
@@ -356,7 +356,6 @@ async def test_create_interview_config_basic(
     payload = _CreatePayload(
         title="Capstone Interview",
         module_id=scenario["module_id"],
-        supported_modes="hybrid",
     )
     async with session_factory() as session, session.begin():
         config = await authoring_service.create_interview_config(
@@ -399,7 +398,6 @@ async def test_create_interview_config_seeds_course_outcomes(
     payload = _CreatePayload(
         title="Seeded Interview",
         module_id=scenario["module_id"],
-        supported_modes="hybrid",
     )
     async with session_factory() as session, session.begin():
         config = await authoring_service.create_interview_config(
