@@ -197,3 +197,48 @@ def test_resume_history_classifies_rich_closing_substeps_as_closing() -> None:
     history = _build_session_history(session, [(session_question, question)], messages)
 
     assert [turn.kind for turn in history] == ["question", "closing", "closing"]
+
+
+def test_resume_history_drops_the_agents_spoken_question_not_its_follow_ups() -> None:
+    # The native agent records its spoken question (a paraphrase) AND its
+    # follow-ups both as metadata kind "question". The spoken question comes
+    # BEFORE the candidate's answer and duplicates the canonical question turn
+    # rebuilt from prompt_text; the follow-up comes AFTER and must survive.
+    started = datetime(2026, 7, 21, 10, 0, tzinfo=UTC)
+    question_id = uuid4()
+    session = SimpleNamespace(onboarding_stage="completed", assessment_started_at=started)
+    session_question = SimpleNamespace(id=question_id, sequence_no=1, asked_at=started)
+    question = SimpleNamespace(
+        prompt_text="What is a primary key?",
+        question_type="technical",
+    )
+    messages = [
+        _message(
+            role="ai",
+            text="Let's start with this: how do you identify a row uniquely?",
+            created_at=started + timedelta(seconds=1),
+            session_question_id=question_id,
+            metadata={"kind": "question"},
+        ),
+        _message(
+            role="user",
+            text="A primary key uniquely identifies each record.",
+            created_at=started + timedelta(seconds=2),
+            session_question_id=question_id,
+        ),
+        _message(
+            role="ai",
+            text="Right — now, what about composite keys?",
+            created_at=started + timedelta(seconds=3),
+            session_question_id=question_id,
+            metadata={"kind": "question"},
+        ),
+    ]
+
+    history = _build_session_history(session, [(session_question, question)], messages)
+
+    assert [(turn.role, turn.kind, turn.content_text) for turn in history] == [
+        ("ai", "question", "What is a primary key?"),
+        ("user", "answer", "A primary key uniquely identifies each record."),
+        ("ai", "followup", "Right — now, what about composite keys?"),
+    ]

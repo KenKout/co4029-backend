@@ -1087,7 +1087,26 @@ def _build_session_history(  # noqa: C901 -- explicit transcript merge is easier
                         question_type=question.question_type,
                     )
                 )
+            # The agent's spoken question (a paraphrase of the prompt) is the
+            # first AI turn for this question, recorded before the candidate's
+            # answer. It duplicates the canonical question turn appended above,
+            # so drop that ONE turn — but only turns the native agent tagged
+            # ``kind == "question"`` that precede the first answer. Follow-ups
+            # (also ``kind == "question"``) come AFTER an answer and stay;
+            # closing/clarification/hint turns carry distinct kinds and stay.
+            # Without this, a resumed voice session showed the question twice
+            # (bank wording in the history + the paraphrase pinned as the active
+            # card), which read as the two panels being swapped.
+            answer_seen = False
             for message in messages_by_question.get(session_question.id, []):
+                if message.role == "user":
+                    answer_seen = True
+                if (
+                    not answer_seen
+                    and message.role == "ai"
+                    and (message.metadata_json or {}).get("kind") == "question"
+                ):
+                    continue
                 append_message(message)
 
     # Defensive recovery for messages whose question was removed after the
