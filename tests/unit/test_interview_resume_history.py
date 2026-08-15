@@ -199,11 +199,12 @@ def test_resume_history_classifies_rich_closing_substeps_as_closing() -> None:
     assert [turn.kind for turn in history] == ["question", "closing", "closing"]
 
 
-def test_resume_history_drops_the_agents_spoken_question_not_its_follow_ups() -> None:
-    # The native agent records its spoken question (a paraphrase) AND its
-    # follow-ups both as metadata kind "question". The spoken question comes
-    # BEFORE the candidate's answer and duplicates the canonical question turn
-    # rebuilt from prompt_text; the follow-up comes AFTER and must survive.
+def test_resume_history_keeps_the_agents_spoken_wording_not_the_bank_prompt() -> None:
+    # The interviewer's own wording is the transcript's source of truth: the
+    # native agent paraphrases every question, and replaying the bank's exact
+    # prompt after a reload showed words the candidate never heard. The spoken
+    # row carries the canonical `question:*` identity; follow-ups (same stored
+    # kind) come AFTER an answer and survive as follow-ups.
     started = datetime(2026, 7, 21, 10, 0, tzinfo=UTC)
     question_id = uuid4()
     session = SimpleNamespace(onboarding_stage="completed", assessment_started_at=started)
@@ -238,7 +239,10 @@ def test_resume_history_drops_the_agents_spoken_question_not_its_follow_ups() ->
     history = _build_session_history(session, [(session_question, question)], messages)
 
     assert [(turn.role, turn.kind, turn.content_text) for turn in history] == [
-        ("ai", "question", "What is a primary key?"),
+        ("ai", "question", "Let's start with this: how do you identify a row uniquely?"),
         ("user", "answer", "A primary key uniquely identifies each record."),
         ("ai", "followup", "Right — now, what about composite keys?"),
     ]
+    # The canonical identity/metadata still ride on the spoken row.
+    assert history[0].id == f"question:{question_id}"
+    assert history[0].question_type == "technical"

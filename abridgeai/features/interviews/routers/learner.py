@@ -367,10 +367,28 @@ def _build_session_history(  # noqa: C901 -- explicit transcript merge is easier
     if session.onboarding_stage == "completed":
         for session_question, question in question_rows:
             included_question_ids.add(session_question.id)
-            if question is not None and (question.prompt_text or "").strip():
-                question_created_at = session_question.asked_at
-                if session_question.sequence_no == 1 and session.assessment_started_at is not None:
-                    question_created_at = session.assessment_started_at
+            question_created_at = session_question.asked_at
+            if session_question.sequence_no == 1 and session.assessment_started_at is not None:
+                question_created_at = session.assessment_started_at
+            # The interviewer's own wording is the transcript's source of truth:
+            # the native agent paraphrases every question, and replaying the
+            # bank's exact prompt after a reload showed words the candidate
+            # never heard. The canonical `question:*` identity and metadata ride
+            # ON the spoken row; the bank prompt only stands in when the agent's
+            # wording was never recorded (routed/REST sessions).
+            spoken_messages = messages_by_question.get(session_question.id, [])
+            answer_seen = False
+            spoken_used = False
+            # Without a spoken question (routed/REST sessions, or the spoken row
+            # was never recorded) the bank prompt stands in — placed FIRST, the
+            # position the question occupied in the live conversation.
+            bank_fallback = not any(
+                message.role == "ai"
+                and (message.metadata_json or {}).get("kind") == "question"
+                and (message.content_text or "").strip()
+                for message in spoken_messages
+            )
+            if bank_fallback and question is not None and (question.prompt_text or "").strip():
                 history.append(
                     InterviewSessionHistoryTurn(
                         id=f"question:{session_question.id}",
@@ -385,18 +403,7 @@ def _build_session_history(  # noqa: C901 -- explicit transcript merge is easier
                         question_type=question.question_type,
                     )
                 )
-            # The agent's spoken question (a paraphrase of the prompt) is the
-            # first AI turn for this question, recorded before the candidate's
-            # answer. It duplicates the canonical question turn appended above,
-            # so drop that ONE turn — but only turns the native agent tagged
-            # ``kind == "question"`` that precede the first answer. Follow-ups
-            # (also ``kind == "question"``) come AFTER an answer and stay;
-            # closing/clarification/hint turns carry distinct kinds and stay.
-            # Without this, a resumed voice session showed the question twice
-            # (bank wording in the history + the paraphrase pinned as the active
-            # card), which read as the two panels being swapped.
-            answer_seen = False
-            for message in messages_by_question.get(session_question.id, []):
+            for message in spoken_messages:
                 if message.role == "user":
                     answer_seen = True
                 if (
@@ -404,6 +411,27 @@ def _build_session_history(  # noqa: C901 -- explicit transcript merge is easier
                     and message.role == "ai"
                     and (message.metadata_json or {}).get("kind") == "question"
                 ):
+                    if spoken_used:
+                        continue
+                    spoken_used = True
+                    history.append(
+                        InterviewSessionHistoryTurn(
+                            id=f"question:{session_question.id}",
+                            role="ai",
+                            content_text=message.content_text,
+                            kind="question",
+                            created_at=message.created_at or question_created_at,
+                            elapsed_seconds=_history_elapsed_seconds(
+                                session.assessment_started_at,
+                                message.created_at or question_created_at,
+                            ),
+                            question_type=(
+                                question.question_type
+                                if question is not None
+                                else None
+                            ),
+                        )
+                    )
                     continue
                 append_message(message)
 
