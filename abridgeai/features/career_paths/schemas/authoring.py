@@ -59,6 +59,36 @@ class CareerPathCourseCandidate(BaseModel):
     status: str
 
 
+class CareerPathImpactStage(BaseModel):
+    """Blast radius of editing one stage of a published path (§2.1 Gap 3).
+
+    ``students_in_stage`` — active enrollments CURRENTLY on this stage (it is
+    the first stage they have not latched). ``students_not_completed`` — active
+    enrollments that have not yet latched this stage at all (still to pass it),
+    which is the count that matters for "adding a required course here adds
+    work": everyone who must still do the stage is affected.
+    """
+
+    stage_id: UUID
+    position: int
+    title: str | None = None
+    students_in_stage: int = 0
+    students_not_completed: int = 0
+
+
+class CareerPathImpactRead(BaseModel):
+    """Who is walking a published path right now (Gap 3 §2.1).
+
+    Served before a manager mutates a published path so the edit is informed
+    instead of silent: "3 students are currently on Stage 2 — adding a
+    required course here adds work to their in-progress stage."
+    """
+
+    career_path_id: UUID
+    active_enrollments: int = 0
+    stages: list[CareerPathImpactStage] = []
+
+
 UnlockPolicy = Literal["always", "after_previous", "after_previous_required"]
 StageEnforcement = Literal["hard", "soft", "advisory"]
 

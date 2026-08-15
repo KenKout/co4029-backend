@@ -10,12 +10,103 @@ from abridgeai.features.career_paths.models import (
     CareerPath,
     CareerPathCourse,
     CareerPathStage,
+    StudentCareerEnrollment,
     StudentStageProgress,
 )
 from abridgeai.features.courses.api import public as courses_api
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
+
+
+async def get_path_impact(
+    db: AsyncSession, career_path_id: UUID
+) -> tuple[int, list[tuple[UUID, int, str | None, int, int]]]:
+    """Blast radius of editing a published path (Gap 3 §2.1).
+
+    Returns ``(active_enrollments, per_stage)`` where each tuple is
+    ``(stage_id, position, title, students_in_stage, students_not_completed)``.
+
+    * ``students_in_stage`` — active enrollments CURRENTLY on the stage: no
+      latch for it AND no latch for any LATER stage (they have not moved past
+      it).
+    * ``students_not_completed`` — active enrollments with no latch for the
+      stage at all; everyone who must still pass it is affected by an edit.
+
+    ``status='active'`` only: dropped/completed enrollments are not walking
+    the path. Stage rows soft-deleted are excluded. Raw SQL keeps the
+    correlated NOT EXISTS latch checks readable (the ORM `exists()` form
+    inside ``func.count().filter()`` does not correlate reliably).
+    """
+    from sqlalchemy import text as sa_text  # noqa: PLC0415
+
+    active = int(
+        (
+            await db.execute(
+                sa_text(
+                    "SELECT count(*) FROM student_career_enrollments "
+                    "WHERE career_path_id = CAST(:pid AS uuid) AND status = 'active'"
+                ),
+                {"pid": str(career_path_id)},
+            )
+        ).scalar_one()
+    )
+
+    rows = (
+        await db.execute(
+            sa_text(
+                """
+                SELECT s.id, s.position, s.title,
+                       COUNT(e.id) FILTER (
+                         WHERE e.status = 'active'
+                           AND NOT EXISTS (
+                             SELECT 1 FROM student_stage_progress lat
+                             WHERE lat.enrollment_id = e.id AND lat.stage_id = s.id
+                           )
+                           -- every EARLIER stage is latched: s is the first
+                           -- unlatch'd stage, i.e. the student is ON it.
+                           AND NOT EXISTS (
+                             SELECT 1 FROM career_path_stages s3
+                             WHERE s3.career_path_id = s.career_path_id
+                               AND s3.deleted_at IS NULL
+                               AND s3.position < s.position
+                               AND NOT EXISTS (
+                                 SELECT 1 FROM student_stage_progress lat4
+                                 WHERE lat4.enrollment_id = e.id
+                                   AND lat4.stage_id = s3.id
+                               )
+                           )
+                       ) AS students_in_stage,
+                       COUNT(e.id) FILTER (
+                         WHERE e.status = 'active'
+                           AND NOT EXISTS (
+                             SELECT 1 FROM student_stage_progress lat
+                             WHERE lat.enrollment_id = e.id AND lat.stage_id = s.id
+                           )
+                       ) AS students_not_completed
+                FROM career_path_stages s
+                JOIN student_career_enrollments e
+                  ON e.career_path_id = s.career_path_id
+                WHERE s.career_path_id = CAST(:pid AS uuid)
+                  AND s.deleted_at IS NULL
+                GROUP BY s.id, s.position, s.title
+                ORDER BY s.position
+                """
+            ),
+            {"pid": str(career_path_id)},
+        )
+    ).all()
+
+    return active, [
+        (
+            row[0] if isinstance(row[0], UUID) else UUID(str(row[0])),
+            int(row[1]),
+            row[2],
+            int(row[3]),
+            int(row[4]),
+        )
+        for row in rows
+    ]
 
 
 async def list_career_paths_for_org(

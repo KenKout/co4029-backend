@@ -24,6 +24,8 @@ from abridgeai.features.career_paths.schemas import (
     CareerPathCourseAuthoring,
     CareerPathCourseCandidate,
     CareerPathCreate,
+    CareerPathImpactRead,
+    CareerPathImpactStage,
     CareerPathStageAuthoring,
     CareerPathStageCreate,
     CareerPathStageReorderResult,
@@ -111,6 +113,116 @@ async def get_career_path(db: AsyncSession, career_path_id: UUID) -> CareerPathA
         stage_count=stage_counts.get(path.id, 0),
         course_count=course_counts.get(path.id, 0),
     )
+
+
+async def get_path_impact(db: AsyncSession, career_path_id: UUID) -> CareerPathImpactRead:
+    """Blast radius of editing a path (Gap 3 §2.1).
+
+    Served to the manager BEFORE a mutation on a published path so the edit
+    is informed instead of silent. Meaningless on draft paths (no students
+    can be enrolled), but harmless — the counts are all zero.
+    """
+    await _require_path(db, career_path_id)
+    active, rows = await authoring_queries.get_path_impact(db, career_path_id)
+    return CareerPathImpactRead(
+        career_path_id=career_path_id,
+        active_enrollments=active,
+        stages=[
+            CareerPathImpactStage(
+                stage_id=stage_id,
+                position=position,
+                title=title,
+                students_in_stage=in_stage,
+                students_not_completed=not_completed,
+            )
+            for stage_id, position, title, in_stage, not_completed in rows
+        ],
+    )
+
+
+def classify_path_edit(
+    *,
+    mutation: str,
+    active_enrollments: int,
+    stage_students_not_completed: int | None = None,
+    is_required: bool | None = None,
+    is_required_before: bool | None = None,
+    min_optional_before: int | None = None,
+    min_optional_after: int | None = None,
+    enforcement_before: str | None = None,
+    enforcement_after: str | None = None,
+    max_student_stage_position: int | None = None,
+    new_stage_position: int | None = None,
+) -> str:
+    """Classify a path edit as ``"safe"`` or ``"breaking"`` (Gap 3 §2.2).
+
+    The Gap-3 taxonomy: a change is BREAKING when an in-flight student is
+    worse off — work added to a stage they have not finished, the goal
+    moved (quota raised / path lengthened), or a stage they could enter
+    locks. Safe edits never make anyone worse off.
+
+    * ``mutation`` — one of ``add_course``, ``update_course``,
+      ``update_stage``, ``create_stage``, ``delete_stage``,
+      ``reorder_stages``.
+    * ``active_enrollments`` — path-level count of walking students; 0 ⇒
+      nothing can be breaking.
+    * ``stage_students_not_completed`` — impact count for the TARGET stage
+      (from :func:`get_path_impact`).
+    * ``max_student_stage_position`` — highest stage position any active
+      enrollment has reached (the last ``students_in_stage > 0`` position;
+      ``None`` when no student has reached any stage).
+
+    This is the advisory half of the plan; chunk 5 (versioning) will turn
+    breaking edits on a published path into a hard fork-or-409 gate. The
+    classification must stay in sync with that gate's rules.
+    """
+    if active_enrollments <= 0:
+        return "safe"
+
+    if mutation == "add_course":
+        # Optional adds are extra work the student may ignore; required adds
+        # to a stage they still must pass are imposed work.
+        if is_required and (stage_students_not_completed or 0) > 0:
+            return "breaking"
+        return "safe"
+
+    if mutation == "update_course":
+        # is_required flip is the only course-level policy change.
+        if is_required is not None and is_required_before is not None:
+            if is_required and not is_required_before:
+                if (stage_students_not_completed or 0) > 0:
+                    return "breaking"
+            else:
+                return "safe"
+        return "safe"
+
+    if mutation == "update_stage":
+        if min_optional_before is not None and min_optional_after is not None:
+            if min_optional_after > min_optional_before and (stage_students_not_completed or 0) > 0:
+                return "breaking"
+        if enforcement_before is not None and enforcement_after is not None:
+            _RANK = {"advisory": 0, "soft": 1, "hard": 2}
+            if _RANK[enforcement_after] > _RANK[enforcement_before]:
+                if (stage_students_not_completed or 0) > 0:
+                    return "breaking"
+        # Title/description edits and any loosening are safe.
+        return "safe"
+
+    if mutation == "create_stage":
+        # Appending past every student's current position does not move their
+        # goal; inserting at/before it does.
+        if max_student_stage_position is not None and new_stage_position is not None:
+            if new_stage_position <= max_student_stage_position:
+                return "breaking"
+        return "safe"
+
+    if mutation in ("delete_stage", "reorder_stages"):
+        # Deleting or reordering always rewrites the sequence under students
+        # already walking it (delete is separately guarded by latched
+        # progress; the classification is about the fairness signal).
+        return "breaking"
+
+    return "safe"
 
 
 async def list_career_path_courses(

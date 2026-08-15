@@ -23,6 +23,7 @@ from abridgeai.features.career_paths.schemas import (
     CareerPathCoursePatch,
     CareerPathCourseReorder,
     CareerPathCreate,
+    CareerPathImpactRead,
     CareerPathStageAuthoring,
     CareerPathStageCreate,
     CareerPathStageReorder,
@@ -212,6 +213,29 @@ async def get_career_path(
             db, current_user, career_path_id, _PATH_READ_CODES
         )
         return await authoring_service.get_career_path(db, career_path_id)
+    except NotFoundError as exc:
+        raise _not_found(str(exc)) from exc
+
+
+@management_router.get(
+    "/{career_path_id}/impact",
+    response_model=CareerPathImpactRead,
+)
+async def get_path_impact(
+    career_path_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_PATH_READ)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> CareerPathImpactRead:
+    """Blast radius of editing this path (Gap 3 §2.1).
+
+    Who is walking the path right now, per stage — call this BEFORE a
+    mutation on a published path so the edit is informed, not silent.
+    """
+    try:
+        await _ensure_caller_in_path_org(
+            db, current_user, career_path_id, _PATH_READ_CODES
+        )
+        return await authoring_service.get_path_impact(db, career_path_id)
     except NotFoundError as exc:
         raise _not_found(str(exc)) from exc
 

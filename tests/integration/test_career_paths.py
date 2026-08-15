@@ -356,6 +356,149 @@ async def test_path_filters_draft_courses(
     assert len(body["courses"]) == 2
 
 
+async def test_path_impact_reports_active_students_per_stage(
+    client: httpx.AsyncClient,
+    manager_bearer: str,
+    engine: AsyncEngine,
+    seeded_users: SeededUsers,
+) -> None:
+    """Gap 3 §2.1: blast radius of editing a published path.
+
+    Two active students — one on Stage 1 (no latches), one on Stage 2
+    (Stage 1 latched) — plus a dropped and a completed enrollment that must
+    NOT count.
+    """
+    suffix = uuid.uuid4().hex[:8]
+    path_id, stage1, stage2 = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    course_a, course_b = uuid.uuid4(), uuid.uuid4()
+    on_stage1, on_stage2, dropped, completed = (
+        uuid.uuid4(),
+        uuid.uuid4(),
+        uuid.uuid4(),
+        uuid.uuid4(),
+    )
+
+    async with engine.begin() as conn:
+        for cid, slug, title in (
+            (course_a, f"impact-a-{suffix}", "Impact A"),
+            (course_b, f"impact-b-{suffix}", "Impact B"),
+        ):
+            await conn.execute(
+                text(
+                    "INSERT INTO courses (id, organization_id, owner_user_id, "
+                    "slug, title, status) "
+                    "VALUES (:id, :org, :owner, :slug, :title, 'published')"
+                ),
+                {
+                    "id": cid,
+                    "org": seeded_users.organization_id,
+                    "owner": seeded_users.admin_id,
+                    "slug": slug,
+                    "title": title,
+                },
+            )
+        await conn.execute(
+            text(
+                "INSERT INTO career_paths (id, organization_id, slug, name, status) "
+                "VALUES (:id, :org, :slug, 'Impact Path', 'published')"
+            ),
+            {"id": path_id, "org": seeded_users.organization_id, "slug": f"impact-{suffix}"},
+        )
+        for sid, pos in ((stage1, 1), (stage2, 2)):
+            await conn.execute(
+                text(
+                    "INSERT INTO career_path_stages "
+                    "(id, career_path_id, position, unlock_policy, enforcement) "
+                    "VALUES (:sid, :pid, :pos, 'always', 'advisory')"
+                ),
+                {"sid": sid, "pid": path_id, "pos": pos},
+            )
+        for cid, sid, pos in ((course_a, stage1, 1), (course_b, stage2, 1)):
+            await conn.execute(
+                text(
+                    "INSERT INTO career_course_items "
+                    "(career_path_id, course_id, stage_id, position, is_required) "
+                    "VALUES (:pid, :cid, :sid, :pos, TRUE)"
+                ),
+                {"pid": path_id, "cid": cid, "sid": sid, "pos": pos},
+            )
+        for uid, status in (
+            (on_stage1, "active"),
+            (on_stage2, "active"),
+            (dropped, "dropped"),
+            (completed, "completed"),
+        ):
+            await conn.execute(
+                text("INSERT INTO users (id, primary_email) VALUES (:id, :email)"),
+                {"id": uid, "email": f"impact-{uid.hex[:6]}@test.local"},
+            )
+            await conn.execute(
+                text(
+                    "INSERT INTO student_career_enrollments "
+                    "(id, career_path_id, student_id, status) "
+                    "VALUES (gen_random_uuid(), :pid, :sid, :status)"
+                ),
+                {"pid": path_id, "sid": uid, "status": status},
+            )
+        # on_stage2 latched Stage 1 → currently walking Stage 2.
+        await conn.execute(
+            text(
+                "INSERT INTO student_stage_progress (enrollment_id, stage_id) "
+                "SELECT e.id, :sid FROM student_career_enrollments e "
+                "WHERE e.career_path_id = :pid AND e.student_id = :uid"
+            ),
+            {"sid": stage1, "pid": path_id, "uid": on_stage2},
+        )
+
+    response = await client.get(
+        f"/api/v1/management/career-paths/{path_id}/impact",
+        headers={"Authorization": f"Bearer {manager_bearer}"},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["active_enrollments"] == 2
+    by_position = {s["position"]: s for s in body["stages"]}
+    assert set(by_position) == {1, 2}
+    # Stage 1: only the no-latch student is on it; the Stage-2 student has
+    # latched it, so neither counts as still-to-do... except the on-stage-1
+    # student still has it ahead.
+    assert by_position[1]["students_in_stage"] == 1
+    assert by_position[1]["students_not_completed"] == 1
+    # Stage 2: the Stage-2 student is on it; both active students still have
+    # it ahead.
+    assert by_position[2]["students_in_stage"] == 1
+    assert by_position[2]["students_not_completed"] == 2
+
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "DELETE FROM student_stage_progress WHERE enrollment_id IN "
+                "(SELECT id FROM student_career_enrollments WHERE career_path_id = :pid)"
+            ),
+            {"pid": path_id},
+        )
+        await conn.execute(
+            text("DELETE FROM student_career_enrollments WHERE career_path_id = :pid"),
+            {"pid": path_id},
+        )
+        await conn.execute(
+            text("DELETE FROM career_course_items WHERE career_path_id = :pid"),
+            {"pid": path_id},
+        )
+        await conn.execute(
+            text("DELETE FROM career_path_stages WHERE career_path_id = :pid"),
+            {"pid": path_id},
+        )
+        await conn.execute(text("DELETE FROM career_paths WHERE id = :pid"), {"pid": path_id})
+        await conn.execute(
+            text("DELETE FROM users WHERE id = ANY(CAST(:ids AS uuid[]))"),
+            {"ids": [str(on_stage1), str(on_stage2), str(dropped), str(completed)]},
+        )
+        await hard_delete_graph(
+            conn, "courses", [str(course_a), str(course_b)]
+        )
+
+
 async def test_manager_enroll_student(
     client: httpx.AsyncClient,
     manager_bearer: str,
