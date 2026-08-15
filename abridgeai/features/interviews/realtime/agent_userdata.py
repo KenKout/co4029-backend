@@ -66,6 +66,7 @@ class InterviewUserdata:
     # comes from here so it cannot drift against `questions_remaining`.
     questions_total: int = 0
     max_follow_ups_per_question: int = 2
+    max_hints_per_question: int = 3
     below_closing_threshold: bool = False
     current_question_text: str | None = None
     # Seconds left on the session clock, refreshed each turn. None means the

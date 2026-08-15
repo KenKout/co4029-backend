@@ -45,7 +45,7 @@ module.exports = {
       name: "abridgeai-interview-agent",
       cwd: "/root/co4029/backend",
       script: "/root/co4029/backend/.venv/bin/python",
-      args: "-m abridgeai.features.interviews.realtime.agent start",
+      args: "-m abridgeai.features.interviews.realtime.agent start --log-level DEBUG",
       interpreter: "none",
       autorestart: true,
       max_restarts: 10,

@@ -133,9 +133,7 @@ def _assert_owns_session(session: InterviewSession, actor: CurrentUser) -> None:
         raise ForbiddenError("Session does not belong to the calling user")
 
 
-async def _first_published_question(
-    db: AsyncSession, config_id: UUID
-) -> InterviewQuestion | None:
+async def _first_published_question(db: AsyncSession, config_id: UUID) -> InterviewQuestion | None:
     questions = await authoring_queries.list_questions_for_config(
         db,
         config_id,
@@ -345,9 +343,7 @@ async def start_session(
     # when there is no live session (the idempotent short-circuit above
     # returns the in-progress row without consuming a fresh attempt).
     await _enforce_retake_policy(db, config_id=config_id, student_id=actor.user_id)
-    attempt_number = await sessions_queries.get_session_attempt_number(
-        db, actor.user_id, config_id
-    )
+    attempt_number = await sessions_queries.get_session_attempt_number(db, actor.user_id, config_id)
 
     # A new session runs at the config's canonical mode, not the client value.
     session_input_mode = (
@@ -789,6 +785,17 @@ def _benign_assessment(
     )
 
 
+async def _config_max_hints(db: AsyncSession, config_id: UUID) -> int:
+    """The teacher-configured hint cap for a session's config.
+
+    Falls back to the shipped constant when the column is absent/zero (a
+    not-yet-migrated row or a test fixture), so behavior never widens by
+    accident.
+    """
+    row = await db.get(InterviewConfig, config_id)
+    return getattr(row, "max_hints_per_question", None) or MAX_CANNOT_ANSWER_HINTS
+
+
 async def _run_security_stage(  # noqa: C901 -- precedence is kept explicit and auditable
     db: AsyncSession,
     *,
@@ -1023,7 +1030,8 @@ async def _run_security_stage(  # noqa: C901 -- precedence is kept explicit and 
     hint_render_level: int | None = None
     hint_ladder_spent = False
     if hint_ladder_enabled and action is SecurityAction.HINT_CURRENT_QUESTION:
-        if data.hint_level >= MAX_CANNOT_ANSWER_HINTS:
+        hint_cap = await _config_max_hints(db, session.interview_config_id)
+        if data.hint_level >= hint_cap:
             hint_ladder_spent = True
         else:
             hint_render_level = data.hint_level
@@ -1913,9 +1921,7 @@ async def _legacy_advance(
         }
 
     asked_ids = await _asked_question_ids(db, session.id)
-    next_question = await _next_published_question_after(
-        db, session.interview_config_id, asked_ids
-    )
+    next_question = await _next_published_question_after(db, session.interview_config_id, asked_ids)
     if next_question is None:
         # No further question: persist the short final-question transition as
         # its OWN AI turn (Natural Interview Transitions spec §ending). The

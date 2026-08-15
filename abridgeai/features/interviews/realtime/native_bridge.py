@@ -366,9 +366,7 @@ async def load_native_setup(
         state = loaded.data if loaded is not None else InterviewRuntimeStateData()
         loaded_version = loaded.version if loaded is not None else None
 
-        candidates, orm_by_id = await turn_perception.load_candidates(
-            db, config.id
-        )
+        candidates, orm_by_id = await turn_perception.load_candidates(db, config.id)
         asked_ids = await turn_perception.persisted_question_ids(db, session_id)
         # Merges the REST transcript into state that the agent path never wrote,
         # so the scorer cannot re-offer a question the candidate already saw.
@@ -406,7 +404,14 @@ async def load_native_setup(
         outcome_titles={str(outcome.id): outcome.outcome_text for outcome in outcomes},
         questions_remaining=selector.remaining(),
         questions_total=selector.total(),
-        max_follow_ups_per_question=DEFAULT_MAX_FOLLOWUPS_PER_QUESTION,
+        # Teacher-configured budgets (Phase 16). The defaults mirror the
+        # pre-config constants so an old row that somehow lacks values — or a
+        # test constructing a config-less session — keeps the shipped behaviour.
+        max_follow_ups_per_question=(
+            getattr(config, "max_follow_ups_per_question", None)
+            or DEFAULT_MAX_FOLLOWUPS_PER_QUESTION
+        ),
+        max_hints_per_question=getattr(config, "max_hints_per_question", None) or 3,
         below_closing_threshold=(
             time_fraction is not None and time_fraction <= _CLOSING_TIME_FRACTION
         ),

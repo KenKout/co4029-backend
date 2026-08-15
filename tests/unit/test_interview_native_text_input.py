@@ -40,7 +40,9 @@ class _Session:
 
     def __init__(self, agent: Any, local: _Local) -> None:
         self.current_agent = agent
-        self.userdata = type("_U", (), {"interview_session_id": uuid4()})()
+        self.userdata = type(
+            "_U", (), {"interview_session_id": uuid4(), "pending_assistant_kind": None}
+        )()
         self.room_io = type("_RIO", (), {"room": type("_R", (), {"local_participant": local})})
         self.interrupted = False
         self.interrupt_forced = False
@@ -158,6 +160,25 @@ async def test_help_requests_are_framed_and_not_graded(action: str) -> None:
     reply = sess.replies[0]
     assert "instructions" in reply, f"{action} needs framing or the model grades it and advances"
     assert "do not advance" in reply["instructions"].lower()
+    # The reply IS assistance: the transcript kind marker and the client notice
+    # must both be set, or the utterance badges as FOLLOW-UP live and after a
+    # reload.
+    assert sess.userdata.pending_assistant_kind == "clarification"
+    actions = [
+        (e["status"], e["turn_action"]) for e in _events(local) if e["status"] == "agent_action"
+    ]
+    assert actions == [("agent_action", action)], (
+        "the client was not told the next utterance is assistance"
+    )
+
+
+async def test_plain_answers_set_no_assistance_marker() -> None:
+    sess, agent, local, cb = _harness()
+
+    await cb(sess, _Event("my answer", {"turn_key": "tk-abcd1234"}))
+
+    assert sess.userdata.pending_assistant_kind is None
+    assert [e for e in _events(local) if e["status"] == "agent_action"] == []
 
 
 async def test_unknown_turn_action_is_rejected_and_never_replied_to() -> None:

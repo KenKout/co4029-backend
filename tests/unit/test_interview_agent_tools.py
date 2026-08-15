@@ -453,3 +453,37 @@ def test_reminder_warns_when_time_is_nearly_up() -> None:
     )
     lowered = note.lower()
     assert "wrap up" in lowered or "closing" in lowered, f"no wrap-up signal: {note}"
+
+
+# ── teacher-configured budgets (Phase 16) ─────────────────────────────────────
+
+
+def test_hint_ladder_respects_a_configured_cap() -> None:
+    from abridgeai.features.interviews.orchestrator.tools import resolve_hint_request
+
+    data = _state()
+    # Cap of 1: the second request must refuse even though the shipped
+    # constant is 3 — the teacher's setting wins.
+    first = resolve_hint_request(data, max_hints=1)
+    assert first.granted is True
+    second = resolve_hint_request(data, max_hints=1)
+    assert second.granted is False
+    assert second.is_final is True
+
+
+def test_current_question_resolves_at_a_configured_hint_cap() -> None:
+    from abridgeai.features.interviews.orchestrator.tools import current_question_resolved
+
+    data = _state(outcome_coverage={"o1": _covered("o1", 0)}, hint_level=1)
+    assert current_question_resolved(
+        data, current_outcome_id="o1", max_follow_ups_per_question=2, max_hints=1
+    ), "a hint cap of 1 must resolve the question after one hint"
+
+
+def test_followup_budget_cap_zero_resolves_immediately() -> None:
+    from abridgeai.features.interviews.orchestrator.tools import current_question_resolved
+
+    data = _state(outcome_coverage={"o1": _covered("o1", 0)})
+    assert current_question_resolved(
+        data, current_outcome_id="o1", max_follow_ups_per_question=0, max_hints=3
+    ), "a follow-up cap of 0 must resolve the question on the first unanswered turn"

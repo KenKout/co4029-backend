@@ -52,6 +52,7 @@ def build_state_reminder(data: InterviewUserdata, *, opening: bool = False) -> s
         required_outcome_ids=data.required_outcome_ids,
         questions_remaining=data.questions_remaining,
         max_follow_ups_per_question=data.max_follow_ups_per_question,
+        max_hints=data.max_hints_per_question,
         below_closing_threshold=data.below_closing_threshold,
         outcome_titles=data.outcome_titles,
         time_remaining_seconds=data.time_remaining_seconds,

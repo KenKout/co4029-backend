@@ -225,6 +225,14 @@ class InterviewConfig(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftD
             "security_max_consecutive_attempts BETWEEN 2 AND 20",
             name="ck_interview_configs_security_max_attempts",
         ),
+        CheckConstraint(
+            "max_follow_ups_per_question BETWEEN 0 AND 10",
+            name="ck_interview_configs_max_follow_ups",
+        ),
+        CheckConstraint(
+            "max_hints_per_question BETWEEN 0 AND 10",
+            name="ck_interview_configs_max_hints",
+        ),
     )
 
     course_id: Mapped[uuid.UUID] = mapped_column(
@@ -250,6 +258,15 @@ class InterviewConfig(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftD
         Boolean, nullable=False, server_default=text("FALSE")
     )
     time_limit_minutes: Mapped[int | None] = mapped_column(Integer)
+    # Per-question budgets the interviewer operates under. Defaults mirror the
+    # orchestrator constants these columns replaced (decision.py), so an
+    # unmigrated config behaves exactly as before.
+    max_follow_ups_per_question: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("2")
+    )
+    max_hints_per_question: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("3")
+    )
     persona: Mapped[str | None] = mapped_column(String(20))
     # Optional per-trait persona overrides (Phase 3). NULL = use the ``persona``
     # preset as-is. When present, it is a partial dict of the PersonaProfile

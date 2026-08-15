@@ -134,6 +134,7 @@ class DecisionInputs:
     has_next_question: bool
     all_required_outcomes_covered: bool
     max_follow_ups_per_question: int = DEFAULT_MAX_FOLLOWUPS_PER_QUESTION
+    max_hints_per_question: int = MAX_CANNOT_ANSWER_HINTS
     max_total_follow_ups: int = DEFAULT_MAX_TOTAL_FOLLOWUPS
     closing_time_fraction: float = 0.1
     # End-confirmation gate (Slice 4): True while a prior turn asked the
@@ -211,7 +212,7 @@ def _cannot_answer_decision(inputs: DecisionInputs) -> InterviewerDecision:
     """
     if (
         inputs.hint_ladder_enabled
-        and inputs.hint_level < MAX_CANNOT_ANSWER_HINTS
+        and inputs.hint_level < inputs.max_hints_per_question
         and inputs.current_question_follow_up_count < inputs.max_follow_ups_per_question
         and inputs.total_follow_up_count < inputs.max_total_follow_ups
         and not _below_closing_threshold(inputs)

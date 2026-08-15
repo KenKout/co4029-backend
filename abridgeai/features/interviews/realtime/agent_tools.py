@@ -68,6 +68,7 @@ class InterviewToolsMixin:
             required_outcome_ids=_required_outcomes(ctx),
             questions_remaining=_questions_remaining(ctx),
             outcome_titles=_outcome_titles(ctx),
+            max_hints=_max_hints(ctx),
         )
         import json
 
@@ -99,6 +100,7 @@ class InterviewToolsMixin:
             questions_remaining=_questions_remaining(ctx),
             below_closing_threshold=_below_closing_threshold(ctx),
             max_follow_ups_per_question=_max_followups(ctx),
+            max_hints=_max_hints(ctx),
         )
         if not verdict.allowed:
             raise _refused(ctx, "interview_next_question", verdict)
@@ -122,6 +124,11 @@ class InterviewToolsMixin:
         # without this the UI stays on the previous question card for the rest of
         # the interview.
         await _publish_state(ctx)
+        # A stale assistance marker would mislabel the question reading; the
+        # next utterance is the question.
+        userdata = ctx.userdata  # type: ignore[attr-defined]
+        userdata.pending_assistant_kind = None  # type: ignore[attr-defined]
+        await userdata.publish_agent_action(kind="question")  # type: ignore[attr-defined]
         return (
             f"Ask this question next, targeting outcome '{selected.outcome_id}':\n"
             f"{selected.prompt_text}"
@@ -138,7 +145,18 @@ class InterviewToolsMixin:
         interview_next_question.
         """
         data = _runtime_state(ctx)
-        grant = resolve_hint_request(data)
+        # The pending question (a server advance the model has not spoken yet)
+        # must be asked before any hint exists to give. Allowing a hint here
+        # let the model's scaffolding instinct fire mid-transition: the marker
+        # then landed on the question's own reading and the transcript showed
+        # the new question as a "hint".
+        userdata = ctx.userdata  # type: ignore[attr-defined]
+        if getattr(userdata, "pending_new_question", False):
+            raise ToolError(
+                "Ask the current question first — hints come after the "
+                "candidate has tried to answer it."
+            )
+        grant = resolve_hint_request(data, max_hints=_max_hints(ctx))
         question = _current_question_text(ctx)
         if not grant.granted:
             raise ToolError(
@@ -158,10 +176,7 @@ class InterviewToolsMixin:
         # own scaffolding instinct, and an unbounded refund let those calls
         # cancel the budget every turn — the count ping-ponged below its
         # threshold and the question could never auto-advance.
-        if (
-            data.current_question_follow_up_count > 0
-            and data.current_question_hint_refunds < 1
-        ):
+        if data.current_question_follow_up_count > 0 and data.current_question_hint_refunds < 1:
             data.current_question_follow_up_count -= 1
             data.current_question_hint_refunds += 1
         # The next thing the model says IS the hint: mark it for the transcript
@@ -169,7 +184,13 @@ class InterviewToolsMixin:
         # client (so the live utterance gets the HINT badge). A refused hint
         # sets neither — the refusal speech is an ordinary probe.
         ctx.userdata.pending_assistant_kind = "hint"  # type: ignore[attr-defined]
-        await ctx.userdata.publish_agent_action("hint")  # type: ignore[attr-defined]
+        await ctx.userdata.publish_agent_action(kind="hint")  # type: ignore[attr-defined]
+        logger.info(
+            "hint granted (session=%s, rung=%s, final=%s)",
+            userdata.interview_session_id,
+            grant.level,
+            grant.is_final,
+        )
         if question:
             return (
                 f"Hint rung {grant.level} for the current question. "
@@ -228,6 +249,10 @@ def _below_closing_threshold(ctx: RunContext[object]) -> bool:
 
 def _max_followups(ctx: RunContext[object]) -> int:
     return int(ctx.userdata.max_follow_ups_per_question)  # type: ignore[attr-defined]
+
+
+def _max_hints(ctx: RunContext[object]) -> int:
+    return int(ctx.userdata.max_hints_per_question)  # type: ignore[attr-defined]
 
 
 def _current_question_text(ctx: RunContext[object]) -> str | None:

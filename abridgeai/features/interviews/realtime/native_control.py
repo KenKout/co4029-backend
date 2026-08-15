@@ -66,6 +66,7 @@ def build_snapshot(userdata: InterviewUserdata) -> tp.StateSnapshot:
         required_outcome_ids=list(userdata.required_outcome_ids),
         questions_remaining=userdata.questions_remaining,
         outcome_titles=dict(userdata.outcome_titles),
+        max_hints=userdata.max_hints_per_question,
     )
     required = len(userdata.required_outcome_ids)
     return tp.StateSnapshot(

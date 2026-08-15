@@ -83,6 +83,7 @@ async def advance_if_resolved(userdata: InterviewUserdata, selector: PoolSizer) 
         state,
         current_outcome_id=state.current_outcome_id,
         max_follow_ups_per_question=userdata.max_follow_ups_per_question,
+        max_hints=userdata.max_hints_per_question,
     ):
         return AdvanceOutcome(advanced=False)
     if userdata.questions_remaining <= 0:
@@ -97,6 +98,10 @@ async def advance_if_resolved(userdata: InterviewUserdata, selector: PoolSizer) 
     userdata.current_question_text = selected.prompt_text
     userdata.questions_remaining = selector.remaining()
     userdata.pending_new_question = True
+    # Any assistance marker still pending belongs to the question just left —
+    # the next utterance is the NEW question's reading, and a stale "hint"
+    # marker mislabeled it in the persisted transcript.
+    userdata.pending_assistant_kind = None
     obs.emit(
         obs.EV_SERVER_ADVANCED,
         session_id=userdata.interview_session_id,
@@ -108,6 +113,18 @@ async def advance_if_resolved(userdata: InterviewUserdata, selector: PoolSizer) 
     except Exception:  # noqa: BLE001 -- the advance already happened; never fail the turn
         logger.exception(
             "publishing the advanced question failed (session=%s)",
+            userdata.interview_session_id,
+        )
+    # Tell the client the agent's NEXT utterance is the new question, so the
+    # live labeler badges it QUESTION instead of guessing from turn timing —
+    # the committed question turn is stamped when the client APPLIES the
+    # snapshot, which can sit after the speech began, and that race filed the
+    # reading one question back as a FOLLOW-UP.
+    try:
+        await userdata.publish_agent_action(kind="question")  # type: ignore[call-arg]
+    except Exception:  # noqa: BLE001 -- convenience channel; never fail the turn
+        logger.warning(
+            "publishing the question agent_action failed (session=%s)",
             userdata.interview_session_id,
         )
     return AdvanceOutcome(advanced=True, question_text=selected.prompt_text)

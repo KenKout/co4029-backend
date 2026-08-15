@@ -98,6 +98,7 @@ def build_progress_report(
     *,
     required_outcome_ids: list[str],
     questions_remaining: int,
+    max_hints: int = MAX_CANNOT_ANSWER_HINTS,
     outcome_titles: dict[str, str] | None = None,
 ) -> ProgressReport:
     titles = outcome_titles or {}
@@ -117,7 +118,7 @@ def build_progress_report(
         required_unticked=[o.outcome_id for o in outcomes if not o.ticked],
         questions_remaining=questions_remaining,
         hint_level=data.hint_level,
-        hints_left_here=max(0, MAX_CANNOT_ANSWER_HINTS - data.hint_level),
+        hints_left_here=max(0, max_hints - data.hint_level),
     )
 
 
@@ -172,6 +173,7 @@ def build_turn_reminder(
     required_outcome_ids: list[str],
     questions_remaining: int,
     max_follow_ups_per_question: int,
+    max_hints: int = MAX_CANNOT_ANSWER_HINTS,
     below_closing_threshold: bool,
     outcome_titles: dict[str, str] | None = None,
     time_remaining_seconds: int | None = None,
@@ -216,7 +218,7 @@ def build_turn_reminder(
             f"{'covered' if covered else 'NOT yet covered'} "
             f"({points}/{COVERAGE_SUFFICIENT_POINTS} evidence points)."
         )
-    hints_left = max(0, MAX_CANNOT_ANSWER_HINTS - data.hint_level)
+    hints_left = max(0, max_hints - data.hint_level)
     parts.append(
         f"Follow-ups used here: {data.current_question_follow_up_count}"
         f"/{max_follow_ups_per_question}. Hints left: {hints_left}."
@@ -317,6 +319,7 @@ def resolve_next_question(
     questions_remaining: int,
     below_closing_threshold: bool,
     max_follow_ups_per_question: int,
+    max_hints: int = MAX_CANNOT_ANSWER_HINTS,
 ) -> NextQuestionVerdict:
     """Decide whether the agent may move to a NEW question.
 
@@ -337,7 +340,7 @@ def resolve_next_question(
         return NextQuestionVerdict(True, "", data.advance_refusal_count)
     if _is_ticked(data, current_outcome_id):
         return NextQuestionVerdict(True, "", data.advance_refusal_count)
-    if data.hint_level >= MAX_CANNOT_ANSWER_HINTS:
+    if data.hint_level >= max_hints:
         return NextQuestionVerdict(True, "", data.advance_refusal_count)
     if data.current_question_follow_up_count >= max_follow_ups_per_question:
         return NextQuestionVerdict(True, "", data.advance_refusal_count)
@@ -362,6 +365,7 @@ def current_question_resolved(
     *,
     current_outcome_id: str | None,
     max_follow_ups_per_question: int,
+    max_hints: int = MAX_CANNOT_ANSWER_HINTS,
 ) -> bool:
     """True when the LIVE question has nothing left to give.
 
@@ -377,7 +381,7 @@ def current_question_resolved(
         return False
     return (
         _is_ticked(data, current_outcome_id)
-        or data.hint_level >= MAX_CANNOT_ANSWER_HINTS
+        or data.hint_level >= max_hints
         or data.current_question_follow_up_count >= max_follow_ups_per_question
     )
 
@@ -409,18 +413,21 @@ class HintGrant:
     is_final: bool
 
 
-def resolve_hint_request(data: InterviewRuntimeStateData) -> HintGrant:
+def resolve_hint_request(
+    data: InterviewRuntimeStateData,
+    max_hints: int = MAX_CANNOT_ANSWER_HINTS,
+) -> HintGrant:
     """Advance the hint ladder for the CURRENT question, server-side.
 
     Returns the rung the model should scaffold at. The model is given the rung and
     the question, never text to reproduce verbatim: handing back a fixed string is
     what made hints read as boilerplate.
     """
-    if data.hint_level >= MAX_CANNOT_ANSWER_HINTS:
+    if data.hint_level >= max_hints:
         return HintGrant(False, data.hint_level, True)
     level = data.hint_level
     data.hint_level += 1
-    return HintGrant(True, level, data.hint_level >= MAX_CANNOT_ANSWER_HINTS)
+    return HintGrant(True, level, data.hint_level >= max_hints)
 
 
 __all__ = [

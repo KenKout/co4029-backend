@@ -30,6 +30,7 @@ import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from functools import partial
 from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
@@ -261,9 +262,7 @@ async def _re_read_question(session: AgentSession, question: str, language: str)
     take the session down.
     """
     try:
-        handle = session.say(
-            _rejoin_question_text(question, language), allow_interruptions=False
-        )
+        handle = session.say(_rejoin_question_text(question, language), allow_interruptions=False)
         await handle
     except Exception:  # noqa: BLE001 -- a failed re-read must not cost the session
         logger.exception("re-read question on rejoin failed")

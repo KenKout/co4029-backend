@@ -51,7 +51,9 @@ from abridgeai.features.interviews.orchestrator.affect import Affect, detect_aff
 from abridgeai.features.interviews.orchestrator.analysis import AnswerAnalysis
 from abridgeai.features.interviews.orchestrator.coverage import is_provisionally_sufficient
 from abridgeai.features.interviews.orchestrator.decision import (
+    DEFAULT_MAX_FOLLOWUPS_PER_QUESTION,
     DEFAULT_MAX_TOTAL_FOLLOWUPS,
+    MAX_CANNOT_ANSWER_HINTS,
     DecisionInputs,
     decide_next_action,
 )
@@ -284,9 +286,7 @@ async def run_adaptive_turn(
     )
 
     # 3. Load candidate pool + compute selection context.
-    candidates, orm_by_id = await turn_perception.load_candidates(
-        db, session.interview_config_id
-    )
+    candidates, orm_by_id = await turn_perception.load_candidates(db, session.interview_config_id)
     asked = frozenset(data.asked_question_ids)
     skipped = frozenset(data.skipped_question_ids)
     # Weighted coverage points (Slice 2) — not the raw evidence count — drive
@@ -365,6 +365,16 @@ async def run_adaptive_turn(
             time_fraction_remaining=ctx.time_fraction_remaining,
             has_next_question=has_next,
             all_required_outcomes_covered=all_required_covered,
+            max_follow_ups_per_question=(
+                config.max_follow_ups_per_question
+                if getattr(config, "max_follow_ups_per_question", None)
+                else DEFAULT_MAX_FOLLOWUPS_PER_QUESTION
+            ),
+            max_hints_per_question=(
+                config.max_hints_per_question
+                if getattr(config, "max_hints_per_question", None)
+                else MAX_CANNOT_ANSWER_HINTS
+            ),
             pending_confirmation=data.pending_confirmation,
             depth_probe_enabled=depth_probe_enabled,
             phase=data.phase,

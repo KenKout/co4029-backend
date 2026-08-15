@@ -612,9 +612,7 @@ async def test_grading_failure_does_not_break_the_turn() -> None:
     # Must not raise: the LLM still has to reply to the candidate.
     await agent.on_user_turn_completed(ctx, ChatMessage(role="user", content=["An answer."]))
     # And the note must still reach the instructions, so the model is not left blind.
-    assert "What is an index?" in agent.instructions, (
-        "state note missing after a grading failure"
-    )
+    assert "What is an index?" in agent.instructions, "state note missing after a grading failure"
 
 
 async def test_grading_runs_before_the_note_is_built() -> None:
@@ -743,9 +741,12 @@ async def test_advancing_the_question_publishes_a_snapshot(
         await agent.interview_next_question(SimpleNamespace(userdata=setup.userdata))
 
         events = fake_session.control_events()
-        assert [e["status"] for e in events] == ["snapshot", "snapshot"]
-        assert events[1]["seq"] > events[0]["seq"], "seq must strictly increase"
+        # The advance publishes a snapshot, then the `agent_action: question`
+        # marker that badges the agent's next utterance as the new question.
+        assert [e["status"] for e in events] == ["snapshot", "snapshot", "agent_action"]
+        assert events[2]["seq"] > events[1]["seq"] > events[0]["seq"], "seq must strictly increase"
         assert events[1]["snapshot"]["current_question_text"] == "What is a covering index?"
+        assert events[2]["turn_action"] == "question"
     finally:
         hard_stop.cancel()
 
@@ -916,7 +917,8 @@ async def test_a_resolved_question_advances_without_the_model_calling_the_tool(
         assert setup.userdata.current_question_text == "What is a covering index?"
         assert setup.userdata.questions_remaining == 1
         assert setup.userdata.pending_new_question is True
-        snapshot = fake_session.control_events()[-1]["snapshot"]
+        # Last control event is the question marker; the snapshot sits before it.
+        snapshot = fake_session.control_events()[-2]["snapshot"]
         assert snapshot["current_question_text"] == "What is a covering index?"
         assert snapshot["question_number"] == 1, "the card must move with the interviewer"
     finally:

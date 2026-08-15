@@ -262,6 +262,75 @@ async def test_request_hint_does_not_refund_when_spent(
     )
 
 
+async def test_request_hint_marks_the_next_utterance_as_a_hint(
+    tools: InterviewToolsMixin,
+) -> None:
+    """A granted hint must reach both the transcript and the live client.
+
+    ``_record_conversation`` persists every assistant row as kind="question"
+    unless told otherwise, and the live labeler has no signal at all for a
+    TYPED hint request (it arrives as an answer). The marker + the
+    ``agent_action`` event are what make the badge say HINT instead of
+    FOLLOW-UP — live and after a reload.
+    """
+    published: list[str] = []
+
+    async def _publish(kind: str) -> None:
+        published.append(kind)
+
+    data = _userdata(points=0, publish_agent_action=_publish)
+    await _call(tools.interview_request_hint, _Ctx(data))
+
+    assert data.pending_assistant_kind == "hint"
+    assert published == ["hint"]
+
+
+async def test_refused_hint_sets_no_marker(
+    tools: InterviewToolsMixin,
+) -> None:
+    from abridgeai.features.interviews.orchestrator.decision import MAX_CANNOT_ANSWER_HINTS
+
+    published: list[str] = []
+
+    async def _publish(kind: str) -> None:
+        published.append(kind)
+
+    data = _userdata(points=0, publish_agent_action=_publish)
+    assert data.state is not None
+    data.state.hint_level = MAX_CANNOT_ANSWER_HINTS
+    data.pending_assistant_kind = None
+    with pytest.raises(ToolError):
+        await _call(tools.interview_request_hint, _Ctx(data))
+
+    assert data.pending_assistant_kind is None
+    assert published == []
+
+
+async def test_hint_refused_while_the_new_question_is_unasked(
+    tools: InterviewToolsMixin,
+) -> None:
+    """No hint before the question it belongs to has been asked.
+
+    The server advances on its own and the model has not spoken the new
+    question yet; a hint granted in that window lands its marker on the
+    question's own reading (production: the Q3 paraphrase persisted and
+    badged as a hint).
+    """
+    published: list[str] = []
+
+    async def _publish(kind: str) -> None:
+        published.append(kind)
+
+    data = _userdata(points=0, publish_agent_action=_publish)
+    data.pending_new_question = True
+    with pytest.raises(ToolError) as excinfo:
+        await _call(tools.interview_request_hint, _Ctx(data))
+
+    assert "Ask the current question first" in str(excinfo.value)
+    assert data.pending_assistant_kind is None
+    assert published == []
+
+
 # ── end_interview ────────────────────────────────────────────────────────────
 
 
