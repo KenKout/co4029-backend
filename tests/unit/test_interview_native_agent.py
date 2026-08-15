@@ -383,21 +383,6 @@ def test_untimed_session_still_gets_a_deadline() -> None:
     )
 
 
-def test_rejoin_question_text_prepends_a_language_appropriate_lead_in() -> None:
-    assert native_runtime._rejoin_question_text("What is an index?", "en") == (
-        "Let me repeat the question: What is an index?"
-    )
-    assert native_runtime._rejoin_question_text("Chỉ mục là gì?", "vi") == (
-        "Để tôi nhắc lại câu hỏi: Chỉ mục là gì?"
-    )
-
-
-def test_rejoin_question_text_defaults_to_english_for_unknown_language() -> None:
-    assert native_runtime._rejoin_question_text("Q?", "fr").startswith(
-        "Let me repeat the question:"
-    )
-
-
 async def test_hard_stop_finalizes_when_the_model_never_ends() -> None:
     closer = AsyncMock(return_value="That concludes your interview. Goodbye.")
     session = FakeSession()

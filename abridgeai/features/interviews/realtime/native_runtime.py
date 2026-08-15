@@ -33,9 +33,6 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
-from livekit import (
-    rtc,  # type: ignore[attr-defined]  # rtc is a lazy submodule; livekit ships no stubs
-)
 from livekit.agents import Agent, AgentSession, ChatContext, get_job_context
 
 from abridgeai.features.interviews.orchestrator.intent import (
@@ -240,33 +237,6 @@ async def _await_playout(handle: object) -> None:
         await asyncio.wait_for(waiter(), timeout=_CLOSING_PLAYOUT_TIMEOUT_S)
     except Exception:  # noqa: BLE001 - playout is best-effort; shutdown proceeds
         logger.warning("closing playout wait failed; shutting down anyway")
-
-
-def _rejoin_question_text(question: str, language: str) -> str:
-    """A short lead-in plus the verbatim question, for a mid-interview rejoin.
-
-    The lead-in keeps the re-read out of the client's verbatim-dedup path (the
-    pinned card already shows the bare question) and reads as a person re-stating
-    the question, not a form being read aloud.
-    """
-    if (language or "en").lower().startswith("vi"):
-        return f"Để tôi nhắc lại câu hỏi: {question}"
-    return f"Let me repeat the question: {question}"
-
-
-async def _re_read_question(session: AgentSession, question: str, language: str) -> None:
-    """Re-speak the current question after a rejoin. Best-effort.
-
-    Fire-and-forget from the participant-connect handler; a failed TTS must not
-    take the session down.
-    """
-    try:
-        handle = session.say(
-            _rejoin_question_text(question, language), allow_interruptions=False
-        )
-        await handle
-    except Exception:  # noqa: BLE001 -- a failed re-read must not cost the session
-        logger.exception("re-read question on rejoin failed")
 
 
 class NativeInterviewAgent(InterviewToolsMixin, Agent):
@@ -501,40 +471,6 @@ async def run_native_interview(
     # Snapshot on join, so a client that reloaded or rejoined mid-interview learns
     # which question it is on without waiting for the next state change.
     await userdata.publish_state()
-
-    # Re-read the current question when the candidate rejoins mid-interview.
-    # `participant_connected` fires for the candidate's FIRST join too (the agent
-    # subscribes to a room the candidate is already in), so only re-read after a
-    # DISCONNECT has been observed — that is the definition of a rejoin.
-    student_identity = f"student-{userdata.student_id}"
-    student_disconnected = False
-
-    def _on_disconnected(participant: rtc.RemoteParticipant) -> None:
-        nonlocal student_disconnected
-        if participant.identity == student_identity:
-            student_disconnected = True
-
-    def _on_connected(participant: rtc.RemoteParticipant) -> None:
-        nonlocal student_disconnected
-        if participant.identity != student_identity:
-            return
-        if not student_disconnected:
-            return
-        student_disconnected = False
-        question = userdata.current_question_text
-        if not question or userdata.finished:
-            return
-        logger.info(
-            "re-reading current question after rejoin (session=%s)",
-            userdata.interview_session_id,
-        )
-        asyncio.create_task(  # noqa: RUF006 - fire-and-forget best-effort
-            _re_read_question(session, question, userdata.language)
-        )
-
-    ctx.room.on("participant_connected", _on_connected)
-    ctx.room.on("participant_disconnected", _on_disconnected)
-
     return hard_stop
 
 
