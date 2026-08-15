@@ -51,6 +51,28 @@ def _async_url(database_url: str) -> str:
     return database_url
 
 
+@pytest_asyncio.fixture(scope="session", autouse=True)
+async def _catalog_seed_after_reset() -> None:
+    """Re-seed the migration-0004 platform catalog after a DB reset.
+
+    The system user (``00000000-...-0001``), permissions and roles are
+    seeded BY migration 0004, not by the test harness. A TRUNCATE-based
+    test-DB reset (the documented recipe) wipes those rows while keeping
+    ``alembic_version`` at head, so the migrations never re-run and every
+    self-contained suite that inserts organizations (whose ``created_by``
+    defaults to the system actor) or resolves roles by code fails on an
+    otherwise clean database. Run the idempotent catalog seed once per
+    session regardless of whether ``seeded_users`` is requested.
+    """
+    settings = get_settings()
+    engine = create_async_engine(_async_url(settings.database_url), pool_pre_ping=True)
+    try:
+        async with engine.begin() as conn:
+            await _ensure_catalog_seeded(AsyncSession(bind=conn, expire_on_commit=False))
+    finally:
+        await engine.dispose()
+
+
 @pytest_asyncio.fixture(scope="session")
 async def test_engine() -> AsyncEngine:
     # The Settings model swaps ``database_url`` to ``test_database_url``

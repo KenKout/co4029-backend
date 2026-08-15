@@ -46,7 +46,7 @@ import abridgeai.features.interviews.models  # noqa: F401  -- register interview
 from abridgeai.core.config import get_settings
 from abridgeai.core.db import get_db
 from abridgeai.core.security import create_access_token, generate_token
-from abridgeai.features.interviews.routers import learner_router
+from abridgeai.features.interviews.routers import learner_router, learner_sessions_router
 
 
 def _async_url(database_url: str) -> str:
@@ -90,6 +90,7 @@ async def app(session_factory: async_sessionmaker[AsyncSession]) -> AsyncIterato
 
     fastapi_app = FastAPI()
     fastapi_app.include_router(learner_router, prefix="/api/v1")
+    fastapi_app.include_router(learner_sessions_router, prefix="/api/v1")
     fastapi_app.dependency_overrides[get_db] = _override_get_db
     yield fastapi_app
     fastapi_app.dependency_overrides.clear()

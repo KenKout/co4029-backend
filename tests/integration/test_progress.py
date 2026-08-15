@@ -210,7 +210,8 @@ async def scenario(
             text(
                 "INSERT INTO course_enrollments "
                 "(course_id, student_id, status, source) "
-                "VALUES (:cid, :sid, 'active', 'self_enroll')"
+                "VALUES (:cid, :sid, 'active', 'self_enroll') "
+                "ON CONFLICT (course_id, student_id) DO NOTHING"
             ),
             {"cid": seeded_users.course_id, "sid": seeded_users.student_id},
         )

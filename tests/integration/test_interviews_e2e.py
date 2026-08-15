@@ -111,6 +111,9 @@ from abridgeai.features.interviews.routers import (
 from abridgeai.features.interviews.routers import (
     learner_router as interview_learner_router,
 )
+from abridgeai.features.interviews.routers import (
+    learner_sessions_router as interview_learner_sessions_router,
+)
 from abridgeai.features.interviews.routers.authoring import (
     get_arq_pool as get_interview_authoring_arq_pool,
 )
@@ -216,6 +219,7 @@ async def app(
     # Phase 6 — interviews
     fastapi_app.include_router(interview_authoring_router, prefix="/api/v1")
     fastapi_app.include_router(interview_learner_router, prefix="/api/v1")
+    fastapi_app.include_router(interview_learner_sessions_router, prefix="/api/v1")
 
     fastapi_app.dependency_overrides[get_db] = _override_get_db
     fastapi_app.dependency_overrides[get_materials_arq_pool] = _override_arq_pool

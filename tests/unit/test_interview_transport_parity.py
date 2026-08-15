@@ -139,17 +139,36 @@ class TestProjectionIsShared:
         is added.
         """
         from abridgeai.features.interviews.routers import learner as rest_router
+        from abridgeai.features.interviews.routers import (
+            learner_sessions as rest_sessions_router,
+        )
 
-        for module in (rest_router, bridge):
-            source = inspect.getsource(module)
-            assert "from_step_result(" in source, (
-                f"{module.__name__} no longer builds the turn payload through the "
-                "shared projection"
-            )
+        # learner_sessions_router joined the god-file split, so the turn
+        # payload call site now lives there. The guard's invariant is: the
+        # payload is built through the shared projection SOMEWHERE, and
+        # neither router module nor the bridge hand-rolls a direct
+        # constructor (a second projection drifts on the next field add).
+        router_sources = {
+            rest_router.__name__: inspect.getsource(rest_router),
+            rest_sessions_router.__name__: inspect.getsource(rest_sessions_router),
+        }
+        assert any(
+            "from_step_result(" in source for source in router_sources.values()
+        ), "no REST router builds the turn payload through the shared projection"
+        for name, source in router_sources.items():
             assert "InterviewSubmitAnswerResponse(" not in source, (
-                f"{module.__name__} constructs InterviewSubmitAnswerResponse directly; "
+                f"{name} constructs InterviewSubmitAnswerResponse directly; "
                 "use from_step_result so both transports stay identical"
             )
+        bridge_source = inspect.getsource(bridge)
+        assert "from_step_result(" in bridge_source, (
+            f"{bridge.__name__} no longer builds the turn payload through the "
+            "shared projection"
+        )
+        assert "InterviewSubmitAnswerResponse(" not in bridge_source, (
+            f"{bridge.__name__} constructs InterviewSubmitAnswerResponse directly; "
+            "use from_step_result so both transports stay identical"
+        )
 
 
 class TestBrainCallParity:

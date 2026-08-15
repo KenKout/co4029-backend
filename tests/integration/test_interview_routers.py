@@ -50,7 +50,11 @@ import abridgeai.features.quizzes.models  # noqa: F401  -- register quiz tables
 from abridgeai.core.config import get_settings
 from abridgeai.core.db import Base, get_db
 from abridgeai.core.security import create_access_token, generate_token, hash_secret
-from abridgeai.features.interviews.routers import authoring_router, learner_router
+from abridgeai.features.interviews.routers import (
+    authoring_router,
+    learner_router,
+    learner_sessions_router,
+)
 from abridgeai.features.interviews.routers.authoring import (
     get_arq_pool as get_authoring_arq_pool,
 )
@@ -115,6 +119,7 @@ async def app(
     fastapi_app = FastAPI()
     fastapi_app.include_router(authoring_router, prefix="/api/v1")
     fastapi_app.include_router(learner_router, prefix="/api/v1")
+    fastapi_app.include_router(learner_sessions_router, prefix="/api/v1")
     fastapi_app.dependency_overrides[get_db] = _override_get_db
     fastapi_app.dependency_overrides[get_authoring_arq_pool] = _override_arq_pool
     fastapi_app.dependency_overrides[get_learner_arq_pool] = _override_arq_pool
@@ -317,7 +322,11 @@ def test_authoring_endpoints_registered() -> None:
 
 def test_learner_session_endpoints_registered() -> None:
     assert learner_router.prefix == ""
-    paths = {route.path for route in learner_router.routes}  # type: ignore[attr-defined]
+    # The session-lifecycle routes live in learner_sessions_router (god-file
+    # split); the reading surface stays in learner_router.
+    paths = {
+        route.path for route in [*learner_router.routes, *learner_sessions_router.routes]  # type: ignore[attr-defined]
+    }
     expected = {
         "/interview-configs/{config_id}",
         "/interview-configs/{config_id}/sessions",
