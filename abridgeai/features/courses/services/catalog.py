@@ -49,6 +49,7 @@ from abridgeai.features.courses.schemas import (
     ModulePublic,
     TagPublic,
 )
+from abridgeai.features.courses.services.assignment import list_teachers_with_emails
 from abridgeai.infrastructure.s3 import create_stream_url
 
 if TYPE_CHECKING:
@@ -245,6 +246,24 @@ async def _course_with_instructor(db: AsyncSession, course: object) -> CoursePub
             update={"instructor": InstructorRead.model_validate(instructor_data)}
         )
     public.thumbnail_url = await _mint_course_thumbnail_url(db, public.id)
+    # Hydrate the full teaching team, Course Instructor first then TAs, each
+    # with its course_role so the learner page can label CI vs TA. Empty (and
+    # `instructor` null) when the course has no assigned teachers.
+    teacher_rows = await list_teachers_with_emails(db, public.id)
+    if teacher_rows:
+        instructors = [
+            InstructorRead.model_validate(
+                {
+                    "user_id": row["user_id"],
+                    "display_name": row["display_name"] or row["primary_email"],
+                    "avatar_url": row.get("avatar_url"),
+                    "headline": None,
+                    "course_role": row.get("course_role"),
+                }
+            )
+            for row in teacher_rows
+        ]
+        public = public.model_copy(update={"instructors": instructors})
     return public
 
 

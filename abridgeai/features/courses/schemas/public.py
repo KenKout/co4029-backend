@@ -65,6 +65,10 @@ class InstructorRead(_ORMModel):
     display_name: str
     avatar_url: str | None = None
     headline: str | None = None
+    # Course-scoped title (Course Instructor vs Teacher Assistant), surfaced so
+    # the student page can label the instructor up front and the TAs behind.
+    # Also set on the instructor block (`CoursePublic.instructor` is the CI).
+    course_role: Literal["course_instructor", "teacher_assistant"] | None = None
 
 
 class TagPublic(_ORMModel):
@@ -116,6 +120,11 @@ class CoursePublic(_ORMModel):
     description: str | None = None
     organization_id: UUID
     instructor: InstructorRead | None = None
+    # Every teacher on the course, ordered Course Instructor first then Teacher
+    # Assistants (see assignment service). Each carries `course_role` so the
+    # learner page can show the CI prominently and the TAs behind. Empty (and
+    # `instructor` null) when the course has no assigned teachers.
+    instructors: list[InstructorRead] = []
     status: Literal["published"]
     # Difficulty / effort exposed for the landing-page meta line (e.g.
     # "Nam · 10 modules · ~18h · Intermediate"). Both are plain Course
