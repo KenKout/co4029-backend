@@ -339,6 +339,23 @@ async def scenario(
             text("DELETE FROM course_learning_outcomes WHERE course_id = ANY(:ids)"),
             {"ids": [seeded_users.course_id, course_b]},
         )
+        # Teacher assignments + the org's min-teachers override are added by
+        # tests/_publish_ready; remove ONLY those (the owner staffed as CI),
+        # never the seeded teacher assignment on course_a that the rest of the
+        # suite depends on.
+        await conn.execute(
+            text(
+                "DELETE FROM user_role_assignments "
+                "WHERE scope_kind = 'course' AND course_role = 'course_instructor' "
+                "AND course_id = ANY(:ids) AND user_id IN ("
+                "  SELECT owner_user_id FROM courses WHERE id = ANY(:ids))"
+            ),
+            {"ids": [seeded_users.course_id, course_b]},
+        )
+        await conn.execute(
+            text("DELETE FROM system_settings WHERE organization_id = :o"),
+            {"o": seeded_users.organization_id},
+        )
         await conn.execute(text("DELETE FROM courses WHERE id = :id"), {"id": course_b})
         await conn.execute(text("DELETE FROM storage_objects WHERE id = :id"), {"id": storage_obj})
 
@@ -621,6 +638,53 @@ async def _publish_ready(engine: AsyncEngine, course_id: object) -> None:
     authored and outcomes are stated before the course goes live.
     """
     async with engine.begin() as conn:
+        org_id, owner_id = (
+            await conn.execute(
+                text(
+                    "SELECT organization_id, owner_user_id FROM courses WHERE id = :cid"
+                ),
+                {"cid": course_id},
+            )
+        ).one()
+        # Idempotent: several tests call this helper against the same course.
+        # Pin the org's teacher-minimum to 1 and staff the course owner as
+        # Course Instructor so these publish tests stay focused on the
+        # content/outcome gates (the staffing gate lives in the assignment
+        # router tests).
+        await conn.execute(
+            text(
+                "DELETE FROM system_settings WHERE organization_id = :o "
+                "AND setting_key = 'courses.min_teachers_per_course'"
+            ),
+            {"o": org_id},
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO system_settings (organization_id, setting_key, "
+                "setting_value_json) VALUES (:o, 'courses.min_teachers_per_course', '1')"
+            ),
+            {"o": org_id},
+        )
+        # The SPA/admin path invalidates the resolver cache on write; the raw
+        # SQL insert here bypasses it, and a prior test may have cached this
+        # org's settings (TTL 30s), so clear it so publish resolves min=1.
+        from abridgeai.core.runtime_settings import invalidate_settings_cache  # noqa: PLC0415
+
+        invalidate_settings_cache()
+        await conn.execute(
+            text(
+                "INSERT INTO user_role_assignments "
+                "(id, user_id, role_id, scope_kind, organization_id, course_id, "
+                "granted_by, course_role) "
+                "SELECT gen_random_uuid(), :owner, r.id, 'course', :org, :cid, :owner, "
+                "'course_instructor' FROM roles r WHERE r.code = 'teacher' "
+                "AND NOT EXISTS ("
+                "  SELECT 1 FROM user_role_assignments WHERE course_id = :cid "
+                "  AND scope_kind = 'course' AND deleted_at IS NULL "
+                "  AND active_until IS NULL)"
+            ),
+            {"owner": owner_id, "org": org_id, "cid": course_id},
+        )
         await conn.execute(
             text(
                 "UPDATE lessons SET status = 'published' WHERE id = ("

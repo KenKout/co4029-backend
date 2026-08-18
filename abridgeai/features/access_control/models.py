@@ -317,6 +317,14 @@ class UserRoleAssignment(
         DateTime(timezone=True), nullable=False, server_default=text("NOW()")
     )
     active_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Course-scoped TEACHER title (user decision 2026-08-18): "no catalog logic
+    # for titles". NULL (the default) for every non-course or non-teacher row;
+    # 'course_instructor' | 'teacher_assistant' for course-scoped teacher rows.
+    # At most one Course Instructor per course is enforced by the partial
+    # unique index ``uq_course_teachers_one_instructor``; at least one is
+    # enforced by the assignment service (a course with teachers has exactly
+    # one Course Instructor, others are Teacher Assistants).
+    course_role: Mapped[str | None] = mapped_column(String(30))
 
 
 class UserPermissionGrant(

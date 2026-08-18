@@ -151,6 +151,23 @@ async def set_setting(
     that nothing ever reads.
     """
     coerced = coerce_and_validate(key, value)
+    # Cross-field invariant: max teachers must stay >= min teachers. Validated
+    # here so a stale org override can't be written into a self-contradicting
+    # state (a min above the max would make every course unpublishable).
+    if key == "courses.min_teachers_per_course":
+        max_val = await _resolved_int(db, "courses.max_teachers_per_course", organization_id)
+        if coerced > max_val:
+            raise SettingValidationError(
+                "courses.min_teachers_per_course cannot exceed "
+                f"courses.max_teachers_per_course ({max_val})"
+            )
+    elif key == "courses.max_teachers_per_course":
+        min_val = await _resolved_int(db, "courses.min_teachers_per_course", organization_id)
+        if coerced < min_val:
+            raise SettingValidationError(
+                "courses.max_teachers_per_course cannot be below "
+                f"courses.min_teachers_per_course ({min_val})"
+            )
     await settings_queries.upsert(
         db,
         setting_key=key,
@@ -189,6 +206,14 @@ async def _one(
         if row.key == key:
             return row
     raise NotFoundError(f"Setting {key} not found")
+
+
+async def _resolved_int(
+    db: AsyncSession, key: str, organization_id: UUID | None
+) -> int:
+    """Effective integer value of a registered int setting."""
+    row = await _one(db, key, organization_id)
+    return int(row.effective_value)
 
 
 __all__ = ["ResolvedSetting", "clear_setting", "list_settings", "set_setting"]

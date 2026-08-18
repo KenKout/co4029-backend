@@ -48,6 +48,7 @@ SettingGroup = Literal[
     "notifications",
     "spaced_repetition",
     "careerpath",
+    "courses",
 ]
 
 
@@ -474,6 +475,46 @@ _SPECS: tuple[SettingSpec, ...] = (
             "the chart MUST segment or annotate at the change, because an "
             "unsegmented line across two formulas misleads even though every "
             "point on it is honest."
+        ),
+    ),
+    # -- courses (teacher staffing bounds; user decision 2026-08-18) -------
+    # Defaults chosen to match the requested behaviour: at least 2 teachers
+    # (default min), of which exactly one is the Course Instructor and the
+    # rest Teacher Assistants, capped at the default max. The max is a hard
+    # reject on assigning past it; the min is a hard gate on FIRST publish
+    # (draft -> published) only — already-published courses are grandfathered
+    # so raising the min later never makes a live course unpublishable.
+    SettingSpec(
+        key="courses.min_teachers_per_course",
+        group="courses",
+        type="int",
+        default=2,
+        minimum=1,
+        maximum=50,
+        env_var="COURSES_MIN_TEACHERS_PER_COURSE",
+        label="Min teachers per course",
+        description=(
+            "Least number of teachers a course must have before its first "
+            "publish. Applied only on the first publish of a draft — courses "
+            "already published are never made unpublishable when this is "
+            "raised. Exactly one of the teachers must be the Course "
+            "Instructor; the rest are Teacher Assistants."
+        ),
+    ),
+    SettingSpec(
+        key="courses.max_teachers_per_course",
+        group="courses",
+        type="int",
+        default=10,
+        minimum=1,
+        maximum=100,
+        env_var="COURSES_MAX_TEACHERS_PER_COURSE",
+        label="Max teachers per course",
+        description=(
+            "Most teachers a course may have. Assigning past it is rejected. "
+            "Existing courses over the cap are grandfathered (no one is "
+            "force-removed); they simply cannot grow further. Must be >= the "
+            "min teachers setting."
         ),
     ),
 )

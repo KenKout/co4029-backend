@@ -39,6 +39,7 @@ from abridgeai.core.db.conflict_mapper import (
 )
 from abridgeai.core.db.recursive_delete import soft_delete_cascade
 from abridgeai.core.exceptions import AppError, ConflictError, NotFoundError
+from abridgeai.core.runtime_settings import resolve_setting
 from abridgeai.core.security import CurrentUser
 from abridgeai.features.courses.models import (
     Course,
@@ -221,6 +222,9 @@ async def create_course(
                 user_id=owner.user_id,
                 role_id=role_id,
                 organization_id=org_id,
+                # The owner is the first teacher on a brand-new course, so they
+                # are its Course Instructor (exactly one per course).
+                course_role="course_instructor",
                 granted_by=owner.user_id,
             )
             # Notify on THIS path too, not just the explicit assign route.
@@ -362,6 +366,28 @@ async def _require_gradeable_units(db: AsyncSession, course_id: UUID) -> None:
         )
 
 
+async def _require_course_teacher_minimum(db: AsyncSession, course: Course) -> None:
+    """First-publish gate: active teachers must meet ``courses.min_teachers_per_course``.
+
+    Only enforced on the transition INTO published; re-publishing an
+    already-published course bypasses it (``publish_course`` skips the whole
+    gate block), which is what grandfathers existing courses when an admin
+    later raises the min.
+    """
+    min_teachers = int(
+        await resolve_setting(
+            db, "courses.min_teachers_per_course", course.organization_id
+        )
+    )
+    count = await assignment_queries.count_active_course_teachers(db, course.id)
+    if count < min_teachers:
+        raise ConflictError(
+            f"course_teacher_min_not_met: course {course.id} needs at least "
+            f"{min_teachers} teacher(s) to publish, but has {count}. Assign more "
+            "teachers first."
+        )
+
+
 async def _require_learning_outcomes(db: AsyncSession, course_id: UUID) -> None:
     """Refuse to publish a course that never states what it teaches.
 
@@ -410,6 +436,12 @@ async def publish_course(db: AsyncSession, course_id: UUID, actor: CurrentUser) 
     already attached to the course is notified with a deep-link: assigned
     teachers and actively-enrolled students. Notification failures never roll
     back the publish.
+
+    Teacher staffing minimum (admin config, user decision 2026-08-18): on the
+    FIRST publish (``draft`` -> ``published``) the course must have at least
+    ``courses.min_teachers_per_course`` active teachers. Re-publishing an
+    already-published course skips the gate, so raising the min later never
+    makes a live course unpublishable (old courses grandfathered).
     """
     del actor
     course = await _require_course(db, course_id)
@@ -418,6 +450,7 @@ async def publish_course(db: AsyncSession, course_id: UUID, actor: CurrentUser) 
     was_published = course.status == "published"
     if not was_published:
         await _require_gradeable_units(db, course_id)
+        await _require_course_teacher_minimum(db, course)
         await _require_learning_outcomes(db, course_id)
     course.status = "published"
     await db.flush()
@@ -990,6 +1023,9 @@ async def clone_course(
                 user_id=actor.user_id,
                 role_id=role_id,
                 organization_id=new_course.organization_id,
+                # A clone starts with no copied assignments; the cloning manager
+                # (when a teacher) is its first teacher = Course Instructor.
+                course_role="course_instructor",
                 granted_by=actor.user_id,
             )
             await _notify_teacher_assigned(

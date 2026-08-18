@@ -108,6 +108,32 @@ async def seed(engine: AsyncEngine) -> AsyncIterator[dict]:
             ),
             {"id": module_id, "cid": course_id},
         )
+        # This file proves the CONTENT / OUTCOME gates in isolation, so it
+        # disables the teacher-staffing dimension: the org's min is 1 and the
+        # manager is staffed as the Course Instructor, leaving publish to hinge
+        # only on the units/outcomes gates under test.
+        await conn.execute(
+            text(
+                "INSERT INTO user_role_assignments "
+                "(id, user_id, role_id, scope_kind, organization_id, course_id, "
+                "granted_by, course_role) "
+                "SELECT :aid, :uid, r.id, 'course', :org, :cid, :uid, "
+                "'course_instructor' FROM roles r WHERE r.code = 'teacher'"
+            ),
+            {
+                "aid": uuid.uuid4(),
+                "uid": manager,
+                "org": org,
+                "cid": course_id,
+            },
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO system_settings (organization_id, setting_key, setting_value_json) "
+                "VALUES (:org, 'courses.min_teachers_per_course', '1')"
+            ),
+            {"org": org},
+        )
 
     yield {
         "org": org,
@@ -119,18 +145,22 @@ async def seed(engine: AsyncEngine) -> AsyncIterator[dict]:
 
     async with engine.begin() as conn:
         await conn.execute(
-            text(
-                "DELETE FROM lessons WHERE module_id IN "
-                "(SELECT id FROM modules WHERE course_id = :c)"
-            ),
+            text("DELETE FROM lessons WHERE module_id IN "
+                 "(SELECT id FROM modules WHERE course_id = :c)"),
             {"c": course_id},
         )
         await conn.execute(text("DELETE FROM modules WHERE course_id = :c"), {"c": course_id})
-        # Outcomes FK the course with ondelete=NO ACTION (soft-deleted in the
-        # service layer, never cascaded), so they go before the course row.
         await conn.execute(
             text("DELETE FROM course_learning_outcomes WHERE course_id = :c"),
             {"c": course_id},
+        )
+        await conn.execute(
+            text("DELETE FROM user_role_assignments WHERE course_id = :c"),
+            {"c": course_id},
+        )
+        await conn.execute(
+            text("DELETE FROM system_settings WHERE organization_id = :o"),
+            {"o": org},
         )
         await conn.execute(text("DELETE FROM courses WHERE id = :c"), {"c": course_id})
         await conn.execute(text("DELETE FROM users WHERE id = :u"), {"u": manager})

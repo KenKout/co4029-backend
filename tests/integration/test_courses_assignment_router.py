@@ -37,6 +37,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import httpx
+import pytest
 import pytest_asyncio
 from alembic import command
 from alembic.config import Config
@@ -56,6 +57,7 @@ import abridgeai.features.identity.models  # noqa: F401  -- register users FK ta
 import abridgeai.features.interviews.models  # noqa: F401  -- T6.1 registers interview_* tables
 from abridgeai.core.config import get_settings
 from abridgeai.core.db import Base, get_db
+from abridgeai.core.exceptions import ConflictError
 from abridgeai.core.security import CurrentUser, create_access_token, generate_token, hash_secret
 from abridgeai.features.courses.routers import assignment_router
 from abridgeai.features.courses.services import authoring as authoring_service
@@ -826,7 +828,45 @@ async def test_readiness_can_publish_matches_the_publish_gate(
         assert readiness.status_code == 200, readiness.text
         assert readiness.json()["gradeable_unit_count"] == 1
         assert readiness.json()["learning_outcome_count"] == 1
-        assert readiness.json()["can_publish"] is True
+        # Staffing gate (user decision 2026-08-18): a draft must meet the
+        # default min (2) before it can publish, so course_a — which has NO
+        # active teachers — must stay red even with content + outcomes.
+        assert readiness.json()["teacher_count"] == 0
+        assert readiness.json()["min_teachers_per_course"] == 2
+        assert readiness.json()["can_publish"] is False
+
+        # One teacher (the Course Instructor) is still below the min of 2.
+        assign_ci = await client.post(
+            f"/api/v1/dept/courses/{course_id}/teachers",
+            json={
+                "user_id": str(seeded_users.teacher_id),
+                "course_role": "course_instructor",
+            },
+            headers=headers,
+        )
+        assert assign_ci.status_code == 201, assign_ci.text
+        one = await client.get(
+            f"/api/v1/dept/courses/{course_id}/readiness", headers=headers
+        )
+        assert one.json()["teacher_count"] == 1
+        assert one.json()["can_publish"] is False
+
+        # A second teacher (Teacher Assistant) satisfies the min.
+        assign_ta = await client.post(
+            f"/api/v1/dept/courses/{course_id}/teachers",
+            json={
+                "user_id": str(scenario["bob_id"]),
+                "course_role": "teacher_assistant",
+            },
+            headers=headers,
+        )
+        assert assign_ta.status_code == 201, assign_ta.text
+        ready = await client.get(
+            f"/api/v1/dept/courses/{course_id}/readiness", headers=headers
+        )
+        assert ready.json()["teacher_count"] == 2
+        assert ready.json()["course_instructor_count"] == 1
+        assert ready.json()["can_publish"] is True
 
         # Cross-check against the gate itself. The publish ROUTE lives on the
         # teacher router, which this test app does not mount (it mounts only
@@ -840,6 +880,13 @@ async def test_readiness_can_publish_matches_the_publish_gate(
         assert published.status == "published"
     finally:
         async with engine.begin() as conn:
+            # Restore the shared seeded course to draft: it belongs to the
+            # session-scoped seed and LATER suites (authoring_router) assume it
+            # is a fresh draft.
+            await conn.execute(
+                text("UPDATE courses SET status = 'draft' WHERE id = :id"),
+                {"id": course_id},
+            )
             await conn.execute(text("DELETE FROM lessons WHERE id = :id"), {"id": lesson_id})
             await conn.execute(text("DELETE FROM modules WHERE id = :id"), {"id": module_id})
             await conn.execute(
@@ -1276,3 +1323,233 @@ async def test_clone_course_rejects_missing_depth(
         headers={"Authorization": f"Bearer {manager_bearer}"},
     )
     assert resp.status_code == 422, resp.text
+
+
+# --- Course teacher titles + min/max staffing (user decision 2026-08-18) -----
+
+
+@pytest_asyncio.fixture
+async def staffing_course(
+    engine: AsyncEngine, seeded_users: SeededUsers
+) -> AsyncIterator[dict[str, str]]:
+    """A fresh draft course in the seeded org + three assignable teachers."""
+    course_id = uuid.uuid4()
+    ta1, ta2 = uuid.uuid4(), uuid.uuid4()
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO courses (id, organization_id, owner_user_id, slug, title, status) "
+                "VALUES (:id, :org, :owner, :slug, 'Staffing Course', 'draft')"
+            ),
+            {
+                "id": course_id,
+                "org": seeded_users.organization_id,
+                "owner": seeded_users.manager_id,
+                "slug": f"staff-{uuid.uuid4().hex[:8]}",
+            },
+        )
+        for uid, email in ((ta1, "ta-1"), (ta2, "ta-2")):
+            await conn.execute(
+                text("INSERT INTO users (id, primary_email, status) VALUES (:id, :e, 'active')"),
+                {"id": uid, "e": f"{email}-{uuid.uuid4().hex[:6]}@abridgeai.local"},
+            )
+            await conn.execute(
+                text("INSERT INTO organization_memberships (id, user_id, organization_id, status) "
+                     "VALUES (gen_random_uuid(), :u, :org, 'active')"),
+                {"u": uid, "org": seeded_users.organization_id},
+            )
+            await conn.execute(
+                text("INSERT INTO user_role_assignments (id, user_id, role_id, scope_kind, "
+                     "organization_id, granted_by) "
+                     "SELECT gen_random_uuid(), :u, r.id, 'organization', :org, :g "
+                     "FROM roles r WHERE r.code = 'teacher'"),
+                {"u": uid, "org": seeded_users.organization_id, "g": seeded_users.admin_id},
+            )
+    yield {
+        "course_id": str(course_id),
+        "ci_id": str(seeded_users.teacher_id),
+        "ta1_id": str(ta1),
+        "ta2_id": str(ta2),
+        "org_id": str(seeded_users.organization_id),
+    }
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("DELETE FROM user_role_assignments WHERE course_id = :c"), {"c": course_id}
+        )
+        await conn.execute(text("DELETE FROM courses WHERE id = :c"), {"c": course_id})
+        for uid in (ta1, ta2):
+            await conn.execute(
+                text("DELETE FROM user_role_assignments WHERE user_id = :u "
+                     "AND scope_kind = 'organization'"), {"u": uid}
+            )
+            await conn.execute(
+                text("DELETE FROM organization_memberships WHERE user_id = :u"), {"u": uid}
+            )
+            await conn.execute(text("DELETE FROM users WHERE id = :u"), {"u": uid})
+
+
+async def test_first_teacher_is_instructor_rest_are_assistants(
+    client: httpx.AsyncClient, manager_bearer: str, staffing_course: dict[str, str]
+) -> None:
+    headers = {"Authorization": f"Bearer {manager_bearer}"}
+    cid = staffing_course["course_id"]
+
+    r1 = await client.post(
+        f"/api/v1/dept/courses/{cid}/teachers",
+        json={"user_id": staffing_course["ci_id"]},
+        headers=headers,
+    )
+    assert r1.status_code == 201, r1.text
+    assert r1.json()["course_role"] == "course_instructor"
+
+    r2 = await client.post(
+        f"/api/v1/dept/courses/{cid}/teachers",
+        json={"user_id": staffing_course["ta1_id"], "course_role": "teacher_assistant"},
+        headers=headers,
+    )
+    assert r2.status_code == 201, r2.text
+    assert r2.json()["course_role"] == "teacher_assistant"
+
+
+async def test_assigning_beyond_max_is_rejected(
+    client: httpx.AsyncClient,
+    manager_bearer: str,
+    staffing_course: dict[str, str],
+    engine: AsyncEngine,
+) -> None:
+    """Assigning a teacher past courses.max_teachers_per_course -> 409."""
+    headers = {"Authorization": f"Bearer {manager_bearer}"}
+    cid = staffing_course["course_id"]
+    # Cap this course's org at 2 teachers.
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("INSERT INTO system_settings (organization_id, setting_key, "
+                 "setting_value_json) VALUES (:o, 'courses.max_teachers_per_course', '2')"),
+            {"o": uuid.UUID(staffing_course["org_id"])},
+        )
+    from abridgeai.core.runtime_settings import invalidate_settings_cache
+
+    invalidate_settings_cache()
+
+    for uid in (staffing_course["ci_id"], staffing_course["ta1_id"]):
+        resp = await client.post(
+            f"/api/v1/dept/courses/{cid}/teachers", json={"user_id": uid}, headers=headers
+        )
+        assert resp.status_code == 201, resp.text
+
+    over = await client.post(
+        f"/api/v1/dept/courses/{cid}/teachers",
+        json={"user_id": staffing_course["ta2_id"]},
+        headers=headers,
+    )
+    assert over.status_code == 409, over.text
+    assert over.json()["detail"]["error"] == "conflict"
+
+    # Restore the org cap (affects the shared seeded org).
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("DELETE FROM system_settings WHERE organization_id = :o "
+                 "AND setting_key = 'courses.max_teachers_per_course'"),
+            {"o": uuid.UUID(staffing_course["org_id"])},
+        )
+    invalidate_settings_cache()
+
+
+async def test_promoting_a_second_instructor_is_rejected(
+    client: httpx.AsyncClient, manager_bearer: str, staffing_course: dict[str, str]
+) -> None:
+    """set_role cannot create a second Course Instructor -> 409."""
+    headers = {"Authorization": f"Bearer {manager_bearer}"}
+    cid = staffing_course["course_id"]
+    for uid in (staffing_course["ci_id"], staffing_course["ta1_id"]):
+        await client.post(
+            f"/api/v1/dept/courses/{cid}/teachers", json={"user_id": uid}, headers=headers
+        )
+
+    promote = await client.put(
+        f"/api/v1/dept/courses/{cid}/teachers/{staffing_course['ta1_id']}/role",
+        json={"course_role": "course_instructor"},
+        headers=headers,
+    )
+    assert promote.status_code == 409, promote.text
+
+
+async def test_removing_the_sole_instructor_is_rejected_when_tas_exist(
+    client: httpx.AsyncClient, manager_bearer: str, staffing_course: dict[str, str]
+) -> None:
+    headers = {"Authorization": f"Bearer {manager_bearer}"}
+    cid = staffing_course["course_id"]
+    await client.post(
+        f"/api/v1/dept/courses/{cid}/teachers", json={"user_id": staffing_course["ci_id"]}, headers=headers
+    )
+    await client.post(
+        f"/api/v1/dept/courses/{cid}/teachers", json={"user_id": staffing_course["ta1_id"]}, headers=headers
+    )
+
+    remove = await client.delete(
+        f"/api/v1/dept/courses/{cid}/teachers/{staffing_course['ci_id']}",
+        headers=headers,
+    )
+    assert remove.status_code == 409, remove.text
+
+
+async def test_publish_below_min_teachers_is_rejected(
+    client: httpx.AsyncClient,
+    manager_bearer: str,
+    staffing_course: dict[str, str],
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """First publish of a draft with fewer than min teachers -> 409 (min=2)."""
+    headers = {"Authorization": f"Bearer {manager_bearer}"}
+    cid = uuid.UUID(staffing_course["course_id"])
+    # One gradeable unit + one outcome, so only the staffing gate can block.
+    module_id, lesson_id, outcome_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("INSERT INTO modules (id, course_id, title, position, status) "
+                 "VALUES (:id, :c, 'M1', 1, 'published')"),
+            {"id": module_id, "c": cid},
+        )
+        await conn.execute(
+            text("INSERT INTO lessons (id, module_id, slug, title, status, lesson_type) "
+                 "VALUES (:id, :m, :s, 'L1', 'published', 'video')"),
+            {"id": lesson_id, "m": module_id, "s": f"pl-{uuid.uuid4().hex[:6]}"},
+        )
+        await conn.execute(
+            text("INSERT INTO course_learning_outcomes (id, course_id, position, outcome_text) "
+                 "VALUES (:id, :c, 1, 'Outcome')"),
+            {"id": outcome_id, "c": cid},
+        )
+    # One teacher only: below the default min of 2.
+    await client.post(
+        f"/api/v1/dept/courses/{cid}/teachers",
+        json={"user_id": staffing_course["ci_id"]},
+        headers=headers,
+    )
+
+    from abridgeai.features.courses.services import authoring as authoring_service
+
+    async with session_factory() as db:
+        # publish_course ignores the actor's identity, so a throwaway actor is fine.
+        with pytest.raises(ConflictError, match="course_teacher_min_not_met"):
+            await authoring_service.publish_course(
+                db, cid, _service_actor(uuid.uuid4())
+            )
+        await db.rollback()
+
+    # Tidy the content added above so the fixture teardown can drop the course.
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("DELETE FROM course_learning_outcomes WHERE course_id = :c"), {"c": cid}
+        )
+        await conn.execute(
+            text("DELETE FROM lesson_resources WHERE lesson_id = :l"), {"l": lesson_id}
+        )
+        await conn.execute(
+            text("DELETE FROM module_items WHERE module_id = :m"), {"m": module_id}
+        )
+        await conn.execute(
+            text("DELETE FROM lessons WHERE module_id = :m"), {"m": module_id}
+        )
+        await conn.execute(text("DELETE FROM modules WHERE id = :m"), {"m": module_id})

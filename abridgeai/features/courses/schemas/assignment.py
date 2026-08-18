@@ -8,6 +8,7 @@ the assign-teacher request body.
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict
@@ -18,13 +19,16 @@ class TeacherAssignmentRead(BaseModel):
 
     ``primary_email`` / ``display_name`` are joined from ``users`` +
     ``user_profiles``; ``active_until`` is non-null for soft-revoked
-    rows (audit trail).
+    rows (audit trail). ``course_role`` is the course-scoped title
+    (``course_instructor`` | ``teacher_assistant`` — "no catalog logic for
+    titles", user decision 2026-08-18).
     """
 
     user_id: UUID
     display_name: str
     primary_email: str
     assignment_id: UUID | None = None
+    course_role: str | None = None
     active_from: datetime | None = None
     active_until: datetime | None = None
     # Short-TTL presigned GET URL for the teacher's uploaded avatar, minted by
@@ -60,6 +64,10 @@ class CourseReadiness(BaseModel):
     course_id: UUID
     status: str
     teacher_count: int
+    course_instructor_count: int = 0
+    min_teachers_per_course: int = 0
+    max_teachers_per_course: int = 0
+    staffing_ok: bool = True
     gradeable_unit_count: int
     learning_outcome_count: int = 0
     career_paths: list[CoursePathPlacement] = []
@@ -90,6 +98,22 @@ class AssignableTeacher(BaseModel):
 
 class AssignTeacherRequest(BaseModel):
     user_id: UUID
+    # Course-scoped title. Optional: the service derives it (first teacher is
+    # always the Course Instructor; everyone else defaults to Teacher
+    # Assistant). Must be ``course_instructor`` when no instructor exists yet.
+    course_role: Literal["course_instructor", "teacher_assistant"] | None = None
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class CourseTeacherRoleRequest(BaseModel):
+    """Switch an assigned teacher's course-scoped title.
+
+    Exactly one Course Instructor is enforced; see the service rules in
+    ``courses.services.assignment.set_course_role``.
+    """
+
+    course_role: Literal["course_instructor", "teacher_assistant"]
 
     model_config = ConfigDict(extra="forbid")
 
@@ -104,6 +128,7 @@ class TeacherAssignmentCreated(BaseModel):
     scope_kind: str
     organization_id: UUID
     granted_by: UUID
+    course_role: str | None = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -177,6 +202,7 @@ __all__ = [
     "CoursePathPlacement",
     "CourseReadiness",
     "CourseRosterRead",
+    "CourseTeacherRoleRequest",
     "RosterEntry",
     "RosterStudentRead",
     "TeacherAssignmentCreated",

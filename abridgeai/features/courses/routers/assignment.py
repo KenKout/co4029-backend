@@ -44,6 +44,7 @@ from abridgeai.features.courses.schemas import (
     CourseAuthoring,
     CourseCloneRequest,
     CourseReadiness,
+    CourseTeacherRoleRequest,
     CourseUpdate,
     RosterEntry,
     TeacherAssignmentCreated,
@@ -180,7 +181,12 @@ async def assign_teacher(
     """
     try:
         result = await assignment_service.assign_teacher_to_course(
-            db, course_id, payload.user_id, current_user, arq_pool=arq_pool
+            db,
+            course_id,
+            payload.user_id,
+            current_user,
+            course_role=payload.course_role or "teacher_assistant",
+            arq_pool=arq_pool,
         )
     except NotFoundError as exc:
         raise _not_found(str(exc)) from exc
@@ -189,6 +195,8 @@ async def assign_teacher(
             status_code=status.HTTP_403_FORBIDDEN,
             detail={"error": "forbidden", "message": str(exc)},
         ) from exc
+    except ConflictError as exc:
+        raise _conflict(str(exc)) from exc
     await db.commit()
     return TeacherAssignmentCreated.model_validate(result)
 
@@ -278,7 +286,51 @@ async def remove_teacher(
         await assignment_service.remove_teacher_from_course(db, course_id, user_id, current_user)
     except NotFoundError as exc:
         raise _not_found(str(exc)) from exc
+    except ConflictError as exc:
+        raise _conflict(str(exc)) from exc
     await db.commit()
+
+
+@router.put(
+    "/courses/{course_id}/teachers/{user_id}/role",
+    response_model=TeacherAssignmentRead,
+)
+async def set_teacher_course_role(
+    course_id: UUID,
+    user_id: UUID,
+    payload: CourseTeacherRoleRequest,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_COURSE_STAFFING)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> TeacherAssignmentRead:
+    """Switch a teacher's course-scoped title (Course Instructor / TA).
+
+    Enforces exactly one Course Instructor: promoting a second instructor is
+    rejected (409), and demoting the sole instructor when no TA exists is
+    rejected (409). Available to the manager staffing surface only.
+    """
+    try:
+        await assignment_service.set_course_role(
+            db,
+            course_id=course_id,
+            user_id=user_id,
+            course_role=payload.course_role,
+            actor=current_user,
+        )
+    except NotFoundError as exc:
+        raise _not_found(str(exc)) from exc
+    except ConflictError as exc:
+        raise _conflict(str(exc)) from exc
+    except AppError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": "bad_request", "message": str(exc)},
+        ) from exc
+    await db.commit()
+    rows = await assignment_service.list_teachers_with_emails(db, course_id)
+    row = next((r for r in rows if r["user_id"] == user_id), None)
+    if row is None:
+        raise _not_found("teacher assignment not found after role update")
+    return TeacherAssignmentRead.model_validate(row)
 
 
 @router.get("/courses/{course_id}/roster", response_model=list[RosterEntry])

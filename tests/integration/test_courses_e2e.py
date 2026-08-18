@@ -415,12 +415,31 @@ async def test_full_course_lifecycle_manager_teacher_student(
     )
     assert outcome_response.status_code == 201, outcome_response.text
 
-    # 4. Manager publishes the course.
+    # 4. Manager publishes the course. This test walks the happy path with a
+    # single seeded teacher; to keep the lifecycle scenario about flow rather
+    # than staffing, pin the org's teacher-minimum to 1 for the transition.
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("INSERT INTO system_settings (organization_id, setting_key, "
+                 "setting_value_json) "
+                 "VALUES (:o, 'courses.min_teachers_per_course', '1')"),
+            {"o": seeded_users.organization_id},
+        )
+    from abridgeai.core.runtime_settings import invalidate_settings_cache  # noqa: PLC0415
+
+    invalidate_settings_cache()
     course_publish = await client.post(
         f"/api/v1/teacher/courses/{course_id}/publish",
         headers={"Authorization": f"Bearer {manager_bearer}"},
     )
     assert course_publish.status_code == 200, course_publish.text
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("DELETE FROM system_settings WHERE organization_id = :o "
+                 "AND setting_key = 'courses.min_teachers_per_course'"),
+            {"o": seeded_users.organization_id},
+        )
+    invalidate_settings_cache()
     assert course_publish.json()["status"] == "published"
 
     # 5a. Student reads the course by slug.

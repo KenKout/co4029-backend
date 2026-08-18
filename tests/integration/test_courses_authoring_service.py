@@ -116,6 +116,16 @@ async def scenario(engine: AsyncEngine) -> AsyncIterator[dict]:
             text("INSERT INTO organizations (id, slug, name) VALUES (:id, :slug, :name)"),
             {"id": org_id, "slug": f"auth-{suffix}", "name": "Authoring Test Org"},
         )
+        # This file exercises publish's CONTENT / OUTCOME gates; pin the org's
+        # teacher-minimum to 1 so those gates are what a publish is judged on
+        # (the staffing gate is covered in test_courses_assignment_router).
+        await conn.execute(
+            text(
+                "INSERT INTO system_settings (organization_id, setting_key, "
+                "setting_value_json) VALUES (:o, 'courses.min_teachers_per_course', '1')"
+            ),
+            {"o": org_id},
+        )
         await conn.execute(
             text("INSERT INTO users (id, primary_email) VALUES (:id, :email)"),
             {"id": owner_id, "email": f"auth-{suffix}@test.local"},
@@ -206,6 +216,10 @@ async def scenario(engine: AsyncEngine) -> AsyncIterator[dict]:
             {"id": owner_id},
         )
         await conn.execute(text("DELETE FROM users WHERE id = :id"), {"id": owner_id})
+        await conn.execute(
+            text("DELETE FROM system_settings WHERE organization_id = :o"),
+            {"o": org_id},
+        )
         await conn.execute(text("DELETE FROM organizations WHERE id = :id"), {"id": org_id})
 
 
