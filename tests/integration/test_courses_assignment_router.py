@@ -1187,3 +1187,92 @@ async def test_teacher_owner_cannot_edit_identity_via_dept(
         headers={"Authorization": f"Bearer {teacher_bearer}"},
     )
     assert resp.status_code == 403, resp.text
+
+
+async def test_manager_can_clone_course_via_dept(
+    client: httpx.AsyncClient,
+    manager_bearer: str,
+    scenario: dict[str, uuid.UUID],
+    engine: AsyncEngine,
+) -> None:
+    """Manager-only course clone: a manager holding ``course.delete`` clones
+    an org course at the requested depth (201 + fresh draft course)."""
+    auth = {"Authorization": f"Bearer {manager_bearer}"}
+    course_a = scenario["course_a"]
+
+    async with engine.begin() as conn:
+        source_slug = (
+            await conn.execute(
+                text("SELECT slug FROM courses WHERE id = :cid"),
+                {"cid": course_a},
+            )
+        ).scalar_one()
+
+    resp = await client.post(
+        f"/api/v1/dept/courses/{course_a}/clone",
+        json={"depth": "shell"},
+        headers=auth,
+    )
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    assert body["id"] != str(course_a)
+    assert body["status"] == "draft"
+    assert body["slug"] == f"{source_slug}-copy"
+    assert body["title"] == "Course A (Copy)"
+
+    # The clone lives in the same org as the source but is owned by the actor
+    # (the manager), not the source owner.
+    async with engine.begin() as conn:
+        source_org, source_owner = (
+            await conn.execute(
+                text("SELECT organization_id, owner_user_id FROM courses WHERE id = :cid"),
+                {"cid": course_a},
+            )
+        ).one()
+        clone_org, clone_owner, clone_status = (
+            await conn.execute(
+                text(
+                    "SELECT organization_id, owner_user_id, status FROM courses "
+                    "WHERE id = :cid"
+                ),
+                {"cid": uuid.UUID(body["id"])},
+            )
+        ).one()
+        await conn.execute(
+            text("DELETE FROM courses WHERE id = :cid"),
+            {"cid": uuid.UUID(body["id"])},
+        )
+
+    assert clone_org == source_org
+    assert clone_owner != source_owner
+    assert clone_status == "draft"
+
+
+async def test_teacher_cannot_clone_course_via_dept(
+    client: httpx.AsyncClient,
+    teacher_bearer: str,
+    scenario: dict[str, uuid.UUID],
+) -> None:
+    """Even the course owner cannot clone via the dept surface —
+    ``course.delete`` (manager-only) gates the clone endpoint."""
+    resp = await client.post(
+        f"/api/v1/dept/courses/{scenario['course_a']}/clone",
+        json={"depth": "full"},
+        headers={"Authorization": f"Bearer {teacher_bearer}"},
+    )
+    assert resp.status_code == 403, resp.text
+    assert resp.json()["detail"]["error"] == "permission_denied"
+
+
+async def test_clone_course_rejects_missing_depth(
+    client: httpx.AsyncClient,
+    manager_bearer: str,
+    scenario: dict[str, uuid.UUID],
+) -> None:
+    """Depth is required — no hidden default decides how much to copy."""
+    resp = await client.post(
+        f"/api/v1/dept/courses/{scenario['course_a']}/clone",
+        json={},
+        headers={"Authorization": f"Bearer {manager_bearer}"},
+    )
+    assert resp.status_code == 422, resp.text

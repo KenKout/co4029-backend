@@ -109,6 +109,21 @@ class CourseUpdate(_StrictRequest):
         return trimmed or None
 
 
+class CourseCloneRequest(_StrictRequest):
+    """Clone-depth selection for the manager-only course clone (user request).
+
+    Depth is REQUIRED — there is no default, because a hidden default would
+    silently decide how much content the manager meant to copy:
+
+    * ``shell``     — course + learning outcomes only (no modules).
+    * ``structure`` — shell + module skeleton (modules + module prerequisites).
+    * ``full``      — complete deep clone (modules + items + lessons +
+      quizzes + interviews + resources + all prerequisite graphs).
+    """
+
+    depth: Literal["shell", "structure", "full"]
+
+
 class ModuleCreate(_StrictRequest):
     course_id: UUID
     title: str = Field(max_length=255)

@@ -67,6 +67,7 @@ from abridgeai.features.courses.schemas.public import (
 )
 from abridgeai.features.courses.schemas.request import (
     CourseArchiveRequest,
+    CourseCloneRequest,
     CourseCreate,
     CoursePublishRequest,
     CourseUpdate,
@@ -93,6 +94,7 @@ __all__ = [
     "CourseAuthoring",
     "ReviewQueueItem",
     "TeacherDashboardStats",
+    "CourseCloneRequest",
     "CourseContentAuthoring",
     "CourseContentPublic",
     "CourseCreate",

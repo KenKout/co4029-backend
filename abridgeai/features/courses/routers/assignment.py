@@ -30,7 +30,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from abridgeai.core.db import get_db
-from abridgeai.core.exceptions import ConflictError, ForbiddenError, NotFoundError
+from abridgeai.core.exceptions import AppError, ConflictError, ForbiddenError, NotFoundError
 from abridgeai.core.security import CurrentUser
 from abridgeai.features.access_control.api import public as access_control_api
 from abridgeai.features.access_control.policies import (
@@ -42,6 +42,7 @@ from abridgeai.features.courses.schemas import (
     AssignableTeacher,
     AssignTeacherRequest,
     CourseAuthoring,
+    CourseCloneRequest,
     CourseReadiness,
     CourseUpdate,
     RosterEntry,
@@ -49,6 +50,9 @@ from abridgeai.features.courses.schemas import (
     TeacherAssignmentRead,
 )
 from abridgeai.features.courses.services import assignment as assignment_service
+from abridgeai.features.courses.services.authoring import (
+    clone_course as clone_course_service,
+)
 from abridgeai.features.courses.services.authoring import (
     delete_course as delete_course_service,
 )
@@ -309,6 +313,57 @@ async def delete_dept_course(
     except NotFoundError as exc:
         raise _not_found(str(exc)) from exc
     await db.commit()
+
+
+@router.post(
+    "/courses/{course_id}/clone",
+    response_model=CourseAuthoring,
+    status_code=status.HTTP_201_CREATED,
+)
+async def clone_dept_course(
+    course_id: UUID,
+    payload: CourseCloneRequest,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_COURSE_DELETE)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    arq_pool: Annotated[object | None, Depends(get_arq_pool)] = None,
+) -> CourseAuthoring:
+    """Manager-only course clone with selectable depth (user request).
+
+    Cloning creates a new course from an existing one — a lifecycle/identity
+    operation, so it is gated on ``course.delete`` (the same manager-only
+    gate as delete/archive) with the ownership short-circuit disabled: a
+    teacher who owns the course cannot clone it through the dept surface.
+
+    Depth (REQUIRED, no default):
+
+    * ``shell``     — course + learning outcomes only.
+    * ``structure`` — + module skeleton (modules + module prerequisites).
+    * ``full``      — complete deep clone: modules + items + lessons +
+      quizzes + interviews + resources, every cross-reference re-wired to
+      the copy. All content lands as drafts; runtime data is never copied.
+
+    The clone gets a fresh org-unique slug (``{slug}-copy``), a
+    ``" (Copy)"`` title suffix, and is owned by the requesting manager.
+    """
+    try:
+        course = await clone_course_service(
+            db,
+            source_course_id=course_id,
+            depth=payload.depth,
+            actor=current_user,
+            arq_pool=arq_pool,
+        )
+    except NotFoundError as exc:
+        raise _not_found(str(exc)) from exc
+    except ConflictError as exc:
+        raise _conflict(str(exc)) from exc
+    except AppError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": "bad_request", "message": str(exc)},
+        ) from exc
+    await db.commit()
+    return course
 
 
 @router.patch("/courses/{course_id}", response_model=CourseAuthoring)

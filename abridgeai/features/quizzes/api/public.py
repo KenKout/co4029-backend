@@ -354,6 +354,9 @@ async def deep_clone_quiz(
     target_module_id: UUID,
     actor_id: UUID,
     title_suffix: str = "",
+    target_course_id: UUID | None = None,
+    outcome_id_map: dict[UUID, UUID] | None = None,
+    lesson_id_map: dict[UUID, UUID] | None = None,
 ) -> UUID:
     """Deep-clone a quiz (and every authoring child) into ``target_module_id``.
 
@@ -375,6 +378,20 @@ async def deep_clone_quiz(
     What is intentionally NOT copied: attempts, answers, grades, overrides,
     regrade runs, statistics — all runtime rows keyed on the source quiz.
 
+    Cross-course clone (course-level clone) support — all optional, so the
+    same-module duplicate flow is byte-for-byte unchanged:
+
+    * ``target_course_id`` — set the clone's ``course_id`` to a DIFFERENT
+      course (defaults to the source's course for in-place duplicates).
+    * ``outcome_id_map`` — old course-learning-outcome id -> new id. Cloned
+      questions' ``learning_outcome_id`` is rewritten through the map; a
+      question whose outcome is NOT in the map (outcome dropped from the clone
+      scope) is nulled instead of dangling across courses.
+    * ``lesson_id_map`` — old lesson id -> new id. ``quiz_source_lessons``
+      links are rewritten through the map; links whose lesson is not in the
+      map are dropped entirely (attribution to a lesson that has no clone in
+      the target course is meaningless).
+
     Returns the new quiz id. Flushes but does not commit; the caller owns the
     surrounding transaction.
     """
@@ -385,7 +402,7 @@ async def deep_clone_quiz(
         raise ValueError(f"Quiz {source_quiz_id} not found")
 
     clone = Quiz(
-        course_id=source.course_id,
+        course_id=target_course_id if target_course_id is not None else source.course_id,
         module_id=target_module_id,
         title=f"{source.title}{title_suffix}",
         description=source.description,
@@ -455,7 +472,11 @@ async def deep_clone_quiz(
     for src_q in questions:
         q_clone = QuizQuestion(
             quiz_id=clone.id,
-            learning_outcome_id=src_q.learning_outcome_id,
+            learning_outcome_id=(
+                outcome_id_map.get(src_q.learning_outcome_id)
+                if outcome_id_map is not None and src_q.learning_outcome_id is not None
+                else src_q.learning_outcome_id
+            ),
             position=src_q.position,
             question_type=src_q.question_type,
             prompt_text=src_q.prompt_text,
@@ -517,7 +538,17 @@ async def deep_clone_quiz(
         .all()
     )
     for link in src_links:
-        db.add(QuizSourceLesson(quiz_id=clone.id, lesson_id=link.lesson_id))
+        if lesson_id_map is not None:
+            new_lesson_id = lesson_id_map.get(link.lesson_id)
+            if new_lesson_id is None:
+                # Lesson is not part of the clone scope — attributing the
+                # cloned quiz to a lesson that lives in another course (or was
+                # dropped from the clone) would be a dangling cross-course
+                # reference. Drop the link instead.
+                continue
+        else:
+            new_lesson_id = link.lesson_id
+        db.add(QuizSourceLesson(quiz_id=clone.id, lesson_id=new_lesson_id))
 
     await db.flush()
     return clone.id

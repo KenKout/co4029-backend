@@ -17,6 +17,7 @@ instances so :func:`delete_lesson_resource` is exercised end-to-end.
 
 from __future__ import annotations
 
+import json
 import re
 import uuid
 from collections.abc import AsyncIterator
@@ -883,3 +884,746 @@ async def test_republishing_a_published_course_skips_the_outcome_gate(
         again = await authoring_service.publish_course(session, course.id, owner)
         await session.commit()
         assert again.status == "published"
+
+
+# --- Course clone (manager-only, selectable depth) --------------------------
+#
+# clone_course creates a fresh draft course from a source at a chosen depth:
+# shell (course + LOs), structure (+ module skeleton + module prereqs) or
+# full (complete deep clone with every cross-reference re-wired).
+
+
+async def test_clone_course_shell_copies_course_and_outcomes(
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict,
+) -> None:
+    """depth=shell clones the course row + LO tree (parent remap), no modules."""
+    async with session_factory() as session:
+        owner = _actor(scenario["owner_id"])
+        top = uuid.uuid4()
+        child = uuid.uuid4()
+        await session.execute(
+            text(
+                "INSERT INTO course_learning_outcomes (id, course_id, position, outcome_text) "
+                "VALUES (:id, :cid, 1, 'L.O.1')"
+            ),
+            {"id": top, "cid": scenario["course_id"]},
+        )
+        await session.execute(
+            text(
+                "INSERT INTO course_learning_outcomes "
+                "(id, course_id, parent_id, position, outcome_text) "
+                "VALUES (:id, :cid, :parent, 1, 'L.O.1.1')"
+            ),
+            {"id": child, "cid": scenario["course_id"], "parent": top},
+        )
+        await session.commit()
+
+        cloned = await authoring_service.clone_course(
+            session, source_course_id=scenario["course_id"], depth="shell", actor=owner
+        )
+        await session.commit()
+
+        suffix = scenario["org_id"].hex[:8]
+        assert cloned.id != scenario["course_id"]
+        assert cloned.status == "draft"
+        assert cloned.slug == f"course-{suffix}-copy"
+        assert cloned.title == "Authoring Test Course (Copy)"
+        assert cloned.owner_user_id == scenario["owner_id"]
+
+        # Outcomes cloned with the parent edge re-pointed at the cloned parent.
+        rows = (
+            (
+                await session.execute(
+                    text(
+                        "SELECT id, parent_id, outcome_text FROM course_learning_outcomes "
+                        "WHERE course_id = :cid ORDER BY parent_id NULLS FIRST"
+                    ),
+                    {"cid": cloned.id},
+                )
+            )
+            .mappings()
+            .all()
+        )
+        assert len(rows) == 2
+        assert rows[0]["outcome_text"] == "L.O.1"
+        assert rows[0]["parent_id"] is None
+        assert rows[1]["outcome_text"] == "L.O.1.1"
+        assert rows[1]["parent_id"] == rows[0]["id"]
+
+        # No modules at shell depth.
+        module_count = (
+            await session.execute(
+                text("SELECT count(*) FROM modules WHERE course_id = :cid"),
+                {"cid": cloned.id},
+            )
+        ).scalar_one()
+        assert module_count == 0
+
+
+async def test_clone_course_structure_copies_modules_and_prereqs(
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict,
+) -> None:
+    """depth=structure clones the module skeleton + module prereqs, no content."""
+    module_2 = uuid.uuid4()
+    try:
+        async with session_factory() as session:
+            owner = _actor(scenario["owner_id"])
+            await session.execute(
+                text(
+                    "INSERT INTO modules (id, course_id, title, description, position, status) "
+                    "VALUES (:id, :cid, 'Module 2', 'Second', 2, 'published')"
+                ),
+                {"id": module_2, "cid": scenario["course_id"]},
+            )
+            # Module 2 requires Module 1.
+            await session.execute(
+                text(
+                    "INSERT INTO module_prerequisites (module_id, prerequisite_module_id) "
+                    "VALUES (:m, :p)"
+                ),
+                {"m": module_2, "p": scenario["module_id"]},
+            )
+            await session.commit()
+
+            cloned = await authoring_service.clone_course(
+                session,
+                source_course_id=scenario["course_id"],
+                depth="structure",
+                actor=owner,
+            )
+            await session.commit()
+
+            # Both modules cloned as drafts at the same positions.
+            module_rows = (
+                (
+                    await session.execute(
+                        text(
+                            "SELECT title, position, status FROM modules "
+                            "WHERE course_id = :cid ORDER BY position"
+                        ),
+                        {"cid": cloned.id},
+                    )
+                )
+                .mappings()
+                .all()
+            )
+            assert len(module_rows) == 2
+            assert [r["position"] for r in module_rows] == [1, 2]
+            assert all(r["status"] == "draft" for r in module_rows)
+            assert module_rows[0]["title"] == "Module 1 (Copy)"
+            assert module_rows[1]["title"] == "Module 2 (Copy)"
+
+            # Module prerequisite re-wired onto the cloned module ids.
+            new_ids = (
+                (
+                    await session.execute(
+                        text("SELECT id FROM modules WHERE course_id = :cid ORDER BY position"),
+                        {"cid": cloned.id},
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            prereq = (
+                await session.execute(
+                    text(
+                        "SELECT module_id, prerequisite_module_id FROM module_prerequisites "
+                        "WHERE module_id = :m"
+                    ),
+                    {"m": new_ids[1]},
+                )
+            ).one()
+            assert prereq == (new_ids[1], new_ids[0])
+
+            # No items / lessons at structure depth.
+            item_count = (
+                await session.execute(
+                    text(
+                        "SELECT count(*) FROM module_items "
+                        "WHERE module_id IN (SELECT id FROM modules WHERE course_id = :cid)"
+                    ),
+                    {"cid": cloned.id},
+                )
+            ).scalar_one()
+            assert item_count == 0
+            lesson_count = (
+                await session.execute(
+                    text(
+                        "SELECT count(*) FROM lessons WHERE module_id IN "
+                        "(SELECT id FROM modules WHERE course_id = :cid)"
+                    ),
+                    {"cid": cloned.id},
+                )
+            ).scalar_one()
+            assert lesson_count == 0
+    finally:
+        # The fixture teardown deletes modules directly, which the
+        # module_prerequisites rows we created would block (FK NO ACTION).
+        async with session_factory() as session:
+            await session.execute(
+                text(
+                    "DELETE FROM module_prerequisites "
+                    "WHERE module_id IN (:m1, :m2) OR prerequisite_module_id IN (:m1, :m2)"
+                ),
+                {"m1": scenario["module_id"], "m2": module_2},
+            )
+            await session.commit()
+
+
+async def test_clone_course_full_deep_clones_content_and_rewires_references(
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict,
+) -> None:
+    """depth=full clones modules + items + lessons + quiz + interview with every
+    cross-reference (quiz source-lesson links, quiz question LOs, interview
+    source modules, module/lesson prereqs) re-pointed at the clones."""
+    m2 = uuid.uuid4()
+    lo = uuid.uuid4()
+    try:
+        await _run_full_clone_test(session_factory, scenario, m2, lo)
+    finally:
+        await _cleanup_full_clone_test(session_factory, scenario, m2, lo)
+
+
+async def _run_full_clone_test(
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict,
+    m2: uuid.UUID,
+    lo: uuid.UUID,
+) -> None:
+    async with session_factory() as session:
+        owner = _actor(scenario["owner_id"])
+        src_course = scenario["course_id"]
+        m1 = scenario["module_id"]
+
+        # Module 2 + a learning outcome on the source course.
+        await session.execute(
+            text(
+                "INSERT INTO modules (id, course_id, title, position, status) "
+                "VALUES (:id, :cid, 'Module 2', 2, 'draft')"
+            ),
+            {"id": m2, "cid": src_course},
+        )
+        await session.execute(
+            text(
+                "INSERT INTO course_learning_outcomes (id, course_id, position, outcome_text) "
+                "VALUES (:id, :cid, 1, 'L.O.1')"
+            ),
+            {"id": lo, "cid": src_course},
+        )
+        # M1 requires M2; lesson B requires lesson A.
+        await session.execute(
+            text(
+                "INSERT INTO module_prerequisites (module_id, prerequisite_module_id) "
+                "VALUES (:m, :p)"
+            ),
+            {"m": m1, "p": m2},
+        )
+
+        # Lessons + resources. The storage object lives outside the course
+        # graph, so the test cleans it up explicitly at the end.
+        obj_id = uuid.uuid4()
+        await session.execute(
+            text(
+                "INSERT INTO storage_objects (id, bucket, object_key, uploaded_at) "
+                "VALUES (:id, 'clone-test', :key, now())"
+            ),
+            {"id": obj_id, "key": f"clone-obj-{uuid.uuid4().hex[:8]}"},
+        )
+        lesson_a = await authoring_service.add_lesson(
+            session,
+            m1,
+            LessonCreate(module_id=m1, slug="clone-src-a", title="Lesson A"),
+            owner,
+        )
+        await authoring_service.add_lesson_resource(
+            session,
+            lesson_a.id,
+            LessonResourceCreate(
+                lesson_id=lesson_a.id,
+                title="Slides",
+                resource_type="pdf",
+                storage_object_id=obj_id,
+                position=1,
+            ),
+            owner,
+        )
+        lesson_b = await authoring_service.add_lesson(
+            session,
+            m2,
+            LessonCreate(module_id=m2, slug="clone-src-b", title="Lesson B"),
+            owner,
+        )
+        await session.execute(
+            text(
+                "INSERT INTO lesson_prerequisites (lesson_id, prereq_lesson_id) "
+                "VALUES (:l, :p)"
+            ),
+            {"l": lesson_b.id, "p": lesson_a.id},
+        )
+
+        # Quiz in M1 with one question (mapped to the LO) + option + source lesson.
+        quiz_id = uuid.uuid4()
+        qid = uuid.uuid4()
+        await session.execute(
+            text(
+                "INSERT INTO quizzes (id, course_id, module_id, title, status) "
+                "VALUES (:id, :cid, :mid, 'Quiz A', 'published')"
+            ),
+            {"id": quiz_id, "cid": src_course, "mid": m1},
+        )
+        await session.execute(
+            text(
+                "INSERT INTO quiz_questions (id, quiz_id, learning_outcome_id, position, "
+                "question_type, prompt_text) "
+                "VALUES (:id, :qid, :lo, 1, 'multiple_choice', 'Q1?')"
+            ),
+            {"id": qid, "qid": quiz_id, "lo": lo},
+        )
+        await session.execute(
+            text(
+                "INSERT INTO quiz_question_options (id, question_id, option_key, option_text, "
+                "is_correct, position) VALUES (:id, :qid, 'A', 'Answer', true, 1)"
+            ),
+            {"id": uuid.uuid4(), "qid": qid},
+        )
+        await session.execute(
+            text(
+                "INSERT INTO quiz_source_lessons (quiz_id, lesson_id) VALUES (:q, :l)"
+            ),
+            {"q": quiz_id, "l": lesson_a.id},
+        )
+
+        # Interview config in M2 with outcome + question sourcing both modules.
+        icfg = uuid.uuid4()
+        iout = uuid.uuid4()
+        iq = uuid.uuid4()
+        await session.execute(
+            text(
+                "INSERT INTO interview_configs (id, course_id, module_id, title, status) "
+                "VALUES (:id, :cid, :mid, 'Interview A', 'published')"
+            ),
+            {"id": icfg, "cid": src_course, "mid": m2},
+        )
+        await session.execute(
+            text(
+                "INSERT INTO interview_outcomes (id, interview_config_id, position, "
+                "outcome_text, outcome_type) VALUES (:id, :icfg, 1, 'Rbic', 'knowledge')"
+            ),
+            {"id": iout, "icfg": icfg},
+        )
+        await session.execute(
+            text(
+                "INSERT INTO interview_questions (id, interview_config_id, linked_outcome_id, "
+                "position, question_type, prompt_text, source_module_ids) "
+                "VALUES (:id, :icfg, :iout, 1, 'conceptual', 'IQ?', CAST(:mods AS jsonb))"
+            ),
+            {"id": iq, "icfg": icfg, "iout": iout, "mods": json.dumps([str(m1), str(m2)])},
+        )
+        # Pin the quiz and interview into their modules.
+        await session.execute(
+            text(
+                "INSERT INTO module_items (module_id, item_type, quiz_id, position) "
+                "VALUES (:m, 'quiz', :q, 2)"
+            ),
+            {"m": m1, "q": quiz_id},
+        )
+        await session.execute(
+            text(
+                "INSERT INTO module_items (module_id, item_type, interview_config_id, position) "
+                "VALUES (:m, 'interview', :icfg, 2)"
+            ),
+            {"m": m2, "icfg": icfg},
+        )
+        await session.commit()
+
+        cloned = await authoring_service.clone_course(
+            session, source_course_id=src_course, depth="full", actor=owner
+        )
+        await session.commit()
+
+        # --- New course shell ---
+        assert cloned.id != src_course
+        assert cloned.status == "draft"
+        assert cloned.slug == f"course-{scenario['org_id'].hex[:8]}-copy"
+
+        # --- Modules + items ---
+        new_mods = (
+            (
+                await session.execute(
+                    text(
+                        "SELECT id, title, position, status FROM modules "
+                        "WHERE course_id = :cid ORDER BY position"
+                    ),
+                    {"cid": cloned.id},
+                )
+            )
+            .mappings()
+            .all()
+        )
+        assert [r["position"] for r in new_mods] == [1, 2]
+        assert all(r["status"] == "draft" for r in new_mods)
+        new_m1, new_m2 = new_mods[0]["id"], new_mods[1]["id"]
+
+        items = (
+            (
+                await session.execute(
+                    text(
+                        "SELECT mi.item_type, mi.lesson_id, mi.quiz_id, "
+                        "mi.interview_config_id, mi.position "
+                        "FROM module_items mi "
+                        "JOIN modules m ON m.id = mi.module_id "
+                        "WHERE mi.module_id IN (:m1, :m2) "
+                        "ORDER BY m.position, mi.position"
+                    ),
+                    {"m1": new_m1, "m2": new_m2},
+                )
+            )
+            .mappings()
+            .all()
+        )
+        assert len(items) == 4
+        assert [(i["position"], i["item_type"]) for i in items] == [
+            (1, "lesson"),
+            (2, "quiz"),
+            (1, "lesson"),
+            (2, "interview"),
+        ]
+
+        # --- Lessons + resources ---
+        new_lessons = (
+            (
+                await session.execute(
+                    text(
+                        "SELECT id, module_id, slug, title, status FROM lessons "
+                        "WHERE module_id IN (:m1, :m2) ORDER BY module_id"
+                    ),
+                    {"m1": new_m1, "m2": new_m2},
+                )
+            )
+            .mappings()
+            .all()
+        )
+        assert len(new_lessons) == 2
+        assert all(r["status"] == "draft" for r in new_lessons)
+        assert all(r["title"].endswith("(Copy)") for r in new_lessons)
+        assert {r["slug"] for r in new_lessons} == {"clone-src-a", "clone-src-b"}
+        lesson_a_new = next(r["id"] for r in new_lessons if r["slug"] == "clone-src-a")
+        lesson_b_new = next(r["id"] for r in new_lessons if r["slug"] == "clone-src-b")
+        # Resource copied by reference.
+        resource = (
+            await session.execute(
+                text(
+                    "SELECT title, resource_type, position FROM lesson_resources "
+                    "WHERE lesson_id = :l"
+                ),
+                {"l": lesson_a_new},
+            )
+        ).one()
+        assert resource == ("Slides", "pdf", 1)
+
+        # --- Quiz subtree re-homed + re-wired ---
+        new_quiz_id = (
+            await session.execute(
+                text("SELECT id FROM quizzes WHERE course_id = :cid"),
+                {"cid": cloned.id},
+            )
+        ).scalar_one()
+        quiz_row = (
+            await session.execute(
+                text(
+                    "SELECT course_id, module_id, title, status FROM quizzes "
+                    "WHERE id = :q"
+                ),
+                {"q": new_quiz_id},
+            )
+        ).one()
+        assert quiz_row == (cloned.id, new_m1, "Quiz A (Copy)", "draft")
+        q_clone = (
+            await session.execute(
+                text(
+                    "SELECT id, learning_outcome_id, question_type, prompt_text, review_status "
+                    "FROM quiz_questions WHERE quiz_id = :q"
+                ),
+                {"q": new_quiz_id},
+            )
+        ).mappings().one()
+        assert q_clone["prompt_text"] == "Q1?"
+        assert q_clone["review_status"] == "pending"
+        # Question LO re-pointed at the cloned outcome.
+        new_lo = (
+            await session.execute(
+                text(
+                    "SELECT id FROM course_learning_outcomes "
+                    "WHERE course_id = :cid AND outcome_text = 'L.O.1'"
+                ),
+                {"cid": cloned.id},
+            )
+        ).scalar_one()
+        assert q_clone["learning_outcome_id"] == new_lo
+        # Option copied.
+        opt = (
+            await session.execute(
+                text(
+                    "SELECT option_key, is_correct FROM quiz_question_options "
+                    "WHERE question_id = :q"
+                ),
+                {"q": q_clone["id"]},
+            )
+        ).mappings().one()
+        assert (opt["option_key"], opt["is_correct"]) == ("A", True)
+        # Source-lesson link re-pointed at the CLONED lesson (not the original).
+        link = (
+            await session.execute(
+                text(
+                    "SELECT lesson_id FROM quiz_source_lessons WHERE quiz_id = :q"
+                ),
+                {"q": new_quiz_id},
+            )
+        ).scalar_one()
+        assert link == lesson_a_new
+        assert link != lesson_a.id
+
+        # --- Interview config subtree re-homed + re-wired ---
+        icfg_row = (
+            await session.execute(
+                text(
+                    "SELECT course_id, module_id, title, status FROM interview_configs "
+                    "WHERE course_id = :cid"
+                ),
+                {"cid": cloned.id},
+            )
+        ).one()
+        assert icfg_row == (cloned.id, new_m2, "Interview A (Copy)", "draft")
+        new_icfg_id = (
+            await session.execute(
+                text("SELECT id FROM interview_configs WHERE course_id = :cid"),
+                {"cid": cloned.id},
+            )
+        ).scalar_one()
+        # Outcome cloned; question linked to the CLONED outcome.
+        out_row = (
+            await session.execute(
+                text(
+                    "SELECT outcome_text FROM interview_outcomes "
+                    "WHERE interview_config_id = :c"
+                ),
+                {"c": new_icfg_id},
+            )
+        ).one()
+        assert out_row[0] == "Rbic"
+        iq_row = (
+            await session.execute(
+                text(
+                    "SELECT linked_outcome_id, prompt_text, review_status, source_module_ids "
+                    "FROM interview_questions WHERE interview_config_id = :c"
+                ),
+                {"c": new_icfg_id},
+            )
+        ).mappings().one()
+        assert iq_row["prompt_text"] == "IQ?"
+        assert iq_row["review_status"] == "pending"
+        cloned_outcome = (
+            await session.execute(
+                text(
+                    "SELECT id FROM interview_outcomes WHERE interview_config_id = :c"
+                ),
+                {"c": new_icfg_id},
+            )
+        ).scalar_one()
+        assert iq_row["linked_outcome_id"] == cloned_outcome
+        # source_module_ids re-pointed at the cloned modules.
+        assert sorted(iq_row["source_module_ids"]) == sorted([str(new_m1), str(new_m2)])
+
+        # --- Prerequisite graphs re-wired ---
+        mprereq = (
+            await session.execute(
+                text(
+                    "SELECT module_id, prerequisite_module_id FROM module_prerequisites "
+                    "WHERE module_id = :m"
+                ),
+                {"m": new_m1},
+            )
+        ).one()
+        assert mprereq == (new_m1, new_m2)
+        lprereq = (
+            await session.execute(
+                text(
+                    "SELECT lesson_id, prereq_lesson_id FROM lesson_prerequisites "
+                    "WHERE lesson_id = :l"
+                ),
+                {"l": lesson_b_new},
+            )
+        ).one()
+        assert lprereq == (lesson_b_new, lesson_a_new)
+
+        # The storage object is NOT a course child — drop the resource refs
+        # on BOTH courses first, then the object (leaves no test pollution).
+        await session.execute(
+            text("DELETE FROM lesson_resources WHERE storage_object_id = :o"),
+            {"o": obj_id},
+        )
+        await session.execute(
+            text("DELETE FROM storage_objects WHERE id = :o"),
+            {"o": obj_id},
+        )
+        await session.commit()
+
+
+async def _cleanup_full_clone_test(
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict,
+    m2: uuid.UUID,
+    lo: uuid.UUID,
+) -> None:
+    """Remove source-side rows the fixture teardown does not sweep.
+
+    The scenario teardown only cleans module items/lessons under the seeded
+    module (m1), then deletes modules by course, then hard-deletes the course
+    graph. Rows that REFERENCE source rows (module/lesson prerequisites,
+    quiz/interview subtrees, the second module's lessons/items) must be gone
+    BEFORE those direct deletes or the FK blocks them.
+    """
+    async with session_factory() as session:
+        m1 = scenario["module_id"]
+        src_course = scenario["course_id"]
+        source_lesson_ids = (
+            await session.execute(
+                text(
+                    "SELECT id FROM lessons WHERE module_id IN (:m1, :m2)"
+                ),
+                {"m1": m1, "m2": m2},
+            )
+        ).scalars().all()
+        source_quiz_ids = (
+            await session.execute(
+                text("SELECT id FROM quizzes WHERE course_id = :cid"),
+                {"cid": src_course},
+            )
+        ).scalars().all()
+        await session.execute(
+            text(
+                "DELETE FROM lesson_prerequisites "
+                "WHERE lesson_id = ANY(:ids) OR prereq_lesson_id = ANY(:ids)"
+            ),
+            {"ids": list(source_lesson_ids)},
+        )
+        await session.execute(
+            text(
+                "DELETE FROM module_prerequisites "
+                "WHERE module_id IN (:m1, :m2) OR prerequisite_module_id IN (:m1, :m2)"
+            ),
+            {"m1": m1, "m2": m2},
+        )
+        # Module items FIRST — they pin the quizzes/interview configs/lessons
+        # we are about to delete.
+        await session.execute(
+            text("DELETE FROM module_items WHERE module_id IN (:m1, :m2)"),
+            {"m1": m1, "m2": m2},
+        )
+        if source_quiz_ids:
+            await session.execute(
+                text(
+                    "DELETE FROM quiz_source_lessons WHERE quiz_id = ANY(:ids)"
+                ),
+                {"ids": source_quiz_ids},
+            )
+            await session.execute(
+                text(
+                    "DELETE FROM quiz_question_options WHERE question_id IN "
+                    "(SELECT id FROM quiz_questions WHERE quiz_id = ANY(:ids))"
+                ),
+                {"ids": source_quiz_ids},
+            )
+            await session.execute(
+                text(
+                    "DELETE FROM quiz_questions WHERE quiz_id = ANY(:ids)"
+                ),
+                {"ids": source_quiz_ids},
+            )
+            await session.execute(
+                text("DELETE FROM quizzes WHERE id = ANY(:ids)"),
+                {"ids": source_quiz_ids},
+            )
+        await session.execute(
+            text(
+                "DELETE FROM interview_questions WHERE interview_config_id IN "
+                "(SELECT id FROM interview_configs WHERE course_id = :cid)"
+            ),
+            {"cid": src_course},
+        )
+        await session.execute(
+            text(
+                "DELETE FROM interview_outcomes WHERE interview_config_id IN "
+                "(SELECT id FROM interview_configs WHERE course_id = :cid)"
+            ),
+            {"cid": src_course},
+        )
+        await session.execute(
+            text(
+                "DELETE FROM interview_configs WHERE course_id = :cid"
+            ),
+            {"cid": src_course},
+        )
+        await session.execute(
+            text(
+                "DELETE FROM lesson_resources WHERE lesson_id IN "
+                "(SELECT id FROM lessons WHERE module_id IN (:m1, :m2))"
+            ),
+            {"m1": m1, "m2": m2},
+        )
+        await session.execute(
+            text("DELETE FROM lessons WHERE module_id IN (:m1, :m2)"),
+            {"m1": m1, "m2": m2},
+        )
+        # The standalone storage object used by lesson_a's resource.
+        await session.execute(
+            text(
+                "DELETE FROM lesson_resources WHERE storage_object_id IN "
+                "(SELECT id FROM storage_objects WHERE bucket = 'clone-test')"
+            ),
+        )
+        await session.execute(
+            text("DELETE FROM storage_objects WHERE bucket = 'clone-test'"),
+        )
+        await session.commit()
+
+
+async def test_clone_course_generates_unique_slug(
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict,
+) -> None:
+    """A pre-existing ``{slug}-copy`` course bumps the clone to ``-copy-2``."""
+    async with session_factory() as session:
+        owner = _actor(scenario["owner_id"])
+        suffix = scenario["org_id"].hex[:8]
+        blocker = await authoring_service.create_course(
+            session,
+            CourseCreate(slug=f"course-{suffix}-copy", title="Blocking Copy"),
+            owner,
+        )
+        await session.commit()
+
+        cloned = await authoring_service.clone_course(
+            session, source_course_id=scenario["course_id"], depth="shell", actor=owner
+        )
+        await session.commit()
+
+        assert cloned.slug == f"course-{suffix}-copy-2"
+        assert cloned.id != blocker.id
+
+
+async def test_clone_course_rejects_unknown_depth(
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict,
+) -> None:
+    async with session_factory() as session:
+        with pytest.raises(AppError, match="Unknown clone depth"):
+            await authoring_service.clone_course(
+                session,
+                source_course_id=scenario["course_id"],
+                depth="everything",
+                actor=_actor(scenario["owner_id"]),
+            )

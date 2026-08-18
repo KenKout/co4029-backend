@@ -24,6 +24,22 @@ from abridgeai.features.interviews.models import (
 from ._dto import SessionSummaryDTO
 
 
+def _coerce_uuid(value: object) -> UUID | None:
+    """Normalise a JSONB-array item to a UUID for dict-key lookup.
+
+    ``source_module_ids`` is stored as a JSONB array of uuid strings, so the
+    remap dict (keyed on ``UUID`` objects) never matches raw items. Accepts
+    already-UUID values and ``str``/anything str()-able; returns ``None`` for
+    malformed entries.
+    """
+    if isinstance(value, UUID):
+        return value
+    try:
+        return UUID(str(value))
+    except (ValueError, TypeError):
+        return None
+
+
 async def get_session_summary(
     db: AsyncSession,
     session_id: UUID,
@@ -70,6 +86,8 @@ async def deep_clone_interview_config(
     target_module_id: UUID,
     actor_id: UUID,
     title_suffix: str = "",
+    target_course_id: UUID | None = None,
+    module_id_map: dict[UUID, UUID] | None = None,
 ) -> UUID:
     """Deep-clone an interview config (+ outcomes + questions) into a module.
 
@@ -87,6 +105,16 @@ async def deep_clone_interview_config(
 
     NOT copied: sessions, evaluations, security/runtime rows, bank items.
 
+    Cross-course clone (course-level clone) support — all optional, so the
+    same-module duplicate flow is unchanged:
+
+    * ``target_course_id`` — set the clone's ``course_id`` to a DIFFERENT
+      course (defaults to the source's course for in-place duplicates).
+    * ``module_id_map`` — old module id -> new id. Cloned questions'
+      ``source_module_ids`` (the modules their source material lives in) are
+      rewritten through the map; ids NOT in the map are dropped rather than
+      left pointing at modules that do not exist in the target course.
+
     Returns the new config id. Flushes but does not commit.
     """
     source = (
@@ -96,7 +124,7 @@ async def deep_clone_interview_config(
         raise ValueError(f"InterviewConfig {source_config_id} not found")
 
     clone = InterviewConfig(
-        course_id=source.course_id,
+        course_id=target_course_id if target_course_id is not None else source.course_id,
         module_id=target_module_id,
         title=f"{source.title}{title_suffix}",
         status="draft",
@@ -183,7 +211,16 @@ async def deep_clone_interview_config(
                 review_status="pending",
                 ai_generated=src_q.ai_generated,
                 source_refs_json=list(src_q.source_refs_json or []),
-                source_module_ids=list(src_q.source_module_ids or []),
+                source_module_ids=(
+                    [
+                        str(new_id)
+                        for m in (src_q.source_module_ids or [])
+                        if (m_id := _coerce_uuid(m)) is not None
+                        and (new_id := module_id_map.get(m_id)) is not None
+                    ]
+                    if module_id_map is not None
+                    else list(src_q.source_module_ids or [])
+                ),
                 created_by=actor_id,
                 updated_by=actor_id,
             )

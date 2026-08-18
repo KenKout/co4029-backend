@@ -44,9 +44,11 @@ from abridgeai.features.courses.models import (
     Course,
     CourseLearningOutcome,
     Lesson,
+    LessonPrerequisite,
     LessonResource,
     Module,
     ModuleItem,
+    ModulePrerequisite,
 )
 from abridgeai.features.courses.queries import (
     assignment as assignment_queries,
@@ -648,6 +650,14 @@ async def delete_module_item(db: AsyncSession, item_id: UUID, actor: CurrentUser
 
 _DUP_SUFFIX = " (Copy)"
 
+# Selectable clone depths for :func:`clone_course` (manager-only surface).
+_CLONE_DEPTHS: frozenset[str] = frozenset({"shell", "structure", "full"})
+
+# Temporary position offset used while flushing a cloned learning-outcome
+# batch (see :func:`_clone_course_outcomes`) — far above any real position,
+# so it can never collide with a restored sibling position.
+_CLONE_TEMP_OFFSET = 1_000_000
+
 
 async def _deep_clone_lesson(
     db: AsyncSession,
@@ -716,6 +726,10 @@ async def _clone_item_target(
     source_item: ModuleItem,
     target_module_id: UUID,
     actor: CurrentUser,
+    target_course_id: UUID | None = None,
+    outcome_id_map: dict[UUID, UUID] | None = None,
+    lesson_id_map: dict[UUID, UUID] | None = None,
+    module_id_map: dict[UUID, UUID] | None = None,
 ) -> tuple[str, dict[str, UUID]]:
     """Deep-clone the polymorphic target a module item points at.
 
@@ -723,6 +737,13 @@ async def _clone_item_target(
     ``lesson_id`` / ``quiz_id`` / ``interview_config_id`` — ready to splat into
     a new :class:`ModuleItem`. Cross-feature quiz/interview cloning goes through
     the respective ``api.public`` (feature-independence contract).
+
+    The optional ``target_course_id`` / ``*_map`` params are forwarded to the
+    cross-feature helpers ONLY for the course-level clone flow (where cloned
+    quizzes/interviews must re-home to the new course and re-link their LOs /
+    source lessons / source modules). The in-place module/item duplicate flow
+    omits them and keeps the historical behaviour (verbatim links inside the
+    same course).
     """
     if source_item.item_type == "lesson":
         source_lesson = await _require_lesson(db, source_item.lesson_id)
@@ -741,6 +762,9 @@ async def _clone_item_target(
             target_module_id=target_module_id,
             actor_id=actor.user_id,
             title_suffix=_DUP_SUFFIX,
+            target_course_id=target_course_id,
+            outcome_id_map=outcome_id_map,
+            lesson_id_map=lesson_id_map,
         )
         return "quiz", {"quiz_id": new_quiz_id}
 
@@ -751,6 +775,8 @@ async def _clone_item_target(
             target_module_id=target_module_id,
             actor_id=actor.user_id,
             title_suffix=_DUP_SUFFIX,
+            target_course_id=target_course_id,
+            module_id_map=module_id_map,
         )
         return "interview", {"interview_config_id": new_config_id}
 
@@ -842,6 +868,357 @@ async def duplicate_module(
 
     await db.refresh(module_clone)
     return ModuleAuthoring.model_validate(module_clone)
+
+
+# --- Course clone (manager-only) ------------------------------------------
+#
+# Manager-side clone with selectable depth (user request):
+#
+# * ``shell``     — course row + learning outcomes only (no modules). A
+#                   re-usable scaffold/template.
+# * ``structure`` — shell + module rows and the module prerequisite graph
+#                   (the course skeleton, no lessons/quizzes/interviews).
+# * ``full``      — everything: modules + items + lessons + resources +
+#                   quizzes + interviews, each deep-cloned as a fresh draft,
+#                   with every cross-reference (module prerequisites, lesson
+#                   prerequisites, quiz source-lesson links, quiz question
+#                   learning outcomes, interview source modules) re-wired to
+#                   the corresponding clone inside the NEW course.
+#
+# The clone is ALWAYS a draft owned by the requesting manager (``draft``
+# status, fresh slug, " (Copy)" title suffix). Runtime data (enrollments,
+# attempts, sessions, grades) is never copied.
+
+async def clone_course(
+    db: AsyncSession,
+    *,
+    source_course_id: UUID,
+    depth: str,
+    actor: CurrentUser,
+    arq_pool: object | None = None,
+) -> CourseAuthoring:
+    """Clone ``source_course_id`` at ``depth`` as a fresh draft course.
+
+    The new course lives in the source's organization, is owned by ``actor``,
+    and gets an auto-generated unique slug (``{slug}-copy``, then
+    ``-copy-2``, ``-copy-3``, … until free). Learning outcomes are copied at
+    every depth; modules (+prereqs) at ``structure``/``full``; lessons,
+    quizzes, interviews and resources only at ``full``. Every cloned row is
+    forced to ``draft``/``pending`` — a clone never inherits a published or
+    approved state.
+
+    The caller (router) holds the surrounding transaction; this flushes but
+    never commits.
+    """
+    if depth not in _CLONE_DEPTHS:
+        raise AppError(f"Unknown clone depth: {depth!r}")
+    source = await _require_course(db, source_course_id)
+
+    # Unique slug inside the source org. Loop until free (soft-deleted slugs
+    # are excluded by the partial unique index, matching check_course_slug_available).
+    base_slug = f"{source.slug}-copy"
+    slug = base_slug
+    counter = 2
+    while await authoring_queries.course_slug_exists(
+        db, organization_id=source.organization_id, slug=slug
+    ):
+        slug = f"{base_slug}-{counter}"
+        counter += 1
+
+    new_course = Course(
+        organization_id=source.organization_id,
+        org_unit_id=source.org_unit_id,
+        owner_user_id=actor.user_id,
+        slug=slug,
+        title=f"{source.title}{_DUP_SUFFIX}",
+        description=source.description,
+        status="draft",
+        level=source.level,
+        thumbnail_object_id=source.thumbnail_object_id,
+        estimated_minutes=source.estimated_minutes,
+        expected_completion_days=source.expected_completion_days,
+        enrollment_cap=source.enrollment_cap,
+        contact_email=source.contact_email,
+        contact_phone=source.contact_phone,
+        contact_website_url=source.contact_website_url,
+        contact_social_url=source.contact_social_url,
+        created_by=actor.user_id,
+        updated_by=actor.user_id,
+    )
+    db.add(new_course)
+    await _flush_or_conflict(db)
+
+    # Learning outcomes (every depth), parent references re-wired via a
+    # two-phase insert: rows are flushed first (server-generated ids), then
+    # parent_id is remapped onto the clone family — the original rows still
+    # exist so the FK is satisfied at every step, and the final tree points
+    # only at cloned siblings.
+    outcome_id_map = await _clone_course_outcomes(
+        db, source_course_id=source.id, target_course_id=new_course.id, actor=actor
+    )
+
+    if depth in ("structure", "full"):
+        module_id_map = await _clone_course_modules(
+            db, source_course_id=source.id, target_course_id=new_course.id, actor=actor
+        )
+        await _copy_course_module_prerequisites(
+            db,
+            module_id_map,
+            source_course_id=source.id,
+        )
+
+        if depth == "full":
+            await _clone_course_items(
+                db,
+                source_course_id=source.id,
+                new_course_id=new_course.id,
+                module_id_map=module_id_map,
+                outcome_id_map=outcome_id_map,
+                actor=actor,
+            )
+
+    if await _creator_is_teacher(db, actor.user_id):
+        existing = await find_active_teacher_assignment(
+            db, course_id=new_course.id, user_id=actor.user_id
+        )
+        if existing is None:
+            role_id = await get_teacher_role_id(db)
+            await insert_teacher_assignment(
+                db,
+                assignment_id=uuid4(),
+                course_id=new_course.id,
+                user_id=actor.user_id,
+                role_id=role_id,
+                organization_id=new_course.organization_id,
+                granted_by=actor.user_id,
+            )
+            await _notify_teacher_assigned(
+                db,
+                teacher_user_id=actor.user_id,
+                course_id=new_course.id,
+                course_title=new_course.title,
+                arq_pool=arq_pool,
+            )
+
+    await db.refresh(new_course)
+    return CourseAuthoring.model_validate(new_course)
+
+
+async def _clone_course_outcomes(
+    db: AsyncSession,
+    *,
+    source_course_id: UUID,
+    target_course_id: UUID,
+    actor: CurrentUser,
+) -> dict[UUID, UUID]:
+    """Clone a course's learning-outcome tree, returning old-id -> new-id.
+
+    Two-phase insert so parent references can be re-pointed at cloned
+    siblings: all rows are added with ``parent_id=None`` and flushed (which
+    populates the server-generated ids), then each clone's ``parent_id`` is
+    remapped through the old->new map.
+    """
+    sources = await authoring_queries.list_course_outcomes(db, source_course_id)
+    if not sources:
+        return {}
+
+    # Two-phase insert so parent references can be re-pointed at cloned
+    # siblings: all rows are added with ``parent_id=None`` and flushed (which
+    # populates the server-generated ids). Positions are temporarily bumped to
+    # distinct values because the partial unique index
+    # ``uq_course_learning_outcomes_sibling_position`` keys on
+    # ``(COALESCE(parent_id, course_id), position)`` — two NULL-parent rows
+    # would otherwise collide at the same position in the very first flush.
+    clones: list[tuple[CourseLearningOutcome, CourseLearningOutcome]] = []
+    for i, src in enumerate(sources):
+        clone = CourseLearningOutcome(
+            course_id=target_course_id,
+            parent_id=None,
+            position=_CLONE_TEMP_OFFSET + i,
+            outcome_text=src.outcome_text,
+            created_by=actor.user_id,
+            updated_by=actor.user_id,
+        )
+        db.add(clone)
+        clones.append((src, clone))
+    await _flush_or_conflict(db)
+
+    # Restore real sibling positions and re-point parents onto the clone
+    # family. The original rows still exist, so the FK is satisfied at every
+    # step; final (parent, position) keys are unique per parent because
+    # original siblings had unique positions.
+    old_to_new = {src.id: clone.id for src, clone in clones}
+    for src, clone in clones:
+        clone.position = src.position
+        if src.parent_id is not None:
+            clone.parent_id = old_to_new.get(src.parent_id)
+    await _flush_or_conflict(db)
+    return old_to_new
+
+
+async def _clone_course_modules(
+    db: AsyncSession,
+    *,
+    source_course_id: UUID,
+    target_course_id: UUID,
+    actor: CurrentUser,
+) -> dict[UUID, UUID]:
+    """Clone a course's module rows (no items), returning old-id -> new-id.
+
+    Positions are preserved 1:1; every module lands as ``status='draft'``.
+    """
+    sources = await authoring_queries.list_modules_for_authoring(db, source_course_id)
+    if not sources:
+        return {}
+
+    clones: list[tuple[Module, Module]] = []
+    for src in sources:
+        if src.deleted_at is not None:
+            continue
+        clone = Module(
+            course_id=target_course_id,
+            title=f"{src.title}{_DUP_SUFFIX}",
+            description=src.description,
+            position=src.position,
+            status="draft",
+            estimated_minutes=src.estimated_minutes,
+            requires_all_lessons_unlocked=src.requires_all_lessons_unlocked,
+            created_by=actor.user_id,
+            updated_by=actor.user_id,
+        )
+        db.add(clone)
+        clones.append((src, clone))
+    await _flush_or_conflict(db)
+    return {src.id: clone.id for src, clone in clones}
+
+
+async def _copy_course_module_prerequisites(
+    db: AsyncSession,
+    module_id_map: dict[UUID, UUID],
+    *,
+    source_course_id: UUID,
+) -> None:
+    """Reproduce the course's module-prerequisite graph inside the clone.
+
+    Only edges whose BOTH endpoints are in ``module_id_map`` are copied — an
+    edge pointing at a module outside the clone scope cannot exist in the new
+    course, so it is dropped rather than left dangling.
+    """
+    if not module_id_map:
+        return
+    rows = await authoring_queries.list_course_module_prerequisites(
+        db, source_course_id
+    )
+    for module_id, prereq_id in rows:
+        new_module_id = module_id_map.get(module_id)
+        new_prereq_id = module_id_map.get(prereq_id)
+        if new_module_id is None or new_prereq_id is None:
+            continue
+        db.add(ModulePrerequisite(module_id=new_module_id, prerequisite_module_id=new_prereq_id))
+    await _flush_or_conflict(db)
+
+
+async def _clone_course_items(
+    db: AsyncSession,
+    *,
+    source_course_id: UUID,
+    new_course_id: UUID,
+    module_id_map: dict[UUID, UUID],
+    outcome_id_map: dict[UUID, UUID],
+    actor: CurrentUser,
+) -> None:
+    """Deep-clone every module item (lesson/quiz/interview) into the clone.
+
+    Two passes over the source items so the remap tables are COMPLETE before
+    any cross-reference is written:
+
+    * Pass 1 — clone every lesson target (building old-lesson-id ->
+      new-lesson-id) and record the pins.
+    * Pass 2 — clone quiz/interview targets with the complete lesson map
+      (quiz source-lesson links) and module map (interview source modules);
+      emit every ``ModuleItem`` pin in source order.
+    """
+    # Pass 1: lessons — their ids are needed to re-wire quiz source-lesson
+    # links, and a quiz can reference a lesson anywhere in the course, so all
+    # lessons must exist before any quiz is cloned.
+    lesson_id_map: dict[UUID, UUID] = {}
+    pins: list[tuple[str, dict[str, UUID], ModuleItem]] = []
+    for old_module_id, new_module_id in module_id_map.items():
+        items = await authoring_queries.list_module_items(db, old_module_id)
+        for item in items:
+            if item.deleted_at is not None:
+                continue
+            if item.item_type == "lesson":
+                source_lesson = await _require_lesson(db, item.lesson_id)
+                new_lesson_id = await _deep_clone_lesson(
+                    db,
+                    source_lesson=source_lesson,
+                    target_module_id=new_module_id,
+                    actor=actor,
+                )
+                lesson_id_map[item.lesson_id] = new_lesson_id
+                pins.append((item.item_type, {"lesson_id": new_lesson_id}, item))
+            else:
+                pins.append((item.item_type, {}, item))
+    await _flush_or_conflict(db)
+
+    # Pass 2: quizzes/interviews with complete remap tables, then all pins.
+    for item_type, fk_kwargs, item in pins:
+        if item_type == "lesson":
+            db.add(
+                ModuleItem(
+                    module_id=module_id_map[item.module_id],
+                    item_type=item_type,
+                    position=item.position,
+                    unlock_rule_json=dict(item.unlock_rule_json or {}),
+                    **fk_kwargs,
+                )
+            )
+            continue
+        new_type, new_fk = await _clone_item_target(
+            db,
+            source_item=item,
+            target_module_id=module_id_map[item.module_id],
+            actor=actor,
+            target_course_id=new_course_id,
+            outcome_id_map=outcome_id_map,
+            lesson_id_map=lesson_id_map,
+            module_id_map=module_id_map,
+        )
+        db.add(
+            ModuleItem(
+                module_id=module_id_map[item.module_id],
+                item_type=new_type,
+                position=item.position,
+                unlock_rule_json=dict(item.unlock_rule_json or {}),
+                **new_fk,
+            )
+        )
+        await _flush_or_conflict(db)
+
+    await _copy_course_lesson_prerequisites(db, lesson_id_map)
+
+
+async def _copy_course_lesson_prerequisites(
+    db: AsyncSession, lesson_id_map: dict[UUID, UUID]
+) -> None:
+    """Reproduce the lesson-prerequisite graph inside the clone.
+
+    Edges whose lesson or prerequisite is not in ``lesson_id_map`` are dropped
+    (that lesson has no clone in the target course).
+    """
+    if not lesson_id_map:
+        return
+    rows = await authoring_queries.list_course_lesson_prerequisites(
+        db, list(lesson_id_map)
+    )
+    for lesson_id, prereq_id in rows:
+        new_lesson_id = lesson_id_map.get(lesson_id)
+        new_prereq_id = lesson_id_map.get(prereq_id)
+        if new_lesson_id is None or new_prereq_id is None:
+            continue
+        db.add(LessonPrerequisite(lesson_id=new_lesson_id, prereq_lesson_id=new_prereq_id))
+    await _flush_or_conflict(db)
 
 
 async def reorder_module_items(

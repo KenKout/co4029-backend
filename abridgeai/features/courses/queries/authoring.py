@@ -15,6 +15,7 @@ from abridgeai.features.courses.models import (
     Course,
     CourseLearningOutcome,
     Lesson,
+    LessonPrerequisite,
     LessonResource,
     Module,
     ModuleItem,
@@ -897,6 +898,41 @@ async def list_module_prerequisites(db: AsyncSession, module_id: UUID) -> list[U
         ModulePrerequisite.module_id == module_id
     )
     return [row[0] for row in (await db.execute(stmt)).all()]
+
+
+async def list_course_module_prerequisites(
+    db: AsyncSession, course_id: UUID
+) -> list[tuple[UUID, UUID]]:
+    """All ``(module_id, prerequisite_module_id)`` rows for a course's modules.
+
+    One query for the whole course so a course-level clone can copy the full
+    prerequisite graph without an N+1 per module. Both endpoints are remapped
+    by the caller (they reference sibling modules, all of which are cloned).
+    """
+    stmt = select(
+        ModulePrerequisite.module_id, ModulePrerequisite.prerequisite_module_id
+    ).join(Module, Module.id == ModulePrerequisite.module_id).where(
+        Module.course_id == course_id,
+        Module.deleted_at.is_(None),
+    )
+    return [(row[0], row[1]) for row in (await db.execute(stmt)).all()]
+
+
+async def list_course_lesson_prerequisites(
+    db: AsyncSession, lesson_ids: Sequence[UUID]
+) -> list[tuple[UUID, UUID]]:
+    """All ``(lesson_id, prereq_lesson_id)`` rows whose lesson is in ``lesson_ids``.
+
+    Used by the course-level clone to reproduce the lesson-gating graph inside
+    the copy. Rows whose lesson is not in ``lesson_ids`` are ignored (a lesson
+    dropped from the clone scope cannot carry prerequisite edges).
+    """
+    if not lesson_ids:
+        return []
+    stmt = select(
+        LessonPrerequisite.lesson_id, LessonPrerequisite.prereq_lesson_id
+    ).where(LessonPrerequisite.lesson_id.in_(lesson_ids))
+    return [(row[0], row[1]) for row in (await db.execute(stmt)).all()]
 
 
 async def replace_module_prerequisites(
