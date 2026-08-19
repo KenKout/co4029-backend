@@ -31,10 +31,8 @@ WITH course_root AS (
         c.title,
         c.description,
         c.status,
-        c.level,
         c.thumbnail_object_id,
         c.estimated_minutes,
-        c.expected_completion_days,
         c.enrollment_cap,
         c.created_at,
         c.updated_at

@@ -147,9 +147,9 @@ class CoursePublic(_ORMModel):
     career_paths: list[CourseCareerPlacementPublic] = []
     status: Literal["published"]
     # Difficulty / effort exposed for the landing-page meta line (e.g.
-    # "Nam · 10 modules · ~18h · Intermediate"). Both are plain Course
-    # columns surfaced verbatim — the SPA formats them.
-    level: str | None = None
+    # "Nam · 10 modules · ~18h"). `estimated_minutes` is a plain Course
+    # column surfaced verbatim — the SPA formats it. The level is DERIVED
+    # from `career_paths` (the level column was dropped).
     estimated_minutes: int | None = None
     # Short-TTL presigned GET URL for the course thumbnail, minted by the
     # service layer from the thumbnail's storage object. None when no thumbnail

@@ -157,7 +157,6 @@ class CourseAuthoring(CoursePublic):
     status: Literal["draft", "published", "archived"]  # type: ignore[assignment]
     org_unit_id: UUID | None = None
     owner_user_id: UUID
-    level: str | None = None
     thumbnail_object_id: UUID | None = None
     # Short-TTL presigned GET URL for the course thumbnail, minted by the
     # service layer from the thumbnail's storage object. None when no
@@ -165,7 +164,6 @@ class CourseAuthoring(CoursePublic):
     # persisted — a projection.
     thumbnail_url: str | None = None
     estimated_minutes: int | None = None
-    expected_completion_days: int | None = None
     enrollment_cap: int | None = None
     # Course-health projections computed by the service layer for the "My
     # courses" grid — active enrollments and non-deleted module count. Not

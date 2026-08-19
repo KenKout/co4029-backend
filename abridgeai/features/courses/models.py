@@ -106,10 +106,6 @@ class Course(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftDeleteMixi
             "status IN ('draft', 'published', 'archived')",
             name="ck_courses_status",
         ),
-        CheckConstraint(
-            "level IS NULL OR level IN ('beginner', 'intermediate', 'advanced')",
-            name="ck_courses_level",
-        ),
     )
 
     organization_id: Mapped[uuid.UUID] = mapped_column(
@@ -131,13 +127,11 @@ class Course(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftDeleteMixi
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     description: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String(20), nullable=False, server_default=text("'draft'"))
-    level: Mapped[str | None] = mapped_column(String(20))
     thumbnail_object_id: Mapped[uuid.UUID | None] = mapped_column(
         PGUUID(as_uuid=True),
         ForeignKey("storage_objects.id", ondelete="SET NULL"),
     )
     estimated_minutes: Mapped[int | None] = mapped_column(Integer)
-    expected_completion_days: Mapped[int | None] = mapped_column(Integer)
     enrollment_cap: Mapped[int | None] = mapped_column(Integer)
 
     # Teacher contact info shown on the student-facing course landing page.
