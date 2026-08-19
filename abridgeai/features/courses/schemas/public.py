@@ -104,6 +104,22 @@ class CourseLearningOutcomePublic(_ORMModel):
     depth: int = 0
 
 
+class CourseCareerPlacementPublic(_ORMModel):
+    """One place where this course sits on a career path.
+
+    The student-facing LEVEL is derived from these placements rather than a
+    user-defined property: a course's "level" is shown as \"Stage {position} —
+    {stage_title}\" (career path: {path_name}). A course may sit on several
+    paths; the FE shows the first and flags the rest.
+    """
+
+    career_path_id: UUID
+    career_path_name: str
+    stage_id: UUID
+    stage_title: str | None = None
+    stage_position: int
+
+
 class CoursePublic(_ORMModel):
     """Student-facing course summary.
 
@@ -125,6 +141,10 @@ class CoursePublic(_ORMModel):
     # learner page can show the CI prominently and the TAs behind. Empty (and
     # `instructor` null) when the course has no assigned teachers.
     instructors: list[InstructorRead] = []
+    # Where the course sits on career paths — the DERIVED level label is built
+    # from these (\"Stage {position} — {stage_title}\"). Empty when the course is
+    # on no path (no stage label to show).
+    career_paths: list[CourseCareerPlacementPublic] = []
     status: Literal["published"]
     # Difficulty / effort exposed for the landing-page meta line (e.g.
     # "Nam · 10 modules · ~18h · Intermediate"). Both are plain Course

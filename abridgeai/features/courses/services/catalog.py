@@ -38,7 +38,9 @@ from abridgeai.features.courses.queries import (
     list_visible_lesson_resources,
     list_visible_module_items,
 )
+from abridgeai.features.courses.queries import assignment as assignment_queries
 from abridgeai.features.courses.schemas import (
+    CourseCareerPlacementPublic,
     CourseContentPublic,
     CourseLearningOutcomePublic,
     CoursePublic,
@@ -264,6 +266,17 @@ async def _course_with_instructor(db: AsyncSession, course: object) -> CoursePub
             for row in teacher_rows
         ]
         public = public.model_copy(update={"instructors": instructors})
+    # Career-path placements -> the DERIVED level label (\u201cStage N \u2014 title\u201d).
+    placements = await assignment_queries.list_career_paths_containing_course(db, public.id)
+    if placements:
+        public = public.model_copy(
+            update={
+                "career_paths": [
+                    CourseCareerPlacementPublic.model_validate(row)
+                    for row in placements
+                ]
+            }
+        )
     return public
 
 

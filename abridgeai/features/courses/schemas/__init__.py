@@ -54,6 +54,7 @@ from abridgeai.features.courses.schemas.authoring import (
     TeacherDashboardStats,
 )
 from abridgeai.features.courses.schemas.public import (
+    CourseCareerPlacementPublic,
     CourseContentPublic,
     CourseLearningOutcomePublic,
     CoursePage,
@@ -98,6 +99,7 @@ __all__ = [
     "CourseCloneRequest",
     "CourseContentAuthoring",
     "CourseContentPublic",
+    "CourseCareerPlacementPublic",
     "CourseCreate",
     "CourseRosterRead",
     "CourseTeacherRoleRequest",
