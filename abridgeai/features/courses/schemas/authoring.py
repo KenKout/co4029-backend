@@ -164,7 +164,6 @@ class CourseAuthoring(CoursePublic):
     # persisted — a projection.
     thumbnail_url: str | None = None
     estimated_minutes: int | None = None
-    enrollment_cap: int | None = None
     # Course-health projections computed by the service layer for the "My
     # courses" grid — active enrollments and non-deleted module count. Not
     # persisted; default 0 so single-course reads that don't populate them

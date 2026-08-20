@@ -968,7 +968,6 @@ async def clone_course(
         status="draft",
         thumbnail_object_id=source.thumbnail_object_id,
         estimated_minutes=source.estimated_minutes,
-        enrollment_cap=source.enrollment_cap,
         contact_email=source.contact_email,
         contact_phone=source.contact_phone,
         contact_website_url=source.contact_website_url,
@@ -1690,7 +1689,6 @@ async def get_authoring_content(
         "status": course.status,
         "thumbnail_object_id": course.thumbnail_object_id,
         "estimated_minutes": course.estimated_minutes,
-        "enrollment_cap": course.enrollment_cap,
         "created_at": course.created_at,
         "updated_at": course.updated_at,
     }

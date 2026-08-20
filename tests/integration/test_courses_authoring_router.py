@@ -498,7 +498,6 @@ async def test_teacher_may_patch_content_fields(
         # The hole this closes: `status` rode in on course.update, so a teacher
         # could publish their own course and skip the manager gate entirely.
         ("status", "published"),
-        ("enrollment_cap", 5),
         ("thumbnail_object_id", "00000000-0000-0000-0000-000000000001"),
     ],
 )
@@ -548,11 +547,11 @@ async def test_manager_may_patch_status(
     """The other side of the boundary: a manager still owns lifecycle."""
     response = await client.patch(
         f"/api/v1/teacher/courses/{scenario['course_a']}",
-        json={"enrollment_cap": 120},
+        json={"title": "Manager-renamed"},
         headers={"Authorization": f"Bearer {manager_bearer}"},
     )
     assert response.status_code == 200, response.text
-    assert response.json()["enrollment_cap"] == 120
+    assert response.json()["title"] == "Manager-renamed"
 
 
 async def _course_status(engine: AsyncEngine, course_id: object) -> str:

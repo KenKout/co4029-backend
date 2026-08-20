@@ -136,10 +136,11 @@ _TEACHER_PATCHABLE_COURSE_FIELDS: frozenset[str] = frozenset(
 )
 
 # Everything else on CourseUpdate is manager-owned (needs course.delete):
-# title, slug, status, org_unit_id, thumbnail_object_id, enrollment_cap.
-# (`level` and `expected_completion_days` were removed from the schema — the
-# course level is now DERIVED from its career-path placement, and completion
-# days is gone — so neither manager nor teacher defines them anymore.)
+# title, slug, status, org_unit_id, thumbnail_object_id.
+# (`level`, `expected_completion_days` and `enrollment_cap` were removed from
+# the schema: level is now DERIVED from career-path placement, completion days
+# is gone, and enrollment is ALWAYS unlimited — so none of them is user-set
+# anymore.)
 #
 # DERIVED from the schema rather than hand-listed, so a field added to
 # CourseUpdate later defaults to manager-only instead of silently becoming

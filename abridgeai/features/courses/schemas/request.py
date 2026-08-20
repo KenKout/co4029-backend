@@ -64,7 +64,6 @@ class CourseCreate(_StrictRequest):
     description: str | None = None
     thumbnail_object_id: UUID | None = None
     estimated_minutes: int | None = None
-    enrollment_cap: int | None = None
     # Teacher contact info surfaced on the student landing page (all optional).
     contact_email: str | None = Field(default=None, max_length=320)
     contact_phone: str | None = Field(default=None, max_length=50)
@@ -82,7 +81,6 @@ class CourseUpdate(_StrictRequest):
     status: Literal["draft", "published", "archived"] | None = None
     thumbnail_object_id: UUID | None = None
     estimated_minutes: int | None = None
-    enrollment_cap: int | None = None
     # Teacher contact info surfaced on the student landing page. Empty string
     # is normalised to None so clearing a field in the form actually blanks the
     # column rather than storing "".
