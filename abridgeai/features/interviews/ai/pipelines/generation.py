@@ -43,6 +43,10 @@ from abridgeai.features.interviews.ai.pipelines.backfill import (
     generate_with_backfill,
     validation_summary,
 )
+from abridgeai.features.interviews.ai.pipelines.variant import (
+    config_uuid,
+    resolve_variant_mode,
+)
 from abridgeai.features.interviews.ai.stages.generation import resolve_question_count
 from abridgeai.features.interviews.ai.stages.retrieval import retrieve_interview_context
 from abridgeai.features.interviews.dedup import store_question_embeddings
@@ -110,7 +114,7 @@ async def run_interview_generation(
         requested_by=run_dto.requested_by,
     )
 
-    config_id = _config_uuid(state.config_json, "interview_config_id")
+    config_id = config_uuid(state.config_json, "interview_config_id")
     if config_id is None:
         raise NotFoundError("Generation run is missing interview_config_id")
     config = await db.get(InterviewConfig, config_id)
@@ -156,6 +160,9 @@ async def run_interview_generation(
             run_config_json=state.config_json,
             supplementary=config.supplementary_instructions,
         )
+        variant_strategy, role_type, target_count = resolve_variant_mode(
+            config, state.config_json, target_count
+        )
 
         # Seed 0/N so the UI shows progress the moment the run goes running.
         await _write_progress(db, state, phase="generating", accepted=0, target=target_count)
@@ -172,6 +179,8 @@ async def run_interview_generation(
             context=context,
             outcomes=outcomes,
             target_count=target_count,
+            variant_strategy=variant_strategy,
+            role_type=role_type,
             on_progress=_on_progress,
         )
 
@@ -285,20 +294,6 @@ async def _update_run(
     sets.append("updated_at = NOW()")
     sql = f"UPDATE generation_runs SET {', '.join(sets)} WHERE id = :id"  # noqa: S608  # sets list is code-controlled, no user input
     await db.execute(text(sql), params)
-
-
-def _config_uuid(config_json: dict[str, Any] | None, key: str) -> UUID | None:
-    if not config_json:
-        return None
-    raw = config_json.get(key)
-    if raw is None:
-        return None
-    if isinstance(raw, UUID):
-        return raw
-    try:
-        return UUID(str(raw))
-    except (TypeError, ValueError):
-        return None
 
 
 async def _write_progress(

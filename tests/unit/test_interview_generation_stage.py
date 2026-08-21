@@ -371,3 +371,77 @@ def test_no_god_file_in_generation() -> None:
             line_count = sum(1 for _ in fh)
         cap = budget.get(path.name, 250)
         assert line_count <= cap, f"{path.name} has {line_count} LOC > {cap}"
+
+
+def test_parser_accepts_system_design() -> None:
+    payload: dict[str, Any] = {
+        "questions": [
+            {
+                "prompt_text": "Design a rate limiter for a distributed API.",
+                "question_type": "system_design",
+                "difficulty": "hard",
+                "expected_depth": 4,
+                "linked_outcome_id": None,
+                "source_refs": [],
+                "rationale": "architecture probe",
+            }
+        ]
+    }
+    parsed = parse_generation_response(payload)
+    assert len(parsed) == 1
+    assert parsed[0].question_type == "system_design"
+
+
+def test_resolve_variant_strategy() -> None:
+    from abridgeai.features.interviews.ai.stages.generation.resolve import (
+        resolve_variant_strategy,
+    )
+
+    assert resolve_variant_strategy({"variant_strategy": "all_angles"}) == "all_angles"
+    assert resolve_variant_strategy({"variant_strategy": "role_only"}) == "role_only"
+    assert resolve_variant_strategy({"variant_strategy": "ROLE_ONLY"}) == "role_only"
+    assert resolve_variant_strategy({"variant_strategy": "bogus"}) is None
+    assert resolve_variant_strategy({}) is None
+    assert resolve_variant_strategy(None) is None
+
+
+@pytest.mark.asyncio
+async def test_all_angles_variant_mode_asks_for_logical_count() -> None:
+    gateway = AsyncMock()
+    gateway.generate_json = AsyncMock(return_value=_llm_result(_eight_questions()))
+
+    await generate_interview_questions(
+        AsyncMock(),
+        run=_fake_run(question_count=8),
+        config=_fake_config(),
+        context=_FakeContext(),
+        outcomes=_fake_outcomes(),
+        gateway=gateway,
+        override_question_count=32,  # pipeline passes total = 8 logical x 4 angles
+        variant_strategy="all_angles",
+    )
+
+    user_prompt: str = gateway.generate_json.await_args.kwargs["user_prompt"]
+    assert "Total LOGICAL questions to produce: 8" in user_prompt
+    assert "system_design" in user_prompt
+    assert "Total rows = 32" in user_prompt
+
+
+@pytest.mark.asyncio
+async def test_role_only_variant_mode_fixes_type() -> None:
+    gateway = AsyncMock()
+    gateway.generate_json = AsyncMock(return_value=_llm_result(_eight_questions()))
+
+    await generate_interview_questions(
+        AsyncMock(),
+        run=_fake_run(question_count=8),
+        config=_fake_config(),
+        context=_FakeContext(),
+        outcomes=_fake_outcomes(),
+        gateway=gateway,
+        variant_strategy="role_only",
+        role_type="technical",
+    )
+
+    user_prompt: str = gateway.generate_json.await_args.kwargs["user_prompt"]
+    assert 'Every question MUST have question_type "technical"' in user_prompt

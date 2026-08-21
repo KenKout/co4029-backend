@@ -17,10 +17,12 @@ from dataclasses import dataclass, field
 from typing import Any, Literal, cast
 from uuid import UUID
 
-InterviewQuestionType = Literal["technical", "behavioral", "situational"]
+InterviewQuestionType = Literal["technical", "behavioral", "situational", "system_design"]
 InterviewDifficulty = Literal["easy", "medium", "hard"]
 
-_VALID_TYPES: frozenset[str] = frozenset({"technical", "behavioral", "situational"})
+_VALID_TYPES: frozenset[str] = frozenset(
+    {"technical", "behavioral", "situational", "system_design"}
+)
 _VALID_DIFFICULTIES: frozenset[str] = frozenset({"easy", "medium", "hard"})
 
 

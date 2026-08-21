@@ -2,6 +2,29 @@ Interview title: {{ title }}
 
 Persona: {{ persona }}
 
+{%- if variant_strategy == "all_angles" %}
+Total LOGICAL questions to produce: {{ question_count }}.
+For EACH logical question, write exactly {{ angles|length }} variants — one of each
+type in [{{ angles|join(', ') }}] — all on the SAME topic and all carrying the SAME
+linked_outcome_id. The variants differ only in the ANGLE they probe: the
+technical variant asks for correctness / edge cases, the system_design variant
+asks for architecture / trade-offs, the situational variant poses a case study,
+the behavioral variant asks for experience / approach. Total rows = {{ question_count * angles|length }}.
+
+Difficulty is assigned per LOGICAL question (all its variants share the SAME
+difficulty), ramping across the logical questions:
+- logical questions 1-3: easy   (expected_depth 1-2)
+- logical questions 4-7: medium (expected_depth 2-4)
+- logical questions 8+ : hard   (expected_depth 3-5)
+{%- elif variant_strategy == "role_only" %}
+Total questions to produce: {{ question_count }}.
+Every question MUST have question_type "{{ role_type }}".
+
+Difficulty progression rubric:
+- positions 1-3: easy   (expected_depth 1-2)
+- positions 4-7: medium (expected_depth 2-4)
+- positions 8+ : hard   (expected_depth 3-5)
+{%- else %}
 Total questions to produce: {{ question_count }}
 
 Type mix (the produced set must match these proportions, rounded):
@@ -13,6 +36,7 @@ Difficulty progression rubric:
 - positions 1-3: easy   (expected_depth 1-2)
 - positions 4-7: medium (expected_depth 2-4)
 - positions 8+ : hard   (expected_depth 3-5)
+{%- endif %}
 {%- if supplementary_instructions %}
 
 Teacher's supplementary instructions:

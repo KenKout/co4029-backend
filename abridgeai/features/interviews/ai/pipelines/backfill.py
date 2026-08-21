@@ -70,6 +70,8 @@ async def generate_with_backfill(
     context: InterviewRetrievalContext,
     outcomes: list[Any],
     target_count: int,
+    variant_strategy: str | None = None,
+    role_type: str | None = None,
     on_progress: Callable[[int, int], Awaitable[None]] | None = None,
 ) -> tuple[list[InterviewQuestionDraft], list[Verdict], list[InterviewQuestionDraft], int]:
     """Generate+validate in rounds until ``target_count`` accepted drafts.
@@ -107,6 +109,8 @@ async def generate_with_backfill(
             outcomes=cast("Any", outcomes),
             override_question_count=request_count,
             avoid_prompts=[d.prompt_text for d in accepted],
+            variant_strategy=variant_strategy,
+            role_type=role_type,
         )
         round_verdicts = await validate_interview_questions(
             db,
@@ -114,6 +118,7 @@ async def generate_with_backfill(
             config=config,
             drafts=cast("Any", round_drafts),
             context=cast("Any", context),
+            skip_type_mix=variant_strategy is not None,
         )
         round_accepted = [
             d

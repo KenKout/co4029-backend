@@ -115,6 +115,7 @@ async def validate_interview_questions(
     drafts: list[InterviewQuestionDraft],
     context: InterviewRetrievalContext,
     gateway: LLMGateway | None = None,
+    skip_type_mix: bool = False,
 ) -> list[Verdict]:
     """Validate ``drafts`` and return a positional list of verdicts.
 
@@ -127,7 +128,9 @@ async def validate_interview_questions(
     if not drafts:
         return []
 
-    deterministic = _run_deterministic_checks(drafts, run=run, context=context)
+    deterministic = _run_deterministic_checks(
+        drafts, run=run, context=context, skip_type_mix=skip_type_mix
+    )
     leading = await _run_leading_check(
         drafts=drafts,
         config=config,
@@ -158,11 +161,18 @@ def _run_deterministic_checks(
     *,
     run: GenerationRun,
     context: InterviewRetrievalContext,
+    skip_type_mix: bool = False,
 ) -> list[list[ValidationCriterion]]:
-    """Apply the four Python-only checks; return failures per question."""
+    """Apply the four Python-only checks; return failures per question.
+
+    ``skip_type_mix`` is set for variant-mode generation (``all_angles`` /
+    ``role_only``), where the type distribution is an explicit per-angle
+    schedule rather than the 60/30/10 mix the check enforces.
+    """
     chunk_ids = _collect_chunk_ids(context)
-    type_weights = _resolve_type_weights(run)
-    type_failures = _check_type_mix(drafts, type_weights)
+    type_failures: set[int] = set()
+    if not skip_type_mix:
+        type_failures = _check_type_mix(drafts, _resolve_type_weights(run))
     failures: list[list[ValidationCriterion]] = []
     for index, draft in enumerate(drafts):
         per_q: list[ValidationCriterion] = []

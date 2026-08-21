@@ -44,6 +44,7 @@ from abridgeai.features.interviews.ai.stages.generation.parsers import (
     parse_generation_response,
 )
 from abridgeai.features.interviews.ai.stages.generation.resolve import (
+    VARIANT_ANGLES,
     resolve_question_count,
     resolve_type_mix,
 )
@@ -89,6 +90,8 @@ async def generate_interview_questions(
     gateway: LLMGateway | None = None,
     override_question_count: int | None = None,
     avoid_prompts: list[str] | None = None,
+    variant_strategy: str | None = None,
+    role_type: str | None = None,
 ) -> list[InterviewQuestionDraft]:
     """Run one INTERVIEW_GENERATION LLM call and return parsed drafts.
 
@@ -113,11 +116,24 @@ async def generate_interview_questions(
     )
     persona = config.persona or "neutral"
 
+    # Variant mode: ``question_count`` is the TOTAL number of rows requested.
+    # ``all_angles`` asks the LLM for whole LOGICAL questions (each spawning one
+    # variant per angle), so round the logical count up and produce
+    # ``logical_count x len(angles)`` rows (the parser caps at that total).
+    logical_count = question_count
+    effective_total = question_count
+    if variant_strategy == "all_angles":
+        logical_count = (question_count + len(VARIANT_ANGLES) - 1) // len(VARIANT_ANGLES)
+        effective_total = logical_count * len(VARIANT_ANGLES)
+
     user_prompt = render_prompt(
         "prompts/user.j2",
         title=config.title,
         persona=persona,
-        question_count=question_count,
+        question_count=logical_count,
+        variant_strategy=variant_strategy,
+        role_type=role_type,
+        angles=list(VARIANT_ANGLES),
         technical_pct=type_mix["technical"],
         behavioral_pct=type_mix["behavioral"],
         situational_pct=type_mix["situational"],
@@ -142,7 +158,7 @@ async def generate_interview_questions(
         pipeline_run_id=run.id,
         parent_run_id=run.id,
     )
-    drafts = parse_generation_response(result.content_json, max_questions=question_count)
+    drafts = parse_generation_response(result.content_json, max_questions=effective_total)
     return _link_outcomes_round_robin(drafts, outcomes)
 
 

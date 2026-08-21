@@ -202,6 +202,31 @@ async def test_type_mix_check() -> None:
 
 
 @pytest.mark.asyncio
+async def test_skip_type_mix_in_variant_mode() -> None:
+    chunk = uuid4()
+    drafts = [_draft(source_refs=[chunk]) for _ in range(9)]
+    drafts.append(_draft(question_type="behavioral", source_refs=[chunk]))
+    context = _context([chunk])
+    run = _run(source_chunk_ids=[chunk])
+    gateway = _gateway_returning(_accept_all(len(drafts)))
+
+    verdicts = await validate_interview_questions(
+        AsyncMock(),
+        run=run,
+        config=_config(),
+        drafts=drafts,
+        context=context,
+        gateway=gateway,
+        skip_type_mix=True,
+    )
+
+    assert all(v.accepted for v in verdicts)
+    assert all(
+        ValidationCriterion.TYPE_MATCHES_CONFIG not in v.failed_criteria for v in verdicts
+    )
+
+
+@pytest.mark.asyncio
 async def test_difficulty_progression_rejects_abrupt_drop() -> None:
     chunk = uuid4()
     drafts = [

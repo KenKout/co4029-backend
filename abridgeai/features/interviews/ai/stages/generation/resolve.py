@@ -15,6 +15,15 @@ _DEFAULT_QUESTION_COUNT = 8
 _MIN_QUESTION_COUNT = 1
 _MAX_QUESTION_COUNT = 50
 
+#: The question angles a role-conditioned bank generates — one per non-generic
+#: interviewer role (see ``orchestrator.role_question_filter``).
+VARIANT_ANGLES: tuple[str, ...] = (
+    "technical",
+    "system_design",
+    "situational",
+    "behavioral",
+)
+
 
 def resolve_type_mix(supplementary: str | None) -> dict[str, int]:
     """Return weights summing to 100 — fall back to the 60/30/10 default."""
@@ -99,4 +108,27 @@ def _try_parse_rubric(supplementary: str | None) -> dict[str, Any] | None:
     return cast(dict[str, Any], parsed) if isinstance(parsed, dict) else None
 
 
-__all__ = ["resolve_question_count", "resolve_type_mix"]
+def resolve_variant_strategy(run_config_json: dict[str, Any] | None) -> str | None:
+    """Resolve the variant generation strategy from the run's form values.
+
+    ``all_angles`` = one question per angle per logical question (4x the
+    typed count); ``role_only`` = every question of the config role's
+    preferred type (1x). Returns ``None`` (legacy mixed generation) when
+    the form value is absent or unrecognised.
+    """
+    if not isinstance(run_config_json, dict):
+        return None
+    raw = run_config_json.get("variant_strategy")
+    if isinstance(raw, str):
+        normalised = raw.strip().lower()
+        if normalised in ("all_angles", "role_only"):
+            return normalised
+    return None
+
+
+__all__ = [
+    "VARIANT_ANGLES",
+    "resolve_question_count",
+    "resolve_type_mix",
+    "resolve_variant_strategy",
+]

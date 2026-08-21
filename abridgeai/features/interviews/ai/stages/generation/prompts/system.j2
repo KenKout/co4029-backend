@@ -31,6 +31,8 @@ Hard rules — violate any and the question set is invalid:
      ("describe a time you...", "how do you usually approach...").
    - "situational" questions present a hypothetical scenario and ask the
      learner what they would do.
+   - "system_design" questions ask the learner to design or architect a
+     solution and justify trade-offs (scale, availability, consistency).
 
 4. DIFFICULTY PROGRESSION.
    Order the questions so the easier ones come first. The first questions
@@ -80,5 +82,5 @@ Output format:
   chunk UUIDs the question is grounded in), ``rationale``, and
   ``model_answer``.
 - ``question_type`` is exactly one of ``technical``, ``behavioral``,
-  ``situational``.
+  ``situational``, ``system_design``.
 - ``difficulty`` is exactly one of ``easy``, ``medium``, ``hard``.
