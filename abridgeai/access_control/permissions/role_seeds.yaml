@@ -21,7 +21,7 @@ roles:
       - interview.manage
       - progress.read.cohort
   - code: hod
-    name: Head of Department
+    name: Faculty Dean
     description: Department oversight, teacher assignment, and HOD role provisioning within scope
     permissions:
       - course.read

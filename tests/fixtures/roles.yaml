@@ -22,7 +22,7 @@ roles:
     name: "Teacher"
     is_system_role: true
   - code: "hod"
-    name: "Head of Department"
+    name: "Faculty Dean"
     is_system_role: true
   - code: "manager"
     name: "Organization Manager"
