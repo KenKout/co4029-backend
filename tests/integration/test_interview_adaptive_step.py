@@ -353,6 +353,7 @@ def _settings_v2(
     comms_polish: bool = False,
     frustration_deescalation: bool = False,
     question_deferral: bool = False,
+    role_question_filter: bool = False,
 ) -> Settings:
     """v1 adaptive fully on PLUS the v2 master + selected sub-flags.
 
@@ -375,6 +376,7 @@ def _settings_v2(
             "adaptive_v2_comms_polish_enabled": comms_polish,
             "adaptive_v2_frustration_deescalation_enabled": frustration_deescalation,
             "adaptive_v2_question_deferral_enabled": question_deferral,
+            "adaptive_v2_role_question_filter_enabled": role_question_filter,
         }
     )
 
@@ -2049,6 +2051,44 @@ async def test_comms_polish_flag_threads_cleanly_and_advances(
             "A solid, on-topic answer.",
             _actor(scenario["student_id"]),
             turn_key="cp-1",
+        )
+        await db.commit()
+    assert result.get("action") is not None
+
+
+# ── Slice 21: role-conditioned question filter ─────────────────────────────
+# A config-scoped interviewer role HARD-filters the candidate pool to its
+# preferred question_type before scoring. This smoke test only proves the flag
+# threads cleanly (pipeline still advances with it ON); the generic-assistant
+# config carries no role, so the filter is a no-op here. Filter semantics are
+# locked in tests/unit/test_interview_role_question_filter.py.
+
+
+@pytest.mark.asyncio
+async def test_role_question_filter_flag_threads_cleanly_and_advances(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        taking_service, "get_settings", lambda: _settings_v2(role_question_filter=True)
+    )
+    gw = _plain_answer_gateway()
+    for mod in ("intent_logic", "analysis_logic", "utterance_logic"):
+        monkeypatch.setattr(
+            f"abridgeai.features.interviews.orchestrator.{mod}.LLMGateway", lambda: gw
+        )
+    session_id, _ = await _make_session(
+        engine, scenario["config_id"], scenario["student_id"], "text"
+    )
+    async with session_factory() as db:
+        result = await taking_service.take_session_step(
+            db,
+            session_id,
+            "A solid, on-topic answer.",
+            _actor(scenario["student_id"]),
+            turn_key="rqf-1",
         )
         await db.commit()
     assert result.get("action") is not None

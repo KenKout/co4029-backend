@@ -405,6 +405,11 @@ class Settings(BaseSettings):
     # hedged read can never establish coverage on an outcome nobody asked about.
     # Off → v1 behaviour: only the linked outcome is visible and attributable.
     adaptive_v2_emergent_evidence_enabled: bool = False
+    # Role-conditioned question filter: when ON, a config-scoped interviewer
+    # role HARD-filters the candidate pool to its preferred question_type before
+    # scoring (see ``orchestrator.role_question_filter``). Off -> selection is
+    # role-blind, byte-for-byte v1.
+    adaptive_v2_role_question_filter_enabled: bool = False
 
     # Prompt-injection guard is operations-only. ``shadow`` is the safe rollout
     # default: assess and report without changing the learner experience.
@@ -459,6 +464,7 @@ class Settings(BaseSettings):
         "frustration_deescalation": "adaptive_v2_frustration_deescalation_enabled",
         "question_deferral": "adaptive_v2_question_deferral_enabled",
         "emergent_evidence": "adaptive_v2_emergent_evidence_enabled",
+        "role_question_filter": "adaptive_v2_role_question_filter_enabled",
     }
 
     def adaptive_v2_feature_enabled(self, input_mode: str, feature: str) -> bool:

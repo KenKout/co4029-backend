@@ -169,6 +169,7 @@ async def run_adaptive_turn(
     frustration_deescalation_enabled: bool = False,
     question_deferral_enabled: bool = False,
     emergent_evidence_enabled: bool = False,
+    role_question_filter_enabled: bool = False,
 ) -> AdaptiveOutcome:
     """Run one adaptive turn. MUST be called inside a caller-owned savepoint.
 
@@ -251,6 +252,21 @@ async def run_adaptive_turn(
 
     # 3. Load candidate pool + compute selection context.
     candidates, orm_by_id = await turn_perception.load_candidates(db, session.interview_config_id)
+    # Role-conditioned question filter (Slice 21, v2): a config-scoped
+    # interviewer role HARD-filters the candidate pool to its preferred
+    # question_type BEFORE scoring. This is a pre-filter, NOT a scorer input --
+    # SelectionContext / select_next_question stay role-blind, preserving the
+    # persona/identity fairness invariant. Gated: off -> candidates unchanged.
+    if role_question_filter_enabled:
+        from abridgeai.features.interviews.orchestrator.interviewer_identity import (  # noqa: PLC0415
+            identity_from_config,
+        )
+        from abridgeai.features.interviews.orchestrator.role_question_filter import (  # noqa: PLC0415
+            filter_candidates_by_role,
+        )
+
+        resolved_identity = identity_from_config(getattr(config, "persona_profile_json", None))
+        candidates = filter_candidates_by_role(candidates, resolved_identity.role)
     asked = frozenset(data.asked_question_ids)
     skipped = frozenset(data.skipped_question_ids)
     # Weighted coverage points (Slice 2) — not the raw evidence count — drive

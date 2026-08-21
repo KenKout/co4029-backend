@@ -119,7 +119,10 @@ def test_persona_is_not_a_decision_input_field() -> None:
     refactor can't quietly thread a trait into the policy.
     """
     field_names = {f.name for f in dataclasses.fields(DecisionInputs)}
-    for banned in ("persona", "warmth", "directness", "verbosity", "tone", "profile"):
+    for banned in (
+        "persona", "warmth", "directness", "verbosity", "tone", "profile",
+        "role", "interviewer_role", "identity",
+    ):
         assert banned not in field_names
 
 
@@ -169,7 +172,10 @@ def test_persona_is_not_a_selection_context_field() -> None:
     from abridgeai.features.interviews.orchestrator.selection import SelectionContext
 
     field_names = {f.name for f in dataclasses.fields(SelectionContext)}
-    for banned in ("persona", "warmth", "directness", "verbosity", "tone", "profile"):
+    for banned in (
+        "persona", "warmth", "directness", "verbosity", "tone", "profile",
+        "role", "interviewer_role", "identity",
+    ):
         assert banned not in field_names
 
 

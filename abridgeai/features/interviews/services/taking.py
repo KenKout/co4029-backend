@@ -545,6 +545,12 @@ async def take_session_step(  # noqa: C901 - shared legacy/adaptive turn coordin
     emergent_evidence_enabled = settings.adaptive_v2_feature_enabled(
         session.input_mode, "emergent_evidence"
     )
+    # v2 role-conditioned question filter: a config-scoped interviewer role
+    # HARD-filters the candidate pool to its preferred question_type before
+    # scoring. Off -> selection is role-blind (byte-for-byte v1).
+    role_question_filter_enabled = settings.adaptive_v2_feature_enabled(
+        session.input_mode, "role_question_filter"
+    )
 
     if adaptive_on:
         adaptive_result = await _try_adaptive_step(
@@ -574,6 +580,7 @@ async def take_session_step(  # noqa: C901 - shared legacy/adaptive turn coordin
             frustration_deescalation_enabled=frustration_deescalation_enabled,
             question_deferral_enabled=question_deferral_enabled,
             emergent_evidence_enabled=emergent_evidence_enabled,
+            role_question_filter_enabled=role_question_filter_enabled,
         )
         if adaptive_result is not None:
             return adaptive_result
@@ -659,6 +666,7 @@ async def take_session_step(  # noqa: C901 - shared legacy/adaptive turn coordin
             frustration_deescalation_enabled=frustration_deescalation_enabled,
             question_deferral_enabled=question_deferral_enabled,
             emergent_evidence_enabled=emergent_evidence_enabled,
+            role_question_filter_enabled=role_question_filter_enabled,
         )
 
     return await _legacy_advance(
@@ -1493,6 +1501,7 @@ async def _try_adaptive_step(
     frustration_deescalation_enabled: bool = False,
     question_deferral_enabled: bool = False,
     emergent_evidence_enabled: bool = False,
+    role_question_filter_enabled: bool = False,
 ) -> dict[str, Any] | None:
     """Attempt one adaptive turn. Returns the canonical result, or None to fall back.
 
@@ -1580,6 +1589,7 @@ async def _try_adaptive_step(
                 frustration_deescalation_enabled=frustration_deescalation_enabled,
                 question_deferral_enabled=question_deferral_enabled,
                 emergent_evidence_enabled=emergent_evidence_enabled,
+                role_question_filter_enabled=role_question_filter_enabled,
             )
         if outcome.result is not None:
             _emit_live_decision(session_id, outcome.result)
@@ -1650,6 +1660,7 @@ async def _run_shadow_step(
     frustration_deescalation_enabled: bool = False,
     question_deferral_enabled: bool = False,
     emergent_evidence_enabled: bool = False,
+    role_question_filter_enabled: bool = False,
 ) -> None:
     """Compute the adaptive decision for comparison WITHOUT driving the student.
 
@@ -1705,6 +1716,7 @@ async def _run_shadow_step(
                 frustration_deescalation_enabled=frustration_deescalation_enabled,
                 question_deferral_enabled=question_deferral_enabled,
                 emergent_evidence_enabled=emergent_evidence_enabled,
+                role_question_filter_enabled=role_question_filter_enabled,
             )
             canonical = outcome.result or {}
             # Emit the shadow decision (no transcript content — same privacy
