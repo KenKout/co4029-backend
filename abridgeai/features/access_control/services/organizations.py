@@ -334,8 +334,28 @@ async def list_unit_tree(db: AsyncSession, organization_id: UUID) -> list[OrgUni
     visibly odd, which is the point.
     """
     rows = await org_queries.list_units_for_organization(db, organization_id)
+    # Built field by field rather than via ``model_validate(row)``. ``_ORM``
+    # sets ``from_attributes=True``, and ``OrgUnitNode.children`` shares its
+    # name with ``OrgUnit.children`` — a default-lazy relationship. Validating
+    # the ORM row therefore READS that relationship, which on an async session
+    # is a lazy load outside the greenlet and raises MissingGreenlet (HTTP
+    # 500) instead of returning a tree. The children we want are the ones
+    # assembled below from ``parent_unit_id``, not whatever the ORM would
+    # emit a query for.
     nodes: dict[UUID, OrgUnitNode] = {
-        row.id: OrgUnitNode.model_validate(row, from_attributes=True) for row in rows
+        row.id: OrgUnitNode(
+            id=row.id,
+            organization_id=row.organization_id,
+            parent_unit_id=row.parent_unit_id,
+            unit_type=row.unit_type,
+            name=row.name,
+            code=row.code,
+            created_at=row.created_at,
+            updated_at=row.updated_at,
+            children=[],
+            descendant_count=0,
+        )
+        for row in rows
     }
     roots: list[OrgUnitNode] = []
     for row in rows:
