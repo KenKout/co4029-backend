@@ -58,11 +58,78 @@ async def get_version(db: AsyncSession, version_id: UUID) -> LearningProgramVers
     return await db.get(LearningProgramVersion, version_id)
 
 
+async def list_versions(db: AsyncSession, program_id: UUID) -> list[LearningProgramVersion]:
+    stmt = (
+        select(LearningProgramVersion)
+        .where(
+            LearningProgramVersion.learning_program_id == program_id,
+            LearningProgramVersion.deleted_at.is_(None),
+        )
+        .order_by(LearningProgramVersion.version_no.desc())
+    )
+    return list((await db.scalars(stmt)).all())
+
+
+async def list_program_authoring_options(
+    db: AsyncSession, *, organization_id: UUID, actor_id: UUID
+) -> tuple[list[OrgUnit], list[CareerPath], UUID | None]:
+    faculties = list(
+        (
+            await db.scalars(
+                select(OrgUnit)
+                .where(
+                    OrgUnit.organization_id == organization_id,
+                    OrgUnit.unit_type == "faculty",
+                    OrgUnit.deleted_at.is_(None),
+                )
+                .order_by(OrgUnit.name)
+            )
+        ).all()
+    )
+    paths = list(
+        (
+            await db.scalars(
+                select(CareerPath)
+                .where(
+                    CareerPath.organization_id == organization_id,
+                    CareerPath.status == "published",
+                    CareerPath.deleted_at.is_(None),
+                    select(CareerPathVersion.id)
+                    .where(
+                        CareerPathVersion.career_path_id == CareerPath.id,
+                        CareerPathVersion.status == "published",
+                        CareerPathVersion.deleted_at.is_(None),
+                    )
+                    .exists(),
+                )
+                .order_by(CareerPath.name)
+            )
+        ).all()
+    )
+    default_faculty_id = await db.scalar(
+        select(UserRoleAssignment.org_unit_id)
+        .join(Role, Role.id == UserRoleAssignment.role_id)
+        .join(OrgUnit, OrgUnit.id == UserRoleAssignment.org_unit_id)
+        .where(
+            UserRoleAssignment.user_id == actor_id,
+            UserRoleAssignment.scope_kind == "org_unit",
+            UserRoleAssignment.organization_id == organization_id,
+            UserRoleAssignment.deleted_at.is_(None),
+            Role.code.in_(("manager", "hod")),
+            OrgUnit.unit_type == "faculty",
+            OrgUnit.deleted_at.is_(None),
+        )
+        .limit(1)
+    )
+    return faculties, paths, default_faculty_id
+
+
 async def list_version_paths(db: AsyncSession, version_id: UUID) -> list[dict[str, object]]:
     stmt = (
         select(
             LearningProgramVersionPath.career_path_id,
             LearningProgramVersionPath.career_path_version_id,
+            CareerPathVersion.version_no.label("career_path_version_no"),
             CareerPath.name,
             CareerPath.slug,
             CareerPath.description,
@@ -70,6 +137,10 @@ async def list_version_paths(db: AsyncSession, version_id: UUID) -> list[dict[st
             LearningProgramVersionPath.position,
         )
         .join(CareerPath, CareerPath.id == LearningProgramVersionPath.career_path_id)
+        .join(
+            CareerPathVersion,
+            CareerPathVersion.id == LearningProgramVersionPath.career_path_version_id,
+        )
         .where(LearningProgramVersionPath.program_version_id == version_id)
         .order_by(LearningProgramVersionPath.position)
     )

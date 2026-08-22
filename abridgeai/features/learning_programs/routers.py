@@ -16,11 +16,13 @@ from abridgeai.features.learning_programs.schemas import (
     ChangePathRequestCreate,
     ChangeRequestDecision,
     PathChangeRequestRead,
+    ProgramAuthoringOptions,
     ProgramCreate,
     ProgramEnrollmentRead,
     ProgramEnrollRequest,
     ProgramRead,
     ProgramUpdate,
+    ProgramVersionRead,
     ProgramWithdrawRequest,
     SelectPathRequest,
 )
@@ -40,6 +42,14 @@ def _http_error(exc: Exception) -> HTTPException:
     if isinstance(exc, ForbiddenError):
         return HTTPException(status.HTTP_403_FORBIDDEN, detail={"error": str(exc)})
     return HTTPException(status.HTTP_409_CONFLICT, detail={"error": str(exc)})
+
+
+@management_router.get("/options", response_model=ProgramAuthoringOptions)
+async def get_authoring_options(
+    actor: Annotated[CurrentUser, Depends(_REQUIRE_MANAGE)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> ProgramAuthoringOptions:
+    return await services.get_authoring_options(db, actor)
 
 
 @management_router.post("", response_model=ProgramRead, status_code=status.HTTP_201_CREATED)
@@ -78,6 +88,33 @@ async def get_program(
 ) -> ProgramRead:
     try:
         return await services.get_program_for_operator(db, program_id=program_id, actor=actor)
+    except (NotFoundError, ForbiddenError) as exc:
+        raise _http_error(exc) from exc
+
+
+@management_router.get("/{program_id}/versions", response_model=list[ProgramVersionRead])
+async def list_program_versions(
+    program_id: UUID,
+    actor: Annotated[CurrentUser, Depends(_REQUIRE_READ)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> list[ProgramVersionRead]:
+    try:
+        return await services.list_program_versions(db, program_id=program_id, actor=actor)
+    except (NotFoundError, ForbiddenError) as exc:
+        raise _http_error(exc) from exc
+
+
+@management_router.get("/{program_id}/versions/{version_id}", response_model=ProgramRead)
+async def get_program_version(
+    program_id: UUID,
+    version_id: UUID,
+    actor: Annotated[CurrentUser, Depends(_REQUIRE_READ)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> ProgramRead:
+    try:
+        return await services.get_program_version(
+            db, program_id=program_id, version_id=version_id, actor=actor
+        )
     except (NotFoundError, ForbiddenError) as exc:
         raise _http_error(exc) from exc
 

@@ -103,6 +103,8 @@ class CareerPathVersionRead(BaseModel):
     published_at: datetime | None = None
     created_at: datetime
     created_by: UUID | None = None
+    published_by: UUID | None = None
+    published_by_name: str | None = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -208,6 +210,7 @@ class CareerPathUpdate(BaseModel):
     """
 
     name: str | None = Field(default=None, min_length=1, max_length=255)
+    slug: str | None = Field(default=None, min_length=1, max_length=100)
     description: str | None = None
     max_concurrent: int | None = Field(default=None, gt=0)
     """Attention cap; ``None`` in a PATCH means "unchanged", not "clear"."""

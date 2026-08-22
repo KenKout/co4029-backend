@@ -248,9 +248,13 @@ async def get_career_path_for_authoring(
 
 
 async def list_authoring_career_path_courses(
-    db: AsyncSession, career_path_id: UUID
+    db: AsyncSession, career_path_id: UUID, *, version_id: UUID | None = None
 ) -> list[dict[str, Any]]:
-    version = await get_current_authoring_version(db, career_path_id)
+    version = (
+        await get_version(db, version_id)
+        if version_id is not None
+        else await get_current_authoring_version(db, career_path_id)
+    )
     if version is None:
         return []
     link_stmt = (
@@ -349,10 +353,18 @@ async def list_items_for_version(
 
 
 async def list_path_stages(
-    db: AsyncSession, career_path_id: UUID, *, include_deleted: bool = False
+    db: AsyncSession,
+    career_path_id: UUID,
+    *,
+    include_deleted: bool = False,
+    version_id: UUID | None = None,
 ) -> list[CareerPathStage]:
     """Stages of a path's authoring version in position order."""
-    version = await get_current_authoring_version(db, career_path_id)
+    version = (
+        await get_version(db, version_id)
+        if version_id is not None
+        else await get_current_authoring_version(db, career_path_id)
+    )
     if version is None:
         return []
     stmt = select(CareerPathStage).where(CareerPathStage.version_id == version.id)

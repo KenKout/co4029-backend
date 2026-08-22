@@ -7,9 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 class ProgramCreate(BaseModel):
-    organization_id: UUID
     faculty_id: UUID
-    owner_faculty_dean_id: UUID
     slug: str = Field(min_length=1, max_length=100, pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
     name: str = Field(min_length=1, max_length=255)
     description: str | None = None
@@ -19,8 +17,10 @@ class ProgramCreate(BaseModel):
 
 class ProgramUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=255)
+    slug: str | None = Field(
+        default=None, min_length=1, max_length=100, pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$"
+    )
     description: str | None = None
-    owner_faculty_dean_id: UUID | None = None
     max_path_switches: int | None = Field(default=None, ge=0, le=100)
     career_path_ids: list[UUID] | None = None
 
@@ -33,11 +33,27 @@ class ProgramVersionRead(BaseModel):
     status: str
     max_path_switches: int
     published_at: datetime | None
+    published_by: UUID | None = None
+    published_by_name: str | None = None
+
+
+class ProgramOptionRead(BaseModel):
+    id: UUID
+    name: str
+    slug: str | None = None
+    description: str | None = None
+
+
+class ProgramAuthoringOptions(BaseModel):
+    faculties: list[ProgramOptionRead] = Field(default_factory=list)
+    career_paths: list[ProgramOptionRead] = Field(default_factory=list)
+    default_faculty_id: UUID | None = None
 
 
 class ProgramPathRead(BaseModel):
     career_path_id: UUID
     career_path_version_id: UUID
+    career_path_version_no: int
     name: str
     slug: str
     description: str | None
@@ -142,6 +158,8 @@ __all__ = [
     "PathAttemptRead",
     "PathChangeRequestRead",
     "ProgramCreate",
+    "ProgramAuthoringOptions",
+    "ProgramOptionRead",
     "ProgramEnrollmentRead",
     "ProgramEnrollRequest",
     "ProgramPathRead",

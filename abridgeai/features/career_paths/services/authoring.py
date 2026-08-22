@@ -272,14 +272,38 @@ async def list_path_versions(
     """All versions of a path, newest first (Gap 3 manager surface)."""
     await _require_path(db, career_path_id)
     versions = await authoring_queries.list_versions(db, career_path_id)
-    return [CareerPathVersionRead.model_validate(v) for v in versions]
+    from abridgeai.features.identity.api import public as identity_api
+
+    users = await identity_api.get_users_by_ids(
+        db, [v.updated_by for v in versions if v.published_at is not None and v.updated_by]
+    )
+    return [
+        CareerPathVersionRead.model_validate(
+            {
+                **version.__dict__,
+                "published_by": version.updated_by
+                if version.published_at is not None
+                else None,
+                "published_by_name": users[version.updated_by].display_name
+                if version.updated_by in users
+                else None,
+            }
+        )
+        for version in versions
+    ]
 
 
 async def list_career_path_courses(
-    db: AsyncSession, career_path_id: UUID
+    db: AsyncSession, career_path_id: UUID, *, version_id: UUID | None = None
 ) -> list[CareerPathCourseAuthoring]:
     await _require_path(db, career_path_id)
-    rows = await authoring_queries.list_authoring_career_path_courses(db, career_path_id)
+    if version_id is not None:
+        version = await authoring_queries.get_version(db, version_id)
+        if version is None or version.career_path_id != career_path_id:
+            raise NotFoundError("career_path_version_not_found")
+    rows = await authoring_queries.list_authoring_career_path_courses(
+        db, career_path_id, version_id=version_id
+    )
     return [CareerPathCourseAuthoring.model_validate(row) for row in rows]
 
 
@@ -607,10 +631,16 @@ async def update_path_course(
 
 
 async def list_path_stages(
-    db: AsyncSession, career_path_id: UUID
+    db: AsyncSession, career_path_id: UUID, *, version_id: UUID | None = None
 ) -> list[CareerPathStageAuthoring]:
     await _require_path(db, career_path_id)
-    stages = await authoring_queries.list_path_stages(db, career_path_id)
+    if version_id is not None:
+        version = await authoring_queries.get_version(db, version_id)
+        if version is None or version.career_path_id != career_path_id:
+            raise NotFoundError("career_path_version_not_found")
+    stages = await authoring_queries.list_path_stages(
+        db, career_path_id, version_id=version_id
+    )
     return [await _to_stage_authoring(db, stage) for stage in stages]
 
 

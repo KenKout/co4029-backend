@@ -319,12 +319,15 @@ async def list_career_path_courses(
     career_path_id: UUID,
     current_user: Annotated[CurrentUser, Depends(_REQUIRE_PATH_READ)],
     db: Annotated[AsyncSession, Depends(get_db)],
+    version_id: UUID | None = None,
 ) -> list[CareerPathCourseAuthoring]:
     try:
         await _ensure_caller_in_path_org(
             db, current_user, career_path_id, _PATH_READ_CODES
         )
-        return await authoring_service.list_career_path_courses(db, career_path_id)
+        return await authoring_service.list_career_path_courses(
+            db, career_path_id, version_id=version_id
+        )
     except NotFoundError as exc:
         raise _not_found(str(exc)) from exc
 
@@ -396,12 +399,15 @@ async def list_path_stages(
     career_path_id: UUID,
     current_user: Annotated[CurrentUser, Depends(_REQUIRE_PATH_READ)],
     db: Annotated[AsyncSession, Depends(get_db)],
+    version_id: UUID | None = None,
 ) -> list[CareerPathStageAuthoring]:
     try:
         await _ensure_caller_in_path_org(
             db, current_user, career_path_id, _PATH_READ_CODES
         )
-        return await authoring_service.list_path_stages(db, career_path_id)
+        return await authoring_service.list_path_stages(
+            db, career_path_id, version_id=version_id
+        )
     except NotFoundError as exc:
         raise _not_found(str(exc)) from exc
 

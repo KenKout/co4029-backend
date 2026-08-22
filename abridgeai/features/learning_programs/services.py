@@ -9,6 +9,7 @@ from abridgeai.core.exceptions import ConflictError, ForbiddenError, NotFoundErr
 from abridgeai.core.runtime_settings import resolve_setting
 from abridgeai.features.access_control.api import public as access_control_api
 from abridgeai.features.career_paths.api import public as career_paths_api
+from abridgeai.features.identity.api import public as identity_api
 from abridgeai.features.learning_programs import queries
 from abridgeai.features.learning_programs.models import (
     LearningProgram,
@@ -21,8 +22,10 @@ from abridgeai.features.learning_programs.models import (
 from abridgeai.features.learning_programs.schemas import (
     PathAttemptRead,
     PathChangeRequestRead,
+    ProgramAuthoringOptions,
     ProgramCreate,
     ProgramEnrollmentRead,
+    ProgramOptionRead,
     ProgramPathRead,
     ProgramRead,
     ProgramUpdate,
@@ -63,8 +66,6 @@ async def _require_operator(db: AsyncSession, *, actor_id: UUID, program: Learni
 async def _require_owner_dean(
     db: AsyncSession, *, actor_id: UUID, program: LearningProgram
 ) -> None:
-    if program.owner_faculty_dean_id != actor_id:
-        raise ForbiddenError("owning_faculty_dean_required")
     if not await queries.actor_has_program_role(
         db,
         user_id=actor_id,
@@ -73,23 +74,6 @@ async def _require_owner_dean(
         role_codes=("hod",),
     ):
         raise ForbiddenError("active_faculty_dean_assignment_required")
-
-
-async def _validate_dean(
-    db: AsyncSession,
-    *,
-    dean_id: UUID,
-    organization_id: UUID,
-    faculty_id: UUID,
-) -> None:
-    if not await queries.actor_has_program_role(
-        db,
-        user_id=dean_id,
-        organization_id=organization_id,
-        faculty_id=faculty_id,
-        role_codes=("hod",),
-    ):
-        raise ConflictError("owner_must_be_an_active_faculty_dean_in_program_scope")
 
 
 async def _paths_for_version(db: AsyncSession, version_id: UUID) -> list[ProgramPathRead]:
@@ -105,24 +89,113 @@ async def _program_out(
     version = version or await queries.get_current_version(db, program.id)
     if version is None:
         raise NotFoundError("learning_program_version_not_found")
+    publisher = (
+        await identity_api.get_user_by_id(db, version.updated_by)
+        if version.published_at is not None and version.updated_by is not None
+        else None
+    )
+    version_out = ProgramVersionRead.model_validate(
+        {
+            **version.__dict__,
+            "published_by": version.updated_by if version.published_at is not None else None,
+            "published_by_name": publisher.display_name if publisher is not None else None,
+        }
+    )
     return ProgramRead.model_validate(
         {
             **program.__dict__,
-            "current_version": ProgramVersionRead.model_validate(version),
+            "current_version": version_out,
             "paths": await _paths_for_version(db, version.id),
         }
     )
 
 
+async def get_authoring_options(db: AsyncSession, actor: CurrentUser) -> ProgramAuthoringOptions:
+    primary_org = await access_control_api.get_user_primary_org(db, actor.user_id)
+    if primary_org is None:
+        return ProgramAuthoringOptions()
+    faculties, paths, default_faculty_id = await queries.list_program_authoring_options(
+        db, organization_id=primary_org.id, actor_id=actor.user_id
+    )
+    allowed_faculties = [
+        faculty
+        for faculty in faculties
+        if await queries.actor_has_program_role(
+            db,
+            user_id=actor.user_id,
+            organization_id=primary_org.id,
+            faculty_id=faculty.id,
+            role_codes=("manager", "hod"),
+        )
+    ]
+    if not allowed_faculties:
+        raise ForbiddenError("manager_or_faculty_dean_scope_required")
+    return ProgramAuthoringOptions(
+        faculties=[ProgramOptionRead(id=row.id, name=row.name) for row in allowed_faculties],
+        career_paths=[
+            ProgramOptionRead(id=row.id, name=row.name, slug=row.slug, description=row.description)
+            for row in paths
+        ],
+        default_faculty_id=default_faculty_id,
+    )
+
+
+async def list_program_versions(
+    db: AsyncSession, *, program_id: UUID, actor: CurrentUser
+) -> list[ProgramVersionRead]:
+    program = await queries.get_program(db, program_id)
+    if program is None:
+        raise NotFoundError("learning_program_not_found")
+    await _require_operator(db, actor_id=actor.user_id, program=program)
+    result: list[ProgramVersionRead] = []
+    for version in await queries.list_versions(db, program_id):
+        publisher = (
+            await identity_api.get_user_by_id(db, version.updated_by)
+            if version.published_at is not None and version.updated_by is not None
+            else None
+        )
+        result.append(
+            ProgramVersionRead.model_validate(
+                {
+                    **version.__dict__,
+                    "published_by": version.updated_by
+                    if version.published_at is not None
+                    else None,
+                    "published_by_name": publisher.display_name
+                    if publisher is not None
+                    else None,
+                }
+            )
+        )
+    return result
+
+
+async def get_program_version(
+    db: AsyncSession, *, program_id: UUID, version_id: UUID, actor: CurrentUser
+) -> ProgramRead:
+    program = await queries.get_program(db, program_id)
+    if program is None:
+        raise NotFoundError("learning_program_not_found")
+    await _require_operator(db, actor_id=actor.user_id, program=program)
+    version = await queries.get_version(db, version_id)
+    if version is None or version.learning_program_id != program.id:
+        raise NotFoundError("learning_program_version_not_found")
+    return await _program_out(db, program, version)
+
+
 async def create_program(
     db: AsyncSession, payload: ProgramCreate, actor: CurrentUser
 ) -> ProgramRead:
-    if not await queries.faculty_is_valid(db, payload.faculty_id, payload.organization_id):
+    primary_org = await access_control_api.get_user_primary_org(db, actor.user_id)
+    if primary_org is None:
+        raise ForbiddenError("primary_organization_required")
+    organization_id = primary_org.id
+    if not await queries.faculty_is_valid(db, payload.faculty_id, organization_id):
         raise ConflictError("faculty_must_belong_to_organization")
     probe = LearningProgram(
-        organization_id=payload.organization_id,
+        organization_id=organization_id,
         faculty_id=payload.faculty_id,
-        owner_faculty_dean_id=payload.owner_faculty_dean_id,
+        owner_faculty_dean_id=None,
         slug=payload.slug,
         name=payload.name,
         description=payload.description,
@@ -131,15 +204,9 @@ async def create_program(
         updated_by=actor.user_id,
     )
     await _require_operator(db, actor_id=actor.user_id, program=probe)
-    await _validate_dean(
-        db,
-        dean_id=payload.owner_faculty_dean_id,
-        organization_id=payload.organization_id,
-        faculty_id=payload.faculty_id,
-    )
     resolved = await queries.resolve_published_path_versions(
         db,
-        organization_id=payload.organization_id,
+        organization_id=organization_id,
         career_path_ids=payload.career_path_ids,
     )
     if len(resolved) != len(set(payload.career_path_ids)):
@@ -204,16 +271,10 @@ async def update_program(
     await _require_operator(db, actor_id=actor.user_id, program=program)
     if program.status == "archived":
         raise ConflictError("archived_program_is_immutable")
-    if payload.owner_faculty_dean_id is not None:
-        await _validate_dean(
-            db,
-            dean_id=payload.owner_faculty_dean_id,
-            organization_id=program.organization_id,
-            faculty_id=program.faculty_id,
-        )
-        program.owner_faculty_dean_id = payload.owner_faculty_dean_id
     if payload.name is not None:
         program.name = payload.name
+    if payload.slug is not None:
+        program.slug = payload.slug
     if "description" in payload.model_fields_set:
         program.description = payload.description
     program.updated_by = actor.user_id
@@ -299,14 +360,6 @@ async def publish_program(db: AsyncSession, *, program_id: UUID, actor: CurrentU
     paths = await queries.list_version_paths(db, version.id)
     if not paths:
         raise ConflictError("program_requires_at_least_one_path")
-    if program.owner_faculty_dean_id is None:
-        raise ConflictError("program_requires_an_owner_faculty_dean")
-    await _validate_dean(
-        db,
-        dean_id=program.owner_faculty_dean_id,
-        organization_id=program.organization_id,
-        faculty_id=program.faculty_id,
-    )
     version.status = "published"
     version.published_at = _now()
     version.updated_by = actor.user_id
