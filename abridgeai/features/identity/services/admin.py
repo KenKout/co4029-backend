@@ -28,6 +28,7 @@ from abridgeai.features.identity.schemas import (
     AssignedCourseRead,
     CareerPathProgressRead,
     CourseProgressRead,
+    ProgramProgressRead,
     UserCreate,
     UserListPage,
     UserOverviewRead,
@@ -277,6 +278,9 @@ async def _attach_student_sections(
     from abridgeai.features.career_paths.api import public as career_paths_api
     from abridgeai.features.courses.api import public as courses_api
     from abridgeai.features.enrollments.api import public as enrollments_api
+    from abridgeai.features.learning_programs.api import (  # noqa: PLC0415
+        public as learning_programs_api,
+    )
     from abridgeai.features.progress.api import public as progress_api
 
     active_at: datetime | None = overview.user.last_login_at
@@ -286,8 +290,11 @@ async def _attach_student_sections(
     )
     courses: list[CourseProgressRead] = []
     for enrollment in enrollments:
-        if enrollment.status == "dropped":
-            continue
+        # Dropped enrolments are KEPT. They were skipped, which meant a
+        # student who left a course simply vanished from this page and a
+        # manager had no way to see it ever happened. `enrollment_status`
+        # already distinguishes them and the SPA renders a muted "dropped"
+        # badge, so showing the row costs nothing and restores the history.
         course = await courses_api.get_course_by_id(db, enrollment.course_id)
         if course is None:
             continue
@@ -350,6 +357,14 @@ async def _attach_student_sections(
             )
         )
     overview.career_paths = paths
+
+    # Learning programs sit beside career paths: a program pins a specific
+    # path VERSION, so its progress is measured against what the student was
+    # actually enrolled onto rather than the path's current head.
+    program_rows = await learning_programs_api.list_student_program_enrollments(
+        db, student_id=student_id
+    )
+    overview.programs = [ProgramProgressRead.model_validate(row) for row in program_rows]
     overview.last_active_at = active_at
 
 

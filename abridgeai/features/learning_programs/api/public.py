@@ -23,6 +23,61 @@ register_conflict_mappings(
 )
 
 
+async def list_student_program_enrollments(
+    db: AsyncSession, *, student_id: UUID
+) -> list[dict[str, object]]:
+    """Learning-program enrolments for ``student_id``, projected for display.
+
+    Backs the manager/HOD user-detail "programs" section, the sibling of the
+    career-path section right beside it.
+
+    Returns plain dicts rather than ``ProgramEnrollmentRead`` so the schema
+    stays inside this feature — the same contract
+    ``career_paths.api.public.list_user_career_enrollments`` follows. Each row
+    carries the enrolment, its progress against the pinned path version, and
+    ``attempts``: the path the student picked, plus every path they switched
+    away from. That attempt list IS the enrolment history — a switch is
+    recorded as a new attempt rather than by mutating the old one.
+    """
+    from abridgeai.features.learning_programs import services  # noqa: PLC0415
+
+    rows = await services.list_my_enrollments(db, student_id)
+    out: list[dict[str, object]] = []
+    for row in rows:
+        # `PathAttemptRead` carries only `career_path_id`; the display name
+        # lives on the version's path list, so resolve it here rather than
+        # making the frontend fetch the program to label its own history.
+        names = {p.career_path_id: p.name for p in row.paths}
+        out.append(
+            {
+                "enrollment_id": row.id,
+                "learning_program_id": row.learning_program_id,
+                "program_name": row.program_name,
+                "program_version_no": row.program_version_no,
+                "status": row.status,
+                "enrolled_at": row.enrolled_at,
+                "completed_at": row.completed_at,
+                "withdrawn_at": row.withdrawn_at,
+                "completion_percent": row.current_progress_percent,
+                "completed_courses": row.current_completed_courses,
+                "course_count": row.current_total_courses,
+                "max_path_switches": row.max_path_switches,
+                "approved_switch_count": row.approved_switch_count,
+                "attempts": [
+                    {
+                        "career_path_id": a.career_path_id,
+                        "career_path_name": names.get(a.career_path_id),
+                        "status": a.status,
+                        "selected_at": a.selected_at,
+                        "ended_at": a.ended_at,
+                    }
+                    for a in row.attempts
+                ],
+            }
+        )
+    return out
+
+
 async def complete_program_attempts(
     db: AsyncSession, *, student_id: UUID, career_path_id: UUID
 ) -> int:
@@ -129,6 +184,7 @@ async def grant_active_path_entitlement(
 
 __all__ = [
     "complete_program_attempts",
+    "list_student_program_enrollments",
     "ensure_completion_award",
     "grant_active_path_entitlement",
 ]

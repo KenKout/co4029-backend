@@ -142,6 +142,46 @@ class CareerPathProgressRead(BaseModel):
     completion_percent: float
 
 
+class ProgramPathAttemptRead(BaseModel):
+    """One path a student took inside a learning program.
+
+    A switch is recorded as a NEW attempt rather than by mutating the old
+    one, so the list is the student's path history: what they picked, what
+    they abandoned, and when.
+    """
+
+    career_path_id: UUID
+    career_path_name: str | None = None
+    status: str
+    selected_at: datetime
+    ended_at: datetime | None = None
+
+
+class ProgramProgressRead(BaseModel):
+    """Learning-program enrolment + progress, sibling of the career-path row.
+
+    ``completion_percent`` is measured against the path version PINNED to
+    this enrolment, not the path's current head — which is the whole point
+    of program versioning, and why this cannot be derived from the
+    career-path section beside it.
+    """
+
+    enrollment_id: UUID
+    learning_program_id: UUID
+    program_name: str
+    program_version_no: int
+    status: str
+    enrolled_at: datetime
+    completed_at: datetime | None = None
+    withdrawn_at: datetime | None = None
+    completed_courses: int = 0
+    course_count: int = 0
+    completion_percent: float = 0
+    max_path_switches: int = 0
+    approved_switch_count: int = 0
+    attempts: list[ProgramPathAttemptRead] = Field(default_factory=list)
+
+
 class AssignedCourseRead(BaseModel):
     """A course assigned to a teacher (manager/HOD user-detail page)."""
 
@@ -167,5 +207,6 @@ class UserOverviewRead(BaseModel):
     user: UserRead
     courses: list[CourseProgressRead] = Field(default_factory=list)
     career_paths: list[CareerPathProgressRead] = Field(default_factory=list)
+    programs: list[ProgramProgressRead] = Field(default_factory=list)
     assigned_courses: list[AssignedCourseRead] = Field(default_factory=list)
     last_active_at: datetime | None = None
