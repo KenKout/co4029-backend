@@ -85,18 +85,30 @@ async def list_instructors_for_courses(
 ) -> dict[UUID, dict[str, Any]]:
     """Batch instructor blocks for authoring list endpoints (drafts included).
 
-    Mirrors the public :func:`~abridgeai.features.courses.queries.published.
-    get_course_instructor` composition but (a) runs over MANY course ids in
-    one join (no N+1) and (b) drops the ``published_course_clause()`` filter
-    — the manager/dept worklist needs the owner on draft rows too, since
-    "no owner profile" is exactly the signal that turns a row into an
-    "Unassigned" work item.
+    The instructor is the teacher actually holding
+    ``course_role='course_instructor'`` on the course — NOT
+    ``Course.owner_user_id``.
 
-    Returns ``{course_id: {user_id, display_name, primary_email, headline,
-    avatar_bucket, avatar_object_key}}`` for courses whose owner has a
-    ``user_profiles`` row; courses with no owner profile are absent (caller
-    leaves ``instructor=None``). The service layer mints the presigned
-    ``avatar_url`` from the bucket/key — this query stays DB-only.
+    This used to join the owner, which made the manager worklist wrong in
+    both directions. Ownership records who CREATED the row and is never
+    reassigned (``assign_teacher_to_course`` writes a
+    ``user_role_assignments`` row and leaves ``owner_user_id`` alone), so a
+    course a manager created showed the MANAGER under "Instructor" — before
+    any teacher existed, and still after one was assigned. It also silently
+    broke the "Needs teacher" worklist filter, which keys off
+    ``instructor is None``: every manager-created course has an owner with a
+    profile, so the unstaffed courses the filter exists to surface never
+    appeared in it.
+
+    Courses with no active Course Instructor are absent from the result and
+    the caller leaves ``instructor=None`` → the SPA's "Unassigned" chip,
+    which is now the truth rather than a proxy for "the creator has no
+    profile row".
+
+    Runs over MANY course ids in one join (no N+1) and applies no
+    published-course filter — the worklist needs drafts. The service layer
+    mints the presigned ``avatar_url`` from the bucket/key; this query stays
+    DB-only.
     """
     if not course_ids:
         return {}
@@ -111,10 +123,20 @@ async def list_instructors_for_courses(
             StorageObject.bucket.label("avatar_bucket"),
             StorageObject.object_key.label("avatar_object_key"),
         )
-        .join(User, User.id == Course.owner_user_id)
+        .join(UserRoleAssignment, UserRoleAssignment.course_id == Course.id)
+        .join(Role, Role.id == UserRoleAssignment.role_id)
+        .join(User, User.id == UserRoleAssignment.user_id)
         .outerjoin(UserProfile, UserProfile.user_id == User.id)
         .outerjoin(StorageObject, StorageObject.id == UserProfile.avatar_object_id)
-        .where(Course.id.in_(course_ids))
+        .where(
+            Course.id.in_(course_ids),
+            UserRoleAssignment.course_role == "course_instructor",
+            UserRoleAssignment.scope_kind == "course",
+            Role.code == "teacher",
+            UserRoleAssignment.deleted_at.is_(None),
+            (UserRoleAssignment.active_until.is_(None))
+            | (UserRoleAssignment.active_until > func.now()),
+        )
     )
     result: dict[UUID, dict[str, Any]] = {}
     for row in (await db.execute(stmt)).all():
