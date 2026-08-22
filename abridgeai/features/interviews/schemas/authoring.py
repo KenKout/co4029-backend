@@ -458,6 +458,13 @@ class InterviewGenerationRequest(BaseModel):
     # focus a run on specific criteria. Flows into ``config_json`` via the
     # router's ``model_dump`` — the pipeline reads it back from there.
     target_outcome_ids: list[UUID] = []
+    # Role-conditioned variant generation (Slice 21). ``None`` keeps the
+    # legacy mixed type-mix; ``all_angles`` multiplies each logical question
+    # into one variant per interviewer angle; ``role_only`` pins every
+    # question to the config role's preferred type. Flows into
+    # ``config_json`` verbatim via the service's ``model_dump`` — the
+    # generation pipeline reads it back from there.
+    variant_strategy: Literal["all_angles", "role_only"] | None = None
 
 
 class InterviewGenerationRunPublic(BaseModel):
