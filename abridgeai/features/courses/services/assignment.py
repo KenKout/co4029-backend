@@ -504,8 +504,21 @@ async def _attach_health_projections(
 
 
 async def list_courses_in_dept(db: AsyncSession, org_unit_id: UUID) -> list[CourseAuthoring]:
-    """HOD overview — all courses scoped to ``org_unit_id``."""
-    courses = await authoring_queries.list_courses_in_org_unit(db, org_unit_id)
+    """All courses in ``org_unit_id`` **and every unit below it**.
+
+    Serves both the HOD's default list and the manager's "filter by node"
+    picker, which is why it expands the subtree: standing on a faculty and
+    seeing none of its departments' courses would make the org tree useless
+    as a filter, and it is also what the permission engine already grants
+    (see :func:`access_control.api.public.get_org_unit_subtree_ids`).
+    """
+    # Lazy import, matching the sibling helpers in this module: a
+    # module-level courses.services -> access_control edge would be a new
+    # import-time cross-feature dependency.
+    from abridgeai.features.access_control.api import public as access_api  # noqa: PLC0415
+
+    unit_ids = await access_api.get_org_unit_subtree_ids(db, org_unit_id)
+    courses = await authoring_queries.list_courses_in_org_units(db, unit_ids)
     dtos = [CourseAuthoring.model_validate(course) for course in courses]
     await _attach_health_projections(db, courses, dtos)
     return dtos

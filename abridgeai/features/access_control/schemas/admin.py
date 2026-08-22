@@ -223,6 +223,32 @@ class OrgUnitPatch(BaseModel):
     code: str | None = Field(default=None, max_length=50)
 
 
+class OrgUnitNode(_ORM):
+    """One node of the nested org tree returned by ``GET .../units/tree``.
+
+    Same columns as :class:`OrgUnitRead` plus the two the tree UI needs and
+    a flat list cannot supply:
+
+    ``children``
+        Populated depth-first by the service; siblings sorted by name.
+    ``descendant_count``
+        Total units BELOW this one. Drives the "deleting this also deletes
+        N sub-units" confirmation — the delete cascades down the subtree,
+        so the count has to be visible before the click.
+    """
+
+    id: UUID
+    organization_id: UUID
+    parent_unit_id: UUID | None = None
+    unit_type: str
+    name: str
+    code: str | None = None
+    created_at: datetime
+    updated_at: datetime
+    children: list[OrgUnitNode] = Field(default_factory=list)
+    descendant_count: int = 0
+
+
 class OrgUnitRead(_ORM):
     """Standalone org-unit row (different from the cross-feature
     :class:`abridgeai.features.access_control.api._dto.OrgUnitDTO` which

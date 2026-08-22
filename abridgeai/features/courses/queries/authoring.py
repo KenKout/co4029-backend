@@ -729,9 +729,27 @@ async def list_courses_assigned_to_teacher(
     return list((await db.execute(stmt)).scalars().all())
 
 
-async def list_courses_in_org_unit(db: AsyncSession, org_unit_id: UUID) -> list[Course]:
+async def list_courses_in_org_units(db: AsyncSession, org_unit_ids: Sequence[UUID]) -> list[Course]:
+    """Courses attached to ANY of ``org_unit_ids``, newest first.
+
+    Takes a set of units rather than one because the caller expands a unit
+    into its subtree first: a faculty's course list has to include the
+    departments underneath it, which is what the permission engine already
+    assumes (``org_unit_tree.sql`` lets an HOD at a faculty manage a course
+    in a child department). Matching on one unit id made the list disagree
+    with the permissions — courses the HOD could open never appeared in the
+    list they opened them from.
+
+    An empty ``org_unit_ids`` returns no rows, NOT every course: the caller
+    passes empty only when the unit was missing or deleted, and widening
+    that to "all courses" would leak the whole org.
+    """
+    if not org_unit_ids:
+        return []
     stmt = (
-        select(Course).where(Course.org_unit_id == org_unit_id).order_by(Course.created_at.desc())
+        select(Course)
+        .where(Course.org_unit_id.in_(list(org_unit_ids)))
+        .order_by(Course.created_at.desc())
     )
     return list((await db.execute(stmt)).scalars().all())
 
@@ -1353,7 +1371,7 @@ __all__ = [
     "list_course_roster_with_progress",
     "list_courses_assigned_to_teacher",
     "list_courses_for_owner",
-    "list_courses_in_org_unit",
+    "list_courses_in_org_units",
     "list_lessons_for_authoring",
     "list_module_items",
     "list_module_prerequisites",

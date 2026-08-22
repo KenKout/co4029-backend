@@ -77,7 +77,18 @@ async def read_me(
     full ``get_current_user`` MFA gate.
     """
     user = await _load_user(db, current_user)
-    return await get_current_user_read(db, user)
+    read = await get_current_user_read(db, user)
+    # Populate the primary organization. `UserRead` has carried these two
+    # fields for the admin user-list all along, but only the search service
+    # filled them, so /users/me answered with organization_id=None. Anything
+    # org-scoped in the SPA (the org-unit tree, and the scope filters built on
+    # it) then had no way to learn which organization the caller belongs to
+    # without an admin-only lookup. Cheap: one membership read per /me.
+    org = await access_control_api.get_user_primary_org(db, current_user.user_id)
+    if org is not None:
+        read.organization_id = org.id
+        read.organization_name = org.name
+    return read
 
 
 @router.patch("/profile", response_model=UserRead)

@@ -337,6 +337,45 @@ async def list_units_for_organization(
     return list(result.scalars().all())
 
 
+async def list_descendant_unit_ids(
+    db: AsyncSession, unit_id: UUID, *, include_self: bool = True
+) -> list[UUID]:
+    """Every live org unit at or below ``unit_id``, via a recursive CTE.
+
+    The mirror image of ``queries/sql/org_unit_tree.sql``, which walks UP
+    from a course to its ancestor units for the permission check. Scope
+    FILTERING needs the opposite direction: "a manager standing on the
+    Faculty of Engineering wants everything in it, including every
+    department underneath".
+
+    ``UNION`` (not ``UNION ALL``) is what makes this terminate if the
+    parent chain ever contains a cycle — the same defence the ancestor
+    walk relies on. :func:`services.organizations.patch_unit` now refuses
+    to create one, but this query predates any guarantee that every row
+    already in the table is acyclic, and an infinite recursion here would
+    hang a request rather than return a wrong answer.
+
+    Soft-deleted units are excluded at every level, so deleting a mid-tree
+    unit detaches its subtree from scope queries rather than leaving the
+    descendants silently reachable.
+    """
+    roots = (
+        select(OrgUnit.id)
+        .where(OrgUnit.id == unit_id, OrgUnit.deleted_at.is_(None))
+        .cte("unit_subtree", recursive=True)
+    )
+    descendants = select(OrgUnit.id).join(roots, OrgUnit.parent_unit_id == roots.c.id).where(
+        OrgUnit.deleted_at.is_(None)
+    )
+    subtree = roots.union(descendants)
+
+    rows = (await db.execute(select(subtree.c.id))).scalars().all()
+    ids = [UUID(str(r)) for r in rows]
+    if not include_self:
+        ids = [i for i in ids if i != unit_id]
+    return ids
+
+
 async def get_unit(db: AsyncSession, unit_id: UUID) -> OrgUnit | None:
     return await db.get(OrgUnit, unit_id)
 

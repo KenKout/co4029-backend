@@ -36,6 +36,7 @@ from abridgeai.features.access_control.schemas.admin import (
     OrganizationDomainPatch,
     OrganizationPatch,
     OrgUnitCreate,
+    OrgUnitNode,
     OrgUnitPatch,
 )
 
@@ -312,6 +313,50 @@ async def list_units(
     )
 
 
+async def list_unit_tree(db: AsyncSession, organization_id: UUID) -> list[OrgUnitNode]:
+    """The org's units as a nested tree, in ONE query.
+
+    Every unit in the org is fetched flat and assembled in memory rather
+    than walked level by level — the tree UI needs the whole thing to
+    render expand/collapse, and a per-level fetch would be a round-trip
+    per expanded node.
+
+    ``descendant_count`` rides along because the destructive actions need
+    it: deleting a unit takes its whole subtree with it
+    (``soft_delete_cascade`` follows ``OrgUnit.children``), so the confirm
+    dialog has to be able to say how many units that is BEFORE the click,
+    not after.
+
+    A unit whose ``parent_unit_id`` points at a row that is missing or
+    soft-deleted is surfaced as a ROOT rather than dropped. Losing a
+    department from the manager's tree because its faculty was deleted
+    would hide real courses and real people; showing it at top level is
+    visibly odd, which is the point.
+    """
+    rows = await org_queries.list_units_for_organization(db, organization_id)
+    nodes: dict[UUID, OrgUnitNode] = {
+        row.id: OrgUnitNode.model_validate(row, from_attributes=True) for row in rows
+    }
+    roots: list[OrgUnitNode] = []
+    for row in rows:
+        node = nodes[row.id]
+        parent = nodes.get(row.parent_unit_id) if row.parent_unit_id else None
+        if parent is None:
+            roots.append(node)
+        else:
+            parent.children.append(node)
+
+    def _count(node: OrgUnitNode) -> int:
+        node.descendant_count = sum(1 + _count(child) for child in node.children)
+        node.children.sort(key=lambda n: n.name.casefold())
+        return node.descendant_count
+
+    for root in roots:
+        _count(root)
+    roots.sort(key=lambda n: n.name.casefold())
+    return roots
+
+
 async def get_unit(db: AsyncSession, unit_id: UUID) -> OrgUnit:
     row = await org_queries.get_unit(db, unit_id)
     if row is None or row.deleted_at is not None:
@@ -356,6 +401,19 @@ async def patch_unit(
             raise AppError("parent_unit_id does not exist or is deleted")
         if parent.organization_id != current.organization_id:
             raise AppError("parent_unit_id belongs to a different organization")
+        # Reject re-parenting a unit under its OWN descendant. The self-check
+        # above only catches the one-hop case (A -> A); moving Faculty under
+        # one of its departments detaches the whole branch into a ring that
+        # no longer reaches a root. Nothing downstream survives that: the
+        # ancestor walk in org_unit_tree.sql stops being able to decide
+        # whether a course is in an HOD's scope, and the tree UI has no node
+        # to render it under.
+        descendants = await org_queries.list_descendant_unit_ids(db, unit_id)
+        if fields["parent_unit_id"] in descendants:
+            raise AppError(
+                "parent_unit_id would create a cycle: the chosen parent is "
+                "inside this unit's own subtree"
+            )
     updated = await org_queries.update_unit(db, unit_id, fields=fields)
     if updated is None:
         raise NotFoundError("Org unit not found")

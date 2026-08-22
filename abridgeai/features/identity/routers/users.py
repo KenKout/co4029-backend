@@ -111,6 +111,7 @@ async def search_users(
     user_status: Annotated[str | None, Query(alias="status")] = None,
     role: Annotated[str | None, Query(max_length=50)] = None,
     organization: Annotated[UUID | None, Query()] = None,
+    org_unit: Annotated[UUID | None, Query()] = None,
     sort: Annotated[str | None, Query()] = None,
     sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
     page: Annotated[int, Query(ge=0)] = 0,
@@ -120,7 +121,8 @@ async def search_users(
     display name), optional ``status`` / ``role`` / ``organization`` filters,
     and whitelisted sort (``email`` / ``status`` / ``created_at``). ``role``
     filters to users holding that role code at any scope; ``organization``
-    filters to members of that org.
+    filters to members of that org; ``org_unit`` narrows to one org-unit
+    **and every unit beneath it**, backing the org-tree scope picker.
 
     Org scope: callers holding ``system.administer`` may search globally and
     pick any ``organization``. Everyone else (e.g. a manager with
@@ -147,6 +149,11 @@ async def search_users(
         search=search,
         role=role,
         organization=organization,
+        # Unlike `organization`, this is NOT overridden for non-admins: the
+        # org filter above already pins the caller to their own org, and the
+        # unit filter can only narrow further within it. A unit id from
+        # another org intersects to the empty set rather than leaking.
+        org_unit=org_unit,
         sort=sort,
         sort_dir=sort_dir,
         page=page,

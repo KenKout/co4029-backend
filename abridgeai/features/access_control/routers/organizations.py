@@ -41,6 +41,7 @@ from abridgeai.features.access_control.schemas.admin import (
     OrganizationPatch,
     OrganizationRead,
     OrgUnitCreate,
+    OrgUnitNode,
     OrgUnitPatch,
     OrgUnitRead,
 )
@@ -428,6 +429,38 @@ async def list_units_endpoint(
     except NotFoundError as exc:
         raise _not_found(str(exc)) from exc
     return [OrgUnitRead.model_validate(r) for r in rows]
+
+
+@router.get(
+    "/admin/organizations/{org_id}/units/tree",
+    response_model=list[OrgUnitNode],
+)
+async def list_unit_tree_endpoint(
+    org_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_ORG_MANAGE)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> list[OrgUnitNode]:
+    """The organization's units as a nested tree (roots first).
+
+    Registered BEFORE ``/units`` is irrelevant here (different suffix), but
+    it must stay above ``/admin/org-units/{unit_id}`` in file order for the
+    same reason the courses router orders its literal paths first.
+
+    Same permission gate as the flat list — ``org_unit.manage`` — so the
+    manager surface reaches it without ``system.administer``.
+    """
+    await require_org_access(
+        db,
+        current_user,
+        org_id,
+        resource="organization",
+        resource_id=org_id,
+        permissions=_ORG_MANAGE_CODES,
+    )
+    try:
+        return await org_service.list_unit_tree(db, org_id)
+    except NotFoundError as exc:
+        raise _not_found(str(exc)) from exc
 
 
 @router.post(

@@ -40,6 +40,7 @@ from abridgeai.features.access_control.policies import (
     require_org_unit_permission,
     require_permission,
 )
+from abridgeai.features.access_control.queries import organizations as org_queries
 
 # Recursive CTE — the cleanest expression of the ancestor walk is the raw
 # SQL form. SQLAlchemy supports recursive CTEs via Query.cte(recursive=True)
@@ -170,6 +171,22 @@ async def get_org_unit_ancestors(db: AsyncSession, org_unit_id: UUID) -> list[Or
     """
     rows = (await db.execute(_ORG_UNIT_ANCESTORS_SQL, {"org_unit_id": org_unit_id})).mappings()
     return [OrgUnitDTO.model_validate(dict(row)) for row in rows]
+
+
+async def get_org_unit_subtree_ids(db: AsyncSession, org_unit_id: UUID) -> list[UUID]:
+    """``org_unit_id`` plus every live unit BELOW it.
+
+    The descending counterpart to :func:`get_org_unit_ancestors`. Scope
+    filtering ("show me everything in this faculty") needs the subtree;
+    permission checks ("is this course inside the HOD's unit?") need the
+    ancestor chain. Both directions now have a blessed cross-feature entry
+    point, so callers stop re-implementing the walk.
+
+    Returns ``[]`` when the unit is missing or soft-deleted — callers
+    should treat that as "no scope", not "no filter", or a deleted unit
+    would silently widen a list to the whole organization.
+    """
+    return await org_queries.list_descendant_unit_ids(db, org_unit_id)
 
 
 async def get_user_primary_org(db: AsyncSession, user_id: UUID) -> OrgDTO | None:
@@ -436,7 +453,36 @@ async def list_user_ids_in_org(db: AsyncSession, org_id: UUID) -> list[UUID]:
     return list((await db.execute(stmt)).scalars().all())
 
 
+async def list_user_ids_in_org_unit(db: AsyncSession, org_unit_id: UUID) -> list[UUID]:
+    """User ids whose active membership sits in ``org_unit_id`` or below it.
+
+    The people-side twin of the course scope filter: picking a faculty in
+    the org tree has to include everyone in its departments, not just the
+    handful of memberships pinned to the faculty row itself.
+
+    Returns ``[]`` for a missing or deleted unit — the caller intersects
+    this into an allowlist, so an empty result correctly narrows to nobody
+    rather than silently disabling the filter.
+    """
+    unit_ids = await get_org_unit_subtree_ids(db, org_unit_id)
+    if not unit_ids:
+        return []
+    om = OrganizationMembership
+    stmt = (
+        select(om.user_id)
+        .where(
+            om.org_unit_id.in_(unit_ids),
+            om.status == "active",
+            om.deleted_at.is_(None),
+        )
+        .distinct()
+    )
+    return list((await db.execute(stmt)).scalars().all())
+
+
 __all__ = [
+    "get_org_unit_subtree_ids",
+    "list_user_ids_in_org_unit",
     "OrgDTO",
     "OrgUnitDTO",
     "PermissionDTO",

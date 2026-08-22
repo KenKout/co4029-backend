@@ -146,6 +146,7 @@ async def search_users(
     search: str | None = None,
     role: str | None = None,
     organization: UUID | None = None,
+    org_unit: UUID | None = None,
     sort: str | None = None,
     sort_dir: str = "asc",
     page: int = 0,
@@ -167,6 +168,14 @@ async def search_users(
     if organization:
         restrict_sets.append(
             set(await access_control_api.list_user_ids_in_org(db, organization))
+        )
+    if org_unit:
+        # Narrows to the unit's whole subtree, so selecting a faculty in the
+        # org tree lists its departments' people too. Intersects with the
+        # org filter above rather than replacing it — a unit id is only ever
+        # meaningful inside its own organization.
+        restrict_sets.append(
+            set(await access_control_api.list_user_ids_in_org_unit(db, org_unit))
         )
 
     restrict_ids: list[UUID] | None = None
