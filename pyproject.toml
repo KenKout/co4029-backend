@@ -50,9 +50,12 @@ interview-agent = [
     "livekit-agents>=1.6,<2",
     "livekit-plugins-openai>=1.6,<2",
     "livekit-plugins-silero>=1.6,<2",
-    # Deepgram STT (nova-2) + Aura-2 TTS for English voice interviews; Vietnamese
-    # falls back to the OpenAI-compatible gateway (Deepgram has no VI locale).
+    # Deepgram STT (Flux v2 for EN realtime, nova-3 elsewhere incl. VI) +
+    # Aura-2 TTS for English voice interviews. Vietnamese TTS is Cartesia
+    # sonic-3 (multilingual); without a Cartesia key, VI falls back to the
+    # OpenAI-compatible gateway.
     "livekit-plugins-deepgram>=1.6,<2",
+    "livekit-plugins-cartesia>=1.6,<2",
 ]
 dev = [
     "pytest>=8.3",

@@ -198,9 +198,15 @@ class Settings(BaseSettings):
     # serve an STT model named by whisper_model).
     audio_stt_provider: Literal["deepgram", "whisper_api"] = "whisper_api"
     # Deepgram STT model + endpoint (used when audio_stt_provider=deepgram).
-    # nova-2 handles EN and VI; detect_language picks per-file at runtime.
-    deepgram_stt_model: str = "nova-2"
+    # nova-3 handles EN and VI; detect_language picks per-file at runtime.
+    deepgram_stt_model: str = "nova-3"
     deepgram_stt_base_url: str = "https://api.deepgram.com/v1"
+    # Realtime English STT rides the v2 /listen API (Deepgram Flux), whose
+    # built-in end-of-turn detection drives turn_handling turn_detection="stt".
+    # Unlike the v1 pair above, the plugin takes the FULL websocket endpoint
+    # here (host + path) because v2 has no per-operation suffix convention.
+    deepgram_stt_v2_model: str = "flux-general-en"
+    deepgram_stt_v2_base_url: str = "wss://api.deepgram.com/v2/listen"
     image_ocr_provider: Literal["tesseract", "llm_vision"] = "tesseract"
     # Tesseract language(s) for image/frame OCR. '+'-joined traineddata names
     # (e.g. "eng+vie" for the bilingual EN/VI corpus). Each must be installed
@@ -266,6 +272,11 @@ class Settings(BaseSettings):
     # identical to the OpenAI-compatible gateway).
     deepgram_tts_encoding: str = "mp3"
     deepgram_tts_timeout_seconds: float = 30.0
+    # Vietnamese voice: Cartesia sonic-3 (multilingual; Aura-2 is English-only).
+    # Without a key the VI session falls back to the OpenAI-compatible gateway.
+    cartesia_api_key: SecretStr | None = None
+    cartesia_tts_model: str = "sonic-3"
+    cartesia_tts_voice_vi: str = "0e58d60a-2f1a-4252-81bd-3db6af45fb41"
 
     # Question-bank duplicate detection (two-stage: pgvector shortlist -> LLM
     # same-or-different verdict). OFF by default: it adds one embedding call plus

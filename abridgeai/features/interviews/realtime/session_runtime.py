@@ -547,9 +547,10 @@ class InterviewAgent(Agent):
 def _is_english(language: str) -> bool:
     """True when the session language is English (the only Deepgram voice locale).
 
-    Deepgram Aura TTS is English-only and Deepgram STT (nova-2/3) does not list
-    Vietnamese, so VI sessions must fall back to the OpenAI-compatible gateway.
-    This mirrors the REST narration policy in ``services/narration.py``.
+    Deepgram Aura TTS is English-only, so VI sessions must fall back to the
+    OpenAI-compatible gateway for voice (nova-3 serves VI for STT, but this
+    routed path predates that and keeps its historical split). This mirrors
+    the REST narration policy in ``services/narration.py``.
     """
     return not language.lower().startswith("vi")
 
@@ -579,7 +580,7 @@ def build_agent_session(
 
     Voice provider is chosen by session language:
 
-    * **English** → Deepgram (STT ``nova-2``/configured model + Aura-2 TTS).
+    * **English** → Deepgram (STT ``nova-3``/configured model + Aura-2 TTS).
       Deepgram gives lower-latency streaming STT and natural Aura voices.
     * **Vietnamese** (or any non-English) → the OpenAI-compatible gateway,
       because Deepgram Aura TTS is English-only and Deepgram STT does not

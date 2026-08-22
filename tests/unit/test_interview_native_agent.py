@@ -552,22 +552,75 @@ async def test_on_enter_stays_silent_when_no_question_is_pending(
 # ── the session really has an LLM ────────────────────────────────────────────
 
 
-async def test_native_session_is_built_with_an_llm() -> None:
+async def test_native_session_is_built_with_an_llm(monkeypatch: pytest.MonkeyPatch) -> None:
     """Constructed for real, in an async context.
 
     ``AgentSession`` needs a running event loop, so this cannot be a sync test —
     a sync ``asyncio.get_event_loop()`` raises. Vietnamese is used because that
-    branch reaches the OpenAI-compatible gateway, which accepts ``NOT_GIVEN``
-    credentials; the English branch would need a live Deepgram key to construct.
+    branch reaches the OpenAI-compatible TTS gateway, which accepts
+    ``NOT_GIVEN`` credentials; the Deepgram STT on that branch only needs a
+    non-empty key to CONSTRUCT (no network until a stream opens), so a fake
+    key is injected for environments without a real one (CI).
     """
+    from pydantic import SecretStr
+
     from abridgeai.core.config import get_settings
     from abridgeai.features.interviews.realtime.agent_session import build_native_session
 
+    settings = get_settings()
+    if not settings.deepgram_api_key:
+        monkeypatch.setattr(settings, "deepgram_api_key", SecretStr("unit-test"))
+
     setup = _setup()
-    session = build_native_session(get_settings(), setup.userdata, language="vi")
+    session = build_native_session(settings, setup.userdata, language="vi")
     try:
         assert session.llm is not None, "the native session lost its LLM; it is no longer multiturn"
         assert session.userdata is setup.userdata
+    finally:
+        await session.aclose()
+
+
+async def test_vietnamese_tts_is_cartesia_when_keyed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With a Cartesia key the VI voice is sonic-3, not the gateway whisper."""
+    from livekit.plugins import cartesia as cartesia_plugin
+    from pydantic import SecretStr
+
+    from abridgeai.core.config import get_settings
+    from abridgeai.features.interviews.realtime.agent_session import build_native_session
+
+    settings = get_settings()
+    monkeypatch.setattr(settings, "deepgram_api_key", SecretStr("unit-test"))
+    monkeypatch.setattr(settings, "cartesia_api_key", SecretStr("unit-test"))
+
+    setup = _setup()
+    session = build_native_session(settings, setup.userdata, language="vi")
+    try:
+        assert isinstance(session.tts, cartesia_plugin.TTS)
+        assert session.tts._opts.language == "vi"
+        assert session.tts._opts.voice == settings.cartesia_tts_voice_vi
+    finally:
+        await session.aclose()
+
+
+async def test_vietnamese_tts_falls_back_without_cartesia_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No Cartesia key => the VI session keeps the OpenAI-compatible gateway
+    voice, so a keyless deployment (CI, local) still constructs."""
+    from livekit.plugins import openai as openai_plugin
+    from pydantic import SecretStr
+
+    from abridgeai.core.config import get_settings
+    from abridgeai.features.interviews.realtime.agent_session import build_native_session
+
+    settings = get_settings()
+    monkeypatch.setattr(settings, "deepgram_api_key", SecretStr("unit-test"))
+    monkeypatch.setattr(settings, "cartesia_api_key", None)
+
+    setup = _setup()
+    session = build_native_session(settings, setup.userdata, language="vi")
+    try:
+        assert isinstance(session.tts, openai_plugin.TTS)
     finally:
         await session.aclose()
 
@@ -1134,9 +1187,7 @@ async def test_end_refusal_injects_a_user_role_todo_note() -> None:
     async def _update_ctx(chat_ctx: ChatContext, **_kw: Any) -> None:
         updates.append(chat_ctx)
 
-    fake_agent = SimpleNamespace(
-        chat_ctx=agent.chat_ctx, update_chat_ctx=_update_ctx
-    )
+    fake_agent = SimpleNamespace(chat_ctx=agent.chat_ctx, update_chat_ctx=_update_ctx)
     ctx = SimpleNamespace(
         userdata=setup.userdata,
         session=SimpleNamespace(current_agent=fake_agent),
@@ -1174,20 +1225,23 @@ async def test_end_refusal_note_never_blocks_the_refusal_itself() -> None:
         await agent.interview_end_interview(ctx)
 
 
-# ── native turn handling: semantic detector for English, VAD for Vietnamese ───
+# ── native turn handling: STT end-of-turn for English, VAD for Vietnamese ─────
 
 
-def test_native_turn_handling_enables_the_semantic_detector_for_english() -> None:
+def test_native_turn_handling_uses_stt_end_of_turn_for_english() -> None:
+    """Flux ships its own phrase-endpointing model; the session must commit
+    turns on the STT's end-of-turn signal instead of a separate detector."""
     from abridgeai.features.interviews.realtime.agent_session import _native_turn_handling
 
     options = _native_turn_handling("en")
-    assert "turn_detection" in options, "English sessions must get the semantic detector"
+    assert options.get("turn_detection") == "stt"
     assert "endpointing" in options, "endpointing bounds are shared with the routed path"
 
 
 def test_native_turn_handling_keeps_vad_for_vietnamese() -> None:
-    """The detector's thresholds are English-tuned; a wrong verdict would
-    truncate a Vietnamese answer mid-sentence — worse than the VAD default."""
+    """Flux is English-only and the semantic thresholds are English-tuned; a
+    wrong verdict would truncate a Vietnamese answer mid-sentence — worse than
+    the VAD default."""
     from abridgeai.features.interviews.realtime.agent_session import _native_turn_handling
 
     options = _native_turn_handling("vi")
@@ -1244,9 +1298,7 @@ async def test_fold_turn_after_an_advance_injects_the_new_question_directive(
     )
     try:
         agent = fake_session.started_with["agent"]
-        monkeypatch.setattr(
-            type(agent), "update_chat_ctx", _update_ctx, raising=False
-        )
+        monkeypatch.setattr(type(agent), "update_chat_ctx", _update_ctx, raising=False)
         # Not a property on the instance: attach a stub readable chat_ctx.
         agent.__dict__.setdefault("chat_ctx", agent.chat_ctx)
 
@@ -1330,7 +1382,11 @@ async def test_advance_directive_replaces_the_previous_one(
         await agent.fold_turn(answer_text="A covering index covers the query.")
 
         directives = [
-            [item for item in ctx.items if item.text_content and "ALREADY moved" in item.text_content]
+            [
+                item
+                for item in ctx.items
+                if item.text_content and "ALREADY moved" in item.text_content
+            ]
             for ctx in updates
         ]
         last = directives[-1]

@@ -23,10 +23,9 @@ from livekit.agents import (
     RoomInputOptions,
     RoomOutputOptions,
     TurnHandlingOptions,
-    inference,
 )
 from livekit.agents.voice.room_io.types import TextInputCallback
-from livekit.plugins import deepgram, openai, silero
+from livekit.plugins import cartesia, deepgram, openai, silero
 
 from abridgeai.features.interviews.orchestrator import tools as gate
 from abridgeai.features.interviews.realtime.agent_userdata import InterviewUserdata
@@ -124,26 +123,25 @@ def _sdk_default_text_input_cb() -> TextInputCallback:
 def _native_turn_handling(language: str) -> TurnHandlingOptions:
     """Turn-taking for the native session, language-aware.
 
-    English (and any locale the detector serves): the semantic turn detector.
-    VAD endpointing cannot tell a finished answer from a mid-thought pause, so
-    a candidate who thinks before speaking gets cut off — or holds the floor
-    through dead air while the agent waits out the max delay. The detector
-    classifies the transcript tail (end / unlikely end / backchannel) and hands
-    over only on a real finish. Cloud credentials are already in the worker
-    env, so the SDK resolves to the hosted model; without them it falls back to
-    the local v1-mini in-process.
+    English: end-of-turn comes from the STT itself (``turn_detection="stt"``).
+    Deepgram Flux ships a phrase-endpointing model that reads both acoustic and
+    semantic cues, replacing the separate semantic turn detector — one fewer
+    cloud dependency, and the verdict is computed by the same model that heard
+    the words. The bundled VAD still handles interruption detection, so a cough
+    stays a cough.
 
-    Vietnamese: the detector's thresholds are English-tuned, and a wrong
-    "unlikely end" verdict would truncate a Vietnamese answer mid-sentence —
-    worse than the VAD default it replaced. Vietnamese sessions keep VAD
-    endpointing with the same dynamic bounds the routed path uses.
+    Vietnamese: Flux is English-only, and the semantic detector's thresholds
+    are English-tuned — a wrong "unlikely end" verdict would truncate a
+    Vietnamese answer mid-sentence, worse than the VAD default it replaced.
+    Vietnamese sessions keep VAD endpointing with the same dynamic bounds the
+    routed path uses.
 
     Endpointing bounds are shared with the routed path either way so the two
-    runtimes cannot drift on pacing while the turn detector rolls out.
+    runtimes cannot drift on pacing while the STT turn detection rolls out.
     """
     options = turn_handling_options()
     if not language.startswith("vi"):
-        options["turn_detection"] = inference.TurnDetector()
+        options["turn_detection"] = "stt"
     return options
 
 
@@ -168,30 +166,50 @@ def build_native_session(
         base_url=base_url,
     )
 
+    dg_key = settings.deepgram_api_key.get_secret_value() if settings.deepgram_api_key else ""
     if language.startswith("vi"):
-        # Deepgram serves no Vietnamese locale; the OpenAI-compatible gateway does
-        # both STT and TTS for it. Same asymmetry the routed path already handles.
-        return AgentSession[InterviewUserdata](
-            userdata=userdata,
-            stt=openai.STT(model=settings.whisper_model, api_key=api_key, base_url=base_url),
-            llm=llm,
-            tts=openai.TTS(
+        # Flux (v2) is English-only, but nova-3 serves Vietnamese STT. TTS:
+        # Cartesia sonic-3 is the multilingual voice (Aura-2 is English-only);
+        # with no Cartesia key the session keeps the OpenAI-compatible gateway
+        # voice it has always had.
+        vi_tts: openai.TTS | cartesia.TTS
+        if settings.cartesia_api_key:
+            vi_tts = cartesia.TTS(
+                model=settings.cartesia_tts_model,
+                voice=settings.cartesia_tts_voice_vi,
+                language="vi",
+                api_key=settings.cartesia_api_key.get_secret_value(),
+            )
+        else:
+            vi_tts = openai.TTS(
                 api_key=api_key,
                 base_url=base_url,
                 voice=narration.voice_for_persona(None),
+            )
+        return AgentSession[InterviewUserdata](
+            userdata=userdata,
+            stt=deepgram.STT(
+                model=settings.deepgram_stt_model,
+                language="vi",
+                api_key=dg_key,
+                base_url=f"{settings.deepgram_stt_base_url.rstrip('/')}/listen",
             ),
+            llm=llm,
+            tts=vi_tts,
             vad=silero.VAD.load(),
             turn_handling=_native_turn_handling(language),
         )
 
-    dg_key = settings.deepgram_api_key.get_secret_value() if settings.deepgram_api_key else ""
     return AgentSession[InterviewUserdata](
         userdata=userdata,
-        stt=deepgram.STT(
-            model=settings.deepgram_stt_model,
-            language="en-US",
+        stt=deepgram.STTv2(
+            model=settings.deepgram_stt_v2_model,
             api_key=dg_key,
-            base_url=f"{settings.deepgram_stt_base_url.rstrip('/')}/listen",
+            # Preemptive generation: fire the eager end-of-turn at low
+            # confidence so the LLM starts composing before the turn is
+            # certain, then commit at the (higher) eot threshold.
+            eager_eot_threshold=0.4,
+            base_url=settings.deepgram_stt_v2_base_url,
         ),
         llm=llm,
         tts=deepgram.TTS(
