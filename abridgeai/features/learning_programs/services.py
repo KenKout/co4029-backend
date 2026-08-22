@@ -89,6 +89,15 @@ async def _program_out(
     version = version or await queries.get_current_version(db, program.id)
     if version is None:
         raise NotFoundError("learning_program_version_not_found")
+    # Any UPDATE through TimestampMixin expires ``updated_at`` (its onupdate
+    # is a server-side NOW()). The __dict__ spreads below read the raw
+    # instance dict and never trigger a lazy load, so an expired column
+    # silently vanishes and ProgramRead rejects the payload with
+    # ``Field required [type=missing]`` (observed as a 500 on
+    # POST .../publish right after a successful flush). Refresh re-loads
+    # both rows inside the current transaction before serializing.
+    await db.refresh(program)
+    await db.refresh(version)
     publisher = (
         await identity_api.get_user_by_id(db, version.updated_by)
         if version.published_at is not None and version.updated_by is not None
@@ -504,6 +513,12 @@ async def _enrollment_out(db: AsyncSession, enrollment: ProgramEnrollment) -> Pr
         )
     completed_courses = sum(bool(row.get("satisfied")) for row in progress_rows)
     total_courses = len(progress_rows)
+    # Same expiry hazard as _program_out: a flush after mutating this row
+    # (e.g. select_path flipping status) expires server-side columns such as
+    # ``completed_at`` / ``withdrawn_at``, which then vanish from ``__dict__``
+    # and make ProgramEnrollmentRead reject the payload. Refresh re-loads
+    # every column before the dict spread.
+    await db.refresh(enrollment)
     return ProgramEnrollmentRead.model_validate(
         {
             **enrollment.__dict__,
