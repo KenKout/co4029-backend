@@ -152,10 +152,7 @@ async def import_course_from_syllabus(
             organization_id=str(org_id),
             filename=filename,
         )
-        reason = (
-            "import_failed: the syllabus was read successfully but the course "
-            f"could not be created ({type(exc).__name__}). Please try again."
-        )
+        reason = _build_failure_reason(exc)
         await _record_failure(
             db,
             organization_id=org_id,
@@ -166,6 +163,18 @@ async def import_course_from_syllabus(
             arq_pool=arq_pool,
         )
         raise SyllabusImportError(reason) from exc
+
+
+def _build_failure_reason(exc: Exception) -> str:
+    """A failure message that names the ACTUAL fault, not just its class."""
+    origin = getattr(exc, "orig", None)
+    detail = str(origin if origin is not None else exc).strip()
+    first_line = detail.splitlines()[0].strip() if detail else ""
+    suffix = f"{type(exc).__name__}: {first_line}" if first_line else type(exc).__name__
+    return (
+        "import_failed: the syllabus was read successfully but the course "
+        f"could not be created ({suffix[:400]})."
+    )
 
 
 def _validate_upload(data: bytes, content_type: str | None) -> None:
