@@ -222,6 +222,80 @@ class CourseLearningOutcome(
     outcome_text: Mapped[str] = mapped_column(Text, nullable=False)
 
 
+class CourseSyllabusImport(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    """One attempt at building a course from an uploaded syllabus document.
+
+    Serves three jobs at once, which is why it is a table and not just a
+    response body:
+
+    * it keeps the uploaded file addressable (``storage_object_id``) so a
+      teacher or student can download the original syllabus long after the
+      import — the requirement that motivated storing it at all;
+    * it records failures, which have no course to hang off (``course_id``
+      is NULL when parsing never got far enough to create one), so the
+      manager's failure notification has something durable behind it;
+    * it records the ``language`` the manager picked and any parser
+      ``warnings``, so a course whose outcomes were renumbered can be
+      explained after the fact rather than looking like data loss.
+
+    Hard-delete (no ``SoftDeleteMixin``): an import attempt is audit
+    history like ``processing_jobs``, not authored content. ``course_id``
+    is ``ON DELETE SET NULL`` so deleting an imported course leaves the
+    attempt (and its file) behind rather than cascading history away.
+    """
+
+    __tablename__ = "course_syllabus_imports"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('succeeded', 'failed')",
+            name="ck_course_syllabus_imports_status",
+        ),
+        CheckConstraint(
+            "language IN ('vi', 'en')",
+            name="ck_course_syllabus_imports_language",
+        ),
+        CheckConstraint(
+            "(status = 'succeeded' AND course_id IS NOT NULL) OR status = 'failed'",
+            name="ck_course_syllabus_imports_course_on_success",
+        ),
+    )
+
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("organizations.id", ondelete="NO ACTION"),
+        nullable=False,
+        index=True,
+    )
+    course_id: Mapped[uuid.UUID | None] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("courses.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    storage_object_id: Mapped[uuid.UUID | None] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("storage_objects.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    imported_by: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="NO ACTION"),
+        nullable=False,
+    )
+    language: Mapped[str] = mapped_column(String(2), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False)
+    original_filename: Mapped[str | None] = mapped_column(String(255))
+    # Machine-readable reason prefix + human sentence, exactly as shown to the
+    # manager and copied into the failure notification.
+    error_message: Mapped[str | None] = mapped_column(Text)
+    # Parser warnings for a *successful* import (renumbered outcomes, a missing
+    # hours row…). JSONB array of strings; empty when the import was clean.
+    warnings: Mapped[list[str]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'[]'::jsonb")
+    )
+    outcome_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+
+
 class Module(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftDeleteMixin, Base):
     """Group of related lessons / quizzes / interviews inside a course.
 

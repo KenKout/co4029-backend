@@ -419,6 +419,48 @@ class StreamUrlResponse(BaseModel):
     expires_at: datetime
 
 
+class SyllabusImportResult(BaseModel):
+    """Outcome of ``POST /teacher/courses/import-syllabus``.
+
+    Returned on success (HTTP 201). Failures raise instead, so this shape
+    never carries an error — ``warnings`` is the "succeeded, but look at
+    this" channel: outcomes renumbered because the source syllabus skipped
+    a code, no total-hours row, a title that fell back to the other
+    language. The SPA shows them next to the created course.
+    """
+
+    import_id: UUID
+    course_id: UUID
+    course_slug: str
+    title: str
+    language: Literal["vi", "en"]
+    description: str | None = None
+    estimated_minutes: int | None = None
+    outcome_count: int = 0
+    warnings: list[str] = Field(default_factory=list)
+
+
+class SyllabusImportRow(BaseModel):
+    """One past import attempt in the manager's history list.
+
+    Unlike :class:`SyllabusImportResult` this covers FAILED attempts too
+    (``course_id`` is then ``None`` and ``error_message`` says why), which
+    is the whole point of keeping the attempts.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    course_id: UUID | None = None
+    status: Literal["succeeded", "failed"]
+    language: Literal["vi", "en"]
+    original_filename: str | None = None
+    error_message: str | None = None
+    warnings: list[str] = Field(default_factory=list)
+    outcome_count: int = 0
+    created_at: datetime
+
+
 __all__ = [
     "CourseAuthoring",
     "CourseContentAuthoring",
@@ -432,5 +474,7 @@ __all__ = [
     "OutlineSection",
     "SlugAvailability",
     "StreamUrlResponse",
+    "SyllabusImportResult",
+    "SyllabusImportRow",
     "TagAuthoring",
 ]

@@ -412,4 +412,28 @@ async def get_lesson_resource_download_url(
     return ResourceDownloadUrlResponse(url=download.url, expires_at=download.expires_at.isoformat())
 
 
+@router.get(
+    "/courses/{course_id}/syllabus/download-url",
+    response_model=ResourceDownloadUrlResponse,
+)
+async def get_course_syllabus_download_url(
+    course_id: UUID,
+    user: Annotated[CurrentUser, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> ResourceDownloadUrlResponse:
+    """The original syllabus PDF a course was imported from.
+
+    Org-scoped like every other learner read, but NOT enrolment-gated: the
+    syllabus is the document a student reads to decide whether to enrol, and
+    the published course itself is already in their catalog. The publish gate
+    lives in the query, so an unimported or unpublished course 404s
+    identically — existence is never leaked.
+    """
+    await _ensure_org_access(db, user, kind="course", resource_id=course_id)
+    download = await catalog_service.get_course_syllabus_download_url(db, course_id)
+    if download is None:
+        raise _not_found("course_syllabus", course_id)
+    return ResourceDownloadUrlResponse(url=download.url, expires_at=download.expires_at.isoformat())
+
+
 __all__ = ["me_courses_router", "router"]

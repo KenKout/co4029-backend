@@ -181,8 +181,92 @@ async def notify_course_published(
             )
 
 
+async def notify_syllabus_import_succeeded(
+    db: AsyncSession,
+    *,
+    manager_user_id: UUID,
+    course_id: UUID,
+    course_title: str,
+    outcome_count: int,
+    warnings: list[str],
+    arq_pool: object | None = None,
+) -> None:
+    """Tell the importing manager their syllabus became a draft course.
+
+    Deep-links to the authoring workspace rather than the learner route:
+    the course is a draft, so there is nothing for a learner to open yet
+    and the manager's next step is reviewing what was imported.
+    """
+    try:
+        locale = await get_user_locale(db, manager_user_id)
+        await notifications_api.send_notification(
+            db,
+            recipient_user_id=manager_user_id,
+            notification_type=_CATEGORY,
+            title=notifications_api.syllabus_import_succeeded_title(
+                course_title=course_title, locale=locale
+            ),
+            body=notifications_api.syllabus_import_succeeded_body(
+                course_title=course_title,
+                outcome_count=outcome_count,
+                warnings=warnings,
+                locale=locale,
+            ),
+            entity_type="course",
+            entity_id=course_id,
+            action_url=_teacher_action_url(course_id),
+            arq_pool=arq_pool,
+        )
+    except Exception:  # noqa: BLE001 — never fail an import over its notification
+        _logger.exception(
+            "syllabus_import_succeeded_notify_failed",
+            manager_user_id=str(manager_user_id),
+            course_id=str(course_id),
+        )
+
+
+async def notify_syllabus_import_failed(
+    db: AsyncSession,
+    *,
+    manager_user_id: UUID,
+    import_id: UUID,
+    filename: str | None,
+    reason: str,
+    arq_pool: object | None = None,
+) -> None:
+    """Tell the importing manager why no course came out of their upload.
+
+    ``entity_id`` is the import attempt, not a course — a failed import has
+    no course to point at, and the attempt row is what holds the file and
+    the reason.
+    """
+    try:
+        locale = await get_user_locale(db, manager_user_id)
+        await notifications_api.send_notification(
+            db,
+            recipient_user_id=manager_user_id,
+            notification_type=_CATEGORY,
+            title=notifications_api.syllabus_import_failed_title(
+                filename=filename, locale=locale
+            ),
+            body=notifications_api.syllabus_import_failed_body(reason=reason, locale=locale),
+            entity_type="course",
+            entity_id=import_id,
+            action_url="/dept/courses",
+            arq_pool=arq_pool,
+        )
+    except Exception:  # noqa: BLE001
+        _logger.exception(
+            "syllabus_import_failed_notify_failed",
+            manager_user_id=str(manager_user_id),
+            import_id=str(import_id),
+        )
+
+
 __all__ = [
     "notify_course_published",
     "notify_student_enrolled",
+    "notify_syllabus_import_failed",
+    "notify_syllabus_import_succeeded",
     "notify_teacher_assigned",
 ]

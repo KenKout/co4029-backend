@@ -40,6 +40,10 @@ course_published_teacher_title = messages.course_published_teacher_title
 course_published_teacher_body = messages.course_published_teacher_body
 course_published_student_title = messages.course_published_student_title
 course_published_student_body = messages.course_published_student_body
+syllabus_import_succeeded_title = messages.syllabus_import_succeeded_title
+syllabus_import_succeeded_body = messages.syllabus_import_succeeded_body
+syllabus_import_failed_title = messages.syllabus_import_failed_title
+syllabus_import_failed_body = messages.syllabus_import_failed_body
 
 __all__ = [
     "EMAIL_NOTIFICATION_TASK_NAME",
@@ -52,4 +56,8 @@ __all__ = [
     "course_teacher_assigned_body",
     "course_teacher_assigned_title",
     "send_notification",
+    "syllabus_import_failed_body",
+    "syllabus_import_failed_title",
+    "syllabus_import_succeeded_body",
+    "syllabus_import_succeeded_title",
 ]

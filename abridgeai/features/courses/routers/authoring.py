@@ -87,9 +87,12 @@ from abridgeai.features.courses.schemas import (
     RosterStudentRead,
     SlugAvailability,
     StreamUrlResponse,
+    SyllabusImportResult,
+    SyllabusImportRow,
     TeacherDashboardStats,
 )
 from abridgeai.features.courses.services import authoring as authoring_service
+from abridgeai.features.courses.services import syllabus_import as syllabus_service
 from abridgeai.features.quizzes.ai.outline import build_lesson_outline
 
 # Whitelist of ``content_role`` values surfaced by ``OutlineSection``.
@@ -117,6 +120,12 @@ async def get_arq_pool() -> object | None:
 
 
 _REQUIRE_CREATE = require_permission("course.create")
+# GLOBAL learning-outcome permission, for the syllabus import: the course it
+# would write outcomes into does not exist yet, so the course-scoped
+# `_REQUIRE_OUTCOME_CREATE` below has nothing to scope to. Stacked WITH
+# `_REQUIRE_CREATE` on that endpoint so a teacher holding only `course.create`
+# cannot author outcomes through the importer.
+_REQUIRE_OUTCOME_MANAGE = require_permission("learning_outcome.manage")
 _REQUIRE_AUTHORING_LIST = require_any_permission("course.read.draft", "course.create")
 _REQUIRE_COURSE_UPDATE = require_course_permission("course_id", "course.update")
 _REQUIRE_COURSE_PUBLISH = require_course_permission("course_id", "course.publish")
@@ -220,6 +229,108 @@ async def create_course(
         raise _bad_request(str(exc)) from exc
     await db.commit()
     return course
+
+
+@router.post(
+    "/courses/import-syllabus",
+    response_model=SyllabusImportResult,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(_REQUIRE_OUTCOME_MANAGE)],
+)
+async def import_course_from_syllabus(
+    request: Request,
+    language: Annotated[Literal["vi", "en"], Query()],
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_CREATE)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    filename: Annotated[str | None, Query(max_length=255)] = None,
+    arq_pool: Annotated[object | None, Depends(get_arq_pool)] = None,
+) -> SyllabusImportResult:
+    """Create a DRAFT course from an uploaded course-syllabus PDF.
+
+    The raw PDF bytes are the request body with ``application/pdf`` in
+    ``Content-Type`` (no multipart wrapper — the same shape as the course
+    thumbnail and avatar uploads, and the reason this repo needs no
+    ``python-multipart`` dependency). ``filename`` is a query parameter
+    because a raw body carries none, and it is only used for display and
+    for the failure notification.
+
+    ``language`` picks which half of the bilingual syllabus is imported —
+    title, description and every learning outcome come from that side.
+
+    Manager-owned, and gated on BOTH ``course.create`` and
+    ``learning_outcome.manage``: the import writes learning outcomes, which
+    a course-owning teacher is never allowed to author (see
+    ``_REQUIRE_OUTCOME_CREATE``). Requiring only ``course.create`` here
+    would have been a side door into LO authoring.
+
+    The service commits (success and failure alike, since a failed attempt
+    is still recorded and notified), so this endpoint does not.
+    """
+    data = await request.body()
+    content_type = request.headers.get("content-type")
+    try:
+        return await syllabus_service.import_course_from_syllabus(
+            db,
+            data=data,
+            content_type=content_type,
+            filename=filename,
+            language=language,
+            actor=current_user,
+            arq_pool=arq_pool,
+        )
+    except syllabus_service.SyllabusImportError as exc:
+        # 422, not 400: the request itself is well-formed — the PDF inside it
+        # is what could not be turned into a course. The message is the
+        # parser's own reason and is shown to the manager verbatim.
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"error": "syllabus_import_failed", "message": str(exc)},
+        ) from exc
+    except AppError as exc:
+        raise _bad_request(str(exc)) from exc
+
+
+@router.get(
+    "/courses/syllabus-imports",
+    response_model=list[SyllabusImportRow],
+    dependencies=[Depends(_REQUIRE_OUTCOME_MANAGE)],
+)
+async def list_syllabus_imports(
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_CREATE)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+) -> list[SyllabusImportRow]:
+    """Recent syllabus-import attempts in the caller's organization.
+
+    Includes FAILURES, which is the point: a failed import has no course to
+    find it by, so this list is the only place the reason survives once the
+    notification is read.
+    """
+    return await syllabus_service.list_syllabus_imports(db, actor=current_user, limit=limit)
+
+
+@router.get(
+    "/courses/{course_id}/syllabus/download-url",
+    response_model=StreamUrlResponse,
+)
+async def get_course_syllabus_download_url(
+    course_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_COURSE_UPDATE)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> StreamUrlResponse:
+    """Short-TTL presigned URL for the course's archived syllabus PDF.
+
+    Gated on ``course.update`` so any teacher on the course can fetch it,
+    not just the manager who imported it. Students get the same document
+    through the learner router instead, which additionally requires the
+    course to be published.
+    """
+    del current_user
+    try:
+        url, expires_at = await syllabus_service.get_syllabus_download_url(db, course_id)
+    except syllabus_service.SyllabusImportError as exc:
+        raise _not_found(str(exc)) from exc
+    return StreamUrlResponse(stream_url=url, expires_at=expires_at)
 
 
 @router.get("/courses/check-slug", response_model=SlugAvailability)
