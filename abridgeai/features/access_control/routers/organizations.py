@@ -31,6 +31,8 @@ from abridgeai.features.access_control.policies import (
     require_org_access,
 )
 from abridgeai.features.access_control.schemas.admin import (
+    BulkAssignUnitRequest,
+    BulkAssignUnitResult,
     MembershipPatch,
     MembershipRead,
     OrganizationCreate,
@@ -570,6 +572,49 @@ async def delete_unit_endpoint(
 # ---------------------------------------------------------------------------
 # Memberships (extends list / add already exposed by routers.admin)
 # ---------------------------------------------------------------------------
+
+
+@router.post(
+    "/admin/organizations/{org_id}/memberships/assign-unit",
+    response_model=BulkAssignUnitResult,
+)
+async def bulk_assign_memberships_to_unit_endpoint(
+    org_id: UUID,
+    payload: BulkAssignUnitRequest,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_ORG_MANAGE)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> BulkAssignUnitResult:
+    """Move many memberships into one org unit — or out of any unit.
+
+    Staffing a department is a cohort operation: the UI lets a manager pick
+    thirty students at once, and doing that as thirty PATCHes meant thirty
+    round-trips and thirty chances to half-finish. This is one request and
+    one UPDATE.
+
+    ``org_unit_id: null`` detaches, matching what a single PATCH does, so the
+    bulk and single paths cannot drift apart.
+
+    Scoped by ``org_id`` in the PATH, not by the ids in the body: a body-only
+    scope would let the caller name the tenancy they are writing into. The org
+    check runs against the path first, then the service refuses the whole call
+    if any membership id belongs to a different organization.
+    """
+    await require_org_access(
+        db,
+        current_user,
+        org_id,
+        resource="organization",
+        resource_id=org_id,
+        permissions=_ORG_MANAGE_CODES,
+    )
+    try:
+        result = await org_service.assign_memberships_to_unit(db, org_id, payload)
+    except NotFoundError as exc:
+        raise _not_found(str(exc)) from exc
+    except AppError as exc:
+        raise _bad_request(str(exc)) from exc
+    await db.commit()
+    return result
 
 
 @router.patch(

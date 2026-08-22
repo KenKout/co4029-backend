@@ -15,6 +15,7 @@ Conventions match :mod:`abridgeai.features.access_control.queries.admin`:
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
@@ -442,6 +443,50 @@ async def soft_delete_unit(
 
 async def get_membership(db: AsyncSession, membership_id: UUID) -> OrganizationMembership | None:
     return await db.get(OrganizationMembership, membership_id)
+
+
+async def list_memberships_by_ids(
+    db: AsyncSession, membership_ids: Sequence[UUID]
+) -> list[OrganizationMembership]:
+    """Load the given memberships, skipping soft-deleted rows.
+
+    The bulk assign uses this to verify EVERY id belongs to the caller's
+    organization before it writes anything — ids arrive from a request body,
+    and a membership id from another tenant must not be movable.
+    """
+    if not membership_ids:
+        return []
+    stmt = select(OrganizationMembership).where(
+        OrganizationMembership.id.in_(list(membership_ids)),
+        OrganizationMembership.deleted_at.is_(None),
+    )
+    return list((await db.execute(stmt)).scalars().all())
+
+
+async def bulk_update_membership_unit(
+    db: AsyncSession, membership_ids: Sequence[UUID], org_unit_id: UUID | None
+) -> int:
+    """Point many memberships at one org unit (or at NULL) in a single UPDATE.
+
+    One statement rather than a loop of them: assigning a cohort is the
+    normal case here, and N round-trips against the same table is what this
+    endpoint exists to avoid. Returns the number of rows actually changed.
+
+    Callers MUST have verified org ownership of every id first — this issues
+    no tenancy check of its own.
+    """
+    if not membership_ids:
+        return 0
+    result = await db.execute(
+        update(OrganizationMembership)
+        .where(
+            OrganizationMembership.id.in_(list(membership_ids)),
+            OrganizationMembership.deleted_at.is_(None),
+        )
+        .values(org_unit_id=org_unit_id)
+    )
+    await db.flush()
+    return int(result.rowcount or 0)
 
 
 async def update_membership(

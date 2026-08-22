@@ -223,6 +223,36 @@ class OrgUnitPatch(BaseModel):
     code: str | None = Field(default=None, max_length=50)
 
 
+class BulkAssignUnitRequest(BaseModel):
+    """Move many memberships into one org unit (or out of any unit).
+
+    ``org_unit_id=None`` detaches — the same "no unit" state a single
+    ``PATCH`` produces, so bulk and single agree.
+
+    The id cap is a guard, not a product limit: this writes one UPDATE, but
+    an unbounded ``IN`` list from a request body is a denial-of-service
+    shape. 500 is far above any real cohort.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    membership_ids: list[UUID] = Field(min_length=1, max_length=500)
+    org_unit_id: UUID | None = None
+
+
+class BulkAssignUnitResult(BaseModel):
+    """What the bulk assign actually did.
+
+    ``assigned`` is rows changed, which can be lower than the number of ids
+    sent when some were already in the target unit. ``skipped`` names ids
+    that were not found or not live, so a partially stale selection reports
+    itself instead of silently doing less than asked.
+    """
+
+    assigned: int
+    skipped: list[UUID] = Field(default_factory=list)
+
+
 class OrgUnitNode(_ORM):
     """One node of the nested org tree returned by ``GET .../units/tree``.
 
