@@ -50,6 +50,8 @@ from abridgeai.features.courses.schemas.authoring import (
     ReviewQueueItem,
     SlugAvailability,
     StreamUrlResponse,
+    SyllabusImportResult,
+    SyllabusImportRow,
     TagAuthoring,
     TeacherDashboardStats,
 )
@@ -143,6 +145,8 @@ __all__ = [
     "RosterStudentRead",
     "SlugAvailability",
     "StreamUrlResponse",
+    "SyllabusImportResult",
+    "SyllabusImportRow",
     "TagAuthoring",
     "TagPublic",
     "TeacherAssignmentCreated",

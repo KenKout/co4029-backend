@@ -15,6 +15,7 @@ from abridgeai.features.access_control.api import public as access_control_api
 from abridgeai.features.courses.models import (
     Course,
     CourseLearningOutcome,
+    CourseSyllabusImport,
     CourseTag,
     Lesson,
     LessonResource,
@@ -522,6 +523,39 @@ async def get_visible_resource_storage_target(
             published_lesson_clause(),
             student_visible_resource_clause(),
         )
+    )
+    row = (await db.execute(stmt)).one_or_none()
+    if row is None:
+        return None
+    return row.bucket, row.object_key
+
+
+async def get_published_course_syllabus_storage_target(
+    db: AsyncSession, course_id: UUID
+) -> tuple[str, str] | None:
+    """Bucket + object_key for a PUBLISHED course's syllabus PDF, or ``None``.
+
+    The student-facing twin of the authoring query: same document, but
+    gated on ``published_course_clause()`` so a draft course's syllabus is
+    never reachable from the learner side. Returns the newest successful
+    import, since re-importing a revised syllabus should hand out the
+    current edition. The service maps ``None`` to HTTP 404 — a learner must
+    not be able to tell "no syllabus" from "course not published".
+    """
+    stmt = (
+        select(StorageObject.bucket, StorageObject.object_key)
+        .join(
+            CourseSyllabusImport,
+            CourseSyllabusImport.storage_object_id == StorageObject.id,
+        )
+        .join(Course, Course.id == CourseSyllabusImport.course_id)
+        .where(
+            CourseSyllabusImport.course_id == course_id,
+            CourseSyllabusImport.status == "succeeded",
+            published_course_clause(),
+        )
+        .order_by(CourseSyllabusImport.created_at.desc())
+        .limit(1)
     )
     row = (await db.execute(stmt)).one_or_none()
     if row is None:

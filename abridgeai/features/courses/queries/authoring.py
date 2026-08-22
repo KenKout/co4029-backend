@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from datetime import datetime
 from importlib import resources
 from typing import Any, NamedTuple
 from uuid import UUID
@@ -14,6 +15,7 @@ from abridgeai.features.access_control.models import Role, UserRoleAssignment
 from abridgeai.features.courses.models import (
     Course,
     CourseLearningOutcome,
+    CourseSyllabusImport,
     Lesson,
     LessonPrerequisite,
     LessonResource,
@@ -854,6 +856,130 @@ async def get_course_thumbnail_storage_target(
     if row is None:
         return None
     return row.bucket, row.object_key
+
+
+def insert_storage_object(
+    db: AsyncSession,
+    *,
+    object_id: UUID,
+    bucket: str,
+    object_key: str,
+    original_filename: str,
+    mime_type: str,
+    size_bytes: int,
+    uploaded_by: UUID,
+    uploaded_at: datetime,
+) -> None:
+    """Stage a ``storage_objects`` row for an uploaded file.
+
+    Lives here rather than in the service because ``StorageObject`` is the
+    identity feature's model: ``courses.queries.**`` is the layer the
+    independence contract sanctions for cross-feature ORM access, and
+    services are not. Does NOT flush — the caller decides when, since the
+    row usually has to land before a FK pointing at it.
+    """
+    db.add(
+        StorageObject(
+            id=object_id,
+            bucket=bucket,
+            object_key=object_key,
+            original_filename=original_filename,
+            mime_type=mime_type,
+            size_bytes=size_bytes,
+            uploaded_by=uploaded_by,
+            uploaded_at=uploaded_at,
+        )
+    )
+
+
+async def get_latest_syllabus_import(
+    db: AsyncSession, course_id: UUID
+) -> CourseSyllabusImport | None:
+    """The newest SUCCESSFUL syllabus import for a course, or ``None``.
+
+    Newest-first because re-importing a syllabus (a revised edition of the
+    same course) should hand out the latest document, while older attempts
+    stay in the table as history. Failed attempts are excluded — they may
+    carry a file that never produced this course.
+    """
+    stmt = (
+        select(CourseSyllabusImport)
+        .where(
+            CourseSyllabusImport.course_id == course_id,
+            CourseSyllabusImport.status == "succeeded",
+            CourseSyllabusImport.storage_object_id.is_not(None),
+        )
+        .order_by(CourseSyllabusImport.created_at.desc())
+        .limit(1)
+    )
+    return (await db.execute(stmt)).scalars().one_or_none()
+
+
+async def get_syllabus_storage_target(
+    db: AsyncSession, course_id: UUID
+) -> tuple[str, str, str | None] | None:
+    """Bucket + object_key + original filename of a course's syllabus.
+
+    Mirrors :func:`get_course_thumbnail_storage_target` but hops through
+    ``course_syllabus_imports`` rather than a column on ``courses``, since
+    a course can be imported more than once and the attempts are history.
+    """
+    stmt = (
+        select(
+            StorageObject.bucket,
+            StorageObject.object_key,
+            StorageObject.original_filename,
+        )
+        .join(
+            CourseSyllabusImport,
+            CourseSyllabusImport.storage_object_id == StorageObject.id,
+        )
+        .where(
+            CourseSyllabusImport.course_id == course_id,
+            CourseSyllabusImport.status == "succeeded",
+        )
+        .order_by(CourseSyllabusImport.created_at.desc())
+        .limit(1)
+    )
+    row = (await db.execute(stmt)).one_or_none()
+    if row is None:
+        return None
+    return row.bucket, row.object_key, row.original_filename
+
+
+async def list_syllabus_imports(
+    db: AsyncSession, *, organization_id: UUID, limit: int = 50
+) -> Sequence[CourseSyllabusImport]:
+    """Recent import attempts in one org, newest first (successes AND failures).
+
+    Org-scoped rather than course-scoped because the manager-facing history
+    has to include failures, which never got a ``course_id``.
+    """
+    stmt = (
+        select(CourseSyllabusImport)
+        .where(CourseSyllabusImport.organization_id == organization_id)
+        .order_by(CourseSyllabusImport.created_at.desc())
+        .limit(limit)
+    )
+    return (await db.execute(stmt)).scalars().all()
+
+
+async def course_slugs_with_prefix(
+    db: AsyncSession, *, organization_id: UUID, prefix: str
+) -> set[str]:
+    """Every live course slug in the org starting with ``prefix``.
+
+    Feeds the import's slug de-duplication: the syllabus suggests
+    ``co2017-operating-systems`` and we need to know whether that (or a
+    ``-2`` suffixed variant) is already taken, in ONE round-trip instead of
+    probing candidates one at a time.
+    """
+    stmt = select(Course.slug).where(
+        Course.organization_id == organization_id,
+        Course.deleted_at.is_(None),
+        Course.slug.startswith(prefix),
+    )
+    return set((await db.execute(stmt)).scalars().all())
 
 
 async def get_module_item(db: AsyncSession, item_id: UUID) -> ModuleItem | None:

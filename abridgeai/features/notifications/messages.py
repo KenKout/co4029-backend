@@ -227,6 +227,81 @@ def course_published_student_body(*, course_title: str, locale: str | None) -> s
     )
 
 
+# ── Syllabus import (courses feature) ────────────────────────────────────────
+
+
+def syllabus_import_succeeded_title(*, course_title: str, locale: str | None) -> str:
+    """Title: a syllabus upload became a draft course."""
+    lang = _norm(locale)
+    if lang == "vi":
+        return f"Đã nhập học phần: {course_title}"[:255]
+    return f"Course imported: {course_title}"[:255]
+
+
+def syllabus_import_succeeded_body(
+    *,
+    course_title: str,
+    outcome_count: int,
+    warnings: list[str] | None,
+    locale: str | None,
+) -> str:
+    """Body: what was created, plus a nudge when the parser had reservations.
+
+    The warnings themselves are NOT inlined — they are English parser codes
+    and can run long. The notification says how many there are and the
+    import screen shows them in full; that keeps the inbox row readable in
+    both locales without half-translating machine strings.
+    """
+    lang = _norm(locale)
+    warning_count = len(warnings or [])
+    if lang == "vi":
+        text = (
+            f'Đã tạo bản nháp khoá học "{course_title}" từ đề cương, '
+            f"kèm {outcome_count} chuẩn đầu ra."
+        )
+        if warning_count:
+            text += f" Có {warning_count} cảnh báo cần xem lại trước khi xuất bản."
+        else:
+            text += " Mở khoá học để kiểm tra và bổ sung nội dung."
+        return text
+    text = (
+        f'Created the draft course "{course_title}" from the syllabus, '
+        f"with {outcome_count} learning outcome{'s' if outcome_count != 1 else ''}."
+    )
+    if warning_count:
+        text += (
+            f" {warning_count} warning{'s' if warning_count != 1 else ''} "
+            "need a look before you publish."
+        )
+    else:
+        text += " Open the course to review it and add content."
+    return text
+
+
+def syllabus_import_failed_title(*, filename: str | None, locale: str | None) -> str:
+    """Title: a syllabus upload produced no course."""
+    lang = _norm(locale)
+    name = filename or ("tệp đã tải lên" if lang == "vi" else "the uploaded file")
+    if lang == "vi":
+        return f"Nhập học phần thất bại: {name}"[:255]
+    return f"Course import failed: {name}"[:255]
+
+
+def syllabus_import_failed_body(*, reason: str, locale: str | None) -> str:
+    """Body: the failure reason verbatim.
+
+    ``reason`` is the parser's own ``code: sentence`` message. It is passed
+    through untranslated on purpose — an approximate translation of a
+    diagnostic is worse than the exact one the import screen also shows,
+    and the leading code is what a manager would quote when asking for
+    help.
+    """
+    lang = _norm(locale)
+    if lang == "vi":
+        return f"Không thể tạo khoá học từ tệp đề cương. Lý do: {reason}"
+    return f"No course was created from the syllabus file. Reason: {reason}"
+
+
 __all__ = [
     "Locale",
     "course_enrolled_body",

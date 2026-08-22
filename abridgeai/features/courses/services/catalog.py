@@ -23,6 +23,7 @@ from abridgeai.features.courses.queries import (
     get_published_course_by_id,
     get_published_course_by_slug,
     get_published_course_content,
+    get_published_course_syllabus_storage_target,
     get_published_course_thumbnail_storage_target,
     get_published_lesson_by_id,
     get_published_module_by_id,
@@ -583,8 +584,32 @@ async def get_lesson_resource_download_url(
     return ResourceDownloadUrl(url=url, expires_at=expires_at)
 
 
+async def get_course_syllabus_download_url(
+    db: AsyncSession, course_id: UUID
+) -> ResourceDownloadUrl | None:
+    """Mint a presigned GET URL for a published course's syllabus PDF.
+
+    ``None`` when the course is unpublished, soft-deleted, or was never
+    imported from a syllabus. The router maps that to HTTP 404 so a learner
+    cannot tell those cases apart — same non-leaking rule as the lesson
+    resource download above.
+
+    Deliberately NOT gated on enrolment: a syllabus is what a student reads
+    to decide whether to enrol, and the course catalog is already visible to
+    them. Lesson resources are the opposite — those stay behind the unlock
+    gate.
+    """
+    target = await get_published_course_syllabus_storage_target(db, course_id)
+    if target is None:
+        return None
+    bucket, object_key = target
+    url, expires_at = await create_stream_url(_StorageTarget(bucket=bucket, object_key=object_key))
+    return ResourceDownloadUrl(url=url, expires_at=expires_at)
+
+
 __all__ = [
     "ResourceDownloadUrl",
+    "get_course_syllabus_download_url",
     "get_lesson_resource_download_url",
     "get_published_course_content_for_learner",
     "get_published_course_detail",

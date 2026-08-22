@@ -293,6 +293,9 @@ ignore_imports = [
     "abridgeai.features.courses.services.assignment -> sqlalchemy",
     "abridgeai.features.courses.services.administration -> sqlalchemy",
     "abridgeai.features.courses.services.notify -> sqlalchemy",
+    # TYPE_CHECKING-only AsyncSession annotation; every read and write goes
+    # through courses.queries (including the storage_objects insert).
+    "abridgeai.features.courses.services.syllabus_import -> sqlalchemy",
     "abridgeai.features.enrollments.services.manager -> sqlalchemy",
     "abridgeai.features.enrollments.services.student_view -> sqlalchemy",
     # TYPE_CHECKING-only AsyncSession annotation; reads go through queries and
