@@ -374,6 +374,7 @@ async def test_generate_returns_202_and_enqueues_arq(
             "module_id": str(scenario["module_id"]),
             "question_count": 3,
             "focus_topics": ["lists"],
+            "variant_strategy": "all_angles",
         },
         headers=_auth(admin_bearer),
     )
