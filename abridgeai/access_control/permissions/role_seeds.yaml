@@ -32,6 +32,10 @@ roles:
       - user.role_assign.hod
       - system.stats.read
       - progress.read.cohort
+      - learning_program.read
+      - learning_program.manage
+      - learning_program.enroll
+      - learning_program.switch.review
   - code: manager
     name: Manager
     description: Course lifecycle, enrollment management, and org-scoped user/role/org-unit administration
@@ -55,6 +59,9 @@ roles:
       - system.stats.read
       - bulk_import.read
       - notification.send.bulk
+      - learning_program.read
+      - learning_program.manage
+      - learning_program.enroll
   - code: admin
     name: IT Admin
     description: Full platform access including audit, AI processing telemetry, and organisation settings

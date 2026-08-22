@@ -134,11 +134,19 @@ async def sync_course_completion(
         enrollment.status = "completed"
         enrollment.completed_at = datetime.now(tz=UTC)
         await flush_or_conflict(db)
+        from abridgeai.features.learning_programs.api import public as programs_api
+
+        await programs_api.ensure_completion_award(
+            db,
+            student_id=student_id,
+            course_id=course_id,
+            source_enrollment_id=enrollment.id,
+        )
         return "completed"
 
     if not should_be_complete and enrollment.status == "completed":
-        # Demotion: keeps `satisfied` honest when a lesson is un-marked.
-        # The stage latch is deliberately NOT unwound (see module docstring).
+        # Learning progress may demote, but the academic completion award is
+        # intentionally immutable and remains available to future paths.
         enrollment.status = "active"
         enrollment.completed_at = None
         await flush_or_conflict(db)

@@ -82,9 +82,7 @@ def _to_authoring_enrollment(
     )
 
 
-async def _resolve_pin_version(
-    db: AsyncSession, career_path_id: UUID
-) -> UUID:
+async def _resolve_pin_version(db: AsyncSession, career_path_id: UUID) -> UUID:
     """The version a NEW enrollment pins to (Gap 3 D3a).
 
     Latest published version; a draft path with no published version pins
@@ -96,9 +94,7 @@ async def _resolve_pin_version(
         return published.id
     authoring = await authoring_queries.get_current_authoring_version(db, career_path_id)
     if authoring is None:
-        raise AppError(
-            f"Career path {career_path_id} has no version to enroll against"
-        )
+        raise AppError(f"Career path {career_path_id} has no version to enroll against")
     return authoring.id
 
 
@@ -196,6 +192,11 @@ async def sync_enrollment_completion(
     """
     if overall_percent < 100:
         return False
+    from abridgeai.features.learning_programs.api import public as programs_api
+
+    await programs_api.complete_program_attempts(
+        db, student_id=student_id, career_path_id=career_path_id
+    )
     enrollment = await student_queries.get_my_career_enrollment(
         db, student_id=student_id, career_path_id=career_path_id
     )
@@ -408,9 +409,7 @@ async def start_course_in_path(
 
     # Gap 3: the reachable route is the VERSION this enrollment is pinned
     # to — never the path's current authoring version.
-    link = await authoring_queries.get_version_course_link(
-        db, enrollment.version_id, course_id
-    )
+    link = await authoring_queries.get_version_course_link(db, enrollment.version_id, course_id)
     if link is None:
         raise NotFoundError(f"Course {course_id} is not part of career path {career_path_id}")
 
@@ -447,6 +446,19 @@ async def start_course_in_path(
         course_id=course_id,
         actor_id=student_id,
     )
+    current_course_enrollment = await enrollments_api.get_course_enrollment(
+        db, student_id=student_id, course_id=course_id
+    )
+    if current_course_enrollment is not None:
+        from abridgeai.features.learning_programs.api import public as programs_api
+
+        await programs_api.grant_active_path_entitlement(
+            db,
+            student_id=student_id,
+            career_path_id=career_path_id,
+            course_enrollment_id=current_course_enrollment.id,
+            actor_id=student_id,
+        )
     created = before is None or before.status == "dropped"
 
     course_ids = [

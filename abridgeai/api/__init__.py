@@ -142,6 +142,12 @@ from abridgeai.features.interviews.routers.authoring import (
 from abridgeai.features.interviews.routers.learner import (
     get_arq_pool as interviews_learner_get_arq_pool,
 )
+from abridgeai.features.learning_programs.routers import (
+    learner_router as learning_programs_learner_router,
+)
+from abridgeai.features.learning_programs.routers import (
+    management_router as learning_programs_management_router,
+)
 from abridgeai.features.materials.routers import (
     authoring_router as materials_authoring_router,
 )
@@ -316,6 +322,8 @@ def create_app() -> FastAPI:
     app.include_router(me_career_enrollments_router, prefix=API_V1_PREFIX)
     app.include_router(career_paths_management_router, prefix=API_V1_PREFIX)
     app.include_router(career_paths_teacher_router, prefix=API_V1_PREFIX)
+    app.include_router(learning_programs_learner_router, prefix=API_V1_PREFIX)
+    app.include_router(learning_programs_management_router, prefix=API_V1_PREFIX)
 
     # Phase 7 -- notifications (T7.4)
     app.include_router(notifications_learner_router, prefix=API_V1_PREFIX)

@@ -27,6 +27,7 @@ import abridgeai.features.discussions.models  # noqa: F401
 import abridgeai.features.enrollments.models  # noqa: F401
 import abridgeai.features.identity.models  # noqa: F401
 import abridgeai.features.interviews.models  # noqa: F401
+import abridgeai.features.learning_programs.models  # noqa: F401
 import abridgeai.features.materials.models  # noqa: F401
 import abridgeai.features.notifications.models  # noqa: F401
 import abridgeai.features.progress.models  # noqa: F401

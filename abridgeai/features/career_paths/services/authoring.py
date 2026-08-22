@@ -1037,6 +1037,10 @@ async def archive_path(
 
 async def soft_delete_path(db: AsyncSession, career_path_id: UUID, actor: CurrentUser) -> None:
     path = await _require_path(db, career_path_id)
+    if path.status != "draft":
+        raise AppError(
+            "published_or_archived_career_path_cannot_be_deleted: archive it instead"
+        )
     await soft_delete_cascade(db, path, actor_id=actor.user_id)
 
 

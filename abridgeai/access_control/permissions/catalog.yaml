@@ -99,3 +99,15 @@ permissions:
   - code: bulk_import.read
     description: Read bulk-import job status, rows, and errors
     category: bulk_import
+  - code: learning_program.read
+    description: Read learning programs within assigned scope
+    category: learning_program
+  - code: learning_program.manage
+    description: Create, edit, publish, and archive learning programs
+    category: learning_program
+  - code: learning_program.enroll
+    description: Enroll or withdraw students in learning programs
+    category: learning_program
+  - code: learning_program.switch.review
+    description: Approve or reject a career-path switch as the owning Faculty Dean
+    category: learning_program

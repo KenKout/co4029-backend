@@ -162,20 +162,24 @@ _PATH_COURSE_PROGRESS_SQL = text(
            cp.stage_id, cp.is_required, cp.satisfied_by,
            -- A course with no gradeable unit reports 0, never 100: it cannot
            -- be completed, and the D2 writer refuses to promote it.
-           CASE WHEN cp.unit_total = 0 THEN 0.0
+           CASE WHEN cca.id IS NOT NULL OR ce.status = 'completed' THEN 100.0
+                WHEN cp.unit_total = 0 THEN 0.0
                 ELSE ROUND(cp.unit_done * 100.0 / cp.unit_total, 2)
            END::float AS completion_percent,
            cp.unit_total, cp.unit_done,
-           -- satisfied is course_enrollments.status = 'completed' (D2), NOT
-           -- completion_percent >= 100. The two can still differ: a course the
-           -- student was never enrolled in has no status row at all, and the
-           -- writer only fires for enrolled students.
-           COALESCE(ce.status = 'completed', FALSE) AS satisfied,
+           -- Completion awards are immutable and survive path switches or a
+           -- later learning-progress demotion. The enrollment fallback keeps
+           -- compatibility with rows completed immediately before migration.
+           COALESCE(cca.id IS NOT NULL OR ce.status = 'completed', FALSE) AS satisfied,
            (ce.id IS NOT NULL) AS is_enrolled
     FROM course_progress cp
     LEFT JOIN course_enrollments ce
         ON ce.course_id = cp.course_id
         AND ce.student_id = :student_id
+    LEFT JOIN course_completion_awards cca
+        ON cca.course_id = cp.course_id
+        AND cca.student_id = :student_id
+        AND cca.revoked_at IS NULL
     ORDER BY cp.stage_id, cp.position
     """
 )

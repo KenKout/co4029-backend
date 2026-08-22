@@ -343,6 +343,9 @@ ignore_imports = [
     "abridgeai.features.career_paths.services.readiness -> sqlalchemy",
     # TYPE_CHECKING-only AsyncSession annotation, same as the siblings above.
     "abridgeai.features.career_paths.services.stages -> sqlalchemy",
+    # TYPE_CHECKING-only AsyncSession annotation; all persistence goes through
+    # learning_programs.queries.
+    "abridgeai.features.learning_programs.services -> sqlalchemy",
     "abridgeai.features.spaced_repetition.services.review -> sqlalchemy",
     "abridgeai.features.spaced_repetition.services.remediation -> sqlalchemy",
 ]
@@ -429,6 +432,10 @@ ignore_imports = [
     # entry point (career_paths has no api/public.py). Same unavoidable-JOIN
     # allowance as the three above. Read-only.
     "abridgeai.features.courses.queries.assignment -> abridgeai.features.career_paths.models",
+    # Learning-program queries resolve scoped role assignments and pin the
+    # latest published career-path version. Read-only ORM joins.
+    "abridgeai.features.learning_programs.queries -> abridgeai.features.access_control.models",
+    "abridgeai.features.learning_programs.queries -> abridgeai.features.career_paths.models",
     # FR-3 outline builder reads DocumentChunk rows to group lesson chunks
     # into sections. Read-only access to the materials model; writes still
     # go through materials' own services.

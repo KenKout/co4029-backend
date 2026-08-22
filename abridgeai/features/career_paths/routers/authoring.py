@@ -625,20 +625,10 @@ async def enroll_student_in_path(
     current_user: Annotated[CurrentUser, Depends(_REQUIRE_PATH_ENROLL)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> StudentCareerEnrollmentAuthoring:
-    try:
-        await _ensure_caller_in_path_org(db, current_user, career_path_id, _PATH_ENROLL_CODES)
-        result = await enrollment_service.enroll_student_in_path(
-            db,
-            career_path_id=career_path_id,
-            student_id=payload.student_id,
-            actor=current_user,
-        )
-    except NotFoundError as exc:
-        raise _not_found(str(exc)) from exc
-    except AppError as exc:
-        raise _conflict(str(exc)) from exc
-    await db.commit()
-    return result
+    del career_path_id, payload, current_user, db
+    raise _conflict(
+        "direct_career_path_enrollment_disabled: enroll the student in a Learning Program"
+    )
 
 
 @management_router.delete(
@@ -651,17 +641,10 @@ async def unenroll_student_from_path(
     current_user: Annotated[CurrentUser, Depends(_REQUIRE_PATH_UNENROLL)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> None:
-    try:
-        await _ensure_caller_in_path_org(db, current_user, career_path_id, _PATH_UNENROLL_CODES)
-        await enrollment_service.unenroll_student(
-            db,
-            career_path_id=career_path_id,
-            student_id=student_id,
-            actor=current_user,
-        )
-    except NotFoundError as exc:
-        raise _not_found(str(exc)) from exc
-    await db.commit()
+    del career_path_id, student_id, current_user, db
+    raise _conflict(
+        "direct_career_path_unenrollment_disabled: withdraw the Learning Program enrollment"
+    )
 
 
 @management_router.post(

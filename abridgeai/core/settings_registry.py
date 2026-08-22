@@ -83,6 +83,19 @@ _SPECS: tuple[SettingSpec, ...] = (
     # retry constants). env_var names match the existing Settings env vars so a
     # deployment's current ``.env`` keeps working as the env-layer fallback.
     SettingSpec(
+        key="learning_program.max_concurrent_enrollments",
+        group="careerpath",
+        type="int",
+        default=1,
+        minimum=1,
+        maximum=100,
+        label="Concurrent learning programs",
+        description=(
+            "Maximum awaiting or active learning-program enrolments per student "
+            "inside this organization. Existing enrolments are grandfathered when lowered."
+        ),
+    ),
+    SettingSpec(
         key="ai.llm_timeout_seconds",
         group="ai",
         type="float",
