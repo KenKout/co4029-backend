@@ -301,8 +301,14 @@ def _create_outcomes(
     ids: dict[str, UUID] = {}
     next_position: dict[UUID | None, int] = {}
 
-    # Shallowest first so a parent id always exists by the time its child is
-    # built, regardless of the order the codes appeared in the document.
+    # Shallowest first. This is load-bearing TWICE, so do not "simplify" it
+    # into document order: it guarantees a parent's id exists by the time a
+    # child references it, AND it fixes the order the rows are added to the
+    # session. `parent_id` is a self-referential FK with no `relationship()`
+    # behind it, so SQLAlchemy has no mapper-level dependency to sort on and
+    # falls back to add-order — children added before their parent would trip
+    # course_learning_outcomes_parent_id_fkey, the same way the storage row
+    # did in _archive_syllabus.
     ordered = sorted(parsed.outcomes, key=lambda o: o.code.count("."))
     for item in ordered:
         parent_id = ids.get(item.parent_code) if item.parent_code else None
@@ -334,11 +340,22 @@ async def _archive_syllabus(
     course_id: UUID,
     uploaded_by: UUID,
 ) -> UUID:
-    """Store the source PDF and return its ``storage_objects.id``.
+    """Store the source PDF and return a FLUSHED ``storage_objects.id``.
 
-    Uploaded before the DB row is added, so a storage failure aborts the
-    whole import instead of leaving a row pointing at an object that was
-    never written.
+    Two orderings matter here, and getting the second wrong is what made
+    the first version of this fail with a foreign-key violation:
+
+    1. The bytes go to object storage BEFORE the row is added, so a
+       storage failure aborts the import instead of committing a row that
+       points at an object which was never written.
+    2. The row is FLUSHED before the caller references its id. Both this
+       insert and the ``course_syllabus_imports`` insert that carries the
+       FK would otherwise sit in the same flush, and SQLAlchemy only
+       orders inserts between mappers that a ``relationship()`` links —
+       a bare ``ForeignKey`` column does not establish that dependency,
+       so the child could be written first and trip
+       ``course_syllabus_imports_storage_object_id_fkey``. The course
+       thumbnail upload flushes here for the same reason.
     """
     settings = get_settings()
     bucket = settings.s3_bucket_name or "abridgeai-local"
@@ -362,6 +379,7 @@ async def _archive_syllabus(
         uploaded_by=uploaded_by,
         uploaded_at=datetime.now(tz=UTC),
     )
+    await db.flush()
     return object_id
 
 
