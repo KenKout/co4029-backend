@@ -168,7 +168,6 @@ async def create_interview_config(
         max_follow_ups_per_question=data.get("max_follow_ups_per_question", 2),
         max_hints_per_question=data.get("max_hints_per_question", 3),
         min_outcomes_to_pass=data.get("min_outcomes_to_pass"),
-        lock_quiz_ef_until_pass=bool(data.get("lock_quiz_ef_until_pass", False)),
         supplementary_instructions=data.get("supplementary_instructions"),
         security_response_policy=data.get("security_response_policy", "warn_and_continue"),
         security_max_consecutive_attempts=data.get("security_max_consecutive_attempts", 3),

@@ -920,10 +920,10 @@ async def test_start_session_self_heals_stale_empty_session(
             text(
                 "INSERT INTO interview_configs ("
                 "  id, course_id, module_id, title, status,"
-                "  lock_quiz_ef_until_pass, created_by, published_at"
+                "  created_by, published_at"
                 ") VALUES ("
                 "  :cid, :course, :module, 'Stale Session Repro', 'published',"
-                "  false, :uid, NOW()"
+                "  :uid, NOW()"
                 ")"
             ),
             {
@@ -1032,10 +1032,10 @@ async def test_start_session_upgrades_input_mode_when_config_allows(
             text(
                 "INSERT INTO interview_configs ("
                 "  id, course_id, module_id, title, status,"
-                "  lock_quiz_ef_until_pass, created_by, published_at"
+                "  created_by, published_at"
                 ") VALUES ("
                 "  :cid, :course, :module, 'Mode Upgrade Repro', 'published',"
-                "  false, :uid, NOW()"
+                "  :uid, NOW()"
                 ")"
             ),
             {
@@ -1139,10 +1139,10 @@ async def test_start_session_aligns_a_legacy_text_session_to_the_unified_mode(
             text(
                 "INSERT INTO interview_configs ("
                 "  id, course_id, module_id, title, status,"
-                "  lock_quiz_ef_until_pass, created_by, published_at"
+                "  created_by, published_at"
                 ") VALUES ("
                 "  :cid, :course, :module, 'Text Only Repro', 'published',"
-                "  false, :uid, NOW()"
+                "  :uid, NOW()"
                 ")"
             ),
             {

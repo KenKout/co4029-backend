@@ -181,7 +181,6 @@ class InterviewConfigCreate(BaseModel):
     cooldown_hours: int | None = Field(default=None, ge=1)
     max_follow_ups_per_question: int = Field(default=2, ge=0, le=50)
     max_hints_per_question: int = Field(default=3, ge=0, le=10)
-    lock_quiz_ef_until_pass: bool = False
     supplementary_instructions: str | None = None
     security_response_policy: SecurityResponsePolicyLiteral = "warn_and_continue"
     security_max_consecutive_attempts: int = Field(default=3, ge=2, le=20)
@@ -214,7 +213,6 @@ class InterviewConfigUpdate(BaseModel):
     min_outcomes_to_pass: int | None = Field(default=None, ge=1)
     max_follow_ups_per_question: int | None = Field(default=None, ge=0, le=50)
     max_hints_per_question: int | None = Field(default=None, ge=0, le=10)
-    lock_quiz_ef_until_pass: bool | None = None
     supplementary_instructions: str | None = None
     security_response_policy: SecurityResponsePolicyLiteral | None = None
     security_max_consecutive_attempts: int | None = Field(default=None, ge=2, le=20)

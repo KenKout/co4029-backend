@@ -93,81 +93,6 @@ class AllCardsInCooldownError(AppError):
         self.cards_due_at = cards_due_at
 
 
-class InterviewPassRequiredError(AppError):
-    """FR-5.3: the quiz's module gates its spaced-repetition unlock behind a
-    passed interview the student has not yet passed.
-
-    Raised by :func:`_ensure_interview_pass_lock` when the quiz belongs to a
-    module carrying a published interview config with
-    ``lock_quiz_ef_until_pass = TRUE`` and the student has no completed+passed
-    interview session for that module. The router maps this to HTTP 403 with an
-    ``interview_pass_required`` payload so the client can deep-link the pending
-    interview. Carries the blocking module + interview config ids for that.
-    """
-
-    def __init__(self, module_id: UUID, interview_config_id: UUID) -> None:
-        super().__init__(
-            f"Interview pass required for module {module_id} "
-            f"(interview config {interview_config_id}) before this quiz"
-        )
-        self.module_id = module_id
-        self.interview_config_id = interview_config_id
-
-
-async def _ensure_interview_pass_lock(db: AsyncSession, *, quiz_id: UUID, student_id: UUID) -> None:
-    """FR-5.3 server-side gate: block a quiz attempt when the quiz's module has a
-    published interview with ``lock_quiz_ef_until_pass`` the student hasn't passed.
-
-    Resolution:
-
-    1. Emergency off-switch — when ``settings.lesson_gating_enforced`` is False
-       the gate is a no-op and never touches the DB.
-    2. Look up a *locking* interview config for the quiz's module: published,
-       ``lock_quiz_ef_until_pass = TRUE``, not soft-deleted. None found → no gate.
-    3. Otherwise the student must have a completed+passed interview session for
-       that module (:func:`has_passing_interview_for_module`); if not, raise
-       :class:`InterviewPassRequiredError`.
-
-    ``get_settings`` and the SR public helper are imported lazily so the unit
-    test's ``patch`` on the source module attributes takes effect at call time
-    (a module-top ``from ... import`` would bind an unpatched reference).
-    """
-    from abridgeai.core.config import get_settings  # noqa: PLC0415
-
-    if not get_settings().lesson_gating_enforced:
-        return
-
-    from sqlalchemy import text  # noqa: PLC0415
-
-    result = await db.execute(
-        text(
-            "SELECT c.id, c.module_id "
-            "FROM interview_configs c "
-            "JOIN quizzes q ON q.module_id = c.module_id "
-            "WHERE q.id = :quiz_id "
-            "AND c.status = 'published' "
-            "AND c.lock_quiz_ef_until_pass = TRUE "
-            "AND c.deleted_at IS NULL "
-            "AND q.deleted_at IS NULL "
-            "LIMIT 1"
-        ),
-        {"quiz_id": str(quiz_id)},
-    )
-    row = result.first()
-    if row is None:
-        return  # no locking interview config for this module → no gate
-
-    interview_config_id, module_id = row[0], row[1]
-
-    from abridgeai.features.spaced_repetition.api import public as sr_public  # noqa: PLC0415
-
-    passed = await sr_public.has_passing_interview_for_module(
-        db, student_id=student_id, module_id=module_id
-    )
-    if not passed:
-        raise InterviewPassRequiredError(module_id, interview_config_id)
-
-
 async def get_published_quiz(db: AsyncSession, quiz_id: UUID) -> Quiz | None:
     """Pass-through to :func:`published_queries.get_published_quiz`.
 
@@ -396,13 +321,6 @@ async def start_attempt(
     (→ 409) per the quiz's ``cooldown_hours`` / ``max_attempts`` /
     ``allow_retakes`` columns. Both exceptions propagate to the router.
     """
-    # FR-5.3 interview-pass gate: fail fast before creating any attempt state
-    # when the quiz's module gates its unlock behind a passed interview the
-    # student hasn't passed. No-op when the emergency switch is off or the module
-    # carries no locking interview config. Raises InterviewPassRequiredError
-    # (router → HTTP 403) so the client can deep-link the pending interview.
-    await _ensure_interview_pass_lock(db, quiz_id=quiz_id, student_id=actor.user_id)
-
     # Phase 5: resolve this student's effective timing/retake policy (base quiz
     # columns overridden by any user/group override) and feed it into the gate
     # so an accommodation (extra attempts, extended window) is honoured. We load

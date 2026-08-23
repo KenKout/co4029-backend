@@ -28,8 +28,6 @@ from abridgeai.features.interviews.models import InterviewConfig
 #                                      interview prompt or the transcript
 #   security_incident_summary_enabled  controls a teacher-side report only
 #                                      (routers/authoring.py), never the run
-#   lock_quiz_ef_until_pass            downstream SR/quiz gating, read outside
-#                                      the interview itself
 #
 # ``max_attempts`` and ``cooldown_hours`` are deliberately NOT here, even though
 # they are only read before a session exists and so cannot disturb a run in
@@ -48,7 +46,6 @@ PUBLISHED_EDITABLE_CONFIG_FIELDS = frozenset(
     {
         "title",
         "security_incident_summary_enabled",
-        "lock_quiz_ef_until_pass",
     }
 )
 

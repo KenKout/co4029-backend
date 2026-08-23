@@ -131,7 +131,6 @@ async def deep_clone_interview_config(
         max_attempts=source.max_attempts,
         cooldown_hours=source.cooldown_hours,
         min_outcomes_to_pass=source.min_outcomes_to_pass,
-        lock_quiz_ef_until_pass=source.lock_quiz_ef_until_pass,
         time_limit_minutes=source.time_limit_minutes,
         persona=source.persona,
         persona_profile_json=(

@@ -278,7 +278,6 @@ def test_interview_config_preserved_columns() -> None:
     for preserved in (
         "max_attempts",
         "min_outcomes_to_pass",
-        "lock_quiz_ef_until_pass",
         "time_limit_minutes",
         "supplementary_instructions",
         "generation_run_id",

@@ -250,9 +250,6 @@ class InterviewConfig(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftD
     # ``Quiz.cooldown_hours``; enforced in ``services/taking.start_session``.
     cooldown_hours: Mapped[int | None] = mapped_column(Integer)
     min_outcomes_to_pass: Mapped[int | None] = mapped_column(Integer)
-    lock_quiz_ef_until_pass: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, server_default=text("FALSE")
-    )
     time_limit_minutes: Mapped[int | None] = mapped_column(Integer)
     # Per-question budgets the interviewer operates under. Defaults mirror the
     # orchestrator constants these columns replaced (decision.py), so an

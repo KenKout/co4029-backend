@@ -173,7 +173,6 @@ def test_config_public_status_narrows_to_published() -> None:
             module_id=module_id,
             title="Draft",
             status="draft",  # type: ignore[arg-type]
-            lock_quiz_ef_until_pass=False,
         )
 
     ok = InterviewConfigPublic(
@@ -182,7 +181,6 @@ def test_config_public_status_narrows_to_published() -> None:
         module_id=module_id,
         title="Live",
         status="published",
-        lock_quiz_ef_until_pass=False,
     )
     assert ok.status == "published"
 
@@ -198,7 +196,6 @@ def test_config_authoring_widens_status() -> None:
             module_id=module_id,
             title="x",
             status=status,  # type: ignore[arg-type]
-            lock_quiz_ef_until_pass=False,
             created_at=now,
             updated_at=now,
         )
@@ -216,7 +213,6 @@ def test_persona_literal_rejects_friendly() -> None:
             title="x",
             status="published",
             persona="friendly",  # type: ignore[arg-type]
-            lock_quiz_ef_until_pass=False,
         )
 
     for persona in ("strict", "neutral", "supportive"):
@@ -227,7 +223,6 @@ def test_persona_literal_rejects_friendly() -> None:
             title="x",
             status="published",
             persona=persona,  # type: ignore[arg-type]
-            lock_quiz_ef_until_pass=False,
         )
         assert ok.persona == persona
 
@@ -298,7 +293,6 @@ def test_create_schemas_basic_validation() -> None:
         time_limit_minutes=30,
         max_attempts=3,
         cooldown_hours=24,
-        lock_quiz_ef_until_pass=True,
         supplementary_instructions="Probe deeply on edge cases",
     )
     assert config.title == "ML Foundations"
@@ -353,7 +347,6 @@ def test_create_schemas_extra_forbidden() -> None:
                 "title": "x",
                 "course_id": uuid4(),
                 "module_id": uuid4(),
-                "lock_quiz_ef_until_pass": False,
                 "extra_field": "boom",
             }
         )
@@ -432,7 +425,6 @@ def test_for_authoring_compose() -> None:
         module_id=module_id,
         title="x",
         status="draft",
-        lock_quiz_ef_until_pass=False,
         created_at=now,
         updated_at=now,
     )
@@ -447,7 +439,6 @@ def test_for_taking_compose() -> None:
         module_id=uuid4(),
         title="x",
         status="published",
-        lock_quiz_ef_until_pass=False,
     )
     first_q = InterviewQuestionPublic(
         id=uuid4(),

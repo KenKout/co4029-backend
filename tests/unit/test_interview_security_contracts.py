@@ -60,7 +60,6 @@ def test_taking_payload_cannot_serialize_outcome_or_bank_metadata() -> None:
         module_id=uuid4(),
         title="Secure interview",
         status="published",
-        lock_quiz_ef_until_pass=False,
     )
     question = InterviewQuestionPublic(
         id=uuid4(),

@@ -143,7 +143,6 @@ class InterviewConfigPublic(_ORMModel):
     cooldown_hours: int | None = None
     max_follow_ups_per_question: int = 2
     max_hints_per_question: int = 3
-    lock_quiz_ef_until_pass: bool
     published_at: datetime | None = None
 
 

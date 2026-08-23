@@ -4,11 +4,6 @@ Covers the two new enforcement points added in phase-02:
 
 * ``courses.routers.learner._ensure_lesson_unlocked`` — 403 with the
   unlock-requirements payload when ``check_lesson_unlock`` says locked.
-* ``quizzes.services.taking._ensure_interview_pass_lock`` — raises
-  :class:`InterviewPassRequiredError` when the quiz's module carries a
-  published interview config with ``lock_quiz_ef_until_pass`` that the
-  student has not passed.
-
 Both helpers consult ``settings.lesson_gating_enforced`` (emergency
 off-switch) and the spaced_repetition public API; everything external is
 mocked — no DB.
@@ -24,10 +19,6 @@ import pytest
 from fastapi import HTTPException
 
 from abridgeai.features.courses.routers.learner import _ensure_lesson_unlocked
-from abridgeai.features.quizzes.services.taking import (
-    InterviewPassRequiredError,
-    _ensure_interview_pass_lock,
-)
 from abridgeai.features.spaced_repetition.api.public import LessonUnlockStatus
 
 _STUDENT = uuid.uuid4()
@@ -109,63 +100,6 @@ class TestEnsureLessonUnlocked:
         assert exc.detail["passing_cards"] == 5
         assert exc.detail["prerequisites_met"] is True
 
-
-def _db_returning_lock_row(row: tuple | None) -> AsyncMock:
-    db = AsyncMock()
-    result = SimpleNamespace(first=lambda: row)
-    db.execute = AsyncMock(return_value=result)
-    return db
-
-
-class TestEnsureInterviewPassLock:
-    async def test_noop_when_flag_disabled(self) -> None:
-        db = _db_returning_lock_row((_CONFIG, _MODULE))
-        with patch(
-            "abridgeai.core.config.get_settings",
-            return_value=_settings(enforced=False),
-        ):
-            await _ensure_interview_pass_lock(db, quiz_id=_QUIZ, student_id=_STUDENT)
-        db.execute.assert_not_called()
-
-    async def test_noop_when_no_locking_config(self) -> None:
-        db = _db_returning_lock_row(None)
-        with patch(
-            "abridgeai.core.config.get_settings",
-            return_value=_settings(enforced=True),
-        ):
-            await _ensure_interview_pass_lock(db, quiz_id=_QUIZ, student_id=_STUDENT)
-
-    async def test_noop_when_interview_passed(self) -> None:
-        db = _db_returning_lock_row((_CONFIG, _MODULE))
-        with (
-            patch(
-                "abridgeai.core.config.get_settings",
-                return_value=_settings(enforced=True),
-            ),
-            patch(
-                "abridgeai.features.spaced_repetition.api.public.has_passing_interview_for_module",
-                new=AsyncMock(return_value=True),
-            ),
-        ):
-            await _ensure_interview_pass_lock(db, quiz_id=_QUIZ, student_id=_STUDENT)
-
-    async def test_raises_when_not_passed(self) -> None:
-        db = _db_returning_lock_row((_CONFIG, _MODULE))
-        with (
-            patch(
-                "abridgeai.core.config.get_settings",
-                return_value=_settings(enforced=True),
-            ),
-            patch(
-                "abridgeai.features.spaced_repetition.api.public.has_passing_interview_for_module",
-                new=AsyncMock(return_value=False),
-            ),
-            pytest.raises(InterviewPassRequiredError) as exc_info,
-        ):
-            await _ensure_interview_pass_lock(db, quiz_id=_QUIZ, student_id=_STUDENT)
-
-        assert exc_info.value.module_id == _MODULE
-        assert exc_info.value.interview_config_id == _CONFIG
 
 
 class TestGateWiring:
@@ -260,22 +194,6 @@ class TestGateWiring:
             )
         assert gate.await_count == 3
         assert all(call.args[2] == _LESSON for call in gate.await_args_list)
-
-    async def test_start_attempt_invokes_interview_lock(self) -> None:
-        from abridgeai.features.quizzes.services import taking
-
-        with (
-            patch.object(
-                taking, "_require_quiz", new=AsyncMock(return_value=SimpleNamespace(id=_QUIZ))
-            ),
-            patch.object(
-                taking,
-                "_ensure_interview_pass_lock",
-                new=AsyncMock(side_effect=InterviewPassRequiredError(_MODULE, _CONFIG)),
-            ),
-            pytest.raises(InterviewPassRequiredError),
-        ):
-            await taking.start_attempt(AsyncMock(), _QUIZ, _fake_user())
 
 
 class TestSlimLessonProjection:
