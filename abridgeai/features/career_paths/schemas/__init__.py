@@ -27,9 +27,11 @@ from abridgeai.features.career_paths.schemas.authoring import (
 )
 from abridgeai.features.career_paths.schemas.public import (
     CareerPathCoursePublic,
+    CareerPathDetailPublic,
     CareerPathListPage,
     CareerPathProgressRead,
     CareerPathPublic,
+    CareerPathStagePublic,
     CareerReadinessSnapshotRead,
     CourseProgressSummary,
     MyCareerEnrollmentRead,
@@ -50,7 +52,9 @@ __all__ = [
     "CareerPathImpactRead",
     "CareerPathImpactStage",
     "CareerPathListPage",
+    "CareerPathDetailPublic",
     "CareerPathProgressRead",
+    "CareerPathStagePublic",
     "CareerPathPublic",
     "CareerPathStageAuthoring",
     "CareerPathStageCreate",

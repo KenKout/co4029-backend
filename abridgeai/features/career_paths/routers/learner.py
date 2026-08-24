@@ -10,6 +10,7 @@ from abridgeai.core.db import get_db
 from abridgeai.core.exceptions import ForbiddenError, NotFoundError
 from abridgeai.core.security import CurrentUser, get_current_user
 from abridgeai.features.career_paths.schemas import (
+    CareerPathDetailPublic,
     CareerPathListPage,
     CareerPathProgressRead,
     CareerPathPublic,
@@ -52,6 +53,30 @@ async def list_published_paths(
             detail={"error": "invalid_cursor", "message": str(exc)},
         ) from exc
     return CareerPathListPage(items=page.items, next_cursor=page.next_cursor)
+
+
+@router.get("/{slug}/detail", response_model=CareerPathDetailPublic)
+async def get_published_path_detail(
+    slug: str,
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> CareerPathDetailPublic:
+    """Published path plus its stage roadmap.
+
+    Separate from ``GET /{slug}`` so the catalog list and the plain detail
+    read keep their slim payload; this one is for the screen where a student
+    decides whether to commit to a path.
+
+    Registered BEFORE ``/{slug}`` would be irrelevant (different suffix), but
+    it must not be shadowed by it — FastAPI matches in declaration order and
+    ``/{slug}`` would happily swallow ``detail`` as a slug if it came first.
+    """
+    result = await enrollment_service.get_published_path_detail_for_user(
+        db, slug=slug, user_id=current_user.user_id
+    )
+    if result is None:
+        raise _not_found(f"CareerPath {slug!r} not found")
+    return result
 
 
 @router.get("/{slug}", response_model=CareerPathPublic)

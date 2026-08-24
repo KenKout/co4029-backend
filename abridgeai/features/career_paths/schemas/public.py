@@ -29,6 +29,45 @@ class CareerPathPublic(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class CareerPathStagePublic(BaseModel):
+    """One stage of a published path, as a PROSPECTIVE student sees it.
+
+    Structure only — no ``unlocked`` / ``complete`` / ``latched``. Those live
+    on :class:`StageProgressRead`, which needs an enrollment to evaluate.
+    A student browsing a path inside a learning program has not chosen it
+    yet, so there is no progress to report; they still need to see the shape
+    of the journey before committing to it, which is what this carries.
+    """
+
+    stage_id: UUID
+    position: int
+    title: str | None = None
+    """NULL means "unnamed" — the client renders ``Stage {position}`` in the
+    user's own locale rather than a server-side English default."""
+    description: str | None = None
+    unlock_policy: str
+    min_optional_to_complete: int
+    required_count: int
+    optional_count: int
+    courses: list[CareerPathCoursePublic] = []
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class CareerPathDetailPublic(CareerPathPublic):
+    """Published path + its stage breakdown.
+
+    A separate schema from :class:`CareerPathPublic` so the CATALOG list
+    endpoint keeps its slim payload — a browse page returning every stage of
+    every path would balloon for no benefit.
+    """
+
+    stages: list[CareerPathStagePublic] = []
+    course_count: int = 0
+    required_course_count: int = 0
+    stage_count: int = 0
+
+
 class CareerPathListPage(BaseModel):
     """Cursor-paginated published career paths.
 

@@ -115,7 +115,56 @@ async def get_active_session_count(db: AsyncSession, user_id: UUID) -> int:
     return int((await db.execute(stmt)).scalar_one())
 
 
+async def find_or_create_student(
+    db: AsyncSession,
+    *,
+    email: str,
+    organization_id: UUID,
+    actor_id: UUID,
+    given_name: str | None = None,
+    family_name: str | None = None,
+    display_name: str | None = None,
+) -> tuple[UUID, bool]:
+    """Resolve ``email`` to a user id, creating the account if it is new.
+
+    Returns ``(user_id, created)``. Backs bulk student import, where a roster
+    file mixes people who already have accounts with people who do not, and
+    the importer must not care which is which.
+
+    An EXISTING user is returned untouched — no profile overwrite, no role
+    change. A roster file is not authority over an account that already
+    exists: silently renaming someone or re-scoping their role because a
+    spreadsheet disagreed is the kind of write nobody asks for.
+
+    A NEW user is created through the same admin-invite path a manual invite
+    uses (active account + profile + org-scoped ``student`` role), so imported
+    students are indistinguishable from invited ones.
+    """
+    from abridgeai.features.identity.queries import users as user_queries  # noqa: PLC0415
+    from abridgeai.features.identity.schemas import UserCreate  # noqa: PLC0415
+    from abridgeai.features.identity.services import admin as admin_service  # noqa: PLC0415
+
+    existing = await user_queries.get_user_by_email(db, email)
+    if existing is not None:
+        return UUID(str(existing.id)), False
+
+    created = await admin_service.create_user_account(
+        db,
+        payload=UserCreate(
+            primary_email=email,
+            given_name=given_name,
+            family_name=family_name,
+            display_name=display_name,
+            organization_id=organization_id,
+            role_code="student",
+        ),
+        actor_id=actor_id,
+    )
+    return UUID(str(created.id)), True
+
+
 __all__ = [
+    "find_or_create_student",
     "UserDTO",
     "UserProfileDTO",
     "get_active_session_count",
