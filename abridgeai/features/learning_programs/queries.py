@@ -155,6 +155,47 @@ async def delete_version_paths(db: AsyncSession, version_id: UUID) -> None:
     )
 
 
+async def list_unpublishable_version_path_ids(
+    db: AsyncSession, *, version_id: UUID, organization_id: UUID
+) -> list[UUID]:
+    """Return path mappings that cannot be frozen into a new Program version.
+
+    Drafts deliberately retain exact Career Path versions while authors edit
+    them. Availability is rechecked at the publish boundary so a path archived
+    (or otherwise invalidated) after the draft was created cannot leak into a
+    newly published Program version.
+    """
+
+    stmt = (
+        select(LearningProgramVersionPath.career_path_id)
+        .outerjoin(
+            CareerPath,
+            CareerPath.id == LearningProgramVersionPath.career_path_id,
+        )
+        .outerjoin(
+            CareerPathVersion,
+            CareerPathVersion.id == LearningProgramVersionPath.career_path_version_id,
+        )
+        .where(
+            LearningProgramVersionPath.program_version_id == version_id,
+            (
+                CareerPath.id.is_(None)
+                | (CareerPath.organization_id != organization_id)
+                | CareerPath.deleted_at.is_not(None)
+                | (CareerPath.status != "published")
+                | CareerPathVersion.id.is_(None)
+                | CareerPathVersion.deleted_at.is_not(None)
+                | (CareerPathVersion.status != "published")
+                | (
+                    CareerPathVersion.career_path_id
+                    != LearningProgramVersionPath.career_path_id
+                )
+            ),
+        )
+    )
+    return list((await db.scalars(stmt)).all())
+
+
 async def resolve_published_path_versions(
     db: AsyncSession, *, organization_id: UUID, career_path_ids: list[UUID]
 ) -> list[tuple[CareerPath, CareerPathVersion]]:

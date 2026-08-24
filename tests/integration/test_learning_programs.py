@@ -11,10 +11,10 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 
 from abridgeai.core.config import get_settings
-from abridgeai.core.exceptions import ForbiddenError
+from abridgeai.core.exceptions import ConflictError, ForbiddenError
 from abridgeai.core.security import CurrentUser
 from abridgeai.features.learning_programs import services
-from abridgeai.features.learning_programs.schemas import ProgramCreate
+from abridgeai.features.learning_programs.schemas import ProgramCreate, ProgramUpdate
 
 
 def _async_url(url: str) -> str:
@@ -144,6 +144,96 @@ async def test_program_selection_and_dean_approved_switch_are_historical(
         assert [attempt.status for attempt in refreshed.attempts] == ["switched_out", "active"]
         assert refreshed.attempts[0].exit_snapshot is not None
         assert refreshed.attempts[1].career_path_id == path_b
+        await db.rollback()
+
+
+@pytest.mark.asyncio
+async def test_removing_path_from_new_draft_preserves_pinned_versions_and_old_enrollment(
+    engine: AsyncEngine, seeded_users: SeededUsers
+) -> None:
+    faculty_id, path_a, path_b = await _seed_program_context(engine, seeded_users)
+    factory = async_sessionmaker(engine, expire_on_commit=False, autoflush=False)
+    manager = CurrentUser(seeded_users.manager_id, uuid.uuid4())
+
+    async with factory() as db:
+        program = await services.create_program(
+            db,
+            ProgramCreate(
+                faculty_id=faculty_id,
+                slug=f"remove-path-{uuid.uuid4().hex[:8]}",
+                name="Path removal preserves history",
+                career_path_ids=[path_a, path_b],
+            ),
+            manager,
+        )
+        published_v1 = await services.publish_program(db, program_id=program.id, actor=manager)
+        enrollment = (
+            await services.enroll_students(
+                db,
+                program_id=program.id,
+                student_ids=[seeded_users.student_id],
+                actor=manager,
+            )
+        )[0]
+
+        # A newer Career Path version exists before the Program draft is edited.
+        # Removing B must not silently upgrade retained path A from v1 to v2.
+        await db.execute(
+            text(
+                "INSERT INTO career_path_versions "
+                "(id, career_path_id, version_no, status, published_at) "
+                "VALUES (gen_random_uuid(), :path, 2, 'published', NOW())"
+            ),
+            {"path": path_a},
+        )
+
+        draft_v2 = await services.update_program(
+            db,
+            program_id=program.id,
+            payload=ProgramUpdate(career_path_ids=[path_a]),
+            actor=manager,
+        )
+
+        assert draft_v2.current_version.version_no == 2
+        assert [path.career_path_id for path in draft_v2.paths] == [path_a]
+        assert draft_v2.paths[0].career_path_version_no == 1
+
+        published_v2 = await services.publish_program(db, program_id=program.id, actor=manager)
+        assert [path.career_path_id for path in published_v2.paths] == [path_a]
+
+        old_enrollment = (await services.list_my_enrollments(db, seeded_users.student_id))[0]
+        assert enrollment.program_version_id == published_v1.current_version.id
+        assert old_enrollment.program_version_id == published_v1.current_version.id
+        assert [path.career_path_id for path in old_enrollment.paths] == [path_a, path_b]
+        await db.rollback()
+
+
+@pytest.mark.asyncio
+async def test_publish_rejects_path_archived_after_draft_was_created(
+    engine: AsyncEngine, seeded_users: SeededUsers
+) -> None:
+    faculty_id, path_a, path_b = await _seed_program_context(engine, seeded_users)
+    factory = async_sessionmaker(engine, expire_on_commit=False, autoflush=False)
+    manager = CurrentUser(seeded_users.manager_id, uuid.uuid4())
+
+    async with factory() as db:
+        program = await services.create_program(
+            db,
+            ProgramCreate(
+                faculty_id=faculty_id,
+                slug=f"archive-before-publish-{uuid.uuid4().hex[:8]}",
+                name="Archived path publish guard",
+                career_path_ids=[path_a, path_b],
+            ),
+            manager,
+        )
+        await db.execute(
+            text("UPDATE career_paths SET status = 'archived' WHERE id = :path"),
+            {"path": path_b},
+        )
+
+        with pytest.raises(ConflictError, match="program_contains_unavailable_paths"):
+            await services.publish_program(db, program_id=program.id, actor=manager)
         await db.rollback()
 
 

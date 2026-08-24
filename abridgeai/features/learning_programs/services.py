@@ -346,15 +346,28 @@ async def update_program(
                     )
                 )
         else:
-            await _replace_draft_paths(db, program, draft, path_ids)
+            await _replace_draft_paths(
+                db,
+                program,
+                draft,
+                path_ids,
+                existing_paths=source_paths,
+            )
         current = draft
     else:
         if payload.max_path_switches is not None:
             current.max_path_switches = payload.max_path_switches
         current.updated_by = actor.user_id
         if payload.career_path_ids is not None:
+            source_paths = await queries.list_version_paths(db, current.id)
             await queries.delete_version_paths(db, current.id)
-            await _replace_draft_paths(db, program, current, payload.career_path_ids)
+            await _replace_draft_paths(
+                db,
+                program,
+                current,
+                payload.career_path_ids,
+                existing_paths=source_paths,
+            )
     await flush_or_conflict(db)
     return await _program_out(db, program, current)
 
@@ -364,15 +377,39 @@ async def _replace_draft_paths(
     program: LearningProgram,
     version: LearningProgramVersion,
     path_ids: list[UUID],
+    *,
+    existing_paths: list[dict[str, object]] | None = None,
 ) -> None:
     if len(path_ids) != len(set(path_ids)):
         raise ConflictError("career_path_ids_must_be_unique")
+
+    existing_by_id = {
+        cast(UUID, row["career_path_id"]): row for row in (existing_paths or [])
+    }
+    added_path_ids = [path_id for path_id in path_ids if path_id not in existing_by_id]
     resolved = await queries.resolve_published_path_versions(
-        db, organization_id=program.organization_id, career_path_ids=path_ids
+        db,
+        organization_id=program.organization_id,
+        career_path_ids=added_path_ids,
     )
-    if len(resolved) != len(path_ids):
+    if len(resolved) != len(added_path_ids):
         raise ConflictError("all_paths_must_be_published_and_not_archived")
-    for position, (path, path_version) in enumerate(resolved, start=1):
+    resolved_by_id = {path.id: (path, path_version) for path, path_version in resolved}
+
+    for position, path_id in enumerate(path_ids, start=1):
+        existing = existing_by_id.get(path_id)
+        if existing is not None:
+            db.add(
+                LearningProgramVersionPath(
+                    program_version_id=version.id,
+                    career_path_id=path_id,
+                    career_path_version_id=cast(UUID, existing["career_path_version_id"]),
+                    position=position,
+                )
+            )
+            continue
+
+        path, path_version = resolved_by_id[path_id]
         if path.status == "archived":
             raise ConflictError("archived_path_cannot_be_added")
         db.add(
@@ -398,6 +435,13 @@ async def publish_program(db: AsyncSession, *, program_id: UUID, actor: CurrentU
     paths = await queries.list_version_paths(db, version.id)
     if not paths:
         raise ConflictError("program_requires_at_least_one_path")
+    invalid_path_ids = await queries.list_unpublishable_version_path_ids(
+        db,
+        version_id=version.id,
+        organization_id=program.organization_id,
+    )
+    if invalid_path_ids:
+        raise ConflictError("program_contains_unavailable_paths")
     version.status = "published"
     version.published_at = _now()
     version.updated_by = actor.user_id
