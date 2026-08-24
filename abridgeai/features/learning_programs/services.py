@@ -24,6 +24,9 @@ from abridgeai.features.learning_programs.schemas import (
     PathChangeRequestRead,
     ProgramAuthoringOptions,
     ProgramCreate,
+    ProgramCsvImportFailure,
+    ProgramCsvImportResult,
+    ProgramCsvImportRow,
     ProgramEnrollmentRead,
     ProgramOptionRead,
     ProgramPathRead,
@@ -387,6 +390,144 @@ async def archive_program(db: AsyncSession, *, program_id: UUID, actor: CurrentU
     program.updated_by = actor.user_id
     await flush_or_conflict(db)
     return await _program_out(db, program)
+
+
+async def import_students_from_csv(
+    db: AsyncSession,
+    *,
+    program_id: UUID,
+    rows: list[dict[str, str]],
+    actor: CurrentUser,
+) -> ProgramCsvImportResult:
+    """Create accounts as needed and enrol a whole roster into the program.
+
+    Deliberately NOT built on :func:`enroll_students`. That one is
+    all-or-nothing: a single already-enrolled student or a missing role
+    aborts the batch. That is right for a hand-picked selection, and wrong
+    for a file — a roster with one duplicate or one typo would import
+    nothing, and the manager gets no clue which line was at fault.
+
+    Here every row is validated and applied independently:
+
+    * an unknown email creates a student account in the program's org (same
+      admin-invite path a manual invite uses);
+    * a known email is reused untouched — a roster file is not authority
+      over an existing account's name or role;
+    * an already-enrolled student is reported in ``already_enrolled``, not
+      failed, because re-uploading last week's file is a normal thing to do;
+    * anything else lands in ``failures`` with its row number and reason.
+
+    The concurrent-enrollment cap is enforced per row exactly as the
+    hand-picked path enforces it, so an import cannot be used to sidestep it.
+    """
+    program = await queries.get_program(db, program_id, lock=True)
+    if program is None:
+        raise NotFoundError("learning_program_not_found")
+    await _require_operator(db, actor_id=actor.user_id, program=program)
+    if program.status != "published":
+        raise ConflictError("only_published_programs_accept_enrollments")
+    version = await queries.get_current_version(db, program.id, published_only=True)
+    if version is None:
+        raise ConflictError("program_has_no_published_version")
+
+    limit = int(
+        await resolve_setting(
+            db,
+            "learning_program.max_concurrent_enrollments",
+            organization_id=program.organization_id,
+        )
+    )
+
+    result = ProgramCsvImportResult()
+    seen_emails: set[str] = set()
+
+    for row_number, raw in enumerate(rows, start=1):
+        try:
+            parsed = ProgramCsvImportRow.model_validate(raw)
+        except (ValueError, TypeError) as exc:
+            result.failures.append(
+                ProgramCsvImportFailure(
+                    row_number=row_number,
+                    identifier=str(raw.get("email", "")) or None,
+                    reason=f"invalid_row: {exc.__class__.__name__}",
+                )
+            )
+            continue
+
+        email = parsed.email.strip().lower()
+        # A file that lists the same person twice should import them once,
+        # not fail the second line with "already enrolled".
+        if email in seen_emails:
+            continue
+        seen_emails.add(email)
+
+        try:
+            student_id, created = await identity_api.find_or_create_student(
+                db,
+                email=email,
+                organization_id=program.organization_id,
+                actor_id=actor.user_id,
+                given_name=parsed.given_name,
+                family_name=parsed.family_name,
+                display_name=parsed.display_name,
+            )
+            if created:
+                result.created_users.append(student_id)
+
+            existing = await queries.get_program_enrollment(db, program.id, student_id)
+            if existing is not None and existing.status in (
+                "awaiting_path",
+                "active",
+                "completed",
+            ):
+                result.already_enrolled.append(student_id)
+                continue
+
+            concurrent = await queries.count_concurrent_enrollments(
+                db, organization_id=program.organization_id, student_id=student_id
+            )
+            if concurrent >= limit:
+                result.failures.append(
+                    ProgramCsvImportFailure(
+                        row_number=row_number,
+                        identifier=email,
+                        reason="max_concurrent_enrollments_reached",
+                    )
+                )
+                continue
+
+            # Same row shape the hand-picked path writes, including the
+            # re-enrol branch: a withdrawn student re-appearing in a roster
+            # file is reinstated onto the current version rather than
+            # colliding with their old row.
+            if existing is None:
+                db.add(
+                    ProgramEnrollment(
+                        learning_program_id=program.id,
+                        program_version_id=version.id,
+                        student_id=student_id,
+                        status="awaiting_path",
+                        created_by=actor.user_id,
+                        updated_by=actor.user_id,
+                    )
+                )
+            else:
+                existing.program_version_id = version.id
+                existing.status = "awaiting_path"
+                existing.enrolled_at = _now()
+                existing.withdrawn_at = None
+                existing.withdrawal_reason = None
+                existing.updated_by = actor.user_id
+            await flush_or_conflict(db)
+            result.enrolled.append(student_id)
+        except (ConflictError, NotFoundError, ValueError) as exc:
+            result.failures.append(
+                ProgramCsvImportFailure(
+                    row_number=row_number, identifier=email, reason=str(exc)
+                )
+            )
+
+    return result
 
 
 async def enroll_students(

@@ -16,8 +16,10 @@ from abridgeai.features.career_paths.models import StudentCareerEnrollment
 from abridgeai.features.career_paths.queries import authoring as authoring_queries
 from abridgeai.features.career_paths.queries import student as student_queries
 from abridgeai.features.career_paths.schemas import (
+    CareerPathDetailPublic,
     CareerPathProgressRead,
     CareerPathPublic,
+    CareerPathStagePublic,
     CourseProgressSummary,
     MyCareerEnrollmentRead,
     StageProgressRead,
@@ -505,6 +507,76 @@ async def get_published_path_with_courses(
         return None
     courses = await list_published_career_path_courses(db, published.id)
     return _to_path_public(path, courses)
+
+
+async def get_published_path_detail_for_user(
+    db: AsyncSession, *, slug: str, user_id: UUID
+) -> CareerPathDetailPublic | None:
+    """Published path WITH its stage breakdown, for a prospective student.
+
+    The plain :func:`get_published_path_for_user` returns a flat course list,
+    which is all the catalog needs. Choosing a path inside a learning program
+    is a bigger decision than browsing, so that screen gets the roadmap: the
+    stages, their gating policy, and which courses sit in each.
+
+    Courses are grouped by their ``stage_id``. A path authored before stages
+    existed has ``stage_id = NULL`` on every course; those fall through as an
+    empty ``stages`` list and the client keeps rendering the flat list, so
+    this is additive rather than a breaking change for older paths.
+    """
+    from abridgeai.features.career_paths.queries import authoring as authoring_queries
+    from abridgeai.features.career_paths.queries import (
+        get_published_career_path_by_slug,
+        get_user_primary_organization_id,
+        list_published_career_path_courses,
+    )
+
+    organization_id = await get_user_primary_organization_id(db, user_id)
+    if organization_id is None:
+        return None
+    path = await get_published_career_path_by_slug(db, slug=slug, organization_id=organization_id)
+    if path is None:
+        return None
+
+    published = await authoring_queries.get_published_version(db, path.id)
+    if published is None:
+        published = await authoring_queries.get_current_authoring_version(db, path.id)
+    if published is None:
+        return None
+
+    courses = await list_published_career_path_courses(db, published.id)
+    base = _to_path_public(path, courses)
+    stages = await authoring_queries.list_stages_for_version(db, published.id)
+
+    by_stage: dict[str, list[CareerPathCoursePublic]] = {}
+    for course in base.courses:
+        if course.stage_id is not None:
+            by_stage.setdefault(str(course.stage_id), []).append(course)
+
+    stage_dtos: list[CareerPathStagePublic] = []
+    for stage in stages:
+        in_stage = by_stage.get(str(stage.id), [])
+        stage_dtos.append(
+            CareerPathStagePublic(
+                stage_id=stage.id,
+                position=stage.position,
+                title=stage.title,
+                description=stage.description,
+                unlock_policy=stage.unlock_policy,
+                min_optional_to_complete=stage.min_optional_to_complete,
+                required_count=sum(1 for c in in_stage if c.is_required),
+                optional_count=sum(1 for c in in_stage if not c.is_required),
+                courses=in_stage,
+            )
+        )
+
+    return CareerPathDetailPublic(
+        **base.model_dump(),
+        stages=stage_dtos,
+        course_count=len(base.courses),
+        required_course_count=sum(1 for c in base.courses if c.is_required),
+        stage_count=len(stage_dtos),
+    )
 
 
 async def get_published_path_for_user(

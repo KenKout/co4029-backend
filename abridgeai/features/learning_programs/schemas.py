@@ -99,6 +99,47 @@ class PathAttemptRead(BaseModel):
     exit_snapshot: dict[str, object] | None
 
 
+class ProgramCsvImportRow(BaseModel):
+    """One roster line. Only ``email`` is required."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    email: str = Field(min_length=3, max_length=320)
+    given_name: str | None = Field(default=None, max_length=100)
+    family_name: str | None = Field(default=None, max_length=100)
+    display_name: str | None = Field(default=None, max_length=200)
+
+
+class ProgramCsvImportFailure(BaseModel):
+    """Why one row did not import, keyed to its position in the file."""
+
+    row_number: int
+    identifier: str | None = None
+    reason: str
+
+
+class ProgramCsvImportRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    rows: list[dict[str, str]] = Field(min_length=1, max_length=2000)
+
+
+class ProgramCsvImportResult(BaseModel):
+    """Per-row outcome of a roster import.
+
+    ``enrolled`` and ``created_users`` are disjoint counts of the same run:
+    a row can enrol an existing account (enrolled, not created) or a brand
+    new one (both). ``failures`` carries the rows that did not import, with
+    the reason — a bad row must not abort the batch, because a roster file
+    with one typo in it is the normal case, not the exception.
+    """
+
+    enrolled: list[UUID] = Field(default_factory=list)
+    created_users: list[UUID] = Field(default_factory=list)
+    already_enrolled: list[UUID] = Field(default_factory=list)
+    failures: list[ProgramCsvImportFailure] = Field(default_factory=list)
+
+
 class ProgramEnrollmentRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

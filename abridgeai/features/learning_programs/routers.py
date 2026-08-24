@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import base64
+import csv
+import io
 from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from abridgeai.core.db import get_db
@@ -18,6 +22,7 @@ from abridgeai.features.learning_programs.schemas import (
     PathChangeRequestRead,
     ProgramAuthoringOptions,
     ProgramCreate,
+    ProgramCsvImportResult,
     ProgramEnrollmentRead,
     ProgramEnrollRequest,
     ProgramRead,
@@ -42,6 +47,34 @@ def _http_error(exc: Exception) -> HTTPException:
     if isinstance(exc, ForbiddenError):
         return HTTPException(status.HTTP_403_FORBIDDEN, detail={"error": str(exc)})
     return HTTPException(status.HTTP_409_CONFLICT, detail={"error": str(exc)})
+
+
+class ProgramCsvImportPayload(BaseModel):
+    """Roster upload. The SPA sends `csv_text`; `csv_base64` exists so a
+    file with an odd encoding can be shipped byte-exact."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    csv_text: str | None = None
+    csv_base64: str | None = None
+
+
+def _decode_csv_text(payload: ProgramCsvImportPayload) -> str:
+    if payload.csv_text is not None:
+        return payload.csv_text
+    if payload.csv_base64 is not None:
+        # utf-8-sig: Excel writes a BOM, and a BOM on the header line makes
+        # the first column name unmatchable.
+        return base64.b64decode(payload.csv_base64).decode("utf-8-sig")
+    raise HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail={"error": "invalid_csv", "message": "csv_text or csv_base64 required"},
+    )
+
+
+def _parse_csv_text(text: str) -> list[dict[str, str]]:
+    reader = csv.DictReader(io.StringIO(text.lstrip("﻿")))
+    return [{k: (v or "").strip() for k, v in row.items() if k} for row in reader]
 
 
 @management_router.get("/options", response_model=ProgramAuthoringOptions)
@@ -173,6 +206,44 @@ async def list_roster(
     try:
         return await services.list_roster(db, program_id=program_id, actor=actor)
     except (NotFoundError, ForbiddenError) as exc:
+        raise _http_error(exc) from exc
+
+
+@management_router.post(
+    "/{program_id}/students/import-csv",
+    response_model=ProgramCsvImportResult,
+)
+async def import_students_csv(
+    program_id: UUID,
+    payload: ProgramCsvImportPayload,
+    actor: Annotated[CurrentUser, Depends(_REQUIRE_ENROLL)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> ProgramCsvImportResult:
+    """Enrol a roster file into the program, creating accounts as needed.
+
+    Accepts ``csv_text`` or ``csv_base64`` and returns a PER-ROW result:
+    unlike ``POST /{program_id}/students``, one bad line does not abort the
+    batch. A roster file with a typo in it is the normal case.
+
+    Returns 200 rather than 201 because a run can legitimately create
+    nothing — re-uploading last week's file reports everyone under
+    ``already_enrolled`` and writes no new rows.
+    """
+    try:
+        rows = _parse_csv_text(_decode_csv_text(payload))
+    except csv.Error as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": "invalid_csv", "message": exc.__class__.__name__},
+        ) from exc
+
+    try:
+        result = await services.import_students_from_csv(
+            db, program_id=program_id, rows=rows, actor=actor
+        )
+        await db.commit()
+        return result
+    except (NotFoundError, ForbiddenError, ConflictError) as exc:
         raise _http_error(exc) from exc
 
 
