@@ -44,9 +44,23 @@ class ProgramOptionRead(BaseModel):
     description: str | None = None
 
 
+class CareerPathOptionRead(ProgramOptionRead):
+    """Career-path entry in the authoring-options picker payload.
+
+    ``selectable`` is False for paths that exist but cannot be attached to a
+    program version yet (draft/archived, or no published version to pin).
+    The backend PATCH/POST gate stays authoritative — this flag only keeps
+    the UI picker from offering a choice that would be rejected with
+    ``all_paths_must_be_published_and_not_archived``.
+    """
+
+    selectable: bool = True
+    not_selectable_reason: str | None = None
+
+
 class ProgramAuthoringOptions(BaseModel):
     faculties: list[ProgramOptionRead] = Field(default_factory=list)
-    career_paths: list[ProgramOptionRead] = Field(default_factory=list)
+    career_paths: list[CareerPathOptionRead] = Field(default_factory=list)
     default_faculty_id: UUID | None = None
 
 
@@ -194,6 +208,7 @@ class PathChangeRequestRead(BaseModel):
 
 
 __all__ = [
+    "CareerPathOptionRead",
     "ChangePathRequestCreate",
     "ChangeRequestDecision",
     "PathAttemptRead",

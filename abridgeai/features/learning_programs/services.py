@@ -8,6 +8,7 @@ from abridgeai.core.db.conflict_mapper import flush_or_conflict, register_confli
 from abridgeai.core.exceptions import ConflictError, ForbiddenError, NotFoundError
 from abridgeai.core.runtime_settings import resolve_setting
 from abridgeai.features.access_control.api import public as access_control_api
+from abridgeai.features.access_control.models import CareerPath
 from abridgeai.features.career_paths.api import public as career_paths_api
 from abridgeai.features.identity.api import public as identity_api
 from abridgeai.features.learning_programs import queries
@@ -20,6 +21,7 @@ from abridgeai.features.learning_programs.models import (
     ProgramPathAttempt,
 )
 from abridgeai.features.learning_programs.schemas import (
+    CareerPathOptionRead,
     PathAttemptRead,
     PathChangeRequestRead,
     ProgramAuthoringOptions,
@@ -142,14 +144,38 @@ async def get_authoring_options(db: AsyncSession, actor: CurrentUser) -> Program
     ]
     if not allowed_faculties:
         raise ForbiddenError("manager_or_faculty_dean_scope_required")
+    # The picker must not offer a path the attach gate would reject. The
+    # options query only returns published paths WITH a published version;
+    # everything else this org owns is fetched here and surfaced as
+    # selectable=False with a reason, so a manager sees "Data Engineer
+    # (draft — publish it first)" instead of picking it and getting a 409.
+    all_org_paths = await queries.list_all_org_paths(db, organization_id=primary_org.id)
+    selectable_ids = {path.id for path in paths}
+    career_path_options = [
+        ProgramOptionFactory.career_path_option(path, selectable=path.id in selectable_ids)
+        for path in all_org_paths
+    ]
     return ProgramAuthoringOptions(
         faculties=[ProgramOptionRead(id=row.id, name=row.name) for row in allowed_faculties],
-        career_paths=[
-            ProgramOptionRead(id=row.id, name=row.name, slug=row.slug, description=row.description)
-            for row in paths
-        ],
+        career_paths=career_path_options,
         default_faculty_id=default_faculty_id,
     )
+
+
+class ProgramOptionFactory:
+    """Builds CareerPathOptionRead rows; kept as a tiny helper so the reason
+    string lives in exactly one place."""
+
+    @staticmethod
+    def career_path_option(path: CareerPath, *, selectable: bool) -> CareerPathOptionRead:
+        return CareerPathOptionRead(
+            id=path.id,
+            name=path.name,
+            slug=path.slug,
+            description=path.description,
+            selectable=selectable,
+            not_selectable_reason=None if selectable else "path_not_published",
+        )
 
 
 async def list_program_versions(

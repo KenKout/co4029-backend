@@ -193,6 +193,27 @@ async def resolve_published_path_versions(
     return [by_id[path_id] for path_id in career_path_ids if path_id in by_id]
 
 
+async def list_all_org_paths(
+    db: AsyncSession, *, organization_id: UUID
+) -> list[CareerPath]:
+    """Every live career path in the org regardless of publish status.
+
+    Feeds the authoring-options picker: published paths come back
+    selectable=True, drafts/archived ones selectable=False with a reason,
+    so the UI can show WHY a path cannot be attached instead of hiding it
+    or letting the manager hit the attach gate's 409 blind.
+    """
+    stmt = (
+        select(CareerPath)
+        .where(
+            CareerPath.organization_id == organization_id,
+            CareerPath.deleted_at.is_(None),
+        )
+        .order_by(CareerPath.name)
+    )
+    return list((await db.scalars(stmt)).all())
+
+
 async def actor_has_program_role(
     db: AsyncSession,
     *,
