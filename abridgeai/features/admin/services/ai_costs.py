@@ -13,12 +13,14 @@ emitted only on the today-window path.
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
 from abridgeai.core.config import get_settings
 from abridgeai.core.observability import get_logger
+from abridgeai.core.ttl_cache import TTLCache
 from abridgeai.features.admin.queries import ai_costs as ai_costs_queries
 
 if TYPE_CHECKING:
@@ -27,6 +29,20 @@ if TYPE_CHECKING:
 _logger = get_logger(__name__)
 
 VALID_PERIODS = ("day", "week", "month")
+
+# The cost dashboards full-scan ``ai_model_calls`` (aggregations, per-model
+# p95, top-driver GROUP BY) on every admin page load. Admin observability is
+# freshness-tolerant — a 60s-stale spend number is fine by definition — while
+# the scan is the heaviest recurring read in the system once call volume
+# grows. Cache key includes every query parameter that can change the result.
+# Only the DEFAULT window (no explicit ``since``) is cached: an explicit
+# since is a bespoke slice whose reuse pattern doesn't justify entries.
+_AI_COSTS_TTL_SECONDS = 60.0
+_AI_COSTS_CACHE = TTLCache(max_entries=256, ttl_seconds=_AI_COSTS_TTL_SECONDS)
+
+
+def _cacheable_since(since: datetime) -> bool:
+    return since == default_since(30)
 
 
 def _to_float(value: Decimal | float | int | str | None) -> float:
@@ -94,6 +110,14 @@ async def summary(
     operation: str | None = None,
     status: str | None = None,
 ) -> dict[str, Any]:
+    cacheable = _cacheable_since(since)
+    cache_key: tuple[Any, ...] | None = (
+        ("summary", since, period, model, role, operation, status) if cacheable else None
+    )
+    if cache_key is not None:
+        cached = _AI_COSTS_CACHE.get(cache_key)
+        if cached is not None:
+            return dict(cached)
     row = await ai_costs_queries.summary(
         db,
         since=since,
@@ -103,7 +127,14 @@ async def summary(
         operation=operation,
         status=status,
     )
-    return _normalise_summary(row)
+    normalised = _normalise_summary(row)
+    if cache_key is not None:
+        # Store a deep-frozen copy so later callers mutating the returned
+        # dict can't poison the cache. json round-trip also converts any
+        # Decimal/datetime that survived normalisation into plain JSON types,
+        # which is exactly what the response model wants back.
+        _AI_COSTS_CACHE.put(cache_key, json.loads(json.dumps(normalised, default=str)))
+    return normalised
 
 
 async def by_user(

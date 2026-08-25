@@ -23,6 +23,9 @@ from abridgeai.features.access_control.models import (
     UserRoleAssignment,
 )
 from abridgeai.features.access_control.queries import admin as admin_queries
+from abridgeai.features.access_control.queries.permissions import (
+    invalidate_user_permissions,
+)
 from abridgeai.features.access_control.schemas.admin import (
     GrantCreate,
     MembershipCreate,
@@ -212,7 +215,7 @@ async def create_role_assignment(
                 "'user.role_assign' or 'user.role_assign.hod'"
             )
 
-    return await admin_queries.insert_assignment(
+    created = await admin_queries.insert_assignment(
         db,
         user_id=user_id,
         role_id=role.id,
@@ -223,6 +226,9 @@ async def create_role_assignment(
         granted_by=actor_id,
         active_until=payload.active_until,
     )
+    # The new assignment must take effect immediately, not one TTL later.
+    invalidate_user_permissions(user_id)
+    return created
 
 
 async def revoke_role_assignment(
@@ -249,6 +255,7 @@ async def revoke_role_assignment(
         await admin_queries.soft_delete_assignment(
             db, assignment_id, actor_id=actor_id
         )
+        invalidate_user_permissions(assignment.user_id)
         return
 
     if actor_id is None:
@@ -282,6 +289,7 @@ async def revoke_role_assignment(
         )
 
     await admin_queries.soft_delete_assignment(db, assignment_id, actor_id=actor_id)
+    invalidate_user_permissions(assignment.user_id)
 
 
 async def list_user_grants(db: AsyncSession, user_id: UUID) -> list[UserPermissionGrant]:
@@ -306,7 +314,7 @@ async def create_permission_grant(
         course_id=payload.course_id,
     )
 
-    return await admin_queries.insert_grant(
+    created = await admin_queries.insert_grant(
         db,
         user_id=user_id,
         permission_id=payload.permission_id,
@@ -317,6 +325,9 @@ async def create_permission_grant(
         granted_by=actor_id,
         expires_at=payload.expires_at,
     )
+    # The new grant must take effect immediately, not one TTL later.
+    invalidate_user_permissions(user_id)
+    return created
 
 
 async def revoke_permission_grant(
@@ -325,8 +336,11 @@ async def revoke_permission_grant(
     *,
     actor_id: UUID | None = None,
 ) -> None:
+    grant = await admin_queries.get_grant(db, grant_id)
     if not await admin_queries.delete_grant(db, grant_id, actor_id=actor_id):
         raise NotFoundError(f"permission grant {grant_id} not found")
+    if grant is not None and grant.user_id is not None:
+        invalidate_user_permissions(grant.user_id)
 
 
 async def list_organization_memberships(

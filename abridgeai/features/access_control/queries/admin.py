@@ -259,6 +259,11 @@ async def insert_grant(
     return fetched.scalar_one()
 
 
+async def get_grant(db: AsyncSession, grant_id: UUID) -> UserPermissionGrant | None:
+    row = await db.get(UserPermissionGrant, grant_id)
+    return row if row is not None and row.deleted_at is None else None
+
+
 async def delete_grant(
     db: AsyncSession,
     grant_id: UUID,
@@ -325,6 +330,7 @@ async def get_role_by_id(db: AsyncSession, role_id: UUID) -> Role | None:
 
 __all__ = [
     "delete_grant",
+    "get_grant",
     "get_permission_by_id",
     "get_role_by_code",
     "get_role_by_id",

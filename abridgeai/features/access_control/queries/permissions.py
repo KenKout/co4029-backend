@@ -32,6 +32,46 @@ from uuid import UUID
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from abridgeai.core.ttl_cache import TTLCache
+
+# Effective-permission resolution runs on EVERY authenticated request
+# (``policies.py`` dependency chain): three joins over permissions /
+# role_permissions / user_role_assignments plus grants, and the course/org
+# variants additionally walk a recursive org-unit tree. The result only
+# changes when an assignment / grant / role mapping is written, which is a
+# rare admin action — so a short-TTL process-local cache removes the query
+# from the hot path while bounding staleness to that window. Write paths in
+# ``services/admin.py`` call :func:`invalidate_user_permissions` on every
+# mutation, so a role change takes effect immediately even before expiry.
+#
+# ``at`` (explicit evaluation timestamp) always BYPASSES the cache: tests and
+# time-travel callers pin determinism there, and caching would collapse two
+# different ``at`` values into one answer.
+_PERMISSIONS_TTL_SECONDS = 30.0
+_USER_PERMS_CACHE = TTLCache(max_entries=2048, ttl_seconds=_PERMISSIONS_TTL_SECONDS)
+_COURSE_PERMS_CACHE = TTLCache(max_entries=4096, ttl_seconds=_PERMISSIONS_TTL_SECONDS)
+_ORG_PERMS_CACHE = TTLCache(max_entries=2048, ttl_seconds=_PERMISSIONS_TTL_SECONDS)
+
+
+def invalidate_user_permissions(user_id: UUID) -> None:
+    """Drop every cached permission set derived from ``user_id``'s roles/grants.
+
+    Called by the access-control write paths (role assignment create/revoke,
+    grant create/revoke). Course- and org-scoped caches use composite keys
+    ``(user_id, scope_id)``, so a predicate sweep drops every entry for that
+    user across all three caches.
+    """
+    _USER_PERMS_CACHE.invalidate(user_id)
+    _COURSE_PERMS_CACHE.invalidate_where(lambda k: k[0] == user_id)
+    _ORG_PERMS_CACHE.invalidate_where(lambda k: k[0] == user_id)
+
+
+def clear_permissions_cache() -> None:
+    """Drop everything. Test-support only."""
+    _USER_PERMS_CACHE.clear()
+    _COURSE_PERMS_CACHE.clear()
+    _ORG_PERMS_CACHE.clear()
+
 _ORG_UNIT_TREE_SQL = (
     resources.files("abridgeai.features.access_control.queries.sql")
     .joinpath("org_unit_tree.sql")
@@ -179,8 +219,17 @@ async def load_user_permissions(
     db: AsyncSession, user_id: UUID, *, at: datetime | None = None
 ) -> set[str]:
     """Effective permission codes the user holds at ``at`` (defaults to now)."""
+    if at is not None:
+        # Explicit timestamp: never cached (determinism for tests/time-travel).
+        result = await db.execute(_LOAD_USER_PERMISSIONS_SQL, {"user_id": user_id, "at": at})
+        return {row[0] for row in result.all()}
+    cached = _USER_PERMS_CACHE.get(user_id)
+    if cached is not None:
+        return set(cached)
     result = await db.execute(_LOAD_USER_PERMISSIONS_SQL, {"user_id": user_id, "at": _now_at(at)})
-    return {row[0] for row in result.all()}
+    perms = {row[0] for row in result.all()}
+    _USER_PERMS_CACHE.put(user_id, frozenset(perms))
+    return perms
 
 
 async def load_course_permissions(
@@ -197,11 +246,23 @@ async def load_course_permissions(
     ``org_unit_id``. Includes role-based assignments and direct grants;
     both are filtered by the active window.
     """
+    if at is not None:
+        result = await db.execute(
+            _LOAD_COURSE_PERMISSIONS_SQL,
+            {"user_id": user_id, "course_id": course_id, "at": at},
+        )
+        return {row[0] for row in result.all()}
+    cache_key = (user_id, course_id)
+    cached = _COURSE_PERMS_CACHE.get(cache_key)
+    if cached is not None:
+        return set(cached)
     result = await db.execute(
         _LOAD_COURSE_PERMISSIONS_SQL,
         {"user_id": user_id, "course_id": course_id, "at": _now_at(at)},
     )
-    return {row[0] for row in result.all()}
+    perms = {row[0] for row in result.all()}
+    _COURSE_PERMS_CACHE.put(cache_key, frozenset(perms))
+    return perms
 
 
 async def load_org_permissions(
@@ -233,11 +294,29 @@ async def load_org_permissions(
     * ``course`` — deliberately absent. Authority over one course does not
       confer authority over the organization that owns it.
     """
+    if at is not None:
+        result = await db.execute(
+            _LOAD_ORG_PERMISSIONS_SQL,
+            {"user_id": user_id, "organization_id": organization_id, "at": at},
+        )
+        return {row[0] for row in result.all()}
+    cache_key = (user_id, organization_id)
+    cached = _ORG_PERMS_CACHE.get(cache_key)
+    if cached is not None:
+        return set(cached)
     result = await db.execute(
         _LOAD_ORG_PERMISSIONS_SQL,
         {"user_id": user_id, "organization_id": organization_id, "at": _now_at(at)},
     )
-    return {row[0] for row in result.all()}
+    perms = {row[0] for row in result.all()}
+    _ORG_PERMS_CACHE.put(cache_key, frozenset(perms))
+    return perms
 
 
-__all__ = ["load_course_permissions", "load_org_permissions", "load_user_permissions"]
+__all__ = [
+    "clear_permissions_cache",
+    "invalidate_user_permissions",
+    "load_course_permissions",
+    "load_org_permissions",
+    "load_user_permissions",
+]
