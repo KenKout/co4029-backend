@@ -1,10 +1,12 @@
 """Unit tests for the variant-mode backfill contract (Slice 21 regression).
 
-Regression: in ``all_angles`` mode the backfill loop passed the *logical*
-shortfall as ``override_question_count``, but the generation stage treats
+Regression: in ``all_angles`` mode the backfill loop passed the raw
+*shortfall* as ``override_question_count``, but the generation stage treats
 ``override_question_count`` as a TOTAL row budget and re-divides it by the
-angle count — so a backfill round asked for ceil(missing/4) logical
-questions instead of exactly ``missing`` rows.
+angle count — so a shortfall of 2 rows became ceil(2/4)=1 logical question
+whose variant set may not include the missing angle (observed: bank ended
+3/3/3/1 instead of 2/2/2/2). The fix: request in whole angle groups and trim
+the overshoot back to the target.
 """
 
 from __future__ import annotations
@@ -16,6 +18,7 @@ from uuid import uuid4
 import pytest
 
 from abridgeai.features.interviews.ai.pipelines.backfill import (
+    _trim_to_shortfall,
     generate_with_backfill,
 )
 from abridgeai.features.interviews.ai.stages.generation import (
@@ -24,10 +27,13 @@ from abridgeai.features.interviews.ai.stages.generation import (
 from abridgeai.features.interviews.ai.stages.validation.verdicts import Verdict
 
 
-def _draft(idx: int) -> InterviewQuestionDraft:
+def _draft(
+    idx: int,
+    question_type: str = "technical",
+) -> InterviewQuestionDraft:
     return InterviewQuestionDraft(
-        question_type="technical",
-        prompt_text=f"Variant question #{idx} for testing purposes.",
+        question_type=question_type,  # type: ignore[arg-type]
+        prompt_text=f"Variant {question_type} question #{idx} for testing purposes.",
         difficulty="easy",
         expected_depth=2,
         linked_outcome_id=None,
@@ -50,17 +56,22 @@ def _fake_stubs() -> tuple[SimpleNamespace, SimpleNamespace, SimpleNamespace]:
 
 
 @pytest.mark.asyncio
-async def test_all_angles_backfill_requests_total_rows_not_logical(
+async def test_all_angles_backfill_requests_whole_angle_groups(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Backfill must request the missing ROW count; the stage owns the /4."""
+    """Backfill must round the shortfall UP to whole angle groups."""
     state, config, context = _fake_stubs()
 
-    # Round 1: 8 requested, 6 accepted → shortfall of 2 rows.
-    round1_drafts = [_draft(i) for i in range(8)]
-    round1_verdicts = [_verdict(i, accepted=i not in (2, 5)) for i in range(8)]
-    round2_drafts = [_draft(20), _draft(21)]
-    round2_verdicts = [_verdict(i, accepted=True) for i in range(2)]
+    # Round 1: 8 requested (2 logical x 4), 6 accepted → shortfall of 2 rows.
+    round1_drafts = [
+        _draft(i, ["technical", "system_design", "situational", "behavioral"][i % 4])
+        for i in range(8)
+    ]
+    round1_verdicts = [_verdict(i, accepted=i not in (3, 7)) for i in range(8)]
+    round2_drafts = [_draft(20 + i, qtype) for i, qtype in enumerate(
+        ["technical", "system_design", "situational", "behavioral"]
+    )]
+    round2_verdicts = [_verdict(i, accepted=True) for i in range(4)]
 
     generate = AsyncMock(side_effect=[round1_drafts, round2_drafts])
     validate = AsyncMock(side_effect=[round1_verdicts, round2_verdicts])
@@ -84,17 +95,44 @@ async def test_all_angles_backfill_requests_total_rows_not_logical(
         role_type=None,
     )
 
-    # Round 1 accepted 6 of 8 (indices 2 & 5 rejected); round 2 tops up with
-    # the 2 backfill drafts → 8 accepted total.
     assert len(accepted) == 8
-    assert len(all_drafts) == 10
-    # Round 2 override is the shortfall (2) + backfill buffer (+1) = 3 TOTAL
-    # rows; the generation stage re-divides that by the angle count itself.
-    assert generate.await_args_list[1].kwargs["override_question_count"] == 3
+    assert len(all_drafts) == 12
+    assert len(all_verdicts) == 12
+    assert rounds == 1
+    # Round 2 override is the shortfall (2) rounded UP to a whole angle group
+    # (4 rows) so every angle is re-requested; surplus rows are trimmed below.
+    assert generate.await_args_list[1].kwargs["override_question_count"] == 4
+    # Trim lands the bank exactly on target with distinct types kept.
+    tail_types = [d.question_type for d in accepted[6:]]
+    assert len(tail_types) == 2
+    assert len(set(tail_types)) == 2
+
+
+def test_trim_to_shortfall_spreads_across_types() -> None:
+    """Trimming drops surplus per-type duplicates before dropping a type."""
+    drafts = [_draft(0, "technical"), _draft(1, "behavioral")]
+    kept = _trim_to_shortfall(drafts, missing=1)
+    assert len(kept) == 1
+    # One row of each type available → round-robin keeps the first type.
+    assert kept[0].question_type in {"technical", "behavioral"}
+
+
+def test_trim_to_shortfall_prefers_rare_types() -> None:
+    """With one rare type and many duplicates, the rare type survives."""
+    drafts = [
+        _draft(0, "technical"),
+        _draft(1, "technical"),
+        _draft(2, "technical"),
+        _draft(3, "behavioral"),
+    ]
+    kept = _trim_to_shortfall(drafts, missing=2)
+    types = {d.question_type for d in kept}
+    assert types == {"technical", "behavioral"}
 
 
 @pytest.mark.asyncio
 async def test_legacy_mode_backfill_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Non-variant mode keeps the exact-shortfall (+buffer) request shape."""
     state, config, context = _fake_stubs()
 
     drafts1 = [_draft(i) for i in range(5)]

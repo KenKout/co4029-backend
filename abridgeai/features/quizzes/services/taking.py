@@ -93,12 +93,12 @@ class AllCardsInCooldownError(AppError):
         self.cards_due_at = cards_due_at
 
 
-async def get_published_quiz(db: AsyncSession, quiz_id: UUID) -> Quiz | None:
+async def get_published_quiz(db: AsyncSession, quiz_id: UUID | str) -> Quiz | None:
     """Pass-through to :func:`published_queries.get_published_quiz`.
 
     Routers cannot import queries directly (T0.4 contract); learner
     callers reach the published-quiz fetcher through this thin service
-    indirection.
+    indirection. Accepts a UUID id or an item slug.
     """
     return await published_queries.get_published_quiz(db, quiz_id)
 

@@ -89,10 +89,8 @@ async def _seed_sr_scaffold(
     )
     await session.execute(
         text(
-            "INSERT INTO quizzes (id, course_id, module_id, title, status, "
-            "passing_score_percent) "
-            "VALUES (:id, :course, :module, 'Q', 'draft', 70.00)"
-        ),
+                "INSERT INTO quizzes (id, course_id, module_id, title, status, passing_score_percent, slug) VALUES (:id, :course, :module, 'Q', 'draft', 70.00, 'slug-' || uuid_generate_v4()::text);"
+            ),
         {"id": str(quiz_id), "course": str(course_id), "module": str(module_id)},
     )
     # get_due_card_count counts only REVIEWABLE cards: the question must be

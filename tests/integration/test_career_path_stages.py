@@ -228,6 +228,13 @@ async def seed(engine: AsyncEngine) -> AsyncIterator[dict]:
         )
         await conn.execute(text("DELETE FROM lesson_progress WHERE user_id = :s"), {"s": student})
         await conn.execute(
+            text(
+                "DELETE FROM course_completion_awards WHERE course_id IN "
+                "(SELECT id FROM courses WHERE organization_id = :org)"
+            ),
+            {"org": org},
+        )
+        await conn.execute(
             text("DELETE FROM student_career_enrollments WHERE career_path_id = :p"),
             {"p": path_id},
         )

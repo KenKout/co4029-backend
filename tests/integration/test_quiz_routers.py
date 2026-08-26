@@ -548,8 +548,7 @@ async def test_cross_org_quiz_not_readable_or_takable(
         )
         await conn.execute(
             text(
-                "INSERT INTO quizzes (id, course_id, module_id, title, status) "
-                "VALUES (:q, :c, :m, 'X Quiz', 'published')"
+                "INSERT INTO quizzes (id, course_id, module_id, title, status, slug) VALUES (:q, :c, :m, 'X Quiz', 'published', 'slug-' || uuid_generate_v4()::text);"
             ),
             {"q": quiz2, "c": course2, "m": module2},
         )

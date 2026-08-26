@@ -153,15 +153,7 @@ async def fixture_data(engine: AsyncEngine) -> AsyncIterator[dict]:
         )
         await conn.execute(
             text(
-                "INSERT INTO quizzes "
-                "(id, course_id, module_id, title, status, "
-                " cooldown_hours, max_attempts) VALUES "
-                "(:p, :c, :m, 'Pub Quiz', 'published', NULL, NULL), "
-                "(:d, :c, :m, 'Draft Quiz', 'draft', NULL, NULL), "
-                "(:a, :c, :m, 'Archived Quiz', 'archived', NULL, NULL), "
-                "(:cd, :c, :m, 'Cooldown Quiz', 'published', 2, NULL), "
-                "(:cp, :c, :m, 'Capped Quiz', 'published', NULL, 3), "
-                "(:mb, :c, :mb_id, 'Module B Quiz', 'published', NULL, NULL)"
+                "INSERT INTO quizzes (id, course_id, module_id, title, status,  cooldown_hours, max_attempts, slug) VALUES (:p, :c, :m, 'Pub Quiz', 'published', NULL, NULL, 'slug-' || uuid_generate_v4()::text), (:d, :c, :m, 'Draft Quiz', 'draft', NULL, NULL, 'slug-' || uuid_generate_v4()::text), (:a, :c, :m, 'Archived Quiz', 'archived', NULL, NULL, 'slug-' || uuid_generate_v4()::text), (:cd, :c, :m, 'Cooldown Quiz', 'published', 2, NULL, 'slug-' || uuid_generate_v4()::text), (:cp, :c, :m, 'Capped Quiz', 'published', NULL, 3, 'slug-' || uuid_generate_v4()::text), (:mb, :c, :mb_id, 'Module B Quiz', 'published', NULL, NULL, 'slug-' || uuid_generate_v4()::text);"
             ),
             {
                 "p": quiz_pub,

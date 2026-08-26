@@ -120,9 +120,7 @@ async def live_session(engine: AsyncEngine) -> AsyncIterator[dict[str, Any]]:
         )
         await conn.execute(
             text(
-                "INSERT INTO interview_configs "
-                "(id, course_id, module_id, title, status, created_by) "
-                "VALUES (:id, :course, :module, 'RT Interview', 'published', :teacher)"
+                "INSERT INTO interview_configs (id, course_id, module_id, title, status, created_by, slug) VALUES (:id, :course, :module, 'RT Interview', 'published', :teacher, 'slug-' || uuid_generate_v4()::text);"
             ),
             {
                 "id": config_id,

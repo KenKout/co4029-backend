@@ -13,6 +13,7 @@ from uuid import UUID
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from abridgeai.core.slug import slugify, unique_slug
 from abridgeai.features.interviews.models import (
     InterviewConfig,
     InterviewOutcome,
@@ -123,10 +124,24 @@ async def deep_clone_interview_config(
     if source is None:
         raise ValueError(f"InterviewConfig {source_config_id} not found")
 
+    clone_title = f"{source.title}{title_suffix}"
+    # Slug: derive from the clone's title; uniqueness is per-module over live
+    # rows, so append -1, -2, ... on collision (same policy as create).
+    from sqlalchemy import select as _select  # noqa: PLC0415
+
+    _base = slugify(clone_title) or "interview"
+    _taken_rows = await db.execute(
+        _select(InterviewConfig.slug).where(
+            InterviewConfig.module_id == target_module_id,
+            InterviewConfig.deleted_at.is_(None),
+        )
+    )
+    _taken = {row[0] for row in _taken_rows.all()}
     clone = InterviewConfig(
         course_id=target_course_id if target_course_id is not None else source.course_id,
         module_id=target_module_id,
-        title=f"{source.title}{title_suffix}",
+        title=clone_title,
+        slug=unique_slug(_base, _taken),
         status="draft",
         max_attempts=source.max_attempts,
         cooldown_hours=source.cooldown_hours,

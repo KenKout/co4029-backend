@@ -119,6 +119,7 @@ async def test_soft_delete_cascade_walks_questions_and_revisions(
         quiz = Quiz(
             course_id=course_id,
             module_id=module_id,
+            slug="cascade-test-quiz",
             title="Cascade Test Quiz",
         )
         session.add(quiz)
@@ -213,7 +214,7 @@ async def test_delete_question_repacks_sibling_positions(
     _org_id, owner_id, course_id, module_id = org_course
 
     async with session_factory() as session:
-        quiz = Quiz(course_id=course_id, module_id=module_id, title="Repack Quiz")
+        quiz = Quiz(course_id=course_id, module_id=module_id, slug="repack-quiz", title="Repack Quiz")
         session.add(quiz)
         await session.flush()
 
@@ -278,7 +279,7 @@ async def test_delete_question_purges_student_card_state(
     student_id = uuid.uuid4()
 
     async with session_factory() as session:
-        quiz = Quiz(course_id=course_id, module_id=module_id, title="Card State Quiz")
+        quiz = Quiz(course_id=course_id, module_id=module_id, slug="card-state-quiz", title="Card State Quiz")
         session.add(quiz)
         await session.flush()
         question = QuizQuestion(
@@ -360,7 +361,7 @@ async def test_delete_quiz_purges_student_card_state(
     student_id = uuid.uuid4()
 
     async with session_factory() as session:
-        quiz = Quiz(course_id=course_id, module_id=module_id, title="Quiz Delete Cards")
+        quiz = Quiz(course_id=course_id, module_id=module_id, slug="quiz-delete-cards", title="Quiz Delete Cards")
         session.add(quiz)
         await session.flush()
         q_ids = []

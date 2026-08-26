@@ -169,8 +169,8 @@ async def _insert_quiz(conn: AsyncConnection) -> PrimaryKey:
     qid = uuid.uuid4()
     await conn.execute(
         text(
-            "INSERT INTO quizzes (id, course_id, module_id, title) VALUES (:id, :cid, :mid, :title)"
-        ),
+                "INSERT INTO quizzes (id, course_id, module_id, title, slug) VALUES (:id, :cid, :mid, :title, 'slug-' || uuid_generate_v4()::text);"
+            ),
         {"id": qid, "cid": course_id, "mid": module_id, "title": "trig quiz"},
     )
     return {"id": qid}
@@ -236,9 +236,8 @@ async def _insert_interview_config(conn: AsyncConnection) -> PrimaryKey:
     iid = uuid.uuid4()
     await conn.execute(
         text(
-            "INSERT INTO interview_configs (id, course_id, module_id, title) "
-            "VALUES (:id, :cid, :mid, :title)"
-        ),
+                "INSERT INTO interview_configs (id, course_id, module_id, title, slug) VALUES (:id, :cid, :mid, :title, 'slug-' || uuid_generate_v4()::text);"
+            ),
         {"id": iid, "cid": course_id, "mid": module_id, "title": "trig ic"},
     )
     return {"id": iid}

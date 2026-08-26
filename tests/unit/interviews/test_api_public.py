@@ -98,10 +98,8 @@ async def test_get_session_summary_rolls_up_outcomes(
             )
             await session.execute(
                 text(
-                    "INSERT INTO interview_configs (id, course_id, module_id, "
-                    "title, status) "
-                    "VALUES (:id, :c, :m, 'IC', 'draft')"
-                ),
+                "INSERT INTO interview_configs (id, course_id, module_id, title, status, slug) VALUES (:id, :c, :m, 'IC', 'draft', 'slug-' || uuid_generate_v4()::text);"
+            ),
                 {
                     "id": str(config_id),
                     "c": str(course_id),

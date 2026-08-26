@@ -296,11 +296,7 @@ async def _create_published_config(
     async with engine.begin() as conn:
         await conn.execute(
             text(
-                "INSERT INTO interview_configs "
-                "(id, course_id, module_id, title, status, created_by, "
-                "max_attempts, cooldown_hours) "
-                "VALUES (:id, :c, :m, 'Pub Interview', 'published', :t, "
-                ":max_attempts, :cooldown_hours)"
+                "INSERT INTO interview_configs (id, course_id, module_id, title, status, created_by, max_attempts, cooldown_hours, slug) VALUES (:id, :c, :m, 'Pub Interview', 'published', :t, :max_attempts, :cooldown_hours, 'slug-' || uuid_generate_v4()::text);"
             ),
             {
                 "id": config_id,

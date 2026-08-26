@@ -231,8 +231,7 @@ async def _seed_lesson(
         )
         await conn.execute(
             text(
-                "INSERT INTO quizzes (id, course_id, module_id, title, status) "
-                "VALUES (:id, :course, :m, :title, 'published')"
+                "INSERT INTO quizzes (id, course_id, module_id, title, status, slug) VALUES (:id, :course, :m, :title, 'published', 'slug-' || uuid_generate_v4()::text);"
             ),
             {"id": quiz_id, "course": course_id, "m": module_id, "title": "Quiz"},
         )

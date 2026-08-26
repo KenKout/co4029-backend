@@ -135,10 +135,8 @@ async def _seed_quiz(
     item_id = uuid.uuid4()
     await conn.execute(
         text(
-            "INSERT INTO quizzes (id, course_id, module_id, title, status, "
-            "allow_retakes, max_attempts) "
-            "VALUES (:id, :c, :m, :title, 'published', :ar, :ma)"
-        ),
+                "INSERT INTO quizzes (id, course_id, module_id, title, status, allow_retakes, max_attempts, slug) VALUES (:id, :c, :m, :title, 'published', :ar, :ma, 'slug-' || uuid_generate_v4()::text);"
+            ),
         {
             "id": quiz_id,
             "c": course_id,

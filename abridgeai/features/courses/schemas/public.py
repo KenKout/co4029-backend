@@ -193,6 +193,7 @@ class LessonPublic(_ORMModel):
 
     id: UUID
     title: str
+    slug: str | None = None
     lesson_type: str
     summary: str | None = None
     notes_markdown: str | None = None
@@ -209,10 +210,14 @@ class QuizSummaryPublic(_ORMModel):
     package so the cross-feature import-linter contract stays intact.
     The field surface intentionally matches :class:`LessonPublic` so
     frontend code can address ``item.target.{id,title}`` polymorphically.
+
+    ``slug`` carries the item's URL slug so the student curriculum tree
+    can build breadcrumb links without per-item fetches.
     """
 
     id: UUID
     title: str
+    slug: str
 
 
 class InterviewSummaryPublic(_ORMModel):
@@ -223,10 +228,14 @@ class InterviewSummaryPublic(_ORMModel):
     code can address ``item.target.{id,title}`` polymorphically; lives
     in the courses schema package so the cross-feature import-linter
     contract stays intact.
+
+    ``slug`` carries the item's URL slug so the student curriculum tree
+    can build breadcrumb links without per-item fetches.
     """
 
     id: UUID
     title: str
+    slug: str
 
 
 class LessonResourcePublic(_ORMModel):

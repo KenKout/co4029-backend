@@ -425,6 +425,9 @@ async def test_all_angles_variant_mode_asks_for_logical_count() -> None:
     assert "Total LOGICAL questions to produce: 8" in user_prompt
     assert "system_design" in user_prompt
     assert "Total rows = 32" in user_prompt
+    # Grounding rule (Slice 21 fix): the prompt must demand source_refs so the
+    # LLM stops emitting empty arrays that the GROUNDED check then rejects.
+    assert "MUST cite at least one chunk" in user_prompt
 
 
 @pytest.mark.asyncio

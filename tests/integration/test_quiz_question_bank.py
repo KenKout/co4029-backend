@@ -154,10 +154,7 @@ async def bank_fixture(engine: AsyncEngine) -> BankFixture:
         )
         await conn.execute(
             text(
-                "INSERT INTO quizzes (id, course_id, module_id, title, status) VALUES "
-                "(:q1, :c1, :m1, 'Source quiz', 'draft'), "
-                "(:q2, :c1, :m1, 'Target quiz', 'draft'), "
-                "(:q3, :c2, :m2, 'Foreign quiz', 'draft')"
+                "INSERT INTO quizzes (id, course_id, module_id, title, status, slug) VALUES (:q1, :c1, :m1, 'Source quiz', 'draft', 'slug-' || uuid_generate_v4()::text), (:q2, :c1, :m1, 'Target quiz', 'draft', 'slug-' || uuid_generate_v4()::text), (:q3, :c2, :m2, 'Foreign quiz', 'draft', 'slug-' || uuid_generate_v4()::text);"
             ),
             {
                 "q1": source_quiz_id,

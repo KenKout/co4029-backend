@@ -171,6 +171,7 @@ async def _seed_questions(
             id=uuid.uuid4(),
             course_id=scenario["course_id"],
             module_id=scenario["module_id"],
+            slug="deadlock-regression",
             title="deadlock regression",
             status="draft",
             created_by=scenario["owner_id"],

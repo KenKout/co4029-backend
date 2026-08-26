@@ -171,9 +171,7 @@ async def quiz_with_questions(engine: AsyncEngine) -> AsyncIterator[dict]:
         )
         await conn.execute(
             text(
-                "INSERT INTO quizzes (id, course_id, module_id, title, status, "
-                "passing_score_percent) VALUES (:id, :course, :module, "
-                "'Cooldown Quiz', 'published', 70.00)"
+                "INSERT INTO quizzes (id, course_id, module_id, title, status, passing_score_percent, slug) VALUES (:id, :course, :module, 'Cooldown Quiz', 'published', 70.00, 'slug-' || uuid_generate_v4()::text);"
             ),
             {"id": quiz_id, "course": course_id, "module": module_id},
         )

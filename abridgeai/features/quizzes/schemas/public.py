@@ -349,6 +349,8 @@ class QuizPublic(_ORMModel):
 
     id: UUID
     title: str
+    # URL slug (immutable once published) for breadcrumb-style student links.
+    slug: str | None = None
     description: str | None = None
     status: Literal["published"]
     passing_score_percent: Decimal

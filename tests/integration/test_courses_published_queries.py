@@ -176,9 +176,7 @@ async def fixture_data(engine: AsyncEngine) -> AsyncIterator[dict]:
         )
         await conn.execute(
             text(
-                "INSERT INTO interview_configs (id, course_id, module_id, title, status) VALUES "
-                "(:ic1, :c, :m, 'Pub Interview', 'published'), "
-                "(:ic2, :c, :m, 'Draft Interview', 'draft')"
+                "INSERT INTO interview_configs (id, course_id, module_id, title, status, slug) VALUES (:ic1, :c, :m, 'Pub Interview', 'published', 'slug-' || uuid_generate_v4()::text), (:ic2, :c, :m, 'Draft Interview', 'draft', 'slug-' || uuid_generate_v4()::text);"
             ),
             {
                 "ic1": interview_pub,

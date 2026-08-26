@@ -126,10 +126,7 @@ async def scenario(engine: AsyncEngine) -> AsyncIterator[dict[str, Any]]:
         )
         await conn.execute(
             text(
-                "INSERT INTO interview_configs "
-                "(id, course_id, module_id, title, status, persona, created_by) "
-                "VALUES (:id, :course, :module, 'AD Interview', 'published', "
-                "'neutral', :teacher)"
+                "INSERT INTO interview_configs (id, course_id, module_id, title, status, persona, created_by, slug) VALUES (:id, :course, :module, 'AD Interview', 'published', 'neutral', :teacher, 'slug-' || uuid_generate_v4()::text);"
             ),
             {
                 "id": config_id,

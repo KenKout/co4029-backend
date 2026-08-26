@@ -203,9 +203,7 @@ async def review_scenario(
         # --- Quiz A: 2 pending + 1 approved-with-t_exp ---------------------
         await conn.execute(
             text(
-                "INSERT INTO quizzes (id, course_id, module_id, title, status, "
-                "passing_score_percent) VALUES "
-                "(:qa, :ca, :ma, 'Quiz A Pending', 'draft', 70.00)"
+                "INSERT INTO quizzes (id, course_id, module_id, title, status, passing_score_percent, slug) VALUES (:qa, :ca, :ma, 'Quiz A Pending', 'draft', 70.00, 'slug-' || uuid_generate_v4()::text);"
             ),
             {"qa": quiz_a, "ca": course_a, "ma": module_a},
         )
@@ -227,9 +225,7 @@ async def review_scenario(
         # --- Quiz B (sibling): 2 pending — must NOT count ------------------
         await conn.execute(
             text(
-                "INSERT INTO quizzes (id, course_id, module_id, title, status, "
-                "passing_score_percent) VALUES "
-                "(:qb, :cb, :mb, 'Quiz B Pending', 'draft', 70.00)"
+                "INSERT INTO quizzes (id, course_id, module_id, title, status, passing_score_percent, slug) VALUES (:qb, :cb, :mb, 'Quiz B Pending', 'draft', 70.00, 'slug-' || uuid_generate_v4()::text);"
             ),
             {"qb": quiz_b, "cb": course_b, "mb": module_b},
         )
@@ -248,8 +244,7 @@ async def review_scenario(
         # --- Interview config A: 2 pending ---------------------------------
         await conn.execute(
             text(
-                "INSERT INTO interview_configs (id, course_id, module_id, title, status) "
-                "VALUES (:ia, :ca, :ma, 'IC A', 'draft')"
+                "INSERT INTO interview_configs (id, course_id, module_id, title, status, slug) VALUES (:ia, :ca, :ma, 'IC A', 'draft', 'slug-' || uuid_generate_v4()::text);"
             ),
             {"ia": cfg_a, "ca": course_a, "ma": module_a},
         )
@@ -265,8 +260,7 @@ async def review_scenario(
         # --- Interview config B (sibling): 1 pending — must NOT count ------
         await conn.execute(
             text(
-                "INSERT INTO interview_configs (id, course_id, module_id, title, status) "
-                "VALUES (:ib, :cb, :mb, 'IC B', 'draft')"
+                "INSERT INTO interview_configs (id, course_id, module_id, title, status, slug) VALUES (:ib, :cb, :mb, 'IC B', 'draft', 'slug-' || uuid_generate_v4()::text);"
             ),
             {"ib": cfg_b, "cb": course_b, "mb": module_b},
         )
@@ -331,9 +325,7 @@ async def review_scenario(
         # --- Published quiz missing t_exp (course A): 2 approved, NULL/0 ---
         await conn.execute(
             text(
-                "INSERT INTO quizzes (id, course_id, module_id, title, status, "
-                "passing_score_percent) VALUES "
-                "(:q, :ca, :ma, 'Quiz Missing Texp', 'published', 70.00)"
+                "INSERT INTO quizzes (id, course_id, module_id, title, status, passing_score_percent, slug) VALUES (:q, :ca, :ma, 'Quiz Missing Texp', 'published', 70.00, 'slug-' || uuid_generate_v4()::text);"
             ),
             {"q": quiz_texp, "ca": course_a, "ma": module_a},
         )
@@ -349,9 +341,7 @@ async def review_scenario(
         # --- Calibrated published quiz (course A) — must NOT count ---------
         await conn.execute(
             text(
-                "INSERT INTO quizzes (id, course_id, module_id, title, status, "
-                "passing_score_percent) VALUES "
-                "(:q, :ca, :ma, 'Quiz Calibrated', 'published', 70.00)"
+                "INSERT INTO quizzes (id, course_id, module_id, title, status, passing_score_percent, slug) VALUES (:q, :ca, :ma, 'Quiz Calibrated', 'published', 70.00, 'slug-' || uuid_generate_v4()::text);"
             ),
             {"q": quiz_calibrated, "ca": course_a, "ma": module_a},
         )
@@ -366,9 +356,7 @@ async def review_scenario(
         # --- Published quiz missing t_exp on sibling — must NOT count ------
         await conn.execute(
             text(
-                "INSERT INTO quizzes (id, course_id, module_id, title, status, "
-                "passing_score_percent) VALUES "
-                "(:q, :cb, :mb, 'Sibling Missing Texp', 'published', 70.00)"
+                "INSERT INTO quizzes (id, course_id, module_id, title, status, passing_score_percent, slug) VALUES (:q, :cb, :mb, 'Sibling Missing Texp', 'published', 70.00, 'slug-' || uuid_generate_v4()::text);"
             ),
             {"q": quiz_texp_b, "cb": course_b, "mb": module_b},
         )

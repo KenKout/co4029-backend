@@ -141,9 +141,7 @@ async def published_quiz(engine: AsyncEngine) -> AsyncIterator[dict]:
         )
         await conn.execute(
             text(
-                "INSERT INTO quizzes (id, course_id, module_id, title, status, "
-                "passing_score_percent, initial_ef) VALUES (:id, :course, :module, "
-                "'Take Quiz', 'published', 70.00, 2.20)"
+                "INSERT INTO quizzes (id, course_id, module_id, title, status, passing_score_percent, initial_ef, slug) VALUES (:id, :course, :module, 'Take Quiz', 'published', 70.00, 2.20, 'slug-' || uuid_generate_v4()::text);"
             ),
             {"id": quiz_id, "course": course_id, "module": module_id},
         )
@@ -481,9 +479,7 @@ async def test_start_attempt_rejects_draft_quiz(
     async with engine.begin() as conn:
         await conn.execute(
             text(
-                "INSERT INTO quizzes (id, course_id, module_id, title, status, "
-                "passing_score_percent) VALUES (:id, :course, :module, "
-                "'Draft Quiz', 'draft', 70.00)"
+                "INSERT INTO quizzes (id, course_id, module_id, title, status, passing_score_percent, slug) VALUES (:id, :course, :module, 'Draft Quiz', 'draft', 70.00, 'slug-' || uuid_generate_v4()::text);"
             ),
             {
                 "id": draft_quiz_id,
@@ -703,9 +699,7 @@ async def test_initial_ef_out_of_range_is_clamped(
         )
         await conn.execute(
             text(
-                "INSERT INTO quizzes (id, course_id, module_id, title, status, "
-                "passing_score_percent, initial_ef) VALUES (:id, :course, :module, "
-                "'Clamp Quiz', 'published', 70.00, 3.00)"
+                "INSERT INTO quizzes (id, course_id, module_id, title, status, passing_score_percent, initial_ef, slug) VALUES (:id, :course, :module, 'Clamp Quiz', 'published', 70.00, 3.00, 'slug-' || uuid_generate_v4()::text);"
             ),
             {"id": quiz_id, "course": course_id, "module": module_id},
         )

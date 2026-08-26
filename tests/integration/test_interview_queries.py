@@ -175,14 +175,7 @@ async def fixture_data(engine: AsyncEngine) -> AsyncIterator[dict]:
         )
         await conn.execute(
             text(
-                "INSERT INTO interview_configs ("
-                "id, course_id, module_id, title, status, max_attempts) VALUES "
-                "(:p, :c, :m, 'Pub Interview', 'published', NULL), "
-                "(:d, :c, :m, 'Draft Interview', 'draft', NULL), "
-                "(:a, :c, :m, 'Archived Interview', 'archived', NULL), "
-                "(:sd, :c, :m, 'Deleted Interview', 'published', NULL), "
-                "(:cp, :c, :m, 'Capped Interview', 'published', 2), "
-                "(:mb, :c, :mb_id, 'Module B Interview', 'published', NULL)"
+                "INSERT INTO interview_configs (id, course_id, module_id, title, status, max_attempts, slug) VALUES (:p, :c, :m, 'Pub Interview', 'published', NULL, 'slug-' || uuid_generate_v4()::text), (:d, :c, :m, 'Draft Interview', 'draft', NULL, 'slug-' || uuid_generate_v4()::text), (:a, :c, :m, 'Archived Interview', 'archived', NULL, 'slug-' || uuid_generate_v4()::text), (:sd, :c, :m, 'Deleted Interview', 'published', NULL, 'slug-' || uuid_generate_v4()::text), (:cp, :c, :m, 'Capped Interview', 'published', 2, 'slug-' || uuid_generate_v4()::text), (:mb, :c, :mb_id, 'Module B Interview', 'published', NULL, 'slug-' || uuid_generate_v4()::text);"
             ),
             {
                 "p": cfg_pub,

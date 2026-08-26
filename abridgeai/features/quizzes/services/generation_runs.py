@@ -21,6 +21,7 @@ from abridgeai.ai.models import GenerationRun
 from abridgeai.core.db.conflict_mapper import flush_or_conflict
 from abridgeai.core.exceptions import AppError, ConflictError
 from abridgeai.core.security import CurrentUser
+from abridgeai.core.slug import slugify, unique_slug
 from abridgeai.features.quizzes.models import (
     Quiz,
     QuizAttemptAnswer,
@@ -203,10 +204,21 @@ async def start_generation_run(
     if quiz is None:
         if not payload.title:
             raise AppError("title is required when creating a new quiz")
+        from sqlalchemy import select as _select  # noqa: PLC0415
+
+        _base = slugify(payload.title) or "quiz"
+        _taken_rows = await db.execute(
+            _select(Quiz.slug).where(
+                Quiz.module_id == module_id,
+                Quiz.deleted_at.is_(None),
+            )
+        )
+        _taken = {row[0] for row in _taken_rows.all()}
         quiz = Quiz(
             course_id=course_id,
             module_id=module_id,
             title=payload.title,
+            slug=unique_slug(_base, _taken),
             description=payload.description,
             generation_run_id=run.id,
             created_by=actor.user_id,

@@ -414,9 +414,7 @@ async def _seed_published_config(
     async with engine.begin() as conn:
         await conn.execute(
             text(
-                "INSERT INTO interview_configs "
-                "(id, course_id, module_id, title, status, created_by) "
-                "VALUES (:id, :c, :m, 'Cross-user', 'published', :u)"
+                "INSERT INTO interview_configs (id, course_id, module_id, title, status, created_by, slug) VALUES (:id, :c, :m, 'Cross-user', 'published', :u, 'slug-' || uuid_generate_v4()::text);"
             ),
             {"id": config_id, "c": course_id, "m": module_id, "u": actor_id},
         )
@@ -843,13 +841,7 @@ async def test_start_session_rejects_config_without_outcomes(
     async with engine.begin() as conn:
         await conn.execute(
             text(
-                "INSERT INTO interview_configs ("
-                "  id, course_id, module_id, title, status,"
-                "  created_by, published_at"
-                ") VALUES ("
-                "  :cid, :course, :module, 'No Outcomes Repro', 'published',"
-                "  :uid, NOW()"
-                ")"
+                "INSERT INTO interview_configs (  id, course_id, module_id, title, status,  created_by, published_at, slug) VALUES (:cid, :course, :module, 'No Outcomes Repro', 'published',  :uid, NOW(), 'slug-' || uuid_generate_v4()::text);"
             ),
             {
                 "cid": config_id,
@@ -918,13 +910,7 @@ async def test_start_session_self_heals_stale_empty_session(
     async with engine.begin() as conn:
         await conn.execute(
             text(
-                "INSERT INTO interview_configs ("
-                "  id, course_id, module_id, title, status,"
-                "  created_by, published_at"
-                ") VALUES ("
-                "  :cid, :course, :module, 'Stale Session Repro', 'published',"
-                "  :uid, NOW()"
-                ")"
+                "INSERT INTO interview_configs (  id, course_id, module_id, title, status,  created_by, published_at, slug) VALUES (:cid, :course, :module, 'Stale Session Repro', 'published',  :uid, NOW(), 'slug-' || uuid_generate_v4()::text);"
             ),
             {
                 "cid": config_id,
@@ -1030,13 +1016,7 @@ async def test_start_session_upgrades_input_mode_when_config_allows(
     async with engine.begin() as conn:
         await conn.execute(
             text(
-                "INSERT INTO interview_configs ("
-                "  id, course_id, module_id, title, status,"
-                "  created_by, published_at"
-                ") VALUES ("
-                "  :cid, :course, :module, 'Mode Upgrade Repro', 'published',"
-                "  :uid, NOW()"
-                ")"
+                "INSERT INTO interview_configs (  id, course_id, module_id, title, status,  created_by, published_at, slug) VALUES (:cid, :course, :module, 'Mode Upgrade Repro', 'published',  :uid, NOW(), 'slug-' || uuid_generate_v4()::text);"
             ),
             {
                 "cid": config_id,
@@ -1137,13 +1117,7 @@ async def test_start_session_aligns_a_legacy_text_session_to_the_unified_mode(
     async with engine.begin() as conn:
         await conn.execute(
             text(
-                "INSERT INTO interview_configs ("
-                "  id, course_id, module_id, title, status,"
-                "  created_by, published_at"
-                ") VALUES ("
-                "  :cid, :course, :module, 'Text Only Repro', 'published',"
-                "  :uid, NOW()"
-                ")"
+                "INSERT INTO interview_configs (  id, course_id, module_id, title, status,  created_by, published_at, slug) VALUES (:cid, :course, :module, 'Text Only Repro', 'published',  :uid, NOW(), 'slug-' || uuid_generate_v4()::text);"
             ),
             {
                 "cid": config_id,

@@ -243,6 +243,12 @@ class InterviewConfig(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftD
         index=True,
     )
     title: Mapped[str] = mapped_column(String(255), nullable=False)
+    # URL slug for student-facing breadcrumb links
+    # (``/courses/<course-slug>/learn/<item-slug>``). Unique per module over
+    # live rows (``uq_interview_configs_module_slug``, migration 0086);
+    # generated from the title at create time and IMMUTABLE once published —
+    # see ``services/published_freeze.py``.
+    slug: Mapped[str] = mapped_column(String(100), nullable=False)
     status: Mapped[str] = mapped_column(String(20), nullable=False, server_default=text("'draft'"))
     max_attempts: Mapped[int | None] = mapped_column(Integer)
     # FR-5.3 retake cooldown: minimum hours between the end of one attempt and

@@ -68,7 +68,7 @@ router = APIRouter(tags=["quizzes-learner"])
 _logger = get_logger(__name__)
 
 
-def _not_found(resource: str, resource_id: UUID) -> HTTPException:
+def _not_found(resource: str, resource_id: UUID | str) -> HTTPException:
     return HTTPException(
         status_code=status.HTTP_404_NOT_FOUND,
         detail={"error": "not_found", "resource": resource, "id": str(resource_id)},
@@ -134,12 +134,13 @@ class QuizIntegrityEventBatchRequest(BaseModel):
 
 @router.get("/quizzes/{quiz_id}", response_model=QuizPublic)
 async def get_published_quiz(
-    quiz_id: UUID,
+    quiz_id: str,
     current_user: Annotated[CurrentUser, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> QuizPublic:
     """Public projection of one published quiz (no ``is_correct`` leak).
 
+    ``quiz_id`` accepts a UUID id or an item slug (breadcrumb URLs).
     Tenant-gated: the caller must be able to see the quiz's owning course
     (org membership or course-management rights) or the quiz resolves to
     404 — a published quiz from another organization must not be readable
@@ -164,7 +165,7 @@ async def get_published_quiz(
     question_count = (
         await db.execute(
             select(func.count(QuizQuestion.id)).where(
-                QuizQuestion.quiz_id == quiz_id,
+                QuizQuestion.quiz_id == quiz.id,
                 QuizQuestion.review_status == "approved",
                 QuizQuestion.deleted_at.is_(None),
             )
@@ -180,7 +181,7 @@ async def get_published_quiz(
     status_code=status.HTTP_201_CREATED,
 )
 async def start_attempt(
-    quiz_id: UUID,
+    quiz_id: str,
     payload: QuizAttemptStart,
     request: Request,
     current_user: Annotated[CurrentUser, Depends(get_current_user)],
@@ -204,17 +205,17 @@ async def start_attempt(
     (``max_attempts`` used up, or a retake with
     ``allow_retakes=False``) → 409.
     """
-    if payload.quiz_id != quiz_id:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail={"error": "quiz_id_mismatch"},
-        )
     # Tenant gate: a quiz from another organization must not be takable by
     # id. The attempt flow would otherwise create cross-tenant attempts and
     # serve the full question payload (options included) to anyone.
     quiz = await taking_service.get_published_quiz(db, quiz_id)
     if quiz is None:
         raise _not_found("quiz", quiz_id)
+    if payload.quiz_id != quiz.id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": "quiz_id_mismatch"},
+        )
     if not await can_view_course_content(
         db, user_id=current_user.user_id, course_id=quiz.course_id
     ):
@@ -222,7 +223,7 @@ async def start_attempt(
     try:
         _, take_payload = await taking_service.start_attempt(
             db,
-            quiz_id,
+            quiz.id,
             current_user,
             idempotency_key=payload.idempotency_key,
             password=payload.password,

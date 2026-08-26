@@ -126,10 +126,7 @@ async def fixture_data(engine: AsyncEngine) -> AsyncIterator[dict]:
         )
         await conn.execute(
             text(
-                "INSERT INTO quizzes "
-                "(id, course_id, module_id, title, status) VALUES "
-                "(:t, :c, :m, 'Target Quiz', 'draft'), "
-                "(:s, :c, :m, 'Sibling Quiz', 'published')"
+                "INSERT INTO quizzes (id, course_id, module_id, title, status, slug) VALUES (:t, :c, :m, 'Target Quiz', 'draft', 'slug-' || uuid_generate_v4()::text), (:s, :c, :m, 'Sibling Quiz', 'published', 'slug-' || uuid_generate_v4()::text);"
             ),
             {
                 "t": target_quiz,

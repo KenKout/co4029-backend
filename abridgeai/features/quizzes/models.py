@@ -150,12 +150,15 @@ class Quiz(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftDeleteMixin,
         index=True,
     )
     title: Mapped[str] = mapped_column(String(255), nullable=False)
+    # URL slug for student-facing breadcrumb links
+    # (``/courses/<course-slug>/learn/<item-slug>``). Unique per module over
+    # live rows (``uq_quizzes_module_slug``, migration 0086); generated from
+    # the title at create time and IMMUTABLE once the quiz is published —
+    # see :func:`_assert_quiz_settings_editable`.
+    slug: Mapped[str] = mapped_column(String(100), nullable=False)
     description: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String(20), nullable=False, server_default=text("'draft'"))
     time_limit_seconds: Mapped[int | None] = mapped_column(Integer)
-    passing_score_percent: Mapped[Decimal] = mapped_column(
-        Numeric(5, 2), nullable=False, server_default=text("70.00")
-    )
     # Moodle-style: which attempt counts as the headline score.
     grading_method: Mapped[str] = mapped_column(
         String(16), nullable=False, server_default=text("'highest'")
@@ -179,6 +182,9 @@ class Quiz(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftDeleteMixin,
         Boolean, nullable=False, server_default=text("FALSE")
     )
     generation_instructions: Mapped[str | None] = mapped_column(Text)
+    passing_score_percent: Mapped[Decimal] = mapped_column(
+        Numeric(5, 2), nullable=False, server_default=text("70.00")
+    )
     generation_run_id: Mapped[uuid.UUID | None] = mapped_column(
         PGUUID(as_uuid=True),
         ForeignKey("generation_runs.id", ondelete="SET NULL"),

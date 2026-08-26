@@ -1183,8 +1183,7 @@ async def _run_full_clone_test(
         qid = uuid.uuid4()
         await session.execute(
             text(
-                "INSERT INTO quizzes (id, course_id, module_id, title, status) "
-                "VALUES (:id, :cid, :mid, 'Quiz A', 'published')"
+                "INSERT INTO quizzes (id, course_id, module_id, title, status, slug) VALUES (:id, :cid, :mid, 'Quiz A', 'published', 'slug-' || uuid_generate_v4()::text);"
             ),
             {"id": quiz_id, "cid": src_course, "mid": m1},
         )
@@ -1216,8 +1215,7 @@ async def _run_full_clone_test(
         iq = uuid.uuid4()
         await session.execute(
             text(
-                "INSERT INTO interview_configs (id, course_id, module_id, title, status) "
-                "VALUES (:id, :cid, :mid, 'Interview A', 'published')"
+                "INSERT INTO interview_configs (id, course_id, module_id, title, status, slug) VALUES (:id, :cid, :mid, 'Interview A', 'published', 'slug-' || uuid_generate_v4()::text);"
             ),
             {"id": icfg, "cid": src_course, "mid": m2},
         )

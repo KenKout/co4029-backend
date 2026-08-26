@@ -189,8 +189,7 @@ async def _seed_quiz_root(engine: AsyncEngine) -> tuple[UUID, UUID, UUID, UUID, 
         )
         await conn.execute(
             text(
-                "INSERT INTO quizzes (id, course_id, module_id, title, status, reminders_enabled) "
-                "VALUES (:id, :course, :m, 'Q', 'published', TRUE)"
+                "INSERT INTO quizzes (id, course_id, module_id, title, status, reminders_enabled, slug) VALUES (:id, :course, :m, 'Q', 'published', TRUE, 'slug-' || uuid_generate_v4()::text);"
             ),
             {"id": quiz_id, "course": course_id, "m": module_id},
         )

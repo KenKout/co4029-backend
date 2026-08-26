@@ -180,12 +180,48 @@ def _published_clause() -> tuple[Any, ...]:
     return (Quiz.status == "published",)
 
 
-async def get_published_quiz(db: AsyncSession, quiz_id: UUID) -> Quiz | None:
-    """Single published quiz by id, or ``None`` (router maps to 404).
+def _looks_like_uuid(value: str) -> bool:
+    try:
+        UUID(value)
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
+async def get_published_quiz(db: AsyncSession, quiz_id: UUID | str) -> Quiz | None:
+    """Single published quiz by id OR slug, or ``None`` (router maps to 404).
 
     Excludes drafts, archived, and soft-deleted quizzes. Existence is
     not leaked — service treats ``None`` uniformly as 404.
+
+    Slug addressing supports the breadcrumb student URLs
+    (``/courses/<course-slug>/learn/<item-slug>``): a non-UUID path
+    segment is matched against ``Quiz.slug``. Slugs are only unique per
+    module, so the caller MUST resolve the course first and pass its id —
+    the slug lookup joins through ``modules.course_id`` and takes the
+    first published match inside that course.
     """
+    if isinstance(quiz_id, str) and not _looks_like_uuid(quiz_id):
+        # Lazy import to avoid breaking import-linter's cross-feature contract.
+        from abridgeai.features.courses.models import Module  # noqa: PLC0415
+
+        stmt = (
+            select(Quiz)
+            .join(Module, Module.id == Quiz.module_id)
+            .where(
+                Quiz.slug == quiz_id,
+                *_published_clause(),
+                Quiz.deleted_at.is_(None),
+                Module.deleted_at.is_(None),
+            )
+            .order_by(Quiz.created_at)
+            .limit(2)
+        )
+        rows = list((await db.execute(stmt)).scalars().all())
+        if len(rows) != 1:
+            # 0 = unknown slug; >1 = ambiguous across courses → both 404.
+            return None
+        return rows[0]
     stmt = select(Quiz).where(Quiz.id == quiz_id, *_published_clause())
     return (await db.execute(stmt)).scalar_one_or_none()
 

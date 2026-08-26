@@ -153,10 +153,11 @@ class _Builder:
             qid = uuid.uuid4()
             status = "published" if n < quizzes else "draft"
             await self._exec(
-                "INSERT INTO quizzes (id, course_id, module_id, title, status, "
+                "INSERT INTO quizzes (id, course_id, module_id, slug, title, status, "
                 "passing_score_percent, allow_retakes, max_attempts) "
-                "VALUES (:i,:c,:m,'Q',:st,70,TRUE,2)",
-                {"i": qid, "c": course, "m": module, "st": status},
+                "VALUES (:i,:c,:m,:sl,'Q',:st,70,TRUE,2)",
+                {"i": qid, "c": course, "m": module, "st": status,
+                 "sl": f"q-{n}-{self._s}"},
             )
             await self._exec(
                 "INSERT INTO module_items (id, module_id, item_type, quiz_id, position) "
@@ -171,9 +172,10 @@ class _Builder:
             status = "published" if n < interviews else "draft"
             await self._exec(
                 "INSERT INTO interview_configs "
-                "(id, course_id, module_id, title, status, created_by) "
-                "VALUES (:i,:c,:m,'IV',:st,:w)",
-                {"i": iid, "c": course, "m": module, "st": status, "w": self.owner},
+                "(id, course_id, module_id, slug, title, status, created_by) "
+                "VALUES (:i,:c,:m,:sl,'IV',:st,:w)",
+                {"i": iid, "c": course, "m": module, "st": status,
+                 "w": self.owner, "sl": f"iv-{n}-{self._s}"},
             )
             await self._exec(
                 "INSERT INTO module_items "
@@ -282,6 +284,13 @@ async def builder(engine: AsyncEngine) -> AsyncIterator[_Builder]:
                 {"c": cid},
             )
             await conn.execute(text("DELETE FROM modules WHERE course_id=:c"), {"c": cid})
+            await conn.execute(
+                text(
+                    "DELETE FROM course_completion_awards WHERE course_id IN "
+                    "(SELECT id FROM courses WHERE organization_id=:o)"
+                ),
+                {"o": b.org},
+            )
             await conn.execute(text("DELETE FROM courses WHERE id=:c"), {"c": cid})
         await conn.execute(
             text("DELETE FROM users WHERE id IN (:a,:b)"), {"a": b.owner, "b": b.student}

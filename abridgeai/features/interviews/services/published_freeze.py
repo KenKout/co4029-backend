@@ -49,6 +49,12 @@ PUBLISHED_EDITABLE_CONFIG_FIELDS = frozenset(
     }
 )
 
+# The URL slug is deliberately NOT here: student-facing links embed it
+# (/courses/<course-slug>/learn/<item-slug>), so changing a published
+# interview's slug breaks every bookmark / shared link mid-cohort. The
+# whitelist shape means ``slug`` is frozen by default — this comment only
+# documents WHY. Drafts may re-slug freely.
+
 
 def assert_config_settings_editable(config: InterviewConfig, changed_fields: set[str]) -> None:
     """Field-aware freeze for the config PATCH on a published interview.

@@ -2533,9 +2533,8 @@ async def test_course_outcome_question_count_surfaces_mappings(
             )
             await conn.execute(
                 text(
-                    "INSERT INTO quizzes (id, course_id, module_id, title, status) "
-                    "VALUES (:id, :cid, :mid, 'Q', 'published')"
-                ),
+                "INSERT INTO quizzes (id, course_id, module_id, title, status, slug) VALUES (:id, :cid, :mid, 'Q', 'published', 'slug-' || uuid_generate_v4()::text);"
+            ),
                 {"id": quiz_id, "cid": course_id, "mid": module_id},
             )
             await conn.execute(

@@ -116,8 +116,7 @@ async def scenario(engine: AsyncEngine) -> AsyncIterator[dict]:
         )
         await conn.execute(
             text(
-                "INSERT INTO quizzes (id, course_id, module_id, title, status, created_by) "
-                "VALUES (:id, :course, :module, 'Publish Gate Quiz', 'draft', :owner)"
+                "INSERT INTO quizzes (id, course_id, module_id, title, status, created_by, slug) VALUES (:id, :course, :module, 'Publish Gate Quiz', 'draft', :owner, 'slug-' || uuid_generate_v4()::text);"
             ),
             {
                 "id": quiz_id,

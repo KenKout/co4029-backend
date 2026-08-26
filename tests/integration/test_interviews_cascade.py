@@ -127,6 +127,7 @@ async def test_soft_delete_cascade_walks_questions_and_outcomes(
         config = InterviewConfig(
             course_id=course_id,
             module_id=module_id,
+            slug="cascade-test-config",
             title="Cascade Test Config",
         )
         session.add(config)

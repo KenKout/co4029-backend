@@ -132,6 +132,8 @@ class InterviewConfigPublic(_ORMModel):
     course_id: UUID
     module_id: UUID
     title: str
+    # URL slug (immutable once published) for breadcrumb-style student links.
+    slug: str | None = None
     status: Literal["published"]
     persona: PersonaLiteral | None = None
     # Deepgram Aura voice for English sessions (NULL = deployment default). Safe

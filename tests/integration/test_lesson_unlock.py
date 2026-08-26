@@ -221,9 +221,7 @@ async def _attach_quiz_with_cards(
     async with _conn(engine) as conn:
         await conn.execute(
             text(
-                "INSERT INTO quizzes "
-                "(id, course_id, module_id, title, status) "
-                "VALUES (:id, :course, :module, 'Quiz', 'published')"
+                "INSERT INTO quizzes (id, course_id, module_id, title, status, slug) VALUES (:id, :course, :module, 'Quiz', 'published', 'slug-' || uuid_generate_v4()::text);"
             ),
             {"id": quiz_id, "course": course_id, "module": module_id},
         )
@@ -285,9 +283,7 @@ async def _seed_passing_interview(
     async with _conn(engine) as conn:
         await conn.execute(
             text(
-                "INSERT INTO interview_configs "
-                "(id, course_id, module_id, title, status) "
-                "VALUES (:id, :c, :m, 'Module Interview', 'published')"
+                "INSERT INTO interview_configs (id, course_id, module_id, title, status, slug) VALUES (:id, :c, :m, 'Module Interview', 'published', 'slug-' || uuid_generate_v4()::text);"
             ),
             {"id": config_id, "c": course_id, "m": module_id},
         )
@@ -310,9 +306,7 @@ async def _seed_only_interview_config(
     async with _conn(engine) as conn:
         await conn.execute(
             text(
-                "INSERT INTO interview_configs "
-                "(id, course_id, module_id, title, status) "
-                "VALUES (:id, :c, :m, 'No-Pass Interview', 'published')"
+                "INSERT INTO interview_configs (id, course_id, module_id, title, status, slug) VALUES (:id, :c, :m, 'No-Pass Interview', 'published', 'slug-' || uuid_generate_v4()::text);"
             ),
             {"id": config_id, "c": course_id, "m": module_id},
         )

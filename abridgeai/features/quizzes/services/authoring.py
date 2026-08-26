@@ -38,6 +38,7 @@ from abridgeai.core.db.conflict_mapper import (
 from abridgeai.core.db.recursive_delete import soft_delete_cascade
 from abridgeai.core.exceptions import AppError, ConflictError, NotFoundError
 from abridgeai.core.security import CurrentUser, utcnow
+from abridgeai.core.slug import slugify, unique_slug
 from abridgeai.features.courses.api import public as courses_api
 from abridgeai.features.quizzes.models import (
     Quiz,
@@ -181,6 +182,11 @@ _PUBLISHED_EDITABLE_FIELDS = frozenset(
     }
 )
 
+# The URL slug is deliberately NOT in the editable set: student-facing links
+# embed it (/courses/<course-slug>/learn/<item-slug>), so renaming a published
+# quiz's slug would break every bookmark / shared link mid-cohort. Drafts may
+# still re-slug freely.
+
 
 def _as_plain_json(value: Any) -> Any:  # noqa: ANN401  -- mirrors arbitrary JSON payloads
     """Coerce a payload value into plain JSON-serializable data.
@@ -249,6 +255,19 @@ async def _resolve_module_course(db: AsyncSession, module_id: UUID) -> UUID:
     if module is None:
         raise NotFoundError(f"Module {module_id} not found")
     return module.course_id
+
+
+async def _taken_quiz_slugs(db: AsyncSession, module_id: UUID) -> set[str]:
+    """Slugs already used by live quizzes in ``module_id`` (uniqueness scope)."""
+    from sqlalchemy import select  # noqa: PLC0415
+
+    result = await db.execute(
+        select(Quiz.slug).where(
+            Quiz.module_id == module_id,
+            Quiz.deleted_at.is_(None),
+        )
+    )
+    return {row[0] for row in result.all()}
 
 
 async def _ensure_module_item(db: AsyncSession, *, module_id: UUID, quiz_id: UUID) -> None:
@@ -438,10 +457,17 @@ async def create_quiz(
     """Create a new draft quiz under ``module_id`` and link a ``ModuleItem``."""
     course_id = await _resolve_module_course(db, module_id)
     data = payload.model_dump(exclude_unset=True)
+    # Auto-generate the URL slug from the title unless the caller pinned one.
+    # Uniqueness is per-module over live rows (uq_quizzes_module_slug):
+    # collisions get -1, -2, … incrementing from 1.
+    requested_slug = data.get("slug")
+    base = slugify(requested_slug or data["title"]) or "quiz"
+    taken = await _taken_quiz_slugs(db, module_id)
     quiz = Quiz(
         course_id=course_id,
         module_id=module_id,
         title=data["title"],
+        slug=unique_slug(base, taken),
         description=data.get("description"),
         time_limit_seconds=data.get("time_limit_seconds"),
         passing_score_percent=data.get("passing_score_percent") or _DEFAULT_PASSING_SCORE,

@@ -49,6 +49,7 @@ from uuid import UUID
 from sqlalchemy import func, select
 
 from abridgeai.ai.models import GenerationRun
+from abridgeai.core.slug import slugify, unique_slug
 from abridgeai.features.quizzes.api._dto import (
     AttemptScoreDTO,
     GenerationRunDTO,
@@ -401,10 +402,24 @@ async def deep_clone_quiz(
     if source is None:
         raise ValueError(f"Quiz {source_quiz_id} not found")
 
+    clone_title = f"{source.title}{title_suffix}"
+    # Slug: derive from the clone's title; uniqueness is per-module over live
+    # rows, so append -1, -2, ... on collision (same policy as create_quiz).
+    from sqlalchemy import select as _select  # noqa: PLC0415
+
+    _base = slugify(clone_title) or "quiz"
+    _taken_rows = await db.execute(
+        _select(Quiz.slug).where(
+            Quiz.module_id == target_module_id,
+            Quiz.deleted_at.is_(None),
+        )
+    )
+    _taken = {row[0] for row in _taken_rows.all()}
     clone = Quiz(
         course_id=target_course_id if target_course_id is not None else source.course_id,
         module_id=target_module_id,
-        title=f"{source.title}{title_suffix}",
+        title=clone_title,
+        slug=unique_slug(_base, _taken),
         description=source.description,
         status="draft",
         time_limit_seconds=source.time_limit_seconds,

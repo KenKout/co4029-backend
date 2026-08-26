@@ -131,9 +131,7 @@ async def scenario(engine: AsyncEngine) -> AsyncIterator[dict[str, uuid.UUID]]:
         )
         await conn.execute(
             text(
-                "INSERT INTO quizzes (id, course_id, module_id, title, status) VALUES "
-                "(:q, :c, :m, 'Results Quiz', 'published'), "
-                "(:eq, :c, :m, 'Empty Quiz', 'published')"
+                "INSERT INTO quizzes (id, course_id, module_id, title, status, slug) VALUES (:q, :c, :m, 'Results Quiz', 'published', 'slug-' || uuid_generate_v4()::text), (:eq, :c, :m, 'Empty Quiz', 'published', 'slug-' || uuid_generate_v4()::text);"
             ),
             {"q": quiz, "eq": empty_quiz, "c": course, "m": module},
         )
@@ -394,8 +392,7 @@ async def breakdown_scenario(engine: AsyncEngine) -> AsyncIterator[dict[str, uui
         )
         await conn.execute(
             text(
-                "INSERT INTO quizzes (id, course_id, module_id, title, status) "
-                "VALUES (:q, :c, :m, 'Breakdown Quiz', 'published')"
+                "INSERT INTO quizzes (id, course_id, module_id, title, status, slug) VALUES (:q, :c, :m, 'Breakdown Quiz', 'published', 'slug-' || uuid_generate_v4()::text);"
             ),
             {"q": quiz, "c": course, "m": module},
         )

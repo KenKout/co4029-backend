@@ -33,6 +33,7 @@ from abridgeai.core.db.conflict_mapper import (
 from abridgeai.core.db.recursive_delete import soft_delete_cascade
 from abridgeai.core.exceptions import AppError, NotFoundError
 from abridgeai.core.security import CurrentUser, utcnow
+from abridgeai.core.slug import slugify, unique_slug
 from abridgeai.features.courses.api import public as courses_public
 from abridgeai.features.interviews.dedup import (
     NOT_DUPLICATE,
@@ -155,10 +156,23 @@ async def create_interview_config(
     module_id = data.get("module_id")
     if module_id is None:
         raise AppError("module_id is required to create an interview config")
+    # Auto-generate the URL slug from the title (unique per module over live
+    # rows; collisions get -1, -2, … incrementing from 1).
+    from sqlalchemy import select  # noqa: PLC0415
+
+    base = slugify(data.get("slug") or data["title"]) or "interview"
+    taken_rows = await db.execute(
+        select(InterviewConfig.slug).where(
+            InterviewConfig.module_id == module_id,
+            InterviewConfig.deleted_at.is_(None),
+        )
+    )
+    taken = {row[0] for row in taken_rows.all()}
     config = InterviewConfig(
         course_id=course_id,
         module_id=module_id,
         title=data["title"],
+        slug=unique_slug(base, taken),
         persona=data.get("persona"),
         persona_profile_json=(data.get("persona_profile") or None),
         tts_voice=data.get("tts_voice"),

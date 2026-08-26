@@ -113,8 +113,7 @@ async def grader_quiz_id(engine: AsyncEngine) -> uuid.UUID:
         )
         await conn.execute(
             text(
-                "INSERT INTO quizzes (id, course_id, module_id, title, status) "
-                "VALUES (:id, :course, :module, :title, 'draft')"
+                "INSERT INTO quizzes (id, course_id, module_id, title, status, slug) VALUES (:id, :course, :module, :title, 'draft', 'slug-' || uuid_generate_v4()::text);"
             ),
             {
                 "id": quiz_id,

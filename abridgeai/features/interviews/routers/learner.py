@@ -66,11 +66,19 @@ logger = logging.getLogger(__name__)
 _REQUIRE_SESSION_OWNER = require_session_owner_access()
 
 
-def _not_found(resource: str, resource_id: UUID) -> HTTPException:
+def _not_found(resource: str, resource_id: UUID | str) -> HTTPException:
     return HTTPException(
         status_code=status.HTTP_404_NOT_FOUND,
         detail={"error": "not_found", "resource": resource, "id": str(resource_id)},
     )
+
+
+def _is_uuid(value: str) -> bool:
+    try:
+        UUID(value)
+    except (TypeError, ValueError):
+        return False
+    return True
 
 
 def _bad_request(message: str) -> HTTPException:
@@ -126,7 +134,7 @@ async def get_arq_pool() -> object | None:
 
 @router.get("/interview-configs/{config_id}", response_model=InterviewForTakingPublic)
 async def get_interview_for_taking(
-    config_id: UUID,
+    config_id: str,
     current_user: Annotated[CurrentUser, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> InterviewForTakingPublic:
@@ -139,7 +147,26 @@ async def get_interview_for_taking(
         InterviewSession,
     )
 
-    config = await db.get(InterviewConfig, config_id)
+    config = None
+    if _is_uuid(config_id):
+        config = await db.get(InterviewConfig, UUID(str(config_id)))
+    else:
+        # Slug addressing (breadcrumb URLs): slugs are unique per module, so
+        # an ambiguous slug across courses resolves to 404 (no leak either way).
+        rows = (
+            await db.execute(
+                select(InterviewConfig)
+                .where(
+                    InterviewConfig.slug == str(config_id),
+                    InterviewConfig.status == "published",
+                    InterviewConfig.deleted_at.is_(None),
+                )
+                .order_by(InterviewConfig.created_at)
+                .limit(2)
+            )
+        ).scalars().all()
+        if len(rows) == 1:
+            config = rows[0]
     if config is None or config.status != "published":
         raise _not_found("interview_config", config_id)
     await _ensure_config_course_enrolled(db, current_user, config)
@@ -147,7 +174,7 @@ async def get_interview_for_taking(
         used = (
             await db.execute(
                 select(func.count(InterviewSession.id)).where(
-                    InterviewSession.interview_config_id == config_id,
+                    InterviewSession.interview_config_id == config.id,
                     InterviewSession.student_id == current_user.user_id,
                 )
             )
@@ -165,7 +192,7 @@ async def get_interview_for_taking(
         await db.execute(
             select(InterviewQuestion)
             .where(
-                InterviewQuestion.interview_config_id == config_id,
+                InterviewQuestion.interview_config_id == config.id,
                 InterviewQuestion.review_status == "approved",
             )
             .order_by(InterviewQuestion.position)
@@ -178,7 +205,7 @@ async def get_interview_for_taking(
     outcome_count = (
         await db.execute(
             select(func.count(InterviewOutcome.id)).where(
-                InterviewOutcome.interview_config_id == config_id,
+                InterviewOutcome.interview_config_id == config.id,
                 InterviewOutcome.deleted_at.is_(None),
             )
         )

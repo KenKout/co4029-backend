@@ -131,7 +131,7 @@ max-complexity = 12
 # Alembic migrations are auto-generated / template-driven. Path is
 # `migrations/versions/` in this project (alembic was renamed during the
 # T0.5 init).
-"migrations/versions/**/*.py" = ["ANN", "E501"]
+"migrations/versions/**/*.py" = ["ANN", "E501", "S608"]
 # eval/ is a manual-trigger eval harness, not part of the production app.
 # CLI legitimately writes to stdout/stderr (T20); tests use assert (S101).
 "eval/run.py" = ["T20"]

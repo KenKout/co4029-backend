@@ -1169,9 +1169,7 @@ async def test_audio_object_id_persisted_without_transcription(
     async with engine.begin() as conn:
         await conn.execute(
             text(
-                "INSERT INTO interview_configs ("
-                "id, course_id, module_id, title, status, created_by) "
-                "VALUES (:id, :c, :m, 'Voice Future-Proof', 'published', :u)"
+                "INSERT INTO interview_configs (id, course_id, module_id, title, status, created_by, slug) VALUES (:id, :c, :m, 'Voice Future-Proof', 'published', :u, 'slug-' || uuid_generate_v4()::text);"
             ),
             {
                 "id": config_id,
