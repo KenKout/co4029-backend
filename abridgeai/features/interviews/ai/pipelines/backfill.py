@@ -17,6 +17,7 @@ from abridgeai.core.observability import get_logger
 from abridgeai.features.interviews.ai.stages.generation import (
     generate_interview_questions,
 )
+from abridgeai.features.interviews.ai.stages.generation.resolve import VARIANT_ANGLES
 from abridgeai.features.interviews.ai.stages.validation import (
     validate_interview_questions,
 )
@@ -62,10 +63,34 @@ def validation_summary(verdicts: list[Verdict]) -> dict[str, Any]:
     }
 
 
+def _trim_to_shortfall(
+    drafts: list[InterviewQuestionDraft],
+    missing: int,
+) -> list[InterviewQuestionDraft]:
+    """Trim an overshooting variant round down to ``missing`` rows.
+
+    A logical-unit backfill request returns whole angle groups (one draft
+    per interviewer angle). When the accepted set exceeds the shortfall we
+    keep rows spread across as many distinct ``question_type`` buckets as
+    possible — dropping surplus duplicates of a type before dropping a
+    type entirely — so whichever angle was missing stays represented.
+    """
+    by_type: dict[str, list[InterviewQuestionDraft]] = {}
+    for d in drafts:
+        by_type.setdefault(d.question_type, []).append(d)
+    kept: list[InterviewQuestionDraft] = []
+    # Round-robin one row per type until the shortfall is met.
+    while len(kept) < missing and any(by_type.values()):
+        for qtype in list(by_type):
+            if len(kept) < missing and by_type[qtype]:
+                kept.append(by_type[qtype].pop(0))
+    return kept
+
+
 async def generate_with_backfill(
     db: AsyncSession,
     *,
-    state: Any,
+    state: Any,  # noqa: ANN401 -- GenerationRunDTO duck-type, avoids quizzes import
     config: InterviewConfig,
     context: InterviewRetrievalContext,
     outcomes: list[Any],
@@ -101,6 +126,18 @@ async def generate_with_backfill(
         # another round.
         request_count = missing if attempt == 0 else min(missing + 1, missing * 2)
 
+        # Variant mode (all_angles): ``override_question_count`` is a TOTAL row
+        # budget and the generation stage re-divides it by the angle count
+        # (ceil), so passing the raw shortfall under-requests — a shortfall of
+        # 2 rows becomes ceil(2/4)=1 logical question whose variants may not
+        # include the missing angle (observed: bank short one behavioral).
+        # Ask in LOGICAL units so every angle is re-requested, then trim the
+        # surplus rows below so the run still lands exactly on target.
+        trim_to_total = False
+        if variant_strategy == "all_angles":
+            request_count = -(-request_count // len(VARIANT_ANGLES)) * len(VARIANT_ANGLES)
+            trim_to_total = True
+
         round_drafts = await generate_interview_questions(
             db,
             run=state,
@@ -125,6 +162,11 @@ async def generate_with_backfill(
             for d in accepted_drafts(round_drafts, round_verdicts)
             if d.prompt_text not in seen_prompts
         ]
+        # Variant mode: a logical-unit backfill request yields a full angle set,
+        # which may overshoot ``target_count``. Keep only the missing rows —
+        # preferring the types still short so the bank stays balanced per role.
+        if trim_to_total and len(round_accepted) > missing:
+            round_accepted = _trim_to_shortfall(round_accepted, missing)
         seen_prompts.update(d.prompt_text for d in round_accepted)
 
         all_drafts.extend(round_drafts)

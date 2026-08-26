@@ -655,8 +655,11 @@ def llm_mocks(scenario: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> dict
         gateway: Any = None,
         override_question_count: int | None = None,
         avoid_prompts: list[str] | None = None,
+        variant_strategy: str | None = None,
+        role_type: str | None = None,
     ) -> list[Any]:
         del config, context, gateway, override_question_count, avoid_prompts
+        del variant_strategy, role_type
         captured_run_id["id"] = run.id
         captured["stages"].append({"stage": "generation"})
         await _emit_audit(
@@ -677,8 +680,9 @@ def llm_mocks(scenario: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> dict
         drafts: list[Any],
         context: Any,
         gateway: Any = None,
+        skip_type_mix: bool = False,
     ) -> list[Any]:
-        del config, context, gateway
+        del config, context, gateway, skip_type_mix
         captured_run_id["id"] = run.id
         captured["stages"].append({"stage": "validation"})
         await _emit_audit(

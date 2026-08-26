@@ -68,6 +68,10 @@ produce close paraphrases of them:
 Source context (chunks the interview should be grounded in):
 {{ chunks_block }}
 
+Grounding rule: every question MUST cite at least one chunk from the
+source-context block above in its "source_refs" (copy the chunk id exactly).
+A question with an empty source_refs array will be REJECTED.
+
 Return JSON in this shape:
 {
   "questions": [
@@ -78,7 +82,7 @@ Return JSON in this shape:
       "difficulty": "easy",
       "expected_depth": 2,
       "linked_outcome_id": "<one of the outcome ids above, or null>",
-      "source_refs": ["<chunk uuid>"],
+      "source_refs": ["<chunk uuid from the source-context block>"],
       "rationale": "...",
       "model_answer": "..."
     }
