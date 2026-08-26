@@ -22,15 +22,28 @@ roles:
       - progress.read.cohort
   - code: hod
     name: Faculty Dean
-    description: Department oversight, teacher assignment, and HOD role provisioning within scope
+    description: Department oversight and full manager authority within scope (dean ⊇ manager)
     permissions:
+      - course.create
       - course.read
       - course.read.draft
+      - course.update
+      - course.publish
+      - course.delete
       - course.assign_teacher
       - course.enrollment.read
+      - course.enrollment.create
+      - course.enrollment.remove
+      - learning_outcome.manage
       - user.read
+      - user.disable
+      - user.bulk_import
+      - user.role_assign
       - user.role_assign.hod
+      - org_unit.manage
       - system.stats.read
+      - bulk_import.read
+      - notification.send.bulk
       - progress.read.cohort
       - learning_program.read
       - learning_program.manage
