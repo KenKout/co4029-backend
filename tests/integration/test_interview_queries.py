@@ -665,6 +665,79 @@ async def test_get_user_interview_sessions(
     assert {s.id for s in only_active} == {fixture_data["session_active"]}
 
 
+async def test_get_user_interview_sessions_no_default_cap(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    fixture_data: dict,
+) -> None:
+    """History list returns ALL attempts — the old silent ``limit=20`` cap is gone.
+
+    Regression: the student attempt-history page (``/me/interviews`` with a
+    ``config`` filter) only ever showed the 20 most recent sessions. An
+    explicit ``limit`` must still work; the default must not truncate.
+    """
+    now = datetime.now(UTC)
+    bulk_student = uuid.uuid4()
+    bulk_cfg = uuid.uuid4()
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO users (id, primary_email, status) "
+                "VALUES (:id, :email, 'active')"
+            ),
+            {"id": bulk_student, "email": f"bulk-{bulk_student.hex[:8]}@test.local"},
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO interview_configs (id, course_id, module_id, title, "
+                "status, max_attempts, slug) VALUES "
+                "(:id, :c, :m, 'Bulk Interview', 'published', NULL, "
+                "'slug-' || uuid_generate_v4()::text)"
+            ),
+            {
+                "id": bulk_cfg,
+                "c": fixture_data["course"],
+                "m": fixture_data["module_a"],
+            },
+        )
+        # 25 attempts — one more than the old 20-row cap.
+        for n in range(1, 26):
+            await conn.execute(
+                text(
+                    "INSERT INTO interview_sessions ("
+                    "id, interview_config_id, student_id, attempt_number, "
+                    "status, input_mode, started_at) VALUES "
+                    "(:id, :c, :s, :n, 'completed', 'text', :ts)"
+                ),
+                {
+                    "id": uuid.uuid4(),
+                    "c": bulk_cfg,
+                    "s": bulk_student,
+                    "n": n,
+                    "ts": now - timedelta(minutes=30 - n),
+                },
+            )
+    async with session_factory() as session:
+        all_rows = await get_user_interview_sessions(session, bulk_student)
+        capped_rows = await get_user_interview_sessions(session, bulk_student, limit=5)
+    assert len(all_rows) == 25, "default history list must return ALL attempts, not 20"
+    assert {r.attempt_number for r in all_rows} == set(range(1, 26))
+    assert [r.attempt_number for r in capped_rows] == [25, 24, 23, 22, 21]
+    # Remove our rows so the module fixture teardown (which only knows its own
+    # config ids) can still drop modules/users.
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("DELETE FROM interview_sessions WHERE interview_config_id = :c"),
+            {"c": bulk_cfg},
+        )
+        await conn.execute(
+            text("DELETE FROM interview_configs WHERE id = :c"), {"c": bulk_cfg}
+        )
+        await conn.execute(
+            text("DELETE FROM users WHERE id = :u"), {"u": bulk_student}
+        )
+
+
 async def test_get_session_with_responses(
     session_factory: async_sessionmaker[AsyncSession],
     fixture_data: dict,

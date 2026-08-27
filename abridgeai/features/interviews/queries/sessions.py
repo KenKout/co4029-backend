@@ -83,7 +83,7 @@ async def get_user_interview_sessions(
     *,
     status: str | None = None,
     interview_config_id: UUID | None = None,
-    limit: int = 20,
+    limit: int | None = None,
 ) -> list[InterviewSession]:
     """Recent sessions for a user, newest first.
 
@@ -92,7 +92,8 @@ async def get_user_interview_sessions(
     / ``failed``); ``None`` returns every state. ``interview_config_id``
     scopes the list to one config's sessions (the live-interview page needs
     exactly those and nothing else); ``None`` returns every config.
-    ``limit`` caps the result count for the user's history page.
+    ``limit`` is an explicit cap (``None`` = no cap): the student history
+    page must show ALL attempts, not a silently truncated window.
     """
     stmt = select(InterviewSession).where(InterviewSession.student_id == user_id)
     if status is not None:
@@ -101,7 +102,9 @@ async def get_user_interview_sessions(
         stmt = stmt.where(
             InterviewSession.interview_config_id == interview_config_id
         )
-    stmt = stmt.order_by(InterviewSession.started_at.desc()).limit(limit)
+    stmt = stmt.order_by(InterviewSession.started_at.desc())
+    if limit is not None:
+        stmt = stmt.limit(limit)
     return list((await db.execute(stmt)).scalars().all())
 
 
