@@ -325,7 +325,8 @@ def test_learner_session_endpoints_registered() -> None:
     # The session-lifecycle routes live in learner_sessions_router (god-file
     # split); the reading surface stays in learner_router.
     paths = {
-        route.path for route in [*learner_router.routes, *learner_sessions_router.routes]  # type: ignore[attr-defined]
+        route.path
+        for route in [*learner_router.routes, *learner_sessions_router.routes]  # type: ignore[attr-defined]
     }
     expected = {
         "/interview-configs/{config_id}",
@@ -727,6 +728,70 @@ async def test_get_interview_config_with_existing_questions_does_not_500(
     payload = get_resp.json()
     assert payload["config"]["id"] == config_id
     assert len(payload["questions"]) == 1
+
+
+async def test_interviewer_role_survives_authoring_save_and_reload_with_questions(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    scenario: dict[str, uuid.UUID],
+    seeded_users: SeededUsers,
+    engine: AsyncEngine,
+) -> None:
+    """Regression: authoring projection must resolve interviewer identity even
+    when the config's ``questions`` relationship is unloaded.
+
+    The frontend rebuilds its draft from ``persona_profile_resolved``. Returning
+    it as null after a reload made every saved role appear as Virtual assistant.
+    """
+    create_resp = await client.post(
+        f"/api/v1/teacher/courses/{scenario['course_id']}/interview-configs",
+        json={
+            "title": "Role Persistence",
+            "course_id": str(scenario["course_id"]),
+            "module_id": str(scenario["module_id"]),
+        },
+        headers=_auth(admin_bearer),
+    )
+    assert create_resp.status_code == 201, create_resp.text
+    config_id = create_resp.json()["id"]
+
+    patch_resp = await client.patch(
+        f"/api/v1/teacher/interview-configs/{config_id}",
+        json={"persona_profile": {"interviewer_role": "backend_tech_lead"}},
+        headers=_auth(admin_bearer),
+    )
+    assert patch_resp.status_code == 200, patch_resp.text
+    assert patch_resp.json()["persona_profile_resolved"]["interviewer_role"] == (
+        "backend_tech_lead"
+    )
+
+    # A fresh GET receives an ORM config whose questions relationship is unloaded.
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO interview_questions ("
+                "  id, interview_config_id, prompt_text, question_type,"
+                "  review_status, ai_generated, position, created_by"
+                ") VALUES ("
+                "  :id, :cid, 'What is recursion?', 'conceptual',"
+                "  'approved', false, 1, :uid"
+                ")"
+            ),
+            {
+                "id": uuid.uuid4(),
+                "cid": uuid.UUID(config_id),
+                "uid": seeded_users.admin_id,
+            },
+        )
+
+    get_resp = await client.get(
+        f"/api/v1/teacher/interview-configs/{config_id}",
+        headers=_auth(admin_bearer),
+    )
+    assert get_resp.status_code == 200, get_resp.text
+    assert get_resp.json()["config"]["persona_profile_resolved"]["interviewer_role"] == (
+        "backend_tech_lead"
+    )
 
 
 async def test_publish_rejects_when_no_approved_question(
@@ -1464,9 +1529,7 @@ async def test_my_sessions_scoped_by_config_id(
         assert rows, "scoped query returned nothing for a config with a live session"
         assert {row["interview_config_id"] for row in rows} == {str(config_a)}
 
-        unscoped = await client.get(
-            "/api/v1/me/interview-sessions", headers=_auth(student_token)
-        )
+        unscoped = await client.get("/api/v1/me/interview-sessions", headers=_auth(student_token))
         unscoped_ids = {row["interview_config_id"] for row in unscoped.json()}
         assert {str(config_a), str(config_b)} <= unscoped_ids, (
             "unscoped list dropped a config the student has sessions in"

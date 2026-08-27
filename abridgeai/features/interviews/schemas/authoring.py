@@ -275,17 +275,15 @@ class InterviewConfigAuthoring(InterviewConfigPublic):
         except Exception:  # noqa: BLE001 — defensive: only treat real ORM instances
             return data
         unloaded: set[str] = getattr(insp, "unloaded", set()) if insp is not None else set()
-        if "questions" in unloaded:
-            return data
-        questions = getattr(data, "questions", None)
-        if questions is None:
-            return data
-        if getattr(data, "total_importance_weight", None) is None:
-            data.total_importance_weight = sum(
-                q.importance_weight or 0 for q in questions if q.deleted_at is None
-            )
-        if getattr(data, "draft_question_count", None) is None:
-            data.draft_question_count = sum(1 for q in questions if q.deleted_at is None)
+        if "questions" not in unloaded:
+            questions = getattr(data, "questions", None)
+            if questions is not None:
+                if getattr(data, "total_importance_weight", None) is None:
+                    data.total_importance_weight = sum(
+                        q.importance_weight or 0 for q in questions if q.deleted_at is None
+                    )
+                if getattr(data, "draft_question_count", None) is None:
+                    data.draft_question_count = sum(1 for q in questions if q.deleted_at is None)
         # Resolve the effective persona profile (preset + any per-trait
         # overrides) for the teacher projection. Best-effort: a bad override can
         # never raise (profile_from_config is defensive) and a failure here just
@@ -311,7 +309,7 @@ class InterviewConfigAuthoring(InterviewConfigPublic):
                     "interviewer_role": identity_from_config(profile_json).role.value,
                 }
             except Exception:  # noqa: BLE001 — projection is best-effort
-                pass
+                return data
         return data
 
 
