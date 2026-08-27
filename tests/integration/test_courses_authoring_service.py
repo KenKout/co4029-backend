@@ -57,6 +57,7 @@ from abridgeai.features.courses.schemas import (
     CourseCreate,
     LessonCreate,
     LessonResourceCreate,
+    LessonUpdate,
 )
 from abridgeai.features.courses.services import authoring as authoring_service
 from tests.support.db_graph import hard_delete_graph
@@ -260,6 +261,120 @@ async def test_add_lesson_auto_creates_module_item(
     assert row["item_type"] == "lesson"
     assert row["lesson_id"] == lesson.id
     assert row["position"] == 1
+
+
+async def test_add_lesson_auto_generates_slug_from_title_with_collision_suffix(
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict,
+) -> None:
+    """LessonCreate without a slug derives it from the title (-1, -2 on
+    collision), matching the quiz/interview authoring rule."""
+    async with session_factory() as session:
+        owner = _actor(scenario["owner_id"])
+        first = await authoring_service.add_lesson(
+            session,
+            scenario["module_id"],
+            LessonCreate(
+                module_id=scenario["module_id"],
+                title="Hệ điều hành & Virtual Memory",
+            ),
+            owner,
+        )
+        second = await authoring_service.add_lesson(
+            session,
+            scenario["module_id"],
+            LessonCreate(
+                module_id=scenario["module_id"],
+                title="Hệ điều hành & Virtual Memory 2",
+            ),
+            owner,
+        )
+        clash = await authoring_service.add_lesson(
+            session,
+            scenario["module_id"],
+            LessonCreate(
+                module_id=scenario["module_id"],
+                title="Hệ điều hành & Virtual Memory 2",
+            ),
+            owner,
+        )
+        explicit = await authoring_service.add_lesson(
+            session,
+            scenario["module_id"],
+            LessonCreate(
+                module_id=scenario["module_id"],
+                slug="pinned-slug",
+                title="Pinned Title",
+            ),
+            owner,
+        )
+        await session.commit()
+
+    # Vietnamese title folds to ASCII; collisions get deterministic integer
+    # suffixes incrementing from 1; an explicit client slug still wins.
+    assert first.slug == "he-dieu-hanh-virtual-memory"
+    assert second.slug == "he-dieu-hanh-virtual-memory-2"
+    assert clash.slug == "he-dieu-hanh-virtual-memory-2-1"
+    assert explicit.slug == "pinned-slug"
+
+
+async def test_update_published_lesson_slug_is_immutable(
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict,
+) -> None:
+    """A published lesson's slug is frozen: student URLs embed it, so a
+    rename attempt is a 409 ConflictError (drafts may re-slug freely)."""
+    async with session_factory() as session:
+        owner = _actor(scenario["owner_id"])
+        lesson = await authoring_service.add_lesson(
+            session,
+            scenario["module_id"],
+            LessonCreate(
+                module_id=scenario["module_id"],
+                title="Freezable Lesson",
+            ),
+            owner,
+        )
+        await authoring_service.update_lesson(
+            session, lesson.id, LessonUpdate(status="published"), owner
+        )
+        await session.commit()
+
+        from abridgeai.core.exceptions import ConflictError
+
+        with pytest.raises(ConflictError):
+            await authoring_service.update_lesson(
+                session, lesson.id, LessonUpdate(slug="renamed-slug"), owner
+            )
+        # Same-slug no-op is tolerated (idempotent), as is draft re-slugging.
+        await authoring_service.update_lesson(
+            session, lesson.id, LessonUpdate(slug=lesson.slug), owner
+        )
+        # Published title rename keeps the frozen slug.
+        await authoring_service.update_lesson(
+            session,
+            lesson.id,
+            LessonUpdate(title="Renamed But Published"),
+            owner,
+        )
+        await session.commit()
+        fresh = await authoring_service._require_lesson(session, lesson.id)
+        assert fresh.slug == "freezable-lesson"
+        assert fresh.title == "Renamed But Published"
+
+        # Drafts re-slug from a title rename (keep breadcrumb URLs fresh).
+        draft = await authoring_service.add_lesson(
+            session,
+            scenario["module_id"],
+            LessonCreate(module_id=scenario["module_id"], title="New Reading"),
+            owner,
+        )
+        await authoring_service.update_lesson(
+            session, draft.id, LessonUpdate(title="CPU Scheduling"), owner
+        )
+        await session.commit()
+        renamed = await authoring_service._require_lesson(session, draft.id)
+        assert renamed.slug == "cpu-scheduling"
 
 
 async def test_reorder_module_items_two_phase_swap(

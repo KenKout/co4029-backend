@@ -41,6 +41,7 @@ from abridgeai.core.db.recursive_delete import soft_delete_cascade
 from abridgeai.core.exceptions import AppError, ConflictError, NotFoundError
 from abridgeai.core.runtime_settings import resolve_setting
 from abridgeai.core.security import CurrentUser
+from abridgeai.core.slug import slugify, unique_slug
 from abridgeai.features.courses.models import (
     Course,
     CourseLearningOutcome,
@@ -584,6 +585,22 @@ async def add_lesson(
     module = await _require_module(db, module_id)
     data = payload.model_dump()
     data["module_id"] = module.id
+    # Auto-generate the URL slug from the title (unique per module over
+    # live rows; collisions get -1, -2, … incrementing from 1) — the same
+    # rule quiz/interview authoring uses for their slugs. An explicit
+    # client-supplied slug still wins verbatim (collisions surface as 409
+    # through the unique constraint, the pre-slug contract).
+    if not data.get("slug"):
+        from sqlalchemy import select as _sa_select  # noqa: PLC0415
+
+        taken_rows = await db.execute(
+            _sa_select(Lesson.slug).where(
+                Lesson.module_id == module.id,
+                Lesson.deleted_at.is_(None),
+            )
+        )
+        taken = {row[0] for row in taken_rows.all()}
+        data["slug"] = unique_slug(slugify(data["title"]) or "lesson", taken)
     lesson = Lesson(**data)
     db.add(lesson)
     await _flush_or_conflict(db)
@@ -609,7 +626,54 @@ async def update_lesson(
 ) -> LessonAuthoring:
     del actor
     lesson = await _require_lesson(db, lesson_id)
-    _apply_patch(lesson, payload)
+    data = payload.model_dump(exclude_unset=True)
+
+    slug_change = (
+        "slug" in data and data["slug"] is not None and data["slug"] != lesson.slug
+    )
+    if slug_change and lesson.status == "published":
+        raise ConflictError(
+            "lesson_slug_frozen: the slug of a published lesson is "
+            "immutable because student URLs embed it "
+            "(/courses/<course-slug>/learn/<item-slug>); archive the "
+            "lesson before re-slugging."
+        )
+    # Slug reassignment triggers: (a) an explicit slug edit on a draft, or
+    # (b) a draft title rename with no explicit slug — the FE creates
+    # lessons with placeholder titles like "New Video", so keeping a
+    # creation-time slug would leave breadcrumb URLs permanently stale.
+    # Published lessons freeze their slug instead: title stays editable,
+    # the student-facing URL does not move.
+    title_rename = (
+        "slug" not in data
+        and "title" in data
+        and bool(data["title"])
+        and data["title"] != lesson.title
+        and lesson.status != "published"
+    )
+    if slug_change or title_rename:
+        if slug_change:
+            # Explicit slug on a draft: applied verbatim — a collision with
+            # a sibling surfaces as 409 through the unique constraint (the
+            # pre-slug contract), no silent rewriting.
+            pass
+        else:
+            from sqlalchemy import select as _sa_select  # noqa: PLC0415
+
+            taken_rows = await db.execute(
+                _sa_select(Lesson.slug).where(
+                    Lesson.module_id == lesson.module_id,
+                    Lesson.deleted_at.is_(None),
+                    Lesson.id != lesson.id,
+                )
+            )
+            taken = {row[0] for row in taken_rows.all()}
+            data["slug"] = unique_slug(
+                slugify(data["title"]) or "lesson", taken
+            )
+
+    for key, value in data.items():
+        setattr(lesson, key, value)
     await _flush_or_conflict(db)
     await db.refresh(lesson)
     return LessonAuthoring.model_validate(lesson)

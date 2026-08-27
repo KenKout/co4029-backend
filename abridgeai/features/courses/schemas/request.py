@@ -158,7 +158,7 @@ class LessonCreate(_StrictRequest):
     """
 
     module_id: UUID
-    slug: str = Field(max_length=100)
+    slug: str | None = Field(default=None, max_length=100)
     title: str = Field(max_length=255)
     summary: str | None = None
     notes_markdown: str | None = None
