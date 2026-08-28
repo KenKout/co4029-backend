@@ -84,6 +84,7 @@ from abridgeai.features.courses.schemas import (
     ModuleReorder,
     ModuleUpdate,
     OutlineSection,
+    PriorityTask,
     ReviewQueueItem,
     RosterStudentRead,
     SlugAvailability,
@@ -389,6 +390,26 @@ async def get_teacher_dashboard_stats(
     enforced in the service via owner/assignment match.
     """
     return await authoring_service.get_teacher_dashboard_stats(db, user=current_user)
+
+
+@router.get("/dashboard/priority", response_model=list[PriorityTask])
+async def list_priority_tasks(
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_AUTHORING_LIST)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    limit: Annotated[int, Query(ge=1, le=20)] = 7,
+) -> list[PriorityTask]:
+    """The teacher's next actions, ranked across every kind of work.
+
+    Blocking work first, then students at risk, then overdue reviews, then
+    age. Content backlogs come back as one grouped task each — a row per
+    pending question would bury the students under identical work.
+
+    Same lax permission as the courses list — scope is enforced in the
+    service via owner/assignment match.
+    """
+    return await authoring_service.list_priority_tasks(
+        db, user=current_user, limit=limit
+    )
 
 
 @router.get("/dashboard/course-health", response_model=list[CourseHealthRow])

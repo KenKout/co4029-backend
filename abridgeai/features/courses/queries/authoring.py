@@ -293,6 +293,90 @@ class TeacherReviewQueueCounts(NamedTuple):
     cards_overdue: int
 
 
+@dataclass(frozen=True)
+class ReviewBacklogAge:
+    """Age and blocking shape of one review-queue category.
+
+    ``oldest_created_at`` is what turns a count into a task: "63 items
+    pending" says nothing about urgency, "63 items, oldest 26 days" does.
+
+    ``blocking`` counts the subset that stops something from going live --
+    pending questions on a DRAFT quiz hold that quiz unpublished, so they
+    outrank an equally old item that merely waits. ``courses_affected``
+    tells a teacher whether the backlog is one bad course or a spread.
+    """
+
+    count: int = 0
+    blocking: int = 0
+    courses_affected: int = 0
+    oldest_created_at: datetime | None = None
+
+
+async def review_backlog_ages_for_courses(
+    db: AsyncSession, course_ids: list[UUID]
+) -> dict[str, ReviewBacklogAge]:
+    """Age + blocking shape per review category, keyed by category name.
+
+    Companion to :func:`count_review_queue_and_retention_for_courses`,
+    which answers "how many"; this answers "how old, how urgent, how
+    spread". Kept separate rather than widening that function's NamedTuple
+    because only the priority feed needs these and the stats endpoint is on
+    every dashboard load.
+    """
+    from abridgeai.features.interviews.models import InterviewConfig, InterviewQuestion
+    from abridgeai.features.quizzes.models import Quiz, QuizQuestion
+
+    empty = {"quiz_questions": ReviewBacklogAge(), "interview_questions": ReviewBacklogAge()}
+    if not course_ids:
+        return empty
+
+    quiz_stmt = select(
+        func.count(),
+        # Blocking: the parent quiz is still a draft, so these pending
+        # questions are what stands between it and publication.
+        func.count().filter(Quiz.status == "draft"),
+        func.count(func.distinct(Quiz.course_id)),
+        func.min(QuizQuestion.created_at),
+    ).select_from(QuizQuestion).join(Quiz, Quiz.id == QuizQuestion.quiz_id).where(
+        Quiz.course_id.in_(course_ids),
+        Quiz.deleted_at.is_(None),
+        QuizQuestion.deleted_at.is_(None),
+        QuizQuestion.review_status == "pending",
+    )
+    q_count, q_blocking, q_courses, q_oldest = (await db.execute(quiz_stmt)).one()
+
+    iv_stmt = select(
+        func.count(),
+        func.count(func.distinct(InterviewConfig.course_id)),
+        func.min(InterviewQuestion.created_at),
+    ).select_from(InterviewQuestion).join(
+        InterviewConfig, InterviewConfig.id == InterviewQuestion.interview_config_id
+    ).where(
+        InterviewConfig.course_id.in_(course_ids),
+        InterviewConfig.deleted_at.is_(None),
+        InterviewQuestion.deleted_at.is_(None),
+        InterviewQuestion.review_status == "pending",
+    )
+    i_count, i_courses, i_oldest = (await db.execute(iv_stmt)).one()
+
+    return {
+        "quiz_questions": ReviewBacklogAge(
+            count=int(q_count),
+            blocking=int(q_blocking),
+            courses_affected=int(q_courses),
+            oldest_created_at=q_oldest,
+        ),
+        "interview_questions": ReviewBacklogAge(
+            count=int(i_count),
+            # Interview questions do not gate a publish step, so nothing
+            # here is blocking; saying 0 is more honest than omitting it.
+            blocking=0,
+            courses_affected=int(i_courses),
+            oldest_created_at=i_oldest,
+        ),
+    }
+
+
 _EF_STRUGGLING_THRESHOLD = 2.0
 """Average easiness factor below which a student counts as struggling.
 

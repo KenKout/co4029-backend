@@ -241,6 +241,47 @@ class TeacherDashboardStats(BaseModel):
     students_needing_attention: int = 0
 
 
+class PriorityTask(BaseModel):
+    """One item in the dashboard's Priority Today feed.
+
+    The feed mixes kinds -- a named student, a content backlog, an
+    uncalibrated quiz -- because a teacher's next action is whichever is
+    most urgent, not whichever section it happens to live in.
+
+    No URL is returned. ``kind`` plus the id fields let the client build a
+    typed route; a server-built path would hard-code the SPA's routing
+    table into the API and break silently when a route is renamed.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    kind: Literal[
+        "student_risk",
+        "quiz_questions_pending",
+        "interview_questions_pending",
+        "quiz_calibration",
+        "materials_ready",
+        "reviews_overdue",
+    ]
+    severity: Literal["high", "medium", "low"]
+    title: str
+    #: Why this is on the list, phrased for a teacher and naming the number
+    #: or threshold behind it.
+    reason: str
+    course_id: UUID | None = None
+    course_title: str | None = None
+    student_id: UUID | None = None
+    #: How long this has been waiting. ``None`` when the underlying rows
+    #: carry no timestamp to age from -- absent rather than guessed.
+    age_hours: float | None = None
+    #: True when the item stops something going live. Ranked above
+    #: everything except nothing: blocking work has a second victim.
+    blocking: bool = False
+    #: Items behind a grouped task, so the UI can say "63 questions".
+    count: int = 1
+
+
 class CourseHealthRow(BaseModel):
     """One course in the dashboard's Course Health table.
 

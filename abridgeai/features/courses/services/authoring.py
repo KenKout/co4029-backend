@@ -82,6 +82,7 @@ from abridgeai.features.courses.schemas import (
     ModuleItemAuthoring,
     ModuleItemUpdate,
     ModuleUpdate,
+    PriorityTask,
     ReviewQueueItem,
     StudentNeedingAttention,
     TeacherDashboardStats,
@@ -1586,6 +1587,50 @@ async def list_students_needing_attention(
     return out
 
 
+def _age_hours(since: datetime | None, *, now: datetime | None = None) -> float | None:
+    """Hours elapsed, or ``None`` when there is nothing to age from."""
+    if since is None:
+        return None
+    reference = now or datetime.now(tz=UTC)
+    if since.tzinfo is None:
+        since = since.replace(tzinfo=UTC)
+    return max(0.0, (reference - since).total_seconds() / 3600)
+
+
+#: FR-012's ranking, as a sort weight. Blocking work comes first because it
+#: has a second victim -- a draft quiz nobody can sit. Student risk next:
+#: people decay while backlogs merely wait. Then overdue reviews, then age.
+_PRIORITY_KIND_RANK = {
+    "quiz_calibration": 1,
+    "quiz_questions_pending": 2,
+    "student_risk": 3,
+    "reviews_overdue": 4,
+    "interview_questions_pending": 5,
+    "materials_ready": 6,
+}
+
+
+def rank_priority_tasks(tasks: list[PriorityTask], limit: int) -> list[PriorityTask]:
+    """Order the feed by FR-012 and cut it to ``limit``.
+
+    Blocking beats everything, then kind, then age. Age sorts last rather
+    than first on purpose: an ancient non-blocking backlog should not
+    outrank a student who went quiet this week.
+
+    Tasks with no age sort as age 0 within their band -- an unknown age is
+    not evidence of urgency, and letting ``None`` win the tie-break would
+    promote exactly the items we know least about.
+    """
+    tasks.sort(
+        key=lambda task: (
+            not task.blocking,
+            _PRIORITY_KIND_RANK.get(task.kind, 99),
+            -(task.age_hours or 0.0),
+        )
+    )
+    return tasks[:limit]
+
+
 def _course_severity(
     *, at_risk: int, students: int, pending_review: int, pass_rate: float | None
 ) -> tuple[str, str | None]:
@@ -1681,6 +1726,150 @@ async def list_course_health(
         )
     )
     return rows
+
+
+async def list_priority_tasks(
+    db: AsyncSession, *, user: CurrentUser, limit: int = 7
+) -> list[PriorityTask]:
+    """The teacher's next actions, ranked across every kind of work.
+
+    Deliberately mixes named students with grouped content backlogs: the
+    most urgent thing on a teacher's plate is not sorted by which section
+    of the dashboard it belongs to.
+
+    Content backlogs appear as ONE grouped task each, not one per item.
+    A row per pending question would bury the students under 63 rows of
+    the same work, and the group carries what makes it actionable anyway --
+    how many, how old, how many are blocking a publish.
+
+    Every count here also appears as a tile or a section elsewhere on the
+    page. FR-013 allows that only where the task adds meaning the KPI
+    lacks, which is why each grouped row leads with age and blocking count
+    rather than restating the number.
+    """
+    courses = await _list_authorable_courses(db, user)
+    if not courses:
+        return []
+    titles = {course.id: course.title for course in courses}
+    course_ids = list(titles)
+
+    at_risk = await progress_api.list_students_needing_attention(db, course_ids)
+    review = await authoring_queries.count_review_queue_and_retention_for_courses(
+        db, course_ids
+    )
+    ages = await authoring_queries.review_backlog_ages_for_courses(db, course_ids)
+
+    tasks: list[PriorityTask] = []
+
+    # --- Live but uncalibrated: students are being graded by SM-2 against
+    # a missing expected response time right now. Blocking and high.
+    if review.published_quizzes_missing_texp > 0:
+        tasks.append(
+            PriorityTask(
+                id="quiz-calibration",
+                kind="quiz_calibration",
+                severity="high",
+                title=f"{review.published_quizzes_missing_texp} published quizzes uncalibrated",
+                reason=(
+                    "Live quizzes are missing an expected response time, so "
+                    "spaced-repetition grading cannot score them correctly."
+                ),
+                blocking=True,
+                count=review.published_quizzes_missing_texp,
+            )
+        )
+
+    # --- Students. Named individually: "3 students need attention" is a
+    # statistic, "Nguyen Van A, silent 12 days" is something to act on.
+    high_risk = [row for row in at_risk if row.severity == "high"]
+    users = await identity_api.get_users_by_ids(
+        db, [row.user_id for row in high_risk[:limit]]
+    )
+    for row in high_risk[:limit]:
+        student = users.get(row.user_id)
+        if student is None:
+            continue
+        tasks.append(
+            PriorityTask(
+                id=f"student:{row.user_id}:{row.course_id}",
+                kind="student_risk",
+                severity="high",
+                title=student.display_name or student.primary_email,
+                reason=row.primary_reason,
+                course_id=row.course_id,
+                course_title=titles.get(row.course_id),
+                student_id=row.user_id,
+                age_hours=(
+                    row.days_since_last_engagement * 24.0
+                    if row.days_since_last_engagement is not None
+                    else None
+                ),
+            )
+        )
+
+    quiz_backlog = ages.get("quiz_questions")
+    if quiz_backlog and quiz_backlog.count > 0:
+        blocking = quiz_backlog.blocking > 0
+        tasks.append(
+            PriorityTask(
+                id="quiz-questions-pending",
+                kind="quiz_questions_pending",
+                severity="high" if blocking else "medium",
+                title=f"{quiz_backlog.count} quiz questions awaiting review",
+                reason=(
+                    f"{quiz_backlog.blocking} are blocking a draft quiz from "
+                    f"publishing, across {quiz_backlog.courses_affected} courses."
+                    if blocking
+                    else f"Across {quiz_backlog.courses_affected} courses."
+                ),
+                age_hours=_age_hours(quiz_backlog.oldest_created_at),
+                blocking=blocking,
+                count=quiz_backlog.count,
+            )
+        )
+
+    iv_backlog = ages.get("interview_questions")
+    if iv_backlog and iv_backlog.count > 0:
+        tasks.append(
+            PriorityTask(
+                id="interview-questions-pending",
+                kind="interview_questions_pending",
+                severity="medium",
+                title=f"{iv_backlog.count} interview questions awaiting review",
+                reason=f"Across {iv_backlog.courses_affected} courses.",
+                age_hours=_age_hours(iv_backlog.oldest_created_at),
+                count=iv_backlog.count,
+            )
+        )
+
+    if review.cards_overdue > 0:
+        tasks.append(
+            PriorityTask(
+                id="reviews-overdue",
+                kind="reviews_overdue",
+                severity="medium",
+                title=f"{review.cards_overdue} reviews past due",
+                reason=(
+                    "Student review cards are past their scheduled date; "
+                    "retention decays while they wait."
+                ),
+                count=review.cards_overdue,
+            )
+        )
+
+    if review.materials_ready_for_quiz_gen > 0:
+        tasks.append(
+            PriorityTask(
+                id="materials-ready",
+                kind="materials_ready",
+                severity="low",
+                title=f"{review.materials_ready_for_quiz_gen} lessons ready for quiz generation",
+                reason="Ingestion finished; no quiz has been generated from them yet.",
+                count=review.materials_ready_for_quiz_gen,
+            )
+        )
+
+    return rank_priority_tasks(tasks, limit)
 
 
 _REVIEW_QUEUE_LISTERS = {
