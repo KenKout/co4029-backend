@@ -13,64 +13,27 @@ signals "every question failed validation" to the caller.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Any, Literal, cast
+from typing import Any, cast
 from uuid import UUID
 
-InterviewQuestionType = Literal["technical", "behavioral", "situational", "system_design"]
-InterviewDifficulty = Literal["easy", "medium", "hard"]
-
-_VALID_TYPES: frozenset[str] = frozenset(
-    {"technical", "behavioral", "situational", "system_design"}
+from abridgeai.features.interviews.ai.stages.generation.draft import (
+    _VALID_DIFFICULTIES,
+    _VALID_TYPES,
+    InterviewDifficulty,
+    InterviewQuestionDraft,
+    InterviewQuestionType,
 )
-_VALID_DIFFICULTIES: frozenset[str] = frozenset({"easy", "medium", "hard"})
-
-
-@dataclass
-class InterviewQuestionDraft:
-    """Pre-validation draft of a single generated interview question.
-
-    Attributes
-    ----------
-    question_type
-        Exactly one of ``technical`` / ``behavioral`` / ``situational``.
-    prompt_text
-        The stem the learner will read. Stands alone (no slide refs).
-    difficulty
-        One of ``easy`` / ``medium`` / ``hard``. Mapped to the ORM-side
-        ``junior`` / ``mid_level`` / ``senior`` set during persistence.
-    expected_depth
-        Integer 1-5 describing how long an adequate answer should be.
-        1 = one-sentence; 5 = multi-paragraph reasoning.
-    linked_outcome_id
-        UUID of the :class:`InterviewOutcome` this question assesses.
-        ``None`` is allowed when no outcomes were provided to the stage.
-    source_refs
-        UUIDs of the source chunks the question is grounded in.
-    rationale
-        Internal explanation of why this question was generated.
-        Never shown to the learner.
-    model_answer
-        Teacher-facing reference/model answer for this question. Authoring
-        aid only — never shown to the learner and never used to auto-grade
-        (live sessions are scored against :class:`InterviewOutcome` rubric
-        criteria, not string/semantic matching against this field).
-    """
-
-    question_type: InterviewQuestionType
-    prompt_text: str
-    difficulty: InterviewDifficulty
-    expected_depth: int
-    linked_outcome_id: UUID | None
-    source_refs: list[UUID] = field(default_factory=list)
-    rationale: str = ""
-    model_answer: str = ""
+from abridgeai.features.interviews.ai.stages.generation.grouping import (
+    assign_variant_group_ids,
+    coerce_logical_question_index,
+)
 
 
 def parse_generation_response(
-    payload: Any,
+    payload: Any,  # noqa: ANN401 -- raw LLM JSON
     *,
     max_questions: int | None = None,
+    require_logical_question_index: bool = False,
 ) -> list[InterviewQuestionDraft]:  # noqa: ANN401 -- raw LLM JSON
     """Validate raw LLM JSON into drafts; drop bad entries silently.
 
@@ -82,6 +45,9 @@ def parse_generation_response(
         Cap the returned list at this length. LLMs sometimes overshoot
         the requested ``question_count``; we keep the first N valid
         entries so the teacher sees exactly the number they asked for.
+    require_logical_question_index
+        All-angle generation requires an integer logical-group ordinal on each
+        row. Other strategies ignore it and leave durable group IDs unset.
     """
     raw = _extract_question_list(payload)
     out: list[InterviewQuestionDraft] = []
@@ -89,9 +55,13 @@ def parse_generation_response(
         draft = _prepare_question(entry)
         if draft is not None:
             out.append(draft)
-            if max_questions is not None and len(out) >= max_questions:
-                break
-    return out
+    grouped = assign_variant_group_ids(
+        out,
+        require_index=require_logical_question_index,
+    )
+    if max_questions is None:
+        return grouped
+    return grouped[:max_questions]
 
 
 def _extract_question_list(payload: Any) -> list[Any]:  # noqa: ANN401 -- raw LLM JSON
@@ -121,6 +91,9 @@ def _prepare_question(entry: Any) -> InterviewQuestionDraft | None:  # noqa: ANN
 
     expected_depth = _coerce_depth(entry.get("expected_depth"))
     linked_outcome_id = _coerce_uuid(entry.get("linked_outcome_id"))
+    logical_question_index = coerce_logical_question_index(
+        entry.get("logical_question_index")
+    )
     source_refs = _coerce_uuid_list(entry.get("source_refs"))
     rationale = entry.get("rationale")
     if not isinstance(rationale, str):
@@ -136,6 +109,7 @@ def _prepare_question(entry: Any) -> InterviewQuestionDraft | None:  # noqa: ANN
         difficulty=cast("InterviewDifficulty", raw_difficulty),
         expected_depth=expected_depth,
         linked_outcome_id=linked_outcome_id,
+        logical_question_index=logical_question_index,
         source_refs=source_refs,
         rationale=rationale.strip(),
         model_answer=model_answer.strip(),

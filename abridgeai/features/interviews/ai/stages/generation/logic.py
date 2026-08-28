@@ -139,9 +139,7 @@ async def generate_interview_questions(
         situational_pct=type_mix["situational"],
         # Only the prose part: when the field holds structured JSON (rubric,
         # type mix, question count) the raw blob must NOT reach the prompt.
-        supplementary_instructions=resolve_supplementary_notes(
-            config.supplementary_instructions
-        ),
+        supplementary_instructions=resolve_supplementary_notes(config.supplementary_instructions),
         outcomes=_outcomes_for_prompt(outcomes),
         chunks_block=_render_chunks(context),
         avoid_prompts=list(avoid_prompts or []),
@@ -158,7 +156,11 @@ async def generate_interview_questions(
         pipeline_run_id=run.id,
         parent_run_id=run.id,
     )
-    drafts = parse_generation_response(result.content_json, max_questions=effective_total)
+    drafts = parse_generation_response(
+        result.content_json,
+        max_questions=effective_total,
+        require_logical_question_index=variant_strategy == "all_angles",
+    )
     return _link_outcomes_round_robin(drafts, outcomes)
 
 
@@ -189,12 +191,25 @@ def _link_outcomes_round_robin(
     drafts: list[InterviewQuestionDraft],
     outcomes: list[InterviewOutcome],
 ) -> list[InterviewQuestionDraft]:
-    """Fill any ``linked_outcome_id is None`` slots round-robin from ``outcomes``."""
+    """Fill missing outcome links while preserving all-angle group coherence."""
     if not outcomes:
         return drafts
     cursor = 0
+    assigned_by_group: dict[UUID, UUID] = {}
     for draft in drafts:
-        if draft.linked_outcome_id is None:
+        if draft.variant_group_id is not None and draft.linked_outcome_id is not None:
+            assigned_by_group.setdefault(draft.variant_group_id, draft.linked_outcome_id)
+    for draft in drafts:
+        if draft.linked_outcome_id is not None:
+            continue
+        if draft.variant_group_id is not None:
+            outcome_id = assigned_by_group.get(draft.variant_group_id)
+            if outcome_id is None:
+                outcome_id = outcomes[cursor % len(outcomes)].id
+                cursor += 1
+                assigned_by_group[draft.variant_group_id] = outcome_id
+            draft.linked_outcome_id = outcome_id
+        else:
             draft.linked_outcome_id = outcomes[cursor % len(outcomes)].id
             cursor += 1
     return drafts

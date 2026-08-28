@@ -370,6 +370,13 @@ class InterviewQuestion(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, Sof
         PGUUID(as_uuid=True),
         ForeignKey("interview_outcomes.id", ondelete="SET NULL"),
     )
+    # Peers generated from the same logical problem share this server-assigned
+    # identifier. NULL preserves legacy, manual, imported, and role-only rows.
+    variant_group_id: Mapped[uuid.UUID | None] = mapped_column(
+        PGUUID(as_uuid=True),
+        nullable=True,
+        index=True,
+    )
     position: Mapped[int | None] = mapped_column(Integer)
     question_type: Mapped[str] = mapped_column(String(30), nullable=False)
     prompt_text: Mapped[str] = mapped_column(Text, nullable=False)

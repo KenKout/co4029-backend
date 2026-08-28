@@ -366,6 +366,7 @@ async def _persist_questions(
         question = InterviewQuestion(
             interview_config_id=config.id,
             linked_outcome_id=draft.linked_outcome_id,
+            variant_group_id=draft.variant_group_id,
             position=position,
             question_type=draft.question_type,
             prompt_text=draft.prompt_text,

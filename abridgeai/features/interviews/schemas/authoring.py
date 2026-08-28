@@ -403,6 +403,8 @@ class InterviewQuestionAuthoring(InterviewQuestionPublic):
 
     interview_config_id: UUID
     linked_outcome_id: UUID | None = None
+    # Authoring-only logical-question grouping for all-angle generation.
+    variant_group_id: UUID | None = None
     position: int | None = None
     difficulty: DifficultyLiteral | None = None
     model_answer: str | None = None

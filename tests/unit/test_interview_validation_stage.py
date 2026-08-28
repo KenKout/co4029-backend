@@ -45,6 +45,7 @@ def _draft(
     prompt_text: str = "Walk me through how you would design a caching layer.",
     source_refs: list[UUID] | None = None,
     linked_outcome_id: UUID | None = None,
+    variant_group_id: UUID | None = None,
 ) -> InterviewQuestionDraft:
     return InterviewQuestionDraft(
         question_type=question_type,  # type: ignore[arg-type]
@@ -52,6 +53,7 @@ def _draft(
         difficulty=difficulty,  # type: ignore[arg-type]
         expected_depth=expected_depth,
         linked_outcome_id=linked_outcome_id,
+        variant_group_id=variant_group_id,
         source_refs=list(source_refs) if source_refs is not None else [],
         rationale="",
     )
@@ -221,8 +223,71 @@ async def test_skip_type_mix_in_variant_mode() -> None:
     )
 
     assert all(v.accepted for v in verdicts)
+    assert all(ValidationCriterion.TYPE_MATCHES_CONFIG not in v.failed_criteria for v in verdicts)
+
+
+@pytest.mark.asyncio
+async def test_variant_group_allows_partial_distinct_angles() -> None:
+    chunk, outcome, group = uuid4(), uuid4(), uuid4()
+    drafts = [
+        _draft(
+            question_type="technical",
+            source_refs=[chunk],
+            linked_outcome_id=outcome,
+            variant_group_id=group,
+        ),
+        _draft(
+            question_type="system_design",
+            source_refs=[chunk],
+            linked_outcome_id=outcome,
+            variant_group_id=group,
+        ),
+    ]
+
+    verdicts = await validate_interview_questions(
+        AsyncMock(),
+        run=_run(source_chunk_ids=[chunk]),
+        config=_config(),
+        drafts=drafts,
+        context=_context([chunk]),
+        gateway=_gateway_returning(_accept_all(2)),
+        skip_type_mix=True,
+    )
+
+    assert all(v.accepted for v in verdicts)
+
+
+@pytest.mark.asyncio
+async def test_variant_group_rejects_duplicate_angle_or_mismatched_outcome() -> None:
+    chunk, group = uuid4(), uuid4()
+    drafts = [
+        _draft(
+            question_type="technical",
+            source_refs=[chunk],
+            linked_outcome_id=uuid4(),
+            variant_group_id=group,
+        ),
+        _draft(
+            question_type="technical",
+            source_refs=[chunk],
+            linked_outcome_id=uuid4(),
+            variant_group_id=group,
+        ),
+    ]
+
+    verdicts = await validate_interview_questions(
+        AsyncMock(),
+        run=_run(source_chunk_ids=[chunk]),
+        config=_config(),
+        drafts=drafts,
+        context=_context([chunk]),
+        gateway=_gateway_returning(_accept_all(2)),
+        skip_type_mix=True,
+    )
+
     assert all(
-        ValidationCriterion.TYPE_MATCHES_CONFIG not in v.failed_criteria for v in verdicts
+        ValidationCriterion.VARIANT_GROUP_COHERENT in verdict.failed_criteria
+        for verdict in verdicts
     )
 
 

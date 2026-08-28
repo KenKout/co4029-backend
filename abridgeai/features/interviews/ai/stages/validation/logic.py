@@ -80,6 +80,8 @@ class InterviewQuestionDraft(Protocol):
     difficulty: str
     expected_depth: int
     source_refs: Sequence[UUID]
+    linked_outcome_id: UUID | None
+    variant_group_id: UUID | None
 
 
 class GenerationRun(Protocol):
@@ -173,6 +175,7 @@ def _run_deterministic_checks(
     type_failures: set[int] = set()
     if not skip_type_mix:
         type_failures = _check_type_mix(drafts, _resolve_type_weights(run))
+    group_failures = _check_variant_groups(drafts)
     failures: list[list[ValidationCriterion]] = []
     for index, draft in enumerate(drafts):
         per_q: list[ValidationCriterion] = []
@@ -184,8 +187,34 @@ def _run_deterministic_checks(
             per_q.append(ValidationCriterion.TYPE_MATCHES_CONFIG)
         if not _has_reasonable_length(draft):
             per_q.append(ValidationCriterion.LENGTH_REASONABLE)
+        if index in group_failures:
+            per_q.append(ValidationCriterion.VARIANT_GROUP_COHERENT)
         failures.append(per_q)
     return failures
+
+
+def _check_variant_groups(drafts: list[InterviewQuestionDraft]) -> set[int]:
+    """Reject structurally inconsistent all-angle groups, allow partial groups."""
+    groups: dict[UUID, list[tuple[int, InterviewQuestionDraft]]] = {}
+    for index, draft in enumerate(drafts):
+        group_id = getattr(draft, "variant_group_id", None)
+        if isinstance(group_id, UUID):
+            groups.setdefault(group_id, []).append((index, draft))
+
+    failed: set[int] = set()
+    for members in groups.values():
+        outcomes = {member.linked_outcome_id for _, member in members}
+        difficulties = {member.difficulty for _, member in members}
+        types = [member.question_type for _, member in members]
+        valid = (
+            len(members) <= 4
+            and len(outcomes) == 1
+            and len(difficulties) == 1
+            and len(types) == len(set(types))
+        )
+        if not valid:
+            failed.update(index for index, _ in members)
+    return failed
 
 
 def _collect_chunk_ids(context: InterviewRetrievalContext) -> set[UUID]:

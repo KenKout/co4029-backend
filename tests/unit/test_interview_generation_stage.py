@@ -89,6 +89,7 @@ def _question(
     expected_depth: int,
     linked_outcome_id: UUID | None = None,
     source_refs: list[str] | None = None,
+    logical_question_index: int | None = None,
 ) -> dict[str, Any]:
     return {
         "position": position,
@@ -97,6 +98,7 @@ def _question(
         "difficulty": difficulty,
         "expected_depth": expected_depth,
         "linked_outcome_id": str(linked_outcome_id) if linked_outcome_id else None,
+        "logical_question_index": logical_question_index,
         "source_refs": source_refs or [str(uuid4())],
         "rationale": f"probes #{position}",
     }
@@ -392,6 +394,51 @@ def test_parser_accepts_system_design() -> None:
     assert parsed[0].question_type == "system_design"
 
 
+def test_parser_assigns_server_group_ids_for_logical_question_indexes() -> None:
+    outcome_id = uuid4()
+    payload = {
+        "questions": [
+            _question(
+                position=1,
+                question_type="technical",
+                difficulty="easy",
+                expected_depth=2,
+                linked_outcome_id=outcome_id,
+                logical_question_index=0,
+            ),
+            _question(
+                position=2,
+                question_type="system_design",
+                difficulty="easy",
+                expected_depth=2,
+                linked_outcome_id=outcome_id,
+                logical_question_index=0,
+            ),
+            _question(
+                position=3,
+                question_type="behavioral",
+                difficulty="easy",
+                expected_depth=2,
+                linked_outcome_id=outcome_id,
+                logical_question_index=1,
+            ),
+            _question(
+                position=4,
+                question_type="situational",
+                difficulty="easy",
+                expected_depth=2,
+            ),
+        ]
+    }
+
+    parsed = parse_generation_response(payload, require_logical_question_index=True)
+
+    assert len(parsed) == 3
+    assert parsed[0].variant_group_id == parsed[1].variant_group_id
+    assert parsed[0].variant_group_id != parsed[2].variant_group_id
+    assert all(question.variant_group_id is not None for question in parsed)
+
+
 def test_resolve_variant_strategy() -> None:
     from abridgeai.features.interviews.ai.stages.generation.resolve import (
         resolve_variant_strategy,
@@ -407,10 +454,27 @@ def test_resolve_variant_strategy() -> None:
 
 @pytest.mark.asyncio
 async def test_all_angles_variant_mode_asks_for_logical_count() -> None:
+    outcome_id = uuid4()
+    payload = {
+        "questions": [
+            _question(
+                position=index,
+                question_type=question_type,
+                difficulty="easy",
+                expected_depth=2,
+                linked_outcome_id=outcome_id,
+                logical_question_index=0,
+            )
+            for index, question_type in enumerate(
+                ("technical", "system_design", "situational", "behavioral"),
+                start=1,
+            )
+        ]
+    }
     gateway = AsyncMock()
-    gateway.generate_json = AsyncMock(return_value=_llm_result(_eight_questions()))
+    gateway.generate_json = AsyncMock(return_value=_llm_result(payload))
 
-    await generate_interview_questions(
+    drafts = await generate_interview_questions(
         AsyncMock(),
         run=_fake_run(question_count=8),
         config=_fake_config(),
@@ -425,6 +489,9 @@ async def test_all_angles_variant_mode_asks_for_logical_count() -> None:
     assert "Total LOGICAL questions to produce: 8" in user_prompt
     assert "system_design" in user_prompt
     assert "Total rows = 32" in user_prompt
+    assert "logical_question_index" in user_prompt
+    assert len(drafts) == 4
+    assert len({draft.variant_group_id for draft in drafts}) == 1
     # Grounding rule (Slice 21 fix): the prompt must demand source_refs so the
     # LLM stops emitting empty arrays that the GROUNDED check then rejects.
     assert "MUST cite at least one chunk" in user_prompt

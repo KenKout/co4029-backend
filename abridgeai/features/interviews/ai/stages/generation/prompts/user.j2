@@ -5,11 +5,13 @@ Persona: {{ persona }}
 {%- if variant_strategy == "all_angles" %}
 Total LOGICAL questions to produce: {{ question_count }}.
 For EACH logical question, write exactly {{ angles|length }} variants — one of each
-type in [{{ angles|join(', ') }}] — all on the SAME topic and all carrying the SAME
-linked_outcome_id. The variants differ only in the ANGLE they probe: the
-technical variant asks for correctness / edge cases, the system_design variant
-asks for architecture / trade-offs, the situational variant poses a case study,
-the behavioral variant asks for experience / approach. Total rows = {{ question_count * angles|length }}.
+type in [{{ angles|join(', ') }}]. Give all four rows the SAME integer
+``logical_question_index`` (starting at 0), the SAME concrete underlying problem,
+the SAME linked_outcome_id, and the SAME difficulty. The variants must be
+meaningfully different probes of that one problem, NEVER paraphrases or four
+independent questions: technical asks correctness / edge cases, system_design
+asks architecture / trade-offs, situational poses a case study, behavioral asks
+experience / approach. Total rows = {{ question_count * angles|length }}.
 
 Difficulty is assigned per LOGICAL question (all its variants share the SAME
 difficulty), ramping across the logical questions:
@@ -77,6 +79,7 @@ Return JSON in this shape:
   "questions": [
     {
       "position": 1,
+      "logical_question_index": 0,
       "question_type": "technical",
       "prompt_text": "...",
       "difficulty": "easy",
