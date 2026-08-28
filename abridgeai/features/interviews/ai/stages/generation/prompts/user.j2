@@ -5,13 +5,16 @@ Persona: {{ persona }}
 {%- if variant_strategy == "all_angles" %}
 Total LOGICAL questions to produce: {{ question_count }}.
 For EACH logical question, write exactly {{ angles|length }} variants — one of each
-type in [{{ angles|join(', ') }}]. Give all four rows the SAME integer
-``logical_question_index`` (starting at 0), the SAME concrete underlying problem,
-the SAME linked_outcome_id, and the SAME difficulty. The variants must be
-meaningfully different probes of that one problem, NEVER paraphrases or four
-independent questions: technical asks correctness / edge cases, system_design
-asks architecture / trade-offs, situational poses a case study, behavioral asks
-experience / approach. Total rows = {{ question_count * angles|length }}.
+type in [{{ angles|join(', ') }}]. Number the logical questions 0, 1, 2, ... in
+the order you write them; the four variants of ONE logical question share that
+integer ``logical_question_index`` — never reuse an index for a different
+problem. A logical question's four rows must also share the SAME concrete
+underlying problem, the SAME linked_outcome_id, and the SAME difficulty. The
+variants must be meaningfully different probes of that one problem, NEVER
+paraphrases or four independent questions: technical asks correctness / edge
+cases, system_design asks architecture / trade-offs, situational poses a case
+study, behavioral asks experience / approach.
+Total rows = {{ question_count * angles|length }}.
 
 Difficulty is assigned per LOGICAL question (all its variants share the SAME
 difficulty), ramping across the logical questions:
