@@ -227,7 +227,7 @@ async def test_skip_type_mix_in_variant_mode() -> None:
 
 
 @pytest.mark.asyncio
-async def test_variant_group_allows_partial_distinct_angles() -> None:
+async def test_variant_group_rejects_partial_angles() -> None:
     chunk, outcome, group = uuid4(), uuid4(), uuid4()
     drafts = [
         _draft(
@@ -254,7 +254,10 @@ async def test_variant_group_allows_partial_distinct_angles() -> None:
         skip_type_mix=True,
     )
 
-    assert all(v.accepted for v in verdicts)
+    assert all(
+        ValidationCriterion.VARIANT_GROUP_COHERENT in verdict.failed_criteria
+        for verdict in verdicts
+    )
 
 
 @pytest.mark.asyncio

@@ -25,6 +25,9 @@ from uuid import UUID
 
 from abridgeai.ai.llm import LLMGateway, LLMRole
 from abridgeai.ai.prompts import render_prompt
+from abridgeai.features.interviews.ai.stages.generation.resolve import (
+    VARIANT_ANGLES,
+)
 from abridgeai.features.interviews.ai.stages.validation.parsers import (
     parse_leading_verdicts,
 )
@@ -205,12 +208,12 @@ def _check_variant_groups(drafts: list[InterviewQuestionDraft]) -> set[int]:
     for members in groups.values():
         outcomes = {member.linked_outcome_id for _, member in members}
         difficulties = {member.difficulty for _, member in members}
-        types = [member.question_type for _, member in members]
+        types = {member.question_type for _, member in members}
         valid = (
-            len(members) <= 4
+            len(members) == len(VARIANT_ANGLES)
+            and types == set(VARIANT_ANGLES)
             and len(outcomes) == 1
             and len(difficulties) == 1
-            and len(types) == len(set(types))
         )
         if not valid:
             failed.update(index for index, _ in members)

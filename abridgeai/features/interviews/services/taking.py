@@ -757,12 +757,12 @@ def _benign_assessment(
 async def _config_max_hints(db: AsyncSession, config_id: UUID) -> int:
     """The teacher-configured hint cap for a session's config.
 
-    Falls back to the shipped constant when the column is absent/zero (a
-    not-yet-migrated row or a test fixture), so behavior never widens by
-    accident.
+    Falls back to the shipped constant only when the config value is absent.
+    Zero is a deliberate teacher setting that disables hints.
     """
     row = await db.get(InterviewConfig, config_id)
-    return getattr(row, "max_hints_per_question", None) or MAX_CANNOT_ANSWER_HINTS
+    value = getattr(row, "max_hints_per_question", None)
+    return value if value is not None else MAX_CANNOT_ANSWER_HINTS
 
 
 async def _run_security_stage(  # noqa: C901 -- precedence is kept explicit and auditable
