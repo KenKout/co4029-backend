@@ -67,6 +67,7 @@ from abridgeai.features.courses.queries import (
 from abridgeai.features.courses.schemas import (
     CourseAuthoring,
     CourseCreate,
+    CourseHealthRow,
     CourseLearningOutcomeAuthoring,
     CourseLearningOutcomeCreate,
     CourseLearningOutcomeUpdate,
@@ -81,11 +82,15 @@ from abridgeai.features.courses.schemas import (
     ModuleItemAuthoring,
     ModuleItemUpdate,
     ModuleUpdate,
+    PriorityTask,
     ReviewQueueItem,
+    StudentNeedingAttention,
     TeacherDashboardStats,
 )
+from abridgeai.features.identity.api import public as identity_api
 from abridgeai.features.identity.models import StorageObject
 from abridgeai.features.interviews.api import public as interviews_public
+from abridgeai.features.progress.api import public as progress_api
 from abridgeai.features.quizzes.api import public as quizzes_public
 from abridgeai.infrastructure.s3 import create_stream_url, put_object_bytes
 
@@ -1460,6 +1465,29 @@ async def list_authoring_courses_for_user(
     return result
 
 
+async def _list_authorable_courses(db: AsyncSession, user: CurrentUser) -> list[Course]:
+    """Every course the caller can author, owned + assigned, deduplicated.
+
+    Owner and teacher-assignment can both point at the same course, so the
+    two lists overlap; without the dedupe a co-owned course would be
+    counted twice in every dashboard aggregate.
+    """
+    owned = await authoring_queries.list_courses_for_owner(
+        db, user.user_id, include_archived=False
+    )
+    assigned = await authoring_queries.list_courses_assigned_to_teacher(
+        db, user.user_id, include_archived=False
+    )
+    seen: set[UUID] = set()
+    courses: list[Course] = []
+    for course in (*owned, *assigned):
+        if course.id in seen:
+            continue
+        seen.add(course.id)
+        courses.append(course)
+    return courses
+
+
 async def get_teacher_dashboard_stats(
     db: AsyncSession, *, user: CurrentUser
 ) -> TeacherDashboardStats:
@@ -1477,20 +1505,9 @@ async def get_teacher_dashboard_stats(
     retention signal (students below the EF threshold, mean EF, overdue
     cards) — same batched-over-course-ids property.
     """
-    owned = await authoring_queries.list_courses_for_owner(db, user.user_id, include_archived=False)
-    assigned = await authoring_queries.list_courses_assigned_to_teacher(
-        db, user.user_id, include_archived=False
-    )
-    seen: set[UUID] = set()
-    course_ids: list[UUID] = []
-    draft_courses = 0
-    for course in (*owned, *assigned):
-        if course.id in seen:
-            continue
-        seen.add(course.id)
-        course_ids.append(course.id)
-        if course.status == "draft":
-            draft_courses += 1
+    courses = await _list_authorable_courses(db, user)
+    course_ids = [course.id for course in courses]
+    draft_courses = sum(1 for course in courses if course.status == "draft")
 
     (
         ungraded_quizzes,
@@ -1500,6 +1517,12 @@ async def get_teacher_dashboard_stats(
         db, course_ids
     )
     review = await authoring_queries.count_review_queue_and_retention_for_courses(db, course_ids)
+    # Cross-feature read: the risk definition (thresholds + new-enrolment
+    # grace period) lives in progress and is administrator-tunable, so the
+    # dashboard asks that engine rather than re-deriving a second opinion.
+    students_needing_attention = await progress_api.count_students_needing_attention(
+        db, course_ids
+    )
     return TeacherDashboardStats(
         draft_courses=draft_courses,
         ungraded_quizzes=ungraded_quizzes,
@@ -1512,7 +1535,341 @@ async def get_teacher_dashboard_stats(
         students_below_ef_threshold=review.students_below_ef_threshold,
         avg_retention_ef=review.avg_retention_ef,
         cards_overdue=review.cards_overdue,
+        students_needing_attention=students_needing_attention,
     )
+
+
+async def list_students_needing_attention(
+    db: AsyncSession, *, user: CurrentUser, limit: int = 50
+) -> list[StudentNeedingAttention]:
+    """Risk rows across the caller's authorable courses, worst first.
+
+    Composition point for three features, each asked only for what it
+    owns: progress scores the risk, identity resolves who the student is,
+    and the course titles come from the scope query we already ran. All
+    three are batched -- one call each, no per-student round trip.
+
+    ``limit`` caps the response because this backs a dashboard section, not
+    a report; the section links through to the per-course at-risk page for
+    the full list.
+    """
+    courses = await _list_authorable_courses(db, user)
+    if not courses:
+        return []
+    titles = {course.id: course.title for course in courses}
+    rows = await progress_api.list_students_needing_attention(db, list(titles))
+    rows = rows[:limit]
+    users = await identity_api.get_users_by_ids(db, [row.user_id for row in rows])
+
+    out: list[StudentNeedingAttention] = []
+    for row in rows:
+        student = users.get(row.user_id)
+        if student is None:
+            # The risk query joins course_enrollments, so a missing user row
+            # means the account was hard-deleted mid-flight. Skip rather
+            # than render a nameless row a teacher cannot act on.
+            continue
+        out.append(
+            StudentNeedingAttention(
+                user_id=row.user_id,
+                display_name=student.display_name,
+                email=student.primary_email,
+                course_id=row.course_id,
+                course_title=titles[row.course_id],
+                completion_percent=float(row.completion_percent),
+                last_engagement_at=row.last_engagement_at,
+                days_since_last_engagement=row.days_since_last_engagement,
+                primary_reason=row.primary_reason,
+                signal_count=row.signal_count,
+                severity=row.severity,
+            )
+        )
+    return out
+
+
+def _age_hours(since: datetime | None, *, now: datetime | None = None) -> float | None:
+    """Hours elapsed, or ``None`` when there is nothing to age from."""
+    if since is None:
+        return None
+    reference = now or datetime.now(tz=UTC)
+    if since.tzinfo is None:
+        since = since.replace(tzinfo=UTC)
+    return max(0.0, (reference - since).total_seconds() / 3600)
+
+
+#: FR-012's ranking, as a sort weight. Blocking work comes first because it
+#: has a second victim -- a draft quiz nobody can sit. Student risk next:
+#: people decay while backlogs merely wait. Then overdue reviews, then age.
+_PRIORITY_KIND_RANK = {
+    "quiz_calibration": 1,
+    "quiz_questions_pending": 2,
+    "student_risk": 3,
+    "reviews_overdue": 4,
+    "interview_questions_pending": 5,
+    "materials_ready": 6,
+}
+
+
+def rank_priority_tasks(tasks: list[PriorityTask], limit: int) -> list[PriorityTask]:
+    """Order the feed by FR-012 and cut it to ``limit``.
+
+    Blocking beats everything, then kind, then age. Age sorts last rather
+    than first on purpose: an ancient non-blocking backlog should not
+    outrank a student who went quiet this week.
+
+    Tasks with no age sort as age 0 within their band -- an unknown age is
+    not evidence of urgency, and letting ``None`` win the tie-break would
+    promote exactly the items we know least about.
+    """
+    tasks.sort(
+        key=lambda task: (
+            not task.blocking,
+            _PRIORITY_KIND_RANK.get(task.kind, 99),
+            -(task.age_hours or 0.0),
+        )
+    )
+    return tasks[:limit]
+
+
+def _course_severity(
+    *, at_risk: int, students: int, pending_review: int, pass_rate: float | None
+) -> tuple[str, str | None]:
+    """Roll a course's signals into one band, and say why.
+
+    FR-043: severity must be explainable, not just coloured. The returned
+    reason names the single fact that set the band, so a teacher can see
+    "12 of 40 students at risk" rather than infer meaning from a red dot.
+
+    Precedence is people first: a roster in trouble outranks a review
+    backlog, which is work the teacher can do whenever. The at-risk band
+    is proportional rather than absolute -- 5 at-risk students is a crisis
+    in a class of 10 and unremarkable in a class of 400.
+    """
+    if students > 0 and at_risk > 0:
+        share = at_risk / students
+        if share >= 0.25:
+            return "high", f"{at_risk} of {students} students at risk"
+        return "medium", f"{at_risk} of {students} students at risk"
+    if pass_rate is not None and pass_rate < 50:
+        return "medium", f"Pass rate {round(pass_rate)}%"
+    if pending_review > 0:
+        return "medium", f"{pending_review} items awaiting review"
+    return "none", None
+
+
+async def list_course_health(
+    db: AsyncSession, *, user: CurrentUser
+) -> list[CourseHealthRow]:
+    """The caller's courses as comparable health rows, worst first.
+
+    Every number is sourced from the feature that owns it -- progress for
+    roster size, average completion and at-risk counts, this feature for
+    pass rate, activity and the review backlog -- so the table cannot
+    disagree with the student list rendered above it on the same page.
+
+    Courses with no active enrolment carry ``avg_progress_percent = None``
+    rather than 0.0, and sort last: an empty course is not a struggling
+    one.
+    """
+    courses = await _list_authorable_courses(db, user)
+    if not courses:
+        return []
+    course_ids = [course.id for course in courses]
+
+    signals = await progress_api.get_course_health_signals(db, course_ids)
+    metrics = await authoring_queries.course_health_metrics_for_courses(db, course_ids)
+    pending = await authoring_queries.count_pending_review_by_course(db, course_ids)
+
+    rows: list[CourseHealthRow] = []
+    for course in courses:
+        signal = signals.get(course.id)
+        metric = metrics.get(course.id)
+        at_risk = signal.at_risk_students if signal else 0
+        students = signal.student_count if signal else 0
+        pending_review = pending.get(course.id, 0)
+        pass_rate = metric.pass_rate_percent if metric else None
+        severity, reason = _course_severity(
+            at_risk=at_risk,
+            students=students,
+            pending_review=pending_review,
+            pass_rate=pass_rate,
+        )
+        rows.append(
+            CourseHealthRow(
+                course_id=course.id,
+                title=course.title,
+                slug=course.slug,
+                status=course.status,
+                students=students,
+                avg_progress_percent=(
+                    signal.avg_completion_percent if signal else None
+                ),
+                at_risk_students=at_risk,
+                pass_rate_percent=pass_rate,
+                pass_sample=metric.pass_sample if metric else 0,
+                pending_review=pending_review,
+                last_activity_at=metric.last_activity_at if metric else None,
+                severity=severity,
+                severity_reason=reason,
+            )
+        )
+
+    # FR-042: default sort is "needs attention". Within a band, the course
+    # with the larger at-risk share comes first -- 8 of 20 outranks 8 of 200.
+    order = {"high": 0, "medium": 1, "none": 2}
+    rows.sort(
+        key=lambda r: (
+            order[r.severity],
+            -(r.at_risk_students / r.students if r.students else 0),
+            -r.pending_review,
+            r.title.lower(),
+        )
+    )
+    return rows
+
+
+async def list_priority_tasks(
+    db: AsyncSession, *, user: CurrentUser, limit: int = 7
+) -> list[PriorityTask]:
+    """The teacher's next actions, ranked across every kind of work.
+
+    Deliberately mixes named students with grouped content backlogs: the
+    most urgent thing on a teacher's plate is not sorted by which section
+    of the dashboard it belongs to.
+
+    Content backlogs appear as ONE grouped task each, not one per item.
+    A row per pending question would bury the students under 63 rows of
+    the same work, and the group carries what makes it actionable anyway --
+    how many, how old, how many are blocking a publish.
+
+    Every count here also appears as a tile or a section elsewhere on the
+    page. FR-013 allows that only where the task adds meaning the KPI
+    lacks, which is why each grouped row leads with age and blocking count
+    rather than restating the number.
+    """
+    courses = await _list_authorable_courses(db, user)
+    if not courses:
+        return []
+    titles = {course.id: course.title for course in courses}
+    course_ids = list(titles)
+
+    at_risk = await progress_api.list_students_needing_attention(db, course_ids)
+    review = await authoring_queries.count_review_queue_and_retention_for_courses(
+        db, course_ids
+    )
+    ages = await authoring_queries.review_backlog_ages_for_courses(db, course_ids)
+
+    tasks: list[PriorityTask] = []
+
+    # --- Live but uncalibrated: students are being graded by SM-2 against
+    # a missing expected response time right now. Blocking and high.
+    if review.published_quizzes_missing_texp > 0:
+        tasks.append(
+            PriorityTask(
+                id="quiz-calibration",
+                kind="quiz_calibration",
+                severity="high",
+                title=f"{review.published_quizzes_missing_texp} published quizzes uncalibrated",
+                reason=(
+                    "Live quizzes are missing an expected response time, so "
+                    "spaced-repetition grading cannot score them correctly."
+                ),
+                blocking=True,
+                count=review.published_quizzes_missing_texp,
+            )
+        )
+
+    # --- Students. Named individually: "3 students need attention" is a
+    # statistic, "Nguyen Van A, silent 12 days" is something to act on.
+    high_risk = [row for row in at_risk if row.severity == "high"]
+    users = await identity_api.get_users_by_ids(
+        db, [row.user_id for row in high_risk[:limit]]
+    )
+    for row in high_risk[:limit]:
+        student = users.get(row.user_id)
+        if student is None:
+            continue
+        tasks.append(
+            PriorityTask(
+                id=f"student:{row.user_id}:{row.course_id}",
+                kind="student_risk",
+                severity="high",
+                title=student.display_name or student.primary_email,
+                reason=row.primary_reason,
+                course_id=row.course_id,
+                course_title=titles.get(row.course_id),
+                student_id=row.user_id,
+                age_hours=(
+                    row.days_since_last_engagement * 24.0
+                    if row.days_since_last_engagement is not None
+                    else None
+                ),
+            )
+        )
+
+    quiz_backlog = ages.get("quiz_questions")
+    if quiz_backlog and quiz_backlog.count > 0:
+        blocking = quiz_backlog.blocking > 0
+        tasks.append(
+            PriorityTask(
+                id="quiz-questions-pending",
+                kind="quiz_questions_pending",
+                severity="high" if blocking else "medium",
+                title=f"{quiz_backlog.count} quiz questions awaiting review",
+                reason=(
+                    f"{quiz_backlog.blocking} are blocking a draft quiz from "
+                    f"publishing, across {quiz_backlog.courses_affected} courses."
+                    if blocking
+                    else f"Across {quiz_backlog.courses_affected} courses."
+                ),
+                age_hours=_age_hours(quiz_backlog.oldest_created_at),
+                blocking=blocking,
+                count=quiz_backlog.count,
+            )
+        )
+
+    iv_backlog = ages.get("interview_questions")
+    if iv_backlog and iv_backlog.count > 0:
+        tasks.append(
+            PriorityTask(
+                id="interview-questions-pending",
+                kind="interview_questions_pending",
+                severity="medium",
+                title=f"{iv_backlog.count} interview questions awaiting review",
+                reason=f"Across {iv_backlog.courses_affected} courses.",
+                age_hours=_age_hours(iv_backlog.oldest_created_at),
+                count=iv_backlog.count,
+            )
+        )
+
+    if review.cards_overdue > 0:
+        tasks.append(
+            PriorityTask(
+                id="reviews-overdue",
+                kind="reviews_overdue",
+                severity="medium",
+                title=f"{review.cards_overdue} reviews past due",
+                reason=(
+                    "Student review cards are past their scheduled date; "
+                    "retention decays while they wait."
+                ),
+                count=review.cards_overdue,
+            )
+        )
+
+    if review.materials_ready_for_quiz_gen > 0:
+        tasks.append(
+            PriorityTask(
+                id="materials-ready",
+                kind="materials_ready",
+                severity="low",
+                title=f"{review.materials_ready_for_quiz_gen} lessons ready for quiz generation",
+                reason="Ingestion finished; no quiz has been generated from them yet.",
+                count=review.materials_ready_for_quiz_gen,
+            )
+        )
+
+    return rank_priority_tasks(tasks, limit)
 
 
 _REVIEW_QUEUE_LISTERS = {

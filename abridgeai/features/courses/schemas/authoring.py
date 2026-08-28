@@ -231,6 +231,123 @@ class TeacherDashboardStats(BaseModel):
     # In-scope cards whose due_at is already in the past.
     cards_overdue: int = 0
 
+    # --- Student risk -------------------------------------------------
+    # DISTINCT students with at least one active risk signal (no engagement,
+    # inactivity past the threshold, or low completion) across the caller's
+    # authorable courses. Produced by the progress feature's risk engine via
+    # its public API -- deliberately NOT the same population as
+    # ``students_below_ef_threshold``, which is a spaced-repetition-only
+    # proxy. One person struggling in three courses counts once.
+    students_needing_attention: int = 0
+
+
+class PriorityTask(BaseModel):
+    """One item in the dashboard's Priority Today feed.
+
+    The feed mixes kinds -- a named student, a content backlog, an
+    uncalibrated quiz -- because a teacher's next action is whichever is
+    most urgent, not whichever section it happens to live in.
+
+    No URL is returned. ``kind`` plus the id fields let the client build a
+    typed route; a server-built path would hard-code the SPA's routing
+    table into the API and break silently when a route is renamed.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    kind: Literal[
+        "student_risk",
+        "quiz_questions_pending",
+        "interview_questions_pending",
+        "quiz_calibration",
+        "materials_ready",
+        "reviews_overdue",
+    ]
+    severity: Literal["high", "medium", "low"]
+    title: str
+    #: Why this is on the list, phrased for a teacher and naming the number
+    #: or threshold behind it.
+    reason: str
+    course_id: UUID | None = None
+    course_title: str | None = None
+    student_id: UUID | None = None
+    #: How long this has been waiting. ``None`` when the underlying rows
+    #: carry no timestamp to age from -- absent rather than guessed.
+    age_hours: float | None = None
+    #: True when the item stops something going live. Ranked above
+    #: everything except nothing: blocking work has a second victim.
+    blocking: bool = False
+    #: Items behind a grouped task, so the UI can say "63 questions".
+    count: int = 1
+
+
+class CourseHealthRow(BaseModel):
+    """One course in the dashboard's Course Health table.
+
+    Replaces the course gallery, which gave every course equal visual
+    weight and buried the signals in badges. Comparison is the point: the
+    columns exist so a teacher can rank their teaching load and see which
+    course to open, which a grid of thumbnails cannot answer.
+
+    Nullable numbers are deliberate and mean "no data", never zero:
+    ``avg_progress_percent`` is ``None`` when nobody is enrolled, and
+    ``pass_rate_percent`` when nobody has completed a published quiz. Zero
+    means they tried and did not get there -- rendering the two alike would
+    accuse an unassessed course of total failure.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    course_id: UUID
+    title: str
+    slug: str
+    status: str
+    students: int = 0
+    avg_progress_percent: float | None = None
+    at_risk_students: int = 0
+    pass_rate_percent: float | None = None
+    #: Student-quiz pairs behind ``pass_rate_percent``. The UI withholds a
+    #: percentage computed from a handful of attempts (FR-054).
+    pass_sample: int = 0
+    pending_review: int = 0
+    last_activity_at: datetime | None = None
+    #: "high" / "medium" / "none" -- the course-level roll-up. Explained by
+    #: ``severity_reason`` rather than by colour alone (FR-043).
+    severity: str = "none"
+    severity_reason: str | None = None
+
+
+class StudentNeedingAttention(BaseModel):
+    """One (student, course) risk row for the teacher dashboard.
+
+    Composed across three features: the risk scoring comes from progress,
+    the display name and email from identity, the course title from here.
+    One row per (student, course) -- a student struggling in two of the
+    teacher's courses appears twice, because the follow-up is per course.
+    This is why the row count exceeds the headline
+    ``students_needing_attention`` figure, which counts people.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    user_id: UUID
+    display_name: str | None = None
+    email: str
+    course_id: UUID
+    course_title: str
+    #: Average lesson completion, 0-100.
+    completion_percent: float
+    last_engagement_at: datetime | None = None
+    days_since_last_engagement: int | None = None
+    #: Highest-severity reason, phrased for a teacher and naming the
+    #: threshold that fired, e.g. "No engagement for 12 days (threshold: 7)."
+    primary_reason: str
+    #: Total reasons that fired. The UI renders "+N" beyond the primary.
+    signal_count: int
+    #: "high" (absent) or "medium" (present but behind).
+    severity: str
+
 
 class ReviewQueueItem(BaseModel):
     """One navigable group inside a review-queue category."""

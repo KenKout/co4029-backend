@@ -49,6 +49,7 @@ SettingGroup = Literal[
     "spaced_repetition",
     "careerpath",
     "courses",
+    "progress",
 ]
 
 
@@ -82,6 +83,57 @@ _SPECS: tuple[SettingSpec, ...] = (
     # ``core.config.Settings`` (timeouts) and ``ai/llm/client.py`` (the 429
     # retry constants). env_var names match the existing Settings env vars so a
     # deployment's current ``.env`` keeps working as the env-layer fallback.
+    # -- progress (at-risk detection) -------------------------------------
+    # These three were hard-coded constants in
+    # ``progress/services/monitoring.py`` (7 / 30) plus a literal in
+    # ``at_risk_students.sql``. The Python and the SQL agreed only by
+    # coincidence; both now read these, so a change lands in one place.
+    #
+    # The grace period is NEW behaviour, not a lift of an existing default:
+    # before it, a student was eligible to be flagged inactive from the
+    # moment they enrolled, so every fresh enrolment tripped the bar after
+    # a week of not starting. 14 days is the starting value; it is tunable
+    # per organization precisely because the right number is a policy call.
+    SettingSpec(
+        key="progress.at_risk_inactivity_days",
+        group="progress",
+        type="int",
+        default=7,
+        minimum=1,
+        maximum=365,
+        label="At risk — inactivity threshold (days)",
+        description=(
+            "Days without any material engagement before a student is flagged "
+            "at risk. Shown to teachers as the threshold that fired."
+        ),
+    ),
+    SettingSpec(
+        key="progress.at_risk_low_completion_percent",
+        group="progress",
+        type="int",
+        default=30,
+        minimum=0,
+        maximum=100,
+        label="At risk — low completion threshold (%)",
+        description=(
+            "Average lesson completion below this percentage flags a student "
+            "at risk, independently of how recently they were active."
+        ),
+    ),
+    SettingSpec(
+        key="progress.at_risk_grace_period_days",
+        group="progress",
+        type="int",
+        default=14,
+        minimum=0,
+        maximum=365,
+        label="At risk — new-enrolment grace period (days)",
+        description=(
+            "Students enrolled more recently than this are never flagged at "
+            "risk, so a new joiner is not reported as inactive before they have "
+            "had a fair chance to start. Set to 0 to disable the grace period."
+        ),
+    ),
     SettingSpec(
         key="learning_program.max_concurrent_enrollments",
         group="careerpath",

@@ -63,6 +63,7 @@ from abridgeai.features.courses.schemas import (
     CourseAuthoring,
     CourseContentAuthoring,
     CourseCreate,
+    CourseHealthRow,
     CourseLearningOutcomeAuthoring,
     CourseLearningOutcomeCreate,
     CourseLearningOutcomeUpdate,
@@ -83,10 +84,12 @@ from abridgeai.features.courses.schemas import (
     ModuleReorder,
     ModuleUpdate,
     OutlineSection,
+    PriorityTask,
     ReviewQueueItem,
     RosterStudentRead,
     SlugAvailability,
     StreamUrlResponse,
+    StudentNeedingAttention,
     SyllabusImportResult,
     SyllabusImportRow,
     TeacherDashboardStats,
@@ -387,6 +390,68 @@ async def get_teacher_dashboard_stats(
     enforced in the service via owner/assignment match.
     """
     return await authoring_service.get_teacher_dashboard_stats(db, user=current_user)
+
+
+@router.get("/dashboard/priority", response_model=list[PriorityTask])
+async def list_priority_tasks(
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_AUTHORING_LIST)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    limit: Annotated[int, Query(ge=1, le=20)] = 7,
+) -> list[PriorityTask]:
+    """The teacher's next actions, ranked across every kind of work.
+
+    Blocking work first, then students at risk, then overdue reviews, then
+    age. Content backlogs come back as one grouped task each — a row per
+    pending question would bury the students under identical work.
+
+    Same lax permission as the courses list — scope is enforced in the
+    service via owner/assignment match.
+    """
+    return await authoring_service.list_priority_tasks(
+        db, user=current_user, limit=limit
+    )
+
+
+@router.get("/dashboard/course-health", response_model=list[CourseHealthRow])
+async def list_course_health(
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_AUTHORING_LIST)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> list[CourseHealthRow]:
+    """The caller's courses as comparable health rows, worst first.
+
+    Backs the dashboard's Course Health table, which replaces the course
+    gallery: the gallery gave every course equal weight and hid the
+    signals in badges, so it could not answer "which of my courses needs
+    me today".
+
+    Same lax permission as the courses list — scope is enforced in the
+    service via owner/assignment match.
+    """
+    return await authoring_service.list_course_health(db, user=current_user)
+
+
+@router.get(
+    "/dashboard/students-needing-attention",
+    response_model=list[StudentNeedingAttention],
+)
+async def list_students_needing_attention(
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_AUTHORING_LIST)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+) -> list[StudentNeedingAttention]:
+    """Students at risk across the caller's authorable courses, worst first.
+
+    The row-level companion to ``students_needing_attention`` on
+    ``/dashboard/stats``: the tile counts distinct people, this lists one
+    row per (student, course) because a teacher follows up inside a course.
+    The two are expected to differ and neither is derivable from the other.
+
+    Same lax permission as the courses list — scope is enforced in the
+    service via owner/assignment match, not by permission gating.
+    """
+    return await authoring_service.list_students_needing_attention(
+        db, user=current_user, limit=limit
+    )
 
 
 @router.get(
