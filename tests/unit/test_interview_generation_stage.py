@@ -89,7 +89,7 @@ def _question(
     expected_depth: int,
     linked_outcome_id: UUID | None = None,
     source_refs: list[str] | None = None,
-    logical_question_index: int | None = None,
+    logical_question_index: int | str | None = None,
 ) -> dict[str, Any]:
     return {
         "position": position,
@@ -436,6 +436,32 @@ def test_parser_assigns_server_group_ids_for_logical_question_indexes() -> None:
     assert len(parsed) == 8
     assert len({draft.variant_group_id for draft in parsed}) == 2
     assert all(question.variant_group_id is not None for question in parsed)
+
+
+def test_all_angle_parser_accepts_stringified_ordinals() -> None:
+    """API layers sometimes stringify the LLM JSON — ``"0"`` must group fine."""
+    outcome_id = uuid4()
+    payload = {
+        "questions": [
+            _question(
+                position=index,
+                question_type=question_type,
+                difficulty="easy",
+                expected_depth=2,
+                linked_outcome_id=outcome_id,
+                logical_question_index="0",  # stringified, not an int
+            )
+            for index, question_type in enumerate(
+                ("technical", "system_design", "situational", "behavioral"),
+                start=1,
+            )
+        ]
+    }
+
+    parsed = parse_generation_response(payload, require_logical_question_index=True)
+
+    assert len(parsed) == 4
+    assert len({draft.variant_group_id for draft in parsed}) == 1
 
 
 def test_all_angle_parser_discards_oversized_or_duplicate_groups() -> None:
