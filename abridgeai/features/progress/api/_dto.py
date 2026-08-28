@@ -58,7 +58,31 @@ class AtRiskStudentDTO(_BaseDTO):
     signal_count: int
 
 
+class StudentNeedingAttentionDTO(_BaseDTO):
+    """One (student, course) risk row for a cross-feature caller.
+
+    Carries ``course_id`` because this projection spans a teacher's whole
+    course set; the same student may appear once per course they are
+    struggling in. Identity (name, email, avatar) is deliberately absent --
+    progress does not own it, and the caller composes it from the identity
+    feature's own public API.
+    """
+
+    user_id: UUID
+    course_id: UUID
+    completion_percent: Decimal
+    last_engagement_at: datetime | None
+    days_since_last_engagement: int | None
+    #: Human-readable detail of the highest-severity reason; names the
+    #: threshold that fired (FR-026).
+    primary_reason: str
+    signal_count: int
+    #: "high" (absent) or "medium" (present but behind).
+    severity: str
+
+
 __all__ = [
     "AtRiskStudentDTO",
+    "StudentNeedingAttentionDTO",
     "LessonProgressDTO",
 ]

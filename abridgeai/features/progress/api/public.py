@@ -21,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from abridgeai.features.progress.models import LessonProgress
 from abridgeai.features.progress.services import monitoring, reporting
 
-from ._dto import AtRiskStudentDTO, LessonProgressDTO
+from ._dto import AtRiskStudentDTO, LessonProgressDTO, StudentNeedingAttentionDTO
 
 
 async def get_lesson_progress(
@@ -88,6 +88,32 @@ async def count_students_needing_attention(
     return await monitoring.count_students_needing_attention(db, course_ids)
 
 
+async def list_students_needing_attention(
+    db: AsyncSession,
+    course_ids: Sequence[UUID],
+) -> list[StudentNeedingAttentionDTO]:
+    """Scored risk rows across ``course_ids``, worst first.
+
+    The row-level companion to :func:`count_students_needing_attention`.
+    One row per (student, course) — the count deduplicates students, this
+    does not, because a follow-up happens inside a course.
+    """
+    rows = await monitoring.list_students_needing_attention(db, course_ids)
+    return [
+        StudentNeedingAttentionDTO(
+            user_id=row.user_id,
+            course_id=row.course_id,
+            completion_percent=row.completion_percent,
+            last_engagement_at=row.last_engagement_at,
+            days_since_last_engagement=row.days_since_last_engagement,
+            primary_reason=row.primary_reason,
+            signal_count=row.signal_count,
+            severity=row.severity,
+        )
+        for row in rows
+    ]
+
+
 async def get_course_progress_for_user(
     db: AsyncSession,
     *,
@@ -112,8 +138,10 @@ async def get_course_progress_for_user(
 __all__ = [
     "AtRiskStudentDTO",
     "LessonProgressDTO",
+    "StudentNeedingAttentionDTO",
     "count_students_needing_attention",
     "get_at_risk_students",
     "get_course_progress_for_user",
     "get_lesson_progress",
+    "list_students_needing_attention",
 ]

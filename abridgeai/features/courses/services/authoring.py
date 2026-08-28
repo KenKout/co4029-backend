@@ -82,8 +82,10 @@ from abridgeai.features.courses.schemas import (
     ModuleItemUpdate,
     ModuleUpdate,
     ReviewQueueItem,
+    StudentNeedingAttention,
     TeacherDashboardStats,
 )
+from abridgeai.features.identity.api import public as identity_api
 from abridgeai.features.identity.models import StorageObject
 from abridgeai.features.interviews.api import public as interviews_public
 from abridgeai.features.progress.api import public as progress_api
@@ -1461,6 +1463,29 @@ async def list_authoring_courses_for_user(
     return result
 
 
+async def _list_authorable_courses(db: AsyncSession, user: CurrentUser) -> list[Course]:
+    """Every course the caller can author, owned + assigned, deduplicated.
+
+    Owner and teacher-assignment can both point at the same course, so the
+    two lists overlap; without the dedupe a co-owned course would be
+    counted twice in every dashboard aggregate.
+    """
+    owned = await authoring_queries.list_courses_for_owner(
+        db, user.user_id, include_archived=False
+    )
+    assigned = await authoring_queries.list_courses_assigned_to_teacher(
+        db, user.user_id, include_archived=False
+    )
+    seen: set[UUID] = set()
+    courses: list[Course] = []
+    for course in (*owned, *assigned):
+        if course.id in seen:
+            continue
+        seen.add(course.id)
+        courses.append(course)
+    return courses
+
+
 async def get_teacher_dashboard_stats(
     db: AsyncSession, *, user: CurrentUser
 ) -> TeacherDashboardStats:
@@ -1478,20 +1503,9 @@ async def get_teacher_dashboard_stats(
     retention signal (students below the EF threshold, mean EF, overdue
     cards) — same batched-over-course-ids property.
     """
-    owned = await authoring_queries.list_courses_for_owner(db, user.user_id, include_archived=False)
-    assigned = await authoring_queries.list_courses_assigned_to_teacher(
-        db, user.user_id, include_archived=False
-    )
-    seen: set[UUID] = set()
-    course_ids: list[UUID] = []
-    draft_courses = 0
-    for course in (*owned, *assigned):
-        if course.id in seen:
-            continue
-        seen.add(course.id)
-        course_ids.append(course.id)
-        if course.status == "draft":
-            draft_courses += 1
+    courses = await _list_authorable_courses(db, user)
+    course_ids = [course.id for course in courses]
+    draft_courses = sum(1 for course in courses if course.status == "draft")
 
     (
         ungraded_quizzes,
@@ -1521,6 +1535,54 @@ async def get_teacher_dashboard_stats(
         cards_overdue=review.cards_overdue,
         students_needing_attention=students_needing_attention,
     )
+
+
+async def list_students_needing_attention(
+    db: AsyncSession, *, user: CurrentUser, limit: int = 50
+) -> list[StudentNeedingAttention]:
+    """Risk rows across the caller's authorable courses, worst first.
+
+    Composition point for three features, each asked only for what it
+    owns: progress scores the risk, identity resolves who the student is,
+    and the course titles come from the scope query we already ran. All
+    three are batched -- one call each, no per-student round trip.
+
+    ``limit`` caps the response because this backs a dashboard section, not
+    a report; the section links through to the per-course at-risk page for
+    the full list.
+    """
+    courses = await _list_authorable_courses(db, user)
+    if not courses:
+        return []
+    titles = {course.id: course.title for course in courses}
+    rows = await progress_api.list_students_needing_attention(db, list(titles))
+    rows = rows[:limit]
+    users = await identity_api.get_users_by_ids(db, [row.user_id for row in rows])
+
+    out: list[StudentNeedingAttention] = []
+    for row in rows:
+        student = users.get(row.user_id)
+        if student is None:
+            # The risk query joins course_enrollments, so a missing user row
+            # means the account was hard-deleted mid-flight. Skip rather
+            # than render a nameless row a teacher cannot act on.
+            continue
+        out.append(
+            StudentNeedingAttention(
+                user_id=row.user_id,
+                display_name=student.display_name,
+                email=student.primary_email,
+                course_id=row.course_id,
+                course_title=titles[row.course_id],
+                completion_percent=float(row.completion_percent),
+                last_engagement_at=row.last_engagement_at,
+                days_since_last_engagement=row.days_since_last_engagement,
+                primary_reason=row.primary_reason,
+                signal_count=row.signal_count,
+                severity=row.severity,
+            )
+        )
+    return out
 
 
 _REVIEW_QUEUE_LISTERS = {

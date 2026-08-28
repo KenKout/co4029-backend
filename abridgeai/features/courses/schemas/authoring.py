@@ -241,6 +241,37 @@ class TeacherDashboardStats(BaseModel):
     students_needing_attention: int = 0
 
 
+class StudentNeedingAttention(BaseModel):
+    """One (student, course) risk row for the teacher dashboard.
+
+    Composed across three features: the risk scoring comes from progress,
+    the display name and email from identity, the course title from here.
+    One row per (student, course) -- a student struggling in two of the
+    teacher's courses appears twice, because the follow-up is per course.
+    This is why the row count exceeds the headline
+    ``students_needing_attention`` figure, which counts people.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    user_id: UUID
+    display_name: str | None = None
+    email: str
+    course_id: UUID
+    course_title: str
+    #: Average lesson completion, 0-100.
+    completion_percent: float
+    last_engagement_at: datetime | None = None
+    days_since_last_engagement: int | None = None
+    #: Highest-severity reason, phrased for a teacher and naming the
+    #: threshold that fired, e.g. "No engagement for 12 days (threshold: 7)."
+    primary_reason: str
+    #: Total reasons that fired. The UI renders "+N" beyond the primary.
+    signal_count: int
+    #: "high" (absent) or "medium" (present but behind).
+    severity: str
+
+
 class ReviewQueueItem(BaseModel):
     """One navigable group inside a review-queue category."""
 

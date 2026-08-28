@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
+from decimal import Decimal
 from typing import TYPE_CHECKING
 from uuid import UUID
 
@@ -133,6 +135,93 @@ async def get_at_risk_students(db: AsyncSession, course_id: UUID) -> AtRiskListR
     return AtRiskListRead(course_id=course_id, students=students)
 
 
+def severity_for(reasons: list[AtRiskReason]) -> str:
+    """Coarse severity band for a set of reasons (FR-021).
+
+    "high" when the student is absent -- no engagement at all, or silent
+    past the inactivity threshold. "medium" when they are present but
+    behind. The distinction matters because the two need different
+    interventions: an absent student needs contacting, a behind one needs
+    help with the material.
+    """
+    codes = {r.code for r in reasons}
+    if codes & {"no_engagement", "inactive"}:
+        return "high"
+    return "medium"
+
+
+@dataclass(frozen=True)
+class StudentAtRisk:
+    """One (student, course) risk row, scored and ready to render."""
+
+    user_id: UUID
+    course_id: UUID
+    completion_percent: Decimal
+    last_engagement_at: datetime | None
+    days_since_last_engagement: int | None
+    primary_reason: str
+    signal_count: int
+    severity: str
+
+
+async def list_students_needing_attention(
+    db: AsyncSession, course_ids: Sequence[UUID]
+) -> list[StudentAtRisk]:
+    """Scored risk rows across ``course_ids``, worst first.
+
+    One row per (student, course): a student at risk in two of a teacher's
+    courses appears twice here, because the follow-up is per course. The
+    headline COUNT deliberately deduplicates -- see
+    :func:`count_students_needing_attention` -- so the tile and this list
+    answer different questions and are expected to differ.
+
+    Ordered high severity first, then by how long the student has been
+    silent, so the top of the list is the person who has been gone longest.
+    """
+    thresholds = await resolve_at_risk_thresholds(db)
+    rows = await list_at_risk_rows_for_courses(
+        db,
+        course_ids,
+        inactivity_days=thresholds.inactivity_days,
+        low_completion_percent=thresholds.low_completion_percent,
+        grace_period_days=thresholds.grace_period_days,
+    )
+    scored: list[StudentAtRisk] = []
+    for row in rows:
+        reasons = classify_at_risk_reasons(row, thresholds)
+        if not reasons:
+            continue
+        scored.append(
+            StudentAtRisk(
+                user_id=row.user_id,
+                course_id=row.course_id,
+                completion_percent=row.completion_percent,
+                last_engagement_at=row.last_engagement_at,
+                days_since_last_engagement=(
+                    int(row.days_since_last_engagement)
+                    if row.days_since_last_engagement is not None
+                    else None
+                ),
+                primary_reason=reasons[0].detail,
+                signal_count=len(reasons),
+                severity=severity_for(reasons),
+            )
+        )
+    # A student who never engaged has no "days silent" to sort on but is the
+    # most absent of all, so they sort above every finite gap.
+    scored.sort(
+        key=lambda s: (
+            s.severity != "high",
+            -(
+                float("inf")
+                if s.last_engagement_at is None
+                else (s.days_since_last_engagement or 0)
+            ),
+        )
+    )
+    return scored
+
+
 async def count_students_needing_attention(
     db: AsyncSession, course_ids: Sequence[UUID]
 ) -> int:
@@ -157,7 +246,10 @@ async def count_students_needing_attention(
 __all__ = [
     "AtRiskThresholds",
     "classify_at_risk_reasons",
+    "StudentAtRisk",
     "count_students_needing_attention",
+    "list_students_needing_attention",
+    "severity_for",
     "get_at_risk_students",
     "get_roster_progress",
     "resolve_at_risk_thresholds",
