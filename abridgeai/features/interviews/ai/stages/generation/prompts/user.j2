@@ -4,17 +4,21 @@ Persona: {{ persona }}
 
 {%- if variant_strategy == "all_angles" %}
 Total LOGICAL questions to produce: {{ question_count }}.
-For EACH logical question, write exactly {{ angles|length }} variants — one of each
-type in [{{ angles|join(', ') }}]. Number the logical questions 0, 1, 2, ... in
-the order you write them; the four variants of ONE logical question share that
-integer ``logical_question_index`` — never reuse an index for a different
-problem. A logical question's four rows must also share the SAME concrete
-underlying problem, the SAME linked_outcome_id, and the SAME difficulty. The
-variants must be meaningfully different probes of that one problem, NEVER
-paraphrases or four independent questions: technical asks correctness / edge
-cases, system_design asks architecture / trade-offs, situational poses a case
-study, behavioral asks experience / approach.
-Total rows = {{ question_count * angles|length }}.
+Create {{ question_count }} distinct logical problems. Number them 0, 1, 2, … in
+write order through {{ question_count - 1 }}. For EACH index, write exactly
+{{ angles|length }} rows — one of each type in [{{ angles|join(', ') }}] — all
+sharing that index. After four rows for index 0, use index 1 for the next logical
+problem; NEVER reuse an index for a different problem. Emit
+``logical_question_index`` as an unquoted non-negative JSON integer (for example
+``0``), never a string, decimal, negative value, or null. Rows of one index share one concrete underlying
+problem, linked_outcome_id, and difficulty. They must be meaningfully different
+probes, NEVER paraphrases or four independent questions: technical asks correctness
+/ edge cases, system_design asks architecture / trade-offs, situational poses a case
+study, behavioral asks experience / approach. Total rows = {{ question_count * angles|length }}.
+
+Index example: rows 1–4 use ``logical_question_index: 0`` (technical,
+system_design, situational, behavioral); rows 5–8 use
+``logical_question_index: 1`` with those same four types for a NEW problem.
 
 Difficulty is assigned per LOGICAL question (all its variants share the SAME
 difficulty), ramping across the logical questions:
