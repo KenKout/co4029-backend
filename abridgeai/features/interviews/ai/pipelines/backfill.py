@@ -65,25 +65,40 @@ def validation_summary(verdicts: list[Verdict]) -> dict[str, Any]:
 
 def _trim_to_shortfall(
     drafts: list[InterviewQuestionDraft],
+    accepted: list[InterviewQuestionDraft],
     missing: int,
 ) -> list[InterviewQuestionDraft]:
-    """Trim an overshooting variant round down to ``missing`` rows.
+    """Trim an overshooting variant round toward the least-represented angles.
 
-    A logical-unit backfill request returns whole angle groups (one draft
-    per interviewer angle). When the accepted set exceeds the shortfall we
-    keep rows spread across as many distinct ``question_type`` buckets as
-    possible — dropping surplus duplicates of a type before dropping a
-    type entirely — so whichever angle was missing stays represented.
+    A whole all-angle backfill group can exceed the remaining row budget. Pick
+    candidates from the angle with the fewest rows already accepted, updating
+    that count after every selection. Canonical ``VARIANT_ANGLES`` order breaks
+    ties, never the order the LLM happened to return, so a previously rejected
+    angle is retained instead of being repeatedly trimmed away.
     """
     by_type: dict[str, list[InterviewQuestionDraft]] = {}
-    for d in drafts:
-        by_type.setdefault(d.question_type, []).append(d)
+    for draft in drafts:
+        by_type.setdefault(draft.question_type, []).append(draft)
+    counts = {angle: 0 for angle in VARIANT_ANGLES}
+    for draft in accepted:
+        if draft.question_type in counts:
+            counts[draft.question_type] += 1
+
     kept: list[InterviewQuestionDraft] = []
-    # Round-robin one row per type until the shortfall is met.
-    while len(kept) < missing and any(by_type.values()):
-        for qtype in list(by_type):
-            if len(kept) < missing and by_type[qtype]:
-                kept.append(by_type[qtype].pop(0))
+    while len(kept) < missing:
+        available_angles = [angle for angle in VARIANT_ANGLES if by_type.get(angle)]
+        if available_angles:
+            selected_type = min(
+                available_angles,
+                key=lambda angle: (counts[angle], VARIANT_ANGLES.index(angle)),
+            )
+        else:
+            selected_type = next((qtype for qtype, items in by_type.items() if items), None)
+            if selected_type is None:
+                break
+        kept.append(by_type[selected_type].pop(0))
+        if selected_type in counts:
+            counts[selected_type] += 1
     return kept
 
 
@@ -166,7 +181,7 @@ async def generate_with_backfill(
         # which may overshoot ``target_count``. Keep only the missing rows —
         # preferring the types still short so the bank stays balanced per role.
         if trim_to_total and len(round_accepted) > missing:
-            round_accepted = _trim_to_shortfall(round_accepted, missing)
+            round_accepted = _trim_to_shortfall(round_accepted, accepted, missing)
         seen_prompts.update(d.prompt_text for d in round_accepted)
 
         all_drafts.extend(round_drafts)

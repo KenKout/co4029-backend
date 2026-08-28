@@ -108,6 +108,22 @@ async def _require_outcome(db: AsyncSession, config_id: UUID, outcome_id: UUID) 
     return outcome
 
 
+def _assert_threshold_within_outcome_count(
+    min_outcomes_to_pass: int | None,
+    outcome_count: int,
+) -> None:
+    if min_outcomes_to_pass is not None and min_outcomes_to_pass > outcome_count:
+        raise AppError(
+            "min_outcomes_to_pass_exceeds_active_outcomes: minimum outcomes to pass "
+            f"({min_outcomes_to_pass}) cannot exceed active learning outcomes ({outcome_count})"
+        )
+
+
+async def _assert_config_threshold_valid(db: AsyncSession, config: InterviewConfig) -> None:
+    outcomes = await authoring_queries.list_outcomes_for_config(db, config.id)
+    _assert_threshold_within_outcome_count(config.min_outcomes_to_pass, len(outcomes))
+
+
 async def _ensure_module_item(
     db: AsyncSession, *, module_id: UUID, interview_config_id: UUID
 ) -> None:
@@ -213,6 +229,7 @@ async def create_interview_config(
         )
     if course_outcome_texts:
         await flush_or_conflict(db)
+    await _assert_config_threshold_valid(db, config)
     # Surface the draft on the course content tree immediately. The
     # ``/content`` reader renders one row per ``module_items`` entry, so without
     # this insert a freshly created draft is invisible until publish. The
@@ -234,8 +251,15 @@ async def update_interview_config(
     # Freeze conduct/grading settings once published. ``exclude_unset`` is what
     # makes this precise: only fields the client actually sent are considered, so
     # a UI that echoes the whole form back does not trip on untouched values.
-    changed = set(payload.model_dump(exclude_unset=True).keys())
+    data = payload.model_dump(exclude_unset=True)
+    changed = set(data)
     published_freeze.assert_config_settings_editable(config, changed)
+    if "min_outcomes_to_pass" in data:
+        outcomes = await authoring_queries.list_outcomes_for_config(db, config_id)
+        _assert_threshold_within_outcome_count(
+            data["min_outcomes_to_pass"],
+            len(outcomes),
+        )
     _apply_patch(config, payload)
     await flush_or_conflict(db)
     await db.refresh(config)
@@ -263,6 +287,7 @@ async def publish_interview_config(
         raise AppError(
             "interview_no_outcomes: at least one learning outcome is required to publish"
         )
+    await _assert_config_threshold_valid(db, config)
     config.status = "published"
     config.published_at = utcnow()
     await _ensure_module_item(db, module_id=config.module_id, interview_config_id=config.id)
@@ -544,6 +569,11 @@ async def delete_outcome(
     # Dropping a criterion retroactively rewrites what the interview measured.
     published_freeze.assert_learning_outcomes_editable(config)
     outcome = await _require_outcome(db, config_id, outcome_id)
+    outcomes = await authoring_queries.list_outcomes_for_config(db, config_id)
+    _assert_threshold_within_outcome_count(
+        config.min_outcomes_to_pass,
+        max(0, len(outcomes) - 1),
+    )
     await soft_delete_cascade(db, outcome, actor_id=actor.user_id)
 
 

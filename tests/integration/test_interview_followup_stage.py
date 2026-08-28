@@ -45,13 +45,17 @@ def _session_stub() -> SimpleNamespace:
     return SimpleNamespace(id=uuid.uuid4())
 
 
-def _db_with_no_existing_followup() -> AsyncMock:
+def _db_with_followup_count(count: int) -> AsyncMock:
     db = AsyncMock()
     result = MagicMock()
-    result.scalar_one_or_none = MagicMock(return_value=None)
+    result.scalar_one = MagicMock(return_value=count)
     db.execute = AsyncMock(return_value=result)
     db.begin_nested = MagicMock(side_effect=_savepoint_cm)
     return db
+
+
+def _db_with_no_existing_followup() -> AsyncMock:
+    return _db_with_followup_count(0)
 
 
 def _savepoint_cm() -> MagicMock:
@@ -69,11 +73,7 @@ def _savepoint_cm() -> MagicMock:
 
 
 def _db_with_existing_followup() -> AsyncMock:
-    db = AsyncMock()
-    result = MagicMock()
-    result.scalar_one_or_none = MagicMock(return_value=uuid.uuid4())
-    db.execute = AsyncMock(return_value=result)
-    return db
+    return _db_with_followup_count(1)
 
 
 def _gateway_returning(payload: dict[str, object]) -> SimpleNamespace:
@@ -129,6 +129,42 @@ async def test_returns_followup_text_for_shallow_answer() -> None:
 
 
 @pytest.mark.asyncio
+async def test_zero_cap_short_circuits_without_llm() -> None:
+    db = _db_with_no_existing_followup()
+    gateway = _gateway_returning({"is_sufficient": False, "followup": "should not be asked"})
+
+    result = await maybe_generate_followup(
+        db,
+        session=_session_stub(),
+        current_question=_question_stub(),
+        student_answer="It runs callbacks.",
+        gateway=gateway,
+        max_follow_ups_per_question=0,
+    )
+
+    assert result is None
+    gateway.generate_json.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_configured_cap_allows_followups_until_count_reaches_limit() -> None:
+    db = _db_with_followup_count(2)
+    gateway = _gateway_returning({"is_sufficient": False, "followup": "Why specifically?"})
+
+    result = await maybe_generate_followup(
+        db,
+        session=_session_stub(),
+        current_question=_question_stub(),
+        student_answer="It runs callbacks.",
+        gateway=gateway,
+        max_follow_ups_per_question=3,
+    )
+
+    assert result == "Why specifically?"
+    gateway.generate_json.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_returns_none_when_followup_already_exists() -> None:
     db = _db_with_existing_followup()
     gateway = _gateway_returning({"is_sufficient": False, "followup": "should not be asked"})
@@ -139,6 +175,7 @@ async def test_returns_none_when_followup_already_exists() -> None:
         current_question=_question_stub(),
         student_answer="It runs callbacks.",
         gateway=gateway,
+        max_follow_ups_per_question=1,
     )
 
     assert result is None

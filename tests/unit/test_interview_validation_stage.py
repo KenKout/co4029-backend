@@ -292,6 +292,40 @@ async def test_variant_group_rejects_duplicate_angle_or_mismatched_outcome() -> 
 
 
 @pytest.mark.asyncio
+async def test_variant_group_rejects_different_outcomes_with_distinct_angles() -> None:
+    chunk, group = uuid4(), uuid4()
+    drafts = [
+        _draft(
+            question_type="technical",
+            source_refs=[chunk],
+            linked_outcome_id=uuid4(),
+            variant_group_id=group,
+        ),
+        _draft(
+            question_type="system_design",
+            source_refs=[chunk],
+            linked_outcome_id=uuid4(),
+            variant_group_id=group,
+        ),
+    ]
+
+    verdicts = await validate_interview_questions(
+        AsyncMock(),
+        run=_run(source_chunk_ids=[chunk]),
+        config=_config(),
+        drafts=drafts,
+        context=_context([chunk]),
+        gateway=_gateway_returning(_accept_all(2)),
+        skip_type_mix=True,
+    )
+
+    assert all(
+        verdict.failed_criteria == [ValidationCriterion.VARIANT_GROUP_COHERENT]
+        for verdict in verdicts
+    )
+
+
+@pytest.mark.asyncio
 async def test_difficulty_progression_rejects_abrupt_drop() -> None:
     chunk = uuid4()
     drafts = [

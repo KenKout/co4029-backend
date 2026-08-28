@@ -45,7 +45,10 @@ from abridgeai.features.interviews.orchestrator.assistance_logic import (
     generate_question_assistance,
     is_term_selection_reply,
 )
-from abridgeai.features.interviews.orchestrator.decision import MAX_CANNOT_ANSWER_HINTS
+from abridgeai.features.interviews.orchestrator.decision import (
+    DEFAULT_MAX_FOLLOWUPS_PER_QUESTION,
+    MAX_CANNOT_ANSWER_HINTS,
+)
 from abridgeai.features.interviews.orchestrator.security import (
     SecurityAction,
     SecurityAssessment,
@@ -1842,11 +1845,18 @@ async def _legacy_advance(
     effective_turn_key = turn_key or f"legacy:{current_session_question.id}:{uuid4().hex}"
     followup_text: str | None = None
     if current_question is not None:
+        config = await db.get(InterviewConfig, session.interview_config_id)
+        max_follow_ups_per_question = (
+            config.max_follow_ups_per_question
+            if config is not None and config.max_follow_ups_per_question is not None
+            else DEFAULT_MAX_FOLLOWUPS_PER_QUESTION
+        )
         followup_text = await maybe_generate_followup(
             db,
             session=session,
             current_question=current_question,
             student_answer=answer_text,
+            max_follow_ups_per_question=max_follow_ups_per_question,
         )
 
     if followup_text:

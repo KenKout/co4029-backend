@@ -43,9 +43,7 @@ def _draft(
 
 
 def _verdict(idx: int, *, accepted: bool) -> Verdict:
-    return Verdict(
-        question_index=idx, accepted=accepted, failed_criteria=[], rationale=""
-    )
+    return Verdict(question_index=idx, accepted=accepted, failed_criteria=[], rationale="")
 
 
 def _fake_stubs() -> tuple[SimpleNamespace, SimpleNamespace, SimpleNamespace]:
@@ -68,9 +66,10 @@ async def test_all_angles_backfill_requests_whole_angle_groups(
         for i in range(8)
     ]
     round1_verdicts = [_verdict(i, accepted=i not in (3, 7)) for i in range(8)]
-    round2_drafts = [_draft(20 + i, qtype) for i, qtype in enumerate(
-        ["technical", "system_design", "situational", "behavioral"]
-    )]
+    round2_drafts = [
+        _draft(20 + i, qtype)
+        for i, qtype in enumerate(["technical", "system_design", "situational", "behavioral"])
+    ]
     round2_verdicts = [_verdict(i, accepted=True) for i in range(4)]
 
     generate = AsyncMock(side_effect=[round1_drafts, round2_drafts])
@@ -102,32 +101,53 @@ async def test_all_angles_backfill_requests_whole_angle_groups(
     # Round 2 override is the shortfall (2) rounded UP to a whole angle group
     # (4 rows) so every angle is re-requested; surplus rows are trimmed below.
     assert generate.await_args_list[1].kwargs["override_question_count"] == 4
-    # Trim lands the bank exactly on target with distinct types kept.
+    # Behavioral was rejected in round 1. It must outrank response-leading
+    # technical/system-design candidates during the two-row trim.
     tail_types = [d.question_type for d in accepted[6:]]
-    assert len(tail_types) == 2
-    assert len(set(tail_types)) == 2
-
-
-def test_trim_to_shortfall_spreads_across_types() -> None:
-    """Trimming drops surplus per-type duplicates before dropping a type."""
-    drafts = [_draft(0, "technical"), _draft(1, "behavioral")]
-    kept = _trim_to_shortfall(drafts, missing=1)
-    assert len(kept) == 1
-    # One row of each type available → round-robin keeps the first type.
-    assert kept[0].question_type in {"technical", "behavioral"}
-
-
-def test_trim_to_shortfall_prefers_rare_types() -> None:
-    """With one rare type and many duplicates, the rare type survives."""
-    drafts = [
-        _draft(0, "technical"),
-        _draft(1, "technical"),
-        _draft(2, "technical"),
-        _draft(3, "behavioral"),
+    assert tail_types == ["behavioral", "technical"]
+    assert [d.prompt_text for d in accepted[6:]] == [
+        "Variant behavioral question #23 for testing purposes.",
+        "Variant technical question #20 for testing purposes.",
     ]
-    kept = _trim_to_shortfall(drafts, missing=2)
-    types = {d.question_type for d in kept}
-    assert types == {"technical", "behavioral"}
+    assert {
+        question_type: sum(d.question_type == question_type for d in accepted)
+        for question_type in ("technical", "system_design", "situational", "behavioral")
+    } == {
+        "technical": 3,
+        "system_design": 2,
+        "situational": 2,
+        "behavioral": 1,
+    }
+
+
+def test_trim_to_shortfall_prioritizes_absent_angle_over_response_order() -> None:
+    accepted = [
+        _draft(0, "technical"),
+        _draft(1, "system_design"),
+        _draft(2, "situational"),
+        _draft(3, "technical"),
+        _draft(4, "system_design"),
+        _draft(5, "situational"),
+    ]
+    candidates = [
+        _draft(10, "technical"),
+        _draft(11, "system_design"),
+        _draft(12, "situational"),
+        _draft(13, "behavioral"),
+    ]
+
+    kept = _trim_to_shortfall(candidates, accepted, missing=2)
+
+    assert [draft.question_type for draft in kept] == ["behavioral", "technical"]
+
+
+def test_trim_to_shortfall_never_exceeds_shortfall() -> None:
+    accepted: list[InterviewQuestionDraft] = []
+    candidates = [_draft(index, "technical") for index in range(3)]
+
+    kept = _trim_to_shortfall(candidates, accepted, missing=2)
+
+    assert len(kept) == 2
 
 
 @pytest.mark.asyncio

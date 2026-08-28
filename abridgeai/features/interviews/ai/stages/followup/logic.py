@@ -30,7 +30,7 @@ import logging
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from abridgeai.ai.llm import LLMGateway, LLMRole
 from abridgeai.ai.prompts import render_prompt
@@ -75,14 +75,15 @@ async def maybe_generate_followup(
     related_chunks: Sequence[Any] | None = None,
     pipeline_run_id: UUID | None = None,
     gateway: LLMGateway | None = None,
+    max_follow_ups_per_question: int = 1,
 ) -> str | None:
     """Return a follow-up question text, or ``None`` when no follow-up is needed.
 
     Returns ``None`` immediately (without an LLM call) when:
 
     * ``student_answer`` is empty after stripping whitespace.
-    * The session/question already has at least one ``role='ai'`` message
-      whose ``metadata_json.kind == 'followup'`` (single-cap rule).
+    * The session/question already has the configured number of ``role='ai'``
+      messages whose ``metadata_json.kind == 'followup'``.
 
     Otherwise calls the gateway with ``LLMRole.INTERVIEW_FOLLOWUP`` and
     returns the parsed follow-up text — or ``None`` when the LLM judges
@@ -96,7 +97,12 @@ async def maybe_generate_followup(
     if not answer:
         return None
 
-    if await _has_existing_followup(db, session_id=session.id, question_id=current_question.id):
+    followup_count = await _existing_followup_count(
+        db,
+        session_id=session.id,
+        question_id=current_question.id,
+    )
+    if followup_count >= max(0, max_follow_ups_per_question):
         return None
 
     chunk_views = [_chunk_for_prompt(chunk) for chunk in related_chunks or []]
@@ -190,24 +196,20 @@ async def _recent_interviewer_questions(
     return [t.strip() for t in reversed(rows) if t and t.strip()]
 
 
-async def _has_existing_followup(
+async def _existing_followup_count(
     db: AsyncSession,
     *,
     session_id: UUID,
     question_id: UUID,
-) -> bool:
-    """Return True when this question already has a persisted follow-up.
+) -> int:
+    """Count persisted follow-ups for one question in a session.
 
-    The single-cap rule (plan §6427) lives here so every caller — production
-    and test — gets the same behaviour. We look for an ``ai`` role message
-    that ties back to a ``session_question`` row pointing at
-    ``question_id``, tagged ``metadata_json.kind = 'followup'``. Question
-    bodies themselves carry ``kind = 'question'`` and are filtered out by
-    the metadata predicate.
+    The transcript is legacy mode's durable per-question counter, so retries
+    and fallback paths cannot reset the configured budget.
     """
 
     stmt = (
-        select(InterviewSessionMessage.id)
+        select(func.count(InterviewSessionMessage.id))
         .join(
             InterviewSessionQuestion,
             InterviewSessionMessage.session_question_id == InterviewSessionQuestion.id,
@@ -218,10 +220,9 @@ async def _has_existing_followup(
             InterviewSessionQuestion.interview_question_id == question_id,
             InterviewSessionMessage.metadata_json["kind"].astext == "followup",
         )
-        .limit(1)
     )
     result = await db.execute(stmt)
-    return result.scalar_one_or_none() is not None
+    return int(result.scalar_one() or 0)
 
 
 def _chunk_for_prompt(chunk: object) -> dict[str, Any]:

@@ -409,7 +409,8 @@ async def load_native_setup(
         # test constructing a config-less session — keeps the shipped behaviour.
         max_follow_ups_per_question=(
             getattr(config, "max_follow_ups_per_question", None)
-            or DEFAULT_MAX_FOLLOWUPS_PER_QUESTION
+            if getattr(config, "max_follow_ups_per_question", None) is not None
+            else DEFAULT_MAX_FOLLOWUPS_PER_QUESTION
         ),
         max_hints_per_question=getattr(config, "max_hints_per_question", None) or 3,
         below_closing_threshold=(
