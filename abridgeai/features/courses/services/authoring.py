@@ -86,6 +86,7 @@ from abridgeai.features.courses.schemas import (
 )
 from abridgeai.features.identity.models import StorageObject
 from abridgeai.features.interviews.api import public as interviews_public
+from abridgeai.features.progress.api import public as progress_api
 from abridgeai.features.quizzes.api import public as quizzes_public
 from abridgeai.infrastructure.s3 import create_stream_url, put_object_bytes
 
@@ -1500,6 +1501,12 @@ async def get_teacher_dashboard_stats(
         db, course_ids
     )
     review = await authoring_queries.count_review_queue_and_retention_for_courses(db, course_ids)
+    # Cross-feature read: the risk definition (thresholds + new-enrolment
+    # grace period) lives in progress and is administrator-tunable, so the
+    # dashboard asks that engine rather than re-deriving a second opinion.
+    students_needing_attention = await progress_api.count_students_needing_attention(
+        db, course_ids
+    )
     return TeacherDashboardStats(
         draft_courses=draft_courses,
         ungraded_quizzes=ungraded_quizzes,
@@ -1512,6 +1519,7 @@ async def get_teacher_dashboard_stats(
         students_below_ef_threshold=review.students_below_ef_threshold,
         avg_retention_ef=review.avg_retention_ef,
         cards_overdue=review.cards_overdue,
+        students_needing_attention=students_needing_attention,
     )
 
 

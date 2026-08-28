@@ -41,15 +41,21 @@ class LessonProgressDTO(_BaseDTO):
 class AtRiskStudentDTO(_BaseDTO):
     """Aggregated at-risk row for a course's roster.
 
-    Wraps the result of ``progress/queries/sql/at_risk_students.sql``.
-    A row is "at risk" when last engagement is NULL, older than 7 days,
-    or the rolling completion percent is below 30.
+    Projects the scored output of ``progress.services.monitoring``, not the
+    raw SQL: a row reaches a cross-feature caller only after the tunable
+    thresholds and the new-enrolment grace period have been applied.
+
+    ``primary_reason`` is the highest-severity reason's human-readable
+    detail (it names the threshold that fired); ``signal_count`` is how many
+    reasons fired in total, so a caller can render "inactive 12 days
+    (threshold: 7) +1 more" without receiving the whole list.
     """
 
     user_id: UUID
-    last_engagement_at: datetime | None
     completion_percent: Decimal
     days_since_last_engagement: float | None
+    primary_reason: str | None
+    signal_count: int
 
 
 __all__ = [

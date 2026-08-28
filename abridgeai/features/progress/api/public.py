@@ -12,14 +12,14 @@ projection cannot drift from the dashboard projection.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from abridgeai.features.progress.models import LessonProgress
-from abridgeai.features.progress.queries.analytics import list_at_risk_rows
-from abridgeai.features.progress.services import reporting
+from abridgeai.features.progress.services import monitoring, reporting
 
 from ._dto import AtRiskStudentDTO, LessonProgressDTO
 
@@ -50,22 +50,42 @@ async def get_at_risk_students(
 ) -> list[AtRiskStudentDTO]:
     """Return the at-risk roster for ``course_id``.
 
-    Wraps :func:`abridgeai.features.progress.queries.analytics.list_at_risk_rows`
-    (which reads ``progress/queries/sql/at_risk_students.sql``) and
-    re-projects each row through :class:`AtRiskStudentDTO`. The
-    underlying SQL stays the source of truth for the at-risk
-    definition; this surface is purely a typed pass-through.
+    Delegates to :func:`progress.services.monitoring.get_at_risk_students`
+    rather than to the raw query, so cross-feature callers get rows scored
+    against the SAME administrator-tunable thresholds and grace period as
+    the teacher-facing surfaces. Calling the query directly would mean
+    picking thresholds here, which is exactly the drift this module exists
+    to prevent.
     """
-    rows = await list_at_risk_rows(db, course_id)
+    result = await monitoring.get_at_risk_students(db, course_id)
     return [
         AtRiskStudentDTO(
-            user_id=row.user_id,
-            last_engagement_at=row.last_engagement_at,
-            completion_percent=row.completion_percent,
-            days_since_last_engagement=row.days_since_last_engagement,
+            user_id=student.user_id,
+            completion_percent=student.completion_percent,
+            days_since_last_engagement=(
+                float(student.days_since_last_engagement)
+                if student.days_since_last_engagement is not None
+                else None
+            ),
+            primary_reason=student.reasons[0].detail if student.reasons else None,
+            signal_count=len(student.reasons),
         )
-        for row in rows
+        for student in result.students
     ]
+
+
+async def count_students_needing_attention(
+    db: AsyncSession,
+    course_ids: Sequence[UUID],
+) -> int:
+    """DISTINCT students at risk across ``course_ids``.
+
+    Backs the teacher dashboard's headline "students needing attention"
+    figure. Exposed as a count rather than as rows because the caller needs
+    a number and shipping the roster across a feature boundary would leak
+    per-student data no aggregate tile can use.
+    """
+    return await monitoring.count_students_needing_attention(db, course_ids)
 
 
 async def get_course_progress_for_user(
@@ -92,6 +112,7 @@ async def get_course_progress_for_user(
 __all__ = [
     "AtRiskStudentDTO",
     "LessonProgressDTO",
+    "count_students_needing_attention",
     "get_at_risk_students",
     "get_course_progress_for_user",
     "get_lesson_progress",

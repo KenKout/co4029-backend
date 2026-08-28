@@ -231,6 +231,15 @@ class TeacherDashboardStats(BaseModel):
     # In-scope cards whose due_at is already in the past.
     cards_overdue: int = 0
 
+    # --- Student risk -------------------------------------------------
+    # DISTINCT students with at least one active risk signal (no engagement,
+    # inactivity past the threshold, or low completion) across the caller's
+    # authorable courses. Produced by the progress feature's risk engine via
+    # its public API -- deliberately NOT the same population as
+    # ``students_below_ef_threshold``, which is a spaced-repetition-only
+    # proxy. One person struggling in three courses counts once.
+    students_needing_attention: int = 0
+
 
 class ReviewQueueItem(BaseModel):
     """One navigable group inside a review-queue category."""

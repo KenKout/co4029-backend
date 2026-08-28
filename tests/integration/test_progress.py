@@ -391,6 +391,23 @@ async def test_at_risk(
     stale_engagement_id = uuid.uuid4()
     eight_days_ago = datetime.now(tz=UTC) - timedelta(days=8)
     async with engine.begin() as conn:
+        # Push the enrolment outside the new-enrolment grace period
+        # (``progress.at_risk_grace_period_days``, default 14). The fixture
+        # enrols at NOW(), and a student inside grace is deliberately never
+        # flagged -- without this the stale engagement below would be
+        # invisible and the test would be asserting the grace rule, not the
+        # inactivity rule it is named for.
+        await conn.execute(
+            text(
+                "UPDATE course_enrollments SET enrolled_at = :t "
+                "WHERE course_id = :c AND student_id = :s"
+            ),
+            {
+                "t": datetime.now(tz=UTC) - timedelta(days=60),
+                "c": seeded_users.course_id,
+                "s": seeded_users.student_id,
+            },
+        )
         await conn.execute(
             text(
                 "INSERT INTO material_engagement "
@@ -421,7 +438,48 @@ async def test_at_risk(
     ]
     assert matched, "expected student flagged as at-risk"
     codes = {r["code"] for r in matched[0]["reasons"]}
-    assert codes & {"inactive_7d", "low_completion", "no_engagement"}
+    assert codes & {"inactive", "low_completion", "no_engagement"}
+
+
+async def test_at_risk_respects_new_enrolment_grace_period(
+    client: httpx.AsyncClient,
+    engine: AsyncEngine,
+    scenario: dict[str, uuid.UUID],
+    seeded_users: SeededUsers,
+    admin_bearer: str,
+) -> None:
+    """FR-025: a freshly enrolled student is not reported at risk.
+
+    This student trips the completion rule outright (no lesson progress at
+    all, so 0% < 30%) AND the no-engagement rule. Before the grace period
+    existed they were flagged the moment they enrolled, which is the false
+    positive that made the metric untrustworthy: "at risk" fired on people
+    whose only failing was having just joined.
+
+    The enrolment is left at the fixture's NOW() on purpose -- that is the
+    condition under test.
+    """
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "UPDATE course_enrollments SET enrolled_at = :t "
+                "WHERE course_id = :c AND student_id = :s"
+            ),
+            {
+                "t": datetime.now(tz=UTC) - timedelta(days=1),
+                "c": seeded_users.course_id,
+                "s": seeded_users.student_id,
+            },
+        )
+
+    response = await client.get(
+        f"/api/v1/teacher/courses/{scenario['course_id']}/progress/at-risk",
+        headers=_auth(admin_bearer),
+    )
+
+    assert response.status_code == 200, response.text
+    flagged = {s["user_id"] for s in response.json()["students"]}
+    assert str(seeded_users.student_id) not in flagged
 
 
 # ---------------------------------------------------------------------------
