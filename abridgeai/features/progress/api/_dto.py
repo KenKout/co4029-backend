@@ -81,8 +81,24 @@ class StudentNeedingAttentionDTO(_BaseDTO):
     severity: str
 
 
+class CourseHealthSignalsDTO(_BaseDTO):
+    """Progress-owned health signals for one course.
+
+    ``at_risk_students`` counts DISTINCT students in this course with at
+    least one active signal, so it is directly comparable with
+    ``student_count`` — "8 of 40" rather than a signal tally that could
+    exceed the roster.
+    """
+
+    course_id: UUID
+    student_count: int
+    avg_completion_percent: float
+    at_risk_students: int
+
+
 __all__ = [
     "AtRiskStudentDTO",
+    "CourseHealthSignalsDTO",
     "StudentNeedingAttentionDTO",
     "LessonProgressDTO",
 ]

@@ -37,6 +37,7 @@ from abridgeai.features.courses.schemas.assignment import (
 from abridgeai.features.courses.schemas.authoring import (
     CourseAuthoring,
     CourseContentAuthoring,
+    CourseHealthRow,
     CourseLearningOutcomeAuthoring,
     CourseLearningOutcomeCreate,
     CourseLearningOutcomeUpdate,
@@ -97,6 +98,7 @@ __all__ = [
     "CourseReadiness",
     "CourseArchiveRequest",
     "CourseAuthoring",
+    "CourseHealthRow",
     "ReviewQueueItem",
     "StudentNeedingAttention",
     "TeacherDashboardStats",

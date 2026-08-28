@@ -241,6 +241,42 @@ class TeacherDashboardStats(BaseModel):
     students_needing_attention: int = 0
 
 
+class CourseHealthRow(BaseModel):
+    """One course in the dashboard's Course Health table.
+
+    Replaces the course gallery, which gave every course equal visual
+    weight and buried the signals in badges. Comparison is the point: the
+    columns exist so a teacher can rank their teaching load and see which
+    course to open, which a grid of thumbnails cannot answer.
+
+    Nullable numbers are deliberate and mean "no data", never zero:
+    ``avg_progress_percent`` is ``None`` when nobody is enrolled, and
+    ``pass_rate_percent`` when nobody has completed a published quiz. Zero
+    means they tried and did not get there -- rendering the two alike would
+    accuse an unassessed course of total failure.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    course_id: UUID
+    title: str
+    slug: str
+    status: str
+    students: int = 0
+    avg_progress_percent: float | None = None
+    at_risk_students: int = 0
+    pass_rate_percent: float | None = None
+    #: Student-quiz pairs behind ``pass_rate_percent``. The UI withholds a
+    #: percentage computed from a handful of attempts (FR-054).
+    pass_sample: int = 0
+    pending_review: int = 0
+    last_activity_at: datetime | None = None
+    #: "high" / "medium" / "none" -- the course-level roll-up. Explained by
+    #: ``severity_reason`` rather than by colour alone (FR-043).
+    severity: str = "none"
+    severity_reason: str | None = None
+
+
 class StudentNeedingAttention(BaseModel):
     """One (student, course) risk row for the teacher dashboard.
 

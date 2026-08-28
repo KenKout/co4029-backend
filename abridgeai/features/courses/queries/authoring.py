@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import datetime
 from importlib import resources
 from typing import Any, NamedTuple
@@ -25,6 +26,12 @@ from abridgeai.features.courses.models import (
 )
 from abridgeai.features.enrollments.models import Enrollment
 from abridgeai.features.identity.models import StorageObject, User, UserProfile
+
+_COURSE_HEALTH_SQL = text(
+    resources.files("abridgeai.features.courses.queries.sql")
+    .joinpath("course_health_metrics.sql")
+    .read_text(encoding="utf-8")
+)
 
 _ROSTER_WITH_PROGRESS_SQL = text(
     resources.files("abridgeai.features.courses.queries.sql")
@@ -1379,3 +1386,46 @@ __all__ = [
     "next_module_item_position",
     "replace_module_prerequisites",
 ]
+
+
+@dataclass(frozen=True)
+class CourseHealthMetricsRow:
+    """Quiz outcome + activity metrics for one course.
+
+    ``pass_rate_percent`` is ``None`` when no student has completed a
+    published quiz — distinct from 0.0, which means they sat them and
+    failed. Rendering the two the same would accuse a course with no
+    assessments yet of a total failure rate.
+    """
+
+    course_id: UUID
+    pass_rate_percent: float | None
+    pass_sample: int
+    last_activity_at: datetime | None
+
+
+async def course_health_metrics_for_courses(
+    db: AsyncSession, course_ids: list[UUID]
+) -> dict[UUID, CourseHealthMetricsRow]:
+    """Batch pass-rate + last-activity metrics, keyed by course id.
+
+    One statement for every course (see ``sql/course_health_metrics.sql``);
+    the table renders a whole teaching load, so a per-course query would be
+    an N+1 on the dashboard's critical path.
+    """
+    if not course_ids:
+        return {}
+    rows = await db.execute(_COURSE_HEALTH_SQL, {"course_ids": course_ids})
+    return {
+        row.course_id: CourseHealthMetricsRow(
+            course_id=row.course_id,
+            pass_rate_percent=(
+                float(row.pass_rate_percent)
+                if row.pass_rate_percent is not None
+                else None
+            ),
+            pass_sample=int(row.pass_sample),
+            last_activity_at=row.last_activity_at,
+        )
+        for row in rows.all()
+    }

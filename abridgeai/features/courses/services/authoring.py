@@ -67,6 +67,7 @@ from abridgeai.features.courses.queries import (
 from abridgeai.features.courses.schemas import (
     CourseAuthoring,
     CourseCreate,
+    CourseHealthRow,
     CourseLearningOutcomeAuthoring,
     CourseLearningOutcomeCreate,
     CourseLearningOutcomeUpdate,
@@ -1583,6 +1584,103 @@ async def list_students_needing_attention(
             )
         )
     return out
+
+
+def _course_severity(
+    *, at_risk: int, students: int, pending_review: int, pass_rate: float | None
+) -> tuple[str, str | None]:
+    """Roll a course's signals into one band, and say why.
+
+    FR-043: severity must be explainable, not just coloured. The returned
+    reason names the single fact that set the band, so a teacher can see
+    "12 of 40 students at risk" rather than infer meaning from a red dot.
+
+    Precedence is people first: a roster in trouble outranks a review
+    backlog, which is work the teacher can do whenever. The at-risk band
+    is proportional rather than absolute -- 5 at-risk students is a crisis
+    in a class of 10 and unremarkable in a class of 400.
+    """
+    if students > 0 and at_risk > 0:
+        share = at_risk / students
+        if share >= 0.25:
+            return "high", f"{at_risk} of {students} students at risk"
+        return "medium", f"{at_risk} of {students} students at risk"
+    if pass_rate is not None and pass_rate < 50:
+        return "medium", f"Pass rate {round(pass_rate)}%"
+    if pending_review > 0:
+        return "medium", f"{pending_review} items awaiting review"
+    return "none", None
+
+
+async def list_course_health(
+    db: AsyncSession, *, user: CurrentUser
+) -> list[CourseHealthRow]:
+    """The caller's courses as comparable health rows, worst first.
+
+    Every number is sourced from the feature that owns it -- progress for
+    roster size, average completion and at-risk counts, this feature for
+    pass rate, activity and the review backlog -- so the table cannot
+    disagree with the student list rendered above it on the same page.
+
+    Courses with no active enrolment carry ``avg_progress_percent = None``
+    rather than 0.0, and sort last: an empty course is not a struggling
+    one.
+    """
+    courses = await _list_authorable_courses(db, user)
+    if not courses:
+        return []
+    course_ids = [course.id for course in courses]
+
+    signals = await progress_api.get_course_health_signals(db, course_ids)
+    metrics = await authoring_queries.course_health_metrics_for_courses(db, course_ids)
+    pending = await authoring_queries.count_pending_review_by_course(db, course_ids)
+
+    rows: list[CourseHealthRow] = []
+    for course in courses:
+        signal = signals.get(course.id)
+        metric = metrics.get(course.id)
+        at_risk = signal.at_risk_students if signal else 0
+        students = signal.student_count if signal else 0
+        pending_review = pending.get(course.id, 0)
+        pass_rate = metric.pass_rate_percent if metric else None
+        severity, reason = _course_severity(
+            at_risk=at_risk,
+            students=students,
+            pending_review=pending_review,
+            pass_rate=pass_rate,
+        )
+        rows.append(
+            CourseHealthRow(
+                course_id=course.id,
+                title=course.title,
+                slug=course.slug,
+                status=course.status,
+                students=students,
+                avg_progress_percent=(
+                    signal.avg_completion_percent if signal else None
+                ),
+                at_risk_students=at_risk,
+                pass_rate_percent=pass_rate,
+                pass_sample=metric.pass_sample if metric else 0,
+                pending_review=pending_review,
+                last_activity_at=metric.last_activity_at if metric else None,
+                severity=severity,
+                severity_reason=reason,
+            )
+        )
+
+    # FR-042: default sort is "needs attention". Within a band, the course
+    # with the larger at-risk share comes first -- 8 of 20 outranks 8 of 200.
+    order = {"high": 0, "medium": 1, "none": 2}
+    rows.sort(
+        key=lambda r: (
+            order[r.severity],
+            -(r.at_risk_students / r.students if r.students else 0),
+            -r.pending_review,
+            r.title.lower(),
+        )
+    )
+    return rows
 
 
 _REVIEW_QUEUE_LISTERS = {

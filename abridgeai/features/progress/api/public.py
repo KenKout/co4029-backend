@@ -19,9 +19,15 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from abridgeai.features.progress.models import LessonProgress
+from abridgeai.features.progress.queries import analytics
 from abridgeai.features.progress.services import monitoring, reporting
 
-from ._dto import AtRiskStudentDTO, LessonProgressDTO, StudentNeedingAttentionDTO
+from ._dto import (
+    AtRiskStudentDTO,
+    CourseHealthSignalsDTO,
+    LessonProgressDTO,
+    StudentNeedingAttentionDTO,
+)
 
 
 async def get_lesson_progress(
@@ -114,6 +120,37 @@ async def list_students_needing_attention(
     ]
 
 
+async def get_course_health_signals(
+    db: AsyncSession,
+    course_ids: Sequence[UUID],
+) -> dict[UUID, CourseHealthSignalsDTO]:
+    """Roster size, average completion and at-risk count per course.
+
+    Backs the dashboard's Course Health table. Both numbers come from
+    progress rather than being recomputed by the caller, so the table's
+    "Avg progress" and "At risk" columns cannot disagree with the risk
+    engine that produced the student list on the same page.
+
+    Courses with no active enrolments are omitted; the caller decides how
+    to render "nobody is enrolled yet", which is not the same as zero
+    progress.
+    """
+    summaries = await analytics.summarize_progress_by_course(db, course_ids)
+    at_risk = await monitoring.list_students_needing_attention(db, course_ids)
+    per_course: dict[UUID, set[UUID]] = {}
+    for row in at_risk:
+        per_course.setdefault(row.course_id, set()).add(row.user_id)
+    return {
+        course_id: CourseHealthSignalsDTO(
+            course_id=course_id,
+            student_count=summary.student_count,
+            avg_completion_percent=summary.avg_completion_percent,
+            at_risk_students=len(per_course.get(course_id, ())),
+        )
+        for course_id, summary in summaries.items()
+    }
+
+
 async def get_course_progress_for_user(
     db: AsyncSession,
     *,
@@ -137,10 +174,12 @@ async def get_course_progress_for_user(
 
 __all__ = [
     "AtRiskStudentDTO",
+    "CourseHealthSignalsDTO",
     "LessonProgressDTO",
     "StudentNeedingAttentionDTO",
     "count_students_needing_attention",
     "get_at_risk_students",
+    "get_course_health_signals",
     "get_course_progress_for_user",
     "get_lesson_progress",
     "list_students_needing_attention",

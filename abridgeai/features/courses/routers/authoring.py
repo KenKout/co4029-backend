@@ -63,6 +63,7 @@ from abridgeai.features.courses.schemas import (
     CourseAuthoring,
     CourseContentAuthoring,
     CourseCreate,
+    CourseHealthRow,
     CourseLearningOutcomeAuthoring,
     CourseLearningOutcomeCreate,
     CourseLearningOutcomeUpdate,
@@ -388,6 +389,24 @@ async def get_teacher_dashboard_stats(
     enforced in the service via owner/assignment match.
     """
     return await authoring_service.get_teacher_dashboard_stats(db, user=current_user)
+
+
+@router.get("/dashboard/course-health", response_model=list[CourseHealthRow])
+async def list_course_health(
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_AUTHORING_LIST)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> list[CourseHealthRow]:
+    """The caller's courses as comparable health rows, worst first.
+
+    Backs the dashboard's Course Health table, which replaces the course
+    gallery: the gallery gave every course equal weight and hid the
+    signals in badges, so it could not answer "which of my courses needs
+    me today".
+
+    Same lax permission as the courses list — scope is enforced in the
+    service via owner/assignment match.
+    """
+    return await authoring_service.list_course_health(db, user=current_user)
 
 
 @router.get(

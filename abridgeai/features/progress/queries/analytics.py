@@ -21,6 +21,42 @@ _AT_RISK_SQL = text(
 )
 
 
+_COURSE_PROGRESS_SQL = text(
+    resources.files("abridgeai.features.progress.queries.sql")
+    .joinpath("course_progress_summary.sql")
+    .read_text(encoding="utf-8")
+)
+
+
+@dataclass(frozen=True)
+class CourseProgressSummaryRow:
+    course_id: UUID
+    student_count: int
+    avg_completion_percent: float
+
+
+async def summarize_progress_by_course(
+    db: AsyncSession, course_ids: Sequence[UUID]
+) -> dict[UUID, CourseProgressSummaryRow]:
+    """Average lesson completion per course, keyed by course id.
+
+    Courses with no active enrolments are absent from the mapping rather
+    than present at 0%: "nobody enrolled" and "everybody at zero" are
+    different facts and the caller renders them differently.
+    """
+    if not course_ids:
+        return {}
+    rows = await db.execute(_COURSE_PROGRESS_SQL, {"course_ids": list(course_ids)})
+    return {
+        row.course_id: CourseProgressSummaryRow(
+            course_id=row.course_id,
+            student_count=int(row.student_count),
+            avg_completion_percent=float(row.avg_completion_percent),
+        )
+        for row in rows.all()
+    }
+
+
 @dataclass(frozen=True)
 class AtRiskRow:
     """One at-risk roster row.
@@ -105,4 +141,10 @@ async def list_at_risk_rows(
     )
 
 
-__all__ = ["AtRiskRow", "list_at_risk_rows", "list_at_risk_rows_for_courses"]
+__all__ = [
+    "AtRiskRow",
+    "CourseProgressSummaryRow",
+    "list_at_risk_rows",
+    "list_at_risk_rows_for_courses",
+    "summarize_progress_by_course",
+]
