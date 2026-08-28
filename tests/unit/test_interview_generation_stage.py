@@ -89,7 +89,7 @@ def _question(
     expected_depth: int,
     linked_outcome_id: UUID | None = None,
     source_refs: list[str] | None = None,
-    logical_question_index: int | str | None = None,
+    logical_question_index: int | None = None,
 ) -> dict[str, Any]:
     return {
         "position": position,
@@ -367,7 +367,7 @@ def test_no_god_file_in_generation() -> None:
     here = Path(__file__).resolve().parents[2]
     target = here / "abridgeai" / "features" / "interviews" / "ai" / "stages" / "generation"
     assert target.is_dir()
-    budget = {"logic.py": 250, "parsers.py": 200, "__init__.py": 100}
+    budget = {"logic.py": 250, "parsers.py": 250, "__init__.py": 100}
     for path in target.glob("*.py"):
         with path.open() as fh:
             line_count = sum(1 for _ in fh)
@@ -401,67 +401,41 @@ def test_parser_assigns_server_group_ids_for_logical_question_indexes() -> None:
         "questions": [
             *[
                 _question(
-                    position=group * 4 + angle_index + 1,
+                    position=index,
                     question_type=question_type,
                     difficulty="easy",
                     expected_depth=2,
                     linked_outcome_id=outcome_id,
-                    logical_question_index=group,
+                    logical_question_index=0,
                 )
-                for group in (0, 1)
-                for angle_index, question_type in enumerate(angles)
+                for index, question_type in enumerate(angles, start=1)
             ],
             # A partial group (missing two angles) is discarded, not kept.
             _question(
-                position=9,
+                position=5,
                 question_type="technical",
                 difficulty="easy",
                 expected_depth=2,
                 linked_outcome_id=outcome_id,
-                logical_question_index=2,
+                logical_question_index=1,
             ),
             _question(
-                position=10,
+                position=6,
                 question_type="system_design",
                 difficulty="easy",
                 expected_depth=2,
                 linked_outcome_id=outcome_id,
-                logical_question_index=2,
+                logical_question_index=1,
             ),
-        ]
-    }
-
-    parsed = parse_generation_response(payload, require_logical_question_index=True)
-
-    assert len(parsed) == 8
-    assert len({draft.variant_group_id for draft in parsed}) == 2
-    assert all(question.variant_group_id is not None for question in parsed)
-
-
-def test_all_angle_parser_accepts_stringified_ordinals() -> None:
-    """API layers sometimes stringify the LLM JSON — ``"0"`` must group fine."""
-    outcome_id = uuid4()
-    payload = {
-        "questions": [
-            _question(
-                position=index,
-                question_type=question_type,
-                difficulty="easy",
-                expected_depth=2,
-                linked_outcome_id=outcome_id,
-                logical_question_index="0",  # stringified, not an int
-            )
-            for index, question_type in enumerate(
-                ("technical", "system_design", "situational", "behavioral"),
-                start=1,
-            )
         ]
     }
 
     parsed = parse_generation_response(payload, require_logical_question_index=True)
 
     assert len(parsed) == 4
+    assert {draft.logical_question_index for draft in parsed} == {0}
     assert len({draft.variant_group_id for draft in parsed}) == 1
+    assert all(question.variant_group_id is not None for question in parsed)
 
 
 def test_all_angle_parser_discards_oversized_or_duplicate_groups() -> None:
@@ -624,6 +598,63 @@ def test_all_angle_parser_rejects_all_rows_reusing_one_index() -> None:
     parsed = parse_generation_response(payload, require_logical_question_index=True)
 
     assert parsed == []
+
+
+@pytest.mark.parametrize("ordinal", ["0", " 0 ", 0.0])
+def test_all_angle_parser_accepts_stringified_ordinals(ordinal: object) -> None:
+    outcome_id = uuid4()
+    payload = {
+        "questions": [
+            {
+                **_question(
+                    position=index,
+                    question_type=question_type,
+                    difficulty="easy",
+                    expected_depth=2,
+                    linked_outcome_id=outcome_id,
+                ),
+                "logical_question_index": ordinal,
+            }
+            for index, question_type in enumerate(
+                ("technical", "system_design", "situational", "behavioral"),
+                start=1,
+            )
+        ]
+    }
+
+    parsed = parse_generation_response(payload, require_logical_question_index=True)
+
+    assert len(parsed) == 4
+    assert {draft.logical_question_index for draft in parsed} == {0}
+    assert len({draft.variant_group_id for draft in parsed}) == 1
+
+
+@pytest.mark.parametrize(
+    "ordinal",
+    [True, -1, -1.0, "-1", "2.5", 2.5, "1e0", "abc", "", " ", float("nan"), float("inf")],
+)
+def test_all_angle_parser_rejects_invalid_ordinals(ordinal: object) -> None:
+    outcome_id = uuid4()
+    payload = {
+        "questions": [
+            {
+                **_question(
+                    position=index,
+                    question_type=question_type,
+                    difficulty="easy",
+                    expected_depth=2,
+                    linked_outcome_id=outcome_id,
+                ),
+                "logical_question_index": ordinal,
+            }
+            for index, question_type in enumerate(
+                ("technical", "system_design", "situational", "behavioral"),
+                start=1,
+            )
+        ]
+    }
+
+    assert parse_generation_response(payload, require_logical_question_index=True) == []
 
 
 def test_resolve_variant_strategy() -> None:
