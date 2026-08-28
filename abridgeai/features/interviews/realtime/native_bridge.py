@@ -32,6 +32,7 @@ from abridgeai.features.interviews.orchestrator import turn_perception
 from abridgeai.features.interviews.orchestrator.coverage import is_provisionally_sufficient
 from abridgeai.features.interviews.orchestrator.decision import (
     DEFAULT_MAX_FOLLOWUPS_PER_QUESTION,
+    MAX_CANNOT_ANSWER_HINTS,
     DecisionInputs,
 )
 from abridgeai.features.interviews.orchestrator.interviewer_identity import identity_from_config
@@ -412,7 +413,11 @@ async def load_native_setup(
             if getattr(config, "max_follow_ups_per_question", None) is not None
             else DEFAULT_MAX_FOLLOWUPS_PER_QUESTION
         ),
-        max_hints_per_question=getattr(config, "max_hints_per_question", None) or 3,
+        max_hints_per_question=(
+            getattr(config, "max_hints_per_question", None)
+            if getattr(config, "max_hints_per_question", None) is not None
+            else MAX_CANNOT_ANSWER_HINTS
+        ),
         below_closing_threshold=(
             time_fraction is not None and time_fraction <= _CLOSING_TIME_FRACTION
         ),

@@ -42,6 +42,9 @@ from abridgeai.features.interviews.models import (
     InterviewSessionMessage,
     InterviewSessionQuestion,
 )
+from abridgeai.features.interviews.orchestrator.decision import (
+    DEFAULT_MAX_FOLLOWUPS_PER_QUESTION,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -75,7 +78,7 @@ async def maybe_generate_followup(
     related_chunks: Sequence[Any] | None = None,
     pipeline_run_id: UUID | None = None,
     gateway: LLMGateway | None = None,
-    max_follow_ups_per_question: int = 1,
+    max_follow_ups_per_question: int = DEFAULT_MAX_FOLLOWUPS_PER_QUESTION,
 ) -> str | None:
     """Return a follow-up question text, or ``None`` when no follow-up is needed.
 

@@ -396,47 +396,208 @@ def test_parser_accepts_system_design() -> None:
 
 def test_parser_assigns_server_group_ids_for_logical_question_indexes() -> None:
     outcome_id = uuid4()
+    angles = ("technical", "system_design", "situational", "behavioral")
     payload = {
         "questions": [
+            *[
+                _question(
+                    position=group * 4 + angle_index + 1,
+                    question_type=question_type,
+                    difficulty="easy",
+                    expected_depth=2,
+                    linked_outcome_id=outcome_id,
+                    logical_question_index=group,
+                )
+                for group in (0, 1)
+                for angle_index, question_type in enumerate(angles)
+            ],
+            # A partial group (missing two angles) is discarded, not kept.
             _question(
-                position=1,
+                position=9,
                 question_type="technical",
                 difficulty="easy",
                 expected_depth=2,
                 linked_outcome_id=outcome_id,
-                logical_question_index=0,
+                logical_question_index=2,
             ),
             _question(
-                position=2,
+                position=10,
                 question_type="system_design",
                 difficulty="easy",
                 expected_depth=2,
                 linked_outcome_id=outcome_id,
-                logical_question_index=0,
-            ),
-            _question(
-                position=3,
-                question_type="behavioral",
-                difficulty="easy",
-                expected_depth=2,
-                linked_outcome_id=outcome_id,
-                logical_question_index=1,
-            ),
-            _question(
-                position=4,
-                question_type="situational",
-                difficulty="easy",
-                expected_depth=2,
+                logical_question_index=2,
             ),
         ]
     }
 
     parsed = parse_generation_response(payload, require_logical_question_index=True)
 
-    assert len(parsed) == 3
-    assert parsed[0].variant_group_id == parsed[1].variant_group_id
-    assert parsed[0].variant_group_id != parsed[2].variant_group_id
+    assert len(parsed) == 8
+    assert len({draft.variant_group_id for draft in parsed}) == 2
     assert all(question.variant_group_id is not None for question in parsed)
+
+
+def test_all_angle_parser_discards_oversized_or_duplicate_groups() -> None:
+    outcome_id = uuid4()
+    payload = {
+        "questions": [
+            *[
+                _question(
+                    position=index,
+                    question_type=question_type,
+                    difficulty="easy",
+                    expected_depth=2,
+                    linked_outcome_id=outcome_id,
+                    logical_question_index=0,
+                )
+                for index, question_type in enumerate(
+                    ("technical", "system_design", "situational", "behavioral", "technical"),
+                    start=1,
+                )
+            ],
+            *[
+                _question(
+                    position=10 + index,
+                    question_type=question_type,
+                    difficulty="easy",
+                    expected_depth=2,
+                    linked_outcome_id=outcome_id,
+                    logical_question_index=1,
+                )
+                for index, question_type in enumerate(
+                    ("technical", "system_design", "situational", "behavioral"),
+                )
+            ],
+        ]
+    }
+
+    parsed = parse_generation_response(payload, require_logical_question_index=True)
+
+    assert len(parsed) == 4
+    assert {draft.logical_question_index for draft in parsed} == {1}
+    assert len({draft.variant_group_id for draft in parsed}) == 1
+
+
+def test_all_angle_parser_caps_complete_interleaved_groups() -> None:
+    outcome_id = uuid4()
+    angles = ("technical", "system_design", "situational", "behavioral")
+    payload = {
+        "questions": [
+            *[
+                _question(
+                    position=angle_index * 2 + group_index + 1,
+                    question_type=question_type,
+                    difficulty="easy",
+                    expected_depth=2,
+                    linked_outcome_id=outcome_id,
+                    logical_question_index=group_index,
+                )
+                for angle_index, question_type in enumerate(angles)
+                for group_index in (0, 1)
+            ],
+            _question(
+                position=9,
+                question_type="technical",
+                difficulty="easy",
+                expected_depth=2,
+                linked_outcome_id=outcome_id,
+                logical_question_index=2,
+            ),
+            _question(
+                position=10,
+                question_type="system_design",
+                difficulty="easy",
+                expected_depth=2,
+                linked_outcome_id=outcome_id,
+                logical_question_index=2,
+            ),
+        ]
+    }
+
+    parsed = parse_generation_response(
+        payload,
+        max_questions=8,
+        require_logical_question_index=True,
+    )
+
+    assert len(parsed) == 8
+    by_group: dict[object, list[InterviewQuestionDraft]] = {}
+    for draft in parsed:
+        by_group.setdefault(draft.variant_group_id, []).append(draft)
+    assert sorted(len(members) for members in by_group.values()) == [4, 4]
+    assert all(
+        len({member.question_type for member in members}) == 4 for members in by_group.values()
+    )
+
+
+def test_all_angle_parser_discards_partial_group_without_slicing() -> None:
+    outcome_id = uuid4()
+    payload = {
+        "questions": [
+            *[
+                _question(
+                    position=index,
+                    question_type=question_type,
+                    difficulty="easy",
+                    expected_depth=2,
+                    linked_outcome_id=outcome_id,
+                    logical_question_index=0,
+                )
+                for index, question_type in enumerate(
+                    ("technical", "system_design", "situational", "behavioral"),
+                )
+            ],
+            _question(
+                position=5,
+                question_type="technical",
+                difficulty="easy",
+                expected_depth=2,
+                linked_outcome_id=outcome_id,
+                logical_question_index=1,
+            ),
+            _question(
+                position=6,
+                question_type="system_design",
+                difficulty="easy",
+                expected_depth=2,
+                linked_outcome_id=outcome_id,
+                logical_question_index=1,
+            ),
+        ]
+    }
+
+    parsed = parse_generation_response(
+        payload,
+        max_questions=5,
+        require_logical_question_index=True,
+    )
+
+    assert len(parsed) == 4
+    assert {draft.logical_question_index for draft in parsed} == {0}
+
+
+def test_all_angle_parser_rejects_all_rows_reusing_one_index() -> None:
+    outcome_id = uuid4()
+    payload = {
+        "questions": [
+            _question(
+                position=index,
+                question_type=("technical", "system_design", "situational", "behavioral")[
+                    index % 4
+                ],
+                difficulty="easy",
+                expected_depth=2,
+                linked_outcome_id=outcome_id,
+                logical_question_index=0,
+            )
+            for index in range(8)
+        ]
+    }
+
+    parsed = parse_generation_response(payload, require_logical_question_index=True)
+
+    assert parsed == []
 
 
 def test_resolve_variant_strategy() -> None:

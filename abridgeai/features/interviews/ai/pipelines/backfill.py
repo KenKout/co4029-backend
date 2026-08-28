@@ -63,43 +63,46 @@ def validation_summary(verdicts: list[Verdict]) -> dict[str, Any]:
     }
 
 
-def _trim_to_shortfall(
+def _accepted_complete_groups(
     drafts: list[InterviewQuestionDraft],
-    accepted: list[InterviewQuestionDraft],
+    verdicts: list[Verdict],
+    seen_prompts: set[str],
+) -> list[list[InterviewQuestionDraft]]:
+    """Return only complete all-angle groups whose members all passed."""
+    verdict_by_draft = {
+        id(draft): verdict for draft, verdict in zip(drafts, verdicts, strict=False)
+    }
+    groups: dict[object, list[InterviewQuestionDraft]] = {}
+    for draft in drafts:
+        if draft.variant_group_id is not None:
+            groups.setdefault(draft.variant_group_id, []).append(draft)
+
+    accepted: list[list[InterviewQuestionDraft]] = []
+    for members in groups.values():
+        types = {draft.question_type for draft in members}
+        if (
+            len(members) != len(VARIANT_ANGLES)
+            or types != set(VARIANT_ANGLES)
+            or any(
+                verdict_by_draft.get(id(draft)) is None
+                or not verdict_by_draft[id(draft)].accepted
+                or draft.prompt_text in seen_prompts
+                for draft in members
+            )
+        ):
+            continue
+        by_type = {draft.question_type: draft for draft in members}
+        accepted.append([by_type[angle] for angle in VARIANT_ANGLES])
+    return accepted
+
+
+def _trim_groups_to_shortfall(
+    groups: list[list[InterviewQuestionDraft]],
     missing: int,
 ) -> list[InterviewQuestionDraft]:
-    """Trim an overshooting variant round toward the least-represented angles.
-
-    A whole all-angle backfill group can exceed the remaining row budget. Pick
-    candidates from the angle with the fewest rows already accepted, updating
-    that count after every selection. Canonical ``VARIANT_ANGLES`` order breaks
-    ties, never the order the LLM happened to return, so a previously rejected
-    angle is retained instead of being repeatedly trimmed away.
-    """
-    by_type: dict[str, list[InterviewQuestionDraft]] = {}
-    for draft in drafts:
-        by_type.setdefault(draft.question_type, []).append(draft)
-    counts = {angle: 0 for angle in VARIANT_ANGLES}
-    for draft in accepted:
-        if draft.question_type in counts:
-            counts[draft.question_type] += 1
-
-    kept: list[InterviewQuestionDraft] = []
-    while len(kept) < missing:
-        available_angles = [angle for angle in VARIANT_ANGLES if by_type.get(angle)]
-        if available_angles:
-            selected_type = min(
-                available_angles,
-                key=lambda angle: (counts[angle], VARIANT_ANGLES.index(angle)),
-            )
-        else:
-            selected_type = next((qtype for qtype, items in by_type.items() if items), None)
-            if selected_type is None:
-                break
-        kept.append(by_type[selected_type].pop(0))
-        if selected_type in counts:
-            counts[selected_type] += 1
-    return kept
+    """Keep complete groups only; all-angle targets are always multiples of four."""
+    group_capacity = missing // len(VARIANT_ANGLES)
+    return [draft for group in groups[:group_capacity] for draft in group]
 
 
 async def generate_with_backfill(
@@ -124,6 +127,9 @@ async def generate_with_backfill(
     after each round so the caller can persist live progress (the teacher UI
     polls ``generation_runs.config_json`` while the run is ``running``).
     """
+    if variant_strategy == "all_angles" and target_count % len(VARIANT_ANGLES) != 0:
+        raise ValueError("all_angles target_count must be divisible by the angle count")
+
     seen_prompts: set[str] = set()
     all_drafts: list[InterviewQuestionDraft] = []
     all_verdicts: list[Verdict] = []
@@ -143,14 +149,12 @@ async def generate_with_backfill(
 
         # Variant mode (all_angles): ``override_question_count`` is a TOTAL row
         # budget and the generation stage re-divides it by the angle count
-        # (ceil), so passing the raw shortfall under-requests — a shortfall of
-        # 2 rows becomes ceil(2/4)=1 logical question whose variants may not
-        # include the missing angle (observed: bank short one behavioral).
-        # Ask in LOGICAL units so every angle is re-requested, then trim the
-        # surplus rows below so the run still lands exactly on target.
+        # (ceil). ``accepted`` only ever grows by whole angle groups, so
+        # ``missing`` is always a multiple of four here — ask for exactly that
+        # many rows (no surplus buffer) so the run lands exactly on target.
         trim_to_total = False
         if variant_strategy == "all_angles":
-            request_count = -(-request_count // len(VARIANT_ANGLES)) * len(VARIANT_ANGLES)
+            request_count = missing
             trim_to_total = True
 
         round_drafts = await generate_interview_questions(
@@ -172,17 +176,22 @@ async def generate_with_backfill(
             context=cast("Any", context),
             skip_type_mix=variant_strategy is not None,
         )
-        round_accepted = [
-            d
-            for d in accepted_drafts(round_drafts, round_verdicts)
-            if d.prompt_text not in seen_prompts
-        ]
-        # Variant mode: a logical-unit backfill request yields a full angle set,
-        # which may overshoot ``target_count``. Keep only the missing rows —
-        # preferring the types still short so the bank stays balanced per role.
+        if variant_strategy == "all_angles":
+            complete_groups = _accepted_complete_groups(
+                round_drafts,
+                round_verdicts,
+                seen_prompts,
+            )
+            round_accepted = _trim_groups_to_shortfall(complete_groups, missing)
+        else:
+            round_accepted = [
+                draft
+                for draft in accepted_drafts(round_drafts, round_verdicts)
+                if draft.prompt_text not in seen_prompts
+            ]
         if trim_to_total and len(round_accepted) > missing:
-            round_accepted = _trim_to_shortfall(round_accepted, accepted, missing)
-        seen_prompts.update(d.prompt_text for d in round_accepted)
+            round_accepted = round_accepted[:missing]
+        seen_prompts.update(draft.prompt_text for draft in round_accepted)
 
         all_drafts.extend(round_drafts)
         all_verdicts.extend(round_verdicts)
@@ -205,7 +214,7 @@ async def generate_with_backfill(
         if on_progress is not None:
             await on_progress(min(len(accepted), target_count), target_count)
 
-        if not round_drafts or not round_accepted:
+        if not round_drafts or (not round_accepted and variant_strategy != "all_angles"):
             break
 
     logger.info(

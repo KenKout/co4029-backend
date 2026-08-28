@@ -351,7 +351,9 @@ async def run_adaptive_turn(
                 else DEFAULT_MAX_FOLLOWUPS_PER_QUESTION
             ),
             max_hints_per_question=(
-                getattr(config, "max_hints_per_question", None) or MAX_CANNOT_ANSWER_HINTS
+                getattr(config, "max_hints_per_question", None)
+                if getattr(config, "max_hints_per_question", None) is not None
+                else MAX_CANNOT_ANSWER_HINTS
             ),
             pending_confirmation=data.pending_confirmation,
             depth_probe_enabled=depth_probe_enabled,

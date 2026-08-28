@@ -24,8 +24,10 @@ from abridgeai.features.interviews.ai.stages.generation.draft import (
     InterviewQuestionType,
 )
 from abridgeai.features.interviews.ai.stages.generation.grouping import (
-    assign_variant_group_ids,
     coerce_logical_question_index,
+)
+from abridgeai.features.interviews.ai.stages.generation.variant_groups import (
+    select_all_angle_groups,
 )
 
 
@@ -47,7 +49,8 @@ def parse_generation_response(
         entries so the teacher sees exactly the number they asked for.
     require_logical_question_index
         All-angle generation requires an integer logical-group ordinal on each
-        row. Other strategies ignore it and leave durable group IDs unset.
+        row. Only complete groups (one variant per angle) survive; other
+        strategies ignore the ordinal and leave durable group IDs unset.
     """
     raw = _extract_question_list(payload)
     out: list[InterviewQuestionDraft] = []
@@ -55,13 +58,11 @@ def parse_generation_response(
         draft = _prepare_question(entry)
         if draft is not None:
             out.append(draft)
-    grouped = assign_variant_group_ids(
-        out,
-        require_index=require_logical_question_index,
-    )
+    if require_logical_question_index:
+        return select_all_angle_groups(out, max_questions=max_questions)
     if max_questions is None:
-        return grouped
-    return grouped[:max_questions]
+        return out
+    return out[:max_questions]
 
 
 def _extract_question_list(payload: Any) -> list[Any]:  # noqa: ANN401 -- raw LLM JSON

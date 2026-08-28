@@ -1,35 +1,24 @@
-"""Unit tests for the variant-mode backfill contract (Slice 21 regression).
-
-Regression: in ``all_angles`` mode the backfill loop passed the raw
-*shortfall* as ``override_question_count``, but the generation stage treats
-``override_question_count`` as a TOTAL row budget and re-divides it by the
-angle count — so a shortfall of 2 rows became ceil(2/4)=1 logical question
-whose variant set may not include the missing angle (observed: bank ended
-3/3/3/1 instead of 2/2/2/2). The fix: request in whole angle groups and trim
-the overshoot back to the target.
-"""
+"""Unit tests for atomic all-angle interview-generation backfill."""
 
 from __future__ import annotations
 
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 
-from abridgeai.features.interviews.ai.pipelines.backfill import (
-    _trim_to_shortfall,
-    generate_with_backfill,
-)
-from abridgeai.features.interviews.ai.stages.generation import (
-    InterviewQuestionDraft,
-)
+from abridgeai.features.interviews.ai.pipelines.backfill import generate_with_backfill
+from abridgeai.features.interviews.ai.stages.generation import InterviewQuestionDraft
+from abridgeai.features.interviews.ai.stages.generation.resolve import VARIANT_ANGLES
 from abridgeai.features.interviews.ai.stages.validation.verdicts import Verdict
 
 
 def _draft(
     idx: int,
     question_type: str = "technical",
+    *,
+    group_id: UUID | None = None,
 ) -> InterviewQuestionDraft:
     return InterviewQuestionDraft(
         question_type=question_type,  # type: ignore[arg-type]
@@ -37,9 +26,25 @@ def _draft(
         difficulty="easy",
         expected_depth=2,
         linked_outcome_id=None,
+        variant_group_id=group_id,
         source_refs=[uuid4()],
         rationale=f"probe {idx}",
     )
+
+
+def _group(start: int, group_id: UUID | None = None) -> list[InterviewQuestionDraft]:
+    return [
+        _draft(start + index, question_type, group_id=group_id or uuid4())
+        for index, question_type in enumerate(VARIANT_ANGLES)
+    ]
+
+
+def _coherent_group(start: int) -> list[InterviewQuestionDraft]:
+    group_id, outcome_id = uuid4(), uuid4()
+    drafts = _group(start, group_id)
+    for draft in drafts:
+        draft.linked_outcome_id = outcome_id
+    return drafts
 
 
 def _verdict(idx: int, *, accepted: bool) -> Verdict:
@@ -54,26 +59,20 @@ def _fake_stubs() -> tuple[SimpleNamespace, SimpleNamespace, SimpleNamespace]:
 
 
 @pytest.mark.asyncio
-async def test_all_angles_backfill_requests_whole_angle_groups(
+async def test_all_angles_backfill_retains_complete_groups_only(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Backfill must round the shortfall UP to whole angle groups."""
     state, config, context = _fake_stubs()
-
-    # Round 1: 8 requested (2 logical x 4), 6 accepted → shortfall of 2 rows.
-    round1_drafts = [
-        _draft(i, ["technical", "system_design", "situational", "behavioral"][i % 4])
-        for i in range(8)
-    ]
-    round1_verdicts = [_verdict(i, accepted=i not in (3, 7)) for i in range(8)]
-    round2_drafts = [
-        _draft(20 + i, qtype)
-        for i, qtype in enumerate(["technical", "system_design", "situational", "behavioral"])
-    ]
-    round2_verdicts = [_verdict(i, accepted=True) for i in range(4)]
-
-    generate = AsyncMock(side_effect=[round1_drafts, round2_drafts])
-    validate = AsyncMock(side_effect=[round1_verdicts, round2_verdicts])
+    group_one = _coherent_group(0)
+    group_two = _coherent_group(20)
+    group_three = _coherent_group(40)
+    generate = AsyncMock(side_effect=[group_one, [*group_two, *group_three]])
+    validate = AsyncMock(
+        side_effect=[
+            [_verdict(index, accepted=True) for index in range(4)],
+            [_verdict(index, accepted=True) for index in range(8)],
+        ]
+    )
     monkeypatch.setattr(
         "abridgeai.features.interviews.ai.pipelines.backfill.generate_interview_questions",
         generate,
@@ -83,7 +82,7 @@ async def test_all_angles_backfill_requests_whole_angle_groups(
         validate,
     )
 
-    all_drafts, all_verdicts, accepted, rounds = await generate_with_backfill(
+    _drafts, _verdicts, accepted, rounds = await generate_with_backfill(
         AsyncMock(),
         state=state,
         config=config,
@@ -94,74 +93,33 @@ async def test_all_angles_backfill_requests_whole_angle_groups(
         role_type=None,
     )
 
-    assert len(accepted) == 8
-    assert len(all_drafts) == 12
-    assert len(all_verdicts) == 12
     assert rounds == 1
-    # Round 2 override is the shortfall (2) rounded UP to a whole angle group
-    # (4 rows) so every angle is re-requested; surplus rows are trimmed below.
+    assert len(accepted) == 8
     assert generate.await_args_list[1].kwargs["override_question_count"] == 4
-    # Behavioral was rejected in round 1. It must outrank response-leading
-    # technical/system-design candidates during the two-row trim.
-    tail_types = [d.question_type for d in accepted[6:]]
-    assert tail_types == ["behavioral", "technical"]
-    assert [d.prompt_text for d in accepted[6:]] == [
-        "Variant behavioral question #23 for testing purposes.",
-        "Variant technical question #20 for testing purposes.",
-    ]
-    assert {
-        question_type: sum(d.question_type == question_type for d in accepted)
-        for question_type in ("technical", "system_design", "situational", "behavioral")
-    } == {
-        "technical": 3,
-        "system_design": 2,
-        "situational": 2,
-        "behavioral": 1,
-    }
-
-
-def test_trim_to_shortfall_prioritizes_absent_angle_over_response_order() -> None:
-    accepted = [
-        _draft(0, "technical"),
-        _draft(1, "system_design"),
-        _draft(2, "situational"),
-        _draft(3, "technical"),
-        _draft(4, "system_design"),
-        _draft(5, "situational"),
-    ]
-    candidates = [
-        _draft(10, "technical"),
-        _draft(11, "system_design"),
-        _draft(12, "situational"),
-        _draft(13, "behavioral"),
-    ]
-
-    kept = _trim_to_shortfall(candidates, accepted, missing=2)
-
-    assert [draft.question_type for draft in kept] == ["behavioral", "technical"]
-
-
-def test_trim_to_shortfall_never_exceeds_shortfall() -> None:
-    accepted: list[InterviewQuestionDraft] = []
-    candidates = [_draft(index, "technical") for index in range(3)]
-
-    kept = _trim_to_shortfall(candidates, accepted, missing=2)
-
-    assert len(kept) == 2
+    group_sizes: dict[UUID, int] = {}
+    group_types: dict[UUID, set[str]] = {}
+    for draft in accepted:
+        assert draft.variant_group_id is not None
+        group_sizes[draft.variant_group_id] = group_sizes.get(draft.variant_group_id, 0) + 1
+        group_types.setdefault(draft.variant_group_id, set()).add(draft.question_type)
+    assert set(group_sizes.values()) == {4}
+    assert all(types == set(VARIANT_ANGLES) for types in group_types.values())
 
 
 @pytest.mark.asyncio
-async def test_legacy_mode_backfill_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Non-variant mode keeps the exact-shortfall (+buffer) request shape."""
+async def test_all_angles_discards_a_group_when_one_angle_fails_validation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     state, config, context = _fake_stubs()
-
-    drafts1 = [_draft(i) for i in range(5)]
-    verdicts1 = [_verdict(i, accepted=i != 4) for i in range(5)]
-    drafts2 = [_draft(30)]
-    verdicts2 = [_verdict(0, accepted=True)]
-
-    generate = AsyncMock(side_effect=[drafts1, drafts2])
-    validate = AsyncMock(side_effect=[verdicts1, verdicts2])
+    invalid_group = _coherent_group(0)
+    valid_group = _coherent_group(20)
+    generate = AsyncMock(side_effect=[invalid_group, valid_group])
+    validate = AsyncMock(
+        side_effect=[
+            [_verdict(index, accepted=index != 3) for index in range(4)],
+            [_verdict(index, accepted=True) for index in range(4)],
+        ]
+    )
     monkeypatch.setattr(
         "abridgeai.features.interviews.ai.pipelines.backfill.generate_interview_questions",
         generate,
@@ -171,7 +129,60 @@ async def test_legacy_mode_backfill_unchanged(monkeypatch: pytest.MonkeyPatch) -
         validate,
     )
 
-    _d, _v, accepted, _r = await generate_with_backfill(
+    _drafts, _verdicts, accepted, _rounds = await generate_with_backfill(
+        AsyncMock(),
+        state=state,
+        config=config,
+        context=context,
+        outcomes=[],
+        target_count=4,
+        variant_strategy="all_angles",
+        role_type=None,
+    )
+
+    assert {draft.variant_group_id for draft in accepted} == {valid_group[0].variant_group_id}
+    assert len(accepted) == 4
+
+
+@pytest.mark.asyncio
+async def test_all_angles_requires_divisible_target() -> None:
+    state, config, context = _fake_stubs()
+
+    with pytest.raises(ValueError, match="divisible"):
+        await generate_with_backfill(
+            AsyncMock(),
+            state=state,
+            config=config,
+            context=context,
+            outcomes=[],
+            target_count=6,
+            variant_strategy="all_angles",
+            role_type=None,
+        )
+
+
+@pytest.mark.asyncio
+async def test_legacy_mode_backfill_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
+    state, config, context = _fake_stubs()
+    drafts_one = [_draft(index) for index in range(5)]
+    verdicts_one = [_verdict(index, accepted=index != 4) for index in range(5)]
+    generate = AsyncMock(side_effect=[drafts_one, [_draft(30)]])
+    validate = AsyncMock(
+        side_effect=[
+            verdicts_one,
+            [_verdict(0, accepted=True)],
+        ]
+    )
+    monkeypatch.setattr(
+        "abridgeai.features.interviews.ai.pipelines.backfill.generate_interview_questions",
+        generate,
+    )
+    monkeypatch.setattr(
+        "abridgeai.features.interviews.ai.pipelines.backfill.validate_interview_questions",
+        validate,
+    )
+
+    _drafts, _verdicts, accepted, _rounds = await generate_with_backfill(
         AsyncMock(),
         state=state,
         config=config,
@@ -181,5 +192,6 @@ async def test_legacy_mode_backfill_unchanged(monkeypatch: pytest.MonkeyPatch) -
         variant_strategy=None,
         role_type=None,
     )
+
     assert len(accepted) == 5
-    assert generate.await_args_list[1].kwargs["override_question_count"] == 2  # 1+buffer
+    assert generate.await_args_list[1].kwargs["override_question_count"] == 2
