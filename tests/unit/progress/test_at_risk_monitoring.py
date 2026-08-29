@@ -32,6 +32,12 @@ def _row(
     course_id: UUID | None = None,
     days_inactive: float | None = 0.0,
     completion: int = 100,
+    quiz_failed: int = 0,
+    quiz_total: int = 0,
+    quiz_ungraded: int = 0,
+    interview_failed: int = 0,
+    interview_total: int = 0,
+    interview_pending: int = 0,
 ) -> AtRiskRow:
     now = datetime.now(tz=UTC)
     return AtRiskRow(
@@ -42,6 +48,12 @@ def _row(
             None if days_inactive is None else now - timedelta(days=days_inactive)
         ),
         completion_percent=Decimal(completion),
+        failed_quiz_attempts=quiz_failed,
+        total_quiz_attempts=quiz_total,
+        ungraded_quiz_attempts=quiz_ungraded,
+        failed_interview_sessions=interview_failed,
+        total_interview_sessions=interview_total,
+        pending_interview_sessions=interview_pending,
         days_since_last_engagement=days_inactive,
         days_since_enrolled=90.0,
     )
@@ -94,13 +106,14 @@ def test_completion_exactly_at_the_threshold_does_not_fire() -> None:
 
 
 def test_multiple_signals_are_ordered_engagement_first() -> None:
-    """Primary reason is the engagement signal when both fire.
+    """Signal order is fixed: assessment failures, completion, then inactivity.
 
-    FR-022 renders reasons[0] as the primary; "hasn't shown up in 20 days"
-    is the more actionable of the two.
+    The engine deliberately lists inactivity LAST — it is the least specific
+    signal and usually a symptom of the earlier ones — so the primary reason
+    stays the most actionable (FR-022 renders reasons[0] as the primary).
     """
     reasons = classify_at_risk_reasons(_row(days_inactive=20, completion=5), DEFAULTS)
-    assert [r.code for r in reasons] == ["inactive", "low_completion"]
+    assert [r.code for r in reasons] == ["low_completion", "inactive"]
 
 
 def test_healthy_row_yields_no_reasons() -> None:
