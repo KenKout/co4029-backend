@@ -983,6 +983,14 @@ async def test_full_interview_lifecycle_generate_take_submit_evaluate(
     assert poll_resp.status_code == 200, poll_resp.text
     assert poll_resp.json()["status"] == "completed"
 
+    # 5b. The run must persist the retrieved chunk ids so the validation
+    # stage can resolve source excerpts (grounding context) without holding
+    # the retrieval context object.
+    run_retrieval = (poll_resp.json().get("config_json") or {}).get("retrieval") or {}
+    assert run_retrieval.get("source_chunk_ids") == [str(scenario["chunk_ids"][0])], (
+        f"source_chunk_ids missing from run config_json: {run_retrieval}"
+    )
+
     # 6. Verify question persistence + flip to approved (simulate teacher review).
     async with engine.begin() as conn:
         question_rows = (

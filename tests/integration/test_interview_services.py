@@ -16,6 +16,7 @@ Covers the 4-capability split:
 
 from __future__ import annotations
 
+import hashlib
 import uuid
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
@@ -56,6 +57,7 @@ from abridgeai.features.interviews.ai.stages.evaluation.rubric import (
     RubricScores,
 )
 from abridgeai.features.interviews.ai.stages.gap_report.logic import GapReportDraft
+from abridgeai.features.interviews.ai.stages.validation.logic import _chunk_views_for_prompt
 from abridgeai.features.interviews.models import (
     InterviewConfig,
     InterviewSession,
@@ -1158,6 +1160,124 @@ async def test_add_question_rejects_outcome_not_in_this_config(
             await conn.execute(
                 text("DELETE FROM interview_configs WHERE id = :id"), {"id": foreign_config_id}
             )
+
+
+async def _seed_lesson_and_chunk(
+    engine: AsyncEngine, scenario: dict[str, Any]
+) -> dict[str, uuid.UUID]:
+    """A lesson + one indexed chunk under the scenario's course/module."""
+    lesson_id, storage_id, material_id, version_id, chunk_id = (uuid.uuid4() for _ in range(5))
+    suffix = scenario["org_id"].hex[:8]
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO lessons (id, module_id, slug, title, status) "
+                "VALUES (:id, :m, :slug, 'Chunk Lesson', 'published')"
+            ),
+            {"id": lesson_id, "m": scenario["module_id"], "slug": f"chunk-lesson-{suffix}"},
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO storage_objects (id, bucket, object_key) "
+                "VALUES (:id, 'test', :key)"
+            ),
+            {"id": storage_id, "key": f"chunk/{suffix}.txt"},
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO learning_materials (id, lesson_id, title, material_type) "
+                "VALUES (:id, :l, 'Chunk Material', 'text')"
+            ),
+            {"id": material_id, "l": lesson_id},
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO learning_material_versions "
+                "(id, material_id, storage_object_id, version_no, processing_status) "
+                "VALUES (:id, :m, :s, 1, 'ready')"
+            ),
+            {"id": version_id, "m": material_id, "s": storage_id},
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO document_chunks "
+                "(id, course_id, module_id, lesson_id, material_version_id, "
+                "chunk_index, chunk_type, content, embedding, content_hash) "
+                "VALUES (:id, :c, :m, :l, :v, 0, 'text', :content, NULL, :hash)"
+            ),
+            {
+                "id": chunk_id,
+                "c": scenario["course_id"],
+                "m": scenario["module_id"],
+                "l": lesson_id,
+                "v": version_id,
+                "content": "Chunk content for validation",
+                "hash": hashlib.sha256(b"chunk").hexdigest(),
+            },
+        )
+    return {
+        "lesson_id": lesson_id,
+        "storage_id": storage_id,
+        "material_id": material_id,
+        "version_id": version_id,
+        "chunk_id": chunk_id,
+    }
+
+
+async def _cleanup_lesson_and_chunk(
+    engine: AsyncEngine, seeded: dict[str, uuid.UUID]
+) -> None:
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("DELETE FROM document_chunks WHERE id = :id"), {"id": seeded["chunk_id"]}
+        )
+        await conn.execute(
+            text(
+                "UPDATE learning_materials SET current_version_id = NULL "
+                "WHERE id = :id"
+            ),
+            {"id": seeded["material_id"]},
+        )
+        await conn.execute(
+            text("DELETE FROM learning_material_versions WHERE id = :id"),
+            {"id": seeded["version_id"]},
+        )
+        await conn.execute(
+            text("DELETE FROM learning_materials WHERE id = :id"), {"id": seeded["material_id"]}
+        )
+        await conn.execute(
+            text("DELETE FROM storage_objects WHERE id = :id"), {"id": seeded["storage_id"]}
+        )
+        await conn.execute(
+            text("DELETE FROM lessons WHERE id = :id"), {"id": seeded["lesson_id"]}
+        )
+
+
+async def test_chunk_views_for_prompt_resolves_excerpt_content(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict[str, Any],
+) -> None:
+    """Validation's LLM leading check sees the retrieved chunks' CONTENT."""
+    seeded = await _seed_lesson_and_chunk(engine, scenario)
+    missing_id = uuid.uuid4()
+    fake_run = SimpleNamespace(
+        config_json={
+            "retrieval": {
+                "source_chunk_ids": [str(seeded["chunk_id"]), str(missing_id)],
+            }
+        }
+    )
+    try:
+        async with session_factory() as session:
+            views = await _chunk_views_for_prompt(session, fake_run)
+        assert views[0]["id"] == str(seeded["chunk_id"])
+        assert views[0]["content"] == "Chunk content for validation"
+        # An id whose row is gone degrades to an id-only view, never dropped.
+        assert views[1]["id"] == str(missing_id)
+        assert views[1]["content"] == ""
+    finally:
+        await _cleanup_lesson_and_chunk(engine, seeded)
 
 
 @pytest.mark.asyncio
