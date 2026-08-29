@@ -147,6 +147,7 @@ async def validate_interview_questions(
         run=run,
         db=db,
         gateway=gateway,
+        context=context,
     )
 
     verdicts: list[Verdict] = []
@@ -312,10 +313,11 @@ async def _run_leading_check(
     run: GenerationRun,
     db: AsyncSession,
     gateway: LLMGateway | None,
+    context: InterviewRetrievalContext,
 ) -> list[bool]:
     """Ask the LLM to judge each question's neutrality."""
     gateway = gateway or LLMGateway()
-    chunk_views = _chunk_views_for_prompt(run)
+    chunk_views = _chunk_views_for_prompt(context)
     questions = [
         {
             "index": index,
@@ -349,15 +351,23 @@ async def _run_leading_check(
     return [verdict.not_leading for verdict in parsed]
 
 
-def _chunk_views_for_prompt(run: GenerationRun) -> list[dict[str, Any]]:
-    config_json = getattr(run, "config_json", None) or {}
-    retrieval = config_json.get("retrieval") if isinstance(config_json, dict) else None
-    if not isinstance(retrieval, dict):
-        return []
-    raw_ids = retrieval.get("source_chunk_ids")
-    if not isinstance(raw_ids, list):
-        return []
-    return [{"id": str(chunk_id), "content": ""} for chunk_id in raw_ids if chunk_id]
+def _chunk_views_for_prompt(
+    context: InterviewRetrievalContext,
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "id": str(chunk_id),
+            "content": chunk.content,
+        }
+        for chunk in getattr(context, "chunks", []) or []
+        if (chunk_id := getattr(chunk, "chunk_id", None) or getattr(chunk, "id", None))
+        and getattr(chunk, "content", None)
+    ]
+
+
+# Legacy run snapshots intentionally do not contain source text. Current
+# validation receives the in-memory retrieval context directly, avoiding a
+# second database lookup and keeping source text out of run JSON.
 
 
 def _config_summary(config: InterviewConfig) -> str:

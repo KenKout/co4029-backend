@@ -25,6 +25,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
+from uuid import UUID
 
 import pytest
 import pytest_asyncio
@@ -1514,34 +1515,43 @@ async def _cleanup_lesson_and_chunk(
         )
 
 
-def test_chunk_views_for_prompt_id_only_no_db_fetch() -> None:
-    """Leading check gets id-only chunk views; excerpt resolution was retired.
+class _Chunk:
+    def __init__(self, content: str, *, chunk_id: UUID | None = None) -> None:
+        self.chunk_id = chunk_id
+        self.id = chunk_id or uuid.uuid4()
+        self.content = content
 
-    The NOT_LEADING judge rules on question TEXT (grounding is enforced by the
-    deterministic GROUNDED check), so chunk views keep ids for context without
-    a per-run ``document_chunks`` fetch.
+
+class _ChunkContext:
+    """Immutable-chunks stand-in for InterviewRetrievalContext."""
+
+    def __init__(self, chunks: tuple[_Chunk, ...] = ()) -> None:
+        self.chunks = chunks
+
+
+def test_chunk_views_for_prompt_uses_retrieval_content() -> None:
+    """Leading check gets chunk ids + CONTENT from the live retrieval context.
+
+    No second DB lookup and no source text in run JSON: the views are built
+    from the in-memory ``context.chunks`` (both ``chunk_id`` and plain ``id``
+    chunk shapes are accepted, matching ``_collect_chunk_ids``).
     """
-    class _StubRun:
-        """Minimal GenerationRun-shaped stub: id + config_json."""
-
-        def __init__(self, config_json: dict[str, Any]) -> None:
-            self.id = uuid.uuid4()
-            self.config_json = config_json
-
-    fake_run = _StubRun(
-        {
-            "retrieval": {
-                "source_chunk_ids": [str(uuid.uuid4()), str(uuid.uuid4())],
-            }
-        }
+    chunk_a = uuid.uuid4()
+    id_only = uuid.uuid4()
+    context = _ChunkContext(
+        (
+            _Chunk("Chunk content for validation", chunk_id=chunk_a),
+            _Chunk("", chunk_id=uuid.uuid4()),
+            _Chunk("id-only chunk shape", chunk_id=None),
+        )
     )
-    views = _chunk_views_for_prompt(fake_run)
-    assert len(views) == 2
-    assert all(view["content"] == "" for view in views)
-    # Missing / malformed retrieval degrades to an empty view list, never raises.
-    assert _chunk_views_for_prompt(_StubRun({})) == []
-    assert _chunk_views_for_prompt(_StubRun({"retrieval": {}})) == []
-    assert _chunk_views_for_prompt(_StubRun({"retrieval": {"source_chunk_ids": []}})) == []
+    # The id-only chunk's stub id is server-assigned via _Chunk.__init__.
+    id_only = context.chunks[2].id
+    views = _chunk_views_for_prompt(context)
+    assert [v["id"] for v in views] == [str(chunk_a), str(id_only)]
+    assert all(v["content"] for v in views)
+    # Empty content chunks are skipped; a chunkless context degrades to [].
+    assert _chunk_views_for_prompt(_ChunkContext()) == []
 
 
 @pytest.mark.asyncio
