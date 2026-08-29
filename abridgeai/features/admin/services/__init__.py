@@ -6,6 +6,7 @@ from abridgeai.features.admin.services import (
     processing,
     security,
     stats,
+    tenants,
     users,
 )
 
@@ -15,5 +16,6 @@ __all__ = [
     "processing",
     "security",
     "stats",
+    "tenants",
     "users",
 ]

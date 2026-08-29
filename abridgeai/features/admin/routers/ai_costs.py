@@ -212,6 +212,60 @@ async def get_by_user(
     return [UserSpendOut.model_validate(r) for r in rows]
 
 
+class OrganizationSpendOut(BaseModel):
+    """Spend for one tenant.
+
+    ``organization_id`` is NULL for the unattributed bucket -- calls with no
+    derivable tenant, which are real spend and are kept so the rows still sum
+    to the platform total.
+    """
+
+    organization_id: UUID | None = None
+    organization_name: str = ""
+    call_count: int
+    failed_count: int
+    tokens: int
+    spend_usd: float
+
+
+class OrganizationSpendPage(BaseModel):
+    """Per-tenant spend plus how much of the bill it explains.
+
+    ``coverage_pct`` travels with the rows on purpose: ``ai_model_calls`` has
+    no tenant column, so this view derives ownership through optional parents
+    and cannot reach every call. A breakdown that explains part of the bill
+    without saying which part invites chargeback decisions the data does not
+    support. ``None`` means the window had no spend at all -- not 0%.
+    """
+
+    items: list[OrganizationSpendOut]
+    total_spend_usd: float
+    attributed_spend_usd: float
+    coverage_pct: float | None = None
+
+
+@router.get("/by-organization", response_model=OrganizationSpendPage)
+async def get_by_organization(
+    _user: Annotated[CurrentUser, Depends(_REQUIRE_READ)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    since: Annotated[
+        str | None,
+        Query(description="ISO date or datetime; defaults to NOW() - 30 days."),
+    ] = None,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+) -> OrganizationSpendPage:
+    """AI spend attributed to organizations (PRD ADM-040)."""
+    result = await ai_costs_service.by_organization(
+        db, since=_parse_since(since, default_days=30), limit=limit
+    )
+    return OrganizationSpendPage(
+        items=[OrganizationSpendOut.model_validate(r) for r in result["items"]],
+        total_spend_usd=result["total_spend_usd"],
+        attributed_spend_usd=result["attributed_spend_usd"],
+        coverage_pct=result["coverage_pct"],
+    )
+
+
 @router.get("/by-pipeline", response_model=list[PipelineSpendOut])
 async def get_by_pipeline(
     _user: Annotated[CurrentUser, Depends(_REQUIRE_READ)],

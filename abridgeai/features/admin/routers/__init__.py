@@ -11,6 +11,7 @@ Five sibling routers all mounted under ``/admin`` by the integration layer
 * :data:`ai_pricing_router` -- ``/admin/ai/pricing/*`` (model cost config CRUD)
 * :data:`settings_router`   -- ``/admin/settings/*`` + per-org overrides
 * :data:`security_router`   -- ``/admin/security/*`` (ADM-020)
+* :data:`tenants_router`    -- ``/admin/organizations/{id}/operations`` (ADM-042)
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ from .processing import router as processing_router
 from .security import router as security_router
 from .settings import router as settings_router
 from .stats import router as stats_router
+from .tenants import router as tenants_router
 from .users import router as users_router
 
 __all__ = [
@@ -32,5 +34,6 @@ __all__ = [
     "security_router",
     "settings_router",
     "stats_router",
+    "tenants_router",
     "users_router",
 ]

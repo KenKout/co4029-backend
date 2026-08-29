@@ -12,6 +12,8 @@ parameter is annotated under ``TYPE_CHECKING`` only.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
@@ -150,13 +152,42 @@ async def search_organizations(
     page: int = 0,
     page_size: int = 25,
     visible_to_ids: list[UUID] | None = None,
+    inactive_days: int | None = None,
+    now: datetime | None = None,
 ) -> Page[Organization]:
     """Offset page of organisations (server-side search + sort). Thin
     delegate to the query layer, which owns the SQLAlchemy statement.
 
     ``visible_to_ids=None`` is unrestricted and reserved for
     ``system.administer``; see the query-layer docstring.
+
+    ``inactive_days`` narrows to tenants with no activity in that many days,
+    using the same definition the dashboard counts (see
+    ``queries/sql/inactive_organizations.sql``). It composes with
+    ``visible_to_ids`` by intersection rather than replacing it — an inactivity
+    filter must never widen what a scoped caller can see.
     """
+    if inactive_days is not None:
+        inactive_rows = await org_queries.list_inactive_organizations(
+            db, now=now or datetime.now(tz=UTC), days=inactive_days
+        )
+        inactive_ids = [row["id"] for row in inactive_rows]
+        if visible_to_ids is None:
+            visible_to_ids = inactive_ids
+        else:
+            allowed = set(visible_to_ids)
+            visible_to_ids = [i for i in inactive_ids if i in allowed]
+        if not visible_to_ids:
+            # No tenant qualifies. An empty allowlist must page to zero rows —
+            # passing None here would silently mean "unrestricted".
+            return Page(
+                items=[],
+                total=0,
+                page=page,
+                page_size=page_size,
+                total_pages=0,
+            )
+
     return await org_queries.search_organizations(
         db,
         include_deleted=include_deleted,

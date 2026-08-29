@@ -20,7 +20,9 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import insert, select, tuple_, update
+from importlib import resources
+
+from sqlalchemy import insert, select, text, tuple_, update
 
 from abridgeai.core.db.recursive_delete import soft_delete_cascade
 from abridgeai.core.pagination import Page, paginate
@@ -556,3 +558,36 @@ __all__ = [
     "update_organization",
     "update_unit",
 ]
+
+
+_INACTIVE_ORGS_SQL = text(
+    resources.files("abridgeai.features.access_control.queries.sql")
+    .joinpath("inactive_organizations.sql")
+    .read_text(encoding="utf-8")
+)
+
+
+async def list_inactive_organizations(
+    db: AsyncSession,
+    *,
+    now: datetime,
+    days: int,
+    organization_id: UUID | None = None,
+) -> list[dict[str, Any]]:
+    """Organizations quiet for ``days`` (``queries/sql/inactive_organizations.sql``).
+
+    The single definition of tenant inactivity. The operator dashboard counts
+    these rows and the organizations list filters by them, so the count and the
+    list it links to cannot disagree.
+    """
+    rows = (
+        await db.execute(
+            _INACTIVE_ORGS_SQL,
+            {
+                "now": now,
+                "days": days,
+                "organization_id": organization_id,
+            },
+        )
+    ).mappings()
+    return [dict(r) for r in rows]

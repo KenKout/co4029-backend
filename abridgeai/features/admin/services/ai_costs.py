@@ -137,6 +137,55 @@ async def summary(
     return normalised
 
 
+async def by_organization(
+    db: AsyncSession,
+    *,
+    since: datetime,
+    until: datetime | None = None,
+    limit: int = 50,
+) -> dict[str, Any]:
+    """Per-tenant spend with an explicit coverage figure (PRD ADM-040).
+
+    ``coverage_pct`` is the share of window spend this breakdown can actually
+    attribute to a tenant. It ships alongside the rows rather than being left
+    for the reader to work out, because a per-organization cost table that
+    explains 40% of the bill and does not say so is worse than no table: it
+    invites chargeback decisions the data does not support.
+
+    ``None`` coverage means there was no spend at all in the window — not 0%,
+    which would read as "nothing could be attributed".
+    """
+    rows = await ai_costs_queries.by_organization(
+        db,
+        since=since,
+        until=until or datetime.now(tz=UTC),
+        limit=limit,
+    )
+    items = [
+        {
+            "organization_id": r["organization_id"],
+            "organization_name": str(r.get("organization_name") or ""),
+            "call_count": _to_int(r.get("call_count")),
+            "failed_count": _to_int(r.get("failed_count")),
+            "tokens": _to_int(r.get("tokens")),
+            "spend_usd": _to_float(r.get("spend_usd")),
+        }
+        for r in rows
+    ]
+    total = sum(item["spend_usd"] for item in items)
+    attributed = sum(
+        item["spend_usd"] for item in items if item["organization_id"] is not None
+    )
+    return {
+        "items": items,
+        "total_spend_usd": total,
+        "attributed_spend_usd": attributed,
+        "coverage_pct": (
+            None if total <= 0 else round(100.0 * attributed / total, 2)
+        ),
+    }
+
+
 async def by_user(
     db: AsyncSession,
     *,

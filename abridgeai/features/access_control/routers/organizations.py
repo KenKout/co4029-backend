@@ -169,6 +169,18 @@ async def search_organizations_endpoint(
     sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
     page: Annotated[int, Query(ge=0)] = 0,
     page_size: Annotated[int, Query(ge=1, le=200)] = 25,
+    inactive_days: Annotated[
+        int | None,
+        Query(
+            ge=1,
+            le=365,
+            description=(
+                "Only tenants with no member login, course edit, quiz attempt "
+                "or interview in this many days. Same definition the dashboard "
+                "counts, so its inactive-tenant tile links straight here."
+            ),
+        ),
+    ] = None,
 ) -> PageResponse[OrganizationRead]:
     """Page-numbered admin org list with server-side search (name/slug) +
     whitelisted sort (``name`` / ``status`` / ``created_at``). Additive to
@@ -182,6 +194,7 @@ async def search_organizations_endpoint(
         page=page,
         page_size=page_size,
         visible_to_ids=await _visible_org_ids(db, current_user),
+        inactive_days=inactive_days,
     )
     return PageResponse[OrganizationRead](
         items=[OrganizationRead.model_validate(o) for o in result.items],

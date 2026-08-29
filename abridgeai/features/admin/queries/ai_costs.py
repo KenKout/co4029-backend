@@ -49,6 +49,7 @@ _BY_USER_SQL = _load("ai_costs/by_user.sql")
 _BY_PIPELINE_SQL = _load("ai_costs/by_pipeline.sql")
 _RECENT_SQL = _load("ai_costs/recent.sql")
 _BY_MODEL_SQL = _load("ai_costs/by_model.sql")
+_BY_ORGANIZATION_SQL = _load("ai_costs/by_organization.sql")
 _BY_CATEGORY_TEMPLATE = _load_raw("ai_costs/by_category.sql")
 
 
@@ -95,6 +96,29 @@ async def by_user(
     top_n: int,
 ) -> list[dict[str, Any]]:
     rows = (await db.execute(_BY_USER_SQL, {"since": since, "top_n": top_n})).mappings()
+    return [dict(r) for r in rows]
+
+
+async def by_organization(
+    db: AsyncSession,
+    *,
+    since: datetime,
+    until: datetime,
+    limit: int,
+) -> list[dict[str, Any]]:
+    """Spend per tenant, plus an ``organization_id IS NULL`` bucket.
+
+    That NULL row is not an error case -- it is the spend from calls with no
+    derivable tenant (session-runtime calls attribute via stage name alone).
+    The caller keeps it so the per-organization rows still sum to the platform
+    total.
+    """
+    rows = (
+        await db.execute(
+            _BY_ORGANIZATION_SQL,
+            {"since": since, "until": until, "limit": limit},
+        )
+    ).mappings()
     return [dict(r) for r in rows]
 
 
@@ -208,6 +232,7 @@ __all__ = [
     "VALID_CATEGORY_DIMENSIONS",
     "by_category",
     "by_model",
+    "by_organization",
     "by_pipeline",
     "by_user",
     "daily_user_spend",

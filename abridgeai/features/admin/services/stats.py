@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from abridgeai.core.ttl_cache import TTLCache
+from abridgeai.features.access_control.api import public as access_control_api
 from abridgeai.features.admin.queries import stats as stats_queries
 from abridgeai.features.admin.services import job_metrics
 
@@ -32,6 +33,12 @@ if TYPE_CHECKING:
 # Default dashboard window. Callers may widen or narrow it; every windowed
 # metric in the response moves together so the tiles stay comparable.
 DEFAULT_WINDOW_DAYS = 7
+
+#: Inactivity threshold for the tenant-anomaly count. Fixed at 30 days rather
+#: than following the dashboard window: a tenant being quiet for a 1-day window
+#: is a weekend, not an anomaly, and letting the window drive it would make the
+#: tile mean something different at every setting.
+INACTIVE_ORG_DAYS = 30
 
 _DASHBOARD_TTL_SECONDS = 60.0
 _DASHBOARD_CACHE = TTLCache(max_entries=64, ttl_seconds=_DASHBOARD_TTL_SECONDS)
@@ -150,6 +157,11 @@ async def _operator_dashboard_uncached(
     jobs = await job_metrics.job_outcomes(db, window_days=window_days, now=now)
     queue = await job_metrics.queue_state(db, now=now)
     api = await stats_queries.api_reliability(db, now=now, window_days=window_days)
+    # Same rows the Organizations list filters to, so the count and its
+    # destination cannot drift (ADM-045).
+    inactive_orgs = await access_control_api.list_inactive_organizations(
+        db, days=INACTIVE_ORG_DAYS, now=now, organization_id=organization_id
+    )
 
     requests_total = int(api["requests_total"] or 0)
     requests_5xx = int(api["requests_5xx"] or 0)
@@ -208,12 +220,13 @@ async def _operator_dashboard_uncached(
         "materials_ingested_window": rollup["materials_ingested_window"],
         # -- tenant anomalies --------------------------------------------
         "orgs_total": rollup["orgs_total"],
-        "orgs_inactive_30d": rollup["orgs_inactive_30d"],
+        "orgs_inactive_30d": len(inactive_orgs),
     }
 
 
 __all__ = [
     "DEFAULT_WINDOW_DAYS",
+    "INACTIVE_ORG_DAYS",
     "active_users",
     "content_breakdown",
     "operator_dashboard",
