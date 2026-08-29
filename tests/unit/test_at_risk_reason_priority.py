@@ -28,8 +28,10 @@ def _row(
     completion_percent: int = 100,
     days_since_last_engagement: float | None = None,
     failed_quiz_attempts: int = 0,
+    total_quiz_attempts: int = 0,
     ungraded_quiz_attempts: int = 0,
     failed_interview_sessions: int = 0,
+    total_interview_sessions: int = 0,
     pending_interview_sessions: int = 0,
     last_engagement_at: datetime | None = None,
 ) -> AtRiskRow:
@@ -44,8 +46,10 @@ def _row(
         last_engagement_at=last_engagement_at,
         completion_percent=Decimal(completion_percent),
         failed_quiz_attempts=failed_quiz_attempts,
+        total_quiz_attempts=total_quiz_attempts,
         ungraded_quiz_attempts=ungraded_quiz_attempts,
         failed_interview_sessions=failed_interview_sessions,
+        total_interview_sessions=total_interview_sessions,
         pending_interview_sessions=pending_interview_sessions,
         days_since_last_engagement=days_since_last_engagement,
         days_since_enrolled=60.0,
@@ -59,12 +63,13 @@ def test_failed_assessments_outrank_inactivity() -> None:
             completion_percent=100,
             days_since_last_engagement=22,
             failed_quiz_attempts=3,
+            total_quiz_attempts=5,
         ),
         THRESHOLDS,
     )
     codes = [r.code for r in reasons]
     assert codes == ["failed_assessments", "inactive"]
-    assert reasons[0].detail == "3 quiz attempts failed."
+    assert reasons[0].detail == "3 of 5 quiz attempts failed."
 
 
 def test_ungraded_interviews_outrank_low_completion() -> None:
@@ -87,7 +92,9 @@ def test_full_priority_order() -> None:
             completion_percent=15,
             days_since_last_engagement=12,
             failed_quiz_attempts=1,
+            total_quiz_attempts=4,
             failed_interview_sessions=2,
+            total_interview_sessions=10,
             ungraded_quiz_attempts=1,
             pending_interview_sessions=1,
         ),
@@ -100,20 +107,22 @@ def test_full_priority_order() -> None:
         "low_completion",
         "inactive",
     ]
-    assert reasons[0].detail == "1 quiz attempt failed, 2 interviews failed."
+    assert reasons[0].detail == "1 of 4 quiz attempts failed, 2 of 10 interviews failed."
 
 
 def test_combined_counts_read_naturally() -> None:
     reasons = classify_at_risk_reasons(
         _row(
             failed_quiz_attempts=1,
+            total_quiz_attempts=3,
             failed_interview_sessions=1,
+            total_interview_sessions=2,
             days_since_last_engagement=3,
         ),
         THRESHOLDS,
     )
     assert reasons[0].code == "failed_assessments"
-    assert reasons[0].detail == "1 quiz attempt failed, 1 interview failed."
+    assert reasons[0].detail == "1 of 3 quiz attempts failed, 1 of 2 interviews failed."
     assert len(reasons) == 1
 
 

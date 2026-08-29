@@ -78,18 +78,24 @@ def classify_at_risk_reasons(
     reasons: list[AtRiskReason] = []
 
     # --- 1. Assessment performance: failing or ungraded attempts. The most
-    # specific, most actionable signal, so it leads the list.
+    # specific, most actionable signal, so it leads the list. The failure
+    # reason carries the denominator ("71 of 120 interviews failed") so an
+    # absolute count cannot be mistaken for a verdict on the whole history.
     failed_quiz = row.failed_quiz_attempts
     failed_iv = row.failed_interview_sessions
     if failed_quiz > 0 or failed_iv > 0:
         parts = []
         if failed_quiz:
+            total_quiz = row.total_quiz_attempts or failed_quiz
             parts.append(
-                f"{failed_quiz} quiz attempt{'s' if failed_quiz != 1 else ''} failed"
+                f"{failed_quiz} of {total_quiz} quiz attempt"
+                f"{'s' if total_quiz != 1 else ''} failed"
             )
         if failed_iv:
+            total_iv = row.total_interview_sessions or failed_iv
             parts.append(
-                f"{failed_iv} interview{'s' if failed_iv != 1 else ''} failed"
+                f"{failed_iv} of {total_iv} interview"
+                f"{'s' if total_iv != 1 else ''} failed"
             )
         reasons.append(
             AtRiskReason(
