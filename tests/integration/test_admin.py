@@ -1101,8 +1101,11 @@ def test_router_metadata() -> None:
         "/admin/stats/active-users",
         "/admin/stats/active-users/trend",
         "/admin/stats/content",
-        "/admin/stats/health",
         "/admin/stats/dashboard",
     }
     actual = {route.path for route in stats_router.routes}  # type: ignore[attr-defined]
     assert expected.issubset(actual)
+    # ``/admin/stats/health`` was retired with the Operations merge: it was a
+    # fourth, incompatible definition of "failed jobs" (processing_jobs only,
+    # window-filtered in-flight count). Its absence is the requirement.
+    assert "/admin/stats/health" not in actual
