@@ -300,28 +300,68 @@ async def test_manager_org_scoped_stats(
 
 
 _DASHBOARD_INT_FIELDS = (
-    "jobs_failed_7d",
-    "jobs_total_7d",
+    "window_days",
+    "jobs_terminal_window",
+    "jobs_failed_window",
+    "jobs_terminal_prev_window",
+    "jobs_failed_prev_window",
     "queue_depth",
-    "failed_ai_calls_30d",
+    "queue_pending",
+    "queue_running",
+    "requests_window",
+    "requests_5xx_window",
+    "requests_4xx_window",
+    "tokens_window",
+    "ai_calls_window",
+    "failed_ai_calls_window",
     "active_users_today",
-    "active_users_7d",
+    "active_users_window",
     "total_users",
-    "quiz_sessions_completed_7d",
-    "interview_sessions_7d",
-    "materials_ingested_7d",
-    "materials_stuck_processing",
-    "published_quizzes_missing_texp",
-    "interview_configs_no_reviewed_questions",
+    "materials_ingested_window",
+    "orgs_total",
     "orgs_inactive_30d",
 )
 _DASHBOARD_FLOAT_FIELDS = (
-    "job_failure_rate_pct",
-    "spend_7d_usd",
-    "spend_prev_7d_usd",
+    "spend_window_usd",
+    "spend_prev_window_usd",
     "projected_month_end_usd",
     "top_cost_driver_usd",
+)
+# Every rate is nullable by contract: None means the denominator was empty and
+# the client must render "No data" rather than 0% (PRD section 5).
+_DASHBOARD_NULLABLE_RATE_FIELDS = (
+    "job_failure_rate_pct",
+    "job_failure_rate_prev_pct",
+    "api_error_rate_pct",
+    "api_client_error_rate_pct",
+    "ai_failure_rate_pct",
+)
+_DASHBOARD_NULLABLE_INT_FIELDS = (
+    "queue_oldest_age_seconds",
+    "api_p50_latency_ms",
+    "api_p95_latency_ms",
+)
+_DASHBOARD_SCOPE_FIELDS = (
+    "usage_scope",
+    "tenant_scope",
+    "job_scope",
+    "cost_scope",
+    "api_scope",
+)
+# Metrics the PRD moved off the operator dashboard: academic signals (ADM-003)
+# and the job counters that used to disagree with the processing page
+# (ADM-004). Their absence is the requirement, so it is asserted.
+_DASHBOARD_REMOVED_FIELDS = (
     "interview_pass_rate_pct",
+    "interview_evaluated_7d",
+    "interview_students_7d",
+    "interview_sessions_7d",
+    "quiz_sessions_completed_7d",
+    "published_quizzes_missing_texp",
+    "interview_configs_no_reviewed_questions",
+    "jobs_failed_7d",
+    "jobs_total_7d",
+    "materials_stuck_processing",
 )
 
 
@@ -345,13 +385,127 @@ async def test_admin_dashboard(
     for field in _DASHBOARD_FLOAT_FIELDS:
         assert isinstance(body[field], int | float), field
         assert body[field] >= 0, field
+    for field in _DASHBOARD_NULLABLE_RATE_FIELDS:
+        value = body[field]
+        assert value is None or 0.0 <= value <= 100.0, field
+    for field in _DASHBOARD_NULLABLE_INT_FIELDS:
+        assert body[field] is None or body[field] >= 0, field
+    for field in _DASHBOARD_SCOPE_FIELDS:
+        assert body[field] in {"global", "organization"}, field
+    for field in _DASHBOARD_REMOVED_FIELDS:
+        assert field not in body, field
     assert body["top_cost_driver"] is None or isinstance(body["top_cost_driver"], str)
     assert body["slowest_model"] is None or isinstance(body["slowest_model"], str)
     assert isinstance(body["slowest_model_p95_ms"], int)
-    # rate is a percentage derived from the two job counters
-    assert 0.0 <= body["job_failure_rate_pct"] <= 100.0
-    assert 0.0 <= body["interview_pass_rate_pct"] <= 100.0
-    assert body["jobs_failed_7d"] <= body["jobs_total_7d"]
+    assert isinstance(body["as_of"], str)
+    assert body["window_days"] == 7
+    # A caller with system.administer and no filter is global everywhere.
+    assert body["organization_id"] is None
+    assert all(body[f] == "global" for f in _DASHBOARD_SCOPE_FIELDS)
+    # Failures are a subset of the terminal population they are divided by.
+    assert body["jobs_failed_window"] <= body["jobs_terminal_window"]
+    assert body["requests_5xx_window"] <= body["requests_window"]
+    assert body["failed_ai_calls_window"] <= body["ai_calls_window"]
+    assert body["queue_pending"] + body["queue_running"] == body["queue_depth"]
+
+
+async def test_dashboard_rate_is_null_not_zero_without_data(
+    client: httpx.AsyncClient, engine: AsyncEngine, seeded_users: SeededUsers
+) -> None:
+    """PRD section 5: an empty window has no rate, and must not report 0%.
+
+    A 1-day window over a freshly seeded database has no terminal jobs and no
+    AI calls, so both rates come back null with a zero denominator beside them
+    -- the pair the client needs in order to render "No data".
+    """
+    token, _ = await _bearer(engine, seeded_users.admin_id)
+    try:
+        resp = await client.get(
+            "/api/v1/admin/stats/dashboard?window_days=1", headers=_auth(token)
+        )
+    finally:
+        await _purge_sessions(engine, seeded_users.admin_id)
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["window_days"] == 1
+    if body["jobs_terminal_window"] == 0:
+        assert body["job_failure_rate_pct"] is None
+    if body["ai_calls_window"] == 0:
+        assert body["ai_failure_rate_pct"] is None
+    if body["queue_depth"] == 0:
+        assert body["queue_oldest_age_seconds"] is None
+
+
+async def test_dashboard_window_days_is_validated(
+    client: httpx.AsyncClient, engine: AsyncEngine, seeded_users: SeededUsers
+) -> None:
+    token, _ = await _bearer(engine, seeded_users.admin_id)
+    try:
+        too_wide = await client.get(
+            "/api/v1/admin/stats/dashboard?window_days=91", headers=_auth(token)
+        )
+        too_narrow = await client.get(
+            "/api/v1/admin/stats/dashboard?window_days=0", headers=_auth(token)
+        )
+    finally:
+        await _purge_sessions(engine, seeded_users.admin_id)
+    assert too_wide.status_code == 422, too_wide.text
+    assert too_narrow.status_code == 422, too_narrow.text
+
+
+async def test_dashboard_org_filter_honoured_for_admin_only(
+    client: httpx.AsyncClient,
+    engine: AsyncEngine,
+    seeded_users: SeededUsers,
+    extra_org: dict[str, uuid.UUID],
+    manager_membership: None,
+) -> None:
+    """ADM-005: an IT admin may narrow to one tenant; a manager may not.
+
+    The manager is already pinned to their own organization, so passing some
+    other org's id must not move their numbers -- that would be a cross-tenant
+    read dressed up as a filter.
+    """
+    del manager_membership
+    other_org = extra_org["organization_id"]
+
+    admin_token, _ = await _bearer(engine, seeded_users.admin_id)
+    try:
+        scoped = await client.get(
+            "/api/v1/admin/stats/dashboard"
+            f"?organization_id={seeded_users.organization_id}",
+            headers=_auth(admin_token),
+        )
+        unscoped = await client.get(
+            "/api/v1/admin/stats/dashboard", headers=_auth(admin_token)
+        )
+    finally:
+        await _purge_sessions(engine, seeded_users.admin_id)
+    assert scoped.status_code == 200, scoped.text
+    assert unscoped.status_code == 200, unscoped.text
+    assert scoped.json()["usage_scope"] == "organization"
+    assert scoped.json()["total_users"] <= unscoped.json()["total_users"]
+    # Job / cost / API families have no organization edge and say so even when
+    # the caller filtered.
+    assert scoped.json()["job_scope"] == "global"
+    assert scoped.json()["cost_scope"] == "global"
+    assert scoped.json()["api_scope"] == "global"
+
+    manager_token, _ = await _bearer(engine, seeded_users.manager_id)
+    try:
+        pinned = await client.get(
+            f"/api/v1/admin/stats/dashboard?organization_id={other_org}",
+            headers=_auth(manager_token),
+        )
+        default = await client.get(
+            "/api/v1/admin/stats/dashboard", headers=_auth(manager_token)
+        )
+    finally:
+        await _purge_sessions(engine, seeded_users.manager_id)
+    assert pinned.status_code == 200, pinned.text
+    assert default.status_code == 200, default.text
+    assert pinned.json()["organization_id"] == default.json()["organization_id"]
+    assert pinned.json()["total_users"] == default.json()["total_users"]
 
 
 async def test_manager_dashboard_is_org_scoped(

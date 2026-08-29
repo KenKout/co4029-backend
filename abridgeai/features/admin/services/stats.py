@@ -16,6 +16,7 @@ from uuid import UUID
 
 from abridgeai.core.ttl_cache import TTLCache
 from abridgeai.features.admin.queries import stats as stats_queries
+from abridgeai.features.admin.services import job_metrics
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -28,8 +29,29 @@ if TYPE_CHECKING:
 # dict hit. Keyed by org scope; ``now`` is pinned inside the cached value's
 # TTL window (windows are relative to the evaluation instant, and 60s of
 # drift on a "7d" window is noise).
+# Default dashboard window. Callers may widen or narrow it; every windowed
+# metric in the response moves together so the tiles stay comparable.
+DEFAULT_WINDOW_DAYS = 7
+
 _DASHBOARD_TTL_SECONDS = 60.0
 _DASHBOARD_CACHE = TTLCache(max_entries=64, ttl_seconds=_DASHBOARD_TTL_SECONDS)
+
+
+def _rate_pct(numerator: int, denominator: int) -> float | None:
+    """Percentage, or ``None`` when the denominator is empty.
+
+    PRD section 5: "0 of 0" must never render as 0% -- a quiet window and a
+    clean window are different states, and a tile that conflates them stops
+    being worth reading.
+    """
+    if denominator <= 0:
+        return None
+    return round(100.0 * numerator / denominator, 2)
+
+
+def _opt_int(value: Any) -> int | None:
+    """Round a nullable numeric (percentile) to int, preserving ``None``."""
+    return None if value is None else int(round(float(value)))
 
 
 async def overview(db: AsyncSession, *, organization_id: UUID | None) -> dict[str, int]:
@@ -78,25 +100,40 @@ async def operator_dashboard(
     db: AsyncSession,
     *,
     organization_id: UUID | None,
+    window_days: int = DEFAULT_WINDOW_DAYS,
     now: datetime | None = None,
 ) -> dict[str, Any]:
     """Single-response operator metrics rollup for the admin dashboard.
 
-    Cached for 60s per org scope (see ``_DASHBOARD_CACHE`` above). Tests that
-    pin ``now`` bypass the cache entirely — determinism beats reuse there.
+    Composes three sources that each own their own contract:
+
+    * ``stats_queries.operator_dashboard`` -- cost, usage, tenant signals.
+    * ``job_metrics`` -- the canonical job failure rate and queue reading,
+      shared with the processing surface so the two can never disagree
+      (PRD ADM-004).
+    * ``stats_queries.api_reliability`` -- request error rate and latency.
+
+    Every rate in the result is ``None`` rather than ``0.0`` when its
+    denominator was empty, and ``as_of`` / ``window_days`` / the per-family
+    ``*_scope`` keys travel with the numbers so the client never has to guess
+    what a tile is measuring (PRD ADM-004, section 5).
+
+    Cached for 60s per (org scope, window). Tests that pin ``now`` bypass the
+    cache entirely -- determinism beats reuse there.
     """
     if now is not None:
-        return await stats_queries.operator_dashboard(
-            db, organization_id=organization_id, now=now
+        return await _operator_dashboard_uncached(
+            db, organization_id=organization_id, window_days=window_days, now=now
         )
-    cache_key = organization_id
+    cache_key = (organization_id, window_days)
     cached = _DASHBOARD_CACHE.get(cache_key)
     if cached is not None:
         return dict(cached)
-    result = await stats_queries.operator_dashboard(
+    result = await _operator_dashboard_uncached(
         db,
         organization_id=organization_id,
-        now=now or datetime.now(tz=UTC),
+        window_days=window_days,
+        now=datetime.now(tz=UTC),
     )
     # json round-trip freezes the copy (dates/Decimals -> plain types) so a
     # caller mutating the returned dict can't poison the cache.
@@ -104,7 +141,83 @@ async def operator_dashboard(
     return result
 
 
+async def _operator_dashboard_uncached(
+    db: AsyncSession,
+    *,
+    organization_id: UUID | None,
+    window_days: int,
+    now: datetime,
+) -> dict[str, Any]:
+    rollup = await stats_queries.operator_dashboard(
+        db, organization_id=organization_id, now=now, window_days=window_days
+    )
+    jobs = await job_metrics.job_outcomes(db, window_days=window_days, now=now)
+    queue = await job_metrics.queue_state(db, now=now)
+    api = await stats_queries.api_reliability(db, now=now, window_days=window_days)
+
+    requests_total = int(api["requests_total"] or 0)
+    requests_5xx = int(api["requests_5xx"] or 0)
+    requests_4xx = int(api["requests_4xx"] or 0)
+    ai_calls = int(rollup["ai_calls_window"] or 0)
+    failed_ai_calls = int(rollup["failed_ai_calls_window"] or 0)
+
+    return {
+        # -- envelope: what these numbers measure -----------------------
+        "as_of": rollup["as_of"],
+        "window_days": window_days,
+        "organization_id": organization_id,
+        # Which families the organization filter actually reached. Job, cost
+        # and API metrics have no organization edge in the schema, so an
+        # org-scoped caller sees global numbers for them and is told so
+        # rather than shown a tenant-looking figure.
+        "usage_scope": "organization" if organization_id else "global",
+        "tenant_scope": "organization" if organization_id else "global",
+        "job_scope": jobs.scope,
+        "cost_scope": "global",
+        "api_scope": "global",
+        # -- reliability & throughput -----------------------------------
+        "job_failure_rate_pct": jobs.failure_rate_pct,
+        "job_failure_rate_prev_pct": jobs.prev_failure_rate_pct,
+        "jobs_terminal_window": jobs.terminal_total,
+        "jobs_failed_window": jobs.terminal_failed,
+        "jobs_terminal_prev_window": jobs.prev_terminal_total,
+        "jobs_failed_prev_window": jobs.prev_terminal_failed,
+        "queue_depth": queue.queue_depth,
+        "queue_pending": queue.pending_count,
+        "queue_running": queue.running_count,
+        "queue_oldest_age_seconds": queue.oldest_age_seconds,
+        "requests_window": requests_total,
+        "requests_5xx_window": requests_5xx,
+        "requests_4xx_window": requests_4xx,
+        "api_error_rate_pct": _rate_pct(requests_5xx, requests_total),
+        "api_client_error_rate_pct": _rate_pct(requests_4xx, requests_total),
+        "api_p50_latency_ms": _opt_int(api["p50_latency_ms"]),
+        "api_p95_latency_ms": _opt_int(api["p95_latency_ms"]),
+        # -- cost & capacity --------------------------------------------
+        "spend_window_usd": rollup["spend_window_usd"],
+        "spend_prev_window_usd": rollup["spend_prev_window_usd"],
+        "projected_month_end_usd": rollup["projected_month_end_usd"],
+        "tokens_window": rollup["tokens_window"],
+        "ai_calls_window": ai_calls,
+        "failed_ai_calls_window": failed_ai_calls,
+        "ai_failure_rate_pct": _rate_pct(failed_ai_calls, ai_calls),
+        "top_cost_driver": rollup["top_cost_driver"],
+        "top_cost_driver_usd": rollup["top_cost_driver_usd"],
+        "slowest_model": rollup["slowest_model"],
+        "slowest_model_p95_ms": rollup["slowest_model_p95_ms"],
+        # -- usage -------------------------------------------------------
+        "active_users_today": rollup["active_users_today"],
+        "active_users_window": rollup["active_users_window"],
+        "total_users": rollup["total_users"],
+        "materials_ingested_window": rollup["materials_ingested_window"],
+        # -- tenant anomalies --------------------------------------------
+        "orgs_total": rollup["orgs_total"],
+        "orgs_inactive_30d": rollup["orgs_inactive_30d"],
+    }
+
+
 __all__ = [
+    "DEFAULT_WINDOW_DAYS",
     "active_users",
     "content_breakdown",
     "health",

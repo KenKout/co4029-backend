@@ -2,7 +2,14 @@
 -- Returns three result sets via array_agg:
 --   * courses by status
 --   * materials by type
---   * processing_jobs by status
+--
+-- Processing-job status deliberately does NOT live here (PRD ADM-004 and the
+-- section 2 IA rule: "job status leaves Content and moves into Operations to
+-- remove the duplication"). This file counted jobs all-time and
+-- processing_jobs-only, while the dashboard counted a 7d window and the
+-- processing page counted a union with generation_runs -- three answers to one
+-- question. Jobs now have exactly one home: sql/jobs/*.sql behind the
+-- Operations surface.
 SELECT
     (
         SELECT COALESCE(jsonb_agg(jsonb_build_object('status', t.status, 'count', t.cnt) ORDER BY t.status), '[]'::jsonb)
@@ -29,14 +36,6 @@ SELECT
         ) t
     ) AS materials_by_type,
     (
-        SELECT COALESCE(jsonb_agg(jsonb_build_object('status', t.status, 'count', t.cnt) ORDER BY t.status), '[]'::jsonb)
-        FROM (
-            SELECT pj.status AS status, COUNT(*) AS cnt
-            FROM processing_jobs pj
-            GROUP BY pj.status
-        ) t
-    ) AS processing_jobs_by_status,
-    (
         SELECT COUNT(*)
         FROM courses c
         WHERE c.deleted_at IS NULL
@@ -53,9 +52,4 @@ SELECT
         WHERE lm.created_at >= now() - interval '7 days'
           AND (CAST(:organization_id AS uuid) IS NULL
                OR c.organization_id = CAST(:organization_id AS uuid))
-    ) AS materials_created_7d,
-    (
-        SELECT COUNT(*)
-        FROM processing_jobs pj
-        WHERE pj.created_at >= date_trunc('day', now())
-    ) AS processing_jobs_created_today;
+    ) AS materials_created_7d;

@@ -8,14 +8,18 @@ Org-scoping is resolved via :func:`resolve_admin_scope`.
 * ``/active-users`` uses fixed 24h / 7d / 30d windows.
 * ``/health`` requires ``since`` to keep the failed-jobs / failed-AI-calls
   scans bounded.
-* ``/dashboard`` is the operator rollup: fixed 1h / 24h / 7d / 14d / 30d and
-  month-to-date windows, all evaluated server-side against ``now``.
+* ``/dashboard`` is the operator rollup. Its window is caller-selectable
+  (``window_days``, default 7) and every windowed metric in the response uses
+  it, with the preceding window of the same length alongside for direction.
+  The response carries ``as_of``, ``window_days`` and a ``*_scope`` per metric
+  family so no tile is ambiguous about what it measures (PRD ADM-004).
 """
 
 from __future__ import annotations
 
 from datetime import date, datetime
 from typing import Annotated, Any
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
@@ -62,56 +66,82 @@ class HealthOut(BaseModel):
 
 
 class ContentOut(BaseModel):
+    """Content inventory. Processing-job status is deliberately absent: jobs
+    live in the Operations surface only (PRD ADM-004 / section 2 IA rule), so
+    there is exactly one place that answers "how are jobs doing"."""
+
     courses_by_status: list[dict[str, Any]]
     materials_by_type: list[dict[str, Any]]
-    processing_jobs_by_status: list[dict[str, Any]]
-    # Analytics deltas for the content page's summary cards. Courses /
-    # materials are org-scoped; processing jobs carry no org edge (global).
+    # Analytics deltas for the content page's summary cards, both org-scoped.
     courses_created_7d: int = 0
     materials_created_7d: int = 0
-    processing_jobs_created_today: int = 0
 
 
 class DashboardOut(BaseModel):
-    """Operator dashboard rollup.
+    """Operator dashboard rollup, ordered the way the dashboard reads it.
 
-    ``processing_jobs`` and ``ai_model_calls`` carry no organization edge in
-    the schema, so the job / cost / latency fields are always global even for
-    an org-scoped caller (documented in ``sql/stats/dashboard.sql``).
+    Two rules run through the whole payload:
+
+    * **Every rate is nullable.** ``None`` means the denominator was empty and
+      the client must render "No data". A fabricated 0% makes a quiet platform
+      indistinguishable from a healthy one (PRD section 5).
+    * **Every family declares its scope.** ``processing_jobs``,
+      ``ai_model_calls`` and ``http_audit_log`` carry no organization edge, so
+      an org-scoped caller gets global numbers there. The ``*_scope`` fields
+      say so outright instead of letting the figure imply a tenant filter it
+      never had (PRD ADM-004).
     """
 
-    # needs action
-    job_failure_rate_pct: float
-    jobs_failed_7d: int
-    jobs_total_7d: int
-    jobs_failed_prev_7d: int
-    jobs_total_prev_7d: int
+    # -- envelope --------------------------------------------------------
+    as_of: datetime
+    window_days: int
+    organization_id: UUID | None = None
+    usage_scope: str
+    tenant_scope: str
+    job_scope: str
+    cost_scope: str
+    api_scope: str
+
+    # -- reliability & throughput ---------------------------------------
+    job_failure_rate_pct: float | None
+    job_failure_rate_prev_pct: float | None
+    jobs_terminal_window: int
+    jobs_failed_window: int
+    jobs_terminal_prev_window: int
+    jobs_failed_prev_window: int
     queue_depth: int
-    failed_ai_calls_30d: int
-    # cost snapshot
-    spend_7d_usd: float
-    spend_prev_7d_usd: float
+    queue_pending: int
+    queue_running: int
+    queue_oldest_age_seconds: int | None
+    requests_window: int
+    requests_5xx_window: int
+    requests_4xx_window: int
+    api_error_rate_pct: float | None
+    api_client_error_rate_pct: float | None
+    api_p50_latency_ms: int | None
+    api_p95_latency_ms: int | None
+
+    # -- cost & capacity -------------------------------------------------
+    spend_window_usd: float
+    spend_prev_window_usd: float
     projected_month_end_usd: float
+    tokens_window: int
+    ai_calls_window: int
+    failed_ai_calls_window: int
+    ai_failure_rate_pct: float | None
     top_cost_driver: str | None
     top_cost_driver_usd: float
     slowest_model: str | None
     slowest_model_p95_ms: int
-    # activity
+
+    # -- usage ------------------------------------------------------------
     active_users_today: int
-    active_users_7d: int
+    active_users_window: int
     total_users: int
-    quiz_sessions_completed_7d: int
-    interview_sessions_7d: int
-    interview_pass_rate_pct: float
-    # Sample size behind the pass rate — a low rate over a couple of students is
-    # a testing artifact, not a platform signal.
-    interview_evaluated_7d: int
-    interview_students_7d: int
-    materials_ingested_7d: int
-    # needs attention (checklist)
-    materials_stuck_processing: int
-    published_quizzes_missing_texp: int
-    interview_configs_no_reviewed_questions: int
+    materials_ingested_window: int
+
+    # -- tenant anomalies --------------------------------------------------
+    orgs_total: int
     orgs_inactive_30d: int
 
 
@@ -181,9 +211,39 @@ async def get_health(
 async def get_dashboard(
     user: Annotated[CurrentUser, Depends(_REQUIRE_STATS)],
     db: Annotated[AsyncSession, Depends(get_db)],
+    window_days: Annotated[
+        int,
+        Query(
+            ge=1,
+            le=90,
+            description="Length of every windowed metric, in days. All tiles "
+            "move together so they stay comparable.",
+        ),
+    ] = stats_service.DEFAULT_WINDOW_DAYS,
+    organization_id: Annotated[
+        UUID | None,
+        Query(
+            description="Narrow org-traceable metrics to one tenant. Honoured "
+            "only for callers holding system.administer -- everyone else is "
+            "already pinned to their own organization."
+        ),
+    ] = None,
 ) -> DashboardOut:
-    org_id = await resolve_admin_scope(db, user)
-    metrics = await stats_service.operator_dashboard(db, organization_id=org_id)
+    """Operator rollup for the admin dashboard.
+
+    Scope resolution (PRD ADM-005): a Manager / HOD is always pinned to their
+    own organization and the ``organization_id`` parameter is ignored for them
+    -- accepting it would be a cross-tenant read. An IT Admin defaults to the
+    global view and may narrow to one tenant with it.
+    """
+    scope = await resolve_admin_scope(db, user)
+    if scope is None and organization_id is not None:
+        # Only reachable with system.administer (resolve_admin_scope returns
+        # None exclusively for that permission).
+        scope = organization_id
+    metrics = await stats_service.operator_dashboard(
+        db, organization_id=scope, window_days=window_days
+    )
     return DashboardOut(**metrics)
 
 
