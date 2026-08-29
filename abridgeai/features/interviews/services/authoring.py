@@ -701,10 +701,18 @@ async def start_generation_run(
     config.generation_run_id = run.id
     await db.commit()
 
-    if arq_pool is not None:
-        await arq_pool.enqueue_job(  # type: ignore[attr-defined]
-            _RUN_INTERVIEW_GENERATION_TASK, actor.user_id, run.id
+    try:
+        if arq_pool is not None:
+            await arq_pool.enqueue_job(  # type: ignore[attr-defined]
+                _RUN_INTERVIEW_GENERATION_TASK, actor.user_id, run.id
+            )
+    except Exception:
+        await db.rollback()
+        await quizzes_public.mark_pending_generation_run_failed(
+            db, run.id, "Generation worker could not be queued"
         )
+        await db.commit()
+        raise
     return run
 
 

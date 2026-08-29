@@ -42,11 +42,13 @@ Surface
 
 from __future__ import annotations
 
+import json
 from collections.abc import Sequence
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 
 from abridgeai.ai.models import GenerationRun
 from abridgeai.core.db.conflict_mapper import flush_or_conflict
@@ -227,6 +229,28 @@ async def get_generation_run(
     if run is None:
         return None
     return GenerationRunDTO.model_validate(run)
+
+
+async def mark_pending_generation_run_failed(
+    db: AsyncSession,
+    run_id: UUID,
+    message: str,
+) -> bool:
+    """Conditionally terminalize a still-queued generation run."""
+    result = await db.execute(
+        text(
+            "UPDATE generation_runs "
+            "SET status = 'failed', finished_at = :finished_at, "
+            "config_json = config_json || CAST(:failure AS jsonb), updated_at = NOW() "
+            "WHERE id = :id AND status = 'pending'"
+        ),
+        {
+            "id": run_id,
+            "finished_at": datetime.now(UTC),
+            "failure": json.dumps({"failure": {"message": message}}),
+        },
+    )
+    return result.rowcount == 1
 
 
 async def get_review_question_payloads(
@@ -626,6 +650,7 @@ __all__ = [
     "get_attempt_score",
     "get_generation_run",
     "get_guess_probability",
+    "mark_pending_generation_run_failed",
     "get_question_with_quiz_context",
     "get_quiz_question_id_set_by_lesson",
     "get_review_question_payloads",

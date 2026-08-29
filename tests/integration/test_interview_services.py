@@ -1367,6 +1367,62 @@ async def test_rejects_blank_question_prompt_and_outcome_text(
         assert updated_outcome.outcome_text == "trimmed outcome"
 
 
+async def test_start_generation_run_enqueue_failure_marks_run_failed(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict[str, Any],
+) -> None:
+    """An ARQ/Redis enqueue failure after commit terminalizes the pending run.
+
+    The run was already committed as pending; the failure handler must not
+    leave it stuck pending forever, and must not clobber a run a worker
+    already claimed. The original exception is re-raised.
+    """
+    seeded = await _create_published_config(
+        engine,
+        course_id=scenario["course_id"],
+        module_id=scenario["module_id"],
+        teacher_id=scenario["teacher_id"],
+        questions=0,
+        outcomes=0,
+        status="draft",
+    )
+    base = _CreatePayload(
+        mode="topic",
+        course_id=scenario["course_id"],
+        module_id=scenario["module_id"],
+        question_count=5,
+    )
+    failing_pool = SimpleNamespace(
+        enqueue_job=AsyncMock(side_effect=RuntimeError("redis connection lost"))
+    )
+    async with session_factory() as session:
+        with pytest.raises(RuntimeError, match="redis connection lost"):
+            await authoring_service.start_generation_run(
+                session,
+                seeded["config_id"],
+                base,
+                _actor(scenario["teacher_id"]),
+                arq_pool=failing_pool,
+            )
+
+    async with session_factory() as session:
+        row = (
+            await session.execute(
+                text(
+                    "SELECT r.status, r.finished_at, r.config_json "
+                    "FROM generation_runs r "
+                    "JOIN interview_configs c ON c.generation_run_id = r.id "
+                    "WHERE c.id = :cfg"
+                ),
+                {"cfg": seeded["config_id"]},
+            )
+        ).one()
+    assert row.status == "failed"
+    assert row.finished_at is not None
+    assert row.config_json["failure"]["message"] == "Generation worker could not be queued"
+
+
 async def _seed_lesson_and_chunk(
     engine: AsyncEngine, scenario: dict[str, Any]
 ) -> dict[str, uuid.UUID]:
