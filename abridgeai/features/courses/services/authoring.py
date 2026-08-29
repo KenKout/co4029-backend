@@ -1597,6 +1597,11 @@ def _age_hours(since: datetime | None, *, now: datetime | None = None) -> float 
     return max(0.0, (reference - since).total_seconds() / 3600)
 
 
+def _course_count_phrase(n: int) -> str:
+    """``Across N course(s)`` with the plural right for the count."""
+    return f"Across {n} course" if n == 1 else f"Across {n} courses"
+
+
 #: FR-012's ranking, as a sort weight. Blocking work comes first because it
 #: has a second victim -- a draft quiz nobody can sit. Student risk next:
 #: people decay while backlogs merely wait. Then overdue reviews, then age.
@@ -1818,9 +1823,11 @@ async def list_priority_tasks(
                 title=f"{quiz_backlog.count} quiz questions awaiting review",
                 reason=(
                     f"{quiz_backlog.blocking} are blocking a draft quiz from "
-                    f"publishing, across {quiz_backlog.courses_affected} courses."
+                    "publishing, across "
+                    + _course_count_phrase(quiz_backlog.courses_affected)
+                    + "."
                     if blocking
-                    else f"Across {quiz_backlog.courses_affected} courses."
+                    else _course_count_phrase(quiz_backlog.courses_affected) + "."
                 ),
                 age_hours=_age_hours(quiz_backlog.oldest_created_at),
                 blocking=blocking,
@@ -1836,7 +1843,7 @@ async def list_priority_tasks(
                 kind="interview_questions_pending",
                 severity="medium",
                 title=f"{iv_backlog.count} interview questions awaiting review",
-                reason=f"Across {iv_backlog.courses_affected} courses.",
+                reason=f"{_course_count_phrase(iv_backlog.courses_affected)}.",
                 age_hours=_age_hours(iv_backlog.oldest_created_at),
                 count=iv_backlog.count,
             )

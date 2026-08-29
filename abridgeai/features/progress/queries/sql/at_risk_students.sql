@@ -21,7 +21,20 @@ WITH user_engagement AS (
         ce.student_id AS user_id,
         MAX(ce.enrolled_at) AS enrolled_at,
         MAX(me.created_at) AS last_engagement_at,
-        COALESCE(AVG(lp.completion_percent), 0) AS completion_percent
+        COALESCE(AVG(lp.completion_percent), 0) AS completion_percent,
+        COUNT(qa.id) FILTER (
+            WHERE qa.passed = FALSE
+        ) AS failed_quiz_attempts,
+        COUNT(qa.id) FILTER (
+            WHERE qa.status = 'submitted'
+        ) AS ungraded_quiz_attempts,
+        COUNT(isx.id) FILTER (
+            WHERE isx.pass_verdict = FALSE
+        ) AS failed_interview_sessions,
+        COUNT(isx.id) FILTER (
+            WHERE isx.pass_verdict IS NULL
+              AND isx.ended_at IS NOT NULL
+        ) AS pending_interview_sessions
     FROM course_enrollments ce
     LEFT JOIN modules m ON m.course_id = ce.course_id AND m.deleted_at IS NULL
     LEFT JOIN lessons l ON l.module_id = m.id AND l.deleted_at IS NULL
@@ -31,6 +44,13 @@ WITH user_engagement AS (
     LEFT JOIN material_engagement me ON me.material_version_id = lmv.id
         AND me.user_id = ce.student_id
     LEFT JOIN lesson_progress lp ON lp.lesson_id = l.id AND lp.user_id = ce.student_id
+    LEFT JOIN quizzes q ON q.course_id = ce.course_id AND q.deleted_at IS NULL
+    LEFT JOIN quiz_attempts qa ON qa.quiz_id = q.id
+        AND qa.student_id = ce.student_id
+    LEFT JOIN interview_configs ic ON ic.course_id = ce.course_id
+        AND ic.deleted_at IS NULL
+    LEFT JOIN interview_sessions isx ON isx.interview_config_id = ic.id
+        AND isx.student_id = ce.student_id
     WHERE ce.course_id = ANY(:course_ids)
       AND ce.status = 'active'
     GROUP BY ce.course_id, ce.student_id
@@ -41,6 +61,10 @@ SELECT
     enrolled_at,
     last_engagement_at,
     completion_percent,
+    failed_quiz_attempts,
+    ungraded_quiz_attempts,
+    failed_interview_sessions,
+    pending_interview_sessions,
     CASE
         WHEN last_engagement_at IS NULL THEN NULL
         ELSE EXTRACT(EPOCH FROM (NOW() - last_engagement_at)) / 86400.0

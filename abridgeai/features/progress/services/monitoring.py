@@ -63,12 +63,74 @@ def classify_at_risk_reasons(
     value, so a teacher can tell "inactive 12 days (threshold 7)" from
     "inactive 8 days (threshold 7)" without opening the settings page.
 
+    Reasons are ordered by how actionable they are, not by when they fired:
+    assessment performance first (a failing grade is the most specific
+    signal a teacher can act on), then incomplete work, then inactivity.
+    A student can be 100% through the lessons and still at risk because
+    their attempts are failing -- and the first line must say that, not
+    that they have been quiet for three weeks.
+
     Returns an empty list when nothing fires. The SQL already filters to
     rows that trip at least one rule, so an empty result means the Python
     and the SQL disagree -- callers treat it as "not at risk" rather than
     inventing a reason.
     """
     reasons: list[AtRiskReason] = []
+
+    # --- 1. Assessment performance: failing or ungraded attempts. The most
+    # specific, most actionable signal, so it leads the list.
+    failed_quiz = row.failed_quiz_attempts
+    failed_iv = row.failed_interview_sessions
+    if failed_quiz > 0 or failed_iv > 0:
+        parts = []
+        if failed_quiz:
+            parts.append(
+                f"{failed_quiz} quiz attempt{'s' if failed_quiz != 1 else ''} failed"
+            )
+        if failed_iv:
+            parts.append(
+                f"{failed_iv} interview{'s' if failed_iv != 1 else ''} failed"
+            )
+        reasons.append(
+            AtRiskReason(
+                code="failed_assessments",
+                detail=", ".join(parts) + ".",
+            )
+        )
+
+    ungraded_quiz = row.ungraded_quiz_attempts
+    pending_iv = row.pending_interview_sessions
+    if ungraded_quiz > 0 or pending_iv > 0:
+        parts = []
+        if ungraded_quiz:
+            parts.append(
+                f"{ungraded_quiz} quiz attempt{'s' if ungraded_quiz != 1 else ''} not graded"
+            )
+        if pending_iv:
+            parts.append(
+                f"{pending_iv} interview{'s' if pending_iv != 1 else ''} awaiting grading"
+            )
+        reasons.append(
+            AtRiskReason(
+                code="ungraded_assessments",
+                detail=", ".join(parts) + ".",
+            )
+        )
+
+    # --- 2. Incomplete critical work: lesson progress below the bar.
+    if int(row.completion_percent) < thresholds.low_completion_percent:
+        reasons.append(
+            AtRiskReason(
+                code="low_completion",
+                detail=(
+                    f"Average lesson completion {int(row.completion_percent)}% "
+                    f"below the {thresholds.low_completion_percent}% threshold."
+                ),
+            )
+        )
+
+    # --- 3. Inactivity, last: the least specific signal, and the one most
+    # likely to be a symptom of 1 or 2 rather than an independent cause.
     days = row.days_since_last_engagement
     if row.last_engagement_at is None:
         reasons.append(
@@ -84,16 +146,6 @@ def classify_at_risk_reasons(
                 detail=(
                     f"No engagement for {int(days)} days "
                     f"(threshold: {thresholds.inactivity_days})."
-                ),
-            )
-        )
-    if int(row.completion_percent) < thresholds.low_completion_percent:
-        reasons.append(
-            AtRiskReason(
-                code="low_completion",
-                detail=(
-                    f"Average lesson completion {int(row.completion_percent)}% "
-                    f"below the {thresholds.low_completion_percent}% threshold."
                 ),
             )
         )
