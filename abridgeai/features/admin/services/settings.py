@@ -28,6 +28,7 @@ from abridgeai.core.settings_registry import (
     SettingValidationError,
     coerce_and_validate,
 )
+from abridgeai.features.admin.queries import setting_changes as change_queries
 from abridgeai.features.admin.queries import settings as settings_queries
 
 if TYPE_CHECKING:
@@ -151,23 +152,11 @@ async def set_setting(
     that nothing ever reads.
     """
     coerced = coerce_and_validate(key, value)
-    # Cross-field invariant: max teachers must stay >= min teachers. Validated
-    # here so a stale org override can't be written into a self-contradicting
-    # state (a min above the max would make every course unpublishable).
-    if key == "courses.min_teachers_per_course":
-        max_val = await _resolved_int(db, "courses.max_teachers_per_course", organization_id)
-        if coerced > max_val:
-            raise SettingValidationError(
-                "courses.min_teachers_per_course cannot exceed "
-                f"courses.max_teachers_per_course ({max_val})"
-            )
-    elif key == "courses.max_teachers_per_course":
-        min_val = await _resolved_int(db, "courses.min_teachers_per_course", organization_id)
-        if coerced < min_val:
-            raise SettingValidationError(
-                "courses.max_teachers_per_course cannot be below "
-                f"courses.min_teachers_per_course ({min_val})"
-            )
+    # Cross-field invariant: max teachers must stay >= min teachers, so a stale
+    # org override cannot be written into a self-contradicting state (a min
+    # above the max makes every course unpublishable). Shared with
+    # ``preview_change`` so the dry run enforces the same rules as the write.
+    await _assert_cross_field_invariants(db, key, coerced, organization_id)
     await settings_queries.upsert(
         db,
         setting_key=key,
@@ -216,4 +205,371 @@ async def _resolved_int(
     return int(row.effective_value)
 
 
-__all__ = ["ResolvedSetting", "clear_setting", "list_settings", "set_setting"]
+# ---------------------------------------------------------------------------
+# Controlled change workflow (PRD ADM-030 -> ADM-034)
+# ---------------------------------------------------------------------------
+#
+# Settings used to save on every keystroke-commit: the field's onBlur wrote
+# straight through to the table. That made "I was reading the form" and "I
+# changed the deployment" the same gesture, with no record of who, why, or what
+# it had been. The flow below separates them:
+#
+#     preview_change()  -> validate + show the blast radius, writing nothing
+#     apply_change()    -> write the value AND the audit row, in one transaction
+#     rollback_change() -> re-apply a previous before-value as a new change
+#
+# The audit row and the setting write are deliberately not separable. A change
+# that lands without its audit row is precisely the state this feature exists
+# to prevent, so they share the caller's transaction and commit together.
+
+CHANGE_SOURCE_ADMIN_CONSOLE = "admin_console"
+
+#: Reason length bounds. A reason is required (ADM-033) but must not become a
+#: place to paste an incident report the audit table then has to carry forever.
+REASON_MIN_LENGTH = 3
+REASON_MAX_LENGTH = 500
+
+
+@dataclass(frozen=True)
+class ChangeImpact:
+    """What applying a pending change would do, computed without writing.
+
+    ``affected_organizations`` is the number of live organizations that would
+    actually feel a global change — those with no override of their own, since
+    an org row wins over the global row. Reporting the total org count instead
+    would overstate the blast radius for a key most tenants have customised.
+    """
+
+    key: str
+    scope: str
+    organization_id: UUID | None
+    current_value: bool | int | float | None
+    current_source: str
+    new_value: bool | int | float | None
+    #: True when the write is a no-op — same value, same scope.
+    unchanged: bool
+    #: Global changes reach every organization that has not overridden the key.
+    affected_organizations: int
+    total_organizations: int
+    #: ADM-034: this setting only takes effect on the NEXT ingest. Already
+    #: processed material is not reprocessed and is not retroactively changed.
+    requires_reprocess: bool
+    label: str
+    description: str
+
+
+def _validate_reason(reason: str) -> str:
+    """A reason is mandatory and must say something (ADM-033)."""
+    cleaned = (reason or "").strip()
+    if len(cleaned) < REASON_MIN_LENGTH:
+        raise SettingValidationError(
+            f"A reason of at least {REASON_MIN_LENGTH} characters is required "
+            "for every configuration change"
+        )
+    if len(cleaned) > REASON_MAX_LENGTH:
+        raise SettingValidationError(
+            f"Reason must be at most {REASON_MAX_LENGTH} characters"
+        )
+    return cleaned
+
+
+def _scope_of(organization_id: UUID | None) -> str:
+    return "organization" if organization_id is not None else "global"
+
+
+def _stored_value_at_scope(
+    row: ResolvedSetting, organization_id: UUID | None
+) -> bool | int | float | None:
+    """The override stored AT THIS SCOPE, or None when the value is inherited.
+
+    Not the same as ``effective_value``: an org with no override of its own has
+    an effective value but nothing stored, and recording the inherited number
+    as the "before" would make a later rollback pin a value nobody ever chose.
+    """
+    return row.org_value if organization_id is not None else row.global_value
+
+
+async def preview_change(
+    db: AsyncSession,
+    *,
+    key: str,
+    value: Any,  # noqa: ANN401 -- raw JSON from the client; validated here
+    organization_id: UUID | None,
+) -> ChangeImpact:
+    """Validate a pending change and describe its effect. Writes nothing.
+
+    Raises :class:`SettingValidationError` exactly as ``apply_change`` would,
+    so the preview step is a genuine dry run rather than a second, weaker set
+    of rules the real write might still reject.
+    """
+    coerced = coerce_and_validate(key, value)
+    await _assert_cross_field_invariants(db, key, coerced, organization_id)
+
+    current = await _one(db, key, organization_id)
+    stored = _stored_value_at_scope(current, organization_id)
+    spec = SETTINGS_REGISTRY[key]
+    affected, total = await change_queries.affected_org_counts(db, setting_key=key)
+
+    return ChangeImpact(
+        key=key,
+        scope=_scope_of(organization_id),
+        organization_id=organization_id,
+        current_value=current.effective_value,
+        current_source=current.source,
+        new_value=coerced,
+        unchanged=stored == coerced,
+        # An org-scoped change touches exactly one tenant; only a global one
+        # spreads, and only to organizations that have not overridden the key.
+        affected_organizations=1 if organization_id is not None else affected,
+        total_organizations=total,
+        requires_reprocess=spec.requires_reprocess,
+        label=spec.label,
+        description=spec.description,
+    )
+
+
+async def preview_clear(
+    db: AsyncSession, *, key: str, organization_id: UUID | None
+) -> ChangeImpact:
+    """Describe what removing an override would do."""
+    if key not in SETTINGS_REGISTRY:
+        raise SettingValidationError(f"Unknown setting {key!r}")
+    current = await _one(db, key, organization_id)
+    stored = _stored_value_at_scope(current, organization_id)
+    spec = SETTINGS_REGISTRY[key]
+    affected, total = await change_queries.affected_org_counts(db, setting_key=key)
+    return ChangeImpact(
+        key=key,
+        scope=_scope_of(organization_id),
+        organization_id=organization_id,
+        current_value=current.effective_value,
+        current_source=current.source,
+        # None means "inherit from the next level down" — the caller renders
+        # that as the inherited value, not as an empty field.
+        new_value=None,
+        unchanged=stored is None,
+        affected_organizations=1 if organization_id is not None else affected,
+        total_organizations=total,
+        requires_reprocess=spec.requires_reprocess,
+        label=spec.label,
+        description=spec.description,
+    )
+
+
+async def apply_change(
+    db: AsyncSession,
+    *,
+    key: str,
+    value: Any,  # noqa: ANN401 -- raw JSON from the client; validated here
+    organization_id: UUID | None,
+    actor_id: UUID | None,
+    reason: str,
+    source: str = CHANGE_SOURCE_ADMIN_CONSOLE,
+) -> tuple[ResolvedSetting, dict[str, Any]]:
+    """Apply one change and record it. Returns ``(new state, audit row)``.
+
+    The audit row is written in the same transaction as the value. There is no
+    ordering in which a change can land without its record.
+    """
+    cleaned_reason = _validate_reason(reason)
+    before = _stored_value_at_scope(await _one(db, key, organization_id), organization_id)
+
+    updated = await set_setting(
+        db,
+        key=key,
+        value=value,
+        organization_id=organization_id,
+        actor_id=actor_id,
+    )
+    after = _stored_value_at_scope(updated, organization_id)
+
+    audit = await change_queries.insert(
+        db,
+        setting_key=key,
+        organization_id=organization_id,
+        scope=_scope_of(organization_id),
+        action="set",
+        before_value=None if before is None else json.dumps(before),
+        after_value=None if after is None else json.dumps(after),
+        reason=cleaned_reason,
+        actor_id=actor_id,
+        source=source,
+    )
+    return updated, audit
+
+
+async def apply_clear(
+    db: AsyncSession,
+    *,
+    key: str,
+    organization_id: UUID | None,
+    actor_id: UUID | None,
+    reason: str,
+    source: str = CHANGE_SOURCE_ADMIN_CONSOLE,
+) -> tuple[ResolvedSetting, dict[str, Any]]:
+    """Remove an override and record it."""
+    cleaned_reason = _validate_reason(reason)
+    before = _stored_value_at_scope(await _one(db, key, organization_id), organization_id)
+
+    updated = await clear_setting(db, key=key, organization_id=organization_id)
+
+    audit = await change_queries.insert(
+        db,
+        setting_key=key,
+        organization_id=organization_id,
+        scope=_scope_of(organization_id),
+        action="clear",
+        before_value=None if before is None else json.dumps(before),
+        after_value=None,
+        reason=cleaned_reason,
+        actor_id=actor_id,
+        source=source,
+    )
+    return updated, audit
+
+
+async def rollback_change(
+    db: AsyncSession,
+    *,
+    change_id: UUID,
+    actor_id: UUID | None,
+    reason: str,
+    organization_id: UUID | None = None,
+) -> tuple[ResolvedSetting, dict[str, Any]]:
+    """Restore the value a previous change replaced.
+
+    Restores ``before_value_json`` — a value if the scope had an override, or
+    inheritance if it did not. Both directions matter: rolling back a change
+    that *created* an override must remove it again, not pin it to whatever it
+    happened to inherit.
+
+    The rollback is appended as its own change pointing at what it undid; the
+    original row is never rewritten. ``organization_id``, when given, pins the
+    tenant the caller is allowed to act on so an org-scoped admin cannot roll
+    back a global change or another tenant's.
+    """
+    cleaned_reason = _validate_reason(reason)
+    original = await change_queries.get_change(db, change_id=change_id)
+    if original is None:
+        raise NotFoundError(f"Setting change {change_id} not found")
+
+    target_org: UUID | None = original["organization_id"]
+    if organization_id is not None and target_org != organization_id:
+        # Caller is scoped to one org; anything else is not theirs to undo.
+        raise NotFoundError(f"Setting change {change_id} not found")
+
+    key = original["setting_key"]
+    if key not in SETTINGS_REGISTRY:
+        # The key was removed from the registry after the change was recorded.
+        # Re-applying it would write a row nothing reads.
+        raise SettingValidationError(
+            f"Setting {key!r} is no longer registered and cannot be rolled back"
+        )
+
+    before = _stored_value_at_scope(await _one(db, key, target_org), target_org)
+    restore_to = original["before_value_json"]
+
+    if restore_to is None:
+        updated = await clear_setting(db, key=key, organization_id=target_org)
+    else:
+        updated = await set_setting(
+            db,
+            key=key,
+            value=restore_to,
+            organization_id=target_org,
+            actor_id=actor_id,
+        )
+    after = _stored_value_at_scope(updated, target_org)
+
+    audit = await change_queries.insert(
+        db,
+        setting_key=key,
+        organization_id=target_org,
+        scope=_scope_of(target_org),
+        action="rollback",
+        before_value=None if before is None else json.dumps(before),
+        after_value=None if after is None else json.dumps(after),
+        reason=cleaned_reason,
+        actor_id=actor_id,
+        source=CHANGE_SOURCE_ADMIN_CONSOLE,
+        reverted_change_id=change_id,
+    )
+    return updated, audit
+
+
+async def list_changes(
+    db: AsyncSession,
+    *,
+    key: str | None = None,
+    organization_id: UUID | None = None,
+    global_only: bool = False,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    """Change history, newest first.
+
+    ``global_only`` and ``organization_id`` are separate because a NULL
+    organization cannot express the difference between "global rows" and "no
+    scope filter at all".
+    """
+    scope_filter = (
+        "global"
+        if global_only
+        else ("organization" if organization_id is not None else None)
+    )
+    return await change_queries.list_changes(
+        db,
+        setting_key=key,
+        organization_id=organization_id,
+        scope_filter=scope_filter,
+        limit=limit,
+    )
+
+
+async def _assert_cross_field_invariants(
+    db: AsyncSession,
+    key: str,
+    coerced: bool | int | float,
+    organization_id: UUID | None,
+) -> None:
+    """Teacher-count bounds must stay consistent with each other.
+
+    Extracted from ``set_setting`` so ``preview_change`` enforces exactly the
+    same rules; a preview that passes and an apply that then fails would make
+    the preview worthless.
+    """
+    if key == "courses.min_teachers_per_course":
+        max_val = await _resolved_int(
+            db, "courses.max_teachers_per_course", organization_id
+        )
+        if coerced > max_val:
+            raise SettingValidationError(
+                "courses.min_teachers_per_course cannot exceed "
+                f"courses.max_teachers_per_course ({max_val})"
+            )
+    elif key == "courses.max_teachers_per_course":
+        min_val = await _resolved_int(
+            db, "courses.min_teachers_per_course", organization_id
+        )
+        if coerced < min_val:
+            raise SettingValidationError(
+                "courses.max_teachers_per_course cannot be below "
+                f"courses.min_teachers_per_course ({min_val})"
+            )
+
+
+__all__ = [
+    "CHANGE_SOURCE_ADMIN_CONSOLE",
+    "REASON_MAX_LENGTH",
+    "REASON_MIN_LENGTH",
+    "ChangeImpact",
+    "ResolvedSetting",
+    "apply_change",
+    "apply_clear",
+    "clear_setting",
+    "list_changes",
+    "list_settings",
+    "preview_change",
+    "preview_clear",
+    "rollback_change",
+    "set_setting",
+]

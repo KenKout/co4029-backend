@@ -4,6 +4,8 @@ Each submodule corresponds to a router slice:
 
 * :mod:`job_metrics` -- the canonical job failure-rate + queue-state contract
   shared by the dashboard and the processing surface (ADM-004).
+* :mod:`setting_changes` -- append-only audit trail behind the controlled
+  runtime-config change flow (ADM-031/033).
 * :mod:`stats`      -- overview / active-users / content / health counts.
 * :mod:`audit`      -- role-change + data-change + http-audit lookups.
 * :mod:`processing` -- ARQ queue depth + processing_jobs triage.
@@ -18,6 +20,20 @@ Org-scoping convention: every query that may be Manager-scoped accepts a
 to short-circuit the scope filter (IT Admin global mode).
 """
 
-from abridgeai.features.admin.queries import audit, job_metrics, processing, stats, users
+from abridgeai.features.admin.queries import (
+    audit,
+    job_metrics,
+    processing,
+    setting_changes,
+    stats,
+    users,
+)
 
-__all__ = ["audit", "job_metrics", "processing", "stats", "users"]
+__all__ = [
+    "audit",
+    "job_metrics",
+    "processing",
+    "setting_changes",
+    "stats",
+    "users",
+]
