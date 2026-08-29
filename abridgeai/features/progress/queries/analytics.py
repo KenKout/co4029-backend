@@ -73,8 +73,10 @@ class AtRiskRow:
     last_engagement_at: datetime | None
     completion_percent: Decimal
     failed_quiz_attempts: int
+    total_quiz_attempts: int
     ungraded_quiz_attempts: int
     failed_interview_sessions: int
+    total_interview_sessions: int
     pending_interview_sessions: int
     days_since_last_engagement: float | None
     days_since_enrolled: float
@@ -117,8 +119,10 @@ async def list_at_risk_rows_for_courses(
             last_engagement_at=row.last_engagement_at,
             completion_percent=row.completion_percent,
             failed_quiz_attempts=int(row.failed_quiz_attempts),
+            total_quiz_attempts=int(row.total_quiz_attempts),
             ungraded_quiz_attempts=int(row.ungraded_quiz_attempts),
             failed_interview_sessions=int(row.failed_interview_sessions),
+            total_interview_sessions=int(row.total_interview_sessions),
             pending_interview_sessions=int(row.pending_interview_sessions),
             days_since_last_engagement=(
                 float(row.days_since_last_engagement)

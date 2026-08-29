@@ -36,6 +36,14 @@ WITH user_engagement AS (
             JOIN quizzes q2 ON q2.id = qa2.quiz_id
             WHERE q2.course_id = ce.course_id
               AND qa2.student_id = ce.student_id
+              AND qa2.passed IS NOT NULL
+        ) AS total_quiz_attempts,
+        (
+            SELECT COUNT(*)
+            FROM quiz_attempts qa2
+            JOIN quizzes q2 ON q2.id = qa2.quiz_id
+            WHERE q2.course_id = ce.course_id
+              AND qa2.student_id = ce.student_id
               AND qa2.status = 'submitted'
         ) AS ungraded_quiz_attempts,
         (
@@ -46,6 +54,14 @@ WITH user_engagement AS (
               AND isx2.student_id = ce.student_id
               AND isx2.pass_verdict = FALSE
         ) AS failed_interview_sessions,
+        (
+            SELECT COUNT(*)
+            FROM interview_sessions isx2
+            JOIN interview_configs ic2 ON ic2.id = isx2.interview_config_id
+            WHERE ic2.course_id = ce.course_id
+              AND isx2.student_id = ce.student_id
+              AND isx2.pass_verdict IS NOT NULL
+        ) AS total_interview_sessions,
         (
             SELECT COUNT(*)
             FROM interview_sessions isx2
@@ -75,8 +91,10 @@ SELECT
     last_engagement_at,
     completion_percent,
     failed_quiz_attempts,
+    total_quiz_attempts,
     ungraded_quiz_attempts,
     failed_interview_sessions,
+    total_interview_sessions,
     pending_interview_sessions,
     CASE
         WHEN last_engagement_at IS NULL THEN NULL
