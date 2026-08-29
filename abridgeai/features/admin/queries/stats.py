@@ -22,7 +22,6 @@ _OVERVIEW_SQL = _load("stats/overview.sql")
 _ACTIVE_USERS_SQL = _load("stats/active_users.sql")
 _ACTIVE_USERS_TREND_SQL = _load("stats/active_users_trend.sql")
 _CONTENT_SQL = _load("stats/content.sql")
-_HEALTH_SQL = _load("stats/health.sql")
 _DASHBOARD_SQL = _load("stats/dashboard.sql")
 _API_RELIABILITY_SQL = _load("stats/api_reliability.sql")
 
@@ -81,15 +80,6 @@ async def content_breakdown(db: AsyncSession, *, organization_id: UUID | None) -
         "materials_by_type": list(row["materials_by_type"] or []),
         "courses_created_7d": int(row["courses_created_7d"] or 0),
         "materials_created_7d": int(row["materials_created_7d"] or 0),
-    }
-
-
-async def health_snapshot(db: AsyncSession, *, since: datetime) -> dict[str, int]:
-    row = (await db.execute(_HEALTH_SQL, {"since": since})).mappings().one()
-    return {
-        "failed_jobs_count": int(row["failed_jobs_count"] or 0),
-        "in_flight_jobs_count": int(row["in_flight_jobs_count"] or 0),
-        "failed_ai_calls_count": int(row["failed_ai_calls_count"] or 0),
     }
 
 
@@ -161,7 +151,6 @@ __all__ = [
     "active_users",
     "api_reliability",
     "content_breakdown",
-    "health_snapshot",
     "operator_dashboard",
     "overview_counts",
 ]

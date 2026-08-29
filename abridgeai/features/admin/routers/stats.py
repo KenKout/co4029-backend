@@ -6,8 +6,12 @@ Org-scoping is resolved via :func:`resolve_admin_scope`.
 * ``/overview`` and ``/content`` are bounded scans (top-level COUNT(*) over
   finite tables) -- no ``since`` parameter needed.
 * ``/active-users`` uses fixed 24h / 7d / 30d windows.
-* ``/health`` requires ``since`` to keep the failed-jobs / failed-AI-calls
-  scans bounded.
+* ``/health`` is GONE. It counted failed and in-flight jobs over
+  ``processing_jobs`` alone, window-filtered on ``updated_at`` -- a fourth
+  incompatible definition of "how many jobs failed", and one that under-
+  reported the queue (a job pending since last week is still in flight now but
+  fell outside a 24h window). The dashboard's reliability fields answer the
+  same question off the shared job contract in ``services/job_metrics.py``.
 * ``/dashboard`` is the operator rollup. Its window is caller-selectable
   (``window_days``, default 7) and every windowed metric in the response uses
   it, with the preceding window of the same length alongside for direction.
@@ -57,12 +61,6 @@ class ActiveUsersTrendPoint(BaseModel):
 
 class ActiveUsersTrendOut(BaseModel):
     points: list[ActiveUsersTrendPoint]
-
-
-class HealthOut(BaseModel):
-    failed_jobs_count: int
-    in_flight_jobs_count: int
-    failed_ai_calls_count: int
 
 
 class ContentOut(BaseModel):
@@ -191,20 +189,6 @@ async def get_content_breakdown(
     org_id = await resolve_admin_scope(db, user)
     breakdown = await stats_service.content_breakdown(db, organization_id=org_id)
     return ContentOut(**breakdown)
-
-
-@router.get("/health", response_model=HealthOut)
-async def get_health(
-    user: Annotated[CurrentUser, Depends(_REQUIRE_STATS)],
-    db: Annotated[AsyncSession, Depends(get_db)],
-    since: Annotated[
-        datetime,
-        Query(description="Lower bound on event time (required to bound scan)."),
-    ],
-) -> HealthOut:
-    del user
-    snapshot = await stats_service.health(db, since=since)
-    return HealthOut(**snapshot)
 
 
 @router.get("/dashboard", response_model=DashboardOut)

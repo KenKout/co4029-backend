@@ -92,10 +92,6 @@ async def content_breakdown(
     return await stats_queries.content_breakdown(db, organization_id=organization_id)
 
 
-async def health(db: AsyncSession, *, since: datetime) -> dict[str, int]:
-    return await stats_queries.health_snapshot(db, since=since)
-
-
 async def operator_dashboard(
     db: AsyncSession,
     *,
@@ -220,7 +216,6 @@ __all__ = [
     "DEFAULT_WINDOW_DAYS",
     "active_users",
     "content_breakdown",
-    "health",
     "operator_dashboard",
     "overview",
 ]
