@@ -95,6 +95,25 @@ def _accept_all(question_count: int) -> dict:
     }
 
 
+class _FakeRows:
+    def __init__(self, rows: list[tuple[str, str]] | None = None) -> None:
+        self._rows = rows or []
+
+    def all(self) -> list[tuple[str, str]]:
+        return self._rows
+
+
+class _FakeDb:
+    """Stand-in for AsyncSession: chunk fetches resolve to nothing."""
+
+    async def execute(self, *_: object, **__: object) -> _FakeRows:
+        return _FakeRows()
+
+
+def _db() -> _FakeDb:
+    return _FakeDb()
+
+
 @pytest.mark.asyncio
 async def test_rejects_ungrounded_question() -> None:
     chunk = uuid4()
@@ -104,7 +123,7 @@ async def test_rejects_ungrounded_question() -> None:
     gateway = _gateway_returning(_accept_all(1))
 
     verdicts = await validate_interview_questions(
-        AsyncMock(),
+        _db(),
         run=run,
         config=_config(),
         drafts=drafts,
@@ -129,7 +148,7 @@ async def test_accepts_well_formed_question() -> None:
     gateway = _gateway_returning(_accept_all(2))
 
     verdicts = await validate_interview_questions(
-        AsyncMock(),
+        _db(),
         run=run,
         config=_config(),
         drafts=drafts,
@@ -155,7 +174,7 @@ async def test_length_check() -> None:
     gateway = _gateway_returning(_accept_all(3))
 
     verdicts = await validate_interview_questions(
-        AsyncMock(),
+        _db(),
         run=run,
         config=_config(),
         drafts=drafts,
@@ -180,7 +199,7 @@ async def test_type_mix_check() -> None:
     gateway = _gateway_returning(_accept_all(len(drafts)))
 
     verdicts = await validate_interview_questions(
-        AsyncMock(),
+        _db(),
         run=run,
         config=_config(),
         drafts=drafts,
@@ -213,7 +232,7 @@ async def test_skip_type_mix_in_variant_mode() -> None:
     gateway = _gateway_returning(_accept_all(len(drafts)))
 
     verdicts = await validate_interview_questions(
-        AsyncMock(),
+        _db(),
         run=run,
         config=_config(),
         drafts=drafts,
@@ -245,7 +264,7 @@ async def test_variant_group_rejects_partial_angles() -> None:
     ]
 
     verdicts = await validate_interview_questions(
-        AsyncMock(),
+        _db(),
         run=_run(source_chunk_ids=[chunk]),
         config=_config(),
         drafts=drafts,
@@ -279,7 +298,7 @@ async def test_variant_group_rejects_duplicate_angle_or_mismatched_outcome() -> 
     ]
 
     verdicts = await validate_interview_questions(
-        AsyncMock(),
+        _db(),
         run=_run(source_chunk_ids=[chunk]),
         config=_config(),
         drafts=drafts,
@@ -313,7 +332,7 @@ async def test_variant_group_rejects_different_outcomes_with_distinct_angles() -
     ]
 
     verdicts = await validate_interview_questions(
-        AsyncMock(),
+        _db(),
         run=_run(source_chunk_ids=[chunk]),
         config=_config(),
         drafts=drafts,
@@ -340,7 +359,7 @@ async def test_difficulty_progression_rejects_abrupt_drop() -> None:
     gateway = _gateway_returning(_accept_all(2))
 
     verdicts = await validate_interview_questions(
-        AsyncMock(),
+        _db(),
         run=run,
         config=_config(),
         drafts=drafts,
@@ -370,7 +389,7 @@ async def test_not_leading_check_threads_through_llm() -> None:
     gateway = _gateway_returning(payload)
 
     verdicts = await validate_interview_questions(
-        AsyncMock(),
+        _db(),
         run=run,
         config=_config(),
         drafts=drafts,
@@ -389,7 +408,7 @@ async def test_audit_stage_name_and_role() -> None:
     context = _context([chunk])
     run = _run(source_chunk_ids=[chunk])
     gateway = _gateway_returning(_accept_all(1))
-    db = AsyncMock()
+    db = _db()
 
     await validate_interview_questions(
         db,

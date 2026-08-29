@@ -187,6 +187,15 @@ async def run_interview_generation(
         await _write_progress(
             db, state, phase="saving", accepted=len(accepted), target=target_count
         )
+        await db.refresh(config)
+        # Local import: the services package imports this pipeline (ARQ entry),
+        # so a module-level ``services.*`` import here is a circular-import trap
+        # for any direct importer (e2e tests import the pipeline first).
+        from abridgeai.features.interviews.services.published_freeze import (  # noqa: PLC0415
+            assert_questions_editable,
+        )
+
+        assert_questions_editable(config)
         await _persist_questions(
             db,
             config=config,
@@ -320,6 +329,7 @@ async def _write_progress(
 def _retrieval_summary(context: InterviewRetrievalContext) -> dict[str, Any]:
     return {
         "count": len(context.chunks),
+        "source_chunk_ids": [str(chunk.chunk_id) for chunk in context.chunks],
         "kg_concept_count": len(context.kg_concepts),
         "weak_topic_count": len(context.weak_topic_chunks),
     }

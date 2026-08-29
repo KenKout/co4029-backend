@@ -161,6 +161,13 @@ async def generate_interview_questions(
         max_questions=effective_total,
         require_logical_question_index=variant_strategy == "all_angles",
     )
+    valid_outcome_ids = {outcome.id for outcome in outcomes}
+    for draft in drafts:
+        if draft.linked_outcome_id not in valid_outcome_ids:
+            # Never persist an LLM-supplied UUID that is not one of this
+            # interview's outcomes. Treat it like a missing link and assign a
+            # valid outcome below instead of dropping the whole draft.
+            draft.linked_outcome_id = None
     return _link_outcomes_round_robin(drafts, outcomes)
 
 

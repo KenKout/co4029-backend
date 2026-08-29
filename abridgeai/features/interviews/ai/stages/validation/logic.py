@@ -307,7 +307,7 @@ async def _run_leading_check(
 ) -> list[bool]:
     """Ask the LLM to judge each question's neutrality."""
     gateway = gateway or LLMGateway()
-    chunk_views = _chunk_views_for_prompt(run)
+    chunk_views = await _chunk_views_for_prompt(db, run)
     questions = [
         {
             "index": index,
@@ -341,15 +341,39 @@ async def _run_leading_check(
     return [verdict.not_leading for verdict in parsed]
 
 
-def _chunk_views_for_prompt(run: GenerationRun) -> list[dict[str, Any]]:
+async def _chunk_views_for_prompt(db: AsyncSession, run: GenerationRun) -> list[dict[str, Any]]:
+    """Chunk views for the LLM leading check: id + excerpt content.
+
+    ``config_json["retrieval"]["source_chunk_ids"]`` is persisted by the
+    generation pipeline (the retrieval context object is never serialized),
+    so the excerpt CONTENT is resolved here from ``document_chunks`` —
+    chunks are immutable once ingested, so ids stay valid across the run.
+    A chunk that no longer exists degrades to an id-only view instead of
+    dropping the question's grounding context entirely.
+    """
     config_json = getattr(run, "config_json", None) or {}
     retrieval = config_json.get("retrieval") if isinstance(config_json, dict) else None
-    if not isinstance(retrieval, dict):
+    raw_ids = retrieval.get("source_chunk_ids") if isinstance(retrieval, dict) else None
+    if not isinstance(raw_ids, list) or not raw_ids:
         return []
-    raw_ids = retrieval.get("source_chunk_ids")
-    if not isinstance(raw_ids, list):
-        return []
-    return [{"id": str(chunk_id), "content": ""} for chunk_id in raw_ids if chunk_id]
+    from sqlalchemy import text  # noqa: PLC0415
+
+    id_params = [str(chunk_id) for chunk_id in raw_ids if chunk_id]
+    rows = (
+        await db.execute(
+            text(
+                "SELECT id, content FROM document_chunks "
+                "WHERE id = ANY(CAST(:ids AS uuid[]))"
+            ),
+            {"ids": id_params},
+        )
+    ).all()
+    content_by_id = {str(row[0]): row[1] for row in rows}
+    return [
+        {"id": str(chunk_id), "content": content_by_id.get(str(chunk_id), "")}
+        for chunk_id in raw_ids
+        if chunk_id
+    ]
 
 
 def _config_summary(config: InterviewConfig) -> str:

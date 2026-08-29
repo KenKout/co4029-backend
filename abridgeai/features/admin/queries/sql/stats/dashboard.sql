@@ -14,11 +14,14 @@
 --
 -- :organization_id (uuid | NULL) -- when NULL, global aggregates; when provided,
 --   filters every metric that can be traced to an organization.
--- :now (timestamptz)             -- evaluation reference timestamp; tests pin
---   this so all windows are deterministic.
--- :window_days (int)             -- primary window length. The preceding window
---   of the same length comes back alongside it so the UI can show direction and
---   not only level.
+-- :as_of (timestamptz)         -- evaluation reference timestamp; tests pin
+--   this so all windows are deterministic. Also the audit stamp for the page.
+-- :window_start / :window_end (timestamptz) -- explicit window bounds. The
+--   service derives them from ``window_days`` (last N days ending now) or
+--   from a caller-supplied date range, so the same SQL serves both. Jobs and
+--   API reliability receive the SAME bounds (PRD ADM-004) — every tile on
+--   the dashboard always describes one identical span.
+-- :previous_start (timestamptz) -- start of the preceding window, same length.
 --
 -- Org-traceability note: ``ai_model_calls`` has no organization_id and no
 -- mandatory parent (ck_ai_model_calls_parent_ref allows stage_name-only rows),
@@ -32,17 +35,18 @@
 --   organizations      -> id
 WITH bounds AS (
     SELECT
-        CAST(:now AS timestamptz)                            AS as_of,
-        make_interval(days => CAST(:window_days AS int))      AS window_len,
-        make_interval(days => CAST(:window_days AS int) * 2)  AS window_len_x2
+        CAST(:as_of AS timestamptz)         AS as_of,
+        CAST(:window_start AS timestamptz)  AS window_start,
+        CAST(:window_end AS timestamptz)    AS window_end,
+        CAST(:previous_start AS timestamptz) AS previous_start
 ),
 top_driver AS (
     SELECT
         COALESCE(amc.stage_name, amc.role) AS driver,
         SUM(amc.estimated_cost_usd)        AS spend_usd
     FROM ai_model_calls amc, bounds b
-    WHERE amc.called_at >= b.as_of - b.window_len
-      AND amc.called_at < b.as_of
+    WHERE amc.called_at >= b.window_start
+      AND amc.called_at < b.window_end
       AND amc.estimated_cost_usd IS NOT NULL
       AND COALESCE(amc.stage_name, amc.role) IS NOT NULL
     GROUP BY COALESCE(amc.stage_name, amc.role)
@@ -54,8 +58,8 @@ slowest AS (
         amc.model_name,
         percentile_cont(0.95) WITHIN GROUP (ORDER BY amc.latency_ms) AS p95_ms
     FROM ai_model_calls amc, bounds b
-    WHERE amc.called_at >= b.as_of - b.window_len
-      AND amc.called_at < b.as_of
+    WHERE amc.called_at >= b.window_start
+      AND amc.called_at < b.window_end
       AND amc.latency_ms IS NOT NULL
     GROUP BY amc.model_name
     HAVING COUNT(*) >= 5
@@ -65,17 +69,17 @@ slowest AS (
 month_spend AS (
     SELECT
         COALESCE(SUM(amc.estimated_cost_usd), 0) AS spend_mtd_usd,
-        -- day-of-month of :now == whole days elapsed (partial day counts as 1)
-        EXTRACT(DAY FROM CAST(:now AS timestamptz))::numeric AS days_elapsed,
+        -- day-of-month of the as-of == whole days elapsed (partial day counts as 1)
+        EXTRACT(DAY FROM CAST(:as_of AS timestamptz))::numeric AS days_elapsed,
         EXTRACT(
             DAY FROM (
-                date_trunc('month', CAST(:now AS timestamptz))
+                date_trunc('month', CAST(:as_of AS timestamptz))
                 + INTERVAL '1 month' - INTERVAL '1 day'
             )
         )::numeric AS days_in_month
     FROM ai_model_calls amc
-    WHERE amc.called_at >= date_trunc('month', CAST(:now AS timestamptz))
-      AND amc.called_at < CAST(:now AS timestamptz)
+    WHERE amc.called_at >= date_trunc('month', CAST(:as_of AS timestamptz))
+      AND amc.called_at < CAST(:as_of AS timestamptz)
 )
 SELECT
     b.as_of AS as_of,
@@ -83,35 +87,35 @@ SELECT
     (
         SELECT COALESCE(SUM(amc.estimated_cost_usd), 0)
         FROM ai_model_calls amc
-        WHERE amc.called_at >= b.as_of - b.window_len
-          AND amc.called_at < b.as_of
+        WHERE amc.called_at >= b.window_start
+          AND amc.called_at < b.window_end
     ) AS spend_window_usd,
     (
         SELECT COALESCE(SUM(amc.estimated_cost_usd), 0)
         FROM ai_model_calls amc
-        WHERE amc.called_at >= b.as_of - b.window_len_x2
-          AND amc.called_at < b.as_of - b.window_len
+        WHERE amc.called_at >= b.previous_start
+          AND amc.called_at < b.window_start
     ) AS spend_prev_window_usd,
     (
         SELECT COALESCE(SUM(amc.total_tokens), 0)
         FROM ai_model_calls amc
-        WHERE amc.called_at >= b.as_of - b.window_len
-          AND amc.called_at < b.as_of
+        WHERE amc.called_at >= b.window_start
+          AND amc.called_at < b.window_end
     ) AS tokens_window,
     (
         SELECT COUNT(*)
         FROM ai_model_calls amc
         WHERE amc.status = 'failed'
-          AND amc.called_at >= b.as_of - b.window_len
-          AND amc.called_at < b.as_of
+          AND amc.called_at >= b.window_start
+          AND amc.called_at < b.window_end
     ) AS failed_ai_calls_window,
     (
         -- denominator for the AI failure rate: without it the UI cannot tell
         -- "no failures" from "no calls" (PRD section 5, no 0-of-0 as 0%).
         SELECT COUNT(*)
         FROM ai_model_calls amc
-        WHERE amc.called_at >= b.as_of - b.window_len
-          AND amc.called_at < b.as_of
+        WHERE amc.called_at >= b.window_start
+          AND amc.called_at < b.window_end
     ) AS ai_calls_window,
     (
         SELECT CASE
@@ -141,7 +145,7 @@ SELECT
     (
         SELECT COUNT(*)
         FROM users u
-        WHERE u.last_login_at >= b.as_of - b.window_len
+        WHERE u.last_login_at >= b.window_start
           AND (CAST(:organization_id AS uuid) IS NULL
                OR EXISTS (
                    SELECT 1
@@ -170,8 +174,8 @@ SELECT
         JOIN modules m ON m.id = l.module_id AND m.deleted_at IS NULL
         JOIN courses c ON c.id = m.course_id AND c.deleted_at IS NULL
         WHERE lm.deleted_at IS NULL
-          AND lm.created_at >= b.as_of - b.window_len
-          AND lm.created_at < b.as_of
+          AND lm.created_at >= b.window_start
+          AND lm.created_at < b.window_end
           AND (CAST(:organization_id AS uuid) IS NULL
                OR c.organization_id = CAST(:organization_id AS uuid))
     ) AS materials_ingested_window,

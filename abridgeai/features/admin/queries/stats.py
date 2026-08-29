@@ -24,6 +24,7 @@ _ACTIVE_USERS_TREND_SQL = _load("stats/active_users_trend.sql")
 _CONTENT_SQL = _load("stats/content.sql")
 _DASHBOARD_SQL = _load("stats/dashboard.sql")
 _API_RELIABILITY_SQL = _load("stats/api_reliability.sql")
+_API_LATENCY_TREND_SQL = _load("stats/api_latency_trend.sql")
 
 
 async def overview_counts(db: AsyncSession, *, organization_id: UUID | None) -> dict[str, int]:
@@ -73,6 +74,27 @@ async def active_users_trend(
     return [(row["day"], int(row["count"] or 0)) for row in rows]
 
 
+async def api_latency_trend(
+    db: AsyncSession,
+    *,
+    days: int,
+    now: datetime,
+) -> list[tuple[date, int, float | None, float | None]]:
+    """Daily latency percentiles + volume; raw floats, callers round."""
+    rows = (
+        await db.execute(_API_LATENCY_TREND_SQL, {"days": days, "now": now})
+    ).mappings()
+    return [
+        (
+            row["day"],
+            int(row["requests_total"] or 0),
+            row["p50_latency_ms"],
+            row["p95_latency_ms"],
+        )
+        for row in rows
+    ]
+
+
 async def content_breakdown(db: AsyncSession, *, organization_id: UUID | None) -> dict[str, Any]:
     row = (await db.execute(_CONTENT_SQL, {"organization_id": organization_id})).mappings().one()
     return {
@@ -84,13 +106,20 @@ async def content_breakdown(db: AsyncSession, *, organization_id: UUID | None) -
 
 
 async def operator_dashboard(
-    db: AsyncSession, *, organization_id: UUID | None, now: datetime, window_days: int
+    db: AsyncSession,
+    *,
+    organization_id: UUID | None,
+    as_of: datetime,
+    window_start: datetime,
+    window_end: datetime,
+    previous_start: datetime,
 ) -> dict[str, Any]:
     """Cost / usage / tenant half of the dashboard (``sql/stats/dashboard.sql``).
 
     Job metrics are NOT here -- they come from
     :mod:`abridgeai.features.admin.services.job_metrics`, the definition shared
-    with the processing surface (PRD ADM-004).
+    with the processing surface (PRD ADM-004). The window bounds are explicit
+    so the service can hand the SAME span to every component of the rollup.
     """
     row = (
         (
@@ -98,8 +127,10 @@ async def operator_dashboard(
                 _DASHBOARD_SQL,
                 {
                     "organization_id": organization_id,
-                    "now": now,
-                    "window_days": window_days,
+                    "as_of": as_of,
+                    "window_start": window_start,
+                    "window_end": window_end,
+                    "previous_start": previous_start,
                 },
             )
         )
@@ -127,7 +158,11 @@ async def operator_dashboard(
 
 
 async def api_reliability(
-    db: AsyncSession, *, now: datetime, window_days: int
+    db: AsyncSession,
+    *,
+    as_of: datetime,
+    window_start: datetime,
+    window_end: datetime,
 ) -> dict[str, Any]:
     """Request error rate + latency percentiles (``sql/stats/api_reliability.sql``).
 
@@ -137,7 +172,12 @@ async def api_reliability(
     row = (
         (
             await db.execute(
-                _API_RELIABILITY_SQL, {"now": now, "window_days": window_days}
+                _API_RELIABILITY_SQL,
+                {
+                    "as_of": as_of,
+                    "window_start": window_start,
+                    "window_end": window_end,
+                },
             )
         )
         .mappings()

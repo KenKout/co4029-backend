@@ -21,11 +21,11 @@ Org-scoping is resolved via :func:`resolve_admin_scope`.
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from typing import Annotated, Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -63,6 +63,18 @@ class ActiveUsersTrendOut(BaseModel):
     points: list[ActiveUsersTrendPoint]
 
 
+class LatencyTrendPoint(BaseModel):
+    day: date
+    requests_total: int
+    # NULL on a zero-traffic day — no fabricated 0ms line.
+    p50_latency_ms: int | None = None
+    p95_latency_ms: int | None = None
+
+
+class LatencyTrendOut(BaseModel):
+    points: list[LatencyTrendPoint]
+
+
 class ContentOut(BaseModel):
     """Content inventory. Processing-job status is deliberately absent: jobs
     live in the Operations surface only (PRD ADM-004 / section 2 IA rule), so
@@ -93,6 +105,11 @@ class DashboardOut(BaseModel):
     # -- envelope --------------------------------------------------------
     as_of: datetime
     window_days: int
+    # Exact date range (inclusive) the window covered, when the caller asked
+    # for one instead of the relative ``window_days`` shape. The UI echoes
+    # these verbatim so the label it prints == the rows counted.
+    window_from: date | None = None
+    window_to: date | None = None
     organization_id: UUID | None = None
     usage_scope: str
     tenant_scope: str
@@ -181,6 +198,33 @@ async def get_active_users_trend(
     return ActiveUsersTrendOut(points=points)
 
 
+@router.get("/latency/trend", response_model=LatencyTrendOut)
+async def get_api_latency_trend(
+    user: Annotated[CurrentUser, Depends(_REQUIRE_STATS)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    days: Annotated[int, Query(ge=1, le=365)] = 30,
+) -> LatencyTrendOut:
+    """Daily p50/p95 API latency over the lookback window.
+
+    Drives the latency chart on the stats overview, mirroring the
+    active-users trend. GLOBAL scope — ``http_audit_log`` does not carry
+    organization (see ``api_reliability.sql``). Every day in the window is
+    returned (zero-traffic days included) so the chart is continuous.
+    """
+    points = await stats_service.api_latency_trend(db, days=days)
+    return LatencyTrendOut(
+        points=[
+            LatencyTrendPoint(
+                day=d,
+                requests_total=r,
+                p50_latency_ms=p50,
+                p95_latency_ms=p95,
+            )
+            for d, r, p50, p95 in points
+        ]
+    )
+
+
 @router.get("/content", response_model=ContentOut)
 async def get_content_breakdown(
     user: Annotated[CurrentUser, Depends(_REQUIRE_STATS)],
@@ -204,6 +248,24 @@ async def get_dashboard(
             "move together so they stay comparable.",
         ),
     ] = stats_service.DEFAULT_WINDOW_DAYS,
+    window_from: Annotated[
+        date | None,
+        Query(
+            alias="from",
+            description="Exact window start date (inclusive). Must pair with "
+            "'to'; overrides window_days with a fixed calendar range so a "
+            "custom picker range (e.g. Aug 1 - Aug 29) counts exactly the "
+            "rows in it.",
+        ),
+    ] = None,
+    window_to: Annotated[
+        date | None,
+        Query(
+            alias="to",
+            description="Exact window end date (inclusive). Must pair with "
+            "'from', and must not be after today's date on the server.",
+        ),
+    ] = None,
     organization_id: Annotated[
         UUID | None,
         Query(
@@ -220,13 +282,50 @@ async def get_dashboard(
     -- accepting it would be a cross-tenant read. An IT Admin defaults to the
     global view and may narrow to one tenant with it.
     """
+    if (window_from is None) != (window_to is None):
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "validation_error",
+                "message": "'from' and 'to' must be provided together",
+            },
+        )
+    if window_from is not None and window_to is not None:
+        if window_from > window_to:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "error": "validation_error",
+                    "message": "'from' must not be after 'to'",
+                },
+            )
+        if window_to > datetime.now(tz=UTC).date():
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "error": "validation_error",
+                    "message": "'to' must not be after today",
+                },
+            )
+        if (window_to - window_from).days + 1 > 366:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "error": "validation_error",
+                    "message": "range must not exceed 366 days",
+                },
+            )
     scope = await resolve_admin_scope(db, user)
     if scope is None and organization_id is not None:
         # Only reachable with system.administer (resolve_admin_scope returns
         # None exclusively for that permission).
         scope = organization_id
     metrics = await stats_service.operator_dashboard(
-        db, organization_id=scope, window_days=window_days
+        db,
+        organization_id=scope,
+        window_days=window_days,
+        window_from=window_from,
+        window_to=window_to,
     )
     return DashboardOut(**metrics)
 

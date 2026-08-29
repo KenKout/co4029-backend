@@ -140,7 +140,7 @@ async def retrieve_interview_context(
         )
 
     capped_anchors = anchors[:MAX_ANCHORS]
-    course_id = _maybe_uuid(run_config.get("course_id")) or run.course_id
+    course_id = run.course_id
     lesson_ids = _maybe_uuid_list(
         run_config.get("lesson_ids") or run_config.get("source_lesson_ids")
     )

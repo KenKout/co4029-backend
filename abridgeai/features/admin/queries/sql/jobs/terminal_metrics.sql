@@ -22,15 +22,21 @@
 --   but scoping half the population would produce a number that is neither
 --   global nor tenant-accurate. Callers surface this as scope="global".
 --
--- :now         (timestamptz) -- evaluation reference; tests pin it.
--- :window_days (int)         -- length of the current window, in days.
+-- :as_of          (timestamptz) -- evaluation reference; tests pin it.
+-- :current_start  (timestamptz) -- current window start; the stats service
+--   derives the same bounds for the dashboard rollup and API reliability, so
+--   every tile describes one identical span (PRD ADM-004). The preceding
+--   window is the same length immediately before it.
+-- :previous_start (timestamptz) -- previous window start.
+-- :current_end    (timestamptz) -- exclusive end of the current window.
+--   (The single-query contract is shared with the processing surface, which
+--   always builds it from ``window_days`` ending at ``now``.)
 WITH bounds AS (
     SELECT
-        CAST(:now AS timestamptz)                                          AS as_of,
-        CAST(:now AS timestamptz)
-            - make_interval(days => CAST(:window_days AS int))             AS current_start,
-        CAST(:now AS timestamptz)
-            - make_interval(days => CAST(:window_days AS int) * 2)         AS previous_start
+        CAST(:as_of AS timestamptz)          AS as_of,
+        CAST(:current_start AS timestamptz)  AS current_start,
+        CAST(:current_end AS timestamptz)    AS current_end,
+        CAST(:previous_start AS timestamptz) AS previous_start
 ),
 combined AS (
     SELECT pj.status, pj.updated_at FROM processing_jobs pj
@@ -48,12 +54,12 @@ SELECT
     b.previous_start,
     (
         SELECT COUNT(*) FROM terminal t, bounds bb
-        WHERE t.updated_at >= bb.current_start AND t.updated_at < bb.as_of
+        WHERE t.updated_at >= bb.current_start AND t.updated_at < bb.current_end
     ) AS terminal_total,
     (
         SELECT COUNT(*) FROM terminal t, bounds bb
         WHERE t.status = 'failed'
-          AND t.updated_at >= bb.current_start AND t.updated_at < bb.as_of
+          AND t.updated_at >= bb.current_start AND t.updated_at < bb.current_end
     ) AS terminal_failed,
     (
         SELECT COUNT(*) FROM terminal t, bounds bb

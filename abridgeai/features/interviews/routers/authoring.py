@@ -683,17 +683,16 @@ async def regenerate_question(
     db: Annotated[AsyncSession, Depends(get_db)],
     arq_pool: Annotated[object | None, Depends(get_arq_pool)],
 ) -> InterviewGenerationRunPublic:
-    try:
-        run = await authoring_service.regenerate_question(
-            db, config_id, question_id, current_user, arq_pool=arq_pool
-        )
-    except NotFoundError as exc:
-        raise _not_found("interview_question", question_id) from exc
-    except ConflictError as exc:
-        raise _conflict(str(exc)) from exc
-    except AppError as exc:
-        raise _bad_request(str(exc)) from exc
-    return _generation_run_view(run)
+    """Temporarily unavailable until true per-question regeneration exists."""
+    del config_id, question_id, current_user, db, arq_pool
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail={
+            "error": "interview_question_regeneration_unavailable",
+            "message": "Per-question regeneration is temporarily unavailable. "
+            "Use full question generation from a draft interview instead.",
+        },
+    )
 
 
 @router.post(

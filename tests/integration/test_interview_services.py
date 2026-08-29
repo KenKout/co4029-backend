@@ -16,6 +16,8 @@ Covers the 4-capability split:
 
 from __future__ import annotations
 
+import hashlib
+import json
 import uuid
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
@@ -44,7 +46,7 @@ import abridgeai.features.interviews.models  # noqa: F401  -- T6.1 registers int
 import abridgeai.features.materials.models  # noqa: F401  -- register learning_* tables
 import abridgeai.features.quizzes.models  # noqa: F401  -- register quiz_attempts
 from abridgeai.core.config import get_settings
-from abridgeai.core.exceptions import ForbiddenError
+from abridgeai.core.exceptions import AppError, ForbiddenError, NotFoundError
 from abridgeai.core.security import CurrentUser
 from abridgeai.features.interviews.ai.stages.evaluation.outcome_verdicts import (
     OutcomeVerdict,
@@ -56,9 +58,13 @@ from abridgeai.features.interviews.ai.stages.evaluation.rubric import (
     RubricScores,
 )
 from abridgeai.features.interviews.ai.stages.gap_report.logic import GapReportDraft
+from abridgeai.features.interviews.ai.stages.validation.logic import _chunk_views_for_prompt
 from abridgeai.features.interviews.models import (
     InterviewConfig,
     InterviewSession,
+)
+from abridgeai.features.interviews.queries import (
+    authoring as authoring_queries,
 )
 from abridgeai.features.interviews.services import (
     authoring as authoring_service,
@@ -68,9 +74,6 @@ from abridgeai.features.interviews.services import (
 )
 from abridgeai.features.interviews.services import (
     taking as taking_service,
-)
-from abridgeai.features.interviews.queries import (
-    authoring as authoring_queries,
 )
 from abridgeai.features.quizzes.api.public import GenerationRunDTO
 
@@ -289,6 +292,7 @@ async def _create_published_config(
     outcomes: int = 1,
     max_attempts: int | None = None,
     cooldown_hours: int | None = None,
+    status: str = "published",
 ) -> dict[str, Any]:
     config_id = uuid.uuid4()
     question_ids = [uuid.uuid4() for _ in range(questions)]
@@ -296,13 +300,14 @@ async def _create_published_config(
     async with engine.begin() as conn:
         await conn.execute(
             text(
-                "INSERT INTO interview_configs (id, course_id, module_id, title, status, created_by, max_attempts, cooldown_hours, slug) VALUES (:id, :c, :m, 'Pub Interview', 'published', :t, :max_attempts, :cooldown_hours, 'slug-' || uuid_generate_v4()::text);"
+                "INSERT INTO interview_configs (id, course_id, module_id, title, status, created_by, max_attempts, cooldown_hours, slug) VALUES (:id, :c, :m, 'Pub Interview', :status, :t, :max_attempts, :cooldown_hours, 'slug-' || uuid_generate_v4()::text);"
             ),
             {
                 "id": config_id,
                 "c": course_id,
                 "m": module_id,
                 "t": teacher_id,
+                "status": status,
                 "max_attempts": max_attempts,
                 "cooldown_hours": cooldown_hours,
             },
@@ -874,6 +879,7 @@ async def test_start_generation_run_enqueues_arq(
         teacher_id=scenario["teacher_id"],
         questions=0,
         outcomes=0,
+        status="draft",
     )
     request = _CreatePayload(
         mode="topic",
@@ -901,6 +907,448 @@ async def test_start_generation_run_enqueues_arq(
     assert invocation.args[0] == "run_interview_generation_task"
     assert invocation.args[1] == scenario["teacher_id"]
     assert invocation.args[2] == run.id
+
+
+async def _insert_foreign_scope(
+    engine: AsyncEngine, org_id: uuid.UUID, teacher_id: uuid.UUID
+) -> tuple[uuid.UUID, uuid.UUID, uuid.UUID]:
+    """A second course + module + lesson under the same org.
+
+    Used to prove cross-course scope is rejected: the teacher is authorized
+    for ``scenario``'s course only, so any module/lesson belonging to the
+    foreign course must be refused at the service boundary.
+    """
+    course_id, module_id, lesson_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    suffix = org_id.hex[:8]
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO courses "
+                "(id, organization_id, owner_user_id, slug, title, status) "
+                "VALUES (:id, :org, :owner, :slug, 'Foreign Course', 'published')"
+            ),
+            {
+                "id": course_id,
+                "org": org_id,
+                "owner": teacher_id,
+                "slug": f"foreign-course-{suffix}",
+            },
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO modules (id, course_id, title, position, status) "
+                "VALUES (:id, :course, 'Foreign Module', 1, 'published')"
+            ),
+            {"id": module_id, "course": course_id},
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO lessons (id, module_id, slug, title, status) "
+                "VALUES (:id, :module, :slug, 'Foreign Lesson', 'published')"
+            ),
+            {"id": lesson_id, "module": module_id, "slug": f"foreign-lesson-{suffix}"},
+        )
+    return course_id, module_id, lesson_id
+
+
+async def _cleanup_foreign_scope(
+    engine: AsyncEngine,
+    course_id: uuid.UUID,
+    module_id: uuid.UUID,
+    lesson_id: uuid.UUID | None,
+) -> None:
+    async with engine.begin() as conn:
+        if lesson_id is not None:
+            await conn.execute(text("DELETE FROM lessons WHERE id = :id"), {"id": lesson_id})
+        await conn.execute(text("DELETE FROM module_items WHERE module_id = :m"), {"m": module_id})
+        await conn.execute(text("DELETE FROM modules WHERE id = :id"), {"id": module_id})
+        await conn.execute(text("DELETE FROM courses WHERE id = :id"), {"id": course_id})
+
+
+async def test_create_config_rejects_module_from_another_course(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict[str, Any],
+) -> None:
+    foreign_course, foreign_module, foreign_lesson = await _insert_foreign_scope(
+        engine, scenario["org_id"], scenario["teacher_id"]
+    )
+    try:
+        payload = _CreatePayload(
+            title="Cross Course Interview",
+            course_id=scenario["course_id"],
+            module_id=foreign_module,
+        )
+        with pytest.raises(AppError, match="not part of course"):
+            async with session_factory() as session:
+                await authoring_service.create_interview_config(
+                    session, scenario["course_id"], payload, _actor(scenario["teacher_id"])
+                )
+    finally:
+        await _cleanup_foreign_scope(engine, foreign_course, foreign_module, foreign_lesson)
+
+
+async def test_start_generation_run_rejects_foreign_scope(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict[str, Any],
+) -> None:
+    seeded = await _create_published_config(
+        engine,
+        course_id=scenario["course_id"],
+        module_id=scenario["module_id"],
+        teacher_id=scenario["teacher_id"],
+        questions=0,
+        outcomes=0,
+        status="draft",
+    )
+    foreign_course, foreign_module, foreign_lesson = await _insert_foreign_scope(
+        engine, scenario["org_id"], scenario["teacher_id"]
+    )
+    base = {"mode": "topic", "question_count": 5}
+    try:
+        async with session_factory() as session:
+            # Foreign course_id in the body must not override the config's.
+            with pytest.raises(AppError, match="course_id does not match"):
+                await authoring_service.start_generation_run(
+                    session,
+                    seeded["config_id"],
+                    _CreatePayload(
+                        course_id=foreign_course,
+                        module_id=scenario["module_id"],
+                        **base,
+                    ),
+                    _actor(scenario["teacher_id"]),
+                )
+            # Foreign module_id must be refused even when course_id matches.
+            with pytest.raises(AppError, match="module_id does not match"):
+                await authoring_service.start_generation_run(
+                    session,
+                    seeded["config_id"],
+                    _CreatePayload(
+                        course_id=scenario["course_id"],
+                        module_id=foreign_module,
+                        **base,
+                    ),
+                    _actor(scenario["teacher_id"]),
+                )
+            # Foreign source_module_ids expand to foreign lessons.
+            with pytest.raises(AppError, match="not part of course"):
+                await authoring_service.start_generation_run(
+                    session,
+                    seeded["config_id"],
+                    _CreatePayload(
+                        course_id=scenario["course_id"],
+                        module_id=scenario["module_id"],
+                        source_module_ids=[foreign_module],
+                        **base,
+                    ),
+                    _actor(scenario["teacher_id"]),
+                )
+            # Foreign source_lesson_ids must be refused outright.
+            with pytest.raises(AppError, match="not part of course"):
+                await authoring_service.start_generation_run(
+                    session,
+                    seeded["config_id"],
+                    _CreatePayload(
+                        course_id=scenario["course_id"],
+                        module_id=scenario["module_id"],
+                        source_lesson_ids=[foreign_lesson],
+                        **base,
+                    ),
+                    _actor(scenario["teacher_id"]),
+                )
+            # Same-course scope still works and the config_json is canonicalized
+            # to the config's own course/module.
+            arq_pool = SimpleNamespace(enqueue_job=AsyncMock(return_value=None))
+            run = await authoring_service.start_generation_run(
+                session,
+                seeded["config_id"],
+                _CreatePayload(
+                    course_id=scenario["course_id"],
+                    module_id=scenario["module_id"],
+                    source_module_ids=[scenario["module_id"]],
+                    **base,
+                ),
+                _actor(scenario["teacher_id"]),
+                arq_pool=arq_pool,
+            )
+            assert run.config_json["course_id"] == str(scenario["course_id"])
+            assert run.config_json["module_id"] == str(scenario["module_id"])
+            assert run.config_json["source_module_ids"] == [str(scenario["module_id"])]
+            arq_pool.enqueue_job.assert_awaited_once()
+    finally:
+        await _cleanup_foreign_scope(engine, foreign_course, foreign_module, foreign_lesson)
+
+
+async def test_start_generation_run_persists_type_weights(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict[str, Any],
+) -> None:
+    """Validation must see the SAME type mix generation used.
+
+    Generation resolves percentages from the config's supplementary
+    rubric; validation compares fractions. The run snapshot normalizes
+    once at enqueue so both stages agree (default 60/30/10 and custom).
+    """
+    seeded = await _create_published_config(
+        engine,
+        course_id=scenario["course_id"],
+        module_id=scenario["module_id"],
+        teacher_id=scenario["teacher_id"],
+        questions=0,
+        outcomes=0,
+        status="draft",
+    )
+    arq_pool = SimpleNamespace(enqueue_job=AsyncMock(return_value=None))
+    base = _CreatePayload(
+        mode="topic",
+        course_id=scenario["course_id"],
+        module_id=scenario["module_id"],
+        question_count=5,
+    )
+    async with session_factory() as session:
+        run = await authoring_service.start_generation_run(
+            session,
+            seeded["config_id"],
+            base,
+            _actor(scenario["teacher_id"]),
+            arq_pool=arq_pool,
+        )
+        assert run.config_json["type_weights"] == {
+            "technical": 0.6,
+            "behavioral": 0.3,
+            "situational": 0.1,
+        }
+
+    # Custom rubric weights: generation + validation must agree on the mix.
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "UPDATE interview_configs SET supplementary_instructions = :json "
+                "WHERE id = :id"
+            ),
+            {
+                "json": json.dumps(
+                    {"rubric_weights": {"technical": 80, "behavioral": 10, "situational": 10}}
+                ),
+                "id": seeded["config_id"],
+            },
+        )
+    async with session_factory() as session:
+        run = await authoring_service.start_generation_run(
+            session,
+            seeded["config_id"],
+            base,
+            _actor(scenario["teacher_id"]),
+            arq_pool=arq_pool,
+        )
+        assert run.config_json["type_weights"] == {
+            "technical": 0.8,
+            "behavioral": 0.1,
+            "situational": 0.1,
+        }
+
+
+async def test_add_question_rejects_outcome_not_in_this_config(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict[str, Any],
+) -> None:
+    """Manual questions must link to an outcome of the SAME config.
+
+    A cross-config outcome passes the FK (the row exists) but corrupts the
+    rubric; a fake UUID would fail the FK with an IntegrityError. Both are
+    rejected up front with NotFoundError, mirroring update_question.
+    """
+    seeded = await _create_published_config(
+        engine,
+        course_id=scenario["course_id"],
+        module_id=scenario["module_id"],
+        teacher_id=scenario["teacher_id"],
+        questions=0,
+        outcomes=1,
+        status="draft",
+    )
+    own_outcome_id = seeded["outcome_ids"][0]
+    foreign_config_id = uuid.uuid4()
+    foreign_outcome_id = uuid.uuid4()
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO interview_configs "
+                "(id, course_id, module_id, title, status, created_by, slug) "
+                "VALUES (:id, :c, :m, 'Foreign Config', 'draft', :t, :slug)"
+            ),
+            {
+                "id": foreign_config_id,
+                "c": scenario["course_id"],
+                "m": scenario["module_id"],
+                "t": scenario["teacher_id"],
+                "slug": f"foreign-cfg-{scenario['org_id'].hex[:8]}",
+            },
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO interview_outcomes "
+                "(id, interview_config_id, position, outcome_text, outcome_type, "
+                "importance_weight) "
+                "VALUES (:id, :cfg, 1, 'Foreign Outcome', 'knowledge', 3)"
+            ),
+            {"id": foreign_outcome_id, "cfg": foreign_config_id},
+        )
+    base = {"prompt_text": "Linked to a foreign outcome?", "question_type": "technical"}
+    try:
+        async with session_factory() as session:
+            with pytest.raises(NotFoundError, match="not found"):
+                await authoring_service.add_question(
+                    session,
+                    seeded["config_id"],
+                    _CreatePayload(linked_outcome_id=foreign_outcome_id, **base),
+                    _actor(scenario["teacher_id"]),
+                )
+            with pytest.raises(NotFoundError, match="not found"):
+                await authoring_service.add_question(
+                    session,
+                    seeded["config_id"],
+                    _CreatePayload(linked_outcome_id=uuid.uuid4(), **base),
+                    _actor(scenario["teacher_id"]),
+                )
+            # A link to the config's OWN outcome still works.
+            question = await authoring_service.add_question(
+                session,
+                seeded["config_id"],
+                _CreatePayload(linked_outcome_id=own_outcome_id, **base),
+                _actor(scenario["teacher_id"]),
+            )
+            assert question.linked_outcome_id == own_outcome_id
+    finally:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("DELETE FROM interview_outcomes WHERE id = :id"), {"id": foreign_outcome_id}
+            )
+            await conn.execute(
+                text("DELETE FROM interview_configs WHERE id = :id"), {"id": foreign_config_id}
+            )
+
+
+async def _seed_lesson_and_chunk(
+    engine: AsyncEngine, scenario: dict[str, Any]
+) -> dict[str, uuid.UUID]:
+    """A lesson + one indexed chunk under the scenario's course/module."""
+    lesson_id, storage_id, material_id, version_id, chunk_id = (uuid.uuid4() for _ in range(5))
+    suffix = scenario["org_id"].hex[:8]
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO lessons (id, module_id, slug, title, status) "
+                "VALUES (:id, :m, :slug, 'Chunk Lesson', 'published')"
+            ),
+            {"id": lesson_id, "m": scenario["module_id"], "slug": f"chunk-lesson-{suffix}"},
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO storage_objects (id, bucket, object_key) "
+                "VALUES (:id, 'test', :key)"
+            ),
+            {"id": storage_id, "key": f"chunk/{suffix}.txt"},
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO learning_materials (id, lesson_id, title, material_type) "
+                "VALUES (:id, :l, 'Chunk Material', 'text')"
+            ),
+            {"id": material_id, "l": lesson_id},
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO learning_material_versions "
+                "(id, material_id, storage_object_id, version_no, processing_status) "
+                "VALUES (:id, :m, :s, 1, 'ready')"
+            ),
+            {"id": version_id, "m": material_id, "s": storage_id},
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO document_chunks "
+                "(id, course_id, module_id, lesson_id, material_version_id, "
+                "chunk_index, chunk_type, content, embedding, content_hash) "
+                "VALUES (:id, :c, :m, :l, :v, 0, 'text', :content, NULL, :hash)"
+            ),
+            {
+                "id": chunk_id,
+                "c": scenario["course_id"],
+                "m": scenario["module_id"],
+                "l": lesson_id,
+                "v": version_id,
+                "content": "Chunk content for validation",
+                "hash": hashlib.sha256(b"chunk").hexdigest(),
+            },
+        )
+    return {
+        "lesson_id": lesson_id,
+        "storage_id": storage_id,
+        "material_id": material_id,
+        "version_id": version_id,
+        "chunk_id": chunk_id,
+    }
+
+
+async def _cleanup_lesson_and_chunk(
+    engine: AsyncEngine, seeded: dict[str, uuid.UUID]
+) -> None:
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("DELETE FROM document_chunks WHERE id = :id"), {"id": seeded["chunk_id"]}
+        )
+        await conn.execute(
+            text(
+                "UPDATE learning_materials SET current_version_id = NULL "
+                "WHERE id = :id"
+            ),
+            {"id": seeded["material_id"]},
+        )
+        await conn.execute(
+            text("DELETE FROM learning_material_versions WHERE id = :id"),
+            {"id": seeded["version_id"]},
+        )
+        await conn.execute(
+            text("DELETE FROM learning_materials WHERE id = :id"), {"id": seeded["material_id"]}
+        )
+        await conn.execute(
+            text("DELETE FROM storage_objects WHERE id = :id"), {"id": seeded["storage_id"]}
+        )
+        await conn.execute(
+            text("DELETE FROM lessons WHERE id = :id"), {"id": seeded["lesson_id"]}
+        )
+
+
+async def test_chunk_views_for_prompt_resolves_excerpt_content(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict[str, Any],
+) -> None:
+    """Validation's LLM leading check sees the retrieved chunks' CONTENT."""
+    seeded = await _seed_lesson_and_chunk(engine, scenario)
+    missing_id = uuid.uuid4()
+    fake_run = SimpleNamespace(
+        config_json={
+            "retrieval": {
+                "source_chunk_ids": [str(seeded["chunk_id"]), str(missing_id)],
+            }
+        }
+    )
+    try:
+        async with session_factory() as session:
+            views = await _chunk_views_for_prompt(session, fake_run)
+        assert views[0]["id"] == str(seeded["chunk_id"])
+        assert views[0]["content"] == "Chunk content for validation"
+        # An id whose row is gone degrades to an id-only view, never dropped.
+        assert views[1]["id"] == str(missing_id)
+        assert views[1]["content"] == ""
+    finally:
+        await _cleanup_lesson_and_chunk(engine, seeded)
 
 
 @pytest.mark.asyncio

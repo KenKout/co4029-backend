@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, time, timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock
 from urllib.parse import quote_plus
 
 import httpx
+import pytest
 import pytest_asyncio
 from alembic import command
 from alembic.config import Config
@@ -1091,6 +1092,221 @@ async def test_active_users_trend(
     assert points[str(labels["d3"])] == 2  # student + manager pinned sessions
 
 
+async def test_api_latency_trend(
+    engine: AsyncEngine,
+    client: httpx.AsyncClient,
+    seeded_users: SeededUsers,
+) -> None:
+    """Latency trend: per-day p50/p95 from http_audit_log, zero days gap-free.
+
+    Rows are pinned 3 days back — the audit middleware only writes *now*, so
+    that day's set is exactly the injected one and the percentiles are
+    deterministic: latencies [10, 30] → p50 = 20, p95 = 10 + 0.95·20 = 29
+    (percentile_cont linear interpolation).
+    """
+    token, _ = await _bearer(engine, seeded_users.admin_id)
+    three_days_ago = datetime.now(tz=UTC) - timedelta(days=3)
+    inserted_ids: list[str] = []
+    async with engine.begin() as conn:
+        # Isolate the window: earlier test runs leave http_audit_log rows on
+        # past days (every API call the suite makes is logged), so the pinned
+        # day would otherwise carry those too. We purge only days BEFORE
+        # today — today's rows belong to concurrent tests' middleware writes.
+        await conn.execute(
+            text(
+                "DELETE FROM http_audit_log "
+                "WHERE created_at::date < now()::date"
+            )
+        )
+        for offset_min, latency in ((10, 10), (40, 30)):
+            row_id = str(uuid.uuid4())
+            inserted_ids.append(row_id)
+            await conn.execute(
+                text(
+                    "INSERT INTO http_audit_log "
+                    "(id, request_id, method, path, status_code, latency_ms, "
+                    "created_at) "
+                    "VALUES (:id, :rid, 'GET', '/api/v1/test', 200, :lat, "
+                    ":created)"
+                ),
+                {
+                    "id": row_id,
+                    "rid": str(uuid.uuid4()),
+                    "lat": latency,
+                    "created": three_days_ago + timedelta(minutes=offset_min),
+                },
+            )
+        # One pinned row today as well. The endpoint's snapshot runs before
+        # the middleware logs the trend request itself, so "today" must be
+        # seeded explicitly to have deterministic content.
+        today_row = str(uuid.uuid4())
+        inserted_ids.append(today_row)
+        await conn.execute(
+            text(
+                "INSERT INTO http_audit_log "
+                "(id, request_id, method, path, status_code, latency_ms, "
+                "created_at) "
+                "VALUES (:id, :rid, 'GET', '/api/v1/test', 200, 150, now())"
+            ),
+            {
+                "id": today_row,
+                "rid": str(uuid.uuid4()),
+            },
+        )
+    try:
+        resp = await client.get(
+            "/api/v1/admin/stats/latency/trend?days=7",
+            headers=_auth(token),
+        )
+    finally:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("DELETE FROM http_audit_log WHERE id = ANY(:ids)"),
+                {"ids": inserted_ids},
+            )
+    assert resp.status_code == 200, resp.text
+    points = {p["day"]: p for p in resp.json()["points"]}
+    assert len(points) == 7  # gap-free: one point per day in the window
+    async with engine.begin() as conn:
+        labels = (
+            await conn.execute(
+                text(
+                    "SELECT now()::date AS today, "
+                    "(now() - interval '3 days')::date AS d3"
+                )
+            )
+        ).mappings().one()
+    pinned = points[str(labels["d3"])]
+    assert pinned["requests_total"] == 2
+    assert pinned["p50_latency_ms"] == 20
+    assert pinned["p95_latency_ms"] == 29  # rounded from 28.999...
+    # Today carries the single seeded row (the middleware logs the trend
+    # request itself only after the response snapshot was taken).
+    today = points[str(labels["today"])]
+    assert today["requests_total"] == 1
+    assert today["p50_latency_ms"] == 150
+    assert today["p95_latency_ms"] == 150
+
+
+async def test_dashboard_custom_range(
+    client: httpx.AsyncClient,
+    engine: AsyncEngine,
+    seeded_users: SeededUsers,
+) -> None:
+    """Range windows count exactly the rows in [from, to], inclusive.
+
+    http_audit_log + ai_model_calls rows are pinned inside and outside a
+    fixed two-day-old window; every windowed figure must reflect only the
+    in-range rows, and the envelope echoes window_from / window_to verbatim
+    so the UI label == the rows counted. The middleware's own request rows
+    land today, which is outside the window, so the counts are exact.
+    """
+    token, _ = await _bearer(engine, seeded_users.admin_id)
+    # Five days back: clear of every other suite's seeds (the AI-costs suite
+    # pins calls ~2 days back for its prev-window shape, and the latency
+    # suite uses day-3) so the in-window counts are exactly ours.
+    d0 = datetime.now(tz=UTC).date() - timedelta(days=5)
+    inside_ts = datetime.combine(d0, time(hour=1), tzinfo=UTC)
+    before_ts = datetime.combine(d0 - timedelta(days=10), time(hour=1), tzinfo=UTC)
+    audit_ids: list[str] = []
+    call_ids: list[str] = []
+    async with engine.begin() as conn:
+        for created_at, latency in (
+            (before_ts, 10),
+            (inside_ts, 100),
+            (inside_ts + timedelta(hours=1), 300),
+        ):
+            row_id = str(uuid.uuid4())
+            audit_ids.append(row_id)
+            await conn.execute(
+                text(
+                    "INSERT INTO http_audit_log "
+                    "(id, request_id, method, path, status_code, latency_ms, "
+                    "created_at) "
+                    "VALUES (:id, :rid, 'GET', '/api/v1/test', 200, :lat, :ts)"
+                ),
+                {
+                    "id": row_id,
+                    "rid": row_id,
+                    "lat": latency,
+                    "ts": created_at,
+                },
+            )
+        for i, (created_at, cost) in enumerate(
+            ((inside_ts, 4.0), (inside_ts + timedelta(hours=1), 6.0), (before_ts, 99.0))
+        ):
+            cid = str(uuid.uuid4())
+            call_ids.append(cid)
+            await conn.execute(
+                text(
+                    "INSERT INTO ai_model_calls "
+                    "(id, role, stage_name, model_name, total_tokens, "
+                    "estimated_cost_usd, latency_ms, status, called_at) "
+                    "VALUES (:id, 'ingest', 'store', 'test-model', 10, "
+                    "CAST(:cost AS numeric), 5, 'success', :ts)"
+                ),
+                {"id": cid, "cost": cost, "ts": created_at},
+            )
+    try:
+        resp = await client.get(
+            f"/api/v1/admin/stats/dashboard?from={d0.isoformat()}&to={d0.isoformat()}",
+            headers=_auth(token),
+        )
+    finally:
+        async with engine.begin() as conn:
+            if audit_ids:
+                await conn.execute(
+                    text("DELETE FROM http_audit_log WHERE id = ANY(:ids)"),
+                    {"ids": audit_ids},
+                )
+            if call_ids:
+                await conn.execute(
+                    text("DELETE FROM ai_model_calls WHERE id = ANY(:ids)"),
+                    {"ids": call_ids},
+                )
+            await _purge_sessions(engine, seeded_users.admin_id)
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    # Envelope echoes the exact dates the picker applied.
+    assert body["window_from"] == d0.isoformat()
+    assert body["window_to"] == d0.isoformat()
+    assert body["window_days"] == 7  # legacy relative shape untouched
+    # Only the two in-range rows count; percentiles over [100, 300].
+    assert body["requests_window"] == 2
+    assert body["api_p50_latency_ms"] == 200
+    assert body["api_p95_latency_ms"] == 290
+    assert body["ai_calls_window"] == 2
+    assert body["spend_window_usd"] == 10.0
+
+
+@pytest.mark.parametrize(
+    ("params", "needle"),
+    [
+        ("from=2026-08-01", "together"),
+        ("from=2026-08-29&to=2026-08-01", "must not be after"),
+        ("from=2026-08-01&to=2030-01-01", "after today"),
+        ("from=2020-01-01&to=2022-01-01", "366"),
+    ],
+)
+async def test_dashboard_custom_range_validation(
+    client: httpx.AsyncClient,
+    engine: AsyncEngine,
+    seeded_users: SeededUsers,
+    params: str,
+    needle: str,
+) -> None:
+    """Range-mode rejects malformed pairs instead of silently misreporting."""
+    token, _ = await _bearer(engine, seeded_users.admin_id)
+    try:
+        resp = await client.get(
+            f"/api/v1/admin/stats/dashboard?{params}", headers=_auth(token)
+        )
+    finally:
+        await _purge_sessions(engine, seeded_users.admin_id)
+    assert resp.status_code == 422, resp.text
+    assert needle in resp.json()["detail"]["message"]
+
+
 def test_router_metadata() -> None:
     assert stats_router.prefix == "/admin/stats"
     assert audit_router.prefix == "/admin/audit"
@@ -1100,6 +1316,7 @@ def test_router_metadata() -> None:
         "/admin/stats/overview",
         "/admin/stats/active-users",
         "/admin/stats/active-users/trend",
+        "/admin/stats/latency/trend",
         "/admin/stats/content",
         "/admin/stats/dashboard",
     }

@@ -4,18 +4,11 @@ Ports the teacher CRUD + generation-trigger surface from
 ``backend/app/routes/interviews/service.py``. Composes
 :mod:`features.interviews.queries.authoring` for reads and applies
 business rules + ORM writes for config / outcome / question CRUD,
-manual edits, and ARQ enqueue.
+manual edits, and ARQ-enqueue triggers.
 
-Discipline matches T5.13 (quiz authoring): the service flushes, the
-router commits — except :func:`start_generation_run` and
-:func:`regenerate_question`, which commit inline because the ARQ
-worker reads the new ``GenerationRun`` row out of band and must see
-the row before the job dequeues.
-
-Locked task names (mirrored by T6.13 worker registration):
-
-* ``run_interview_generation_task`` — fan-out for full + per-question
-  regeneration runs.
+Discipline matches T5.13: the service flushes, the router commits —
+except :func:`start_generation_run`, which commits inline so the ARQ
+worker sees the new ``GenerationRun`` row before the job dequeues.
 """
 
 from __future__ import annotations
@@ -35,6 +28,7 @@ from abridgeai.core.exceptions import AppError, NotFoundError
 from abridgeai.core.security import CurrentUser, utcnow
 from abridgeai.core.slug import slugify, unique_slug
 from abridgeai.features.courses.api import public as courses_public
+from abridgeai.features.interviews.ai.stages.generation.resolve import resolve_type_mix
 from abridgeai.features.interviews.dedup import (
     NOT_DUPLICATE,
     check_duplicate,
@@ -48,6 +42,10 @@ from abridgeai.features.interviews.models import (
 )
 from abridgeai.features.interviews.queries import authoring as authoring_queries
 from abridgeai.features.interviews.services import published_freeze
+from abridgeai.features.interviews.services.scope_guards import (
+    require_lessons_in_course,
+    require_module_in_course,
+)
 from abridgeai.features.quizzes.api import public as quizzes_public
 from abridgeai.features.quizzes.api.public import GenerationRunDTO
 
@@ -130,12 +128,9 @@ async def _ensure_module_item(
     """Insert a ``module_items`` row pointing at the published config.
 
     Existence check stays raw because ``courses.api.public`` does not
-    surface a "find module_items by interview_config_id" reader (the
-    available ``find_module_items`` is keyed by ``lesson_id``).  Next-
-    position resolution and the INSERT itself bracket that raw SELECT:
-    the position fetch goes through ``courses.api.public`` and the
-    INSERT remains raw because it is a cross-feature WRITE that owns
-    its own UoW boundary (mirrors T5.13 quiz authoring).
+    surface a "find module_items by interview_config_id" reader; the
+    insert is a cross-feature WRITE owning its own UoW boundary (mirrors
+    T5.13 quiz authoring).
     """
     from sqlalchemy import text  # noqa: PLC0415
 
@@ -172,6 +167,8 @@ async def create_interview_config(
     module_id = data.get("module_id")
     if module_id is None:
         raise AppError("module_id is required to create an interview config")
+    module_id = UUID(str(module_id))
+    await require_module_in_course(db, module_id, course_id)
     # Auto-generate the URL slug from the title (unique per module over live
     # rows; collisions get -1, -2, … incrementing from 1).
     from sqlalchemy import select  # noqa: PLC0415
@@ -347,13 +344,7 @@ async def delete_interview_config(db: AsyncSession, config_id: UUID, actor: Curr
 
 
 async def adaptive_readiness(db: AsyncSession, config_id: UUID) -> dict[str, Any]:
-    """Assemble the advisory adaptive-readiness report for a config (Slice 5).
-
-    Read-only: analyses the APPROVED question pool + outcomes with the pure
-    :func:`orchestrator.readiness.analyze_readiness`, and reports the deployment
-    rollout status per mode. Never blocks publishing — ``blocks_publish`` is
-    always False (the hard publish gates live in ``publish_interview_config``).
-    """
+    """Advisory adaptive-readiness report (Slice 5); never blocks publishing."""
     from abridgeai.core.config import get_settings  # noqa: PLC0415
     from abridgeai.features.interviews.orchestrator.readiness import (  # noqa: PLC0415
         ReadinessInputs,
@@ -413,9 +404,12 @@ async def add_question(
     data = payload.model_dump(exclude_unset=True)
     if not str(data.get("prompt_text", "")).strip():
         raise AppError("Question prompt is required")
+    linked_outcome_id = data.get("linked_outcome_id")
+    if linked_outcome_id is not None:
+        await _require_outcome(db, config_id, linked_outcome_id)
     question = InterviewQuestion(
         interview_config_id=config_id,
-        linked_outcome_id=data.get("linked_outcome_id"),
+        linked_outcome_id=linked_outcome_id,
         position=data.get("position") or next_position,
         question_type=data["question_type"],
         prompt_text=data["prompt_text"].strip(),
@@ -444,12 +438,9 @@ async def check_question_duplicate(
 ) -> dict[str, Any]:
     """Report whether ``prompt_text`` duplicates something already in the bank.
 
-    A read-only advisory check for the authoring UI: it never blocks or mutates
-    anything, so a teacher who disagrees with the verdict can still save. Returns
-    the verdict as a dict (see :class:`DuplicateVerdict`) plus ``enabled`` so the
-    caller can distinguish "feature off" from "nothing similar found".
-
-    Returns ``enabled: False`` without any provider call when
+    A read-only advisory check for the authoring UI: never blocks or
+    mutates; returns the verdict (see :class:`DuplicateVerdict`) plus
+    ``enabled``, or ``enabled: False`` with no provider call when
     ``interview_dedup_enabled`` is off.
     """
     await _require_config(db, config_id)
@@ -468,13 +459,7 @@ async def check_question_duplicate(
 
 
 async def _store_question_embedding(db: AsyncSession, question: InterviewQuestion) -> None:
-    """Best-effort: persist the question's vector so it can be matched later.
-
-    Thin single-row wrapper over :func:`dedup.store_question_embeddings`, which
-    owns the feature gate, the pgvector text formatting and the swallow-and-log
-    policy — the generation pipeline needs the batch form, and two copies of that
-    UPDATE is how the two paths drifted apart in the first place.
-    """
+    """Best-effort single-row wrapper over dedup.store_question_embeddings."""
     await store_question_embeddings(
         db,
         question_ids=[question.id],
@@ -493,6 +478,10 @@ async def update_question(
     published_freeze.assert_questions_editable(config)
     question = await _require_question(db, config_id, question_id)
     data = payload.model_dump(exclude_unset=True)
+    if data.get("prompt_text", question.prompt_text) is None:
+        raise AppError("Question prompt is required")
+    if data.get("question_type", question.question_type) is None:
+        raise AppError("Question type is required")
     if "linked_outcome_id" in data and data["linked_outcome_id"] is not None:
         await _require_outcome(db, config_id, data["linked_outcome_id"])
     prompt_changed = "prompt_text" in data and (data["prompt_text"] or "") != question.prompt_text
@@ -614,6 +603,13 @@ async def start_generation_run(
     published_freeze.assert_questions_editable(config)
     request_data = request.model_dump(exclude_unset=True, mode="json") if request else {}
 
+    request_course_id = request_data.get("course_id")
+    if request_course_id is None or UUID(str(request_course_id)) != config.course_id:
+        raise AppError("course_id does not match the interview config")
+    request_module_id = request_data.get("module_id")
+    if request_module_id is None or UUID(str(request_module_id)) != config.module_id:
+        raise AppError("module_id does not match the interview config")
+
     # Module-scoped retrieval (§QGen-scope): each selected module expands to
     # its lessons, which are merged into the ``source_lesson_ids`` retrieval
     # filter (retrieval reads ``lesson_ids`` / ``source_lesson_ids`` from
@@ -623,12 +619,21 @@ async def start_generation_run(
     module_ids: list[UUID] = [UUID(str(m)) for m in raw_module_ids]
     if not module_ids and config.module_id is not None:
         module_ids = [config.module_id]
-    module_lesson_ids = await courses_public.list_lesson_ids_for_modules(db, module_ids)
+    for module_id in module_ids:
+        await require_module_in_course(db, module_id, config.course_id)
+
     explicit_lesson_ids = [UUID(str(x)) for x in (request_data.get("source_lesson_ids") or [])]
+    await require_lessons_in_course(db, explicit_lesson_ids, config.course_id)
+    module_lesson_ids = await courses_public.list_lesson_ids_for_modules(db, module_ids)
     merged_lesson_ids = sorted({*explicit_lesson_ids, *module_lesson_ids})
+    # Normalize generation's percentages to fractions for validation's mix check.
+    type_weights = resolve_type_mix(config.supplementary_instructions)
 
     config_json: dict[str, Any] = dict(request_data) | {
         "interview_config_id": str(config.id),
+        "type_weights": {key: value / 100 for key, value in type_weights.items()},
+        "course_id": str(config.course_id),
+        "module_id": str(config.module_id),
         "source_module_ids": [str(m) for m in module_ids],
         "source_lesson_ids": [str(x) for x in merged_lesson_ids],
     }
@@ -642,44 +647,6 @@ async def start_generation_run(
         config_json=config_json,
     )
     config.generation_run_id = run.id
-    await db.commit()
-
-    if arq_pool is not None:
-        await arq_pool.enqueue_job(  # type: ignore[attr-defined]
-            _RUN_INTERVIEW_GENERATION_TASK, actor.user_id, run.id
-        )
-    return run
-
-
-async def regenerate_question(
-    db: AsyncSession,
-    config_id: UUID,
-    question_id: UUID,
-    actor: CurrentUser,
-    *,
-    arq_pool: object | None = None,
-) -> GenerationRunDTO:
-    """Per-question regeneration run + ARQ enqueue.
-
-    Worker dispatcher reads ``config_json["question_id"]`` to route to
-    the per-question regeneration path. Task name matches the canonical
-    worker function (``run_interview_generation_task``).
-    """
-    config = await _require_config(db, config_id)
-    published_freeze.assert_questions_editable(config)
-    question = await _require_question(db, config_id, question_id)
-    run = await quizzes_public.create_generation_run(
-        db,
-        kind="interview",
-        source_scope_kind="module",
-        course_id=config.course_id,
-        module_id=config.module_id,
-        requested_by=actor.user_id,
-        config_json={
-            "interview_config_id": str(config.id),
-            "question_id": str(question.id),
-        },
-    )
     await db.commit()
 
     if arq_pool is not None:
@@ -821,7 +788,6 @@ __all__ = [
     "list_question_bank",
     "publish_interview_config",
     "update_question_bank_item",
-    "regenerate_question",
     "start_generation_run",
     "unarchive_interview_config",
     "update_interview_config",

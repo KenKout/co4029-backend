@@ -2248,11 +2248,6 @@ async def test_published_config_rejects_question_bank_mutations(
             f"/api/v1/teacher/interview-configs/{config_id}/questions/{question_id}",
             None,
         ),
-        (
-            "post",
-            f"/api/v1/teacher/interview-configs/{config_id}/questions/{question_id}/regenerate",
-            None,
-        ),
     ]
     for method, url, body in endpoints:
         request_kwargs = {"headers": _auth(admin_bearer)}
@@ -2261,6 +2256,14 @@ async def test_published_config_rejects_question_bank_mutations(
         response = await getattr(client, method)(url, **request_kwargs)
         assert response.status_code == 409, response.text
         assert "interview_published_setting_locked" in response.text
+
+    # Per-question regenerate is retired (410) — it used to run a full
+    # generation, which the published freeze would otherwise have to fight.
+    retired = await client.post(
+        f"/api/v1/teacher/interview-configs/{config_id}/questions/{question_id}/regenerate",
+        headers=_auth(admin_bearer),
+    )
+    assert retired.status_code == 410, retired.text
 
     async with engine.begin() as conn:
         row = (

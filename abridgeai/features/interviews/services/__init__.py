@@ -1,8 +1,7 @@
 """Interviews-feature service layer (T6.11 — 4-capability split).
 
 * :mod:`.authoring`  — teacher CRUD + manual question/outcome edits +
-  ARQ-enqueue triggers (``start_generation_run``,
-  ``regenerate_question``).
+  ARQ-enqueue triggers (``start_generation_run``).
 * :mod:`.taking`     — student session lifecycle (``start_session``,
   ``take_session_step``, ``submit_session``) with the runtime
   follow-up hook + post-submit ARQ enqueue.
