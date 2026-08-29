@@ -1609,7 +1609,6 @@ _PRIORITY_KIND_RANK = {
     "quiz_calibration": 1,
     "quiz_questions_pending": 2,
     "student_risk": 3,
-    "reviews_overdue": 4,
     "interview_questions_pending": 5,
     "materials_ready": 6,
 }
@@ -1844,21 +1843,6 @@ async def list_priority_tasks(
                 reason=f"{_course_count_phrase(iv_backlog.courses_affected)}.",
                 age_hours=_age_hours(iv_backlog.oldest_created_at),
                 count=iv_backlog.count,
-            )
-        )
-
-    if review.cards_overdue > 0:
-        tasks.append(
-            PriorityTask(
-                id="reviews-overdue",
-                kind="reviews_overdue",
-                severity="medium",
-                title=f"{review.cards_overdue} reviews past due",
-                reason=(
-                    "Student review cards are past their scheduled date; "
-                    "retention decays while they wait."
-                ),
-                count=review.cards_overdue,
             )
         )
 
