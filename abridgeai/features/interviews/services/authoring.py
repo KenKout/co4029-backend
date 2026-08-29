@@ -407,7 +407,8 @@ async def add_question(
     payload: Any,  # noqa: ANN401
     actor: CurrentUser,
 ) -> InterviewQuestion:
-    await _require_config(db, config_id)
+    config = await _require_config(db, config_id)
+    published_freeze.assert_questions_editable(config)
     next_position = await authoring_queries.next_question_position(db, config_id)
     data = payload.model_dump(exclude_unset=True)
     if not str(data.get("prompt_text", "")).strip():
@@ -488,11 +489,24 @@ async def update_question(
     payload: Any,  # noqa: ANN401
     actor: CurrentUser,
 ) -> InterviewQuestion:
+    config = await _require_config(db, config_id)
+    published_freeze.assert_questions_editable(config)
     question = await _require_question(db, config_id, question_id)
     data = payload.model_dump(exclude_unset=True)
+    if "linked_outcome_id" in data and data["linked_outcome_id"] is not None:
+        await _require_outcome(db, config_id, data["linked_outcome_id"])
     prompt_changed = "prompt_text" in data and (data["prompt_text"] or "") != question.prompt_text
-    for key, value in data.items():
-        setattr(question, key, value)
+    for key in (
+        "prompt_text",
+        "question_type",
+        "difficulty",
+        "model_answer",
+        "linked_outcome_id",
+        "position",
+        "review_status",
+    ):
+        if key in data:
+            setattr(question, key, data[key])
     question.reviewed_by = actor.user_id
     question.reviewed_at = utcnow()
     await flush_or_conflict(db)
@@ -511,6 +525,8 @@ async def delete_question(
     question_id: UUID,
     actor: CurrentUser,
 ) -> None:
+    config = await _require_config(db, config_id)
+    published_freeze.assert_questions_editable(config)
     question = await _require_question(db, config_id, question_id)
     await soft_delete_cascade(db, question, actor_id=actor.user_id)
 
@@ -548,12 +564,16 @@ async def update_outcome(
     payload: Any,  # noqa: ANN401
     actor: CurrentUser,
 ) -> InterviewOutcome:
-    del actor
     config = await _require_config(db, config_id)
     # Reweighting an outcome changes how every answer scores; frozen on publish.
     published_freeze.assert_learning_outcomes_editable(config)
     outcome = await _require_outcome(db, config_id, outcome_id)
-    _apply_patch(outcome, payload)
+    data = payload.model_dump(exclude_unset=True)
+    for key in ("outcome_text", "outcome_type", "importance_weight", "position"):
+        if key in data:
+            setattr(outcome, key, data[key])
+    if data:
+        outcome.updated_by = actor.user_id
     await flush_or_conflict(db)
     await db.refresh(outcome)
     return outcome
@@ -591,6 +611,7 @@ async def start_generation_run(
     dequeues. Mirrors T5.13 quiz ``start_generation_run`` semantics.
     """
     config = await _require_config(db, config_id)
+    published_freeze.assert_questions_editable(config)
     request_data = request.model_dump(exclude_unset=True, mode="json") if request else {}
 
     # Module-scoped retrieval (§QGen-scope): each selected module expands to
@@ -644,8 +665,9 @@ async def regenerate_question(
     the per-question regeneration path. Task name matches the canonical
     worker function (``run_interview_generation_task``).
     """
-    question = await _require_question(db, config_id, question_id)
     config = await _require_config(db, config_id)
+    published_freeze.assert_questions_editable(config)
+    question = await _require_question(db, config_id, question_id)
     run = await quizzes_public.create_generation_run(
         db,
         kind="interview",

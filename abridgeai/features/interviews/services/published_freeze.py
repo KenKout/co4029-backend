@@ -101,8 +101,33 @@ def assert_learning_outcomes_editable(config: InterviewConfig) -> None:
     )
 
 
+def assert_questions_editable(config: InterviewConfig) -> None:
+    """Freeze question-bank mutations on a published interview.
+
+    The question bank is what students actually sit. Adding, deleting, or
+    editing a question mid-cohort means two students answer different
+    questions while believing they share the same interview. ``review_status``
+    and ``position`` are frozen too: reordering changes what a late student is
+    presented with, and flipping an AI-generated question to approved after
+    someone already sat it rewrites what that run measured.
+
+    Called by question create / update / delete / regenerate and by the
+    generation-run start before any write, so a published config rejects the
+    mutation with the same ``interview_published_setting_locked`` error the
+    settings PATCH uses. Unpublishing lifts the restriction.
+    """
+    if config.status != "published":
+        return
+    raise ConflictError(
+        "interview_published_setting_locked: the question bank is frozen on a "
+        "published interview because students sit it live. Unpublish the "
+        "interview first to add, edit, reorder, or delete questions."
+    )
+
+
 __all__ = [
     "PUBLISHED_EDITABLE_CONFIG_FIELDS",
     "assert_config_settings_editable",
     "assert_learning_outcomes_editable",
+    "assert_questions_editable",
 ]

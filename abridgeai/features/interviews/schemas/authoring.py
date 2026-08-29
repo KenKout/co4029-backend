@@ -329,6 +329,17 @@ class InterviewOutcomeCreate(BaseModel):
     importance_weight: int = Field(default=1, ge=1, le=5)
 
 
+class InterviewOutcomeUpdate(BaseModel):
+    """Teacher-editable fields of an existing interview outcome."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    outcome_text: str | None = None
+    outcome_type: OutcomeTypeLiteral | None = None
+    importance_weight: int | None = Field(default=None, ge=1, le=5)
+    position: int | None = Field(default=None, ge=1)
+
+
 class InterviewOutcomeAuthoring(InterviewOutcomePublic):
     """Authoring projection of :class:`InterviewOutcome`.
 
@@ -363,6 +374,24 @@ class InterviewQuestionCreate(BaseModel):
     model_answer: str | None = None
     linked_outcome_id: UUID | None = None
     position: int | None = Field(default=None, ge=1)
+
+
+class InterviewQuestionUpdate(BaseModel):
+    """Teacher-editable fields of an existing interview question.
+
+    Ownership, all-angle grouping, AI provenance, source attribution, audit,
+    soft-delete, and embedding fields are server-owned and intentionally absent.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    prompt_text: str | None = None
+    question_type: QuestionTypeLiteral | None = None
+    difficulty: DifficultyLiteral | None = None
+    model_answer: str | None = None
+    linked_outcome_id: UUID | None = None
+    position: int | None = Field(default=None, ge=1)
+    review_status: ReviewStatusLiteral | None = None
 
 
 class InterviewQuestionDuplicateCheckRequest(BaseModel):
