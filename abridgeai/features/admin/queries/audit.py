@@ -87,6 +87,8 @@ async def http_audit_search(
     until: datetime | None,
     user_id: UUID | None,
     path_pattern: str | None,
+    event_kind: str | None = None,
+    request_id: UUID | None = None,
     limit: int,
 ) -> list[dict[str, Any]]:
     rows = (
@@ -97,6 +99,8 @@ async def http_audit_search(
                 "until": until,
                 "user_id": user_id,
                 "path_pattern": path_pattern,
+                "event_kind": event_kind,
+                "request_id": request_id,
                 "limit": limit,
             },
         )

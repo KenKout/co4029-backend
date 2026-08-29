@@ -41,7 +41,14 @@ SELECT
     gr.finished_at                           AS finished_at,
     gr.created_at                            AS created_at,
     gr.updated_at                            AS updated_at,
-    CAST(NULL AS uuid)                       AS request_id
+    (
+        SELECT amc.request_id
+        FROM ai_model_calls amc
+        WHERE amc.generation_run_id = gr.id
+          AND amc.request_id IS NOT NULL
+        ORDER BY amc.called_at ASC
+        LIMIT 1
+    )                                        AS request_id
 FROM generation_runs gr
 WHERE gr.updated_at >= CAST(:since AS timestamptz)
   AND (CAST(:until AS timestamptz) IS NULL OR gr.updated_at <= CAST(:until AS timestamptz))

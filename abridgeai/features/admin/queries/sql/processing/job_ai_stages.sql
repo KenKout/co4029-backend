@@ -20,5 +20,6 @@ SELECT
     MAX(amc.latency_ms)                            AS max_latency_ms
 FROM ai_model_calls amc
 WHERE amc.processing_job_id = CAST(:job_id AS uuid)
+   OR amc.generation_run_id = CAST(:job_id AS uuid)
 GROUP BY COALESCE(amc.stage_name, amc.role, 'unknown')
 ORDER BY spend_usd DESC NULLS LAST, call_count DESC;

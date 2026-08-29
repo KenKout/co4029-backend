@@ -1,6 +1,6 @@
 -- Active (non-revoked, non-expired) auth sessions for a single user.
 SELECT
-    s.id           AS session_id,
+    s.id           AS id,
     s.expires_at   AS expires_at,
     s.revoked_at   AS revoked_at,
     s.ip_address   AS ip_address,

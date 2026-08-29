@@ -50,11 +50,13 @@ class RoleChangeRow(BaseModel):
 
 class HttpAuditRow(BaseModel):
     id: UUID
+    request_id: UUID
     user_id: UUID | None = None
     session_id: UUID | None = None
     method: str
     path: str
     status_code: int
+    failure_reason: str | None = None
     latency_ms: int | None = None
     ip_address: str | None = None
     user_agent: str | None = None
@@ -207,6 +209,17 @@ async def search_http_audit(
         str | None,
         Query(description="SQL LIKE pattern, e.g. '/api/v1/admin/%'."),
     ] = None,
+    event_kind: Annotated[
+        str | None,
+        Query(
+            pattern="^(login_failure|denied)$",
+            description="Verified deep-link filter for a login failure or denied request.",
+        ),
+    ] = None,
+    request_id: Annotated[
+        UUID | None,
+        Query(description="Exact request correlation id."),
+    ] = None,
     limit: Annotated[int, Query(ge=1, le=500)] = 100,
     reveal: Annotated[
         bool,
@@ -241,6 +254,8 @@ async def search_http_audit(
             until=until,
             user_id=user_id,
             path_pattern=path_pattern,
+            event_kind=event_kind,
+            request_id=request_id,
             limit=limit,
         )
     except audit_service.HttpAuditUnavailableError as exc:

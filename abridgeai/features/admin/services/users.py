@@ -58,6 +58,17 @@ _REVOKE_SESSIONS_SQL = text(
     """
 )
 
+_REVOKE_ONE_SESSION_SQL = text(
+    """
+    UPDATE auth_sessions
+       SET revoked_at = NOW()
+     WHERE id = :session_id
+       AND user_id = :user_id
+       AND revoked_at IS NULL
+    RETURNING id
+    """
+)
+
 _GET_USER_SQL = text(
     """
     SELECT u.id, u.primary_email, u.status, u.last_login_at,
@@ -122,6 +133,7 @@ async def user_detail(db: AsyncSession, *, user_id: UUID) -> dict[str, Any]:
         raise NotFoundError(f"user {user_id} not found")
     role_assignments = await user_queries.role_assignments(db, user_id=user_id)
     sessions = await user_queries.active_sessions(db, user_id=user_id)
+    role_history = await user_queries.role_history(db, user_id=user_id)
     base_dict = dict(base)
     profile_keys = ("display_name", "given_name", "family_name", "bio", "avatar_object_id")
     profile = {k: base_dict.pop(k) for k in profile_keys}
@@ -131,7 +143,23 @@ async def user_detail(db: AsyncSession, *, user_id: UUID) -> dict[str, Any]:
         "user": user_payload,
         "role_assignments": role_assignments,
         "active_sessions": sessions,
+        "role_history": role_history,
     }
+
+
+async def revoke_session(
+    db: AsyncSession, *, user_id: UUID, session_id: UUID
+) -> dict[str, Any]:
+    row = (
+        await db.execute(
+            _REVOKE_ONE_SESSION_SQL,
+            {"user_id": user_id, "session_id": session_id},
+        )
+    ).mappings().one_or_none()
+    if row is None:
+        raise NotFoundError(f"active session {session_id} not found for user {user_id}")
+    await db.commit()
+    return {"session_id": row["id"], "revoked": True}
 
 
 async def disable_user(db: AsyncSession, *, user_id: UUID) -> dict[str, Any]:
@@ -178,5 +206,6 @@ __all__ = [
     "disable_user",
     "enable_user",
     "list_users",
+    "revoke_session",
     "user_detail",
 ]
