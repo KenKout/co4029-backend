@@ -88,9 +88,7 @@ def _window_bounds(
     """
     if window_from is not None and window_to is not None:
         start = datetime.combine(window_from, time.min, tzinfo=UTC)
-        end = datetime.combine(
-            window_to + timedelta(days=1), time.min, tzinfo=UTC
-        )
+        end = datetime.combine(window_to + timedelta(days=1), time.min, tzinfo=UTC)
         length = end - start
         previous_start = start - length
         return start, end, previous_start
@@ -177,10 +175,7 @@ async def api_latency_trend(
         window_start=window_start,
         window_end=window_end,
     )
-    return [
-        (day, requests, _opt_int(p50), _opt_int(p95))
-        for day, requests, p50, p95 in raw
-    ]
+    return [(day, requests, _opt_int(p50), _opt_int(p95)) for day, requests, p50, p95 in raw]
 
 
 async def operator_dashboard(
@@ -275,7 +270,9 @@ async def _operator_dashboard_uncached(
         previous_start=previous_start,
     )
     queue = await job_metrics.queue_state(db, now=now)
-    api = await stats_queries.api_reliability(db, now=now, window_days=window_days)
+    api = await stats_queries.api_reliability(
+        db, as_of=now, window_start=window_start, window_end=window_end
+    )
     # Same rows the Organizations list filters to, so the count and its
     # destination cannot drift (ADM-045).
     inactive_orgs = await access_control_api.list_inactive_organizations(
