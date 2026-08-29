@@ -110,15 +110,17 @@ async def test_all_angles_backfill_retains_complete_groups_only(
 async def test_all_angles_discards_a_group_when_one_angle_fails_validation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """One rejected angle discards the whole group — and ends the loop.
+
+    A partial (3/4) group is never persisted (atomicity), and a round that
+    produced no complete group stops the backfill immediately instead of
+    burning up to three more LLM rounds re-attempting the same group.
+    """
     state, config, context = _fake_stubs()
     invalid_group = _coherent_group(0)
-    valid_group = _coherent_group(20)
-    generate = AsyncMock(side_effect=[invalid_group, valid_group])
+    generate = AsyncMock(return_value=invalid_group)
     validate = AsyncMock(
-        side_effect=[
-            [_verdict(index, accepted=index != 3) for index in range(4)],
-            [_verdict(index, accepted=True) for index in range(4)],
-        ]
+        return_value=[_verdict(index, accepted=index != 3) for index in range(4)]
     )
     monkeypatch.setattr(
         "abridgeai.features.interviews.ai.pipelines.backfill.generate_interview_questions",
@@ -129,7 +131,7 @@ async def test_all_angles_discards_a_group_when_one_angle_fails_validation(
         validate,
     )
 
-    _drafts, _verdicts, accepted, _rounds = await generate_with_backfill(
+    _drafts, _verdicts, accepted, rounds = await generate_with_backfill(
         AsyncMock(),
         state=state,
         config=config,
@@ -140,8 +142,9 @@ async def test_all_angles_discards_a_group_when_one_angle_fails_validation(
         role_type=None,
     )
 
-    assert {draft.variant_group_id for draft in accepted} == {valid_group[0].variant_group_id}
-    assert len(accepted) == 4
+    assert accepted == []
+    assert rounds == 0
+    assert generate.await_count == 1
 
 
 @pytest.mark.asyncio

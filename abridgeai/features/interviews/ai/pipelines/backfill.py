@@ -215,7 +215,7 @@ async def generate_with_backfill(
         if on_progress is not None:
             await on_progress(min(len(accepted), target_count), target_count)
 
-        if not round_drafts or (not round_accepted and variant_strategy != "all_angles"):
+        if not round_drafts or not round_accepted:
             break
 
     logger.info(
