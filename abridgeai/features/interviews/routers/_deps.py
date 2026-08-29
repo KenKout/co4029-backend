@@ -44,6 +44,7 @@ from abridgeai.features.access_control.policies import can_manage_course
 from abridgeai.features.courses.api import public as courses_public
 from abridgeai.features.interviews.models import (
     InterviewConfig,
+    InterviewOutcome,
     InterviewQuestion,
     InterviewSession,
 )
@@ -171,6 +172,49 @@ def require_question_authoring_access(
     return dependency
 
 
+def require_outcome_authoring_access(
+    *perm_codes: str,
+) -> SubResourceDependency:
+    """Walks ``outcome_id → interview_config → course`` and enforces course perms.
+
+    The path parameter MUST be named ``outcome_id``. If a sibling
+    ``config_id`` path parameter is also present it is cross-checked
+    against the outcome's parent — a request smuggling a foreign
+    ``config_id`` is rejected with 404 to avoid leaking existence.
+    """
+    codes = perm_codes or _DEFAULT_AUTHORING_PERMS
+
+    async def dependency(
+        request: Request,
+        outcome_id: UUID,
+        current_user: Annotated[CurrentUser, Depends(get_current_user)],
+        db: Annotated[AsyncSession, Depends(get_db)],
+    ) -> CurrentUser:
+        outcome = (
+            await db.execute(select(InterviewOutcome).where(InterviewOutcome.id == outcome_id))
+        ).scalar_one_or_none()
+        if outcome is None:
+            raise _not_found("interview_outcome", outcome_id)
+        config = (
+            await db.execute(
+                select(InterviewConfig).where(InterviewConfig.id == outcome.interview_config_id)
+            )
+        ).scalar_one_or_none()
+        if config is None:
+            raise _not_found("interview_outcome", outcome_id)
+        path_config = request.path_params.get("config_id")
+        if path_config is not None and str(path_config) != str(config.id):
+            raise _not_found("interview_outcome", outcome_id)
+        course = await courses_public.get_course_by_id(db, config.course_id)
+        if course is None:
+            raise _not_found("interview_outcome", outcome_id)
+        return await _check_course_permission(
+            db, current_user, course.id, course.owner_user_id, codes
+        )
+
+    return dependency
+
+
 def require_session_owner_access() -> SubResourceDependency:
     """Walks ``session_id → student_id`` and enforces ownership.
 
@@ -244,6 +288,7 @@ def require_session_authoring_access(
 __all__ = [
     "SubResourceDependency",
     "require_interview_authoring_access",
+    "require_outcome_authoring_access",
     "require_question_authoring_access",
     "require_session_authoring_access",
     "require_session_owner_access",

@@ -47,6 +47,7 @@ from abridgeai.core.security import CurrentUser
 from abridgeai.features.access_control.policies import require_course_permission
 from abridgeai.features.interviews.routers._deps import (
     require_interview_authoring_access,
+    require_outcome_authoring_access,
     require_question_authoring_access,
     require_session_authoring_access,
 )
@@ -65,6 +66,7 @@ from abridgeai.features.interviews.schemas import (
     InterviewIntegrityRead,
     InterviewOutcomeAuthoring,
     InterviewOutcomeCreate,
+    InterviewOutcomeUpdate,
     InterviewQuestionAuthoring,
     InterviewQuestionBankItemCreate,
     InterviewQuestionBankItemRead,
@@ -72,6 +74,7 @@ from abridgeai.features.interviews.schemas import (
     InterviewQuestionCreate,
     InterviewQuestionDuplicateCheck,
     InterviewQuestionDuplicateCheckRequest,
+    InterviewQuestionUpdate,
     InterviewSessionPublic,
     InterviewSessionSummary,
     InterviewSessionTeacherRead,
@@ -85,6 +88,7 @@ router = APIRouter(prefix="/teacher", tags=["interviews-authoring"])
 
 _REQUIRE_COURSE_UPDATE = require_course_permission("course_id", "course.update")
 _REQUIRE_CONFIG = require_interview_authoring_access()
+_REQUIRE_OUTCOME = require_outcome_authoring_access()
 _REQUIRE_QUESTION = require_question_authoring_access()
 _REQUIRE_SESSION_AUTHORING = require_session_authoring_access()
 
@@ -630,13 +634,13 @@ async def check_question_duplicate(
 async def update_question(
     config_id: UUID,
     question_id: UUID,
-    payload: dict[str, Any],
+    payload: InterviewQuestionUpdate,
     current_user: Annotated[CurrentUser, Depends(_REQUIRE_QUESTION)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> InterviewQuestionAuthoring:
     try:
         question = await authoring_service.update_question(
-            db, config_id, question_id, _AttrShim(payload), current_user
+            db, config_id, question_id, payload, current_user
         )
     except NotFoundError as exc:
         raise _not_found("interview_question", question_id) from exc
@@ -662,6 +666,8 @@ async def delete_question(
         await authoring_service.delete_question(db, config_id, question_id, current_user)
     except NotFoundError as exc:
         raise _not_found("interview_question", question_id) from exc
+    except ConflictError as exc:
+        raise _conflict(str(exc)) from exc
     await db.commit()
 
 
@@ -683,6 +689,8 @@ async def regenerate_question(
         )
     except NotFoundError as exc:
         raise _not_found("interview_question", question_id) from exc
+    except ConflictError as exc:
+        raise _conflict(str(exc)) from exc
     except AppError as exc:
         raise _bad_request(str(exc)) from exc
     return _generation_run_view(run)
@@ -718,13 +726,13 @@ async def create_outcome(
 async def update_outcome(
     config_id: UUID,
     outcome_id: UUID,
-    payload: dict[str, Any],
-    current_user: Annotated[CurrentUser, Depends(_REQUIRE_CONFIG)],
+    payload: InterviewOutcomeUpdate,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_OUTCOME)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> InterviewOutcomeAuthoring:
     try:
         outcome = await authoring_service.update_outcome(
-            db, config_id, outcome_id, _AttrShim(payload), current_user
+            db, config_id, outcome_id, payload, current_user
         )
     except NotFoundError as exc:
         raise _not_found("interview_outcome", outcome_id) from exc
@@ -743,7 +751,7 @@ async def update_outcome(
 async def delete_outcome(
     config_id: UUID,
     outcome_id: UUID,
-    current_user: Annotated[CurrentUser, Depends(_REQUIRE_CONFIG)],
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_OUTCOME)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> None:
     try:
@@ -1159,29 +1167,6 @@ def _generation_run_view(run: Any) -> InterviewGenerationRunPublic:  # noqa: ANN
         finished_at=run.finished_at,
         failure_message=failure_message,
     )
-
-
-class _AttrShim:
-    """Adapt a ``dict`` body into the ``model_dump`` / attr-access shape services expect."""
-
-    def __init__(self, data: dict[str, Any]) -> None:
-        self._data = dict(data)
-
-    def model_dump(self, exclude_unset: bool = False, mode: str | None = None) -> dict[str, Any]:
-        del exclude_unset, mode
-        return dict(self._data)
-
-    def __getattr__(self, name: str) -> Any:  # noqa: ANN401  -- shim returns whatever the dict holds
-        if name.startswith("_"):
-            raise AttributeError(name)
-        if name in self._data:
-            value = self._data[name]
-            if isinstance(value, list) and value and isinstance(value[0], dict):
-                return [_AttrShim(item) for item in value]
-            if isinstance(value, dict):
-                return _AttrShim(value)
-            return value
-        return None
 
 
 __all__ = [

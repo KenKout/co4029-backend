@@ -2091,6 +2091,87 @@ async def test_check_duplicate_rejects_unknown_fields(
     assert resp.status_code == 422, resp.text
 
 
+async def test_outcome_patch_rejects_protected_fields(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    scenario: dict[str, uuid.UUID],
+) -> None:
+    config_id = await _create_interview_config(client, admin_bearer, scenario, "Outcome Guard")
+    created = await client.post(
+        f"/api/v1/teacher/interview-configs/{config_id}/outcomes",
+        json={
+            "position": 1,
+            "outcome_text": "Understand recursion",
+            "outcome_type": "knowledge",
+        },
+        headers=_auth(admin_bearer),
+    )
+    assert created.status_code == 201, created.text
+    outcome_id = created.json()["id"]
+
+    for field, value in (
+        ("interview_config_id", str(uuid.uuid4())),
+        ("created_by", str(uuid.uuid4())),
+        ("updated_by", str(uuid.uuid4())),
+        ("deleted_at", "2026-01-01T00:00:00Z"),
+    ):
+        response = await client.patch(
+            f"/api/v1/teacher/interview-configs/{config_id}/outcomes/{outcome_id}",
+            json={field: value},
+            headers=_auth(admin_bearer),
+        )
+        assert response.status_code == 422, response.text
+
+    updated = await client.patch(
+        f"/api/v1/teacher/interview-configs/{config_id}/outcomes/{outcome_id}",
+        json={"outcome_text": "Explain recursive base cases", "importance_weight": 4},
+        headers=_auth(admin_bearer),
+    )
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["interview_config_id"] == config_id
+    assert updated.json()["outcome_text"] == "Explain recursive base cases"
+    assert updated.json()["importance_weight"] == 4
+
+
+async def test_question_patch_rejects_protected_fields(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    scenario: dict[str, uuid.UUID],
+) -> None:
+    config_id = await _create_interview_config(client, admin_bearer, scenario, "Patch Guard")
+    created = await client.post(
+        f"/api/v1/teacher/interview-configs/{config_id}/questions",
+        json={"prompt_text": "Original prompt?", "question_type": "conceptual"},
+        headers=_auth(admin_bearer),
+    )
+    assert created.status_code == 201, created.text
+    question_id = created.json()["id"]
+
+    for field, value in (
+        ("interview_config_id", str(uuid.uuid4())),
+        ("variant_group_id", str(uuid.uuid4())),
+        ("ai_generated", True),
+        ("source_refs_json", []),
+        ("created_by", str(uuid.uuid4())),
+        ("deleted_at", "2026-01-01T00:00:00Z"),
+    ):
+        response = await client.patch(
+            f"/api/v1/teacher/interview-configs/{config_id}/questions/{question_id}",
+            json={field: value},
+            headers=_auth(admin_bearer),
+        )
+        assert response.status_code == 422, response.text
+
+    loaded = await client.get(
+        f"/api/v1/teacher/interview-configs/{config_id}",
+        headers=_auth(admin_bearer),
+    )
+    assert loaded.status_code == 200, loaded.text
+    question = next(item for item in loaded.json()["questions"] if item["id"] == question_id)
+    assert question["interview_config_id"] == config_id
+    assert question["prompt_text"] == "Original prompt?"
+
+
 async def test_authoring_unaffected_when_dedup_disabled(
     client: httpx.AsyncClient,
     admin_bearer: str,
@@ -2128,6 +2209,68 @@ async def test_authoring_unaffected_when_dedup_disabled(
     )
     assert other.status_code == 200, other.text
     assert other.json()["difficulty"] == "senior"
+
+
+async def test_published_config_rejects_question_bank_mutations(
+    client: httpx.AsyncClient,
+    engine: AsyncEngine,
+    scenario: dict[str, uuid.UUID],
+    seeded_users: SeededUsers,
+    admin_bearer: str,
+) -> None:
+    config_id = await _seed_published_config(
+        engine,
+        course_id=scenario["course_id"],
+        module_id=scenario["module_id"],
+        actor_id=seeded_users.admin_id,
+    )
+    async with engine.begin() as conn:
+        question_id = (
+            await conn.execute(
+                text("SELECT id FROM interview_questions WHERE interview_config_id = :cid LIMIT 1"),
+                {"cid": config_id},
+            )
+        ).scalar_one()
+
+    endpoints = [
+        (
+            "post",
+            f"/api/v1/teacher/interview-configs/{config_id}/questions",
+            {"prompt_text": "New question?", "question_type": "conceptual"},
+        ),
+        (
+            "patch",
+            f"/api/v1/teacher/interview-configs/{config_id}/questions/{question_id}",
+            {"prompt_text": "Changed question?"},
+        ),
+        (
+            "delete",
+            f"/api/v1/teacher/interview-configs/{config_id}/questions/{question_id}",
+            None,
+        ),
+        (
+            "post",
+            f"/api/v1/teacher/interview-configs/{config_id}/questions/{question_id}/regenerate",
+            None,
+        ),
+    ]
+    for method, url, body in endpoints:
+        request_kwargs = {"headers": _auth(admin_bearer)}
+        if body is not None:
+            request_kwargs["json"] = body
+        response = await getattr(client, method)(url, **request_kwargs)
+        assert response.status_code == 409, response.text
+        assert "interview_published_setting_locked" in response.text
+
+    async with engine.begin() as conn:
+        row = (
+            await conn.execute(
+                text("SELECT prompt_text, deleted_at FROM interview_questions WHERE id = :id"),
+                {"id": question_id},
+            )
+        ).one()
+    assert row[0] == "What is recursion?"
+    assert row[1] is None
 
 
 async def test_published_config_rejects_conduct_setting_edits(
