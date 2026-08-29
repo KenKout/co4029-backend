@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 from collections import defaultdict
-from collections.abc import Sequence
 from typing import Protocol
 
 from abridgeai.features.interviews.orchestrator.interviewer_identity import (
@@ -23,7 +22,7 @@ _POLICY_VERSION = "logical-angle-v1"
 
 
 def select_logical_variants(
-    candidates: Sequence[VariantCandidate],
+    candidates: list[VariantCandidate],
     *,
     role: InterviewerRole,
     session_seed: str,

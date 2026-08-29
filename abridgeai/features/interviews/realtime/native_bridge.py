@@ -36,9 +36,6 @@ from abridgeai.features.interviews.orchestrator.decision import (
     DecisionInputs,
 )
 from abridgeai.features.interviews.orchestrator.interviewer_identity import identity_from_config
-from abridgeai.features.interviews.orchestrator.role_question_filter import (
-    filter_candidates_by_role,
-)
 from abridgeai.features.interviews.orchestrator.selection import (
     SelectionContext,
     select_next_question,
@@ -380,17 +377,11 @@ async def load_native_setup(
             role=identity.role,
             session_seed=str(session.id),
         )
-        if getattr(config, "generation_variant_strategy", None) == "role_only":
-            candidates = filter_candidates_by_role(
-                candidates,
-                identity_from_config(getattr(config, "persona_profile_json", None)).role,
-                strict=True,
-            )
-            orm_by_id = {
-                question_id: question
-                for question_id, question in orm_by_id.items()
-                if any(candidate.question_id == UUID(question_id) for candidate in candidates)
-            }
+        orm_by_id = {
+            question_id: question
+            for question_id, question in orm_by_id.items()
+            if any(candidate.question_id == question_id for candidate in candidates)
+        }
         asked_ids = await turn_perception.persisted_question_ids(db, session_id)
         # Merges the REST transcript into state that the agent path never wrote,
         # so the scorer cannot re-offer a question the candidate already saw.

@@ -78,7 +78,7 @@ def filter_candidates_by_role(
 
     kept = [c for c in candidates if c.question_type == preferred]
     if strict:
-        return kept
+        return kept + [c for c in candidates if c.variant_group_id is None]
     if not kept:
         return candidates
 
@@ -86,9 +86,12 @@ def filter_candidates_by_role(
     fallback = [
         c
         for c in candidates
-        if c.linked_outcome_id is not None
-        and c.linked_outcome_id not in covered_outcomes
-        and c.question_type != preferred
+        if c.variant_group_id is None
+        or (
+            c.linked_outcome_id is not None
+            and c.linked_outcome_id not in covered_outcomes
+            and c.question_type != preferred
+        )
     ]
     return kept + fallback
 

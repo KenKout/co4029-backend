@@ -189,25 +189,7 @@ async def _runtime_question_pool(
         session_seed=session_seed,
     )
     selected_ids = {candidate.question_id for candidate in selected}
-    questions = [question for question in questions if str(question.id) in selected_ids]
-    return await _strict_role_questions(db, config_id, questions)
-
-
-async def _strict_role_questions(
-    db: AsyncSession,
-    config_id: UUID,
-    questions: list[InterviewQuestion],
-) -> list[InterviewQuestion]:
-    config = await db.get(InterviewConfig, config_id)
-    if config is None or config.generation_variant_strategy != "role_only":
-        return questions
-    from abridgeai.features.interviews.orchestrator.interviewer_identity import identity_from_config
-    from abridgeai.features.interviews.orchestrator.role_question_filter import preferred_type
-
-    preferred = preferred_type(identity_from_config(config.persona_profile_json).role)
-    if preferred is None:
-        return questions
-    return [q for q in questions if q.question_type == preferred]
+    return [question for question in questions if str(question.id) in selected_ids]
 
 
 async def _next_published_question_after(

@@ -15,13 +15,14 @@ from abridgeai.features.interviews.orchestrator.role_question_filter import (
 from abridgeai.features.interviews.orchestrator.selection import CandidateQuestion
 
 
-def _c(qid: str, oid: str | None, qtype: str) -> CandidateQuestion:
+def _c(qid: str, oid: str | None, qtype: str, group: str | None = None) -> CandidateQuestion:
     return CandidateQuestion(
         question_id=qid,
         linked_outcome_id=oid,
         question_type=qtype,
         difficulty=None,
         position=None,
+        variant_group_id=group,
     )
 
 
@@ -39,14 +40,52 @@ def test_generic_assistant_no_filter():
 
 
 def test_hard_filter_keeps_only_preferred():
+    # Grouped candidates: only the role's preferred type survives, plus
+    # per-outcome fallbacks for grouped questions of uncovered outcomes.
     cands = [
-        _c("a", "o1", "technical"),
-        _c("b", "o1", "situational"),
-        _c("c", "o2", "technical"),
-        _c("d", "o2", "behavioral"),
+        _c("a", "o1", "technical", group="g1"),
+        _c("b", "o1", "situational", group="g1"),
+        _c("c", "o2", "technical", group="g1"),
+        _c("d", "o2", "behavioral", group="g1"),
     ]
     out = filter_candidates_by_role(cands, InterviewerRole.BACKEND_TECH_LEAD)
     assert {c.question_id for c in out} == {"a", "c"}
+
+
+def test_ungrouped_non_preferred_without_outcome_is_kept():
+    # Ungrouped questions are always askable by any role — even a
+    # non-preferred type with no linked outcome survives the filter.
+    cands = [_c("a", "o1", "technical"), _c("b", None, "behavioral")]
+    out = filter_candidates_by_role(cands, InterviewerRole.BACKEND_TECH_LEAD)
+    assert {c.question_id for c in out} == {"a", "b"}
+
+
+def test_ungrouped_questions_survive_strict_mode():
+    # Strict only drops non-preferred GROUPED fallbacks; ungrouped stays.
+    cands = [
+        _c("g-tech", "o1", "technical", group="g1"),
+        _c("g-sit", "o2", "situational", group="g1"),
+        _c("loose", "o2", "behavioral"),
+    ]
+    out = filter_candidates_by_role(
+        cands, InterviewerRole.BACKEND_TECH_LEAD, strict=True
+    )
+    assert {c.question_id for c in out} == {"g-tech", "loose"}
+
+
+def test_strict_mode_drops_grouped_fallback():
+    # Strict: a grouped question of an uncovered outcome keeps no fallback.
+    cands = [
+        _c("a", "o1", "technical", group="g1"),
+        _c("b", "o2", "situational", group="g1"),
+    ]
+    out = filter_candidates_by_role(
+        cands, InterviewerRole.BACKEND_TECH_LEAD, strict=True
+    )
+    assert {c.question_id for c in out} == {"a"}
+    # Same pool without strict restores the grouped fallback.
+    relaxed = filter_candidates_by_role(cands, InterviewerRole.BACKEND_TECH_LEAD)
+    assert {c.question_id for c in relaxed} == {"a", "b"}
 
 
 def test_outcome_without_preferred_keeps_fallback():
@@ -59,32 +98,6 @@ def test_empty_pool_degrades_to_all():
     cands = [_c("b", "o1", "situational")]
     out = filter_candidates_by_role(cands, InterviewerRole.BACKEND_TECH_LEAD)
     assert out == cands
-
-
-def test_no_outcome_non_preferred_is_dropped():
-    # A question with no linked outcome is not a coverage fallback and does not
-    # match the role's type, so a hard filter drops it.
-    cands = [_c("a", "o1", "technical"), _c("b", None, "behavioral")]
-    out = filter_candidates_by_role(cands, InterviewerRole.BACKEND_TECH_LEAD)
-    assert {c.question_id for c in out} == {"a"}
-
-
-def test_strict_mode_removes_fallback():
-    # Strict role_only: an outcome with no preferred-type question keeps NO
-    # non-preferred fallback (unlike the legacy mode above).
-    cands = [_c("a", "o1", "technical"), _c("b", "o2", "situational")]
-    out = filter_candidates_by_role(
-        cands, InterviewerRole.BACKEND_TECH_LEAD, strict=True
-    )
-    assert {c.question_id for c in out} == {"a"}
-
-
-def test_strict_mode_empty_pool_stays_empty():
-    cands = [_c("b", "o1", "situational")]
-    out = filter_candidates_by_role(
-        cands, InterviewerRole.BACKEND_TECH_LEAD, strict=True
-    )
-    assert out == []
 
 
 def test_strict_generic_assistant_still_no_filter():

@@ -265,20 +265,14 @@ async def run_adaptive_turn(
         role=resolved_identity.role,
         session_seed=str(session.id),
     )
-    # Role-conditioned question filter (Slice 21, v2) remains the legacy
-    # coverage-preserving filter. Logical groups above are always collapsed to
-    # one role-aware angle before scoring.
-    strict_role_only = getattr(config, "generation_variant_strategy", None) == "role_only"
-    if role_question_filter_enabled or strict_role_only:
+    # Logical groups above are always collapsed to one role-aware angle before
+    # scoring. The legacy role filter remains opt-in for ungrouped questions.
+    if role_question_filter_enabled:
         from abridgeai.features.interviews.orchestrator.role_question_filter import (  # noqa: PLC0415
             filter_candidates_by_role,
         )
 
-        candidates = filter_candidates_by_role(
-            candidates,
-            resolved_identity.role,
-            strict=strict_role_only,
-        )
+        candidates = filter_candidates_by_role(candidates, resolved_identity.role)
     asked = frozenset(data.asked_question_ids)
     skipped = frozenset(data.skipped_question_ids)
     # Weighted coverage points (Slice 2) — not the raw evidence count — drive
