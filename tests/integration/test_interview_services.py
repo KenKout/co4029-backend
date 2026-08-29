@@ -643,6 +643,99 @@ async def test_start_session_creates_first_session_question_row(
 
 
 @pytest.mark.asyncio
+async def test_strict_role_only_filters_session_question_type(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict[str, Any],
+) -> None:
+    """role_only configs serve only the preferred type; NULL flags keep order."""
+    seeded = await _create_published_config(
+        engine,
+        course_id=scenario["course_id"],
+        module_id=scenario["module_id"],
+        teacher_id=scenario["teacher_id"],
+        questions=3,
+        outcomes=1,
+        status="published",
+    )
+    q0, q1, q2 = seeded["question_ids"]
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("UPDATE interview_questions SET question_type='behavioral' WHERE id=:id"),
+            {"id": q0},
+        )
+        await conn.execute(
+            text("UPDATE interview_questions SET question_type='situational' WHERE id=:id"),
+            {"id": q1},
+        )
+        # q2 stays technical — the tech-lead role's preferred type.
+        await conn.execute(
+            text(
+                "UPDATE interview_configs SET persona_profile_json=:p, "
+                "generation_variant_strategy='role_only' WHERE id=:id"
+            ),
+            {"p": json.dumps({"interviewer_role": "backend_tech_lead"}), "id": seeded["config_id"]},
+        )
+
+    payload = _CreatePayload(input_mode="text")
+    async with session_factory() as session, session.begin():
+        started = await taking_service.start_session(
+            session, seeded["config_id"], payload, _actor(scenario["student_id"])
+        )
+
+    async with session_factory() as session:
+        qtype = (
+            await session.execute(
+                text(
+                    "SELECT q.question_type FROM interview_session_questions s "
+                    "JOIN interview_questions q ON q.id = s.interview_question_id "
+                    "WHERE s.session_id=:sid"
+                ),
+                {"sid": started.id},
+            )
+        ).one()[0]
+    # Position 1 (behavioral) is skipped: strict mode serves only technical.
+    assert qtype == "technical"
+
+    # Control: a legacy config (flag NULL) with the same bank keeps
+    # position-order selection — position 1 (behavioral) wins.
+    seeded_legacy = await _create_published_config(
+        engine,
+        course_id=scenario["course_id"],
+        module_id=scenario["module_id"],
+        teacher_id=scenario["teacher_id"],
+        questions=3,
+        outcomes=1,
+        status="published",
+    )
+    leg_q0 = seeded_legacy["question_ids"][0]
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("UPDATE interview_questions SET question_type='behavioral' WHERE id=:id"),
+            {"id": leg_q0},
+        )
+    async with session_factory() as session, session.begin():
+        started2 = await taking_service.start_session(
+            session,
+            seeded_legacy["config_id"],
+            payload,
+            _actor(scenario["student_id"]),
+        )
+    async with session_factory() as session:
+        qtype2 = (
+            await session.execute(
+                text(
+                    "SELECT q.question_type FROM interview_session_questions s "
+                    "JOIN interview_questions q ON q.id = s.interview_question_id "
+                    "WHERE s.session_id=:sid"
+                ),
+                {"sid": started2.id},
+            )
+        ).one()[0]
+    assert qtype2 == "behavioral"
+
+
+@pytest.mark.asyncio
 async def test_take_step_persists_answer_and_advances(
     engine: AsyncEngine,
     session_factory: async_sessionmaker[AsyncSession],

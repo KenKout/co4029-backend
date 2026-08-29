@@ -207,6 +207,8 @@ async def run_interview_generation(
             source_module_ids=_module_ids_for_questions(state.config_json, config),
             pipeline_run_id=state.id,
         )
+        strategy = state.config_json.get("variant_strategy")
+        config.generation_variant_strategy = "role_only" if strategy == "role_only" else None
 
         state.config_json = state.config_json | {
             "pipeline": {

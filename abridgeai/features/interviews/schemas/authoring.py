@@ -244,6 +244,7 @@ class InterviewConfigAuthoring(InterviewConfigPublic):
     security_custom_refusal_vi: str | None = None
     security_incident_summary_enabled: bool = True
     generation_run_id: UUID | None = None
+    generation_variant_strategy: Literal["role_only"] | None = None
     draft_question_count: int | None = None
     total_importance_weight: int | None = None
     published_at: datetime | None = None

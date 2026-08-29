@@ -142,7 +142,27 @@ async def _first_published_question(db: AsyncSession, config_id: UUID) -> Interv
         config_id,
         review_status="approved",
     )
-    return questions[0] if questions else None
+    questions = await _strict_role_questions(db, config_id, questions)
+    if not questions:
+        return None
+    return questions[0]
+
+
+async def _strict_role_questions(
+    db: AsyncSession,
+    config_id: UUID,
+    questions: list[InterviewQuestion],
+) -> list[InterviewQuestion]:
+    config = await db.get(InterviewConfig, config_id)
+    if config is None or config.generation_variant_strategy != "role_only":
+        return questions
+    from abridgeai.features.interviews.orchestrator.interviewer_identity import identity_from_config
+    from abridgeai.features.interviews.orchestrator.role_question_filter import preferred_type
+
+    preferred = preferred_type(identity_from_config(config.persona_profile_json).role)
+    if preferred is None:
+        return questions
+    return [q for q in questions if q.question_type == preferred]
 
 
 async def _next_published_question_after(
@@ -155,6 +175,7 @@ async def _next_published_question_after(
         config_id,
         review_status="approved",
     )
+    questions = await _strict_role_questions(db, config_id, questions)
     for question in questions:
         if question.id not in asked_question_ids:
             return question
