@@ -95,6 +95,30 @@ def _address(name: str | None, language: str) -> str:
     return f" {name}" if language == "vi" else f", {name}"
 
 
+def _role_focus(identity: InterviewerIdentity, language: str) -> str | None:
+    focus = {
+        "backend_tech_lead": (
+            "Tôi đặc biệt quan tâm đến cách bạn giải quyết các vấn đề kỹ thuật và triển khai.",
+            "I’m especially keen on technical problem-solving and implementation.",
+        ),
+        "staff_engineer": (
+            "Tôi đặc biệt quan tâm đến thiết kế hệ thống, lập luận và các đánh đổi.",
+            "I’m especially keen on system design, reasoning, and trade-offs.",
+        ),
+        "eng_manager": (
+            "Tôi đặc biệt quan tâm đến cách bạn xử lý tình huống và dẫn dắt công việc.",
+            "I’m especially keen on situational judgment and leadership.",
+        ),
+        "hr_screener": (
+            "Tôi đặc biệt quan tâm đến cách bạn hợp tác và giao tiếp trong các tình huống thực tế.",
+            "I’m especially keen on behavioral collaboration and communication.",
+        ),
+    }.get(identity.role.value)
+    if focus is None:
+        return None
+    return focus[0] if language == "vi" else focus[1]
+
+
 def opening_text(
     *,
     title: str,
@@ -148,6 +172,9 @@ def opening_text(
             f"Tôi là {who.name}, {who.title(lang)}, và hôm nay tôi là người phỏng vấn AI "
             f"của aBridgeAI cho buổi phỏng vấn kỹ thuật “{safe_title}”."
         )
+        focus = _role_focus(who, lang)
+        if focus:
+            parts.append(focus)
         if style is OpeningStyle.COMFORT:
             parts.append(
                 "Bạn cứ thoải mái, không cần vội — hãy dành thời gian cho mỗi câu trả lời."
@@ -170,6 +197,9 @@ def opening_text(
         f"I’m {who.name}, a {who.title(lang)} — and today I’m aBridgeAI’s AI interviewer "
         f"for your “{safe_title}” technical course interview."
     )
+    focus = _role_focus(who, lang)
+    if focus:
+        parts.append(focus)
     if style is OpeningStyle.COMFORT:
         parts.append("There’s no rush — take your time with each answer.")
     parts.append(confirm)

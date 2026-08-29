@@ -45,6 +45,9 @@ from abridgeai.features.interviews.orchestrator.selection import (
 )
 from abridgeai.features.interviews.orchestrator.state import InterviewRuntimeStateData
 from abridgeai.features.interviews.orchestrator.turn_state import sync_question_history
+from abridgeai.features.interviews.orchestrator.variant_selection import (
+    select_logical_variants,
+)
 from abridgeai.features.interviews.realtime import orchestration_bridge as bridge
 from abridgeai.features.interviews.realtime.agent_userdata import InterviewUserdata
 from abridgeai.features.interviews.services.taking import session_time_remaining_seconds
@@ -371,6 +374,12 @@ async def load_native_setup(
         loaded_version = loaded.version if loaded is not None else None
 
         candidates, orm_by_id = await turn_perception.load_candidates(db, config.id)
+        identity = identity_from_config(getattr(config, "persona_profile_json", None))
+        candidates = select_logical_variants(
+            candidates,
+            role=identity.role,
+            session_seed=str(session.id),
+        )
         if getattr(config, "generation_variant_strategy", None) == "role_only":
             candidates = filter_candidates_by_role(
                 candidates,
@@ -396,7 +405,6 @@ async def load_native_setup(
         remaining_seconds = await session_time_remaining_seconds(db, session)
         session_language = getattr(session, "interview_language", language) or language
         input_mode = session.input_mode
-        identity = identity_from_config(getattr(config, "persona_profile_json", None))
         tts_voice = getattr(config, "tts_voice", None)
 
     # Every config outcome is required — ``InterviewOutcome`` carries no

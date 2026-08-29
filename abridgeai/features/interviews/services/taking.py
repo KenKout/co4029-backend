@@ -49,6 +49,9 @@ from abridgeai.features.interviews.orchestrator.decision import (
     DEFAULT_MAX_FOLLOWUPS_PER_QUESTION,
     MAX_CANNOT_ANSWER_HINTS,
 )
+from abridgeai.features.interviews.orchestrator.interviewer_identity import (
+    identity_from_config,
+)
 from abridgeai.features.interviews.orchestrator.security import (
     SecurityAction,
     SecurityAssessment,
@@ -66,8 +69,12 @@ from abridgeai.features.interviews.orchestrator.security_logic import (
     safe_security_response,
     should_flag_session,
 )
+from abridgeai.features.interviews.orchestrator.selection import CandidateQuestion
 from abridgeai.features.interviews.orchestrator.utterance import (
     hint_ladder_exhausted_text,
+)
+from abridgeai.features.interviews.orchestrator.variant_selection import (
+    select_logical_variants,
 )
 from abridgeai.features.interviews.queries import authoring as authoring_queries
 from abridgeai.features.interviews.queries import sessions as sessions_queries
@@ -136,16 +143,54 @@ def _assert_owns_session(session: InterviewSession, actor: CurrentUser) -> None:
         raise ForbiddenError("Session does not belong to the calling user")
 
 
-async def _first_published_question(db: AsyncSession, config_id: UUID) -> InterviewQuestion | None:
+async def _first_published_question(
+    db: AsyncSession,
+    config_id: UUID,
+    *,
+    session_seed: str,
+) -> InterviewQuestion | None:
     questions = await authoring_queries.list_questions_for_config(
         db,
         config_id,
         review_status="approved",
     )
-    questions = await _strict_role_questions(db, config_id, questions)
-    if not questions:
-        return None
-    return questions[0]
+    questions = await _runtime_question_pool(db, config_id, questions, session_seed)
+    return questions[0] if questions else None
+
+
+async def _runtime_question_pool(
+    db: AsyncSession,
+    config_id: UUID,
+    questions: list[InterviewQuestion],
+    session_seed: str,
+) -> list[InterviewQuestion]:
+    config = await db.get(InterviewConfig, config_id)
+    if config is None:
+        return questions
+
+    candidates = [
+        CandidateQuestion(
+            question_id=str(question.id),
+            linked_outcome_id=(
+                str(question.linked_outcome_id) if question.linked_outcome_id is not None else None
+            ),
+            question_type=question.question_type,
+            difficulty=question.difficulty,
+            position=question.position,
+            variant_group_id=(
+                str(question.variant_group_id) if question.variant_group_id is not None else None
+            ),
+        )
+        for question in questions
+    ]
+    selected = select_logical_variants(
+        candidates,
+        role=identity_from_config(config.persona_profile_json).role,
+        session_seed=session_seed,
+    )
+    selected_ids = {candidate.question_id for candidate in selected}
+    questions = [question for question in questions if str(question.id) in selected_ids]
+    return await _strict_role_questions(db, config_id, questions)
 
 
 async def _strict_role_questions(
@@ -169,13 +214,15 @@ async def _next_published_question_after(
     db: AsyncSession,
     config_id: UUID,
     asked_question_ids: set[UUID],
+    *,
+    session_seed: str,
 ) -> InterviewQuestion | None:
     questions = await authoring_queries.list_questions_for_config(
         db,
         config_id,
         review_status="approved",
     )
-    questions = await _strict_role_questions(db, config_id, questions)
+    questions = await _runtime_question_pool(db, config_id, questions, session_seed)
     for question in questions:
         if question.id not in asked_question_ids:
             return question
@@ -374,7 +421,7 @@ async def start_session(
     db.add(session)
     await flush_or_conflict(db)
 
-    first_question = await _first_published_question(db, config_id)
+    first_question = await _first_published_question(db, config_id, session_seed=str(session.id))
     if first_question is not None:
         db.add(
             InterviewSessionQuestion(
@@ -416,7 +463,7 @@ async def _ensure_first_question_attached(
     ).scalar_one()
     if int(count) > 0:
         return
-    first_question = await _first_published_question(db, config_id)
+    first_question = await _first_published_question(db, config_id, session_seed=str(session_id))
     if first_question is None:
         return
     db.add(
@@ -1922,7 +1969,12 @@ async def _legacy_advance(
         }
 
     asked_ids = await _asked_question_ids(db, session.id)
-    next_question = await _next_published_question_after(db, session.interview_config_id, asked_ids)
+    next_question = await _next_published_question_after(
+        db,
+        session.interview_config_id,
+        asked_ids,
+        session_seed=str(session.id),
+    )
     if next_question is None:
         # No further question: persist the short final-question transition as
         # its OWN AI turn (Natural Interview Transitions spec §ending). The

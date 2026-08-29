@@ -71,15 +71,16 @@ async def load_candidates(
                 difficulty=q.difficulty,
                 position=q.position,
                 importance_weight=weight_by_outcome.get(oid or "", 1),
+                variant_group_id=(
+                    str(q.variant_group_id) if q.variant_group_id is not None else None
+                ),
             )
         )
         orm_by_id[str(q.id)] = q
     return candidates, orm_by_id
 
 
-async def list_questions(
-    db: AsyncSession, config_id: UUID
-) -> list[InterviewQuestion]:
+async def list_questions(db: AsyncSession, config_id: UUID) -> list[InterviewQuestion]:
     from abridgeai.features.interviews.queries import authoring as authoring_queries
 
     return await authoring_queries.list_questions_for_config(

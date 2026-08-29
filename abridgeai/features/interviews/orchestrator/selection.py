@@ -56,6 +56,7 @@ class CandidateQuestion:
     difficulty: str | None
     position: int | None
     importance_weight: int = 1
+    variant_group_id: str | None = None
 
 
 @dataclass(frozen=True)
