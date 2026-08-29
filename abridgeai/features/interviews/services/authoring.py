@@ -517,13 +517,16 @@ async def update_question(
     published_freeze.assert_questions_editable(config)
     question = await _require_question(db, config_id, question_id)
     data = payload.model_dump(exclude_unset=True)
-    if data.get("prompt_text", question.prompt_text) is None:
+    prompt_text = str(data.get("prompt_text", question.prompt_text) or "").strip()
+    if not prompt_text:
         raise AppError("Question prompt is required")
     if data.get("question_type", question.question_type) is None:
         raise AppError("Question type is required")
     if "linked_outcome_id" in data and data["linked_outcome_id"] is not None:
         await _require_outcome(db, config_id, data["linked_outcome_id"])
-    prompt_changed = "prompt_text" in data and (data["prompt_text"] or "") != question.prompt_text
+    prompt_changed = "prompt_text" in data and prompt_text != question.prompt_text
+    if "prompt_text" in data:
+        data["prompt_text"] = prompt_text
     for key in (
         "prompt_text",
         "question_type",
@@ -570,11 +573,14 @@ async def add_outcome(
     # grow a criterion mid-cohort (see published_freeze.py).
     published_freeze.assert_learning_outcomes_editable(config)
     data = payload.model_dump(exclude_unset=True)
+    outcome_text = str(data["outcome_text"] or "").strip()
+    if not outcome_text:
+        raise AppError("Outcome text is required")
     next_position = await authoring_queries.next_outcome_position(db, config_id)
     outcome = InterviewOutcome(
         interview_config_id=config_id,
         position=data.get("position") or next_position,
-        outcome_text=data["outcome_text"],
+        outcome_text=outcome_text,
         outcome_type=data["outcome_type"],
         importance_weight=data.get("importance_weight", 1),
         created_by=actor.user_id,
@@ -597,6 +603,11 @@ async def update_outcome(
     published_freeze.assert_learning_outcomes_editable(config)
     outcome = await _require_outcome(db, config_id, outcome_id)
     data = payload.model_dump(exclude_unset=True)
+    if "outcome_text" in data:
+        outcome_text = str(data["outcome_text"] or "").strip()
+        if not outcome_text:
+            raise AppError("Outcome text is required")
+        data["outcome_text"] = outcome_text
     for key in ("outcome_text", "outcome_type", "importance_weight", "position"):
         if key in data:
             setattr(outcome, key, data[key])

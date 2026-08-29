@@ -1285,6 +1285,88 @@ async def test_add_question_rejects_outcome_not_in_this_config(
             )
 
 
+async def test_rejects_blank_question_prompt_and_outcome_text(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict[str, Any],
+) -> None:
+    """Whitespace-only question prompts / outcome text are rejected; writes are trimmed."""
+    from abridgeai.features.interviews.schemas.authoring import (
+        InterviewOutcomeCreate,
+        InterviewOutcomeUpdate,
+        InterviewQuestionUpdate,
+    )
+
+    seeded = await _create_published_config(
+        engine,
+        course_id=scenario["course_id"],
+        module_id=scenario["module_id"],
+        teacher_id=scenario["teacher_id"],
+        questions=0,
+        outcomes=1,
+        status="draft",
+    )
+    async with session_factory() as session:
+        question = await authoring_service.add_question(
+            session,
+            seeded["config_id"],
+            _CreatePayload(
+                prompt_text="Needs a prompt.",
+                question_type="technical",
+                linked_outcome_id=seeded["outcome_ids"][0],
+            ),
+            _actor(scenario["teacher_id"]),
+        )
+        # PATCH question: whitespace-only prompt rejected.
+        with pytest.raises(AppError, match="Question prompt is required"):
+            await authoring_service.update_question(
+                session,
+                seeded["config_id"],
+                question.id,
+                InterviewQuestionUpdate(prompt_text=" \n\t "),
+                _actor(scenario["teacher_id"]),
+            )
+        # PATCH question: non-blank prompt is trimmed before persistence.
+        updated = await authoring_service.update_question(
+            session,
+            seeded["config_id"],
+            question.id,
+            InterviewQuestionUpdate(prompt_text="  trimmed prompt  "),
+            _actor(scenario["teacher_id"]),
+        )
+        assert updated.prompt_text == "trimmed prompt"
+
+        # Create outcome: whitespace-only text rejected.
+        with pytest.raises(AppError, match="Outcome text is required"):
+            await authoring_service.add_outcome(
+                session,
+                seeded["config_id"],
+                InterviewOutcomeCreate(
+                    position=2, outcome_text=" \n\t ", outcome_type="knowledge"
+                ),
+                _actor(scenario["teacher_id"]),
+            )
+
+        # PATCH outcome: whitespace-only text rejected; real text trimmed.
+        outcome_id = seeded["outcome_ids"][0]
+        with pytest.raises(AppError, match="Outcome text is required"):
+            await authoring_service.update_outcome(
+                session,
+                seeded["config_id"],
+                outcome_id,
+                InterviewOutcomeUpdate(outcome_text="   "),
+                _actor(scenario["teacher_id"]),
+            )
+        updated_outcome = await authoring_service.update_outcome(
+            session,
+            seeded["config_id"],
+            outcome_id,
+            InterviewOutcomeUpdate(outcome_text="  trimmed outcome  "),
+            _actor(scenario["teacher_id"]),
+        )
+        assert updated_outcome.outcome_text == "trimmed outcome"
+
+
 async def _seed_lesson_and_chunk(
     engine: AsyncEngine, scenario: dict[str, Any]
 ) -> dict[str, uuid.UUID]:
