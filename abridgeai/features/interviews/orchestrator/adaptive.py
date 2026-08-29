@@ -257,7 +257,8 @@ async def run_adaptive_turn(
     # question_type BEFORE scoring. This is a pre-filter, NOT a scorer input --
     # SelectionContext / select_next_question stay role-blind, preserving the
     # persona/identity fairness invariant. Gated: off -> candidates unchanged.
-    if role_question_filter_enabled:
+    strict_role_only = getattr(config, "generation_variant_strategy", None) == "role_only"
+    if role_question_filter_enabled or strict_role_only:
         from abridgeai.features.interviews.orchestrator.interviewer_identity import (  # noqa: PLC0415
             identity_from_config,
         )
@@ -266,7 +267,11 @@ async def run_adaptive_turn(
         )
 
         resolved_identity = identity_from_config(getattr(config, "persona_profile_json", None))
-        candidates = filter_candidates_by_role(candidates, resolved_identity.role)
+        candidates = filter_candidates_by_role(
+            candidates,
+            resolved_identity.role,
+            strict=getattr(config, "generation_variant_strategy", None) == "role_only",
+        )
     asked = frozenset(data.asked_question_ids)
     skipped = frozenset(data.skipped_question_ids)
     # Weighted coverage points (Slice 2) — not the raw evidence count — drive

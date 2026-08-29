@@ -67,3 +67,31 @@ def test_no_outcome_non_preferred_is_dropped():
     cands = [_c("a", "o1", "technical"), _c("b", None, "behavioral")]
     out = filter_candidates_by_role(cands, InterviewerRole.BACKEND_TECH_LEAD)
     assert {c.question_id for c in out} == {"a"}
+
+
+def test_strict_mode_removes_fallback():
+    # Strict role_only: an outcome with no preferred-type question keeps NO
+    # non-preferred fallback (unlike the legacy mode above).
+    cands = [_c("a", "o1", "technical"), _c("b", "o2", "situational")]
+    out = filter_candidates_by_role(
+        cands, InterviewerRole.BACKEND_TECH_LEAD, strict=True
+    )
+    assert {c.question_id for c in out} == {"a"}
+
+
+def test_strict_mode_empty_pool_stays_empty():
+    cands = [_c("b", "o1", "situational")]
+    out = filter_candidates_by_role(
+        cands, InterviewerRole.BACKEND_TECH_LEAD, strict=True
+    )
+    assert out == []
+
+
+def test_strict_generic_assistant_still_no_filter():
+    cands = [_c("a", "o1", "technical")]
+    assert (
+        filter_candidates_by_role(
+            cands, InterviewerRole.GENERIC_ASSISTANT, strict=True
+        )
+        == cands
+    )

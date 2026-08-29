@@ -54,7 +54,10 @@ def preferred_type(role: InterviewerRole) -> str | None:
 
 
 def filter_candidates_by_role(
-    candidates: list[CandidateQuestion], role: InterviewerRole
+    candidates: list[CandidateQuestion],
+    role: InterviewerRole,
+    *,
+    strict: bool = False,
 ) -> list[CandidateQuestion]:
     """HARD-filter the candidate pool to the role's preferred question type.
 
@@ -74,12 +77,12 @@ def filter_candidates_by_role(
         return candidates
 
     kept = [c for c in candidates if c.question_type == preferred]
+    if strict:
+        return kept
     if not kept:
         return candidates
 
-    covered_outcomes = {
-        c.linked_outcome_id for c in kept if c.linked_outcome_id is not None
-    }
+    covered_outcomes = {c.linked_outcome_id for c in kept if c.linked_outcome_id is not None}
     fallback = [
         c
         for c in candidates
