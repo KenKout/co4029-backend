@@ -17,6 +17,7 @@ Covers the 4-capability split:
 from __future__ import annotations
 
 import hashlib
+import json
 import uuid
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
@@ -1078,6 +1079,76 @@ async def test_start_generation_run_rejects_foreign_scope(
             arq_pool.enqueue_job.assert_awaited_once()
     finally:
         await _cleanup_foreign_scope(engine, foreign_course, foreign_module, foreign_lesson)
+
+
+async def test_start_generation_run_persists_type_weights(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict[str, Any],
+) -> None:
+    """Validation must see the SAME type mix generation used.
+
+    Generation resolves percentages from the config's supplementary
+    rubric; validation compares fractions. The run snapshot normalizes
+    once at enqueue so both stages agree (default 60/30/10 and custom).
+    """
+    seeded = await _create_published_config(
+        engine,
+        course_id=scenario["course_id"],
+        module_id=scenario["module_id"],
+        teacher_id=scenario["teacher_id"],
+        questions=0,
+        outcomes=0,
+        status="draft",
+    )
+    arq_pool = SimpleNamespace(enqueue_job=AsyncMock(return_value=None))
+    base = _CreatePayload(
+        mode="topic",
+        course_id=scenario["course_id"],
+        module_id=scenario["module_id"],
+        question_count=5,
+    )
+    async with session_factory() as session:
+        run = await authoring_service.start_generation_run(
+            session,
+            seeded["config_id"],
+            base,
+            _actor(scenario["teacher_id"]),
+            arq_pool=arq_pool,
+        )
+        assert run.config_json["type_weights"] == {
+            "technical": 0.6,
+            "behavioral": 0.3,
+            "situational": 0.1,
+        }
+
+    # Custom rubric weights: generation + validation must agree on the mix.
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "UPDATE interview_configs SET supplementary_instructions = :json "
+                "WHERE id = :id"
+            ),
+            {
+                "json": json.dumps(
+                    {"rubric_weights": {"technical": 80, "behavioral": 10, "situational": 10}}
+                ),
+                "id": seeded["config_id"],
+            },
+        )
+    async with session_factory() as session:
+        run = await authoring_service.start_generation_run(
+            session,
+            seeded["config_id"],
+            base,
+            _actor(scenario["teacher_id"]),
+            arq_pool=arq_pool,
+        )
+        assert run.config_json["type_weights"] == {
+            "technical": 0.8,
+            "behavioral": 0.1,
+            "situational": 0.1,
+        }
 
 
 async def test_add_question_rejects_outcome_not_in_this_config(

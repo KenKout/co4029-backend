@@ -9,7 +9,6 @@ manual edits, and ARQ-enqueue triggers.
 Discipline matches T5.13: the service flushes, the router commits —
 except :func:`start_generation_run`, which commits inline so the ARQ
 worker sees the new ``GenerationRun`` row before the job dequeues.
-Cross-course scope guards live in :mod:`.scope_guards`.
 """
 
 from __future__ import annotations
@@ -29,6 +28,7 @@ from abridgeai.core.exceptions import AppError, NotFoundError
 from abridgeai.core.security import CurrentUser, utcnow
 from abridgeai.core.slug import slugify, unique_slug
 from abridgeai.features.courses.api import public as courses_public
+from abridgeai.features.interviews.ai.stages.generation.resolve import resolve_type_mix
 from abridgeai.features.interviews.dedup import (
     NOT_DUPLICATE,
     check_duplicate,
@@ -440,8 +440,7 @@ async def check_question_duplicate(
 
     A read-only advisory check for the authoring UI: never blocks or
     mutates; returns the verdict (see :class:`DuplicateVerdict`) plus
-    ``enabled`` so callers can distinguish "feature off" from "no match".
-    Returns ``enabled: False`` without a provider call when
+    ``enabled``, or ``enabled: False`` with no provider call when
     ``interview_dedup_enabled`` is off.
     """
     await _require_config(db, config_id)
@@ -460,11 +459,7 @@ async def check_question_duplicate(
 
 
 async def _store_question_embedding(db: AsyncSession, question: InterviewQuestion) -> None:
-    """Best-effort: persist the question's vector so it can be matched later.
-
-    Thin single-row wrapper over :func:`dedup.store_question_embeddings`
-    (the generation pipeline needs the batch form).
-    """
+    """Best-effort single-row wrapper over dedup.store_question_embeddings."""
     await store_question_embeddings(
         db,
         question_ids=[question.id],
@@ -631,9 +626,12 @@ async def start_generation_run(
     await require_lessons_in_course(db, explicit_lesson_ids, config.course_id)
     module_lesson_ids = await courses_public.list_lesson_ids_for_modules(db, module_ids)
     merged_lesson_ids = sorted({*explicit_lesson_ids, *module_lesson_ids})
+    # Normalize generation's percentages to fractions for validation's mix check.
+    type_weights = resolve_type_mix(config.supplementary_instructions)
 
     config_json: dict[str, Any] = dict(request_data) | {
         "interview_config_id": str(config.id),
+        "type_weights": {key: value / 100 for key, value in type_weights.items()},
         "course_id": str(config.course_id),
         "module_id": str(config.module_id),
         "source_module_ids": [str(m) for m in module_ids],
