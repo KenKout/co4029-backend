@@ -20,5 +20,6 @@ JOIN lessons l  ON l.id = m.lesson_id
 JOIN modules mo ON mo.id = l.module_id
 JOIN courses c  ON c.id = mo.course_id
 WHERE m.updated_at >= CAST(:since AS timestamptz)
+  AND (CAST(:until AS timestamptz) IS NULL OR updated_at < CAST(:until AS timestamptz))
 ORDER BY m.updated_at DESC
 LIMIT :limit;

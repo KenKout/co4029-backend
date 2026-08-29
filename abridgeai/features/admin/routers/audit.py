@@ -94,10 +94,16 @@ async def get_role_changes(
     user: Annotated[CurrentUser, Depends(_REQUIRE_AUDIT)],
     db: Annotated[AsyncSession, Depends(get_db)],
     since: Annotated[datetime, Query(description="Lower bound on updated_at (required).")],
+    until: Annotated[
+        datetime | None,
+        Query(description="Exclusive upper bound on updated_at (optional)."),
+    ] = None,
     limit: Annotated[int, Query(ge=1, le=500)] = 100,
 ) -> list[RoleChangeRow]:
     org_id = await resolve_admin_scope(db, user)
-    rows = await audit_service.role_changes(db, since=since, organization_id=org_id, limit=limit)
+    rows = await audit_service.role_changes(
+        db, since=since, until=until, organization_id=org_id, limit=limit
+    )
     return [RoleChangeRow.model_validate(r) for r in rows]
 
 
@@ -117,9 +123,13 @@ async def list_data_changes(
     since: Annotated[
         datetime, Query(description="Lower bound on updated_at (required).")
     ],
+    until: Annotated[
+        datetime | None,
+        Query(description="Exclusive upper bound on updated_at (optional)."),
+    ] = None,
     limit: Annotated[int, Query(ge=1, le=500)] = 100,
 ) -> list[DataChangeOut]:
-    """Every row in ``table`` changed since ``since``, newest first.
+    """Every row in ``table`` changed within ``[since, until)``, newest first.
 
     The sibling of the single-entity ``GET /data-changes`` lookup — lets the
     audit screen show a recent-changes table per entity kind, then drill
@@ -137,7 +147,7 @@ async def list_data_changes(
             },
         )
     rows = await audit_service.data_changes_list(
-        db, table=table, since=since, limit=limit
+        db, table=table, since=since, until=until, limit=limit
     )
     return [DataChangeOut.model_validate(r) for r in rows]
 
@@ -188,6 +198,10 @@ async def search_http_audit(
     _user: Annotated[CurrentUser, Depends(_REQUIRE_AUDIT)],
     db: Annotated[AsyncSession, Depends(get_db)],
     since: Annotated[datetime, Query(description="Lower bound on created_at (required).")],
+    until: Annotated[
+        datetime | None,
+        Query(description="Exclusive upper bound on created_at (optional)."),
+    ] = None,
     user_id: Annotated[UUID | None, Query()] = None,
     path_pattern: Annotated[
         str | None,
@@ -224,6 +238,7 @@ async def search_http_audit(
             db,
             reveal=reveal,
             since=since,
+            until=until,
             user_id=user_id,
             path_pattern=path_pattern,
             limit=limit,

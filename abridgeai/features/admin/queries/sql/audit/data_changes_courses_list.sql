@@ -15,5 +15,6 @@ SELECT
     c.organization_id AS organization_id
 FROM courses c
 WHERE c.updated_at >= CAST(:since AS timestamptz)
+  AND (CAST(:until AS timestamptz) IS NULL OR updated_at < CAST(:until AS timestamptz))
 ORDER BY c.updated_at DESC
 LIMIT :limit;

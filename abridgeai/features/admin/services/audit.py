@@ -45,11 +45,12 @@ async def role_changes(
     db: AsyncSession,
     *,
     since: datetime,
+    until: datetime | None = None,
     organization_id: UUID | None,
     limit: int,
 ) -> list[dict[str, Any]]:
     return await audit_queries.role_changes(
-        db, since=since, organization_id=organization_id, limit=limit
+        db, since=since, until=until, organization_id=organization_id, limit=limit
     )
 
 
@@ -58,6 +59,7 @@ async def http_audit_search(
     *,
     reveal: bool = False,
     since: datetime,
+    until: datetime | None = None,
     user_id: UUID | None,
     path_pattern: str | None,
     limit: int,
@@ -74,6 +76,7 @@ async def http_audit_search(
     rows = await audit_queries.http_audit_search(
         db,
         since=since,
+        until=until,
         user_id=user_id,
         path_pattern=path_pattern,
         limit=limit,
@@ -98,6 +101,7 @@ async def data_changes_list(
     *,
     table: str,
     since: datetime,
+    until: datetime | None = None,
     limit: int,
 ) -> list[dict[str, Any]]:
     """Every row in ``table`` changed since ``since``, newest first.
@@ -109,7 +113,7 @@ async def data_changes_list(
     is the stated purpose that entitles the caller to it.
     """
     rows = await audit_queries.data_changes_list(
-        db, table=table, since=since, limit=limit
+        db, table=table, since=since, until=until, limit=limit
     )
     return [_mask_row(row) for row in rows]
 

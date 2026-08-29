@@ -13,6 +13,7 @@ SELECT
     h.created_at    AS created_at
 FROM http_audit_log h
 WHERE h.created_at >= CAST(:since AS timestamptz)
+  AND (CAST(:until AS timestamptz) IS NULL OR h.created_at < CAST(:until AS timestamptz))
   AND (CAST(:user_id AS uuid) IS NULL OR h.user_id = CAST(:user_id AS uuid))
   AND (CAST(:path_pattern AS text) IS NULL OR h.path LIKE CAST(:path_pattern AS text))
 ORDER BY h.created_at DESC
