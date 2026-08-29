@@ -868,6 +868,36 @@ async def test_audit_role_changes_search(
     assert {"role_code", "scope_kind", "user_id"}.issubset(sample.keys())
 
 
+async def test_audit_role_changes_honors_until_bound(
+    client: httpx.AsyncClient,
+    engine: AsyncEngine,
+    seeded_users: SeededUsers,
+) -> None:
+    """``until`` (range upper bound) narrows the scan window — a bound in
+    the deep past must yield nothing, an open window keeps everything."""
+    token, _ = await _bearer(engine, seeded_users.admin_id)
+    try:
+        open_ = await client.get(
+            "/api/v1/admin/audit/role-changes"
+            f"?since={quote_plus((datetime.now(tz=UTC) - timedelta(days=365)).isoformat())}&limit=10",
+            headers=_auth(token),
+        )
+        empty = await client.get(
+            "/api/v1/admin/audit/role-changes"
+            "?since=2000-01-01T00:00:00Z"
+            f"&until={quote_plus((datetime.now(tz=UTC) - timedelta(days=365)).isoformat())}&limit=10",
+            headers=_auth(token),
+        )
+    finally:
+        await _purge_sessions(engine, seeded_users.admin_id)
+    assert open_.status_code == 200, open_.text
+    assert empty.status_code == 200, empty.text
+    assert len(open_.json()) >= 1
+    # Every assignment is newer than a year ago, so the (since=2000, until=now-365d)
+    # window is empty — proves the exclusive upper bound is actually applied.
+    assert empty.json() == []
+
+
 async def test_data_changes_lookup(
     client: httpx.AsyncClient,
     engine: AsyncEngine,
@@ -1108,16 +1138,13 @@ async def test_api_latency_trend(
     three_days_ago = datetime.now(tz=UTC) - timedelta(days=3)
     inserted_ids: list[str] = []
     async with engine.begin() as conn:
-        # Isolate the window: earlier test runs leave http_audit_log rows on
-        # past days (every API call the suite makes is logged), so the pinned
-        # day would otherwise carry those too. We purge only days BEFORE
-        # today — today's rows belong to concurrent tests' middleware writes.
-        await conn.execute(
-            text(
-                "DELETE FROM http_audit_log "
-                "WHERE created_at::date < now()::date"
-            )
-        )
+        # Isolate the window: the suite shares one Postgres across runs, so
+        # http_audit_log carries every request logged since local midnight
+        # (middleware writes *now*). Purging only past days left today's
+        # accumulation intact, which made the "today == 1 row" assertion
+        # depend on how many requests earlier tests made. Clean the whole
+        # table — tests run serially and every test creates its own rows.
+        await conn.execute(text("DELETE FROM http_audit_log"))
         for offset_min, latency in ((10, 10), (40, 30)):
             row_id = str(uuid.uuid4())
             inserted_ids.append(row_id)

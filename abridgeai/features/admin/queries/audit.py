@@ -57,13 +57,19 @@ async def role_changes(
     db: AsyncSession,
     *,
     since: datetime,
+    until: datetime | None,
     organization_id: UUID | None,
     limit: int,
 ) -> list[dict[str, Any]]:
     rows = (
         await db.execute(
             _ROLE_CHANGES_SQL,
-            {"since": since, "organization_id": organization_id, "limit": limit},
+            {
+                "since": since,
+                "until": until,
+                "organization_id": organization_id,
+                "limit": limit,
+            },
         )
     ).mappings()
     return [dict(r) for r in rows]
@@ -78,6 +84,7 @@ async def http_audit_search(
     db: AsyncSession,
     *,
     since: datetime,
+    until: datetime | None,
     user_id: UUID | None,
     path_pattern: str | None,
     limit: int,
@@ -87,6 +94,7 @@ async def http_audit_search(
             _HTTP_AUDIT_SQL,
             {
                 "since": since,
+                "until": until,
                 "user_id": user_id,
                 "path_pattern": path_pattern,
                 "limit": limit,
@@ -113,13 +121,14 @@ async def data_changes_list(
     *,
     table: str,
     since: datetime,
+    until: datetime | None,
     limit: int,
 ) -> list[dict[str, Any]]:
-    """Every row in ``table`` updated since ``since``, newest first."""
+    """Every row in ``table`` updated within ``[since, until)``, newest first."""
     rows = (
         await db.execute(
             _DATA_CHANGES_LIST_SQL[table],
-            {"since": since, "limit": limit},
+            {"since": since, "until": until, "limit": limit},
         )
     ).mappings()
     return [dict(r) for r in rows]

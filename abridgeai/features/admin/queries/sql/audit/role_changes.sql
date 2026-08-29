@@ -19,6 +19,7 @@ SELECT
 FROM user_role_assignments ura
 JOIN roles r ON r.id = ura.role_id
 WHERE ura.updated_at >= CAST(:since AS timestamptz)
+  AND (CAST(:until AS timestamptz) IS NULL OR ura.updated_at < CAST(:until AS timestamptz))
   AND (CAST(:organization_id AS uuid) IS NULL
        OR ura.organization_id = CAST(:organization_id AS uuid))
 ORDER BY ura.updated_at DESC

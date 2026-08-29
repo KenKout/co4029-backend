@@ -17,5 +17,6 @@ SELECT
 FROM users u
 LEFT JOIN user_profiles p ON p.user_id = u.id
 WHERE u.updated_at >= CAST(:since AS timestamptz)
+  AND (CAST(:until AS timestamptz) IS NULL OR updated_at < CAST(:until AS timestamptz))
 ORDER BY u.updated_at DESC
 LIMIT :limit;
