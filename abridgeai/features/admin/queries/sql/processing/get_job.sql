@@ -11,7 +11,8 @@ SELECT
     pj.started_at       AS started_at,
     pj.finished_at      AS finished_at,
     pj.created_at       AS created_at,
-    pj.updated_at       AS updated_at
+    pj.updated_at       AS updated_at,
+    pj.request_id       AS request_id
 FROM processing_jobs pj
 WHERE pj.id = CAST(:job_id AS uuid)
 
@@ -33,7 +34,8 @@ SELECT
     gr.started_at                            AS started_at,
     gr.finished_at                           AS finished_at,
     gr.created_at                            AS created_at,
-    gr.updated_at                            AS updated_at
+    gr.updated_at                            AS updated_at,
+    CAST(NULL AS uuid)                       AS request_id
 FROM generation_runs gr
 WHERE gr.id = CAST(:job_id AS uuid)
 
