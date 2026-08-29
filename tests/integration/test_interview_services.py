@@ -44,7 +44,7 @@ import abridgeai.features.interviews.models  # noqa: F401  -- T6.1 registers int
 import abridgeai.features.materials.models  # noqa: F401  -- register learning_* tables
 import abridgeai.features.quizzes.models  # noqa: F401  -- register quiz_attempts
 from abridgeai.core.config import get_settings
-from abridgeai.core.exceptions import ForbiddenError
+from abridgeai.core.exceptions import AppError, ForbiddenError
 from abridgeai.core.security import CurrentUser
 from abridgeai.features.interviews.ai.stages.evaluation.outcome_verdicts import (
     OutcomeVerdict,
@@ -904,6 +904,178 @@ async def test_start_generation_run_enqueues_arq(
     assert invocation.args[0] == "run_interview_generation_task"
     assert invocation.args[1] == scenario["teacher_id"]
     assert invocation.args[2] == run.id
+
+
+async def _insert_foreign_scope(
+    engine: AsyncEngine, org_id: uuid.UUID, teacher_id: uuid.UUID
+) -> tuple[uuid.UUID, uuid.UUID, uuid.UUID]:
+    """A second course + module + lesson under the same org.
+
+    Used to prove cross-course scope is rejected: the teacher is authorized
+    for ``scenario``'s course only, so any module/lesson belonging to the
+    foreign course must be refused at the service boundary.
+    """
+    course_id, module_id, lesson_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    suffix = org_id.hex[:8]
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO courses "
+                "(id, organization_id, owner_user_id, slug, title, status) "
+                "VALUES (:id, :org, :owner, :slug, 'Foreign Course', 'published')"
+            ),
+            {
+                "id": course_id,
+                "org": org_id,
+                "owner": teacher_id,
+                "slug": f"foreign-course-{suffix}",
+            },
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO modules (id, course_id, title, position, status) "
+                "VALUES (:id, :course, 'Foreign Module', 1, 'published')"
+            ),
+            {"id": module_id, "course": course_id},
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO lessons (id, module_id, slug, title, status) "
+                "VALUES (:id, :module, :slug, 'Foreign Lesson', 'published')"
+            ),
+            {"id": lesson_id, "module": module_id, "slug": f"foreign-lesson-{suffix}"},
+        )
+    return course_id, module_id, lesson_id
+
+
+async def _cleanup_foreign_scope(
+    engine: AsyncEngine,
+    course_id: uuid.UUID,
+    module_id: uuid.UUID,
+    lesson_id: uuid.UUID | None,
+) -> None:
+    async with engine.begin() as conn:
+        if lesson_id is not None:
+            await conn.execute(text("DELETE FROM lessons WHERE id = :id"), {"id": lesson_id})
+        await conn.execute(text("DELETE FROM module_items WHERE module_id = :m"), {"m": module_id})
+        await conn.execute(text("DELETE FROM modules WHERE id = :id"), {"id": module_id})
+        await conn.execute(text("DELETE FROM courses WHERE id = :id"), {"id": course_id})
+
+
+async def test_create_config_rejects_module_from_another_course(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict[str, Any],
+) -> None:
+    foreign_course, foreign_module, foreign_lesson = await _insert_foreign_scope(
+        engine, scenario["org_id"], scenario["teacher_id"]
+    )
+    try:
+        payload = _CreatePayload(
+            title="Cross Course Interview",
+            course_id=scenario["course_id"],
+            module_id=foreign_module,
+        )
+        with pytest.raises(AppError, match="not part of course"):
+            async with session_factory() as session:
+                await authoring_service.create_interview_config(
+                    session, scenario["course_id"], payload, _actor(scenario["teacher_id"])
+                )
+    finally:
+        await _cleanup_foreign_scope(engine, foreign_course, foreign_module, foreign_lesson)
+
+
+async def test_start_generation_run_rejects_foreign_scope(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict[str, Any],
+) -> None:
+    seeded = await _create_published_config(
+        engine,
+        course_id=scenario["course_id"],
+        module_id=scenario["module_id"],
+        teacher_id=scenario["teacher_id"],
+        questions=0,
+        outcomes=0,
+        status="draft",
+    )
+    foreign_course, foreign_module, foreign_lesson = await _insert_foreign_scope(
+        engine, scenario["org_id"], scenario["teacher_id"]
+    )
+    base = {"mode": "topic", "question_count": 5}
+    try:
+        async with session_factory() as session:
+            # Foreign course_id in the body must not override the config's.
+            with pytest.raises(AppError, match="course_id does not match"):
+                await authoring_service.start_generation_run(
+                    session,
+                    seeded["config_id"],
+                    _CreatePayload(
+                        course_id=foreign_course,
+                        module_id=scenario["module_id"],
+                        **base,
+                    ),
+                    _actor(scenario["teacher_id"]),
+                )
+            # Foreign module_id must be refused even when course_id matches.
+            with pytest.raises(AppError, match="module_id does not match"):
+                await authoring_service.start_generation_run(
+                    session,
+                    seeded["config_id"],
+                    _CreatePayload(
+                        course_id=scenario["course_id"],
+                        module_id=foreign_module,
+                        **base,
+                    ),
+                    _actor(scenario["teacher_id"]),
+                )
+            # Foreign source_module_ids expand to foreign lessons.
+            with pytest.raises(AppError, match="not part of course"):
+                await authoring_service.start_generation_run(
+                    session,
+                    seeded["config_id"],
+                    _CreatePayload(
+                        course_id=scenario["course_id"],
+                        module_id=scenario["module_id"],
+                        source_module_ids=[foreign_module],
+                        **base,
+                    ),
+                    _actor(scenario["teacher_id"]),
+                )
+            # Foreign source_lesson_ids must be refused outright.
+            with pytest.raises(AppError, match="not part of course"):
+                await authoring_service.start_generation_run(
+                    session,
+                    seeded["config_id"],
+                    _CreatePayload(
+                        course_id=scenario["course_id"],
+                        module_id=scenario["module_id"],
+                        source_lesson_ids=[foreign_lesson],
+                        **base,
+                    ),
+                    _actor(scenario["teacher_id"]),
+                )
+            # Same-course scope still works and the config_json is canonicalized
+            # to the config's own course/module.
+            arq_pool = SimpleNamespace(enqueue_job=AsyncMock(return_value=None))
+            run = await authoring_service.start_generation_run(
+                session,
+                seeded["config_id"],
+                _CreatePayload(
+                    course_id=scenario["course_id"],
+                    module_id=scenario["module_id"],
+                    source_module_ids=[scenario["module_id"]],
+                    **base,
+                ),
+                _actor(scenario["teacher_id"]),
+                arq_pool=arq_pool,
+            )
+            assert run.config_json["course_id"] == str(scenario["course_id"])
+            assert run.config_json["module_id"] == str(scenario["module_id"])
+            assert run.config_json["source_module_ids"] == [str(scenario["module_id"])]
+            arq_pool.enqueue_job.assert_awaited_once()
+    finally:
+        await _cleanup_foreign_scope(engine, foreign_course, foreign_module, foreign_lesson)
 
 
 @pytest.mark.asyncio
