@@ -1598,8 +1598,8 @@ def _age_hours(since: datetime | None, *, now: datetime | None = None) -> float 
 
 
 def _course_count_phrase(n: int) -> str:
-    """``Across N course(s)`` with the plural right for the count."""
-    return f"Across {n} course" if n == 1 else f"Across {n} courses"
+    """``across 3 courses`` / ``across 1 course`` with the plural right."""
+    return f"across {n} course" if n == 1 else f"across {n} courses"
 
 
 #: FR-012's ranking, as a sort weight. Blocking work comes first because it
@@ -1823,9 +1823,7 @@ async def list_priority_tasks(
                 title=f"{quiz_backlog.count} quiz questions awaiting review",
                 reason=(
                     f"{quiz_backlog.blocking} are blocking a draft quiz from "
-                    "publishing, across "
-                    + _course_count_phrase(quiz_backlog.courses_affected)
-                    + "."
+                    f"publishing, {_course_count_phrase(quiz_backlog.courses_affected)}."
                     if blocking
                     else _course_count_phrase(quiz_backlog.courses_affected) + "."
                 ),
