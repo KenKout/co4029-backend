@@ -56,6 +56,9 @@ from abridgeai.features.admin.routers import (
     processing_router as admin_processing_router,
 )
 from abridgeai.features.admin.routers import (
+    security_router as admin_security_router,
+)
+from abridgeai.features.admin.routers import (
     settings_router as admin_settings_router,
 )
 from abridgeai.features.admin.routers import (
@@ -344,6 +347,11 @@ def create_app() -> FastAPI:
     # Admin-configurable AI model pricing (replaces hardcoded PRICE_TABLE)
     app.include_router(admin_ai_pricing_router, prefix=API_V1_PREFIX)
     app.include_router(admin_settings_router, prefix=API_V1_PREFIX)
+
+    # Security & access summary (ADM-020). Same permission family as the audit
+    # log — the person who reviews audit trails needs the rollup of what they
+    # are reviewing.
+    app.include_router(admin_security_router, prefix=API_V1_PREFIX)
 
     # T0.28 -- security headers (HSTS, CSP, X-Frame-Options, ...). Added
     # BEFORE the audit-log middleware in source order so it sits INSIDE the
