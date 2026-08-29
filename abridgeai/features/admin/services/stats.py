@@ -34,6 +34,10 @@ if TYPE_CHECKING:
 # metric in the response moves together so the tiles stay comparable.
 DEFAULT_WINDOW_DAYS = 7
 
+#: Fallback lookback for the trend charts when no explicit range is supplied.
+#: Wider than the KPI window because a trend needs points to be a trend.
+DEFAULT_TREND_DAYS = 30
+
 #: Inactivity threshold for the tenant-anomaly count. Fixed at 30 days rather
 #: than following the dashboard window: a tenant being quiet for a 1-day window
 #: is a weekend, not an anomaly, and letting the window drive it would make the
@@ -115,14 +119,30 @@ async def active_users_trend(
     db: AsyncSession,
     *,
     organization_id: UUID | None,
-    days: int,
+    days: int = DEFAULT_TREND_DAYS,
+    window_from: date | None = None,
+    window_to: date | None = None,
     now: datetime | None = None,
 ) -> list[tuple[date, int]]:
+    """Daily logins over the page window.
+
+    Takes the same ``window_from`` / ``window_to`` pair as the dashboard
+    rollup and resolves it through the same ``_window_bounds``, so the chart
+    plots exactly the span the KPIs above it were computed over. ``days``
+    remains as the fallback for callers with no explicit range.
+    """
+    evaluated_at = now or datetime.now(tz=UTC)
+    window_start, window_end, _ = _window_bounds(
+        evaluated_at,
+        window_days=days,
+        window_from=window_from,
+        window_to=window_to,
+    )
     return await stats_queries.active_users_trend(
         db,
         organization_id=organization_id,
-        days=days,
-        now=now or datetime.now(tz=UTC),
+        window_start=window_start,
+        window_end=window_end,
     )
 
 
@@ -135,13 +155,27 @@ async def content_breakdown(
 async def api_latency_trend(
     db: AsyncSession,
     *,
-    days: int,
+    days: int = DEFAULT_TREND_DAYS,
+    window_from: date | None = None,
+    window_to: date | None = None,
     now: datetime | None = None,
 ) -> list[tuple[date, int, int | None, int | None]]:
+    """Daily p50/p95 latency over the page window.
+
+    Shares ``_window_bounds`` with the dashboard rollup so this chart and the
+    API p95 tile above it describe one span of time rather than two.
+    """
+    evaluated_at = now or datetime.now(tz=UTC)
+    window_start, window_end, _ = _window_bounds(
+        evaluated_at,
+        window_days=days,
+        window_from=window_from,
+        window_to=window_to,
+    )
     raw = await stats_queries.api_latency_trend(
         db,
-        days=days,
-        now=now or datetime.now(tz=UTC),
+        window_start=window_start,
+        window_end=window_end,
     )
     return [
         (day, requests, _opt_int(p50), _opt_int(p95))
@@ -314,6 +348,7 @@ async def _operator_dashboard_uncached(
 
 
 __all__ = [
+    "DEFAULT_TREND_DAYS",
     "DEFAULT_WINDOW_DAYS",
     "INACTIVE_ORG_DAYS",
     "active_users",

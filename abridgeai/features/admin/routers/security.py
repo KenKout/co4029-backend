@@ -75,11 +75,16 @@ async def get_security_summary(
         ),
     ] = None,
 ) -> SecuritySummaryOut:
-    scope = await resolve_admin_scope(db, user)
-    if scope is None and organization_id is not None:
-        # Reachable only with system.administer — resolve_admin_scope returns
-        # None for that permission alone.
+    # Gate on the PERMISSION, never on `resolve_admin_scope` returning None.
+    # It returns None both for a platform admin (global view) and for a caller
+    # whose organization could not be resolved, and its own docstring says the
+    # second must mean "no data visible". Conflating them let a caller holding
+    # audit.read with no org membership pass any organization_id and read that
+    # tenant's role and account figures.
+    if user.has_permission("system.administer"):
         scope = organization_id
+    else:
+        scope = await resolve_admin_scope(db, user)
     summary = await security_service.summary(
         db, organization_id=scope, window_days=window_days
     )

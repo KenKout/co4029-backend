@@ -86,6 +86,22 @@ _GLOBAL_BY_DESIGN: dict[tuple[str, str], str] = {
         "career_paths/routers/learner.py",
         "get_my_readiness_history",
     ): "Keyed on student_id=current_user.user_id; returns only the caller's own snapshots.",
+    (
+        "admin/routers/stats.py",
+        "get_dashboard",
+    ): (
+        "organization_id is a NARROWING filter, honoured only for "
+        "system.administer; every other caller is pinned by "
+        "resolve_admin_scope to their own org and the parameter is ignored. "
+        "It can never widen what a scoped caller sees."
+    ),
+    (
+        "admin/routers/security.py",
+        "get_security_summary",
+    ): (
+        "Same narrowing-only organization_id as get_dashboard: honoured for "
+        "system.administer, ignored for everyone else."
+    ),
 }
 
 

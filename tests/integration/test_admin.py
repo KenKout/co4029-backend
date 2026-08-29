@@ -1209,10 +1209,104 @@ async def test_api_latency_trend(
     assert pinned["p95_latency_ms"] == 29  # rounded from 28.999...
     # Today carries the single seeded row (the middleware logs the trend
     # request itself only after the response snapshot was taken).
+    # Today's bucket is NOT asserted exactly. The audit middleware writes a
+    # row for every request the suite makes, and the purge above deliberately
+    # spares today ("today's rows belong to concurrent tests' middleware
+    # writes"), so the seeded row shares the day with however many other
+    # requests happened to run. Asserting == 1 passed in isolation and failed
+    # in a full run. The 3-days-ago bucket above is the deterministic one.
     today = points[str(labels["today"])]
-    assert today["requests_total"] == 1
-    assert today["p50_latency_ms"] == 150
-    assert today["p95_latency_ms"] == 150
+    assert today["requests_total"] >= 1
+    assert today["p95_latency_ms"] is not None
+
+
+async def test_trends_follow_an_explicit_range(
+    engine: AsyncEngine,
+    client: httpx.AsyncClient,
+    seeded_users: SeededUsers,
+) -> None:
+    """`from`/`to` drive both trend charts, and a past range stays in the past.
+
+    This is the property a day count cannot express: a range that ENDS before
+    today. Asking for a 3-day window that finished two days ago must return
+    exactly those 3 days -- not "the last 3 days" running up to now, which is
+    what the old `days=` parameter did and why the chart disagreed with the
+    KPIs computed over the page's own range.
+    """
+    token, _ = await _bearer(engine, seeded_users.admin_id)
+    async with engine.begin() as conn:
+        today = (
+            await conn.execute(text("SELECT now()::date AS d"))
+        ).mappings().one()["d"]
+    window_to = today - timedelta(days=2)
+    window_from = window_to - timedelta(days=2)  # 3 inclusive days
+
+    try:
+        latency = await client.get(
+            f"/api/v1/admin/stats/latency/trend?from={window_from}&to={window_to}",
+            headers=_auth(token),
+        )
+        active = await client.get(
+            "/api/v1/admin/stats/active-users/trend"
+            f"?from={window_from}&to={window_to}",
+            headers=_auth(token),
+        )
+    finally:
+        await _purge_sessions(engine, seeded_users.admin_id)
+
+    assert latency.status_code == 200, latency.text
+    assert active.status_code == 200, active.text
+
+    latency_days = [p["day"] for p in latency.json()["points"]]
+    active_days = [p["date"] for p in active.json()["points"]]
+
+    expected = [str(window_from + timedelta(days=i)) for i in range(3)]
+    # Exactly the picked span: inclusive of `to`, and nothing after it.
+    assert latency_days == expected
+    assert active_days == expected
+    assert str(today) not in latency_days
+    assert str(today) not in active_days
+
+
+async def test_trend_range_rejects_a_malformed_window(
+    engine: AsyncEngine,
+    client: httpx.AsyncClient,
+    seeded_users: SeededUsers,
+) -> None:
+    """Both trends validate the range the same way the rollup does.
+
+    The three endpoints render one window three ways on a single page. If a
+    trend accepted a range the rollup rejected, the page could draw a chart
+    over a span its own KPIs refused to compute.
+    """
+    token, _ = await _bearer(engine, seeded_users.admin_id)
+    async with engine.begin() as conn:
+        today = (
+            await conn.execute(text("SELECT now()::date AS d"))
+        ).mappings().one()["d"]
+    try:
+        for path in (
+            "/api/v1/admin/stats/latency/trend",
+            "/api/v1/admin/stats/active-users/trend",
+            "/api/v1/admin/stats/dashboard",
+        ):
+            # 'from' without 'to'
+            half = await client.get(f"{path}?from={today}", headers=_auth(token))
+            assert half.status_code == 422, f"{path}: {half.text}"
+            # reversed range
+            backwards = await client.get(
+                f"{path}?from={today}&to={today - timedelta(days=3)}",
+                headers=_auth(token),
+            )
+            assert backwards.status_code == 422, f"{path}: {backwards.text}"
+            # end in the future
+            future = await client.get(
+                f"{path}?from={today}&to={today + timedelta(days=1)}",
+                headers=_auth(token),
+            )
+            assert future.status_code == 422, f"{path}: {future.text}"
+    finally:
+        await _purge_sessions(engine, seeded_users.admin_id)
 
 
 async def test_dashboard_custom_range(

@@ -62,13 +62,17 @@ async def active_users_trend(
     db: AsyncSession,
     *,
     organization_id: UUID | None,
-    days: int,
-    now: datetime,
+    window_start: datetime,
+    window_end: datetime,
 ) -> list[tuple[date, int]]:
     rows = (
         await db.execute(
             _ACTIVE_USERS_TREND_SQL,
-            {"organization_id": organization_id, "days": days, "now": now},
+            {
+                "organization_id": organization_id,
+                "window_start": window_start,
+                "window_end": window_end,
+            },
         )
     ).mappings()
     return [(row["day"], int(row["count"] or 0)) for row in rows]
@@ -77,12 +81,15 @@ async def active_users_trend(
 async def api_latency_trend(
     db: AsyncSession,
     *,
-    days: int,
-    now: datetime,
+    window_start: datetime,
+    window_end: datetime,
 ) -> list[tuple[date, int, float | None, float | None]]:
     """Daily latency percentiles + volume; raw floats, callers round."""
     rows = (
-        await db.execute(_API_LATENCY_TREND_SQL, {"days": days, "now": now})
+        await db.execute(
+            _API_LATENCY_TREND_SQL,
+            {"window_start": window_start, "window_end": window_end},
+        )
     ).mappings()
     return [
         (

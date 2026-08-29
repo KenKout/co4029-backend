@@ -92,6 +92,12 @@ PATTERN3_ALLOWLIST: Final[frozenset[str]] = frozenset(
         "abridgeai/core/observability/audit_log.py",
         "abridgeai/ai/llm/embeddings.py",
         "abridgeai/api/healthz.py",
+        # Deleting an organization must not erase the record of who changed
+        # its runtime config. The LEFT JOIN there exists only to label the
+        # audit row with the org's name; filtering soft-deleted orgs out would
+        # blank that label precisely for the tenant an investigation is most
+        # likely to be about.
+        "abridgeai/features/admin/queries/setting_changes.py",
         # Tier B -- Wave 1 baseline (12 sites, T4 commit). Wave 5 target: 0.
         "abridgeai/features/career_paths/queries/published.py",
         "abridgeai/features/courses/queries/published.py",

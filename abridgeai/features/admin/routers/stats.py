@@ -160,6 +160,33 @@ class DashboardOut(BaseModel):
     orgs_inactive_30d: int
 
 
+def _range_error(message: str) -> HTTPException:
+    return HTTPException(
+        status_code=422,
+        detail={"error": "validation_error", "message": message},
+    )
+
+
+def _validate_window_range(window_from: date | None, window_to: date | None) -> None:
+    """Reject a malformed ``from``/``to`` pair.
+
+    Shared by the rollup and both trend endpoints rather than copied into each.
+    They are the same window shown three ways on one page -- if one of them
+    accepted a range the others rejected, the page could render a chart over a
+    span its own KPIs refused to compute.
+    """
+    if (window_from is None) != (window_to is None):
+        raise _range_error("'from' and 'to' must be provided together")
+    if window_from is None or window_to is None:
+        return
+    if window_from > window_to:
+        raise _range_error("'from' must not be after 'to'")
+    if window_to > datetime.now(tz=UTC).date():
+        raise _range_error("'to' must not be after today")
+    if (window_to - window_from).days + 1 > 366:
+        raise _range_error("range must not exceed 366 days")
+
+
 @router.get("/overview", response_model=OverviewOut)
 async def get_overview(
     user: Annotated[CurrentUser, Depends(_REQUIRE_STATS)],
@@ -184,16 +211,49 @@ async def get_active_users(
 async def get_active_users_trend(
     user: Annotated[CurrentUser, Depends(_REQUIRE_STATS)],
     db: Annotated[AsyncSession, Depends(get_db)],
-    days: Annotated[int, Query(ge=1, le=365)] = 30,
+    days: Annotated[
+        int,
+        Query(
+            ge=1,
+            le=365,
+            description="Lookback in days. Ignored when 'from'/'to' are given.",
+        ),
+    ] = stats_service.DEFAULT_TREND_DAYS,
+    window_from: Annotated[
+        date | None,
+        Query(
+            alias="from",
+            description="Exact window start date (inclusive). Must pair with "
+            "'to'. Supplied by the page's date-range filter so the chart "
+            "plots the same span the KPIs above it were computed over.",
+        ),
+    ] = None,
+    window_to: Annotated[
+        date | None,
+        Query(
+            alias="to",
+            description="Exact window end date (inclusive). Must pair with "
+            "'from', and must not be after today's date on the server.",
+        ),
+    ] = None,
 ) -> ActiveUsersTrendOut:
-    """Daily active users over the lookback window (distinct logins/day).
+    """Daily active users over the page window (distinct logins/day).
 
-    Drives the trend chart on the Active Users tab, mirroring the AI-cost
-    trend. ``days`` defaults to 30; every day in the window is returned
-    (zero-activity days included) so the chart is continuous.
+    Accepts the same ``from``/``to`` pair as the dashboard rollup, so the chart
+    follows the page's date-range filter instead of keeping a private window.
+    ``days`` remains the fallback for callers with no explicit range. Every day
+    in the window is returned (zero-activity days included) so the chart is
+    continuous.
     """
+    _validate_window_range(window_from, window_to)
     org_id = await resolve_admin_scope(db, user)
-    raw = await stats_service.active_users_trend(db, organization_id=org_id, days=days)
+    raw = await stats_service.active_users_trend(
+        db,
+        organization_id=org_id,
+        days=days,
+        window_from=window_from,
+        window_to=window_to,
+    )
     points = [ActiveUsersTrendPoint(date=d, count=n) for d, n in raw]
     return ActiveUsersTrendOut(points=points)
 
@@ -202,16 +262,43 @@ async def get_active_users_trend(
 async def get_api_latency_trend(
     user: Annotated[CurrentUser, Depends(_REQUIRE_STATS)],
     db: Annotated[AsyncSession, Depends(get_db)],
-    days: Annotated[int, Query(ge=1, le=365)] = 30,
+    days: Annotated[
+        int,
+        Query(
+            ge=1,
+            le=365,
+            description="Lookback in days. Ignored when 'from'/'to' are given.",
+        ),
+    ] = stats_service.DEFAULT_TREND_DAYS,
+    window_from: Annotated[
+        date | None,
+        Query(
+            alias="from",
+            description="Exact window start date (inclusive). Must pair with "
+            "'to'. Supplied by the page's date-range filter so the chart "
+            "plots the same span the KPIs above it were computed over.",
+        ),
+    ] = None,
+    window_to: Annotated[
+        date | None,
+        Query(
+            alias="to",
+            description="Exact window end date (inclusive). Must pair with "
+            "'from', and must not be after today's date on the server.",
+        ),
+    ] = None,
 ) -> LatencyTrendOut:
-    """Daily p50/p95 API latency over the lookback window.
+    """Daily p50/p95 API latency over the page window.
 
     Drives the latency chart on the stats overview, mirroring the
     active-users trend. GLOBAL scope — ``http_audit_log`` does not carry
     organization (see ``api_reliability.sql``). Every day in the window is
     returned (zero-traffic days included) so the chart is continuous.
     """
-    points = await stats_service.api_latency_trend(db, days=days)
+    _validate_window_range(window_from, window_to)
+    points = await stats_service.api_latency_trend(
+        db, days=days, window_from=window_from, window_to=window_to
+    )
     return LatencyTrendOut(
         points=[
             LatencyTrendPoint(
@@ -282,44 +369,19 @@ async def get_dashboard(
     -- accepting it would be a cross-tenant read. An IT Admin defaults to the
     global view and may narrow to one tenant with it.
     """
-    if (window_from is None) != (window_to is None):
-        raise HTTPException(
-            status_code=422,
-            detail={
-                "error": "validation_error",
-                "message": "'from' and 'to' must be provided together",
-            },
-        )
-    if window_from is not None and window_to is not None:
-        if window_from > window_to:
-            raise HTTPException(
-                status_code=422,
-                detail={
-                    "error": "validation_error",
-                    "message": "'from' must not be after 'to'",
-                },
-            )
-        if window_to > datetime.now(tz=UTC).date():
-            raise HTTPException(
-                status_code=422,
-                detail={
-                    "error": "validation_error",
-                    "message": "'to' must not be after today",
-                },
-            )
-        if (window_to - window_from).days + 1 > 366:
-            raise HTTPException(
-                status_code=422,
-                detail={
-                    "error": "validation_error",
-                    "message": "range must not exceed 366 days",
-                },
-            )
-    scope = await resolve_admin_scope(db, user)
-    if scope is None and organization_id is not None:
-        # Only reachable with system.administer (resolve_admin_scope returns
-        # None exclusively for that permission).
+    _validate_window_range(window_from, window_to)
+    # Gate on the PERMISSION, never on `resolve_admin_scope` returning None.
+    # It returns None in two different situations -- a platform admin (global
+    # view) AND a caller whose organization could not be resolved -- and its
+    # own docstring says the second must be treated as "no data visible". The
+    # old `if scope is None` test conflated them, so a caller holding
+    # system.stats.read with no org membership could pass any organization_id
+    # and read that tenant. That is the cross-tenant read this endpoint's
+    # filter is supposed to prevent.
+    if user.has_permission("system.administer"):
         scope = organization_id
+    else:
+        scope = await resolve_admin_scope(db, user)
     metrics = await stats_service.operator_dashboard(
         db,
         organization_id=scope,
