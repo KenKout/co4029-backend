@@ -14,7 +14,7 @@ to distrust the tile. Callers render ``None`` as "No data".
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 from abridgeai.features.admin.queries import job_metrics as job_queries
@@ -67,10 +67,32 @@ class QueueState:
 
 
 async def job_outcomes(
-    db: AsyncSession, *, window_days: int, now: datetime | None = None
+    db: AsyncSession,
+    *,
+    window_days: int,
+    now: datetime | None = None,
+    current_start: datetime | None = None,
+    current_end: datetime | None = None,
+    previous_start: datetime | None = None,
 ) -> JobOutcomeMetrics:
+    """Terminal job counts, current window + the one before it.
+
+    ``window_days`` / ``now`` is the relative shape (last N days ending
+    ``now``). Callers that already resolved an explicit window (the stats
+    service, whose dashboard must describe one identical span everywhere)
+    pass ``current_start`` / ``current_end`` / ``previous_start`` instead.
+    """
+    if current_start is None or current_end is None or previous_start is None:
+        reference = now or datetime.now(tz=UTC)
+        current_start = reference - timedelta(days=window_days)
+        current_end = reference
+        previous_start = reference - timedelta(days=window_days * 2)
     row = await job_queries.terminal_metrics(
-        db, now=now or datetime.now(tz=UTC), window_days=window_days
+        db,
+        as_of=now or datetime.now(tz=UTC),
+        current_start=current_start,
+        current_end=current_end,
+        previous_start=previous_start,
     )
     total = int(row["terminal_total"] or 0)
     failed = int(row["terminal_failed"] or 0)

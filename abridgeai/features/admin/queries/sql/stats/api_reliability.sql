@@ -12,22 +12,25 @@
 -- reason. 5xx is the server-error rate; 4xx is reported separately because a
 -- burst of 401/403 is a security signal, not a reliability one.
 --
--- :now         (timestamptz) -- as-of reference; tests pin it.
--- :window_days (int)         -- window length in days.
+-- :as_of         (timestamptz) -- as-of reference; tests pin it.
+-- :window_start  (timestamptz) -- window start; the service derives it from
+--   ``window_days`` (last N days ending now) or a caller date range, and the
+--   dashboard's job metrics receive the same bounds (PRD ADM-004).
+-- :window_end    (timestamptz) -- exclusive window end.
 --
 -- Scope: GLOBAL. http_audit_log records the acting user but not their
 -- organization, so this metric cannot be tenant-filtered.
 WITH bounds AS (
     SELECT
-        CAST(:now AS timestamptz)                       AS as_of,
-        CAST(:now AS timestamptz)
-            - make_interval(days => CAST(:window_days AS int)) AS window_start
+        CAST(:as_of AS timestamptz)         AS as_of,
+        CAST(:window_start AS timestamptz)  AS window_start,
+        CAST(:window_end AS timestamptz)    AS window_end
 ),
 requests AS (
     SELECT h.status_code, h.latency_ms
     FROM http_audit_log h, bounds b
     WHERE h.created_at >= b.window_start
-      AND h.created_at < b.as_of
+      AND h.created_at < b.window_end
 )
 SELECT
     b.as_of,

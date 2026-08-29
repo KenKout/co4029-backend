@@ -30,12 +30,23 @@ _QUEUE_STATE_SQL = _load("jobs/queue_state.sql")
 
 
 async def terminal_metrics(
-    db: AsyncSession, *, now: datetime, window_days: int
+    db: AsyncSession,
+    *,
+    as_of: datetime,
+    current_start: datetime,
+    current_end: datetime,
+    previous_start: datetime,
 ) -> dict[str, Any]:
     """Terminal job counts for the current window and the one before it."""
     row = (
         await db.execute(
-            _TERMINAL_METRICS_SQL, {"now": now, "window_days": window_days}
+            _TERMINAL_METRICS_SQL,
+            {
+                "as_of": as_of,
+                "current_start": current_start,
+                "current_end": current_end,
+                "previous_start": previous_start,
+            },
         )
     ).mappings().one()
     return dict(row)

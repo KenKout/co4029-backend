@@ -21,11 +21,11 @@ Org-scoping is resolved via :func:`resolve_admin_scope`.
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from typing import Annotated, Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -105,6 +105,11 @@ class DashboardOut(BaseModel):
     # -- envelope --------------------------------------------------------
     as_of: datetime
     window_days: int
+    # Exact date range (inclusive) the window covered, when the caller asked
+    # for one instead of the relative ``window_days`` shape. The UI echoes
+    # these verbatim so the label it prints == the rows counted.
+    window_from: date | None = None
+    window_to: date | None = None
     organization_id: UUID | None = None
     usage_scope: str
     tenant_scope: str
@@ -243,6 +248,24 @@ async def get_dashboard(
             "move together so they stay comparable.",
         ),
     ] = stats_service.DEFAULT_WINDOW_DAYS,
+    window_from: Annotated[
+        date | None,
+        Query(
+            alias="from",
+            description="Exact window start date (inclusive). Must pair with "
+            "'to'; overrides window_days with a fixed calendar range so a "
+            "custom picker range (e.g. Aug 1 - Aug 29) counts exactly the "
+            "rows in it.",
+        ),
+    ] = None,
+    window_to: Annotated[
+        date | None,
+        Query(
+            alias="to",
+            description="Exact window end date (inclusive). Must pair with "
+            "'from', and must not be after today's date on the server.",
+        ),
+    ] = None,
     organization_id: Annotated[
         UUID | None,
         Query(
@@ -259,13 +282,50 @@ async def get_dashboard(
     -- accepting it would be a cross-tenant read. An IT Admin defaults to the
     global view and may narrow to one tenant with it.
     """
+    if (window_from is None) != (window_to is None):
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "validation_error",
+                "message": "'from' and 'to' must be provided together",
+            },
+        )
+    if window_from is not None and window_to is not None:
+        if window_from > window_to:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "error": "validation_error",
+                    "message": "'from' must not be after 'to'",
+                },
+            )
+        if window_to > datetime.now(tz=UTC).date():
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "error": "validation_error",
+                    "message": "'to' must not be after today",
+                },
+            )
+        if (window_to - window_from).days + 1 > 366:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "error": "validation_error",
+                    "message": "range must not exceed 366 days",
+                },
+            )
     scope = await resolve_admin_scope(db, user)
     if scope is None and organization_id is not None:
         # Only reachable with system.administer (resolve_admin_scope returns
         # None exclusively for that permission).
         scope = organization_id
     metrics = await stats_service.operator_dashboard(
-        db, organization_id=scope, window_days=window_days
+        db,
+        organization_id=scope,
+        window_days=window_days,
+        window_from=window_from,
+        window_to=window_to,
     )
     return DashboardOut(**metrics)
 

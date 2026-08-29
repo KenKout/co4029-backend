@@ -10,7 +10,7 @@ otherwise an empty result is returned (no leak across tenants).
 from __future__ import annotations
 
 import json
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, time, timedelta
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
@@ -52,6 +52,39 @@ def _rate_pct(numerator: int, denominator: int) -> float | None:
 def _opt_int(value: Any) -> int | None:
     """Round a nullable numeric (percentile) to int, preserving ``None``."""
     return None if value is None else int(round(float(value)))
+
+
+def _window_bounds(
+    now: datetime,
+    *,
+    window_days: int,
+    window_from: date | None = None,
+    window_to: date | None = None,
+) -> tuple[datetime, datetime, datetime]:
+    """Resolve the rollup window to explicit datetime bounds.
+
+    Two shapes, both inclusive of full days:
+
+    * days-mode: ``window_days`` given -> ``[now - days, now)``, the leading
+      edge of the window ending at the evaluation instant.
+    * range-mode: ``window_from`` / ``window_to`` given -> ``[from 00:00,
+      to + 1d 00:00)``, so a picker range like Aug 1 - Aug 29 covers all of
+      Aug 29 and the labels the UI prints match the rows counted
+      (the label == the calculation rule).
+
+    Returns ``(window_start, window_end, previous_start)`` where the previous
+    window has the same length and sits immediately before the current one.
+    """
+    if window_from is not None and window_to is not None:
+        start = datetime.combine(window_from, time.min, tzinfo=UTC)
+        end = datetime.combine(
+            window_to + timedelta(days=1), time.min, tzinfo=UTC
+        )
+        length = end - start
+        previous_start = start - length
+        return start, end, previous_start
+    start = now - timedelta(days=window_days)
+    return start, now, start - timedelta(days=window_days)
 
 
 async def overview(db: AsyncSession, *, organization_id: UUID | None) -> dict[str, int]:
@@ -114,6 +147,8 @@ async def operator_dashboard(
     *,
     organization_id: UUID | None,
     window_days: int = DEFAULT_WINDOW_DAYS,
+    window_from: date | None = None,
+    window_to: date | None = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
     """Single-response operator metrics rollup for the admin dashboard.
@@ -131,14 +166,25 @@ async def operator_dashboard(
     ``*_scope`` keys travel with the numbers so the client never has to guess
     what a tile is measuring (PRD ADM-004, section 5).
 
+    The window is either ``window_days`` (last N days ending now) or the
+    explicit ``window_from`` / ``window_to`` date range; both shapes resolve
+    to the SAME datetime bounds for every component so the tiles can never
+    describe different spans. In range mode the response also carries
+    ``window_from`` / ``window_to`` so the UI labels match the rows counted.
+
     Cached for 60s per (org scope, window). Tests that pin ``now`` bypass the
     cache entirely -- determinism beats reuse there.
     """
     if now is not None:
         return await _operator_dashboard_uncached(
-            db, organization_id=organization_id, window_days=window_days, now=now
+            db,
+            organization_id=organization_id,
+            window_days=window_days,
+            window_from=window_from,
+            window_to=window_to,
+            now=now,
         )
-    cache_key = (organization_id, window_days)
+    cache_key = (organization_id, window_days, window_from, window_to)
     cached = _DASHBOARD_CACHE.get(cache_key)
     if cached is not None:
         return dict(cached)
@@ -146,6 +192,8 @@ async def operator_dashboard(
         db,
         organization_id=organization_id,
         window_days=window_days,
+        window_from=window_from,
+        window_to=window_to,
         now=datetime.now(tz=UTC),
     )
     # json round-trip freezes the copy (dates/Decimals -> plain types) so a
@@ -159,14 +207,36 @@ async def _operator_dashboard_uncached(
     *,
     organization_id: UUID | None,
     window_days: int,
+    window_from: date | None,
+    window_to: date | None,
     now: datetime,
 ) -> dict[str, Any]:
-    rollup = await stats_queries.operator_dashboard(
-        db, organization_id=organization_id, now=now, window_days=window_days
+    window_start, window_end, previous_start = _window_bounds(
+        now,
+        window_days=window_days,
+        window_from=window_from,
+        window_to=window_to,
     )
-    jobs = await job_metrics.job_outcomes(db, window_days=window_days, now=now)
+    rollup = await stats_queries.operator_dashboard(
+        db,
+        organization_id=organization_id,
+        as_of=now,
+        window_start=window_start,
+        window_end=window_end,
+        previous_start=previous_start,
+    )
+    jobs = await job_metrics.job_outcomes(
+        db,
+        window_days=(window_end - window_start).days,
+        now=now,
+        current_start=window_start,
+        current_end=window_end,
+        previous_start=previous_start,
+    )
     queue = await job_metrics.queue_state(db, now=now)
-    api = await stats_queries.api_reliability(db, now=now, window_days=window_days)
+    api = await stats_queries.api_reliability(
+        db, as_of=now, window_start=window_start, window_end=window_end
+    )
 
     requests_total = int(api["requests_total"] or 0)
     requests_5xx = int(api["requests_5xx"] or 0)
@@ -177,6 +247,10 @@ async def _operator_dashboard_uncached(
     return {
         # -- envelope: what these numbers measure -----------------------
         "as_of": rollup["as_of"],
+        # range-mode windows report the exact dates the picker applied; the
+        # UI echoes them so the label it prints == the rows counted.
+        "window_from": window_from,
+        "window_to": window_to,
         "window_days": window_days,
         "organization_id": organization_id,
         # Which families the organization filter actually reached. Job, cost
