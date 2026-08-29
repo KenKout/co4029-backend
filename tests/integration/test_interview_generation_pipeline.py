@@ -628,30 +628,66 @@ async def test_pipeline_persists_question_with_correct_fields(
 
 
 @pytest.mark.asyncio
-async def test_pipeline_sets_and_clears_strict_role_only_flag(
+async def test_pipeline_strict_role_only_flag_is_sticky(
     session_factory: async_sessionmaker[AsyncSession],
     fixture_data: dict[str, UUID],
     engine: AsyncEngine,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Successful role_only runs persist the strict flag; legacy runs clear it."""
+    """role_only enables strict; later mixed/failed runs never clear it."""
+
+    async def _flag() -> str | None:
+        async with session_factory() as session:
+            return (
+                await session.execute(
+                    text(
+                        "SELECT generation_variant_strategy FROM interview_configs "
+                        "WHERE id = :id"
+                    ),
+                    {"id": fixture_data["cfg_id"]},
+                )
+            ).scalar_one()
+
+    async def _insert_run(run_id: UUID, strategy: str | None = None) -> None:
+        cfg = {"interview_config_id": str(fixture_data["cfg_id"]), "question_count": 1}
+        if strategy:
+            cfg["variant_strategy"] = strategy
+        async with engine.begin() as conn:
+            await conn.execute(
+                text(
+                    "INSERT INTO generation_runs (id, generation_type, source_scope_kind, "
+                    "course_id, module_id, status, config_json) "
+                    "VALUES (:id, 'interview', 'module', :c, :m, 'pending', CAST(:cfg AS jsonb))"
+                ),
+                {
+                    "id": run_id,
+                    "c": fixture_data["course"],
+                    "m": fixture_data["module_id"],
+                    "cfg": json.dumps(cfg),
+                },
+            )
+
+    # Never role_only -> stays NULL (legacy).
+    assert await _flag() is None
+
     # Non-generic role so resolve_variant_mode keeps role_only (generic degrades).
     async with engine.begin() as conn:
         await conn.execute(
             text(
-                "UPDATE interview_configs SET persona_profile_json = :persona WHERE id = :id"
+                "UPDATE generation_runs SET config_json = config_json || "
+                "CAST(:cfg AS jsonb) WHERE id = :id"
             ),
+            {
+                "id": fixture_data["run_id"],
+                "cfg": json.dumps({"variant_strategy": "role_only"}),
+            },
+        )
+        await conn.execute(
+            text("UPDATE interview_configs SET persona_profile_json = :persona WHERE id = :id"),
             {
                 "persona": json.dumps({"interviewer_role": "backend_tech_lead"}),
                 "id": fixture_data["cfg_id"],
             },
-        )
-        await conn.execute(
-            text(
-                "UPDATE generation_runs SET config_json = config_json || "
-                "'{\"variant_strategy\": \"role_only\"}'::jsonb WHERE id = :id"
-            ),
-            {"id": fixture_data["run_id"]},
         )
     _install_stage_mocks(
         monkeypatch,
@@ -662,55 +698,29 @@ async def test_pipeline_sets_and_clears_strict_role_only_flag(
 
     async with session_factory() as session:
         await run_interview_generation(session, fixture_data["run_id"])
-    async with session_factory() as session:
-        flag = (
-            await session.execute(
-                text(
-                    "SELECT generation_variant_strategy FROM interview_configs WHERE id = :id"
-                ),
-                {"id": fixture_data["cfg_id"]},
-            )
-        ).scalar_one()
-    assert flag == "role_only"
+    assert await _flag() == "role_only"
 
-    # A later successful run WITHOUT a strategy clears the flag.
+    # A later successful mixed/all-angles run KEEPS strict mode.
     second_run_id = uuid4()
+    third_run_id = uuid4()
     try:
-        async with engine.begin() as conn:
-            await conn.execute(
-                text(
-                    "INSERT INTO generation_runs (id, generation_type, source_scope_kind, "
-                    "course_id, module_id, status, config_json) "
-                    "VALUES (:id, 'interview', 'module', :c, :m, 'pending', CAST(:cfg AS jsonb))"
-                ),
-                {
-                    "id": second_run_id,
-                    "c": fixture_data["course"],
-                    "m": fixture_data["module_id"],
-                    "cfg": json.dumps(
-                        {
-                            "interview_config_id": str(fixture_data["cfg_id"]),
-                            "question_count": 1,
-                        }
-                    ),
-                },
-            )
+        await _insert_run(second_run_id)
         async with session_factory() as session:
             await run_interview_generation(session, second_run_id)
+        assert await _flag() == "role_only"
+
+        # A later FAILED run (underfill: nothing accepted) leaves it untouched.
+        _install_stage_mocks(monkeypatch, drafts=[], verdicts=[])
+        await _insert_run(third_run_id)
         async with session_factory() as session:
-            flag = (
-                await session.execute(
-                    text(
-                        "SELECT generation_variant_strategy FROM interview_configs WHERE id = :id"
-                    ),
-                    {"id": fixture_data["cfg_id"]},
-                )
-            ).scalar_one()
-        assert flag is None
+            with pytest.raises(RuntimeError, match="underfilled"):
+                await run_interview_generation(session, third_run_id)
+        assert await _flag() == "role_only"
     finally:
         async with engine.begin() as conn:
             await conn.execute(
-                text("DELETE FROM generation_runs WHERE id = :id"), {"id": second_run_id}
+                text("DELETE FROM generation_runs WHERE id IN (:a, :b)"),
+                {"a": second_run_id, "b": third_run_id},
             )
 
 

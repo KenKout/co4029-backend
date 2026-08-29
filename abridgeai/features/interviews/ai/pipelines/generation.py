@@ -76,7 +76,7 @@ class _RunState:
     requested_by: UUID | None = None
 
 
-async def run_interview_generation(
+async def run_interview_generation(  # noqa: C901 -- pipeline stages stay auditable in one flow
     db: AsyncSession,
     generation_run_id: UUID,
     *,
@@ -208,7 +208,8 @@ async def run_interview_generation(
             pipeline_run_id=state.id,
         )
         strategy = state.config_json.get("variant_strategy")
-        config.generation_variant_strategy = "role_only" if strategy == "role_only" else None
+        if strategy == "role_only":
+            config.generation_variant_strategy = "role_only"
 
         state.config_json = state.config_json | {
             "pipeline": {
