@@ -43,26 +43,23 @@ from abridgeai.features.interviews.ai.pipelines.backfill import (
     generate_with_backfill,
     validation_summary,
 )
+from abridgeai.features.interviews.ai.pipelines.persistence import (
+    _module_ids_for_questions,
+    _persist_questions,
+)
 from abridgeai.features.interviews.ai.pipelines.variant import (
     config_uuid,
     resolve_variant_mode,
 )
 from abridgeai.features.interviews.ai.stages.generation import resolve_question_count
 from abridgeai.features.interviews.ai.stages.retrieval import retrieve_interview_context
-from abridgeai.features.interviews.dedup import store_question_embeddings
-from abridgeai.features.interviews.models import InterviewConfig, InterviewQuestion
-from abridgeai.features.interviews.queries.authoring import (
-    list_outcomes_for_config,
-    next_question_position,
-)
+from abridgeai.features.interviews.models import InterviewConfig
+from abridgeai.features.interviews.queries.authoring import list_outcomes_for_config
 from abridgeai.features.quizzes.api import public as quizzes_public
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
-    from abridgeai.features.interviews.ai.stages.generation.parsers import (
-        InterviewQuestionDraft,
-    )
     from abridgeai.features.interviews.ai.stages.retrieval.logic import (
         InterviewRetrievalContext,
     )
@@ -113,18 +110,20 @@ async def run_interview_generation(
         config_json=dict(run_dto.config_json or {}),
         requested_by=run_dto.requested_by,
     )
-
-    config_id = config_uuid(state.config_json, "interview_config_id")
-    if config_id is None:
-        raise NotFoundError("Generation run is missing interview_config_id")
-    config = await db.get(InterviewConfig, config_id)
-    if config is None:
-        raise NotFoundError("Interview config not found for generation run")
-
-    await _update_run(db, state.id, status="running", started_at=utcnow())
-    await db.commit()
+    config: InterviewConfig | None = None
 
     try:
+        if not await _claim_pending_run(db, state.id):
+            return
+        await db.commit()
+
+        config_id = config_uuid(state.config_json, "interview_config_id")
+        if config_id is None:
+            raise NotFoundError("Generation run is missing interview_config_id")
+        config = await db.get(InterviewConfig, config_id)
+        if config is None:
+            raise NotFoundError("Interview config not found for generation run")
+
         context = await retrieve_interview_context(
             db,
             run=state,
@@ -183,6 +182,11 @@ async def run_interview_generation(
             role_type=role_type,
             on_progress=_on_progress,
         )
+
+        if len(accepted) != target_count:
+            raise RuntimeError(
+                f"Generation underfilled: accepted {len(accepted)} of {target_count} questions"
+            )
 
         await _write_progress(
             db, state, phase="saving", accepted=len(accepted), target=target_count
@@ -265,14 +269,26 @@ async def run_interview_generation(
             db,
             recipient_user_id=state.requested_by,
             course_id=state.course_id,
-            config_id=config.id,
-            interview_title=config.title,
+            config_id=config.id if config is not None else None,
+            interview_title=config.title if config is not None else None,
             succeeded=False,
             error_message=str(exc),
             arq_pool=arq_pool,
         )
         await db.commit()
         raise
+
+
+async def _claim_pending_run(db: AsyncSession, run_id: UUID) -> bool:
+    """Atomically claim a queued run; duplicate worker deliveries no-op."""
+    result = await db.execute(
+        text(
+            "UPDATE generation_runs SET status = 'running', started_at = :started_at, "
+            "updated_at = NOW() WHERE id = :id AND status = 'pending'"
+        ),
+        {"id": run_id, "started_at": utcnow()},
+    )
+    return result.rowcount == 1
 
 
 async def _update_run(
@@ -333,89 +349,6 @@ def _retrieval_summary(context: InterviewRetrievalContext) -> dict[str, Any]:
         "kg_concept_count": len(context.kg_concepts),
         "weak_topic_count": len(context.weak_topic_chunks),
     }
-
-
-_DIFFICULTY_DRAFT_TO_ORM: dict[str, str] = {
-    "easy": "junior",
-    "medium": "mid_level",
-    "hard": "senior",
-}
-
-
-def _persist_difficulty(value: str | None) -> str | None:
-    if value is None:
-        return None
-    return _DIFFICULTY_DRAFT_TO_ORM.get(value, value)
-
-
-def _module_ids_for_questions(config_json: dict[str, Any], config: InterviewConfig) -> list[str]:
-    """Module attribution for generated questions.
-
-    Prefers the run's ``source_module_ids`` (the modules the teacher scoped
-    generation to). Falls back to the interview config's own module so a
-    question is never left unattributed.
-    """
-    raw = config_json.get("source_module_ids") or []
-    ids = [str(m) for m in raw if m]
-    if ids:
-        return ids
-    return [str(config.module_id)] if config.module_id is not None else []
-
-
-async def _persist_questions(
-    db: AsyncSession,
-    *,
-    config: InterviewConfig,
-    accepted: list[InterviewQuestionDraft],
-    source_module_ids: list[str],
-    pipeline_run_id: UUID | None = None,
-) -> None:
-    created: list[InterviewQuestion] = []
-    for draft in accepted:
-        position = await next_question_position(db, config.id)
-        question = InterviewQuestion(
-            interview_config_id=config.id,
-            linked_outcome_id=draft.linked_outcome_id,
-            variant_group_id=draft.variant_group_id,
-            position=position,
-            question_type=draft.question_type,
-            prompt_text=draft.prompt_text,
-            difficulty=_persist_difficulty(draft.difficulty),
-            model_answer=draft.model_answer.strip() or None,
-            review_status="pending",
-            ai_generated=True,
-            source_refs_json=[str(c) for c in draft.source_refs],
-            source_module_ids=source_module_ids,
-        )
-        db.add(question)
-        await db.flush()
-        created.append(question)
-
-    # Embed the whole batch in ONE provider call, after the rows exist.
-    #
-    # This is the seam that was missing: duplicate detection only ever ran for
-    # hand-authored questions, because `add_question` / `update_question` embed
-    # but this pipeline did not. Since the shortlist skips `embedding IS NULL`
-    # rows, an AI-generated bank was invisible to the checker and every
-    # check-duplicate call on it answered "not a duplicate" — the feature looked
-    # enabled and silently did nothing.
-    #
-    # Best-effort and already gated on `interview_dedup_enabled` inside the
-    # helper: a provider failure here must not fail a completed generation run,
-    # whose questions are otherwise perfectly valid.
-    stored = await store_question_embeddings(
-        db,
-        question_ids=[q.id for q in created],
-        prompt_texts=[q.prompt_text for q in created],
-        pipeline_run_id=pipeline_run_id,
-    )
-    if stored:
-        logger.info(
-            "interview_generation_embedded",
-            embedded=stored,
-            total=len(created),
-            config_id=str(config.id),
-        )
 
 
 __all__ = ["run_interview_generation"]

@@ -11,7 +11,7 @@ import json
 from typing import Any, cast
 
 _DEFAULT_TYPE_MIX: dict[str, int] = {"technical": 60, "behavioral": 30, "situational": 10}
-_DEFAULT_QUESTION_COUNT = 8
+_DEFAULT_QUESTION_COUNT = 5
 _MIN_QUESTION_COUNT = 1
 _MAX_QUESTION_COUNT = 50
 

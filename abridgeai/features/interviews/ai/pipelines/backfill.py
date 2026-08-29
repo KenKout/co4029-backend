@@ -175,6 +175,7 @@ async def generate_with_backfill(
             drafts=cast("Any", round_drafts),
             context=cast("Any", context),
             skip_type_mix=variant_strategy is not None,
+            expected_question_type=role_type if variant_strategy == "role_only" else None,
         )
         if variant_strategy == "all_angles":
             complete_groups = _accepted_complete_groups(

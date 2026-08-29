@@ -1122,6 +1122,15 @@ async def test_start_generation_run_persists_type_weights(
             "situational": 0.1,
         }
 
+    # Release the active-run dedup (generation_runs partial unique index on
+    # pending/running) so the second run below can be created for the SAME
+    # config under its custom rubric.
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("UPDATE generation_runs SET status = 'completed' WHERE id = :id"),
+            {"id": run.id},
+        )
+
     # Custom rubric weights: generation + validation must agree on the mix.
     async with engine.begin() as conn:
         await conn.execute(
@@ -1149,6 +1158,49 @@ async def test_start_generation_run_persists_type_weights(
             "behavioral": 0.1,
             "situational": 0.1,
         }
+
+
+async def test_start_generation_run_conflicts_while_active(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict[str, Any],
+) -> None:
+    """Active-generation dedup: a second run for the same config → 409 Conflict."""
+    from abridgeai.core.exceptions import ConflictError
+
+    seeded = await _create_published_config(
+        engine,
+        course_id=scenario["course_id"],
+        module_id=scenario["module_id"],
+        teacher_id=scenario["teacher_id"],
+        questions=0,
+        outcomes=0,
+        status="draft",
+    )
+    base = _CreatePayload(
+        mode="topic",
+        course_id=scenario["course_id"],
+        module_id=scenario["module_id"],
+        question_count=5,
+    )
+    arq_pool = SimpleNamespace(enqueue_job=AsyncMock(return_value=None))
+    async with session_factory() as session:
+        first = await authoring_service.start_generation_run(
+            session,
+            seeded["config_id"],
+            base,
+            _actor(scenario["teacher_id"]),
+            arq_pool=arq_pool,
+        )
+        assert first is not None
+        with pytest.raises(ConflictError, match="interview_generation_in_progress"):
+            await authoring_service.start_generation_run(
+                session,
+                seeded["config_id"],
+                base,
+                _actor(scenario["teacher_id"]),
+                arq_pool=arq_pool,
+            )
 
 
 async def test_add_question_rejects_outcome_not_in_this_config(
@@ -1324,31 +1376,34 @@ async def _cleanup_lesson_and_chunk(
         )
 
 
-async def test_chunk_views_for_prompt_resolves_excerpt_content(
-    engine: AsyncEngine,
-    session_factory: async_sessionmaker[AsyncSession],
-    scenario: dict[str, Any],
-) -> None:
-    """Validation's LLM leading check sees the retrieved chunks' CONTENT."""
-    seeded = await _seed_lesson_and_chunk(engine, scenario)
-    missing_id = uuid.uuid4()
-    fake_run = SimpleNamespace(
-        config_json={
+def test_chunk_views_for_prompt_id_only_no_db_fetch() -> None:
+    """Leading check gets id-only chunk views; excerpt resolution was retired.
+
+    The NOT_LEADING judge rules on question TEXT (grounding is enforced by the
+    deterministic GROUNDED check), so chunk views keep ids for context without
+    a per-run ``document_chunks`` fetch.
+    """
+    class _StubRun:
+        """Minimal GenerationRun-shaped stub: id + config_json."""
+
+        def __init__(self, config_json: dict[str, Any]) -> None:
+            self.id = uuid.uuid4()
+            self.config_json = config_json
+
+    fake_run = _StubRun(
+        {
             "retrieval": {
-                "source_chunk_ids": [str(seeded["chunk_id"]), str(missing_id)],
+                "source_chunk_ids": [str(uuid.uuid4()), str(uuid.uuid4())],
             }
         }
     )
-    try:
-        async with session_factory() as session:
-            views = await _chunk_views_for_prompt(session, fake_run)
-        assert views[0]["id"] == str(seeded["chunk_id"])
-        assert views[0]["content"] == "Chunk content for validation"
-        # An id whose row is gone degrades to an id-only view, never dropped.
-        assert views[1]["id"] == str(missing_id)
-        assert views[1]["content"] == ""
-    finally:
-        await _cleanup_lesson_and_chunk(engine, seeded)
+    views = _chunk_views_for_prompt(fake_run)
+    assert len(views) == 2
+    assert all(view["content"] == "" for view in views)
+    # Missing / malformed retrieval degrades to an empty view list, never raises.
+    assert _chunk_views_for_prompt(_StubRun({})) == []
+    assert _chunk_views_for_prompt(_StubRun({"retrieval": {}})) == []
+    assert _chunk_views_for_prompt(_StubRun({"retrieval": {"source_chunk_ids": []}})) == []
 
 
 @pytest.mark.asyncio

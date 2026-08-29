@@ -162,6 +162,44 @@ async def test_accepts_well_formed_question() -> None:
 
 
 @pytest.mark.asyncio
+async def test_role_only_rejects_type_mismatch() -> None:
+    """role_only: drafts whose type differs from the role's preferred type fail."""
+    chunk = uuid4()
+    context = _context([chunk])
+    run = _run(source_chunk_ids=[chunk])
+    gateway = _gateway_returning(_accept_all(1))
+
+    wrong_type = _draft(question_type="behavioral", source_refs=[chunk])
+    verdicts = await validate_interview_questions(
+        _db(),
+        run=run,
+        config=_config(),
+        drafts=[wrong_type],
+        context=context,
+        skip_type_mix=True,
+        expected_question_type="technical",
+        gateway=gateway,
+    )
+    assert verdicts[0].accepted is False
+    assert ValidationCriterion.TYPE_MATCHES_CONFIG in verdicts[0].failed_criteria
+
+    # Same type as the role's preferred type passes (all other checks green).
+    right_type = _draft(question_type="technical", source_refs=[chunk])
+    verdicts = await validate_interview_questions(
+        _db(),
+        run=run,
+        config=_config(),
+        drafts=[right_type],
+        context=context,
+        skip_type_mix=True,
+        expected_question_type="technical",
+        gateway=gateway,
+    )
+    assert verdicts[0].accepted is True
+    assert verdicts[0].failed_criteria == []
+
+
+@pytest.mark.asyncio
 async def test_length_check() -> None:
     chunk = uuid4()
     drafts = [

@@ -41,6 +41,7 @@ from abridgeai.ai.models import GenerationRun
 from abridgeai.core.config import get_settings
 from abridgeai.features.interviews.ai.pipelines import backfill as generation_backfill
 from abridgeai.features.interviews.ai.pipelines import generation as generation_pipeline
+from abridgeai.features.interviews.ai.pipelines import persistence as generation_persistence
 from abridgeai.features.interviews.ai.pipelines import run_interview_generation
 from abridgeai.features.interviews.ai.stages.generation.parsers import (
     InterviewQuestionDraft,
@@ -278,7 +279,7 @@ def _install_stage_mocks(
     monkeypatch.setattr(generation_backfill, "generate_interview_questions", generate)
     monkeypatch.setattr(generation_backfill, "validate_interview_questions", validate)
     monkeypatch.setattr(generation_pipeline, "list_outcomes_for_config", list_outcomes)
-    monkeypatch.setattr(generation_pipeline, "next_question_position", next_pos)
+    monkeypatch.setattr(generation_persistence, "next_question_position", next_pos)
 
     return {
         "retrieve": retrieve,
@@ -332,7 +333,7 @@ async def test_backfill_tops_up_shortfall_from_validation_rejections(
     monkeypatch.setattr(generation_backfill, "validate_interview_questions", validate)
     monkeypatch.setattr(generation_pipeline, "list_outcomes_for_config", list_outcomes)
     monkeypatch.setattr(
-        generation_pipeline, "next_question_position", AsyncMock(side_effect=_fake_next_pos)
+        generation_persistence, "next_question_position", AsyncMock(side_effect=_fake_next_pos)
     )
 
     async with session_factory() as session:
@@ -496,11 +497,15 @@ async def test_pipeline_threads_run_id_to_stages(
 async def test_audit_rows_share_pipeline_run_id(
     session_factory: async_sessionmaker[AsyncSession],
     fixture_data: dict[str, UUID],
+    engine: AsyncEngine,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """End-to-end: every stage writes one ai_model_calls row sharing run.id."""
 
     expected_run_id = fixture_data["run_id"]
+    # The mocked generate returns a single draft; align the target count so
+    # the underfill gate (accept == target) passes instead of failing the run.
+    await _set_question_count(engine, expected_run_id, 1)
 
     async def _emit_audit(db: AsyncSession, *, stage: str, role: LLMRole) -> None:
         await write_ai_model_call(
@@ -547,7 +552,7 @@ async def test_audit_rows_share_pipeline_run_id(
     monkeypatch.setattr(generation_backfill, "generate_interview_questions", _fake_generate)
     monkeypatch.setattr(generation_backfill, "validate_interview_questions", _fake_validate)
     monkeypatch.setattr(generation_pipeline, "list_outcomes_for_config", _fake_outcomes)
-    monkeypatch.setattr(generation_pipeline, "next_question_position", _fake_pos)
+    monkeypatch.setattr(generation_persistence, "next_question_position", _fake_pos)
 
     async with session_factory() as session:
         await run_interview_generation(session, expected_run_id)
@@ -667,7 +672,11 @@ async def test_pipeline_raises_when_run_missing_interview_config_id(
         async with session_factory() as session:
             run = await session.get(GenerationRun, bare_run_id)
         assert run is not None
-        assert run.status == "pending"
+        # Pre-config failure goes through the failure handler: the run is
+        # claimed (pending → running) then stamped failed, never left pending.
+        assert run.status == "failed"
+        assert run.finished_at is not None
+        assert "failure" in (run.config_json or {})
     finally:
         async with engine.begin() as conn:
             await conn.execute(

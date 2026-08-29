@@ -121,6 +121,7 @@ async def validate_interview_questions(
     context: InterviewRetrievalContext,
     gateway: LLMGateway | None = None,
     skip_type_mix: bool = False,
+    expected_question_type: str | None = None,
 ) -> list[Verdict]:
     """Validate ``drafts`` and return a positional list of verdicts.
 
@@ -134,7 +135,11 @@ async def validate_interview_questions(
         return []
 
     deterministic = _run_deterministic_checks(
-        drafts, run=run, context=context, skip_type_mix=skip_type_mix
+        drafts,
+        run=run,
+        context=context,
+        skip_type_mix=skip_type_mix,
+        expected_question_type=expected_question_type,
     )
     leading = await _run_leading_check(
         drafts=drafts,
@@ -167,6 +172,7 @@ def _run_deterministic_checks(
     run: GenerationRun,
     context: InterviewRetrievalContext,
     skip_type_mix: bool = False,
+    expected_question_type: str | None = None,
 ) -> list[list[ValidationCriterion]]:
     """Apply the four Python-only checks; return failures per question.
 
@@ -186,7 +192,9 @@ def _run_deterministic_checks(
             per_q.append(ValidationCriterion.GROUNDED)
         if not _has_coherent_difficulty(drafts, index):
             per_q.append(ValidationCriterion.DIFFICULTY_COHERENT)
-        if index in type_failures:
+        if index in type_failures or (
+            expected_question_type is not None and draft.question_type != expected_question_type
+        ):
             per_q.append(ValidationCriterion.TYPE_MATCHES_CONFIG)
         if not _has_reasonable_length(draft):
             per_q.append(ValidationCriterion.LENGTH_REASONABLE)
@@ -307,7 +315,7 @@ async def _run_leading_check(
 ) -> list[bool]:
     """Ask the LLM to judge each question's neutrality."""
     gateway = gateway or LLMGateway()
-    chunk_views = await _chunk_views_for_prompt(db, run)
+    chunk_views = _chunk_views_for_prompt(run)
     questions = [
         {
             "index": index,
@@ -341,39 +349,15 @@ async def _run_leading_check(
     return [verdict.not_leading for verdict in parsed]
 
 
-async def _chunk_views_for_prompt(db: AsyncSession, run: GenerationRun) -> list[dict[str, Any]]:
-    """Chunk views for the LLM leading check: id + excerpt content.
-
-    ``config_json["retrieval"]["source_chunk_ids"]`` is persisted by the
-    generation pipeline (the retrieval context object is never serialized),
-    so the excerpt CONTENT is resolved here from ``document_chunks`` —
-    chunks are immutable once ingested, so ids stay valid across the run.
-    A chunk that no longer exists degrades to an id-only view instead of
-    dropping the question's grounding context entirely.
-    """
+def _chunk_views_for_prompt(run: GenerationRun) -> list[dict[str, Any]]:
     config_json = getattr(run, "config_json", None) or {}
     retrieval = config_json.get("retrieval") if isinstance(config_json, dict) else None
-    raw_ids = retrieval.get("source_chunk_ids") if isinstance(retrieval, dict) else None
-    if not isinstance(raw_ids, list) or not raw_ids:
+    if not isinstance(retrieval, dict):
         return []
-    from sqlalchemy import text  # noqa: PLC0415
-
-    id_params = [str(chunk_id) for chunk_id in raw_ids if chunk_id]
-    rows = (
-        await db.execute(
-            text(
-                "SELECT id, content FROM document_chunks "
-                "WHERE id = ANY(CAST(:ids AS uuid[]))"
-            ),
-            {"ids": id_params},
-        )
-    ).all()
-    content_by_id = {str(row[0]): row[1] for row in rows}
-    return [
-        {"id": str(chunk_id), "content": content_by_id.get(str(chunk_id), "")}
-        for chunk_id in raw_ids
-        if chunk_id
-    ]
+    raw_ids = retrieval.get("source_chunk_ids")
+    if not isinstance(raw_ids, list):
+        return []
+    return [{"id": str(chunk_id), "content": ""} for chunk_id in raw_ids if chunk_id]
 
 
 def _config_summary(config: InterviewConfig) -> str:

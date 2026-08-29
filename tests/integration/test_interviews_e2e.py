@@ -681,8 +681,9 @@ def llm_mocks(scenario: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> dict
         context: Any,
         gateway: Any = None,
         skip_type_mix: bool = False,
+        expected_question_type: str | None = None,
     ) -> list[Any]:
-        del config, context, gateway, skip_type_mix
+        del config, context, gateway, skip_type_mix, expected_question_type
         captured_run_id["id"] = run.id
         captured["stages"].append({"stage": "validation"})
         await _emit_audit(

@@ -49,6 +49,7 @@ from uuid import UUID
 from sqlalchemy import func, select
 
 from abridgeai.ai.models import GenerationRun
+from abridgeai.core.db.conflict_mapper import flush_or_conflict
 from abridgeai.core.slug import slugify, unique_slug
 from abridgeai.features.quizzes.api._dto import (
     AttemptScoreDTO,
@@ -211,7 +212,7 @@ async def create_generation_run(
         dedup_key=dedup_key,
     )
     db.add(run)
-    await db.flush()
+    await flush_or_conflict(db)
     await db.refresh(run)
     return GenerationRunDTO.model_validate(run)
 
@@ -302,13 +303,17 @@ async def grade_review_answer(
     qtype = question.question_type
     if qtype in {"multiple_choice", "true_false"}:
         opt_rows = (
-            await db.execute(
-                select(QuizQuestionOption.id).where(
-                    QuizQuestionOption.question_id == question_id,
-                    QuizQuestionOption.is_correct.is_(True),
+            (
+                await db.execute(
+                    select(QuizQuestionOption.id).where(
+                        QuizQuestionOption.question_id == question_id,
+                        QuizQuestionOption.is_correct.is_(True),
+                    )
                 )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         correct_option_ids = list(opt_rows)
     else:
         correct_answer_text = _canonical_answer_text(question)
@@ -396,9 +401,7 @@ async def deep_clone_quiz(
     Returns the new quiz id. Flushes but does not commit; the caller owns the
     surrounding transaction.
     """
-    source = (
-        await db.execute(select(Quiz).where(Quiz.id == source_quiz_id))
-    ).scalar_one_or_none()
+    source = (await db.execute(select(Quiz).where(Quiz.id == source_quiz_id))).scalar_one_or_none()
     if source is None:
         raise ValueError(f"Quiz {source_quiz_id} not found")
 
@@ -504,9 +507,7 @@ async def deep_clone_quiz(
             expected_ef_ceiling=src_q.expected_ef_ceiling,
             source_refs=list(src_q.source_refs or []),
             original_generated_payload=(
-                dict(src_q.original_generated_payload)
-                if src_q.original_generated_payload
-                else None
+                dict(src_q.original_generated_payload) if src_q.original_generated_payload else None
             ),
             imported_from_question_id=src_q.id,
             prompt_format=src_q.prompt_format,
