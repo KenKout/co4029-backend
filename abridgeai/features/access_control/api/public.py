@@ -14,6 +14,7 @@ will be satisfied without exceptions.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID
 
@@ -480,7 +481,60 @@ async def list_user_ids_in_org_unit(db: AsyncSession, org_unit_id: UUID) -> list
     return list((await db.execute(stmt)).scalars().all())
 
 
+@dataclass(frozen=True)
+class InactiveOrgDTO:
+    """One organization that has gone quiet.
+
+    ``last_activity_at`` / ``days_quiet`` are ``None`` when nothing was ever
+    recorded for the tenant. That is a different state from "quiet since
+    March" and the caller must be able to tell them apart — a brand-new
+    organization and an abandoned one both cross the threshold, but only one
+    of them is a problem.
+    """
+
+    id: UUID
+    name: str
+    slug: str
+    last_activity_at: datetime | None
+    days_quiet: int | None
+
+
+async def list_inactive_organizations(
+    db: AsyncSession,
+    *,
+    days: int,
+    now: datetime | None = None,
+    organization_id: UUID | None = None,
+) -> list[InactiveOrgDTO]:
+    """Organizations with no activity in ``days`` days.
+
+    The one definition of tenant inactivity, shared by the operator
+    dashboard's count and the organizations list that count links to. Exposed
+    here because organizations belong to access_control while the surfaces that
+    need this live in admin, and cross-feature traffic goes through the public
+    API rather than reaching into another feature's queries.
+    """
+    rows = await org_queries.list_inactive_organizations(
+        db,
+        now=_now_at(now),
+        days=days,
+        organization_id=organization_id,
+    )
+    return [
+        InactiveOrgDTO(
+            id=row["id"],
+            name=row["name"],
+            slug=row["slug"],
+            last_activity_at=row["last_activity_at"],
+            days_quiet=row["days_quiet"],
+        )
+        for row in rows
+    ]
+
+
 __all__ = [
+    "InactiveOrgDTO",
+    "list_inactive_organizations",
     "get_org_unit_subtree_ids",
     "list_user_ids_in_org_unit",
     "OrgDTO",

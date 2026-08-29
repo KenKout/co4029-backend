@@ -29,6 +29,7 @@ from abridgeai.features.admin.queries import (
     security,
     setting_changes,
     stats,
+    tenants,
     users,
 )
 
@@ -39,5 +40,6 @@ __all__ = [
     "security",
     "setting_changes",
     "stats",
+    "tenants",
     "users",
 ]

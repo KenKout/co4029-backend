@@ -62,6 +62,9 @@ from abridgeai.features.admin.routers import (
     settings_router as admin_settings_router,
 )
 from abridgeai.features.admin.routers import (
+    tenants_router as admin_tenants_router,
+)
+from abridgeai.features.admin.routers import (
     stats_router as admin_stats_router,
 )
 from abridgeai.features.admin.routers import (
@@ -352,6 +355,10 @@ def create_app() -> FastAPI:
     # log — the person who reviews audit trails needs the rollup of what they
     # are reviewing.
     app.include_router(admin_security_router, prefix=API_V1_PREFIX)
+
+    # Tenant operations detail (ADM-042). Org-scoped, checked with
+    # require_org_access like the per-org settings routes.
+    app.include_router(admin_tenants_router, prefix=API_V1_PREFIX)
 
     # T0.28 -- security headers (HSTS, CSP, X-Frame-Options, ...). Added
     # BEFORE the audit-log middleware in source order so it sits INSIDE the

@@ -81,9 +81,7 @@ async def api_latency_trend(
     now: datetime,
 ) -> list[tuple[date, int, float | None, float | None]]:
     """Daily latency percentiles + volume; raw floats, callers round."""
-    rows = (
-        await db.execute(_API_LATENCY_TREND_SQL, {"days": days, "now": now})
-    ).mappings()
+    rows = (await db.execute(_API_LATENCY_TREND_SQL, {"days": days, "now": now})).mappings()
     return [
         (
             row["day"],
@@ -154,7 +152,6 @@ async def operator_dashboard(
         "total_users": int(row["total_users"] or 0),
         "materials_ingested_window": int(row["materials_ingested_window"] or 0),
         "orgs_total": int(row["orgs_total"] or 0),
-        "orgs_inactive_30d": int(row["orgs_inactive_30d"] or 0),
     }
 
 

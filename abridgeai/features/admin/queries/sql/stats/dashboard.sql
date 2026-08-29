@@ -180,52 +180,19 @@ SELECT
                OR c.organization_id = CAST(:organization_id AS uuid))
     ) AS materials_ingested_window,
     --------------------------------------------------------- tenant anomalies
+    -- The inactive-tenant COUNT is deliberately not here. It used to be an
+    -- inlined copy of a four-way NOT EXISTS predicate that the organizations
+    -- list did not have at all, so the dashboard could say "2 inactive" and
+    -- link to a page showing every organization on the platform. Both now read
+    -- ``access_control/queries/sql/inactive_organizations.sql`` through the
+    -- feature's public API (PRD ADM-004 / ADM-045).
     (
         SELECT COUNT(*)
         FROM organizations o
         WHERE o.deleted_at IS NULL
           AND (CAST(:organization_id AS uuid) IS NULL
                OR o.id = CAST(:organization_id AS uuid))
-    ) AS orgs_total,
-    (
-        -- no member login, no course edit, no attempt and no interview in 30d
-        SELECT COUNT(*)
-        FROM organizations o
-        WHERE o.deleted_at IS NULL
-          AND (CAST(:organization_id AS uuid) IS NULL
-               OR o.id = CAST(:organization_id AS uuid))
-          AND NOT EXISTS (
-              SELECT 1
-              FROM organization_memberships om
-              JOIN users u ON u.id = om.user_id
-              WHERE om.organization_id = o.id
-                AND om.deleted_at IS NULL
-                AND u.last_login_at >= b.as_of - INTERVAL '30 days'
-          )
-          AND NOT EXISTS (
-              SELECT 1
-              FROM courses c2
-              WHERE c2.organization_id = o.id
-                AND c2.deleted_at IS NULL
-                AND c2.updated_at >= b.as_of - INTERVAL '30 days'
-          )
-          AND NOT EXISTS (
-              SELECT 1
-              FROM quiz_attempts qa2
-              JOIN quizzes q2 ON q2.id = qa2.quiz_id
-              JOIN courses c3 ON c3.id = q2.course_id
-              WHERE c3.organization_id = o.id
-                AND qa2.started_at >= b.as_of - INTERVAL '30 days'
-          )
-          AND NOT EXISTS (
-              SELECT 1
-              FROM interview_sessions is2
-              JOIN interview_configs ic2 ON ic2.id = is2.interview_config_id
-              JOIN courses c4 ON c4.id = ic2.course_id
-              WHERE c4.organization_id = o.id
-                AND is2.started_at >= b.as_of - INTERVAL '30 days'
-          )
-    ) AS orgs_inactive_30d
+    ) AS orgs_total
 FROM bounds b
 LEFT JOIN top_driver td ON TRUE
 LEFT JOIN slowest sl ON TRUE;

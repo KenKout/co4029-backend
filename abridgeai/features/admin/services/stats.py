@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from abridgeai.core.ttl_cache import TTLCache
+from abridgeai.features.access_control.api import public as access_control_api
 from abridgeai.features.admin.queries import stats as stats_queries
 from abridgeai.features.admin.services import job_metrics
 
@@ -32,6 +33,12 @@ if TYPE_CHECKING:
 # Default dashboard window. Callers may widen or narrow it; every windowed
 # metric in the response moves together so the tiles stay comparable.
 DEFAULT_WINDOW_DAYS = 7
+
+#: Inactivity threshold for the tenant-anomaly count. Fixed at 30 days rather
+#: than following the dashboard window: a tenant being quiet for a 1-day window
+#: is a weekend, not an anomaly, and letting the window drive it would make the
+#: tile mean something different at every setting.
+INACTIVE_ORG_DAYS = 30
 
 _DASHBOARD_TTL_SECONDS = 60.0
 _DASHBOARD_CACHE = TTLCache(max_entries=64, ttl_seconds=_DASHBOARD_TTL_SECONDS)
@@ -77,9 +84,7 @@ def _window_bounds(
     """
     if window_from is not None and window_to is not None:
         start = datetime.combine(window_from, time.min, tzinfo=UTC)
-        end = datetime.combine(
-            window_to + timedelta(days=1), time.min, tzinfo=UTC
-        )
+        end = datetime.combine(window_to + timedelta(days=1), time.min, tzinfo=UTC)
         length = end - start
         previous_start = start - length
         return start, end, previous_start
@@ -136,10 +141,7 @@ async def api_latency_trend(
         days=days,
         now=now or datetime.now(tz=UTC),
     )
-    return [
-        (day, requests, _opt_int(p50), _opt_int(p95))
-        for day, requests, p50, p95 in raw
-    ]
+    return [(day, requests, _opt_int(p50), _opt_int(p95)) for day, requests, p50, p95 in raw]
 
 
 async def operator_dashboard(
@@ -237,6 +239,11 @@ async def _operator_dashboard_uncached(
     api = await stats_queries.api_reliability(
         db, as_of=now, window_start=window_start, window_end=window_end
     )
+    # Same rows the Organizations list filters to, so the count and its
+    # destination cannot drift (ADM-045).
+    inactive_orgs = await access_control_api.list_inactive_organizations(
+        db, days=INACTIVE_ORG_DAYS, now=now, organization_id=organization_id
+    )
 
     requests_total = int(api["requests_total"] or 0)
     requests_5xx = int(api["requests_5xx"] or 0)
@@ -299,12 +306,13 @@ async def _operator_dashboard_uncached(
         "materials_ingested_window": rollup["materials_ingested_window"],
         # -- tenant anomalies --------------------------------------------
         "orgs_total": rollup["orgs_total"],
-        "orgs_inactive_30d": rollup["orgs_inactive_30d"],
+        "orgs_inactive_30d": len(inactive_orgs),
     }
 
 
 __all__ = [
     "DEFAULT_WINDOW_DAYS",
+    "INACTIVE_ORG_DAYS",
     "active_users",
     "content_breakdown",
     "operator_dashboard",
