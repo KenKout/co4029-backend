@@ -7,15 +7,14 @@ business rules + ORM writes for config / outcome / question CRUD,
 manual edits, and ARQ enqueue.
 
 Discipline matches T5.13 (quiz authoring): the service flushes, the
-router commits — except :func:`start_generation_run` and
-:func:`regenerate_question`, which commit inline because the ARQ
-worker reads the new ``GenerationRun`` row out of band and must see
-the row before the job dequeues.
+router commits — except :func:`start_generation_run`, which commits
+inline because the ARQ worker reads the new ``GenerationRun`` row out of
+band and must see the row before the job dequeues.
 
 Locked task names (mirrored by T6.13 worker registration):
 
-* ``run_interview_generation_task`` — fan-out for full + per-question
-  regeneration runs.
+* ``run_interview_generation_task`` — full interview generation runs
+  (per-question regeneration was retired; see the router 410).
 """
 
 from __future__ import annotations
@@ -493,6 +492,10 @@ async def update_question(
     published_freeze.assert_questions_editable(config)
     question = await _require_question(db, config_id, question_id)
     data = payload.model_dump(exclude_unset=True)
+    if data.get("prompt_text", question.prompt_text) is None:
+        raise AppError("Question prompt is required")
+    if data.get("question_type", question.question_type) is None:
+        raise AppError("Question type is required")
     if "linked_outcome_id" in data and data["linked_outcome_id"] is not None:
         await _require_outcome(db, config_id, data["linked_outcome_id"])
     prompt_changed = "prompt_text" in data and (data["prompt_text"] or "") != question.prompt_text
@@ -651,44 +654,6 @@ async def start_generation_run(
     return run
 
 
-async def regenerate_question(
-    db: AsyncSession,
-    config_id: UUID,
-    question_id: UUID,
-    actor: CurrentUser,
-    *,
-    arq_pool: object | None = None,
-) -> GenerationRunDTO:
-    """Per-question regeneration run + ARQ enqueue.
-
-    Worker dispatcher reads ``config_json["question_id"]`` to route to
-    the per-question regeneration path. Task name matches the canonical
-    worker function (``run_interview_generation_task``).
-    """
-    config = await _require_config(db, config_id)
-    published_freeze.assert_questions_editable(config)
-    question = await _require_question(db, config_id, question_id)
-    run = await quizzes_public.create_generation_run(
-        db,
-        kind="interview",
-        source_scope_kind="module",
-        course_id=config.course_id,
-        module_id=config.module_id,
-        requested_by=actor.user_id,
-        config_json={
-            "interview_config_id": str(config.id),
-            "question_id": str(question.id),
-        },
-    )
-    await db.commit()
-
-    if arq_pool is not None:
-        await arq_pool.enqueue_job(  # type: ignore[attr-defined]
-            _RUN_INTERVIEW_GENERATION_TASK, actor.user_id, run.id
-        )
-    return run
-
-
 async def get_generation_run(
     db: AsyncSession, config_id: UUID, run_id: UUID
 ) -> GenerationRunDTO | None:
@@ -821,7 +786,6 @@ __all__ = [
     "list_question_bank",
     "publish_interview_config",
     "update_question_bank_item",
-    "regenerate_question",
     "start_generation_run",
     "unarchive_interview_config",
     "update_interview_config",

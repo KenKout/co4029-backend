@@ -60,6 +60,9 @@ from abridgeai.features.interviews.models import (
     InterviewConfig,
     InterviewSession,
 )
+from abridgeai.features.interviews.queries import (
+    authoring as authoring_queries,
+)
 from abridgeai.features.interviews.services import (
     authoring as authoring_service,
 )
@@ -68,9 +71,6 @@ from abridgeai.features.interviews.services import (
 )
 from abridgeai.features.interviews.services import (
     taking as taking_service,
-)
-from abridgeai.features.interviews.queries import (
-    authoring as authoring_queries,
 )
 from abridgeai.features.quizzes.api.public import GenerationRunDTO
 
@@ -289,6 +289,7 @@ async def _create_published_config(
     outcomes: int = 1,
     max_attempts: int | None = None,
     cooldown_hours: int | None = None,
+    status: str = "published",
 ) -> dict[str, Any]:
     config_id = uuid.uuid4()
     question_ids = [uuid.uuid4() for _ in range(questions)]
@@ -296,13 +297,14 @@ async def _create_published_config(
     async with engine.begin() as conn:
         await conn.execute(
             text(
-                "INSERT INTO interview_configs (id, course_id, module_id, title, status, created_by, max_attempts, cooldown_hours, slug) VALUES (:id, :c, :m, 'Pub Interview', 'published', :t, :max_attempts, :cooldown_hours, 'slug-' || uuid_generate_v4()::text);"
+                "INSERT INTO interview_configs (id, course_id, module_id, title, status, created_by, max_attempts, cooldown_hours, slug) VALUES (:id, :c, :m, 'Pub Interview', :status, :t, :max_attempts, :cooldown_hours, 'slug-' || uuid_generate_v4()::text);"
             ),
             {
                 "id": config_id,
                 "c": course_id,
                 "m": module_id,
                 "t": teacher_id,
+                "status": status,
                 "max_attempts": max_attempts,
                 "cooldown_hours": cooldown_hours,
             },
@@ -874,6 +876,7 @@ async def test_start_generation_run_enqueues_arq(
         teacher_id=scenario["teacher_id"],
         questions=0,
         outcomes=0,
+        status="draft",
     )
     request = _CreatePayload(
         mode="topic",

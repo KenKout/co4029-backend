@@ -175,13 +175,7 @@ def require_question_authoring_access(
 def require_outcome_authoring_access(
     *perm_codes: str,
 ) -> SubResourceDependency:
-    """Walks ``outcome_id → interview_config → course`` and enforces course perms.
-
-    The path parameter MUST be named ``outcome_id``. If a sibling
-    ``config_id`` path parameter is also present it is cross-checked
-    against the outcome's parent — a request smuggling a foreign
-    ``config_id`` is rejected with 404 to avoid leaking existence.
-    """
+    """Walk ``outcome_id → interview_config → course`` and cross-check config."""
     codes = perm_codes or _DEFAULT_AUTHORING_PERMS
 
     async def dependency(
@@ -200,10 +194,7 @@ def require_outcome_authoring_access(
                 select(InterviewConfig).where(InterviewConfig.id == outcome.interview_config_id)
             )
         ).scalar_one_or_none()
-        if config is None:
-            raise _not_found("interview_outcome", outcome_id)
-        path_config = request.path_params.get("config_id")
-        if path_config is not None and str(path_config) != str(config.id):
+        if config is None or str(request.path_params.get("config_id")) != str(config.id):
             raise _not_found("interview_outcome", outcome_id)
         course = await courses_public.get_course_by_id(db, config.course_id)
         if course is None:

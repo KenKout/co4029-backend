@@ -55,6 +55,9 @@ from abridgeai.features.interviews.queries.authoring import (
     list_outcomes_for_config,
     next_question_position,
 )
+from abridgeai.features.interviews.services.published_freeze import (
+    assert_questions_editable,
+)
 from abridgeai.features.quizzes.api import public as quizzes_public
 
 if TYPE_CHECKING:
@@ -187,6 +190,8 @@ async def run_interview_generation(
         await _write_progress(
             db, state, phase="saving", accepted=len(accepted), target=target_count
         )
+        await db.refresh(config)
+        assert_questions_editable(config)
         await _persist_questions(
             db,
             config=config,
