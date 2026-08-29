@@ -44,7 +44,7 @@ import abridgeai.features.interviews.models  # noqa: F401  -- T6.1 registers int
 import abridgeai.features.materials.models  # noqa: F401  -- register learning_* tables
 import abridgeai.features.quizzes.models  # noqa: F401  -- register quiz_attempts
 from abridgeai.core.config import get_settings
-from abridgeai.core.exceptions import AppError, ForbiddenError
+from abridgeai.core.exceptions import AppError, ForbiddenError, NotFoundError
 from abridgeai.core.security import CurrentUser
 from abridgeai.features.interviews.ai.stages.evaluation.outcome_verdicts import (
     OutcomeVerdict,
@@ -1076,6 +1076,88 @@ async def test_start_generation_run_rejects_foreign_scope(
             arq_pool.enqueue_job.assert_awaited_once()
     finally:
         await _cleanup_foreign_scope(engine, foreign_course, foreign_module, foreign_lesson)
+
+
+async def test_add_question_rejects_outcome_not_in_this_config(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict[str, Any],
+) -> None:
+    """Manual questions must link to an outcome of the SAME config.
+
+    A cross-config outcome passes the FK (the row exists) but corrupts the
+    rubric; a fake UUID would fail the FK with an IntegrityError. Both are
+    rejected up front with NotFoundError, mirroring update_question.
+    """
+    seeded = await _create_published_config(
+        engine,
+        course_id=scenario["course_id"],
+        module_id=scenario["module_id"],
+        teacher_id=scenario["teacher_id"],
+        questions=0,
+        outcomes=1,
+        status="draft",
+    )
+    own_outcome_id = seeded["outcome_ids"][0]
+    foreign_config_id = uuid.uuid4()
+    foreign_outcome_id = uuid.uuid4()
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO interview_configs "
+                "(id, course_id, module_id, title, status, created_by, slug) "
+                "VALUES (:id, :c, :m, 'Foreign Config', 'draft', :t, :slug)"
+            ),
+            {
+                "id": foreign_config_id,
+                "c": scenario["course_id"],
+                "m": scenario["module_id"],
+                "t": scenario["teacher_id"],
+                "slug": f"foreign-cfg-{scenario['org_id'].hex[:8]}",
+            },
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO interview_outcomes "
+                "(id, interview_config_id, position, outcome_text, outcome_type, "
+                "importance_weight) "
+                "VALUES (:id, :cfg, 1, 'Foreign Outcome', 'knowledge', 3)"
+            ),
+            {"id": foreign_outcome_id, "cfg": foreign_config_id},
+        )
+    base = {"prompt_text": "Linked to a foreign outcome?", "question_type": "technical"}
+    try:
+        async with session_factory() as session:
+            with pytest.raises(NotFoundError, match="not found"):
+                await authoring_service.add_question(
+                    session,
+                    seeded["config_id"],
+                    _CreatePayload(linked_outcome_id=foreign_outcome_id, **base),
+                    _actor(scenario["teacher_id"]),
+                )
+            with pytest.raises(NotFoundError, match="not found"):
+                await authoring_service.add_question(
+                    session,
+                    seeded["config_id"],
+                    _CreatePayload(linked_outcome_id=uuid.uuid4(), **base),
+                    _actor(scenario["teacher_id"]),
+                )
+            # A link to the config's OWN outcome still works.
+            question = await authoring_service.add_question(
+                session,
+                seeded["config_id"],
+                _CreatePayload(linked_outcome_id=own_outcome_id, **base),
+                _actor(scenario["teacher_id"]),
+            )
+            assert question.linked_outcome_id == own_outcome_id
+    finally:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("DELETE FROM interview_outcomes WHERE id = :id"), {"id": foreign_outcome_id}
+            )
+            await conn.execute(
+                text("DELETE FROM interview_configs WHERE id = :id"), {"id": foreign_config_id}
+            )
 
 
 @pytest.mark.asyncio

@@ -404,9 +404,12 @@ async def add_question(
     data = payload.model_dump(exclude_unset=True)
     if not str(data.get("prompt_text", "")).strip():
         raise AppError("Question prompt is required")
+    linked_outcome_id = data.get("linked_outcome_id")
+    if linked_outcome_id is not None:
+        await _require_outcome(db, config_id, linked_outcome_id)
     question = InterviewQuestion(
         interview_config_id=config_id,
-        linked_outcome_id=data.get("linked_outcome_id"),
+        linked_outcome_id=linked_outcome_id,
         position=data.get("position") or next_position,
         question_type=data["question_type"],
         prompt_text=data["prompt_text"].strip(),
@@ -435,12 +438,10 @@ async def check_question_duplicate(
 ) -> dict[str, Any]:
     """Report whether ``prompt_text`` duplicates something already in the bank.
 
-    A read-only advisory check for the authoring UI: it never blocks or mutates
-    anything, so a teacher who disagrees with the verdict can still save. Returns
-    the verdict as a dict (see :class:`DuplicateVerdict`) plus ``enabled`` so the
-    caller can distinguish "feature off" from "nothing similar found".
-
-    Returns ``enabled: False`` without any provider call when
+    A read-only advisory check for the authoring UI: never blocks or
+    mutates; returns the verdict (see :class:`DuplicateVerdict`) plus
+    ``enabled`` so callers can distinguish "feature off" from "no match".
+    Returns ``enabled: False`` without a provider call when
     ``interview_dedup_enabled`` is off.
     """
     await _require_config(db, config_id)
@@ -461,10 +462,8 @@ async def check_question_duplicate(
 async def _store_question_embedding(db: AsyncSession, question: InterviewQuestion) -> None:
     """Best-effort: persist the question's vector so it can be matched later.
 
-    Thin single-row wrapper over :func:`dedup.store_question_embeddings`, which
-    owns the feature gate, the pgvector text formatting and the swallow-and-log
-    policy — the generation pipeline needs the batch form, and two copies of that
-    UPDATE is how the two paths drifted apart in the first place.
+    Thin single-row wrapper over :func:`dedup.store_question_embeddings`
+    (the generation pipeline needs the batch form).
     """
     await store_question_embeddings(
         db,
