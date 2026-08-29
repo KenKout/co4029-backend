@@ -92,6 +92,23 @@ async def content_breakdown(
     return await stats_queries.content_breakdown(db, organization_id=organization_id)
 
 
+async def api_latency_trend(
+    db: AsyncSession,
+    *,
+    days: int,
+    now: datetime | None = None,
+) -> list[tuple[date, int, int | None, int | None]]:
+    raw = await stats_queries.api_latency_trend(
+        db,
+        days=days,
+        now=now or datetime.now(tz=UTC),
+    )
+    return [
+        (day, requests, _opt_int(p50), _opt_int(p95))
+        for day, requests, p50, p95 in raw
+    ]
+
+
 async def operator_dashboard(
     db: AsyncSession,
     *,

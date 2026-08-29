@@ -1091,6 +1091,102 @@ async def test_active_users_trend(
     assert points[str(labels["d3"])] == 2  # student + manager pinned sessions
 
 
+async def test_api_latency_trend(
+    engine: AsyncEngine,
+    client: httpx.AsyncClient,
+    seeded_users: SeededUsers,
+) -> None:
+    """Latency trend: per-day p50/p95 from http_audit_log, zero days gap-free.
+
+    Rows are pinned 3 days back — the audit middleware only writes *now*, so
+    that day's set is exactly the injected one and the percentiles are
+    deterministic: latencies [10, 30] → p50 = 20, p95 = 10 + 0.95·20 = 29
+    (percentile_cont linear interpolation).
+    """
+    token, _ = await _bearer(engine, seeded_users.admin_id)
+    three_days_ago = datetime.now(tz=UTC) - timedelta(days=3)
+    inserted_ids: list[str] = []
+    async with engine.begin() as conn:
+        # Isolate the window: earlier test runs leave http_audit_log rows on
+        # past days (every API call the suite makes is logged), so the pinned
+        # day would otherwise carry those too. We purge only days BEFORE
+        # today — today's rows belong to concurrent tests' middleware writes.
+        await conn.execute(
+            text(
+                "DELETE FROM http_audit_log "
+                "WHERE created_at::date < now()::date"
+            )
+        )
+        for offset_min, latency in ((10, 10), (40, 30)):
+            row_id = str(uuid.uuid4())
+            inserted_ids.append(row_id)
+            await conn.execute(
+                text(
+                    "INSERT INTO http_audit_log "
+                    "(id, request_id, method, path, status_code, latency_ms, "
+                    "created_at) "
+                    "VALUES (:id, :rid, 'GET', '/api/v1/test', 200, :lat, "
+                    ":created)"
+                ),
+                {
+                    "id": row_id,
+                    "rid": str(uuid.uuid4()),
+                    "lat": latency,
+                    "created": three_days_ago + timedelta(minutes=offset_min),
+                },
+            )
+        # One pinned row today as well. The endpoint's snapshot runs before
+        # the middleware logs the trend request itself, so "today" must be
+        # seeded explicitly to have deterministic content.
+        today_row = str(uuid.uuid4())
+        inserted_ids.append(today_row)
+        await conn.execute(
+            text(
+                "INSERT INTO http_audit_log "
+                "(id, request_id, method, path, status_code, latency_ms, "
+                "created_at) "
+                "VALUES (:id, :rid, 'GET', '/api/v1/test', 200, 150, now())"
+            ),
+            {
+                "id": today_row,
+                "rid": str(uuid.uuid4()),
+            },
+        )
+    try:
+        resp = await client.get(
+            "/api/v1/admin/stats/latency/trend?days=7",
+            headers=_auth(token),
+        )
+    finally:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("DELETE FROM http_audit_log WHERE id = ANY(:ids)"),
+                {"ids": inserted_ids},
+            )
+    assert resp.status_code == 200, resp.text
+    points = {p["day"]: p for p in resp.json()["points"]}
+    assert len(points) == 7  # gap-free: one point per day in the window
+    async with engine.begin() as conn:
+        labels = (
+            await conn.execute(
+                text(
+                    "SELECT now()::date AS today, "
+                    "(now() - interval '3 days')::date AS d3"
+                )
+            )
+        ).mappings().one()
+    pinned = points[str(labels["d3"])]
+    assert pinned["requests_total"] == 2
+    assert pinned["p50_latency_ms"] == 20
+    assert pinned["p95_latency_ms"] == 29  # rounded from 28.999...
+    # Today carries the single seeded row (the middleware logs the trend
+    # request itself only after the response snapshot was taken).
+    today = points[str(labels["today"])]
+    assert today["requests_total"] == 1
+    assert today["p50_latency_ms"] == 150
+    assert today["p95_latency_ms"] == 150
+
+
 def test_router_metadata() -> None:
     assert stats_router.prefix == "/admin/stats"
     assert audit_router.prefix == "/admin/audit"
@@ -1100,6 +1196,7 @@ def test_router_metadata() -> None:
         "/admin/stats/overview",
         "/admin/stats/active-users",
         "/admin/stats/active-users/trend",
+        "/admin/stats/latency/trend",
         "/admin/stats/content",
         "/admin/stats/dashboard",
     }

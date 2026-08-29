@@ -63,6 +63,18 @@ class ActiveUsersTrendOut(BaseModel):
     points: list[ActiveUsersTrendPoint]
 
 
+class LatencyTrendPoint(BaseModel):
+    day: date
+    requests_total: int
+    # NULL on a zero-traffic day — no fabricated 0ms line.
+    p50_latency_ms: int | None = None
+    p95_latency_ms: int | None = None
+
+
+class LatencyTrendOut(BaseModel):
+    points: list[LatencyTrendPoint]
+
+
 class ContentOut(BaseModel):
     """Content inventory. Processing-job status is deliberately absent: jobs
     live in the Operations surface only (PRD ADM-004 / section 2 IA rule), so
@@ -179,6 +191,33 @@ async def get_active_users_trend(
     raw = await stats_service.active_users_trend(db, organization_id=org_id, days=days)
     points = [ActiveUsersTrendPoint(date=d, count=n) for d, n in raw]
     return ActiveUsersTrendOut(points=points)
+
+
+@router.get("/latency/trend", response_model=LatencyTrendOut)
+async def get_api_latency_trend(
+    user: Annotated[CurrentUser, Depends(_REQUIRE_STATS)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    days: Annotated[int, Query(ge=1, le=365)] = 30,
+) -> LatencyTrendOut:
+    """Daily p50/p95 API latency over the lookback window.
+
+    Drives the latency chart on the stats overview, mirroring the
+    active-users trend. GLOBAL scope — ``http_audit_log`` does not carry
+    organization (see ``api_reliability.sql``). Every day in the window is
+    returned (zero-traffic days included) so the chart is continuous.
+    """
+    points = await stats_service.api_latency_trend(db, days=days)
+    return LatencyTrendOut(
+        points=[
+            LatencyTrendPoint(
+                day=d,
+                requests_total=r,
+                p50_latency_ms=p50,
+                p95_latency_ms=p95,
+            )
+            for d, r, p50, p95 in points
+        ]
+    )
 
 
 @router.get("/content", response_model=ContentOut)

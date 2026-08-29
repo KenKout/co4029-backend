@@ -24,6 +24,7 @@ _ACTIVE_USERS_TREND_SQL = _load("stats/active_users_trend.sql")
 _CONTENT_SQL = _load("stats/content.sql")
 _DASHBOARD_SQL = _load("stats/dashboard.sql")
 _API_RELIABILITY_SQL = _load("stats/api_reliability.sql")
+_API_LATENCY_TREND_SQL = _load("stats/api_latency_trend.sql")
 
 
 async def overview_counts(db: AsyncSession, *, organization_id: UUID | None) -> dict[str, int]:
@@ -71,6 +72,27 @@ async def active_users_trend(
         )
     ).mappings()
     return [(row["day"], int(row["count"] or 0)) for row in rows]
+
+
+async def api_latency_trend(
+    db: AsyncSession,
+    *,
+    days: int,
+    now: datetime,
+) -> list[tuple[date, int, float | None, float | None]]:
+    """Daily latency percentiles + volume; raw floats, callers round."""
+    rows = (
+        await db.execute(_API_LATENCY_TREND_SQL, {"days": days, "now": now})
+    ).mappings()
+    return [
+        (
+            row["day"],
+            int(row["requests_total"] or 0),
+            row["p50_latency_ms"],
+            row["p95_latency_ms"],
+        )
+        for row in rows
+    ]
 
 
 async def content_breakdown(db: AsyncSession, *, organization_id: UUID | None) -> dict[str, Any]:
