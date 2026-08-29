@@ -9,7 +9,7 @@ the operator escalate via task management if a worker still cannot drain it.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
@@ -70,6 +70,42 @@ async def get_job(db: AsyncSession, *, job_id: UUID) -> dict[str, Any]:
     return job
 
 
+async def job_investigation(
+    db: AsyncSession,
+    *,
+    job_id: UUID,
+    ai_call_limit: int = 50,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """One job with everything needed to investigate it (PRD ADM-013/014).
+
+    Assembles the base row, the owner resolved at read time, the derived
+    timings, the per-stage AI rollup and the individual calls -- the four
+    surfaces an operator previously had to visit by hand, copying the job id
+    between them.
+
+    Generation runs share the detail endpoint's id space but are not
+    ``processing_jobs`` rows, so ``context`` comes back empty for them and the
+    response says the owner is unknown rather than inventing one.
+    """
+    job = await get_job(db, job_id=job_id)
+    evaluated_at = now or datetime.now(tz=UTC)
+    context = await processing_queries.job_context(
+        db, job_id=job_id, now=evaluated_at
+    )
+    stages = await processing_queries.job_ai_stages(db, job_id=job_id)
+    calls = await processing_queries.job_ai_calls(
+        db, job_id=job_id, limit=ai_call_limit
+    )
+    return {
+        "job": job,
+        "context": context or {},
+        "stages": stages,
+        "ai_calls": calls,
+        "as_of": evaluated_at,
+    }
+
+
 async def retry_failed_job(
     db: AsyncSession,
     *,
@@ -102,4 +138,11 @@ async def retry_failed_job(
     return refreshed
 
 
-__all__ = ["get_job", "list_jobs", "queue_depth", "retry_failed_job", "status_counts_since"]
+__all__ = [
+    "get_job",
+    "job_investigation",
+    "list_jobs",
+    "queue_depth",
+    "retry_failed_job",
+    "status_counts_since",
+]

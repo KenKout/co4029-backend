@@ -6,6 +6,8 @@ Each submodule corresponds to a router slice:
   shared by the dashboard and the processing surface (ADM-004).
 * :mod:`setting_changes` -- append-only audit trail behind the controlled
   runtime-config change flow (ADM-031/033).
+* :mod:`security` -- failed logins / denied requests / privileged accounts
+  rollup (ADM-020).
 * :mod:`stats`      -- overview / active-users / content / health counts.
 * :mod:`audit`      -- role-change + data-change + http-audit lookups.
 * :mod:`processing` -- ARQ queue depth + processing_jobs triage.
@@ -24,6 +26,7 @@ from abridgeai.features.admin.queries import (
     audit,
     job_metrics,
     processing,
+    security,
     setting_changes,
     stats,
     users,
@@ -33,6 +36,7 @@ __all__ = [
     "audit",
     "job_metrics",
     "processing",
+    "security",
     "setting_changes",
     "stats",
     "users",

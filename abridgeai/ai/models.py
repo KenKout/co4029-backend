@@ -32,6 +32,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from abridgeai.core.db import PGUUID, Base, UUIDPrimaryKeyMixin
+from abridgeai.core.observability.logging import current_request_id
 from abridgeai.core.db.mixins import TimestampMixin
 
 _PROCESSING_JOB_ENTITY_CHECK = (
@@ -76,6 +77,13 @@ class AIModelCall(UUIDPrimaryKeyMixin, Base):
         PGUUID(as_uuid=True),
         ForeignKey("processing_jobs.id", ondelete="CASCADE"),
         index=True,
+    )
+    # Same correlation id as ``ProcessingJob.request_id``. Present on both
+    # because not every AI call belongs to a job — session-runtime calls
+    # attribute via stage_name alone — and those still want to be findable
+    # from the request that triggered them.
+    request_id: Mapped[uuid.UUID | None] = mapped_column(
+        PGUUID(as_uuid=True), nullable=True, default=current_request_id
     )
     role: Mapped[str | None] = mapped_column(String(30))
     tier: Mapped[str | None] = mapped_column(String(20))
@@ -127,6 +135,15 @@ class ProcessingJob(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
     entity_type: Mapped[str] = mapped_column(String(30), nullable=False)
     entity_id: Mapped[uuid.UUID] = mapped_column(PGUUID(as_uuid=True), nullable=False, index=True)
+    # Correlation to the HTTP request that enqueued this job, so an operator
+    # can walk job -> request -> audit trail without copying UUIDs between
+    # screens (ADM-013/014). Defaulted from the ambient request context rather
+    # than passed in, so every enqueue site gets it without being edited — and
+    # so a new one cannot forget. NULL off-request (worker ticks, CLI, tests),
+    # which is a real state and not a gap to be filled with a fake id.
+    request_id: Mapped[uuid.UUID | None] = mapped_column(
+        PGUUID(as_uuid=True), nullable=True, default=current_request_id
+    )
     job_type: Mapped[str] = mapped_column(String(40), nullable=False)
     status: Mapped[str] = mapped_column(
         String(20), nullable=False, server_default=text("'pending'")

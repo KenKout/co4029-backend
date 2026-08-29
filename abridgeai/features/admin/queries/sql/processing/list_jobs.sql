@@ -15,7 +15,8 @@ SELECT
     pj.started_at       AS started_at,
     pj.finished_at      AS finished_at,
     pj.created_at       AS created_at,
-    pj.updated_at       AS updated_at
+    pj.updated_at       AS updated_at,
+    pj.request_id       AS request_id
 FROM processing_jobs pj
 WHERE pj.updated_at >= CAST(:since AS timestamptz)
   AND (CAST(:until AS timestamptz) IS NULL OR pj.updated_at <= CAST(:until AS timestamptz))
@@ -39,7 +40,8 @@ SELECT
     gr.started_at                            AS started_at,
     gr.finished_at                           AS finished_at,
     gr.created_at                            AS created_at,
-    gr.updated_at                            AS updated_at
+    gr.updated_at                            AS updated_at,
+    CAST(NULL AS uuid)                       AS request_id
 FROM generation_runs gr
 WHERE gr.updated_at >= CAST(:since AS timestamptz)
   AND (CAST(:until AS timestamptz) IS NULL OR gr.updated_at <= CAST(:until AS timestamptz))

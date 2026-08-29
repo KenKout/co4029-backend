@@ -13,10 +13,16 @@ from __future__ import annotations
 
 import logging
 import sys
+import uuid
 from typing import Any
 
 import structlog
-from structlog.contextvars import bind_contextvars, clear_contextvars, merge_contextvars
+from structlog.contextvars import (
+    bind_contextvars,
+    clear_contextvars,
+    get_contextvars,
+    merge_contextvars,
+)
 from structlog.types import Processor
 
 from abridgeai.core.config import get_settings
@@ -149,6 +155,26 @@ def bind_request_context(**values: object) -> None:
     automatically — no need to pass them at the call site of ``log.info(...)``.
     """
     bind_contextvars(**values)
+
+
+def current_request_id() -> uuid.UUID | None:
+    """The request id bound to this task, when there is one.
+
+    Read back out of the same structlog contextvars the audit middleware binds
+    on the way in, so anything created while serving a request can stamp itself
+    with that request's id without the id being threaded through every call
+    signature. Returns ``None`` off-request (a worker tick, a CLI script, a
+    test) — absence is a real answer and callers must keep it nullable.
+    """
+    raw = get_contextvars().get("request_id")
+    if not isinstance(raw, str):
+        return None
+    try:
+        return uuid.UUID(raw)
+    except ValueError:
+        # Bound by something that did not put a UUID there. Not worth raising
+        # from a logging helper; the correlation is simply unavailable.
+        return None
 
 
 def clear_request_context() -> None:

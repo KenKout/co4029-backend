@@ -194,10 +194,35 @@ async def search_http_audit(
         Query(description="SQL LIKE pattern, e.g. '/api/v1/admin/%'."),
     ] = None,
     limit: Annotated[int, Query(ge=1, le=500)] = 100,
+    reveal: Annotated[
+        bool,
+        Query(
+            description=(
+                "Return unmasked IP addresses. Requires system.administer. "
+                "The request itself is recorded in this log."
+            )
+        ),
+    ] = False,
 ) -> list[HttpAuditRow]:
+    """Request log search. IPs are masked by default (ADM-024).
+
+    Scanning this log is a pattern-finding exercise and a /16 answers it. Full
+    addresses need a specific target and a reason, so they are behind
+    ``reveal`` and the platform-administrator permission — a caller holding
+    only ``audit.read`` never receives one.
+    """
+    if reveal and not _user.has_permission("system.administer"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "error": "forbidden",
+                "message": "unmasking audit IP addresses requires system.administer",
+            },
+        )
     try:
         rows = await audit_service.http_audit_search(
             db,
+            reveal=reveal,
             since=since,
             user_id=user_id,
             path_pattern=path_pattern,
