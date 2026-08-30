@@ -523,3 +523,50 @@ async def test_output_guard_mode_matrix(
     assert result.text == expected_text
     assert result.output_leakage_blocked is expected_blocked
     assert len(events) == expected_events
+
+
+@pytest.mark.asyncio
+async def test_output_guard_force_record_only_keeps_text_and_records_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    protected = "The protected reference answer contains durable logging details."
+    events: list[dict[str, Any]] = []
+
+    async def _protected(*args: Any, **kwargs: Any) -> list[ProtectedContent]:
+        del args, kwargs
+        return [ProtectedContent(category="model_answer", text=protected)]
+
+    async def _record(*args: Any, **kwargs: Any) -> bool:
+        del args
+        events.append(kwargs)
+        return True
+
+    monkeypatch.setattr(
+        security_service,
+        "get_settings",
+        lambda: SimpleNamespace(interview_security_guard_mode="enforce"),
+    )
+    monkeypatch.setattr(security_service, "protected_content_for_config", _protected)
+    monkeypatch.setattr(security_service, "record_security_event", _record)
+    result = await security_service.guard_student_output(
+        _FakeDB(),  # type: ignore[arg-type]
+        session_id=uuid4(),
+        config_id=uuid4(),
+        turn_key="gap-report-record-only",
+        proposed_text=protected,
+        fallback_text="Safe deterministic fallback.",
+        allowed_question_ids=[],
+        assessment=assess_by_rules("A benign academic answer."),
+        action=SecurityAction.ALLOW,
+        attempt_count=0,
+        force_record_only=True,
+    )
+
+    # Even in enforce mode, record-only conveys the proposed text untouched
+    # (the gap-report boundary must always show the AI feedback), while the
+    # leakage event is still persisted for audit.
+    assert result.text == protected
+    assert result.output_leakage_blocked is True
+    assert result.output_fallback_used is False
+    assert len(events) == 1
+    assert events[0]["fallback_status"] is False

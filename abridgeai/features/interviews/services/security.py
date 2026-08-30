@@ -292,8 +292,16 @@ async def guard_student_output(
     action: SecurityAction,
     attempt_count: int,
     turn_id: str | None = None,
+    force_record_only: bool = False,
 ) -> GuardedOutput:
-    """Apply the output guard immediately before persistence/serialization."""
+    """Apply the output guard immediately before persistence/serialization.
+
+    ``force_record_only`` downgrades even ``enforce`` mode to record-only for
+    this single call: the leakage event is still persisted/emitted for audit,
+    but ``proposed_text`` is returned unmodified and no fallback is
+    substituted. Used by the gap-report boundary, where product decisions
+    require the learner-facing AI feedback to always be displayed.
+    """
     mode = get_settings().interview_security_guard_mode
     if mode == "off":
         return GuardedOutput(proposed_text, False, False, None)
@@ -307,7 +315,7 @@ async def guard_student_output(
     if not leakage.blocked:
         return GuardedOutput(proposed_text, False, False, None)
 
-    enforcing = mode == "enforce"
+    enforcing = mode == "enforce" and not force_record_only
     await record_security_event(
         db,
         session_id=session_id,
@@ -321,7 +329,14 @@ async def guard_student_output(
         protected_content_category=leakage.protected_content_category,
     )
     if not enforcing:
-        return GuardedOutput(proposed_text, False, False, leakage.protected_content_category)
+        return GuardedOutput(
+            proposed_text,
+            # force_record_only still reports the detection so callers can
+            # distinguish "flagged but displayed" from a clean pass.
+            output_leakage_blocked=force_record_only,
+            output_fallback_used=False,
+            protected_content_category=leakage.protected_content_category,
+        )
 
     fallback_check = assess_output_leakage(fallback_text, protected)
     safe_text = fallback_text

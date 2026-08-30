@@ -659,10 +659,17 @@ async def _persist_gap_report(
         assessment=assessment,
         action=SecurityAction.ALLOW,
         attempt_count=0,
+        # Product decision: the learner-facing AI feedback is ALWAYS shown to
+        # the student, so the gap-report boundary is record-only — leakage is
+        # still persisted/audited as a security event, but the feedback itself
+        # is never substituted with the fallback text.
+        force_record_only=True,
     )
     report_json = dict(draft.report_json)
     student_summary = draft.student_summary
-    if guarded.output_fallback_used:
+    if guarded.output_fallback_used and guarded.output_leakage_blocked:
+        # Unreachable today (force_record_only above) — kept as a defensive
+        # backstop in case the boundary is ever switched back to enforcing.
         student_summary = guarded.text
         report_json["study_plan"] = []
         report_json["strengths"] = []
