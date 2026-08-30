@@ -1584,6 +1584,143 @@ async def test_nonsemantic_question_edit_keeps_variant_group(
     assert group_ids == [group_id] * 4
 
 
+@pytest.mark.asyncio
+async def test_approve_variants_stamps_whole_group(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict[str, Any],
+) -> None:
+    seeded = await _create_published_config(
+        engine,
+        course_id=scenario["course_id"],
+        module_id=scenario["module_id"],
+        teacher_id=scenario["teacher_id"],
+        questions=4,
+        outcomes=1,
+        status="draft",
+    )
+    group_id = uuid.uuid4()
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "UPDATE interview_questions SET variant_group_id=:group_id, "
+                "linked_outcome_id=:outcome_id "
+                "WHERE interview_config_id=:config_id"
+            ),
+            {
+                "group_id": group_id,
+                "outcome_id": seeded["outcome_ids"][0],
+                "config_id": seeded["config_id"],
+            },
+        )
+        await conn.execute(
+            text(
+                "UPDATE interview_questions SET review_status='pending' "
+                "WHERE interview_config_id=:config_id"
+            ),
+            {"config_id": seeded["config_id"]},
+        )
+
+    async with session_factory() as session:
+        approved = await authoring_service.approve_question_variants(
+            session,
+            seeded["config_id"],
+            seeded["question_ids"][0],
+            _actor(scenario["teacher_id"]),
+        )
+        await session.commit()
+    assert approved == 4
+
+    async with session_factory() as session:
+        rows = (
+            await session.execute(
+                text(
+                    "SELECT review_status, reviewed_by, reviewed_at "
+                    "FROM interview_questions "
+                    "WHERE interview_config_id=:config_id ORDER BY position"
+                ),
+                {"config_id": seeded["config_id"]},
+            )
+        ).all()
+    assert all(row.review_status == "approved" for row in rows)
+    assert all(row.reviewed_by == scenario["teacher_id"] for row in rows)
+    assert all(row.reviewed_at is not None for row in rows)
+
+
+@pytest.mark.asyncio
+async def test_approve_variants_standalone_question_approves_only_itself(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict[str, Any],
+) -> None:
+    seeded = await _create_published_config(
+        engine,
+        course_id=scenario["course_id"],
+        module_id=scenario["module_id"],
+        teacher_id=scenario["teacher_id"],
+        questions=4,
+        outcomes=1,
+        status="draft",
+    )
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "UPDATE interview_questions SET review_status='pending' "
+                "WHERE interview_config_id=:config_id"
+            ),
+            {"config_id": seeded["config_id"]},
+        )
+
+    async with session_factory() as session:
+        approved = await authoring_service.approve_question_variants(
+            session,
+            seeded["config_id"],
+            seeded["question_ids"][0],
+            _actor(scenario["teacher_id"]),
+        )
+        await session.commit()
+    assert approved == 1
+
+    async with session_factory() as session:
+        statuses = (
+            await session.execute(
+                text(
+                    "SELECT review_status FROM interview_questions "
+                    "WHERE interview_config_id=:config_id ORDER BY position"
+                ),
+                {"config_id": seeded["config_id"]},
+            )
+        ).scalars().all()
+    assert statuses == ["approved", "pending", "pending", "pending"]
+
+
+@pytest.mark.asyncio
+async def test_approve_variants_rejects_published_config(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict[str, Any],
+) -> None:
+    from abridgeai.core.exceptions import ConflictError
+
+    seeded = await _create_published_config(
+        engine,
+        course_id=scenario["course_id"],
+        module_id=scenario["module_id"],
+        teacher_id=scenario["teacher_id"],
+        questions=4,
+        outcomes=1,
+        status="published",
+    )
+    async with session_factory() as session:
+        with pytest.raises(ConflictError):
+            await authoring_service.approve_question_variants(
+                session,
+                seeded["config_id"],
+                seeded["question_ids"][0],
+                _actor(scenario["teacher_id"]),
+            )
+
+
 async def test_start_generation_run_enqueue_failure_marks_run_failed(
     engine: AsyncEngine,
     session_factory: async_sessionmaker[AsyncSession],

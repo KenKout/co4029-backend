@@ -652,6 +652,28 @@ async def update_question(
     return InterviewQuestionAuthoring.model_validate(question)
 
 
+@router.post(
+    "/interview-configs/{config_id}/questions/{question_id}/approve-variants",
+    response_model=dict[str, int],
+)
+async def approve_question_variants(
+    config_id: UUID,
+    question_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_QUESTION)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> dict[str, int]:
+    try:
+        approved = await authoring_service.approve_question_variants(
+            db, config_id, question_id, current_user
+        )
+    except NotFoundError as exc:
+        raise _not_found("interview_question", question_id) from exc
+    except ConflictError as exc:
+        raise _conflict(str(exc)) from exc
+    await db.commit()
+    return {"approved": approved}
+
+
 @router.delete(
     "/interview-configs/{config_id}/questions/{question_id}",
     status_code=status.HTTP_204_NO_CONTENT,

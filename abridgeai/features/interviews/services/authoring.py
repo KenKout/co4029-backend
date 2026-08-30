@@ -575,6 +575,42 @@ async def update_question(
     return question
 
 
+async def approve_question_variants(
+    db: AsyncSession,
+    config_id: UUID,
+    question_id: UUID,
+    actor: CurrentUser,
+) -> int:
+    """Approve the active members of one logical question."""
+    config = await _require_config(db, config_id)
+    published_freeze.assert_questions_editable(config)
+    question = await _require_question(db, config_id, question_id)
+
+    from sqlalchemy import select  # noqa: PLC0415
+
+    if question.variant_group_id is None:
+        questions = [question]
+    else:
+        result = await db.execute(
+            select(InterviewQuestion)
+            .where(
+                InterviewQuestion.interview_config_id == config_id,
+                InterviewQuestion.variant_group_id == question.variant_group_id,
+                InterviewQuestion.deleted_at.is_(None),
+            )
+            .order_by(InterviewQuestion.position)
+        )
+        questions = list(result.scalars().all())
+
+    reviewed_at = utcnow()
+    for member in questions:
+        member.review_status = "approved"
+        member.reviewed_by = actor.user_id
+        member.reviewed_at = reviewed_at
+    await flush_or_conflict(db)
+    return len(questions)
+
+
 async def delete_question(
     db: AsyncSession,
     config_id: UUID,
@@ -864,6 +900,7 @@ __all__ = [
     "add_question",
     "add_to_question_bank",
     "archive_interview_config",
+    "approve_question_variants",
     "create_interview_config",
     "delete_interview_config",
     "delete_outcome",
