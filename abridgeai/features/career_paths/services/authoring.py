@@ -426,9 +426,17 @@ async def add_course_to_path(
     if path.status == "published" and not await authoring_queries.course_is_published_in_org(
         db, course_id, path.organization_id
     ):
+        # Name the course and its actual status: a raw uuid plus "is not
+        # published" left the manager guessing WHICH pick was wrong, and
+        # the sentence read as if the PATH were the unpublished thing.
+        course = await courses_api.get_course_by_id(db, course_id)
+        title = course.title if course is not None else str(course_id)
+        state = course.status if course is not None else "missing"
         raise AppError(
-            f"Course {course_id} is not published — only published courses can be "
-            "attached to a published career path"
+            f"course_not_published: {title!r} is a {state} course. "
+            f"{path.name!r} is already published, so only published courses can be "
+            "added to it. Publish the course first, or add it to a new draft version "
+            "of the path."
         )
     existing = await authoring_queries.get_path_course_link(db, career_path_id, course_id)
     if existing is not None:

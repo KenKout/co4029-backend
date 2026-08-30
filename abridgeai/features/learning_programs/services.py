@@ -53,8 +53,38 @@ register_conflict_mappings(
 )
 
 
+class ProgramConflictError(ConflictError):
+    """A 409 that carries a HUMAN sentence plus structured fields.
+
+    The rest of this module raises ``ConflictError("some_machine_code")`` and
+    the router serializes ``str(exc)`` into ``detail.error``, which is fine
+    for codes the SPA branches on. It stopped being fine once codes started
+    carrying identifiers: a manager hitting the concurrency cap was shown
+    ``concurrent_program_limit_reached:71acb8a2-…:1`` verbatim in a toast.
+
+    So: ``code`` stays the stable machine string (FE branching, tests),
+    ``message`` is the sentence a manager can act on, and ``fields`` carries
+    the ids/limits the SPA may want to render itself. The router emits all
+    three as ``{"error": code, "message": message, **fields}``.
+    """
+
+    def __init__(self, code: str, message: str, **fields: object) -> None:
+        super().__init__(code)
+        self.code = code
+        self.message = message
+        self.fields = fields
+
+
 def _now() -> datetime:
     return datetime.now(UTC)
+
+
+async def _student_label(db: AsyncSession, student_id: UUID) -> str:
+    """Name (or email) for an error sentence; the raw id as a last resort."""
+    user = await identity_api.get_user_by_id(db, student_id)
+    if user is None:
+        return str(student_id)
+    return (user.display_name or "").strip() or user.primary_email
 
 
 async def _require_operator(db: AsyncSession, *, actor_id: UUID, program: LearningProgram) -> None:
@@ -561,7 +591,10 @@ async def import_students_from_csv(
                     ProgramCsvImportFailure(
                         row_number=row_number,
                         identifier=email,
-                        reason="max_concurrent_enrollments_reached",
+                        reason=(
+                            f"Already in {concurrent} active learning program(s); "
+                            f"this organization allows at most {limit} at a time."
+                        ),
                     )
                 )
                 continue
@@ -615,7 +648,14 @@ async def enroll_students(
     roles = await access_control_api.get_role_codes_for_users(db, student_ids)
     bad = [student_id for student_id in student_ids if "student" not in roles.get(student_id, ())]
     if bad:
-        raise ConflictError("all_enrollees_must_have_the_student_role")
+        names = ", ".join([await _student_label(db, student_id) for student_id in bad[:5]])
+        more = f" (and {len(bad) - 5} more)" if len(bad) > 5 else ""
+        raise ProgramConflictError(
+            "all_enrollees_must_have_the_student_role",
+            f"{names}{more} do not have the Student role, so they cannot be enrolled. "
+            "Give them the Student role first, or remove them from the selection.",
+            student_ids=[str(student_id) for student_id in bad],
+        )
     limit = int(
         await resolve_setting(
             db,
@@ -627,12 +667,26 @@ async def enroll_students(
     for student_id in dict.fromkeys(student_ids):
         existing = await queries.get_program_enrollment(db, program.id, student_id)
         if existing is not None and existing.status in ("awaiting_path", "active", "completed"):
-            raise ConflictError(f"student_already_enrolled_in_program:{student_id}")
+            raise ProgramConflictError(
+                "student_already_enrolled_in_program",
+                f"{await _student_label(db, student_id)} is already enrolled in this program. "
+                "Remove them from the selection and try again.",
+                student_id=str(student_id),
+            )
         concurrent = await queries.count_concurrent_enrollments(
             db, organization_id=program.organization_id, student_id=student_id
         )
         if concurrent >= limit:
-            raise ConflictError(f"concurrent_program_limit_reached:{student_id}:{limit}")
+            raise ProgramConflictError(
+                "concurrent_program_limit_reached",
+                f"{await _student_label(db, student_id)} is already in {concurrent} active "
+                f"learning program(s), and this organization allows at most {limit} at a time. "
+                "Withdraw them from a program first, or raise the limit in "
+                "Settings → Learning programs.",
+                student_id=str(student_id),
+                limit=limit,
+                current=concurrent,
+            )
         if existing is None:
             existing = ProgramEnrollment(
                 learning_program_id=program.id,

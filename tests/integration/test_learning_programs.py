@@ -238,6 +238,72 @@ async def test_publish_rejects_path_archived_after_draft_was_created(
 
 
 @pytest.mark.asyncio
+async def test_concurrency_cap_conflict_is_human_readable(
+    engine: AsyncEngine, seeded_users: SeededUsers
+) -> None:
+    """Hitting the concurrent-program cap must explain itself, not emit a code.
+
+    The manager used to see the raw
+    ``concurrent_program_limit_reached:<uuid>:1`` in a toast: no name, no
+    number they could act on. The service now raises
+    :class:`services.ProgramConflictError`, whose ``code`` stays stable for
+    FE branching while ``message`` carries the sentence and ``fields`` the
+    ids/limits.
+    """
+    faculty_id, path_a, path_b = await _seed_program_context(engine, seeded_users)
+    factory = async_sessionmaker(engine, expire_on_commit=False, autoflush=False)
+    manager = CurrentUser(seeded_users.manager_id, uuid.uuid4())
+    student = seeded_users.student_id
+
+    async with factory() as db:
+        # The org cap is 1 by default (settings_registry:
+        # learning_program.max_concurrent_enrollments), so one live
+        # enrollment is enough to make the second one collide.
+        first = await services.create_program(
+            db,
+            ProgramCreate(
+                faculty_id=faculty_id,
+                slug=f"cap-first-{uuid.uuid4().hex[:8]}",
+                name="Cap Program One",
+                career_path_ids=[path_a],
+            ),
+            manager,
+        )
+        await services.publish_program(db, program_id=first.id, actor=manager)
+        await services.enroll_students(
+            db, program_id=first.id, student_ids=[student], actor=manager
+        )
+
+        second = await services.create_program(
+            db,
+            ProgramCreate(
+                faculty_id=faculty_id,
+                slug=f"cap-second-{uuid.uuid4().hex[:8]}",
+                name="Cap Program Two",
+                career_path_ids=[path_b],
+            ),
+            manager,
+        )
+        await services.publish_program(db, program_id=second.id, actor=manager)
+
+        with pytest.raises(services.ProgramConflictError) as caught:
+            await services.enroll_students(
+                db, program_id=second.id, student_ids=[student], actor=manager
+            )
+
+        exc = caught.value
+        assert exc.code == "concurrent_program_limit_reached"
+        # No raw uuid, no colon-packed code — a sentence naming the student.
+        assert str(student) not in exc.message
+        assert "concurrent_program_limit_reached" not in exc.message
+        assert "learning program" in exc.message
+        assert exc.fields["student_id"] == str(student)
+        assert exc.fields["limit"] == 1
+        assert exc.fields["current"] == 1
+        await db.rollback()
+
+
+@pytest.mark.asyncio
 async def test_it_admin_cannot_operate_academic_programs(
     engine: AsyncEngine, seeded_users: SeededUsers
 ) -> None:

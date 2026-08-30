@@ -46,6 +46,15 @@ def _http_error(exc: Exception) -> HTTPException:
         return HTTPException(status.HTTP_404_NOT_FOUND, detail={"error": str(exc)})
     if isinstance(exc, ForbiddenError):
         return HTTPException(status.HTTP_403_FORBIDDEN, detail={"error": str(exc)})
+    # ProgramConflictError carries a manager-readable sentence and structured
+    # fields; plain ConflictError only has its machine code. Emitting `message`
+    # for the former is what stops toasts reading
+    # "concurrent_program_limit_reached:<uuid>:1".
+    if isinstance(exc, services.ProgramConflictError):
+        return HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail={"error": exc.code, "message": exc.message, **exc.fields},
+        )
     return HTTPException(status.HTTP_409_CONFLICT, detail={"error": str(exc)})
 
 

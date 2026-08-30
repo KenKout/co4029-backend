@@ -1036,7 +1036,11 @@ async def test_add_unpublished_course_to_published_path_is_rejected(
         assert reject.status_code == 409, reject.text
         detail = reject.json()["detail"]
         assert detail["error"] == "conflict"
-        assert "not published" in detail["message"]
+        # Names the COURSE and its actual status — a bare uuid + "is not
+        # published" read as if the PATH were unpublished.
+        assert "course_not_published" in detail["message"]
+        assert "draft course" in detail["message"]
+        assert "Guard Path" in detail["message"]
 
         # Published course -> still accepted (on the draft version).
         ok = await client.post(
