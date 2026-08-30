@@ -152,10 +152,11 @@ async def _resolve_outcome_texts(db: AsyncSession, config: dict[str, Any]) -> li
                     JOIN coded ON c.parent_id = coded.id
                     WHERE c.deleted_at IS NULL
                 )
-                SELECT DISTINCT coded.code, coded.outcome_text
+                SELECT DISTINCT coded.code, coded.outcome_text,
+                       string_to_array(coded.code, '.')::int[] AS sort_key
                 FROM coded
                 JOIN subtree ON subtree.id = coded.id
-                ORDER BY string_to_array(coded.code, '.')::int[]
+                ORDER BY sort_key
                 """
             ),
             {"ids": outcome_ids},
