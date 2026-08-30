@@ -96,6 +96,43 @@ def _window_bounds(
     return start, now, start - timedelta(days=window_days)
 
 
+def _trend_bounds(
+    now: datetime,
+    *,
+    days: int,
+    window_from: date | None,
+    window_to: date | None,
+) -> tuple[datetime, datetime]:
+    """Resolve a TREND window to bounds that span whole calendar days.
+
+    Range-mode delegates to :func:`_window_bounds`, so a chart and the KPI
+    above it describe one span.
+
+    Days-mode cannot: ``_window_bounds`` returns ``[now - days, now)``, which
+    is the right rolling window for the rollup's totals but straddles ``days +
+    1`` calendar days once the SQL buckets by day (``days=7`` at 18:30 spans
+    Aug 23 18:30 -> Aug 30 18:30, i.e. eight ``::date`` buckets, and the two
+    edge days are partial). A chart labelled "last 7 days" must plot seven
+    whole days ending today, so days-mode resolves to the calendar range
+    ``[today - (days - 1), today]``.
+    """
+    if window_from is not None and window_to is not None:
+        window_start, window_end, _ = _window_bounds(
+            now,
+            window_days=days,
+            window_from=window_from,
+            window_to=window_to,
+        )
+        return window_start, window_end
+    today = now.date()
+    return _window_bounds(
+        now,
+        window_days=days,
+        window_from=today - timedelta(days=days - 1),
+        window_to=today,
+    )[:2]
+
+
 async def overview(db: AsyncSession, *, organization_id: UUID | None) -> dict[str, int]:
     return await stats_queries.overview_counts(db, organization_id=organization_id)
 
@@ -130,9 +167,9 @@ async def active_users_trend(
     remains as the fallback for callers with no explicit range.
     """
     evaluated_at = now or datetime.now(tz=UTC)
-    window_start, window_end, _ = _window_bounds(
+    window_start, window_end = _trend_bounds(
         evaluated_at,
-        window_days=days,
+        days=days,
         window_from=window_from,
         window_to=window_to,
     )
@@ -164,9 +201,9 @@ async def api_latency_trend(
     API p95 tile above it describe one span of time rather than two.
     """
     evaluated_at = now or datetime.now(tz=UTC)
-    window_start, window_end, _ = _window_bounds(
+    window_start, window_end = _trend_bounds(
         evaluated_at,
-        window_days=days,
+        days=days,
         window_from=window_from,
         window_to=window_to,
     )

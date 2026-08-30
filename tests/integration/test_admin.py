@@ -1300,8 +1300,17 @@ async def test_trend_range_rejects_a_malformed_window(
             )
             assert backwards.status_code == 422, f"{path}: {backwards.text}"
             # end in the future
-            future = await client.get(
+            # One day of slack is DELIBERATE (see _resolve_window_range): a
+            # browser east of UTC legitimately sends tomorrow's server date
+            # early in its own day, and rejecting it took every stats panel
+            # down at the start of the day for those users.
+            tomorrow = await client.get(
                 f"{path}?from={today}&to={today + timedelta(days=1)}",
+                headers=_auth(token),
+            )
+            assert tomorrow.status_code == 200, f"{path}: {tomorrow.text}"
+            future = await client.get(
+                f"{path}?from={today}&to={today + timedelta(days=2)}",
                 headers=_auth(token),
             )
             assert future.status_code == 422, f"{path}: {future.text}"
@@ -1398,6 +1407,63 @@ async def test_dashboard_custom_range(
     assert body["api_p95_latency_ms"] == 290
     assert body["ai_calls_window"] == 2
     assert body["spend_window_usd"] == 10.0
+
+
+async def test_stats_range_tolerates_a_client_one_day_ahead_of_utc(
+    client: httpx.AsyncClient,
+    engine: AsyncEngine,
+    seeded_users: SeededUsers,
+) -> None:
+    """A browser east of UTC may legitimately ask for "tomorrow".
+
+    Ranges are ``YYYY-MM-DD`` in the BROWSER's timezone and the server compares
+    against UTC. At 00:32 in UTC+7 (17:32 UTC the previous day) the picker's
+    "today" preset sends the server's tomorrow, and the old guard 422'd it —
+    every stats panel on the page went down at the start of each day for
+    anyone east of UTC.
+
+    So tomorrow is accepted and CLAMPED to today: the echoed ``window_to``
+    must be the server's date, not the requested one, or the trend SQL would
+    emit a trailing all-zero day and draw a fake dead day on every chart.
+    """
+    token, _ = await _bearer(engine, seeded_users.admin_id)
+    async with engine.begin() as conn:
+        today = (await conn.execute(text("SELECT now()::date AS d"))).mappings().one()["d"]
+    tomorrow = today + timedelta(days=1)
+    try:
+        # The exact shape the UTC+7 report came in with: a week ending
+        # "tomorrow" as the server reckons it.
+        rollup = await client.get(
+            f"/api/v1/admin/stats/dashboard?from={today - timedelta(days=5)}&to={tomorrow}",
+            headers=_auth(token),
+        )
+        assert rollup.status_code == 200, rollup.text
+        assert rollup.json()["window_to"] == today.isoformat()
+
+        for path in (
+            "/api/v1/admin/stats/latency/trend",
+            "/api/v1/admin/stats/active-users/trend",
+        ):
+            resp = await client.get(
+                f"{path}?from={today - timedelta(days=5)}&to={tomorrow}",
+                headers=_auth(token),
+            )
+            assert resp.status_code == 200, f"{path}: {resp.text}"
+            days = [point.get("day") or point.get("date") for point in resp.json()["points"]]
+            # Clamped: no point past today, and the window still ends on it.
+            assert days[-1] == today.isoformat(), f"{path}: {days[-3:]}"
+
+        # The "today" preset in UTC+7 is from == to == the server's tomorrow.
+        # Clamping `to` alone would invert the window, so `from` moves with it.
+        single = await client.get(
+            f"/api/v1/admin/stats/dashboard?from={tomorrow}&to={tomorrow}",
+            headers=_auth(token),
+        )
+        assert single.status_code == 200, single.text
+        assert single.json()["window_from"] == today.isoformat()
+        assert single.json()["window_to"] == today.isoformat()
+    finally:
+        await _purge_sessions(engine, seeded_users.admin_id)
 
 
 @pytest.mark.parametrize(

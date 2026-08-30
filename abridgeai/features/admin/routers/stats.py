@@ -21,7 +21,7 @@ Org-scoping is resolved via :func:`resolve_admin_scope`.
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import Annotated, Any
 from uuid import UUID
 
@@ -167,24 +167,49 @@ def _range_error(message: str) -> HTTPException:
     )
 
 
-def _validate_window_range(window_from: date | None, window_to: date | None) -> None:
-    """Reject a malformed ``from``/``to`` pair.
+# A browser sends dates in ITS OWN timezone; the server compares against UTC.
+# Every real offset sits within UTC+14..UTC-12, so a client can legitimately be
+# one calendar day ahead of the server — a user in UTC+7 opening the page at
+# 00:32 local (17:32 UTC yesterday) asks for `to = tomorrow` as the server
+# reckons it. Rejecting that took every stats panel down at the start of each
+# day for anyone east of UTC. One day of slack accepts it; anything beyond is
+# still a typo worth refusing.
+_FUTURE_DATE_GRACE = timedelta(days=1)
+
+
+def _resolve_window_range(
+    window_from: date | None, window_to: date | None
+) -> tuple[date | None, date | None]:
+    """Validate a ``from``/``to`` pair and clamp ``to`` to the server's today.
 
     Shared by the rollup and both trend endpoints rather than copied into each.
     They are the same window shown three ways on one page -- if one of them
     accepted a range the others rejected, the page could render a chart over a
     span its own KPIs refused to compute.
+
+    Returns the pair the query layer should use. ``to`` is clamped rather than
+    passed through: a window ending "tomorrow" in the client's timezone would
+    otherwise make the trend SQL emit a trailing all-zero day, drawing a fake
+    dead day at the right edge of every chart.
     """
     if (window_from is None) != (window_to is None):
         raise _range_error("'from' and 'to' must be provided together")
     if window_from is None or window_to is None:
-        return
+        return window_from, window_to
     if window_from > window_to:
         raise _range_error("'from' must not be after 'to'")
-    if window_to > datetime.now(tz=UTC).date():
+    today = datetime.now(tz=UTC).date()
+    if window_to > today + _FUTURE_DATE_GRACE:
         raise _range_error("'to' must not be after today")
     if (window_to - window_from).days + 1 > 366:
         raise _range_error("range must not exceed 366 days")
+    if window_to > today:
+        window_to = today
+        # A single-day "today" range in a timezone ahead of UTC clamps its end
+        # below its own start; move the start with it rather than handing the
+        # query layer an inverted window.
+        window_from = min(window_from, window_to)
+    return window_from, window_to
 
 
 @router.get("/overview", response_model=OverviewOut)
@@ -233,7 +258,9 @@ async def get_active_users_trend(
         Query(
             alias="to",
             description="Exact window end date (inclusive). Must pair with "
-            "'from', and must not be after today's date on the server.",
+            "'from'. Interpreted as a calendar date; a client one day ahead "
+            "of the server's UTC date (any timezone east of UTC, early in "
+            "the local day) is accepted and clamped to today.",
         ),
     ] = None,
 ) -> ActiveUsersTrendOut:
@@ -245,7 +272,7 @@ async def get_active_users_trend(
     in the window is returned (zero-activity days included) so the chart is
     continuous.
     """
-    _validate_window_range(window_from, window_to)
+    window_from, window_to = _resolve_window_range(window_from, window_to)
     org_id = await resolve_admin_scope(db, user)
     raw = await stats_service.active_users_trend(
         db,
@@ -284,7 +311,9 @@ async def get_api_latency_trend(
         Query(
             alias="to",
             description="Exact window end date (inclusive). Must pair with "
-            "'from', and must not be after today's date on the server.",
+            "'from'. Interpreted as a calendar date; a client one day ahead "
+            "of the server's UTC date (any timezone east of UTC, early in "
+            "the local day) is accepted and clamped to today.",
         ),
     ] = None,
 ) -> LatencyTrendOut:
@@ -295,7 +324,7 @@ async def get_api_latency_trend(
     organization (see ``api_reliability.sql``). Every day in the window is
     returned (zero-traffic days included) so the chart is continuous.
     """
-    _validate_window_range(window_from, window_to)
+    window_from, window_to = _resolve_window_range(window_from, window_to)
     points = await stats_service.api_latency_trend(
         db, days=days, window_from=window_from, window_to=window_to
     )
@@ -350,7 +379,9 @@ async def get_dashboard(
         Query(
             alias="to",
             description="Exact window end date (inclusive). Must pair with "
-            "'from', and must not be after today's date on the server.",
+            "'from'. Interpreted as a calendar date; a client one day ahead "
+            "of the server's UTC date (any timezone east of UTC, early in "
+            "the local day) is accepted and clamped to today.",
         ),
     ] = None,
     organization_id: Annotated[
@@ -369,7 +400,7 @@ async def get_dashboard(
     -- accepting it would be a cross-tenant read. An IT Admin defaults to the
     global view and may narrow to one tenant with it.
     """
-    _validate_window_range(window_from, window_to)
+    window_from, window_to = _resolve_window_range(window_from, window_to)
     # Gate on the PERMISSION, never on `resolve_admin_scope` returning None.
     # It returns None in two different situations -- a platform admin (global
     # view) AND a caller whose organization could not be resolved -- and its
