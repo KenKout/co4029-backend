@@ -396,6 +396,14 @@ async def _run_reconcile_quiz(*, arq_pool: Any) -> None:
     so an orphaned run has persisted nothing and is safe to re-enqueue: the
     re-run starts cleanly from retrieval.
     """
+    if arq_pool is None:
+        # Same reasoning as the interview reaper below: no Redis means the
+        # liveness scan returns an empty set (every run looks orphaned) and the
+        # replacement job cannot be enqueued, so reaping would only burn the
+        # durable budget on live runs. Do nothing.
+        _logger.warning("reaper_quiz_skipped_no_arq_pool")
+        return
+
     cutoff = datetime.now(tz=UTC) - timedelta(seconds=_QUIZ_ORPHAN_GRACE_SECONDS)
 
     try:
@@ -488,8 +496,6 @@ async def _run_reconcile_quiz(*, arq_pool: Any) -> None:
             actor_id = run.requested_by
             await db.commit()
 
-            if arq_pool is None:
-                continue
             try:
                 await arq_pool.enqueue_job(  # type: ignore[attr-defined]
                     "run_quiz_generation_task", actor_id, run.id
@@ -588,6 +594,15 @@ async def _run_reconcile_interview(*, arq_pool: Any) -> None:
     an orphaned run has persisted nothing and is safe to re-enqueue: the re-run
     starts cleanly from retrieval.
     """
+    if arq_pool is None:
+        # Without Redis we can neither prove a run is dead (the liveness scan
+        # returns an EMPTY set, which makes every run look orphaned) nor
+        # re-enqueue the replacement. Reaping here would spend the durable
+        # ``reap_count`` budget on runs that are very much alive and terminalize
+        # them as 'failed' two ticks later. Do nothing instead.
+        _logger.warning("reaper_interview_skipped_no_arq_pool")
+        return
+
     cutoff = datetime.now(tz=UTC) - timedelta(seconds=_INTERVIEW_ORPHAN_GRACE_SECONDS)
 
     try:
@@ -682,8 +697,6 @@ async def _run_reconcile_interview(*, arq_pool: Any) -> None:
             actor_id = run.requested_by
             await db.commit()
 
-            if arq_pool is None:
-                continue
             try:
                 await arq_pool.enqueue_job(  # type: ignore[attr-defined]
                     "run_interview_generation_task", actor_id, run.id

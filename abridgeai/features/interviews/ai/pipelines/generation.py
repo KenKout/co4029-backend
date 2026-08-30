@@ -315,7 +315,20 @@ async def _update_run(
         sets.append("finished_at = :finished_at")
         params["finished_at"] = finished_at
     if config_json is not None:
-        sets.append("config_json = CAST(:config_json AS jsonb)")
+        # MERGE, never replace. The orphan reaper
+        # (``features.materials.workers.reaper._run_reconcile_interview``)
+        # writes its durable re-enqueue budget into the SAME column as
+        # ``config_json["reap_count"]``. A full replace from this pipeline's
+        # in-memory ``state.config_json`` snapshot — which is loaded once at
+        # run start and re-committed by every ``_write_progress`` tick — would
+        # silently erase that counter, resetting the reaper's budget to 0 and
+        # letting a genuinely unrecoverable run be re-enqueued forever.
+        # ``||`` is a shallow merge: the keys this pipeline owns (progress,
+        # retrieval, pipeline, failure) win, and any key it does not know about
+        # survives.
+        sets.append(
+            "config_json = COALESCE(config_json, '{}'::jsonb) || CAST(:config_json AS jsonb)"
+        )
         params["config_json"] = json.dumps(config_json, default=str)
     if not sets:
         return
