@@ -850,6 +850,13 @@ class InterviewQuestionBankItem(
     tags_json: Mapped[Any] = mapped_column(
         JSONB, nullable=False, server_default=text("'[]'::jsonb")
     )
+    # Course-bank logical-question membership. NULL remains an ordinary
+    # standalone item; a non-null id links 1-4 distinct interviewer angles.
+    variant_group_id: Mapped[uuid.UUID | None] = mapped_column(
+        PGUUID(as_uuid=True),
+        nullable=True,
+        index=True,
+    )
     # Provenance: which config this question was first added from (audit
     # only; SET NULL so deleting the source config keeps the bank item).
     source_config_id: Mapped[uuid.UUID | None] = mapped_column(

@@ -68,9 +68,13 @@ from abridgeai.features.interviews.schemas import (
     InterviewOutcomeCreate,
     InterviewOutcomeUpdate,
     InterviewQuestionAuthoring,
+    InterviewQuestionBankImportRequest,
+    InterviewQuestionBankImportResult,
     InterviewQuestionBankItemCreate,
     InterviewQuestionBankItemRead,
     InterviewQuestionBankItemUpdate,
+    InterviewQuestionBankLogicalGroupCreate,
+    InterviewQuestionBankSiblingCreate,
     InterviewQuestionCreate,
     InterviewQuestionDuplicateCheck,
     InterviewQuestionDuplicateCheckRequest,
@@ -161,6 +165,57 @@ async def add_interview_question_bank_item(
         raise _conflict(str(exc)) from exc
     await db.commit()
     return InterviewQuestionBankItemRead.model_validate(item)
+
+
+@router.post(
+    "/courses/{course_id}/interview-question-bank/logical-groups",
+    response_model=list[InterviewQuestionBankItemRead],
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_interview_question_bank_logical_group(
+    course_id: UUID,
+    payload: InterviewQuestionBankLogicalGroupCreate,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_COURSE_UPDATE)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> list[InterviewQuestionBankItemRead]:
+    try:
+        items = await authoring_service.create_question_bank_logical_group(
+            db, course_id, payload, current_user
+        )
+    except NotFoundError as exc:
+        raise _not_found("course", course_id) from exc
+    except ConflictError as exc:
+        raise _conflict(str(exc)) from exc
+    except AppError as exc:
+        raise _bad_request(str(exc)) from exc
+    await db.commit()
+    return [InterviewQuestionBankItemRead.model_validate(item) for item in items]
+
+
+@router.post(
+    "/courses/{course_id}/interview-question-bank/{item_id}/siblings",
+    response_model=list[InterviewQuestionBankItemRead],
+    status_code=status.HTTP_201_CREATED,
+)
+async def add_interview_question_bank_sibling(
+    course_id: UUID,
+    item_id: UUID,
+    payload: InterviewQuestionBankSiblingCreate,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_COURSE_UPDATE)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> list[InterviewQuestionBankItemRead]:
+    try:
+        items = await authoring_service.add_question_bank_sibling(
+            db, course_id, item_id, payload, current_user
+        )
+    except NotFoundError as exc:
+        raise _not_found("interview_question_bank_item", item_id) from exc
+    except ConflictError as exc:
+        raise _conflict(str(exc)) from exc
+    except AppError as exc:
+        raise _bad_request(str(exc)) from exc
+    await db.commit()
+    return [InterviewQuestionBankItemRead.model_validate(item) for item in items]
 
 
 @router.patch(
@@ -571,6 +626,37 @@ async def get_generation_run(
     if run is None:
         raise _not_found("generation_run", run_id)
     return _generation_run_view(run)
+
+
+@router.post(
+    "/interview-configs/{config_id}/questions/import-bank",
+    response_model=InterviewQuestionBankImportResult,
+    status_code=status.HTTP_201_CREATED,
+)
+async def import_interview_question_bank_items(
+    config_id: UUID,
+    payload: InterviewQuestionBankImportRequest,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_CONFIG)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> InterviewQuestionBankImportResult:
+    try:
+        created = await authoring_service.import_question_bank_items(
+            db, config_id, payload.item_ids, current_user
+        )
+    except NotFoundError as exc:
+        raise _not_found("interview_question_bank_item", config_id) from exc
+    except ConflictError as exc:
+        raise _conflict(str(exc)) from exc
+    except AppError as exc:
+        raise _bad_request(str(exc)) from exc
+    await db.commit()
+    group_count = len(
+        {question.variant_group_id for question in created if question.variant_group_id}
+    )
+    return InterviewQuestionBankImportResult(
+        created=[InterviewQuestionAuthoring.model_validate(question) for question in created],
+        imported_group_count=group_count,
+    )
 
 
 @router.post(

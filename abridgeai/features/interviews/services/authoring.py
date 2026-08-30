@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import logging
 from typing import TYPE_CHECKING, Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from abridgeai.ai.llm.embeddings import EmbeddingClient
 from abridgeai.core.config import get_settings
@@ -30,7 +30,7 @@ from abridgeai.core.db.conflict_mapper import (
     register_conflict_mappings,
 )
 from abridgeai.core.db.recursive_delete import soft_delete_cascade
-from abridgeai.core.exceptions import AppError, NotFoundError
+from abridgeai.core.exceptions import AppError, ConflictError, NotFoundError
 from abridgeai.core.security import CurrentUser, utcnow
 from abridgeai.core.slug import slugify, unique_slug
 from abridgeai.features.courses.api import public as courses_public
@@ -827,20 +827,248 @@ async def add_to_question_bank(
     """Add a reusable question to the course bank (copy semantics)."""
     await _require_course(db, course_id)
     data = payload.model_dump(exclude_unset=True)
-    item = InterviewQuestionBankItem(
+    item = await _create_bank_item(
+        db,
         course_id=course_id,
-        prompt_text=data["prompt_text"],
-        question_type=data["question_type"],
-        difficulty=data.get("difficulty"),
-        model_answer=data.get("model_answer"),
-        tags_json=data.get("tags", []),
-        source_config_id=data.get("source_config_id"),
-        created_by=actor.user_id,
+        data=data,
+        actor=actor,
+        variant_group_id=None,
     )
-    db.add(item)
     await flush_or_conflict(db)
     await db.refresh(item)
     return item
+
+
+_LOGICAL_QUESTION_ANGLES = {
+    "technical",
+    "system_design",
+    "situational",
+    "behavioral",
+}
+
+
+def _normalise_prompt(value: str) -> str:
+    return value.strip().lower()
+
+
+async def _active_bank_group(
+    db: AsyncSession, course_id: UUID, group_id: UUID
+) -> list[InterviewQuestionBankItem]:
+    from sqlalchemy import select  # noqa: PLC0415
+
+    result = await db.execute(
+        select(InterviewQuestionBankItem)
+        .where(
+            InterviewQuestionBankItem.course_id == course_id,
+            InterviewQuestionBankItem.variant_group_id == group_id,
+            InterviewQuestionBankItem.deleted_at.is_(None),
+        )
+        .order_by(InterviewQuestionBankItem.created_at)
+    )
+    return list(result.scalars().all())
+
+
+async def _create_bank_item(
+    db: AsyncSession,
+    *,
+    course_id: UUID,
+    data: dict[str, Any],
+    actor: CurrentUser,
+    variant_group_id: UUID | None,
+) -> InterviewQuestionBankItem:
+    question_type = data["question_type"]
+    if variant_group_id is not None and question_type not in _LOGICAL_QUESTION_ANGLES:
+        raise AppError("logical_question_angle_required")
+    prompt_text = str(data["prompt_text"] or "").strip()
+    if not prompt_text:
+        raise AppError("Question prompt is required")
+    source_config_id = data.get("source_config_id")
+    if source_config_id is not None:
+        config = await _require_config(db, UUID(str(source_config_id)))
+        if config.course_id != course_id:
+            raise AppError("source_config_id does not belong to course")
+    item = InterviewQuestionBankItem(
+        course_id=course_id,
+        prompt_text=prompt_text,
+        question_type=question_type,
+        difficulty=data.get("difficulty"),
+        model_answer=(data.get("model_answer") or "").strip() or None,
+        tags_json=data.get("tags", []),
+        variant_group_id=variant_group_id,
+        source_config_id=source_config_id,
+        created_by=actor.user_id,
+    )
+    db.add(item)
+    return item
+
+
+async def create_question_bank_logical_group(
+    db: AsyncSession,
+    course_id: UUID,
+    payload: Any,  # noqa: ANN401
+    actor: CurrentUser,
+) -> list[InterviewQuestionBankItem]:
+    """Copy one complete four-angle logical question into the course bank."""
+    await _require_course(db, course_id)
+    group_id = uuid4()
+    items = [
+        await _create_bank_item(
+            db,
+            course_id=course_id,
+            data=item.model_dump(exclude_unset=True),
+            actor=actor,
+            variant_group_id=group_id,
+        )
+        for item in payload.items
+    ]
+    await flush_or_conflict(db)
+    for item in items:
+        await db.refresh(item)
+    return items
+
+
+async def add_question_bank_sibling(
+    db: AsyncSession,
+    course_id: UUID,
+    item_id: UUID,
+    payload: Any,  # noqa: ANN401
+    actor: CurrentUser,
+) -> list[InterviewQuestionBankItem]:
+    """Append one missing angle to a singleton or partial logical bank group."""
+    from sqlalchemy import select, update  # noqa: PLC0415
+
+    anchor = (
+        await db.execute(
+            select(InterviewQuestionBankItem).where(
+                InterviewQuestionBankItem.id == item_id,
+                InterviewQuestionBankItem.course_id == course_id,
+                InterviewQuestionBankItem.deleted_at.is_(None),
+            )
+        )
+    ).scalar_one_or_none()
+    if anchor is None:
+        raise NotFoundError(f"Question bank item {item_id} not found")
+
+    group_id = anchor.variant_group_id or uuid4()
+    siblings = (
+        await _active_bank_group(db, course_id, group_id)
+        if anchor.variant_group_id
+        else [anchor]
+    )
+    question_type = payload.question_type
+    if question_type in {item.question_type for item in siblings}:
+        raise ConflictError("logical_question_angle_already_present")
+    if len(siblings) >= 4:
+        raise ConflictError("logical_question_group_is_full")
+
+    if anchor.variant_group_id is None:
+        await db.execute(
+            update(InterviewQuestionBankItem)
+            .where(InterviewQuestionBankItem.id == anchor.id)
+            .values(variant_group_id=group_id)
+        )
+        anchor.variant_group_id = group_id
+    await _create_bank_item(
+        db,
+        course_id=course_id,
+        data=payload.model_dump(exclude_unset=True),
+        actor=actor,
+        variant_group_id=group_id,
+    )
+    await flush_or_conflict(db)
+    return await _active_bank_group(db, course_id, group_id)
+
+
+async def import_question_bank_items(
+    db: AsyncSession,
+    config_id: UUID,
+    item_ids: list[UUID],
+    actor: CurrentUser,
+) -> list[InterviewQuestion]:
+    """Atomically append chosen bank items, expanding logical siblings first."""
+    from sqlalchemy import select  # noqa: PLC0415
+
+    config = await _require_config(db, config_id)
+    published_freeze.assert_questions_editable(config)
+    selected = list(
+        (
+            await db.execute(
+                select(InterviewQuestionBankItem).where(
+                    InterviewQuestionBankItem.id.in_(set(item_ids)),
+                    InterviewQuestionBankItem.course_id == config.course_id,
+                    InterviewQuestionBankItem.deleted_at.is_(None),
+                )
+            )
+        ).scalars().all()
+    )
+    if len(selected) != len(set(item_ids)):
+        raise NotFoundError("One or more question-bank items were not found")
+
+    group_ids = {item.variant_group_id for item in selected if item.variant_group_id is not None}
+    expanded = list(selected)
+    if group_ids:
+        siblings = list(
+            (
+                await db.execute(
+                    select(InterviewQuestionBankItem).where(
+                        InterviewQuestionBankItem.course_id == config.course_id,
+                        InterviewQuestionBankItem.variant_group_id.in_(group_ids),
+                        InterviewQuestionBankItem.deleted_at.is_(None),
+                    )
+                )
+            ).scalars().all()
+        )
+        expanded = list({item.id: item for item in [*selected, *siblings]}.values())
+
+    existing = {
+        _normalise_prompt(question.prompt_text)
+        for question in await authoring_queries.list_questions_for_config(db, config_id)
+    }
+    collisions = [
+        item.id for item in expanded if _normalise_prompt(item.prompt_text) in existing
+    ]
+    if collisions:
+        raise ConflictError("question_bank_import_prompt_already_exists")
+
+    next_position = await authoring_queries.next_question_position(db, config_id)
+    group_map = {group_id: uuid4() for group_id in group_ids}
+    ordered = sorted(
+        expanded,
+        key=lambda item: (str(item.variant_group_id or item.id), str(item.id)),
+    )
+    created: list[InterviewQuestion] = []
+    for offset, item in enumerate(ordered):
+        question = InterviewQuestion(
+            interview_config_id=config_id,
+            position=next_position + offset,
+            question_type=item.question_type,
+            prompt_text=item.prompt_text,
+            difficulty=item.difficulty,
+            model_answer=item.model_answer,
+            review_status="approved",
+            ai_generated=False,
+            source_refs_json=[],
+            source_module_ids=[],
+            variant_group_id=(
+                group_map[item.variant_group_id]
+                if item.variant_group_id is not None
+                else None
+            ),
+            reviewed_by=actor.user_id,
+            reviewed_at=utcnow(),
+            created_by=actor.user_id,
+        )
+        db.add(question)
+        created.append(question)
+    await flush_or_conflict(db)
+    for question in created:
+        await db.refresh(question)
+    await store_question_embeddings(
+        db,
+        question_ids=[question.id for question in created],
+        prompt_texts=[question.prompt_text for question in created],
+    )
+    return created
 
 
 async def update_question_bank_item(
@@ -898,7 +1126,10 @@ async def delete_question_bank_item(
 __all__ = [
     "add_outcome",
     "add_question",
+    "add_question_bank_sibling",
     "add_to_question_bank",
+    "create_question_bank_logical_group",
+    "import_question_bank_items",
     "archive_interview_config",
     "approve_question_variants",
     "create_interview_config",

@@ -714,9 +714,52 @@ class InterviewQuestionBankItemRead(BaseModel):
     difficulty: DifficultyLiteral | None = None
     model_answer: str | None = None
     tags: list[str] = Field(default_factory=list, validation_alias="tags_json")
+    variant_group_id: UUID | None = None
     source_config_id: UUID | None = None
     created_at: datetime
     updated_at: datetime
+
+
+LogicalQuestionAngleLiteral = Literal[
+    "technical", "system_design", "situational", "behavioral"
+]
+
+
+class InterviewQuestionBankLogicalGroupCreate(BaseModel):
+    """Atomically add one complete, four-angle logical question to the bank."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[InterviewQuestionBankItemCreate] = Field(min_length=4, max_length=4)
+
+    @model_validator(mode="after")
+    def _validate_angles(self) -> InterviewQuestionBankLogicalGroupCreate:
+        angles = [item.question_type for item in self.items]
+        expected = {"technical", "system_design", "situational", "behavioral"}
+        if set(angles) != expected or len(set(angles)) != 4:
+            raise ValueError("logical question requires exactly one of each four angle types")
+        return self
+
+
+class InterviewQuestionBankSiblingCreate(InterviewQuestionBankItemCreate):
+    """One missing angle to append to a bank singleton or partial group."""
+
+    question_type: LogicalQuestionAngleLiteral
+
+
+class InterviewQuestionBankImportRequest(BaseModel):
+    """Import bank entries; selecting one grouped child imports every sibling."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    item_ids: list[UUID] = Field(min_length=1)
+
+
+class InterviewQuestionBankImportResult(BaseModel):
+    """Questions copied into a target config by one atomic bank import."""
+
+    created: list[InterviewQuestionAuthoring]
+    imported_group_count: int = 0
 
 
 class InterviewQuestionBankItemUpdate(BaseModel):
@@ -752,9 +795,14 @@ __all__ = [
     "InterviewOutcomeAuthoring",
     "InterviewOutcomeCreate",
     "InterviewQuestionAuthoring",
+    "InterviewQuestionBankImportRequest",
+    "InterviewQuestionBankImportResult",
     "InterviewQuestionBankItemCreate",
     "InterviewQuestionBankItemRead",
     "InterviewQuestionBankItemUpdate",
+    "InterviewQuestionBankLogicalGroupCreate",
+    "InterviewQuestionBankSiblingCreate",
+    "LogicalQuestionAngleLiteral",
     "InterviewQuestionCreate",
     "InterviewSessionSummary",
     "InterviewSessionTeacherRead",

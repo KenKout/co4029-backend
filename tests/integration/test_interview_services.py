@@ -67,6 +67,11 @@ from abridgeai.features.interviews.models import (
 from abridgeai.features.interviews.queries import (
     authoring as authoring_queries,
 )
+from abridgeai.features.interviews.schemas import (
+    InterviewQuestionBankItemCreate,
+    InterviewQuestionBankLogicalGroupCreate,
+    InterviewQuestionBankSiblingCreate,
+)
 from abridgeai.features.interviews.services import (
     authoring as authoring_service,
 )
@@ -2109,3 +2114,319 @@ async def test_evaluate_and_generate_report_fails_when_outcomes_not_met(
     assert {row["verdict_met"] for row in evals} == {True, False}
     assert refreshed is not None
     assert refreshed.pass_verdict is False  # high rubric did NOT force a pass
+
+
+def _bank_payload(question_type: str, prompt: str, *, difficulty: str | None = None) -> dict[str, Any]:
+    return {
+        "prompt_text": prompt,
+        "question_type": question_type,
+        "difficulty": difficulty,
+        "model_answer": f"Answer for {prompt}",
+        "tags": [],
+    }
+
+
+@pytest.mark.asyncio
+async def test_create_logical_group_makes_four_grouped_bank_items(
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict[str, Any],
+) -> None:
+    payload = InterviewQuestionBankLogicalGroupCreate(
+        items=[
+            InterviewQuestionBankItemCreate(
+                **_bank_payload(t, f"Group {t}?")
+            )
+            for t in ("technical", "system_design", "situational", "behavioral")
+        ]
+    )
+
+    async with session_factory() as session:
+        items = await authoring_service.create_question_bank_logical_group(
+            session,
+            scenario["course_id"],
+            payload,
+            _actor(scenario["teacher_id"]),
+        )
+        await session.commit()
+
+    assert len(items) == 4
+    group_ids = {item.variant_group_id for item in items}
+    assert len(group_ids) == 1
+    assert group_ids != {None}
+    types = {item.question_type for item in items}
+    assert types == {"technical", "system_design", "situational", "behavioral"}
+
+
+@pytest.mark.asyncio
+async def test_create_logical_group_rejects_duplicate_angle(
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict[str, Any],
+) -> None:
+    from pydantic import ValidationError
+
+    items = [
+        InterviewQuestionBankItemCreate(**_bank_payload("technical", f"T{i}?"))
+        for i in range(4)
+    ]
+    items[1].question_type = "technical"  # duplicate angle
+    with pytest.raises(ValidationError):
+        InterviewQuestionBankLogicalGroupCreate(items=items)
+
+
+@pytest.mark.asyncio
+async def test_add_sibling_expands_singleton_into_group(
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict[str, Any],
+) -> None:
+    async with session_factory() as session:
+        singleton = await authoring_service.add_to_question_bank(
+            session,
+            scenario["course_id"],
+            _CreatePayload(**_bank_payload("technical", "Solo technical")),
+            _actor(scenario["teacher_id"]),
+        )
+        await session.commit()
+        singleton_id = singleton.id
+    assert singleton.variant_group_id is None
+
+    async with session_factory() as session:
+        items = await authoring_service.add_question_bank_sibling(
+            session,
+            scenario["course_id"],
+            singleton_id,
+            InterviewQuestionBankSiblingCreate(
+                **_bank_payload("system_design", "Solo system design")
+            ),
+            _actor(scenario["teacher_id"]),
+        )
+        await session.commit()
+
+    assert len(items) == 2
+    group_ids = {item.variant_group_id for item in items}
+    assert len(group_ids) == 1
+    assert group_ids != {None}
+    assert {item.question_type for item in items} == {"technical", "system_design"}
+
+
+@pytest.mark.asyncio
+async def test_add_sibling_rejects_duplicate_angle_in_group(
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict[str, Any],
+) -> None:
+    from abridgeai.core.exceptions import ConflictError
+
+    async with session_factory() as session:
+        singleton = await authoring_service.add_to_question_bank(
+            session,
+            scenario["course_id"],
+            _CreatePayload(**_bank_payload("technical", "Dup technical")),
+            _actor(scenario["teacher_id"]),
+        )
+        await session.commit()
+        singleton_id = singleton.id
+
+    async with session_factory() as session:
+        with pytest.raises(ConflictError):
+            await authoring_service.add_question_bank_sibling(
+                session,
+                scenario["course_id"],
+                singleton_id,
+                InterviewQuestionBankSiblingCreate(
+                    **_bank_payload("technical", "Dup technical 2")
+                ),
+                _actor(scenario["teacher_id"]),
+            )
+
+
+@pytest.mark.asyncio
+async def test_import_bank_expands_group_and_fresh_group_id(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict[str, Any],
+) -> None:
+    seeded = await _create_published_config(
+        engine,
+        course_id=scenario["course_id"],
+        module_id=scenario["module_id"],
+        teacher_id=scenario["teacher_id"],
+        questions=0,
+        outcomes=0,
+        status="draft",
+    )
+    payload = InterviewQuestionBankLogicalGroupCreate(
+        items=[
+            InterviewQuestionBankItemCreate(
+                **_bank_payload(t, f"Group {t}?")
+            )
+            for t in ("technical", "system_design", "situational", "behavioral")
+        ]
+    )
+    async with session_factory() as session:
+        group = await authoring_service.create_question_bank_logical_group(
+            session,
+            scenario["course_id"],
+            payload,
+            _actor(scenario["teacher_id"]),
+        )
+        await session.commit()
+    bank_group_id = {i.variant_group_id for i in group}.pop()
+
+    async with session_factory() as session:
+        created = await authoring_service.import_question_bank_items(
+            session,
+            seeded["config_id"],
+            [group[0].id],  # selecting ONE child expands the whole group
+            _actor(scenario["teacher_id"]),
+        )
+        await session.commit()
+
+    assert len(created) == 4
+    config_group_ids = {q.variant_group_id for q in created}
+    assert len(config_group_ids) == 1
+    assert config_group_ids != {bank_group_id}  # fresh group id, never the bank's
+    assert all(q.review_status == "approved" for q in created)
+    positions = sorted(q.position for q in created)
+    assert positions == [1, 2, 3, 4]
+
+
+@pytest.mark.asyncio
+async def test_import_bank_rolls_back_on_prompt_collision(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict[str, Any],
+) -> None:
+    from abridgeai.core.exceptions import ConflictError
+
+    seeded = await _create_published_config(
+        engine,
+        course_id=scenario["course_id"],
+        module_id=scenario["module_id"],
+        teacher_id=scenario["teacher_id"],
+        questions=0,
+        outcomes=0,
+        status="draft",
+    )
+    # A bank item whose prompt already exists inside the config.
+    async with session_factory() as session:
+        await authoring_service.add_question(
+            session,
+            seeded["config_id"],
+            _CreatePayload(**_bank_payload("technical", "Collides with bank")),
+            _actor(scenario["teacher_id"]),
+        )
+        await session.commit()
+        bank = await authoring_service.add_to_question_bank(
+            session,
+            scenario["course_id"],
+            _CreatePayload(**_bank_payload("technical", "Collides with bank")),
+            _actor(scenario["teacher_id"]),
+        )
+        await session.commit()
+        bank_id = bank.id
+
+    async with session_factory() as session:
+        with pytest.raises(ConflictError):
+            await authoring_service.import_question_bank_items(
+                session,
+                seeded["config_id"],
+                [bank_id],
+                _actor(scenario["teacher_id"]),
+            )
+
+    async with session_factory() as session:
+        count = (
+            await session.execute(
+                text(
+                    "SELECT count(*) FROM interview_questions "
+                    "WHERE interview_config_id=:config_id"
+                ),
+                {"config_id": seeded["config_id"]},
+            )
+        ).scalar_one()
+    assert count == 1  # the pre-existing question only; import added nothing
+
+
+@pytest.mark.asyncio
+async def test_import_bank_imports_standalone_singleton(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict[str, Any],
+) -> None:
+    seeded = await _create_published_config(
+        engine,
+        course_id=scenario["course_id"],
+        module_id=scenario["module_id"],
+        teacher_id=scenario["teacher_id"],
+        questions=0,
+        outcomes=0,
+        status="draft",
+    )
+    async with session_factory() as session:
+        bank = await authoring_service.add_to_question_bank(
+            session,
+            scenario["course_id"],
+            _CreatePayload(**_bank_payload("technical", "Standalone import")),
+            _actor(scenario["teacher_id"]),
+        )
+        await session.commit()
+        bank_id = bank.id
+
+    async with session_factory() as session:
+        created = await authoring_service.import_question_bank_items(
+            session,
+            seeded["config_id"],
+            [bank_id],
+            _actor(scenario["teacher_id"]),
+        )
+        await session.commit()
+
+    assert len(created) == 1
+    assert created[0].variant_group_id is None
+    assert created[0].position == 1
+
+
+@pytest.mark.asyncio
+async def test_import_bank_ignores_soft_deleted_config_prompt(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict[str, Any],
+) -> None:
+    """A soft-deleted question's prompt must not block re-import (the ORM
+    loader-criteria listener already hides deleted rows from authoring reads)."""
+    seeded = await _create_published_config(
+        engine,
+        course_id=scenario["course_id"],
+        module_id=scenario["module_id"],
+        teacher_id=scenario["teacher_id"],
+        questions=1,
+        outcomes=0,
+        status="draft",
+    )
+    async with session_factory() as session:
+        await authoring_service.delete_question(
+            session,
+            seeded["config_id"],
+            seeded["question_ids"][0],
+            _actor(scenario["teacher_id"]),
+        )
+        await session.commit()
+        bank = await authoring_service.add_to_question_bank(
+            session,
+            scenario["course_id"],
+            _CreatePayload(**_bank_payload("technical", "Question 1?")),
+            _actor(scenario["teacher_id"]),
+        )
+        await session.commit()
+        bank_id = bank.id
+
+    async with session_factory() as session:
+        created = await authoring_service.import_question_bank_items(
+            session,
+            seeded["config_id"],
+            [bank_id],
+            _actor(scenario["teacher_id"]),
+        )
+        await session.commit()
+
+    assert len(created) == 1
+    assert created[0].position == 1  # deleted question freed the prompt + position
