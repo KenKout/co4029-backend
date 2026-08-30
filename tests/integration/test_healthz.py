@@ -284,3 +284,99 @@ async def test_readyz_no_auth_required(
 
     resp = await client.get("/readyz")
     assert resp.status_code == 200
+
+
+class _FakeSettings:
+    llm_base_url = "https://llm.example.test/v1"
+    llm_api_key = "k-test"
+
+
+class _FakeResp:
+    def __init__(self, status_code: int) -> None:
+        self.status_code = status_code
+
+
+class _FakeAsyncClient:
+    """In-memory stand-in for httpx.AsyncClient; records the ping URL."""
+
+    def __init__(self, resp: _FakeResp) -> None:
+        self._resp = resp
+        self.url: str | None = None
+
+    async def __aenter__(self) -> _FakeAsyncClient:
+        return self
+
+    async def __aexit__(self, *_: object) -> None:
+        return None
+
+    async def get(self, url: str, headers: dict[str, str] | None = None) -> _FakeResp:
+        self.url = url
+        return self._resp
+
+
+async def test_llm_probe_skipped_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Without LLM_HEALTH_PING the probe is a no-op — never calls the network."""
+    monkeypatch.delenv("LLM_HEALTH_PING", raising=False)
+
+    status = await healthz_module._check_llm_provider()
+
+    assert status.status == "skipped"
+    assert status.latency_ms is None
+
+
+async def test_llm_probe_skipped_when_api_key_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LLM_HEALTH_PING", "1")
+
+    # Missing key keeps the check skipped without touching the network.
+    class _NoKey:
+        llm_base_url = "https://llm.example.test/v1"
+        llm_api_key = None
+
+    monkeypatch.setattr(healthz_module, "get_settings", lambda: _NoKey())
+
+    status = await healthz_module._check_llm_provider()
+
+    assert status.status == "skipped"
+
+
+class _FakeHttpx:
+    """Stand-in giving healthz module an AsyncClient factory + HTTPError."""
+
+    def __init__(self, client: _FakeAsyncClient) -> None:
+        self._client = client
+
+    def AsyncClient(self, *args: object, **kwargs: object) -> _FakeAsyncClient:
+        return self._client
+
+    class HTTPError(Exception):
+        pass
+
+
+async def test_llm_probe_pings_models_when_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LLM_HEALTH_PING", "1")
+    monkeypatch.setattr(healthz_module, "get_settings", _FakeSettings)
+    client = _FakeAsyncClient(_FakeResp(200))
+    monkeypatch.setattr(healthz_module, "httpx", _FakeHttpx(client))
+
+    status = await healthz_module._check_llm_provider()
+
+    assert status.status == "ok"
+    assert status.latency_ms is not None
+    assert client.url == "https://llm.example.test/v1/models"
+
+
+async def test_llm_probe_unhealthy_on_http_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LLM_HEALTH_PING", "1")
+    monkeypatch.setattr(healthz_module, "get_settings", _FakeSettings)
+    client = _FakeAsyncClient(_FakeResp(500))
+    monkeypatch.setattr(healthz_module, "httpx", _FakeHttpx(client))
+
+    status = await healthz_module._check_llm_provider()
+
+    assert status.status == "unhealthy"

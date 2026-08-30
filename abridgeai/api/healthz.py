@@ -32,9 +32,11 @@ Implementation notes:
   real infrastructure.
 * ``_get_version`` and ``_get_git_sha`` are ``@cache``-decorated so the
   subprocess + import cost is paid once per process, not per request.
-* The Neo4j / Garage / LLM checks fall through to ``"disabled"`` when
-  the corresponding settings are absent, never ``"unhealthy"`` -- a
-  feature being intentionally off must not flip the overall status.
+* The Neo4j / Garage checks fall through to "disabled" when
+  the corresponding settings are absent, never "unhealthy" -- a
+  feature being intentionally off must not flip the overall status. The
+  LLM check defaults to "skipped" and only pings the provider when
+  "LLM_HEALTH_PING" opts in (see ``_check_llm_provider``).
 """
 
 from __future__ import annotations
@@ -49,6 +51,7 @@ from functools import cache
 from pathlib import Path
 from typing import Annotated, Literal
 
+import httpx
 from fastapi import APIRouter, Depends, Response, status
 from pydantic import BaseModel
 from sqlalchemy import text
@@ -217,13 +220,34 @@ async def _check_garage_s3() -> CheckStatus:
 
 
 async def _check_llm_provider() -> CheckStatus:
-    """LLM probe is intentionally a no-op to avoid burning quota on every call.
+    """LLM probe: skipped unless ``LLM_HEALTH_PING`` opts in.
 
-    Operators that want a real ping can swap this for a ``GET /v1/models``
-    request gated on a ``LLM_HEALTH_PING`` env var; today we surface
-    ``skipped`` so dashboards know a status was deliberately omitted.
+    A live ping costs the provider quota on every health view, so the
+    default is a deliberate no-op that reports ``skipped`` — dashboards
+    render it as "Not checked". With ``LLM_HEALTH_PING=1`` the probe
+    issues a cheap ``GET {base}/models`` (a capabilities list, never a
+    generation) against the same credential the app uses, bounded by the
+    same per-check timeout as every other probe. Missing API key keeps
+    the check ``skipped`` with a warning instead of failing.
     """
-    return CheckStatus(status="skipped", latency_ms=None)
+    settings = get_settings()
+    if not os.environ.get("LLM_HEALTH_PING") or not settings.llm_api_key:
+        return CheckStatus(status="skipped", latency_ms=None)
+    started = time.perf_counter()
+    try:
+        async with httpx.AsyncClient(timeout=PER_CHECK_TIMEOUT_S) as client:
+            resp = await client.get(
+                f"{settings.llm_base_url.rstrip('/')}/models",
+                headers={"Authorization": f"Bearer {settings.llm_api_key}"},
+            )
+    except httpx.HTTPError as exc:
+        logger.warning("healthz.llm_ping_failed: %s", exc)
+        return CheckStatus(status="unhealthy", latency_ms=None)
+    latency_ms = round((time.perf_counter() - started) * 1000, 1)
+    if resp.status_code >= 400:
+        logger.warning("healthz.llm_ping_http_%s", resp.status_code)
+        return CheckStatus(status="unhealthy", latency_ms=latency_ms)
+    return CheckStatus(status="ok", latency_ms=latency_ms)
 
 
 def _check_alembic_at_head_sync() -> bool:
