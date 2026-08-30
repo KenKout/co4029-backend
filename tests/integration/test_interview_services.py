@@ -2272,10 +2272,16 @@ async def test_import_bank_expands_group_and_fresh_group_id(
     bank_group_id = {i.variant_group_id for i in group}.pop()
 
     async with session_factory() as session:
+        # Selecting a NON-first child (behavioral) still pulls in the whole
+        # group, and the persisted order is the canonical interviewer-angle
+        # sequence — never UUID / SQL order.
+        late_child = next(
+            item for item in group if item.question_type == "behavioral"
+        )
         created = await authoring_service.import_question_bank_items(
             session,
             seeded["config_id"],
-            [group[0].id],  # selecting ONE child expands the whole group
+            [late_child.id],
             _actor(scenario["teacher_id"]),
         )
         await session.commit()
@@ -2285,8 +2291,13 @@ async def test_import_bank_expands_group_and_fresh_group_id(
     assert len(config_group_ids) == 1
     assert config_group_ids != {bank_group_id}  # fresh group id, never the bank's
     assert all(q.review_status == "approved" for q in created)
-    positions = sorted(q.position for q in created)
-    assert positions == [1, 2, 3, 4]
+    assert [q.question_type for q in created] == [
+        "technical",
+        "system_design",
+        "situational",
+        "behavioral",
+    ]
+    assert [q.position for q in created] == [1, 2, 3, 4]
 
 
 @pytest.mark.asyncio

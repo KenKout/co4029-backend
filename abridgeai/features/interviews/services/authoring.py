@@ -839,12 +839,22 @@ async def add_to_question_bank(
     return item
 
 
-_LOGICAL_QUESTION_ANGLES = {
+_LOGICAL_QUESTION_ANGLE_ORDER = (
     "technical",
     "system_design",
     "situational",
     "behavioral",
+)
+_LOGICAL_QUESTION_ANGLES = set(_LOGICAL_QUESTION_ANGLE_ORDER)
+_LOGICAL_QUESTION_ANGLE_RANK = {
+    angle: index for index, angle in enumerate(_LOGICAL_QUESTION_ANGLE_ORDER)
 }
+
+
+def _logical_angle_rank(item: InterviewQuestionBankItem) -> int:
+    return _LOGICAL_QUESTION_ANGLE_RANK.get(
+        item.question_type, len(_LOGICAL_QUESTION_ANGLE_ORDER)
+    )
 
 
 def _normalise_prompt(value: str) -> str:
@@ -865,7 +875,11 @@ async def _active_bank_group(
         )
         .order_by(InterviewQuestionBankItem.created_at)
     )
-    return list(result.scalars().all())
+    # Canonical interviewer-angle order (created_at/id only break ties).
+    return sorted(
+        result.scalars().all(),
+        key=lambda item: (_logical_angle_rank(item), item.created_at, item.id),
+    )
 
 
 async def _create_bank_item(
@@ -1030,12 +1044,46 @@ async def import_question_bank_items(
     if collisions:
         raise ConflictError("question_bank_import_prompt_already_exists")
 
+    # Preserve the user's selected unit order, but always persist members of a
+    # logical question in its canonical interviewer-angle sequence. SQL and UUID
+    # order are intentionally never part of the authoring experience.
+    selected_by_id = {item.id: item for item in selected}
+    unit_keys: list[tuple[str, UUID]] = []
+    seen_units: set[tuple[str, UUID]] = set()
+    for item_id in item_ids:
+        item = selected_by_id[item_id]
+        key = (
+            ("group", item.variant_group_id)
+            if item.variant_group_id is not None
+            else ("item", item.id)
+        )
+        if key not in seen_units:
+            seen_units.add(key)
+            unit_keys.append(key)
+    expanded_by_group: dict[UUID, list[InterviewQuestionBankItem]] = {}
+    expanded_by_id = {item.id: item for item in expanded}
+    for item in expanded:
+        if item.variant_group_id is not None:
+            expanded_by_group.setdefault(item.variant_group_id, []).append(item)
+
+    ordered: list[InterviewQuestionBankItem] = []
+    for kind_unit, unit_id in unit_keys:
+        if kind_unit == "group":
+            ordered.extend(
+                sorted(
+                    expanded_by_group[unit_id],
+                    key=lambda item: (
+                        _logical_angle_rank(item),
+                        item.created_at,
+                        item.id,
+                    ),
+                )
+            )
+        else:
+            ordered.append(expanded_by_id[unit_id])
+
     next_position = await authoring_queries.next_question_position(db, config_id)
     group_map = {group_id: uuid4() for group_id in group_ids}
-    ordered = sorted(
-        expanded,
-        key=lambda item: (str(item.variant_group_id or item.id), str(item.id)),
-    )
     created: list[InterviewQuestion] = []
     for offset, item in enumerate(ordered):
         question = InterviewQuestion(
