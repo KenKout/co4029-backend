@@ -318,6 +318,50 @@ def test_parser_drops_malformed_entries() -> None:
     assert parsed[0].question_type == "technical"
 
 
+def test_parser_drops_non_string_question_type() -> None:
+    """A number / list / object in ``question_type`` must not crash ``.strip()``.
+
+    The LLM occasionally emits ``"question_type": 3`` (an index) or a list of
+    angles. Before the guard this raised ``AttributeError`` inside the parser
+    and failed the whole generation run instead of dropping one row.
+    """
+    good = _question(position=1, question_type="technical", difficulty="easy", expected_depth=2)
+    for bad_value in (3, ["technical"], {"kind": "technical"}, True):
+        payload: dict[str, Any] = {
+            "questions": [
+                {**good, "prompt_text": "Bad type row", "question_type": bad_value},
+                good,
+            ]
+        }
+        parsed = parse_generation_response(payload)
+        assert [d.prompt_text for d in parsed] == [good["prompt_text"]]
+
+
+def test_parser_drops_non_string_difficulty() -> None:
+    """Same guard for ``difficulty`` — a numeric level is dropped, not fatal."""
+    good = _question(position=1, question_type="technical", difficulty="easy", expected_depth=2)
+    for bad_value in (2, ["hard"], {"level": "hard"}):
+        payload: dict[str, Any] = {
+            "questions": [
+                {**good, "prompt_text": "Bad difficulty row", "difficulty": bad_value},
+                good,
+            ]
+        }
+        parsed = parse_generation_response(payload)
+        assert [d.prompt_text for d in parsed] == [good["prompt_text"]]
+
+
+def test_parser_treats_null_type_and_difficulty_as_defaults() -> None:
+    """Explicit ``null`` keeps the historical default, unlike a wrong type."""
+    entry = _question(position=1, question_type="technical", difficulty="easy", expected_depth=2)
+    entry["question_type"] = None
+    entry["difficulty"] = None
+    parsed = parse_generation_response({"questions": [entry]})
+    assert len(parsed) == 1
+    assert parsed[0].question_type == "technical"
+    assert parsed[0].difficulty == "medium"
+
+
 def test_parser_accepts_british_spelling() -> None:
     payload: dict[str, Any] = {
         "questions": [

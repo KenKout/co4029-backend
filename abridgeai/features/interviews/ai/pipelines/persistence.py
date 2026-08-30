@@ -13,7 +13,10 @@ from typing import TYPE_CHECKING, Any
 from abridgeai.core.observability import get_logger
 from abridgeai.features.interviews.dedup import store_question_embeddings
 from abridgeai.features.interviews.models import InterviewQuestion
-from abridgeai.features.interviews.queries.authoring import next_question_position
+from abridgeai.features.interviews.queries.authoring import (
+    lock_question_append,
+    next_question_position,
+)
 
 if TYPE_CHECKING:
     from uuid import UUID
@@ -64,9 +67,11 @@ async def _persist_questions(
     source_module_ids: list[str],
     pipeline_run_id: UUID | None = None,
 ) -> None:
+    await lock_question_append(db, config.id)
+    next_position = await next_question_position(db, config.id)
     created: list[InterviewQuestion] = []
-    for draft in accepted:
-        position = await next_question_position(db, config.id)
+    for offset, draft in enumerate(accepted):
+        position = next_position + offset
         question = InterviewQuestion(
             interview_config_id=config.id,
             linked_outcome_id=draft.linked_outcome_id,

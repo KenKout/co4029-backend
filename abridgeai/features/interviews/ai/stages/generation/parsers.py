@@ -119,13 +119,23 @@ def _prepare_question(entry: Any) -> InterviewQuestionDraft | None:  # noqa: ANN
     if not isinstance(raw_text, str) or not raw_text.strip():
         return None
 
-    raw_type = (entry.get("question_type") or "technical").strip().lower()
+    type_value = entry.get("question_type", "technical")
+    if type_value is None:
+        type_value = "technical"
+    if not isinstance(type_value, str):
+        return None
+    raw_type = type_value.strip().lower()
     if raw_type == "behavioural":  # accept BrEng spelling from the LLM
         raw_type = "behavioral"
     if raw_type not in _VALID_TYPES:
         return None
 
-    raw_difficulty = (entry.get("difficulty") or "medium").strip().lower()
+    difficulty_value = entry.get("difficulty", "medium")
+    if difficulty_value is None:
+        difficulty_value = "medium"
+    if not isinstance(difficulty_value, str):
+        return None
+    raw_difficulty = difficulty_value.strip().lower()
     if raw_difficulty not in _VALID_DIFFICULTIES:
         return None
 

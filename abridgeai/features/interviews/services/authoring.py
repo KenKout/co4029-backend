@@ -107,12 +107,10 @@ register_conflict_mappings(
         "uq_interview_outcome_evaluations": "interview_outcome_evaluation_already_recorded: this outcome has already been evaluated for this session",  # noqa: E501
         "uq_interview_session_questions_sequence": "interview_session_question_sequence_taken: this answer was already submitted — please refresh",  # noqa: E501
         "uq_generation_runs_active_dedup": "interview_generation_in_progress",
-        # Partial unique index (migration 0092): a logical bank group can hold
-        # each angle at most once. Catches the cross-anchor sibling race where
-        # two concurrent adds target the same group through DIFFERENT anchors —
-        # the pre-check in add_question_bank_sibling can't see each other, so
-        # this index is the final arbiter. Without the mapping the duplicate
-        # would surface as IntegrityError (HTTP 500) instead of a clean 409.
+        # Partial unique index (migration 0092): a logical bank group holds each
+        # angle at most once. Last line of defence behind the group advisory
+        # lock — without the mapping a lost race surfaces as IntegrityError
+        # (HTTP 500) instead of a clean 409.
         "uq_iq_bank_live_group_angle": "logical_question_angle_already_present",
     }
 )
@@ -437,6 +435,7 @@ async def add_question(
 ) -> InterviewQuestion:
     config = await _require_config(db, config_id)
     published_freeze.assert_questions_editable(config)
+    await authoring_queries.lock_question_append(db, config_id)
     next_position = await authoring_queries.next_question_position(db, config_id)
     data = payload.model_dump(exclude_unset=True)
     if not str(data.get("prompt_text", "")).strip():
@@ -704,6 +703,29 @@ async def delete_outcome(
     await soft_delete_cascade(db, outcome, actor_id=actor.user_id)
 
 
+async def _assert_target_outcomes_in_config(
+    db: AsyncSession, config_id: UUID, request_data: dict[str, Any]
+) -> None:
+    """Reject a target-outcome filter that does not resolve inside this config.
+
+    An empty / absent filter means "every outcome" (prior behaviour). A
+    non-empty one must name live outcomes of THIS config: soft-deleted,
+    unknown, or foreign-config ids would otherwise be dropped by the pipeline
+    filter and silently widen the run back to all outcomes.
+    """
+    raw_ids = request_data.get("target_outcome_ids") or []
+    target_ids = [UUID(str(outcome_id)) for outcome_id in raw_ids]
+    if not target_ids:
+        return
+    if len(target_ids) != len(set(target_ids)):
+        raise AppError("target_outcome_ids contains duplicates")
+    live_ids = {
+        outcome.id for outcome in await authoring_queries.list_outcomes_for_config(db, config_id)
+    }
+    if set(target_ids) - live_ids:
+        raise AppError("target_outcome_ids must belong to the interview config")
+
+
 async def start_generation_run(
     db: AsyncSession,
     config_id: UUID,
@@ -744,6 +766,8 @@ async def start_generation_run(
     await _require_lessons_in_course(db, explicit_lesson_ids, config.course_id)
     module_lesson_ids = await courses_public.list_lesson_ids_for_modules(db, module_ids)
     merged_lesson_ids = sorted({*explicit_lesson_ids, *module_lesson_ids})
+
+    await _assert_target_outcomes_in_config(db, config_id, request_data)
 
     config_json: dict[str, Any] = dict(request_data) | {
         "interview_config_id": str(config.id),
@@ -931,6 +955,10 @@ async def create_question_bank_logical_group(
 ) -> list[InterviewQuestionBankItem]:
     """Copy one complete four-angle logical question into the course bank."""
     await _require_course(db, course_id)
+    payload_items = list(payload.items)
+    prompts = [_normalise_prompt(str(item.prompt_text or "")) for item in payload_items]
+    if len(prompts) != len(set(prompts)):
+        raise ConflictError("logical_question_prompt_duplicate")
     group_id = uuid4()
     items = [
         await _create_bank_item(
@@ -973,12 +1001,21 @@ async def add_question_bank_sibling(
         raise NotFoundError(f"Question bank item {item_id} not found")
 
     group_id = anchor.variant_group_id or uuid4()
+    # Different children of an existing group are distinct rows, so their row
+    # locks alone cannot serialize a same-angle sibling add. Coordinate writes
+    # by the durable group id; singleton promotion is already serialized by the
+    # anchor row lock above.
+    if anchor.variant_group_id is not None:
+        await authoring_queries.lock_bank_group(db, course_id, group_id)
     siblings = (
         await _active_bank_group(db, course_id, group_id)
         if anchor.variant_group_id
         else [anchor]
     )
     question_type = payload.question_type
+    prompt_text = _normalise_prompt(str(payload.prompt_text or ""))
+    if prompt_text in {_normalise_prompt(item.prompt_text) for item in siblings}:
+        raise ConflictError("logical_question_prompt_duplicate")
     if question_type in {item.question_type for item in siblings}:
         raise ConflictError("logical_question_angle_already_present")
     if len(siblings) >= 4:
@@ -1002,6 +1039,52 @@ async def add_question_bank_sibling(
     return await _active_bank_group(db, course_id, group_id)
 
 
+def _order_bank_import(
+    *,
+    item_ids: list[UUID],
+    selected: list[InterviewQuestionBankItem],
+    expanded: list[InterviewQuestionBankItem],
+) -> list[InterviewQuestionBankItem]:
+    """Flatten the selection into insert order.
+
+    Preserves the user's selected unit order, but always persists members of a
+    logical question in its canonical interviewer-angle sequence. SQL and UUID
+    order are intentionally never part of the authoring experience.
+    """
+    selected_by_id = {item.id: item for item in selected}
+    unit_keys: list[tuple[str, UUID]] = []
+    seen_units: set[tuple[str, UUID]] = set()
+    for item_id in item_ids:
+        item = selected_by_id[item_id]
+        key = (
+            ("group", item.variant_group_id)
+            if item.variant_group_id is not None
+            else ("item", item.id)
+        )
+        if key not in seen_units:
+            seen_units.add(key)
+            unit_keys.append(key)
+
+    expanded_by_group: dict[UUID, list[InterviewQuestionBankItem]] = {}
+    expanded_by_id = {item.id: item for item in expanded}
+    for item in expanded:
+        if item.variant_group_id is not None:
+            expanded_by_group.setdefault(item.variant_group_id, []).append(item)
+
+    ordered: list[InterviewQuestionBankItem] = []
+    for kind_unit, unit_id in unit_keys:
+        if kind_unit == "group":
+            ordered.extend(
+                sorted(
+                    expanded_by_group[unit_id],
+                    key=lambda item: (_logical_angle_rank(item), item.created_at, item.id),
+                )
+            )
+        else:
+            ordered.append(expanded_by_id[unit_id])
+    return ordered
+
+
 async def import_question_bank_items(
     db: AsyncSession,
     config_id: UUID,
@@ -1013,6 +1096,9 @@ async def import_question_bank_items(
 
     config = await _require_config(db, config_id)
     published_freeze.assert_questions_editable(config)
+    if len(item_ids) != len(set(item_ids)):
+        raise AppError("question_bank_import_item_ids contains duplicates")
+    await authoring_queries.lock_question_append(db, config_id)
     selected = list(
         (
             await db.execute(
@@ -1043,6 +1129,10 @@ async def import_question_bank_items(
         )
         expanded = list({item.id: item for item in [*selected, *siblings]}.values())
 
+    expanded_prompts = [_normalise_prompt(item.prompt_text) for item in expanded]
+    if len(expanded_prompts) != len(set(expanded_prompts)):
+        raise ConflictError("question_bank_import_prompt_duplicate")
+
     existing = {
         _normalise_prompt(question.prompt_text)
         for question in await authoring_queries.list_questions_for_config(db, config_id)
@@ -1054,42 +1144,8 @@ async def import_question_bank_items(
         raise ConflictError("question_bank_import_prompt_already_exists")
 
     # Preserve the user's selected unit order, but always persist members of a
-    # logical question in its canonical interviewer-angle sequence. SQL and UUID
-    # order are intentionally never part of the authoring experience.
-    selected_by_id = {item.id: item for item in selected}
-    unit_keys: list[tuple[str, UUID]] = []
-    seen_units: set[tuple[str, UUID]] = set()
-    for item_id in item_ids:
-        item = selected_by_id[item_id]
-        key = (
-            ("group", item.variant_group_id)
-            if item.variant_group_id is not None
-            else ("item", item.id)
-        )
-        if key not in seen_units:
-            seen_units.add(key)
-            unit_keys.append(key)
-    expanded_by_group: dict[UUID, list[InterviewQuestionBankItem]] = {}
-    expanded_by_id = {item.id: item for item in expanded}
-    for item in expanded:
-        if item.variant_group_id is not None:
-            expanded_by_group.setdefault(item.variant_group_id, []).append(item)
-
-    ordered: list[InterviewQuestionBankItem] = []
-    for kind_unit, unit_id in unit_keys:
-        if kind_unit == "group":
-            ordered.extend(
-                sorted(
-                    expanded_by_group[unit_id],
-                    key=lambda item: (
-                        _logical_angle_rank(item),
-                        item.created_at,
-                        item.id,
-                    ),
-                )
-            )
-        else:
-            ordered.append(expanded_by_id[unit_id])
+    # logical question in its canonical interviewer-angle sequence.
+    ordered = _order_bank_import(item_ids=item_ids, selected=selected, expanded=expanded)
 
     next_position = await authoring_queries.next_question_position(db, config_id)
     group_map = {group_id: uuid4() for group_id in group_ids}
@@ -1128,6 +1184,38 @@ async def import_question_bank_items(
     return created
 
 
+async def _assert_grouped_edit_keeps_group_valid(
+    db: AsyncSession,
+    *,
+    course_id: UUID,
+    item: InterviewQuestionBankItem,
+    final_type: str | None,
+    final_prompt: str,
+) -> None:
+    """Guard an edit of a logical-group member against its live siblings.
+
+    Holds the group advisory lock first so two concurrent edits of different
+    children cannot both pass the check and land the same angle. Errors are
+    domain errors (400 / 409) — never an IntegrityError surfacing as a 500.
+    """
+    group_id = item.variant_group_id
+    assert group_id is not None  # noqa: S101 -- caller checks; keeps mypy narrow
+    await authoring_queries.lock_bank_group(db, course_id, group_id)
+    siblings = [
+        sibling
+        for sibling in await _active_bank_group(db, course_id, group_id)
+        if sibling.id != item.id
+    ]
+    if final_type not in _LOGICAL_QUESTION_ANGLES:
+        raise AppError("logical_question_angle_required")
+    if final_type in {sibling.question_type for sibling in siblings}:
+        raise ConflictError("logical_question_angle_already_present")
+    if _normalise_prompt(final_prompt) in {
+        _normalise_prompt(sibling.prompt_text) for sibling in siblings
+    }:
+        raise ConflictError("logical_question_prompt_duplicate")
+
+
 async def update_question_bank_item(
     db: AsyncSession,
     course_id: UUID,
@@ -1135,21 +1223,42 @@ async def update_question_bank_item(
     payload: Any,  # noqa: ANN401  -- InterviewQuestionBankItemUpdate at edge
     actor: CurrentUser,
 ) -> InterviewQuestionBankItem:
-    """Edit a bank item (management page). Only supplied fields change.
-
-    ``tags`` maps to the ``tags_json`` column; everything else maps 1:1.
-    """
+    """Edit one bank item without breaking its logical-question siblings."""
     from sqlalchemy import select  # noqa: PLC0415
 
-    stmt = select(InterviewQuestionBankItem).where(
-        InterviewQuestionBankItem.id == item_id,
-        InterviewQuestionBankItem.course_id == course_id,
-        InterviewQuestionBankItem.deleted_at.is_(None),
+    stmt = (
+        select(InterviewQuestionBankItem)
+        .where(
+            InterviewQuestionBankItem.id == item_id,
+            InterviewQuestionBankItem.course_id == course_id,
+            InterviewQuestionBankItem.deleted_at.is_(None),
+        )
+        .with_for_update()
     )
     item = (await db.execute(stmt)).scalar_one_or_none()
     if item is None:
         raise NotFoundError(f"Question bank item {item_id} not found")
+
     data = payload.model_dump(exclude_unset=True)
+    final_prompt = str(data.get("prompt_text", item.prompt_text) or "").strip()
+    if not final_prompt:
+        raise AppError("Question prompt is required")
+    if "prompt_text" in data:
+        data["prompt_text"] = final_prompt
+    final_type = data.get("question_type", item.question_type)
+    if final_type is None:
+        # NOT NULL column: an explicit null is a bad request, not a DB error.
+        raise AppError("question_type cannot be null")
+
+    if item.variant_group_id is not None:
+        await _assert_grouped_edit_keeps_group_valid(
+            db,
+            course_id=course_id,
+            item=item,
+            final_type=final_type,
+            final_prompt=final_prompt,
+        )
+
     if "tags" in data:
         item.tags_json = data.pop("tags")
     for key, value in data.items():

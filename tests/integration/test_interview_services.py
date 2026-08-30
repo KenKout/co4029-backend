@@ -69,6 +69,7 @@ from abridgeai.features.interviews.queries import (
 )
 from abridgeai.features.interviews.schemas import (
     InterviewQuestionBankItemCreate,
+    InterviewQuestionBankItemUpdate,
     InterviewQuestionBankLogicalGroupCreate,
     InterviewQuestionBankSiblingCreate,
 )
@@ -2441,3 +2442,613 @@ async def test_import_bank_ignores_soft_deleted_config_prompt(
 
     assert len(created) == 1
     assert created[0].position == 1  # deleted question freed the prompt + position
+
+
+# --- Duplicate-import / scope / group-edit guards -------------------------------
+
+
+@pytest.mark.asyncio
+async def test_import_bank_rejects_duplicate_item_ids(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict[str, Any],
+) -> None:
+    """The same bank item listed twice is a bad request, not two questions."""
+    seeded = await _create_published_config(
+        engine,
+        course_id=scenario["course_id"],
+        module_id=scenario["module_id"],
+        teacher_id=scenario["teacher_id"],
+        questions=0,
+        outcomes=0,
+        status="draft",
+    )
+    async with session_factory() as session:
+        bank = await authoring_service.add_to_question_bank(
+            session,
+            scenario["course_id"],
+            _CreatePayload(**_bank_payload("technical", "Twice selected")),
+            _actor(scenario["teacher_id"]),
+        )
+        await session.commit()
+        bank_id = bank.id
+
+    async with session_factory() as session:
+        with pytest.raises(AppError):
+            await authoring_service.import_question_bank_items(
+                session,
+                seeded["config_id"],
+                [bank_id, bank_id],
+                _actor(scenario["teacher_id"]),
+            )
+
+    async with session_factory() as session:
+        count = (
+            await session.execute(
+                text(
+                    "SELECT count(*) FROM interview_questions "
+                    "WHERE interview_config_id=:config_id"
+                ),
+                {"config_id": seeded["config_id"]},
+            )
+        ).scalar_one()
+    assert count == 0  # nothing written on a rejected request
+
+
+@pytest.mark.asyncio
+async def test_import_bank_rejects_duplicate_prompts_within_request(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict[str, Any],
+) -> None:
+    """Two DIFFERENT bank items sharing one prompt cannot both be imported.
+
+    The pre-existing collision check only compared against prompts already in
+    the config, so a request that carried the collision inside itself slipped
+    through and produced two identical questions.
+    """
+    from abridgeai.core.exceptions import ConflictError
+
+    seeded = await _create_published_config(
+        engine,
+        course_id=scenario["course_id"],
+        module_id=scenario["module_id"],
+        teacher_id=scenario["teacher_id"],
+        questions=0,
+        outcomes=0,
+        status="draft",
+    )
+    async with session_factory() as session:
+        first = await authoring_service.add_to_question_bank(
+            session,
+            scenario["course_id"],
+            _CreatePayload(**_bank_payload("technical", "Same prompt")),
+            _actor(scenario["teacher_id"]),
+        )
+        await session.commit()
+        second = await authoring_service.add_to_question_bank(
+            session,
+            scenario["course_id"],
+            # Normalised prompt equality: case + surrounding whitespace only.
+            _CreatePayload(**_bank_payload("behavioral", "  SAME PROMPT ")),
+            _actor(scenario["teacher_id"]),
+        )
+        await session.commit()
+        ids = [first.id, second.id]
+
+    async with session_factory() as session:
+        with pytest.raises(ConflictError):
+            await authoring_service.import_question_bank_items(
+                session,
+                seeded["config_id"],
+                ids,
+                _actor(scenario["teacher_id"]),
+            )
+
+    async with session_factory() as session:
+        count = (
+            await session.execute(
+                text(
+                    "SELECT count(*) FROM interview_questions "
+                    "WHERE interview_config_id=:config_id"
+                ),
+                {"config_id": seeded["config_id"]},
+            )
+        ).scalar_one()
+    assert count == 0
+
+
+@pytest.mark.asyncio
+async def test_create_logical_group_rejects_duplicate_prompts(
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict[str, Any],
+) -> None:
+    """Four distinct angles are not enough — the prompts must differ too."""
+    from abridgeai.core.exceptions import ConflictError
+
+    payload = InterviewQuestionBankLogicalGroupCreate(
+        items=[
+            InterviewQuestionBankItemCreate(**_bank_payload(angle, "Identical prompt"))
+            for angle in ("technical", "system_design", "situational", "behavioral")
+        ]
+    )
+    async with session_factory() as session:
+        with pytest.raises(ConflictError):
+            await authoring_service.create_question_bank_logical_group(
+                session,
+                scenario["course_id"],
+                payload,
+                _actor(scenario["teacher_id"]),
+            )
+
+
+@pytest.mark.asyncio
+async def test_add_sibling_rejects_prompt_duplicate_of_group(
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict[str, Any],
+) -> None:
+    """A new angle may not reuse a prompt already present in the group."""
+    from abridgeai.core.exceptions import ConflictError
+
+    async with session_factory() as session:
+        singleton = await authoring_service.add_to_question_bank(
+            session,
+            scenario["course_id"],
+            _CreatePayload(**_bank_payload("technical", "Shared sibling prompt")),
+            _actor(scenario["teacher_id"]),
+        )
+        await session.commit()
+        singleton_id = singleton.id
+
+    async with session_factory() as session:
+        with pytest.raises(ConflictError):
+            await authoring_service.add_question_bank_sibling(
+                session,
+                scenario["course_id"],
+                singleton_id,
+                InterviewQuestionBankSiblingCreate(
+                    **_bank_payload("system_design", "shared sibling prompt")
+                ),
+                _actor(scenario["teacher_id"]),
+            )
+
+
+@pytest.mark.asyncio
+async def test_start_generation_rejects_outcomes_outside_config(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict[str, Any],
+) -> None:
+    """Unknown, soft-deleted, and foreign-config outcome ids are all rejected.
+
+    Silently dropping them let the pipeline fall back to "all outcomes", so a
+    teacher who targeted one rubric criterion got a full-scope run instead.
+    """
+    seeded = await _create_published_config(
+        engine,
+        course_id=scenario["course_id"],
+        module_id=scenario["module_id"],
+        teacher_id=scenario["teacher_id"],
+        questions=0,
+        outcomes=2,
+        status="draft",
+    )
+    other = await _create_published_config(
+        engine,
+        course_id=scenario["course_id"],
+        module_id=scenario["module_id"],
+        teacher_id=scenario["teacher_id"],
+        questions=0,
+        outcomes=1,
+        status="draft",
+    )
+    # Soft-delete one of this config's own outcomes.
+    async with session_factory() as session:
+        await authoring_service.delete_outcome(
+            session,
+            seeded["config_id"],
+            seeded["outcome_ids"][1],
+            _actor(scenario["teacher_id"]),
+        )
+        await session.commit()
+
+    arq_pool = SimpleNamespace(enqueue_job=AsyncMock(return_value=None))
+    bad_selections = {
+        "unknown": [uuid.uuid4()],
+        "soft_deleted": [seeded["outcome_ids"][1]],
+        "foreign_config": [other["outcome_ids"][0]],
+        "duplicate": [seeded["outcome_ids"][0], seeded["outcome_ids"][0]],
+    }
+    for label, target_ids in bad_selections.items():
+        request = _CreatePayload(
+            mode="topic",
+            course_id=scenario["course_id"],
+            module_id=scenario["module_id"],
+            question_count=2,
+            # _CreatePayload.model_dump(mode="json") only stringifies top-level
+            # UUIDs; the real Pydantic schema serialises nested lists, so pass
+            # the already-JSON shape the service actually receives.
+            target_outcome_ids=[str(x) for x in target_ids],
+        )
+        async with session_factory() as session:
+            with pytest.raises(AppError, match="target_outcome_ids"):
+                await authoring_service.start_generation_run(
+                    session,
+                    seeded["config_id"],
+                    request,
+                    _actor(scenario["teacher_id"]),
+                    arq_pool=arq_pool,
+                )
+        assert arq_pool.enqueue_job.await_count == 0, label
+
+    # The live outcome of THIS config still passes and reaches config_json.
+    request = _CreatePayload(
+        mode="topic",
+        course_id=scenario["course_id"],
+        module_id=scenario["module_id"],
+        question_count=2,
+        target_outcome_ids=[str(seeded["outcome_ids"][0])],
+    )
+    async with session_factory() as session:
+        run = await authoring_service.start_generation_run(
+            session,
+            seeded["config_id"],
+            request,
+            _actor(scenario["teacher_id"]),
+            arq_pool=arq_pool,
+        )
+    assert run.config_json["target_outcome_ids"] == [str(seeded["outcome_ids"][0])]
+    arq_pool.enqueue_job.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_update_bank_item_keeps_group_invariants(
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict[str, Any],
+) -> None:
+    """Editing a grouped item cannot break its group — 400/409, never a 500."""
+    from abridgeai.core.exceptions import ConflictError
+
+    payload = InterviewQuestionBankLogicalGroupCreate(
+        items=[
+            InterviewQuestionBankItemCreate(**_bank_payload(angle, f"Edit guard {angle}?"))
+            for angle in ("technical", "system_design", "situational", "behavioral")
+        ]
+    )
+    async with session_factory() as session:
+        group = await authoring_service.create_question_bank_logical_group(
+            session,
+            scenario["course_id"],
+            payload,
+            _actor(scenario["teacher_id"]),
+        )
+        await session.commit()
+    technical = next(item for item in group if item.question_type == "technical")
+
+    # 1. Leaving the four-angle vocabulary (e.g. `conceptual`) is a bad request.
+    async with session_factory() as session:
+        with pytest.raises(AppError) as excinfo:
+            await authoring_service.update_question_bank_item(
+                session,
+                scenario["course_id"],
+                technical.id,
+                InterviewQuestionBankItemUpdate(question_type="conceptual"),
+                _actor(scenario["teacher_id"]),
+            )
+        assert not isinstance(excinfo.value, ConflictError)
+
+    # 2. Taking an angle a sibling already holds is a conflict.
+    async with session_factory() as session:
+        with pytest.raises(ConflictError):
+            await authoring_service.update_question_bank_item(
+                session,
+                scenario["course_id"],
+                technical.id,
+                InterviewQuestionBankItemUpdate(question_type="behavioral"),
+                _actor(scenario["teacher_id"]),
+            )
+
+    # 3. Reusing a sibling's prompt (normalised) is a conflict.
+    async with session_factory() as session:
+        with pytest.raises(ConflictError):
+            await authoring_service.update_question_bank_item(
+                session,
+                scenario["course_id"],
+                technical.id,
+                InterviewQuestionBankItemUpdate(prompt_text="  EDIT GUARD BEHAVIORAL? "),
+                _actor(scenario["teacher_id"]),
+            )
+
+    # 4. A blank prompt is rejected instead of writing an empty question.
+    async with session_factory() as session:
+        with pytest.raises(AppError):
+            await authoring_service.update_question_bank_item(
+                session,
+                scenario["course_id"],
+                technical.id,
+                InterviewQuestionBankItemUpdate(prompt_text="   "),
+                _actor(scenario["teacher_id"]),
+            )
+
+    # 5. The editable fields still save, and the group is unchanged.
+    async with session_factory() as session:
+        updated = await authoring_service.update_question_bank_item(
+            session,
+            scenario["course_id"],
+            technical.id,
+            InterviewQuestionBankItemUpdate(
+                prompt_text="Edit guard technical, revised?",
+                difficulty="senior",
+                model_answer="Revised answer",
+                tags=["revised"],
+            ),
+            _actor(scenario["teacher_id"]),
+        )
+        await session.commit()
+    assert updated.question_type == "technical"
+    assert updated.prompt_text == "Edit guard technical, revised?"
+    assert updated.difficulty == "senior"
+    assert updated.tags_json == ["revised"]
+
+    async with session_factory() as session:
+        angles = (
+            await session.execute(
+                text(
+                    "SELECT question_type FROM interview_question_bank_items "
+                    "WHERE variant_group_id=:g AND deleted_at IS NULL"
+                ),
+                {"g": technical.variant_group_id},
+            )
+        ).scalars().all()
+    assert sorted(angles) == [
+        "behavioral",
+        "situational",
+        "system_design",
+        "technical",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_update_bank_item_ungrouped_can_change_type(
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict[str, Any],
+) -> None:
+    """A standalone item keeps full type freedom — the guard is group-scoped."""
+    async with session_factory() as session:
+        item = await authoring_service.add_to_question_bank(
+            session,
+            scenario["course_id"],
+            _CreatePayload(**_bank_payload("technical", "Standalone retype")),
+            _actor(scenario["teacher_id"]),
+        )
+        await session.commit()
+        item_id = item.id
+
+    async with session_factory() as session:
+        updated = await authoring_service.update_question_bank_item(
+            session,
+            scenario["course_id"],
+            item_id,
+            InterviewQuestionBankItemUpdate(question_type="conceptual"),
+            _actor(scenario["teacher_id"]),
+        )
+        await session.commit()
+    assert updated.question_type == "conceptual"
+
+
+@pytest.mark.asyncio
+async def test_concurrent_sibling_adds_through_different_children_serialize(
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict[str, Any],
+) -> None:
+    """Two adds racing on the same group via DIFFERENT anchors: one 409, no break.
+
+    Row locks cannot help here — each request locks the child it names, and the
+    children are different rows. Two defences must hold together: the group
+    advisory lock serialises the pre-checks, and ``uq_iq_bank_live_group_angle``
+    is the last arbiter, mapped to a clean 409 rather than an IntegrityError
+    surfacing as HTTP 500. Either way the group must not gain a duplicate angle.
+    """
+    import asyncio
+
+    from abridgeai.core.exceptions import ConflictError
+
+    # A PARTIAL group (2 of 4 angles) is the shape that has room for a race;
+    # the bulk create endpoint only accepts complete four-angle payloads, so
+    # build it the way the UI does: singleton, then one sibling.
+    async with session_factory() as session:
+        singleton = await authoring_service.add_to_question_bank(
+            session,
+            scenario["course_id"],
+            _CreatePayload(**_bank_payload("technical", "Race technical?")),
+            _actor(scenario["teacher_id"]),
+        )
+        await session.commit()
+        group = await authoring_service.add_question_bank_sibling(
+            session,
+            scenario["course_id"],
+            singleton.id,
+            InterviewQuestionBankSiblingCreate(
+                **_bank_payload("system_design", "Race system_design?")
+            ),
+            _actor(scenario["teacher_id"]),
+        )
+        await session.commit()
+    group_id = group[0].variant_group_id
+    anchors = {item.question_type: item.id for item in group}
+    assert set(anchors) == {"technical", "system_design"}
+
+    async def add_via(anchor_id: uuid.UUID, prompt: str) -> str:
+        async with session_factory() as session:
+            try:
+                await authoring_service.add_question_bank_sibling(
+                    session,
+                    scenario["course_id"],
+                    anchor_id,
+                    InterviewQuestionBankSiblingCreate(
+                        **_bank_payload("situational", prompt)
+                    ),
+                    _actor(scenario["teacher_id"]),
+                )
+                await session.commit()
+            except ConflictError:
+                await session.rollback()
+                return "conflict"
+            return "ok"
+
+    results = await asyncio.gather(
+        add_via(anchors["technical"], "Race situational A?"),
+        add_via(anchors["system_design"], "Race situational B?"),
+    )
+    assert sorted(results) == ["conflict", "ok"]
+
+    async with session_factory() as session:
+        angles = (
+            await session.execute(
+                text(
+                    "SELECT question_type FROM interview_question_bank_items "
+                    "WHERE variant_group_id=:g AND deleted_at IS NULL"
+                ),
+                {"g": group_id},
+            )
+        ).scalars().all()
+    assert sorted(angles) == ["situational", "system_design", "technical"]
+
+
+@pytest.mark.asyncio
+async def test_concurrent_bank_imports_do_not_collide_on_position(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict[str, Any],
+) -> None:
+    """Two imports into one config must produce distinct, contiguous positions.
+
+    ``next_question_position`` is a ``MAX(position)+1`` read, so two overlapping
+    transactions both computed the same next position and one lost to
+    ``uq_interview_questions_position``. The per-config append advisory lock
+    serialises the read-then-insert window.
+    """
+    import asyncio
+
+    seeded = await _create_published_config(
+        engine,
+        course_id=scenario["course_id"],
+        module_id=scenario["module_id"],
+        teacher_id=scenario["teacher_id"],
+        questions=0,
+        outcomes=0,
+        status="draft",
+    )
+    async with session_factory() as session:
+        bank_ids = []
+        for idx in range(2):
+            item = await authoring_service.add_to_question_bank(
+                session,
+                scenario["course_id"],
+                _CreatePayload(**_bank_payload("technical", f"Position race {idx}?")),
+                _actor(scenario["teacher_id"]),
+            )
+            await session.commit()
+            bank_ids.append(item.id)
+
+    async def import_one(bank_id: uuid.UUID) -> None:
+        async with session_factory() as session:
+            await authoring_service.import_question_bank_items(
+                session,
+                seeded["config_id"],
+                [bank_id],
+                _actor(scenario["teacher_id"]),
+            )
+            await session.commit()
+
+    await asyncio.gather(*(import_one(bank_id) for bank_id in bank_ids))
+
+    async with session_factory() as session:
+        positions = (
+            await session.execute(
+                text(
+                    "SELECT position FROM interview_questions "
+                    "WHERE interview_config_id=:cfg AND deleted_at IS NULL "
+                    "ORDER BY position"
+                ),
+                {"cfg": seeded["config_id"]},
+            )
+        ).scalars().all()
+    assert positions == [1, 2]
+
+
+@pytest.mark.asyncio
+async def test_concurrent_sibling_adds_cannot_duplicate_a_prompt(
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict[str, Any],
+) -> None:
+    """Same prompt, DIFFERENT angles, racing through different anchors.
+
+    ``uq_iq_bank_live_group_angle`` covers (group, angle) only, so it cannot
+    catch this shape — the group advisory lock is the ONLY thing standing
+    between the two prompt pre-checks. Without it both transactions read the
+    group before either wrote, both passed, and the group ended up holding the
+    same question text twice under two angles.
+    """
+    import asyncio
+
+    from abridgeai.core.exceptions import ConflictError
+
+    async with session_factory() as session:
+        singleton = await authoring_service.add_to_question_bank(
+            session,
+            scenario["course_id"],
+            _CreatePayload(**_bank_payload("technical", "Prompt race anchor?")),
+            _actor(scenario["teacher_id"]),
+        )
+        await session.commit()
+        group = await authoring_service.add_question_bank_sibling(
+            session,
+            scenario["course_id"],
+            singleton.id,
+            InterviewQuestionBankSiblingCreate(
+                **_bank_payload("system_design", "Prompt race second?")
+            ),
+            _actor(scenario["teacher_id"]),
+        )
+        await session.commit()
+    group_id = group[0].variant_group_id
+    anchors = {item.question_type: item.id for item in group}
+
+    shared_prompt = "Collided prompt under two angles?"
+
+    async def add_via(anchor_id: uuid.UUID, angle: str) -> str:
+        async with session_factory() as session:
+            try:
+                await authoring_service.add_question_bank_sibling(
+                    session,
+                    scenario["course_id"],
+                    anchor_id,
+                    InterviewQuestionBankSiblingCreate(
+                        **_bank_payload(angle, shared_prompt)
+                    ),
+                    _actor(scenario["teacher_id"]),
+                )
+                await session.commit()
+            except ConflictError:
+                await session.rollback()
+                return "conflict"
+            return "ok"
+
+    results = await asyncio.gather(
+        add_via(anchors["technical"], "situational"),
+        add_via(anchors["system_design"], "behavioral"),
+    )
+    assert sorted(results) == ["conflict", "ok"]
+
+    async with session_factory() as session:
+        prompts = (
+            await session.execute(
+                text(
+                    "SELECT prompt_text FROM interview_question_bank_items "
+                    "WHERE variant_group_id=:g AND deleted_at IS NULL"
+                ),
+                {"g": group_id},
+            )
+        ).scalars().all()
+    assert len(prompts) == len(set(prompts)) == 3

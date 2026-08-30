@@ -238,6 +238,8 @@ async def update_interview_question_bank_item(
         raise _not_found("interview_question_bank_item", item_id) from exc
     except ConflictError as exc:
         raise _conflict(str(exc)) from exc
+    except AppError as exc:
+        raise _bad_request(str(exc)) from exc
     await db.commit()
     return InterviewQuestionBankItemRead.model_validate(item)
 

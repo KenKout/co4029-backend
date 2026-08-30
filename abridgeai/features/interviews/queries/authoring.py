@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from abridgeai.features.interviews.models import (
@@ -121,6 +121,32 @@ async def next_outcome_position(db: AsyncSession, config_id: UUID) -> int:
     return int((await db.execute(stmt)).scalar_one()) + 1
 
 
+async def lock_question_append(db: AsyncSession, config_id: UUID) -> None:
+    """Serialize automatic question position allocation for one config.
+
+    The transaction-scoped advisory lock survives through the caller's commit,
+    including an empty question list where row-level locks cannot help.
+    """
+    await db.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+        {"key": f"interview_questions_append:{config_id}"},
+    )
+
+
+async def lock_bank_group(db: AsyncSession, course_id: UUID, group_id: UUID) -> None:
+    """Serialize writes that reshape one logical bank group.
+
+    Sibling adds and grouped edits reach a group through DIFFERENT rows, so
+    ``SELECT ... FOR UPDATE`` on the row the request names cannot serialize
+    them against each other. The transaction-scoped advisory lock is keyed on
+    the durable group id instead and is held until the caller commits.
+    """
+    await db.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+        {"key": f"interview_question_bank_group:{course_id}:{group_id}"},
+    )
+
+
 async def next_question_position(db: AsyncSession, config_id: UUID) -> int:
     """``MAX(position) + 1`` for ``INSERT`` on a new question.
 
@@ -141,6 +167,8 @@ __all__ = [
     "list_interviews_for_course",
     "list_outcomes_for_config",
     "list_questions_for_config",
+    "lock_bank_group",
+    "lock_question_append",
     "next_outcome_position",
     "next_question_position",
 ]
