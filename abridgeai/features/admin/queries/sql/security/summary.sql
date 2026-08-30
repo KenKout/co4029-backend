@@ -9,10 +9,9 @@
 -- Definitions, all bounded by :since so the scans stay indexed
 -- (ix_http_audit_log_created_at):
 --
---   failed_logins       -- 401/403 on the auth surface (``/api/v1/auth/%``).
---                          A rejected credential and a rejected refresh both
---                          count: from an operator's seat they are the same
---                          signal, "someone is failing to get in".
+--   failed_logins       -- failed Google OAuth callback requests only. Token
+--                          refresh/logout traffic is deliberately excluded:
+--                          it is session maintenance, not a login attempt.
 --   denied_requests     -- 403 anywhere OUTSIDE the auth surface. This is
 --                          authorization, not authentication: a signed-in user
 --                          reaching for something that is not theirs. Kept
@@ -40,8 +39,8 @@ WITH auth_failures AS (
     FROM http_audit_log h
     WHERE h.created_at >= CAST(:since AS timestamptz)
       AND h.created_at < CAST(:now AS timestamptz)
-      AND h.status_code IN (401, 403)
-      AND h.path LIKE '/api/v1/auth/%'
+      AND h.status_code >= 400
+      AND h.path = '/api/v1/auth/google/callback'
 )
 SELECT
     CAST(:now AS timestamptz) AS as_of,
@@ -58,7 +57,7 @@ SELECT
         WHERE h.created_at >= CAST(:since AS timestamptz)
           AND h.created_at < CAST(:now AS timestamptz)
           AND h.status_code = 403
-          AND h.path NOT LIKE '/api/v1/auth/%'
+          AND h.path <> '/api/v1/auth/google/callback'
     ) AS denied_requests,
     (
         SELECT COUNT(*)

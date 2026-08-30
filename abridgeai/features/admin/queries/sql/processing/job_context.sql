@@ -29,9 +29,20 @@
 -- :job_id (uuid), :now (timestamptz)
 WITH job AS (
     SELECT pj.id, pj.entity_type, pj.entity_id, pj.created_at,
-           pj.started_at, pj.finished_at
+           pj.started_at, pj.finished_at,
+           CAST(NULL AS uuid) AS direct_course_id,
+           CAST(NULL AS uuid) AS direct_module_id,
+           CAST(NULL AS uuid) AS direct_lesson_id
     FROM processing_jobs pj
     WHERE pj.id = CAST(:job_id AS uuid)
+
+    UNION ALL
+
+    SELECT gr.id, 'generation_run', gr.id, gr.created_at,
+           gr.started_at, gr.finished_at,
+           gr.course_id, gr.module_id, gr.lesson_id
+    FROM generation_runs gr
+    WHERE gr.id = CAST(:job_id AS uuid)
 ),
 resolved AS (
     SELECT
@@ -60,9 +71,16 @@ resolved AS (
                 WHERE ic.id = j.entity_id
             )
             WHEN 'generation_run' THEN (
-                SELECT gr.course_id
-                FROM generation_runs gr
-                WHERE gr.id = j.entity_id
+                SELECT COALESCE(
+                    j.direct_course_id,
+                    (SELECT m.course_id FROM modules m WHERE m.id = j.direct_module_id),
+                    (
+                        SELECT m.course_id
+                        FROM lessons l
+                        JOIN modules m ON m.id = l.module_id
+                        WHERE l.id = j.direct_lesson_id
+                    )
+                )
             )
         END AS course_id
     FROM job j

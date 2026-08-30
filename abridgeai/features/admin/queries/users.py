@@ -25,6 +25,7 @@ def _load(name: str) -> TextClause:
 _LIST_USERS_SQL = _load("users/list_users.sql")
 _ROLE_ASSIGNMENTS_SQL = _load("users/role_assignments.sql")
 _ACTIVE_SESSIONS_SQL = _load("users/active_sessions.sql")
+_ROLE_HISTORY_SQL = _load("users/role_history.sql")
 
 
 async def list_users(
@@ -65,4 +66,9 @@ async def active_sessions(db: AsyncSession, *, user_id: UUID) -> list[dict[str, 
     return [dict(r) for r in rows]
 
 
-__all__ = ["active_sessions", "list_users", "role_assignments"]
+async def role_history(db: AsyncSession, *, user_id: UUID) -> list[dict[str, Any]]:
+    rows = (await db.execute(_ROLE_HISTORY_SQL, {"user_id": user_id})).mappings()
+    return [dict(r) for r in rows]
+
+
+__all__ = ["active_sessions", "list_users", "role_assignments", "role_history"]

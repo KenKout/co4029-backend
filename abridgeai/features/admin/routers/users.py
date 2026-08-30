@@ -154,6 +154,11 @@ class EnableUserOut(BaseModel):
     status: str
 
 
+class RevokeSessionOut(BaseModel):
+    session_id: UUID
+    revoked: bool
+
+
 @router.get("", response_model=UserListPage)
 async def list_users(
     user: Annotated[CurrentUser, Depends(_REQUIRE_READ)],
@@ -236,6 +241,26 @@ async def enable_user(
     except NotFoundError as exc:
         raise _not_found(str(exc)) from exc
     return EnableUserOut(**result)
+
+
+@router.post(
+    "/{user_id}/sessions/{session_id}/revoke",
+    response_model=RevokeSessionOut,
+)
+async def revoke_user_session(
+    user_id: UUID,
+    session_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_WRITE)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> RevokeSessionOut:
+    await _assert_can_manage_user(db, current_user, user_id)
+    try:
+        result = await users_service.revoke_session(
+            db, user_id=user_id, session_id=session_id
+        )
+    except NotFoundError as exc:
+        raise _not_found(str(exc)) from exc
+    return RevokeSessionOut(**result)
 
 
 __all__ = ["router"]

@@ -30,5 +30,6 @@ SELECT
     amc.called_at          AS called_at
 FROM ai_model_calls amc
 WHERE amc.processing_job_id = CAST(:job_id AS uuid)
+   OR amc.generation_run_id = CAST(:job_id AS uuid)
 ORDER BY amc.called_at DESC
 LIMIT :limit;
