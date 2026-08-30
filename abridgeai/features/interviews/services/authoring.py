@@ -107,6 +107,13 @@ register_conflict_mappings(
         "uq_interview_outcome_evaluations": "interview_outcome_evaluation_already_recorded: this outcome has already been evaluated for this session",  # noqa: E501
         "uq_interview_session_questions_sequence": "interview_session_question_sequence_taken: this answer was already submitted — please refresh",  # noqa: E501
         "uq_generation_runs_active_dedup": "interview_generation_in_progress",
+        # Partial unique index (migration 0092): a logical bank group can hold
+        # each angle at most once. Catches the cross-anchor sibling race where
+        # two concurrent adds target the same group through DIFFERENT anchors —
+        # the pre-check in add_question_bank_sibling can't see each other, so
+        # this index is the final arbiter. Without the mapping the duplicate
+        # would surface as IntegrityError (HTTP 500) instead of a clean 409.
+        "uq_iq_bank_live_group_angle": "logical_question_angle_already_present",
     }
 )
 
@@ -953,11 +960,13 @@ async def add_question_bank_sibling(
 
     anchor = (
         await db.execute(
-            select(InterviewQuestionBankItem).where(
+            select(InterviewQuestionBankItem)
+            .where(
                 InterviewQuestionBankItem.id == item_id,
                 InterviewQuestionBankItem.course_id == course_id,
                 InterviewQuestionBankItem.deleted_at.is_(None),
             )
+            .with_for_update()
         )
     ).scalar_one_or_none()
     if anchor is None:
