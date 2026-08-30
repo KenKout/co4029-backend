@@ -777,3 +777,100 @@ async def test_role_only_variant_mode_fixes_type() -> None:
 
     user_prompt: str = gateway.generate_json.await_args.kwargs["user_prompt"]
     assert 'Every question MUST have question_type "technical"' in user_prompt
+
+
+@pytest.mark.asyncio
+async def test_avoid_topics_reach_the_generation_prompt() -> None:
+    """The teacher's "topics to avoid" list must actually constrain the LLM.
+
+    The field existed on the request (and had a UI input) since the feature
+    shipped, but nothing rendered it — the exclusion was silently dropped.
+    Mirrors the quiz stages, which pass it to ideation/generation/validation.
+    """
+    gateway = AsyncMock()
+    gateway.generate_json = AsyncMock(return_value=_llm_result(_eight_questions()))
+    run = _fake_run(question_count=3)
+    run.config_json["avoid_topics"] = ["dynamic programming", "graph theory"]
+
+    await generate_interview_questions(
+        AsyncMock(),
+        run=run,
+        config=_fake_config(),
+        context=_FakeContext(),
+        outcomes=_fake_outcomes(),
+        gateway=gateway,
+    )
+
+    user_prompt: str = gateway.generate_json.await_args.kwargs["user_prompt"]
+    assert "Topics to avoid" in user_prompt
+    assert "- dynamic programming" in user_prompt
+    assert "- graph theory" in user_prompt
+
+
+@pytest.mark.asyncio
+async def test_avoid_topics_block_is_absent_when_unset() -> None:
+    """No exclusions = no section, so the prompt is byte-identical to before."""
+    gateway = AsyncMock()
+    gateway.generate_json = AsyncMock(return_value=_llm_result(_eight_questions()))
+
+    await generate_interview_questions(
+        AsyncMock(),
+        run=_fake_run(question_count=3),
+        config=_fake_config(),
+        context=_FakeContext(),
+        outcomes=_fake_outcomes(),
+        gateway=gateway,
+    )
+
+    user_prompt: str = gateway.generate_json.await_args.kwargs["user_prompt"]
+    assert "Topics to avoid" not in user_prompt
+
+
+@pytest.mark.asyncio
+async def test_avoid_topics_ignores_blanks_and_non_strings() -> None:
+    """config_json round-trips through JSONB, so the value is untrusted.
+
+    Blank entries would render as empty ``-`` bullets and dilute the
+    instruction; a non-list must degrade to "no exclusions", never raise.
+    """
+    gateway = AsyncMock()
+    gateway.generate_json = AsyncMock(return_value=_llm_result(_eight_questions()))
+    run = _fake_run(question_count=3)
+    run.config_json["avoid_topics"] = ["  recursion  ", "", "   ", None, 42]
+
+    await generate_interview_questions(
+        AsyncMock(),
+        run=run,
+        config=_fake_config(),
+        context=_FakeContext(),
+        outcomes=_fake_outcomes(),
+        gateway=gateway,
+    )
+
+    user_prompt: str = gateway.generate_json.await_args.kwargs["user_prompt"]
+    # Stripped, and exactly one bullet under the heading (blanks/non-strings
+    # dropped rather than rendered as empty "- " lines).
+    assert "- recursion\n" in user_prompt
+    heading = "Topics to avoid (NEVER produce a question that touches these, not even as"
+    avoid_block = user_prompt.split(heading)[1].split("Learning outcomes")[0]
+    assert avoid_block.count("\n- ") == 1
+
+
+@pytest.mark.asyncio
+async def test_avoid_topics_survive_a_malformed_config_json() -> None:
+    gateway = AsyncMock()
+    gateway.generate_json = AsyncMock(return_value=_llm_result(_eight_questions()))
+    run = _fake_run(question_count=3)
+    run.config_json["avoid_topics"] = "not-a-list"
+
+    await generate_interview_questions(
+        AsyncMock(),
+        run=run,
+        config=_fake_config(),
+        context=_FakeContext(),
+        outcomes=_fake_outcomes(),
+        gateway=gateway,
+    )
+
+    user_prompt: str = gateway.generate_json.await_args.kwargs["user_prompt"]
+    assert "Topics to avoid" not in user_prompt

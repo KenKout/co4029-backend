@@ -64,7 +64,6 @@ from abridgeai.features.interviews.schemas.session import (
 DifficultyLiteral = Literal["junior", "mid_level", "senior"]
 ReviewStatusLiteral = Literal["pending", "approved", "edited", "rejected"]
 ConfigStatusLiteral = Literal["draft", "published", "archived"]
-GenerationModeLiteral = Literal["topic", "outcome-based", "coverage"]
 GenerationRunStatusLiteral = Literal[
     "pending",
     "running",
@@ -460,22 +459,29 @@ class InterviewQuestionAuthoring(InterviewQuestionPublic):
 class InterviewGenerationRequest(BaseModel):
     """Body for ``POST /teacher/interviews/{id}/generate``.
 
-    The mode discriminator selects the generation strategy:
-
-    * ``topic`` — generate questions covering listed focus topics.
-    * ``outcome-based`` — generate one (or more) per rubric outcome.
-    * ``coverage`` — fill gaps in lesson coverage from ``source_lesson_ids``.
+    There is deliberately NO generation-mode discriminator. One pipeline
+    (retrieval → generation → validation → persistence) serves every run;
+    scoping is expressed by the fields themselves — ``source_module_ids`` /
+    ``source_lesson_ids`` narrow the material, ``target_outcome_ids`` narrows
+    the rubric criteria, ``focus_topics`` overrides the retrieval anchors. A
+    ``mode`` field existed until 2026-08-30 but no stage ever read it, so the
+    teacher's three-way choice ("topic" / "outcome-based" / "coverage") had
+    identical behaviour; it was removed rather than left as a decorative dial.
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    mode: GenerationModeLiteral
     course_id: UUID
     module_id: UUID
     source_module_ids: list[UUID] = []
     source_lesson_ids: list[UUID] = []
     question_count: int = Field(default=5, ge=1, le=50)
+    # Retrieval anchors: when non-empty these REPLACE the KG-concept /
+    # lesson-title anchors in ``ai.stages.retrieval.anchors``, so they steer
+    # which chunks the questions are grounded in.
     focus_topics: list[str] = []
+    # Rendered into the GENERATION prompt as a hard exclusion list
+    # (``ai/stages/generation/prompts/user.j2``), mirroring the quiz stages.
     avoid_topics: list[str] = []
     persona: PersonaLiteral | None = None
     supplementary_instructions: str | None = None
@@ -784,7 +790,6 @@ __all__ = [
     "AdaptiveReadinessRead",
     "ConfigStatusLiteral",
     "DifficultyLiteral",
-    "GenerationModeLiteral",
     "GenerationRunStatusLiteral",
     "InterviewConfigAuthoring",
     "InterviewConfigCreate",

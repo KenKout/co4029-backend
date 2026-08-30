@@ -988,7 +988,6 @@ async def test_start_generation_run_enqueues_arq(
         status="draft",
     )
     request = _CreatePayload(
-        mode="topic",
         course_id=scenario["course_id"],
         module_id=scenario["module_id"],
         question_count=5,
@@ -1111,7 +1110,7 @@ async def test_start_generation_run_rejects_foreign_scope(
     foreign_course, foreign_module, foreign_lesson = await _insert_foreign_scope(
         engine, scenario["org_id"], scenario["teacher_id"]
     )
-    base = {"mode": "topic", "question_count": 5}
+    base = {"question_count": 5}
     try:
         async with session_factory() as session:
             # Foreign course_id in the body must not override the config's.
@@ -1209,7 +1208,6 @@ async def test_start_generation_run_persists_type_weights(
     )
     arq_pool = SimpleNamespace(enqueue_job=AsyncMock(return_value=None))
     base = _CreatePayload(
-        mode="topic",
         course_id=scenario["course_id"],
         module_id=scenario["module_id"],
         question_count=5,
@@ -1284,7 +1282,6 @@ async def test_start_generation_run_conflicts_while_active(
         status="draft",
     )
     base = _CreatePayload(
-        mode="topic",
         course_id=scenario["course_id"],
         module_id=scenario["module_id"],
         question_count=5,
@@ -1748,7 +1745,6 @@ async def test_start_generation_run_enqueue_failure_marks_run_failed(
         status="draft",
     )
     base = _CreatePayload(
-        mode="topic",
         course_id=scenario["course_id"],
         module_id=scenario["module_id"],
         question_count=5,
@@ -2661,8 +2657,7 @@ async def test_start_generation_rejects_outcomes_outside_config(
     }
     for label, target_ids in bad_selections.items():
         request = _CreatePayload(
-            mode="topic",
-            course_id=scenario["course_id"],
+                course_id=scenario["course_id"],
             module_id=scenario["module_id"],
             question_count=2,
             # _CreatePayload.model_dump(mode="json") only stringifies top-level
@@ -2683,7 +2678,6 @@ async def test_start_generation_rejects_outcomes_outside_config(
 
     # The live outcome of THIS config still passes and reaches config_json.
     request = _CreatePayload(
-        mode="topic",
         course_id=scenario["course_id"],
         module_id=scenario["module_id"],
         question_count=2,

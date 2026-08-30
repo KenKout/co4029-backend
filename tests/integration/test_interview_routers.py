@@ -370,7 +370,6 @@ async def test_generate_returns_202_and_enqueues_arq(
     gen_resp = await client.post(
         f"/api/v1/teacher/interview-configs/{config_id}/generate",
         json={
-            "mode": "topic",
             "course_id": str(scenario["course_id"]),
             "module_id": str(scenario["module_id"]),
             "question_count": 3,

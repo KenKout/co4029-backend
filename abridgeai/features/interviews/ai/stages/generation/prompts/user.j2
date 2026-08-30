@@ -46,6 +46,14 @@ Difficulty progression rubric:
 - positions 4-7: medium (expected_depth 2-4)
 - positions 8+ : hard   (expected_depth 3-5)
 {%- endif %}
+{%- if avoid_topics %}
+
+Topics to avoid (NEVER produce a question that touches these, not even as
+context or a sub-part of a broader question):
+{%- for topic in avoid_topics %}
+- {{ topic }}
+{%- endfor %}
+{%- endif %}
 {%- if supplementary_instructions %}
 
 Teacher's supplementary instructions:

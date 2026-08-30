@@ -324,12 +324,11 @@ def test_create_schemas_basic_validation() -> None:
     assert question.difficulty == "mid_level"
 
     gen = InterviewGenerationRequest(
-        mode="outcome-based",
         course_id=uuid4(),
         module_id=uuid4(),
         question_count=8,
     )
-    assert gen.mode == "outcome-based"
+    assert gen.question_count == 8
 
     submit = InterviewSubmitAnswerRequest(
         session_id=uuid4(),
@@ -354,10 +353,25 @@ def test_create_schemas_extra_forbidden() -> None:
     with pytest.raises(ValidationError):
         InterviewGenerationRequest.model_validate(
             {
-                "mode": "topic",
                 "course_id": uuid4(),
                 "module_id": uuid4(),
                 "unexpected": True,
+            }
+        )
+
+
+def test_generation_request_rejects_the_removed_mode_field() -> None:
+    """``mode`` was removed (2026-08-30): no stage ever read it.
+
+    ``extra="forbid"`` turns a stale client into a loud 422 rather than a run
+    that silently ignores the teacher's three-way choice.
+    """
+    with pytest.raises(ValidationError):
+        InterviewGenerationRequest.model_validate(
+            {
+                "mode": "coverage",
+                "course_id": uuid4(),
+                "module_id": uuid4(),
             }
         )
 
@@ -366,7 +380,6 @@ def test_generation_request_question_count_bounds() -> None:
     course_id = uuid4()
     module_id = uuid4()
     ok = InterviewGenerationRequest(
-        mode="topic",
         course_id=course_id,
         module_id=module_id,
         question_count=10,
@@ -375,16 +388,14 @@ def test_generation_request_question_count_bounds() -> None:
 
     with pytest.raises(ValidationError):
         InterviewGenerationRequest(
-            mode="topic",
-            course_id=course_id,
+                course_id=course_id,
             module_id=module_id,
             question_count=0,
         )
 
     with pytest.raises(ValidationError):
         InterviewGenerationRequest(
-            mode="topic",
-            course_id=course_id,
+                course_id=course_id,
             module_id=module_id,
             question_count=999,
         )
@@ -488,7 +499,7 @@ def test_generation_run_orm_compat() -> None:
     obj = SimpleNamespace(
         run_id=uuid4(),
         status="running",
-        config_json={"mode": "topic"},
+        config_json={"question_count": 5},
         started_at=datetime.now(UTC),
         finished_at=None,
         failure_message=None,

@@ -143,6 +143,7 @@ async def generate_interview_questions(
         outcomes=_outcomes_for_prompt(outcomes),
         chunks_block=_render_chunks(context),
         avoid_prompts=list(avoid_prompts or []),
+        avoid_topics=_avoid_topics(getattr(run, "config_json", None)),
     )
     system_prompt = render_prompt("prompts/system.j2")
 
@@ -169,6 +170,21 @@ async def generate_interview_questions(
             # valid outcome below instead of dropping the whole draft.
             draft.linked_outcome_id = None
     return _link_outcomes_round_robin(drafts, outcomes)
+
+
+def _avoid_topics(run_config_json: dict[str, Any] | None) -> list[str]:
+    """Teacher-supplied exclusion list from the run's ``config_json``.
+
+    Cleaned here rather than trusted raw: the value round-trips through JSONB,
+    so a non-list or a list holding blanks/non-strings is possible. Blanks
+    would render as empty ``-`` bullets and dilute the instruction.
+    """
+    if not isinstance(run_config_json, dict):
+        return []
+    raw = run_config_json.get("avoid_topics")
+    if not isinstance(raw, list):
+        return []
+    return [item.strip() for item in raw if isinstance(item, str) and item.strip()]
 
 
 def _outcomes_for_prompt(outcomes: list[InterviewOutcome]) -> list[dict[str, Any]]:
