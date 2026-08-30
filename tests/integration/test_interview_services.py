@@ -1467,6 +1467,123 @@ async def test_rejects_blank_question_prompt_and_outcome_text(
         assert updated_outcome.outcome_text == "trimmed outcome"
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "patch",
+    [
+        {"prompt_text": "Updated coherence-bearing prompt."},
+        {"question_type": "behavioral"},
+        {"difficulty": "senior"},
+        {"linked_outcome_id": None},
+    ],
+)
+async def test_semantic_question_edit_clears_variant_group(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict[str, Any],
+    patch: dict[str, Any],
+) -> None:
+    seeded = await _create_published_config(
+        engine,
+        course_id=scenario["course_id"],
+        module_id=scenario["module_id"],
+        teacher_id=scenario["teacher_id"],
+        questions=4,
+        outcomes=1,
+        status="draft",
+    )
+    group_id = uuid.uuid4()
+    async with engine.begin() as conn:
+        for question_id, question_type in zip(
+            seeded["question_ids"],
+            ("technical", "system_design", "situational", "behavioral"),
+            strict=True,
+        ):
+            await conn.execute(
+                text(
+                    "UPDATE interview_questions SET variant_group_id=:group_id, "
+                    "question_type=:question_type, linked_outcome_id=:outcome_id "
+                    "WHERE id=:question_id"
+                ),
+                {
+                    "group_id": group_id,
+                    "question_type": question_type,
+                    "outcome_id": seeded["outcome_ids"][0],
+                    "question_id": question_id,
+                },
+            )
+
+    async with session_factory() as session:
+        await authoring_service.update_question(
+            session,
+            seeded["config_id"],
+            seeded["question_ids"][0],
+            _CreatePayload(**patch),
+            _actor(scenario["teacher_id"]),
+        )
+        await session.commit()
+
+    async with session_factory() as session:
+        group_ids = (
+            await session.execute(
+                text(
+                    "SELECT variant_group_id FROM interview_questions "
+                    "WHERE interview_config_id=:config_id ORDER BY position"
+                ),
+                {"config_id": seeded["config_id"]},
+            )
+        ).scalars().all()
+    assert group_ids == [None, None, None, None]
+
+
+@pytest.mark.asyncio
+async def test_nonsemantic_question_edit_keeps_variant_group(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict[str, Any],
+) -> None:
+    seeded = await _create_published_config(
+        engine,
+        course_id=scenario["course_id"],
+        module_id=scenario["module_id"],
+        teacher_id=scenario["teacher_id"],
+        questions=4,
+        outcomes=1,
+        status="draft",
+    )
+    group_id = uuid.uuid4()
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "UPDATE interview_questions SET variant_group_id=:group_id "
+                "WHERE interview_config_id=:config_id"
+            ),
+            {"group_id": group_id, "config_id": seeded["config_id"]},
+        )
+
+    async with session_factory() as session:
+        await authoring_service.update_question(
+            session,
+            seeded["config_id"],
+            seeded["question_ids"][0],
+            _CreatePayload(model_answer="Updated answer."),
+            _actor(scenario["teacher_id"]),
+        )
+        await session.commit()
+
+    async with session_factory() as session:
+        group_ids = (
+            await session.execute(
+                text(
+                    "SELECT variant_group_id FROM interview_questions "
+                    "WHERE interview_config_id=:config_id ORDER BY position"
+                ),
+                {"config_id": seeded["config_id"]},
+            )
+        ).scalars().all()
+    assert group_ids == [group_id] * 4
+
+
 async def test_start_generation_run_enqueue_failure_marks_run_failed(
     engine: AsyncEngine,
     session_factory: async_sessionmaker[AsyncSession],

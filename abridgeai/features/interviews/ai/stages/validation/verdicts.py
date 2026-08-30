@@ -32,6 +32,7 @@ class ValidationCriterion(str, Enum):  # noqa: UP042 -- StrEnum changes value co
     NOT_LEADING = "not_leading"
     LENGTH_REASONABLE = "length_reasonable"
     VARIANT_GROUP_COHERENT = "variant_group_coherent"
+    VARIANT_TOPIC_COHERENT = "variant_topic_coherent"
 
 
 @dataclass(frozen=True)

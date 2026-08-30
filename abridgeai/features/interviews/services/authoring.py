@@ -527,6 +527,31 @@ async def update_question(
     prompt_changed = "prompt_text" in data and prompt_text != question.prompt_text
     if "prompt_text" in data:
         data["prompt_text"] = prompt_text
+
+    semantic_fields = (
+        "prompt_text",
+        "question_type",
+        "difficulty",
+        "linked_outcome_id",
+    )
+    semantic_group_changed = any(
+        key in data and data[key] != getattr(question, key) for key in semantic_fields
+    )
+    variant_group_id = question.variant_group_id
+    if semantic_group_changed and variant_group_id is not None:
+        from sqlalchemy import update  # noqa: PLC0415
+
+        await db.execute(
+            update(InterviewQuestion)
+            .where(
+                InterviewQuestion.interview_config_id == config_id,
+                InterviewQuestion.variant_group_id == variant_group_id,
+                InterviewQuestion.deleted_at.is_(None),
+            )
+            .values(variant_group_id=None)
+        )
+        question.variant_group_id = None
+
     for key in (
         "prompt_text",
         "question_type",

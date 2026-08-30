@@ -1,16 +1,14 @@
 """LLM verdict parser for the interview VALIDATION stage (T6.6).
 
-The validation pipeline runs four deterministic checks in Python
+The validation pipeline combines four deterministic checks
 (GROUNDED / DIFFICULTY_COHERENT / TYPE_MATCHES_CONFIG /
-LENGTH_REASONABLE) plus one LLM judgement (NOT_LEADING). This module
-isolates the LLM-side parsing so :mod:`logic` stays focused on
-combining all five signals.
+LENGTH_REASONABLE) with two LLM judgements: per-question NOT_LEADING
+and complete-group VARIANT_TOPIC_COHERENT.
 
-The parser is permissive by design: a flaky validator must never
-silently reject every question, so missing or malformed entries
-default to "not leading" with a synthetic rationale. Callers can
-distinguish "validator was silent" from "validator approved" via the
-returned ``LeadingVerdict.is_default`` flag.
+Leading verdict parsing is permissive: malformed per-question entries
+default to "not leading". Complete variant-group coherence is deliberately
+fail-closed: a missing, malformed, duplicate, or out-of-scope group verdict
+rejects that expected group atomically.
 """
 
 from __future__ import annotations
@@ -31,6 +29,72 @@ class LeadingVerdict:
 
 
 _DEFAULT_RATIONALE = "Validator did not return a verdict; accepted by default."
+
+
+@dataclass(frozen=True)
+class GroupCoherenceVerdict:
+    group_index: int
+    topic_coherent: bool
+    outlier_question_indices: tuple[int, ...] = ()
+    rationale: str = ""
+    is_default: bool = False
+
+
+def parse_group_coherence_verdicts(
+    payload: Mapping[str, Any] | None,
+    *,
+    expected_groups: Mapping[int, frozenset[int]],
+) -> list[GroupCoherenceVerdict]:
+    """Return one strict semantic-coherence verdict per expected group."""
+    by_group: dict[int, GroupCoherenceVerdict] = {}
+    duplicate_groups: set[int] = set()
+    raw = payload.get("group_verdicts") if isinstance(payload, Mapping) else None
+    if isinstance(raw, list):
+        for entry in raw:
+            if not isinstance(entry, dict):
+                continue
+            raw_index = entry.get("group_index")
+            if isinstance(raw_index, bool) or not isinstance(raw_index, int):
+                continue
+            if raw_index not in expected_groups:
+                continue
+            if raw_index in by_group:
+                duplicate_groups.add(raw_index)
+                continue
+            coherent = entry.get("topic_coherent")
+            if not isinstance(coherent, bool):
+                continue
+            raw_outliers = entry.get("outlier_question_indices", [])
+            if not isinstance(raw_outliers, list) or any(
+                isinstance(item, bool) or not isinstance(item, int) for item in raw_outliers
+            ):
+                continue
+            outliers = tuple(dict.fromkeys(raw_outliers))
+            if not set(outliers).issubset(expected_groups[raw_index]):
+                continue
+            if coherent and outliers:
+                continue
+            rationale_raw = entry.get("rationale")
+            rationale = rationale_raw.strip()[:400] if isinstance(rationale_raw, str) else ""
+            by_group[raw_index] = GroupCoherenceVerdict(
+                group_index=raw_index,
+                topic_coherent=coherent,
+                outlier_question_indices=outliers,
+                rationale=rationale,
+            )
+
+    defaults = duplicate_groups
+    return [
+        GroupCoherenceVerdict(
+            group_index=group_index,
+            topic_coherent=False,
+            rationale="Validator did not return a valid group coherence verdict.",
+            is_default=True,
+        )
+        if group_index in defaults or group_index not in by_group
+        else by_group[group_index]
+        for group_index in sorted(expected_groups)
+    ]
 
 
 def parse_leading_verdicts(
@@ -123,4 +187,9 @@ def _coerce_bool(value: object) -> bool | None:
     return None
 
 
-__all__ = ["LeadingVerdict", "parse_leading_verdicts"]
+__all__ = [
+    "GroupCoherenceVerdict",
+    "LeadingVerdict",
+    "parse_group_coherence_verdicts",
+    "parse_leading_verdicts",
+]

@@ -1,13 +1,13 @@
 """Interview validation stage (T6.6) — partition AI-generated questions
-against five quality criteria.
+against deterministic, leading-question, and variant-topic criteria.
 
 Public surface:
 
 * :func:`validate_interview_questions` — orchestrator entry point used
   by the interview generation pipeline (T6.10).
 * :class:`Verdict` — typed verdict dataclass with parallel index.
-* :class:`ValidationCriterion` — five-criterion enum.
-* :func:`parse_leading_verdicts` — pure parser usable in tests.
+* :class:`ValidationCriterion` — quality-criterion enum.
+* Parser helpers for leading and variant-topic LLM verdicts, usable in tests.
 """
 
 from __future__ import annotations
@@ -22,7 +22,9 @@ from abridgeai.features.interviews.ai.stages.validation.logic import (
     validate_interview_questions,
 )
 from abridgeai.features.interviews.ai.stages.validation.parsers import (
+    GroupCoherenceVerdict,
     LeadingVerdict,
+    parse_group_coherence_verdicts,
     parse_leading_verdicts,
 )
 from abridgeai.features.interviews.ai.stages.validation.verdicts import (
@@ -32,6 +34,7 @@ from abridgeai.features.interviews.ai.stages.validation.verdicts import (
 
 __all__ = [
     "DEFAULT_TYPE_WEIGHTS",
+    "GroupCoherenceVerdict",
     "InterviewRetrievalContext",
     "LeadingVerdict",
     "MAX_PROMPT_CHARS",
@@ -40,6 +43,7 @@ __all__ = [
     "VALIDATION_STAGE_NAME",
     "ValidationCriterion",
     "Verdict",
+    "parse_group_coherence_verdicts",
     "parse_leading_verdicts",
     "validate_interview_questions",
 ]

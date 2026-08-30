@@ -21,6 +21,7 @@ from abridgeai.features.interviews.ai.stages.generation.resolve import VARIANT_A
 from abridgeai.features.interviews.ai.stages.validation import (
     validate_interview_questions,
 )
+from abridgeai.features.interviews.ai.stages.validation.verdicts import ValidationCriterion
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -215,7 +216,11 @@ async def generate_with_backfill(
         if on_progress is not None:
             await on_progress(min(len(accepted), target_count), target_count)
 
-        if not round_drafts or not round_accepted:
+        semantic_group_rejected = variant_strategy == "all_angles" and any(
+            ValidationCriterion.VARIANT_TOPIC_COHERENT in verdict.failed_criteria
+            for verdict in round_verdicts
+        )
+        if not round_drafts or (not round_accepted and not semantic_group_rejected):
             break
 
     logger.info(

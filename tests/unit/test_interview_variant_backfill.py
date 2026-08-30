@@ -11,7 +11,10 @@ import pytest
 from abridgeai.features.interviews.ai.pipelines.backfill import generate_with_backfill
 from abridgeai.features.interviews.ai.stages.generation import InterviewQuestionDraft
 from abridgeai.features.interviews.ai.stages.generation.resolve import VARIANT_ANGLES
-from abridgeai.features.interviews.ai.stages.validation.verdicts import Verdict
+from abridgeai.features.interviews.ai.stages.validation.verdicts import (
+    ValidationCriterion,
+    Verdict,
+)
 
 
 def _draft(
@@ -47,8 +50,18 @@ def _coherent_group(start: int) -> list[InterviewQuestionDraft]:
     return drafts
 
 
-def _verdict(idx: int, *, accepted: bool) -> Verdict:
-    return Verdict(question_index=idx, accepted=accepted, failed_criteria=[], rationale="")
+def _verdict(
+    idx: int,
+    *,
+    accepted: bool,
+    failed_criteria: list[ValidationCriterion] | None = None,
+) -> Verdict:
+    return Verdict(
+        question_index=idx,
+        accepted=accepted,
+        failed_criteria=failed_criteria or [],
+        rationale="",
+    )
 
 
 def _fake_stubs() -> tuple[SimpleNamespace, SimpleNamespace, SimpleNamespace]:
@@ -145,6 +158,53 @@ async def test_all_angles_discards_a_group_when_one_angle_fails_validation(
     assert accepted == []
     assert rounds == 0
     assert generate.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_all_angles_retries_semantically_incoherent_group(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state, config, context = _fake_stubs()
+    incoherent_group = _coherent_group(0)
+    coherent_group = _coherent_group(10)
+    generate = AsyncMock(side_effect=[incoherent_group, coherent_group])
+    validate = AsyncMock(
+        side_effect=[
+            [
+                _verdict(
+                    index,
+                    accepted=False,
+                    failed_criteria=[ValidationCriterion.VARIANT_TOPIC_COHERENT],
+                )
+                for index in range(4)
+            ],
+            [_verdict(index, accepted=True) for index in range(4)],
+        ]
+    )
+    monkeypatch.setattr(
+        "abridgeai.features.interviews.ai.pipelines.backfill.generate_interview_questions",
+        generate,
+    )
+    monkeypatch.setattr(
+        "abridgeai.features.interviews.ai.pipelines.backfill.validate_interview_questions",
+        validate,
+    )
+
+    _drafts, _verdicts, accepted, rounds = await generate_with_backfill(
+        AsyncMock(),
+        state=state,
+        config=config,
+        context=context,
+        outcomes=[],
+        target_count=4,
+        variant_strategy="all_angles",
+        role_type=None,
+    )
+
+    assert accepted == coherent_group
+    assert rounds == 1
+    assert generate.await_count == 2
+    assert generate.await_args_list[1].kwargs["override_question_count"] == 4
 
 
 @pytest.mark.asyncio

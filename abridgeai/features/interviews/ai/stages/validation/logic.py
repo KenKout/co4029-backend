@@ -1,9 +1,9 @@
 """Interview validation stage orchestrator (T6.6).
 
 Combines four deterministic Python checks (GROUNDED,
-DIFFICULTY_COHERENT, TYPE_MATCHES_CONFIG, LENGTH_REASONABLE) with one
-LLM-judged check (NOT_LEADING) into a positional list of
-:class:`Verdict` objects parallel to the input drafts.
+DIFFICULTY_COHERENT, TYPE_MATCHES_CONFIG, LENGTH_REASONABLE) with two
+LLM-judged checks (NOT_LEADING and VARIANT_TOPIC_COHERENT) into a positional
+list of :class:`Verdict` objects parallel to the input drafts.
 
 Audit fields
 ------------
@@ -29,6 +29,7 @@ from abridgeai.features.interviews.ai.stages.generation.resolve import (
     VARIANT_ANGLES,
 )
 from abridgeai.features.interviews.ai.stages.validation.parsers import (
+    parse_group_coherence_verdicts,
     parse_leading_verdicts,
 )
 from abridgeai.features.interviews.ai.stages.validation.verdicts import (
@@ -141,7 +142,7 @@ async def validate_interview_questions(
         skip_type_mix=skip_type_mix,
         expected_question_type=expected_question_type,
     )
-    leading = await _run_leading_check(
+    leading, topic_failures = await _run_llm_checks(
         drafts=drafts,
         config=config,
         run=run,
@@ -155,6 +156,8 @@ async def validate_interview_questions(
         failed = list(deterministic[index])
         if not leading[index]:
             failed.append(ValidationCriterion.NOT_LEADING)
+        if index in topic_failures:
+            failed.append(ValidationCriterion.VARIANT_TOPIC_COHERENT)
         rationale = _build_rationale(draft, failed)
         verdicts.append(
             Verdict(
@@ -306,7 +309,7 @@ def _check_type_mix(
     return {index for index, draft in enumerate(drafts) if draft.question_type in overrepresented}
 
 
-async def _run_leading_check(
+async def _run_llm_checks(
     *,
     drafts: list[InterviewQuestionDraft],
     config: InterviewConfig,
@@ -314,13 +317,15 @@ async def _run_leading_check(
     db: AsyncSession,
     gateway: LLMGateway | None,
     context: InterviewRetrievalContext,
-) -> list[bool]:
-    """Ask the LLM to judge each question's neutrality."""
+) -> tuple[list[bool], set[int]]:
+    """Judge neutrality and logical-group topic coherence in one LLM call."""
     gateway = gateway or LLMGateway()
     chunk_views = _chunk_views_for_prompt(context)
+    expected_groups, group_index_by_question = _semantic_groups(drafts)
     questions = [
         {
             "index": index,
+            "group_index": group_index_by_question.get(index),
             "question_type": draft.question_type,
             "difficulty": draft.difficulty,
             "expected_depth": draft.expected_depth,
@@ -336,6 +341,7 @@ async def _run_leading_check(
         config_summary=config_summary,
         chunks=chunk_views,
         questions=questions,
+        group_indices=sorted(expected_groups),
     )
     llm_result = await gateway.generate_json(
         role=LLMRole.INTERVIEW_VALIDATION,
@@ -348,7 +354,46 @@ async def _run_leading_check(
     )
     payload = llm_result.content_json if isinstance(llm_result.content_json, dict) else {}
     parsed = parse_leading_verdicts(payload, question_count=len(drafts))
-    return [verdict.not_leading for verdict in parsed]
+    group_verdicts = parse_group_coherence_verdicts(
+        payload,
+        expected_groups=expected_groups,
+    )
+    failed_groups = {
+        verdict.group_index for verdict in group_verdicts if not verdict.topic_coherent
+    }
+    topic_failures = {
+        question_index
+        for group_index in failed_groups
+        for question_index in expected_groups[group_index]
+    }
+    return [verdict.not_leading for verdict in parsed], topic_failures
+
+
+def _semantic_groups(
+    drafts: list[InterviewQuestionDraft],
+) -> tuple[dict[int, frozenset[int]], dict[int, int]]:
+    """Map complete structurally-valid variant groups to local safe indices."""
+    by_id: dict[UUID, list[tuple[int, InterviewQuestionDraft]]] = {}
+    for question_index, draft in enumerate(drafts):
+        if isinstance(draft.variant_group_id, UUID):
+            by_id.setdefault(draft.variant_group_id, []).append((question_index, draft))
+    expected: dict[int, frozenset[int]] = {}
+    reverse: dict[int, int] = {}
+    for group_index, members in enumerate(by_id.values()):
+        outcomes = {member.linked_outcome_id for _, member in members}
+        difficulties = {member.difficulty for _, member in members}
+        types = {member.question_type for _, member in members}
+        if not (
+            len(members) == len(VARIANT_ANGLES)
+            and types == set(VARIANT_ANGLES)
+            and len(outcomes) == 1
+            and len(difficulties) == 1
+        ):
+            continue
+        indices = frozenset(index for index, _ in members)
+        expected[group_index] = indices
+        reverse.update({index: group_index for index in indices})
+    return expected, reverse
 
 
 def _chunk_views_for_prompt(

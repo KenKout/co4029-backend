@@ -2,12 +2,13 @@
 
 Mirrors the partition + parser coverage style from
 ``test_quiz_validation_stage.py`` but targets the interview-specific
-five-criterion verdict shape:
+validation verdict shape:
 
 * GROUNDED — empty / mismatched ``source_refs`` rejects the question.
 * DIFFICULTY_COHERENT — abrupt rank drops (hard → easy) reject.
 * TYPE_MATCHES_CONFIG — overrepresented buckets fail (9/1/0 vs 60/30/10).
 * NOT_LEADING — LLM judgement plumbed through; failure flips accepted.
+* VARIANT_TOPIC_COHERENT — an incoherent complete group rejects all members.
 * LENGTH_REASONABLE — prompt under 20 or over 500 chars rejects.
 
 Plus an architectural test enforcing prompts live in ``.j2`` files
@@ -26,6 +27,7 @@ import pytest
 from abridgeai.features.interviews.ai.stages.generation.parsers import (
     InterviewQuestionDraft,
 )
+from abridgeai.features.interviews.ai.stages.generation.resolve import VARIANT_ANGLES
 from abridgeai.features.interviews.ai.stages.validation import (
     ValidationCriterion,
     Verdict,
@@ -93,6 +95,29 @@ def _accept_all(question_count: int) -> dict:
             {"question_index": index, "not_leading": True} for index in range(question_count)
         ]
     }
+
+
+def _coherent_variant_group(chunk: UUID) -> list[InterviewQuestionDraft]:
+    group_id, outcome_id = uuid4(), uuid4()
+    return [
+        _draft(
+            question_type=question_type,
+            source_refs=[chunk],
+            linked_outcome_id=outcome_id,
+            variant_group_id=group_id,
+        )
+        for question_type in VARIANT_ANGLES
+    ]
+
+
+def _validation_payload(
+    question_count: int,
+    group_verdicts: list[dict] | None = None,
+) -> dict:
+    payload = _accept_all(question_count)
+    if group_verdicts is not None:
+        payload["group_verdicts"] = group_verdicts
+    return payload
 
 
 class _FakeRows:
@@ -381,6 +406,124 @@ async def test_variant_group_rejects_different_outcomes_with_distinct_angles() -
 
     assert all(
         verdict.failed_criteria == [ValidationCriterion.VARIANT_GROUP_COHERENT]
+        for verdict in verdicts
+    )
+
+
+@pytest.mark.asyncio
+async def test_variant_topic_coherence_accepts_complete_group() -> None:
+    chunk = uuid4()
+    drafts = _coherent_variant_group(chunk)
+
+    verdicts = await validate_interview_questions(
+        _db(),
+        run=_run(source_chunk_ids=[chunk]),
+        config=_config(),
+        drafts=drafts,
+        context=_context([chunk]),
+        gateway=_gateway_returning(
+            _validation_payload(4, [{"group_index": 0, "topic_coherent": True}])
+        ),
+        skip_type_mix=True,
+    )
+
+    assert all(verdict.accepted for verdict in verdicts)
+    assert all(
+        ValidationCriterion.VARIANT_TOPIC_COHERENT not in verdict.failed_criteria
+        for verdict in verdicts
+    )
+
+
+@pytest.mark.asyncio
+async def test_variant_topic_coherence_rejects_every_member() -> None:
+    chunk = uuid4()
+    drafts = _coherent_variant_group(chunk)
+
+    verdicts = await validate_interview_questions(
+        _db(),
+        run=_run(source_chunk_ids=[chunk]),
+        config=_config(),
+        drafts=drafts,
+        context=_context([chunk]),
+        gateway=_gateway_returning(
+            _validation_payload(
+                4,
+                [
+                    {
+                        "group_index": 0,
+                        "topic_coherent": False,
+                        "outlier_question_indices": [3],
+                        "rationale": "One member tests a different problem.",
+                    }
+                ],
+            )
+        ),
+        skip_type_mix=True,
+    )
+
+    assert all(verdict.accepted is False for verdict in verdicts)
+    assert all(
+        ValidationCriterion.VARIANT_TOPIC_COHERENT in verdict.failed_criteria
+        for verdict in verdicts
+    )
+
+
+@pytest.mark.asyncio
+async def test_leading_and_topic_failures_accumulate() -> None:
+    chunk = uuid4()
+    drafts = _coherent_variant_group(chunk)
+    payload = _validation_payload(4, [{"group_index": 0, "topic_coherent": False}])
+    payload["verdicts"][0]["not_leading"] = False
+
+    verdicts = await validate_interview_questions(
+        _db(),
+        run=_run(source_chunk_ids=[chunk]),
+        config=_config(),
+        drafts=drafts,
+        context=_context([chunk]),
+        gateway=_gateway_returning(payload),
+        skip_type_mix=True,
+    )
+
+    assert ValidationCriterion.NOT_LEADING in verdicts[0].failed_criteria
+    assert ValidationCriterion.VARIANT_TOPIC_COHERENT in verdicts[0].failed_criteria
+    assert all(
+        ValidationCriterion.VARIANT_TOPIC_COHERENT in verdict.failed_criteria
+        for verdict in verdicts[1:]
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "group_verdicts",
+    [
+        None,
+        [{"group_index": 0, "topic_coherent": "yes"}],
+        [
+            {"group_index": 0, "topic_coherent": True},
+            {"group_index": 0, "topic_coherent": True},
+        ],
+        [{"group_index": 1, "topic_coherent": True}],
+    ],
+)
+async def test_variant_topic_coherence_fails_closed_for_invalid_group_verdicts(
+    group_verdicts: list[dict] | None,
+) -> None:
+    chunk = uuid4()
+    drafts = _coherent_variant_group(chunk)
+
+    verdicts = await validate_interview_questions(
+        _db(),
+        run=_run(source_chunk_ids=[chunk]),
+        config=_config(),
+        drafts=drafts,
+        context=_context([chunk]),
+        gateway=_gateway_returning(_validation_payload(4, group_verdicts)),
+        skip_type_mix=True,
+    )
+
+    assert all(
+        ValidationCriterion.VARIANT_TOPIC_COHERENT in verdict.failed_criteria
         for verdict in verdicts
     )
 
