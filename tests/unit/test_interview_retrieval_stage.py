@@ -2,8 +2,6 @@
 
 Covers acceptance items in plan §6284-6322:
 * Multi-anchor retrieval composes ``vector_search`` + MMR for module lessons.
-* Student-weakness chunks pulled when ``run.config_json["student_id"]`` is set.
-* Weak-topic lookup omitted (returns ``[]`` not ``None``) when student_id absent.
 * KG concepts loaded when the module has lessons with KG anchors.
 * No file in ``stages/retrieval/`` exceeds 300 LOC.
 """
@@ -93,10 +91,6 @@ async def test_retrieves_chunks_for_module_lessons(
             "abridgeai.features.interviews.ai.stages.retrieval.anchors._module_lesson_ids",
             AsyncMock(return_value=[uuid4(), uuid4(), uuid4()]),
         ),
-        patch(
-            "abridgeai.features.interviews.ai.stages.retrieval.logic.fetch_weak_topic_chunks",
-            AsyncMock(return_value=[]),
-        ),
     ):
         ctx = await retrieve_interview_context(
             db,
@@ -115,102 +109,6 @@ async def test_retrieves_chunks_for_module_lessons(
     assert ctx.query_embedding == [0.1] * 8
     assert ctx.metadata["chunk_count"] == 12
     assert ctx.metadata["anchor_count"] == 2
-
-
-@pytest.mark.asyncio
-async def test_includes_weak_topic_chunks_when_student_id_present(
-    fake_embedding_client: AsyncMock,
-) -> None:
-    """Student id in run.config_json → weak-topic chunks merged into context."""
-    db = AsyncMock()
-    student_id = uuid4()
-    config = _config_stub()
-    run = _run_stub(
-        config_json={
-            "focus_topics": ["recursion"],
-            "student_id": str(student_id),
-        }
-    )
-
-    weak_chunks = [_chunk(content="weak-1"), _chunk(content="weak-2")]
-
-    with (
-        patch(
-            "abridgeai.features.interviews.ai.stages.retrieval.logic.vector_search",
-            AsyncMock(return_value=[_chunk(0.1)]),
-        ),
-        patch(
-            "abridgeai.features.interviews.ai.stages.retrieval.anchors.retrieve_kg_context_for_lesson_ids",
-            AsyncMock(return_value=KGContext(enabled=False)),
-        ),
-        patch(
-            "abridgeai.features.interviews.ai.stages.retrieval.anchors._module_lesson_ids",
-            AsyncMock(return_value=[uuid4()]),
-        ),
-        patch(
-            "abridgeai.features.interviews.ai.stages.retrieval.logic.fetch_weak_topic_chunks",
-            AsyncMock(return_value=weak_chunks),
-        ) as mock_weak,
-    ):
-        ctx = await retrieve_interview_context(
-            db,
-            run=run,
-            config=config,
-            kg_context_enabled=False,
-            embedding_client=fake_embedding_client,
-        )
-
-    mock_weak.assert_awaited_once()
-    call_kwargs = mock_weak.call_args.kwargs
-    assert call_kwargs["student_id"] == student_id
-    assert call_kwargs["module_id"] == config.module_id
-
-    assert ctx.weak_topic_chunks == weak_chunks
-    assert ctx.metadata["weak_topic_chunk_count"] == 2
-    assert ctx.metadata["student_id"] == str(student_id)
-    assert len(ctx.metadata["weak_topic_chunk_ids"]) == 2
-
-
-@pytest.mark.asyncio
-async def test_omits_weak_topics_when_no_student_id(
-    fake_embedding_client: AsyncMock,
-) -> None:
-    """student_id missing → weak_topic_chunks is empty list (not None)."""
-    db = AsyncMock()
-    config = _config_stub()
-    run = _run_stub(config_json={"focus_topics": ["binary search"]})
-
-    with (
-        patch(
-            "abridgeai.features.interviews.ai.stages.retrieval.logic.vector_search",
-            AsyncMock(return_value=[_chunk(0.1)]),
-        ),
-        patch(
-            "abridgeai.features.interviews.ai.stages.retrieval.anchors.retrieve_kg_context_for_lesson_ids",
-            AsyncMock(return_value=KGContext(enabled=False)),
-        ),
-        patch(
-            "abridgeai.features.interviews.ai.stages.retrieval.anchors._module_lesson_ids",
-            AsyncMock(return_value=[uuid4()]),
-        ),
-        patch(
-            "abridgeai.features.interviews.ai.stages.retrieval.logic.fetch_weak_topic_chunks",
-            AsyncMock(return_value=[]),
-        ) as mock_weak,
-    ):
-        ctx = await retrieve_interview_context(
-            db,
-            run=run,
-            config=config,
-            kg_context_enabled=False,
-            embedding_client=fake_embedding_client,
-        )
-
-    mock_weak.assert_not_called()
-    assert ctx.weak_topic_chunks == []
-    assert ctx.weak_topic_chunks is not None
-    assert ctx.metadata["weak_topic_chunk_count"] == 0
-    assert ctx.metadata["student_id"] is None
 
 
 @pytest.mark.asyncio
@@ -243,10 +141,6 @@ async def test_kg_concepts_loaded_when_module_has_lessons_with_kg_anchors(
         patch(
             "abridgeai.features.interviews.ai.stages.retrieval.anchors._module_lesson_ids",
             AsyncMock(return_value=[uuid4(), uuid4()]),
-        ),
-        patch(
-            "abridgeai.features.interviews.ai.stages.retrieval.logic.fetch_weak_topic_chunks",
-            AsyncMock(return_value=[]),
         ),
     ):
         ctx = await retrieve_interview_context(
@@ -288,10 +182,6 @@ async def test_falls_back_to_lesson_titles_when_no_kg_or_focus_topics(
         patch(
             "abridgeai.features.interviews.ai.stages.retrieval.anchors._module_lesson_ids",
             AsyncMock(return_value=[uuid4()]),
-        ),
-        patch(
-            "abridgeai.features.interviews.ai.stages.retrieval.logic.fetch_weak_topic_chunks",
-            AsyncMock(return_value=[]),
         ),
     ):
         ctx = await retrieve_interview_context(
@@ -336,87 +226,7 @@ async def test_returns_empty_context_when_no_anchors() -> None:
     assert ctx.chunks == []
     assert ctx.anchors == []
     assert ctx.query_embedding == []
-    assert ctx.weak_topic_chunks == []
     assert ctx.metadata["chunk_count"] == 0
-
-
-@pytest.mark.asyncio
-async def test_weak_topic_sql_returns_empty_on_db_error() -> None:
-    """Best-effort: SQL failure does not raise — empty list and run continues."""
-    from abridgeai.features.interviews.ai.stages.retrieval.anchors import (
-        fetch_weak_topic_chunks,
-    )
-
-    db = AsyncMock()
-    db.execute = AsyncMock(side_effect=RuntimeError("db gone"))
-
-    out = await fetch_weak_topic_chunks(
-        db,
-        student_id=uuid4(),
-        module_id=uuid4(),
-    )
-
-    assert out == []
-
-
-@pytest.mark.asyncio
-async def test_weak_topic_sql_parses_chunk_rows() -> None:
-    from abridgeai.features.interviews.ai.stages.retrieval.anchors import (
-        fetch_weak_topic_chunks,
-    )
-
-    db = AsyncMock()
-    chunk_id_a, chunk_id_b = uuid4(), uuid4()
-    rows = [
-        {
-            "chunk_id": chunk_id_a,
-            "material_version_id": uuid4(),
-            "course_id": uuid4(),
-            "lesson_id": uuid4(),
-            "content": "weak topic A",
-        },
-        {
-            "chunk_id": chunk_id_b,
-            "material_version_id": uuid4(),
-            "course_id": None,
-            "lesson_id": None,
-            "content": "weak topic B",
-        },
-    ]
-    mappings = MagicMock()
-    mappings.all.return_value = rows
-    result = MagicMock()
-    result.mappings.return_value = mappings
-    db.execute = AsyncMock(return_value=result)
-
-    out = await fetch_weak_topic_chunks(
-        db,
-        student_id=uuid4(),
-        module_id=uuid4(),
-        limit=5,
-    )
-
-    assert len(out) == 2
-    assert {c.chunk_id for c in out} == {chunk_id_a, chunk_id_b}
-    assert all(c.embedding is None for c in out)
-
-
-@pytest.mark.asyncio
-async def test_weak_topic_lookup_skipped_for_zero_limit() -> None:
-    from abridgeai.features.interviews.ai.stages.retrieval.anchors import (
-        fetch_weak_topic_chunks,
-    )
-
-    db = AsyncMock()
-    db.execute = AsyncMock()
-    out = await fetch_weak_topic_chunks(
-        db,
-        student_id=uuid4(),
-        module_id=uuid4(),
-        limit=0,
-    )
-    assert out == []
-    db.execute.assert_not_called()
 
 
 def test_no_file_exceeds_300_loc() -> None:

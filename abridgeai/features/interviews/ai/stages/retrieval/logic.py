@@ -11,14 +11,12 @@ out for interviews:
   and merges the per-anchor pools by chunk id keeping the smallest
   cosine distance.
 * Diversifies with :func:`mmr_diversify` (λ=0.5, top_k=12 by default).
-* Pulls student-weakness chunks via :func:`fetch_weak_topic_chunks`
-  when ``run.config_json["student_id"]`` is set; absent silently.
 
 The public entry point is :func:`retrieve_interview_context`. It
 returns an :class:`InterviewRetrievalContext` that the generation
-stage (T6.5) consumes — primary chunks, weak-topic chunks, KG
-concepts, primary embedding and audit metadata are kept separate so
-the prompt builder can decide how to weight each pool.
+stage (T6.5) consumes — primary chunks, KG concepts, primary embedding
+and audit metadata are kept separate so the prompt builder can decide
+how to weight each pool.
 """
 
 from __future__ import annotations
@@ -34,9 +32,7 @@ from abridgeai.ai.retrieval import ChunkWithDistance, mmr_diversify, vector_sear
 from abridgeai.ai.retrieval.role_filter import split_by_role
 from abridgeai.features.interviews.ai.stages.retrieval.anchors import (
     MAX_ANCHORS,
-    MAX_WEAK_TOPIC_CHUNKS,
     build_interview_anchors,
-    fetch_weak_topic_chunks,
 )
 from abridgeai.features.interviews.ai.stages.retrieval.metadata import (
     retrieval_metadata,
@@ -76,7 +72,6 @@ class InterviewRetrievalContext:
 
     chunks: list[ChunkWithDistance]
     kg_concepts: list[Concept]
-    weak_topic_chunks: list[ChunkWithDistance]
     query_embedding: list[float]
     anchors: list[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
@@ -110,30 +105,17 @@ async def retrieve_interview_context(
         kg_context_enabled=kg_context_enabled,
     )
 
-    student_id = _maybe_uuid(run_config.get("student_id"))
-    weak_topic_chunks: list[ChunkWithDistance] = []
-    if student_id is not None and config.module_id is not None:
-        weak_topic_chunks = await fetch_weak_topic_chunks(
-            db,
-            student_id=student_id,
-            module_id=config.module_id,
-            limit=MAX_WEAK_TOPIC_CHUNKS,
-        )
-
     if not anchors:
         meta = retrieval_metadata(
             [],
             anchors=[],
             kg_concepts=kg_concepts,
-            weak_topic_chunks=weak_topic_chunks,
             primary_embedding=None,
             kg_context_enabled=kg_context_enabled,
-            student_id=str(student_id) if student_id else None,
         )
         return InterviewRetrievalContext(
             chunks=[],
             kg_concepts=kg_concepts,
-            weak_topic_chunks=weak_topic_chunks,
             query_embedding=[],
             anchors=[],
             metadata=meta,
@@ -193,31 +175,17 @@ async def retrieve_interview_context(
         diversified,
         anchors=capped_anchors,
         kg_concepts=kg_concepts,
-        weak_topic_chunks=weak_topic_chunks,
         primary_embedding=primary_embedding,
         kg_context_enabled=kg_context_enabled,
-        student_id=str(student_id) if student_id else None,
     )
 
     return InterviewRetrievalContext(
         chunks=diversified,
         kg_concepts=kg_concepts,
-        weak_topic_chunks=weak_topic_chunks,
         query_embedding=primary_embedding,
         anchors=capped_anchors,
         metadata=meta,
     )
-
-
-def _maybe_uuid(raw: object) -> UUID | None:
-    if raw is None:
-        return None
-    if isinstance(raw, UUID):
-        return raw
-    try:
-        return UUID(str(raw))
-    except (ValueError, TypeError):
-        return None
 
 
 def _maybe_uuid_list(raw: object) -> list[UUID] | None:

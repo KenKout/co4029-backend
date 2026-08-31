@@ -569,10 +569,9 @@ def _retrieval_context(scenario_data: dict[str, Any]) -> Any:
     return InterviewRetrievalContext(
         chunks=chunks,
         kg_concepts=[],
-        weak_topic_chunks=[],
         query_embedding=[0.1] * EMBEDDING_DIM,
         anchors=["recursion"],
-        metadata={"count": 1, "kg_concept_count": 0, "weak_topic_count": 0},
+        metadata={"count": 1, "kg_concept_count": 0},
     )
 
 

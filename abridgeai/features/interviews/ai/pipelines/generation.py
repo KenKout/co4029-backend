@@ -135,7 +135,6 @@ async def run_interview_generation(  # noqa: C901 -- pipeline stages stay audita
             "interview_retrieval_complete",
             chunk_count=len(context.chunks),
             kg_concept_count=len(context.kg_concepts),
-            weak_topic_count=len(context.weak_topic_chunks),
         )
         state.config_json = state.config_json | {
             "retrieval": _retrieval_summary(context),
@@ -373,7 +372,6 @@ def _retrieval_summary(context: InterviewRetrievalContext) -> dict[str, Any]:
         "count": len(context.chunks),
         "source_chunk_ids": [str(chunk.chunk_id) for chunk in context.chunks],
         "kg_concept_count": len(context.kg_concepts),
-        "weak_topic_count": len(context.weak_topic_chunks),
     }
 
 

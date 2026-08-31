@@ -1,10 +1,7 @@
-"""Interview retrieval anchors + student-weakness chunk lookup (T6.4).
+"""Interview retrieval anchors (T6.4).
 
 Ports anchor logic from
-``backend/app/ai/haystack/pipelines/interview_generation.py:123-146``
-and extends it with the **interview-specific** student-weakness anchor
-the plan calls out in §6.4 ("recent quiz misses — signal of student
-gap").
+``backend/app/ai/haystack/pipelines/interview_generation.py:123-146``.
 
 Anchor precedence (interview flavour):
 
@@ -18,11 +15,6 @@ Unlike the quiz retriever, the interview path always loads the KG
 context — interview question relevance comes from concept relations
 (plan §6.4 MUST NOT: "Skip KG context"). The ``kg_context_enabled``
 flag gates the network call, not the anchor list shape.
-
-Student-weakness chunks are returned **separately** from the anchor
-list. They feed an additional vector-search-free chunk pool that the
-generation stage merges into its grounding context. This keeps the
-"weak topics" signal from polluting the anchor pre-filter.
 """
 
 from __future__ import annotations
@@ -38,7 +30,6 @@ from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from abridgeai.ai.knowledge_graph.retrieval import retrieve_kg_context_for_lesson_ids
 from abridgeai.ai.knowledge_graph.schemas import Concept
 from abridgeai.ai.knowledge_graph.tenancy import organization_id_for_lessons
-from abridgeai.ai.retrieval import ChunkWithDistance
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -49,7 +40,6 @@ logger = logging.getLogger(__name__)
 
 MAX_ANCHORS = 10
 MAX_KG_CONCEPTS_AS_ANCHORS = 8
-MAX_WEAK_TOPIC_CHUNKS = 12
 
 
 async def build_interview_anchors(
@@ -106,83 +96,6 @@ async def build_interview_anchors(
     return _dedupe_preserving_order(anchors)[:MAX_ANCHORS], kg_concepts
 
 
-async def fetch_weak_topic_chunks(
-    db: AsyncSession,
-    *,
-    student_id: UUID,
-    module_id: UUID,
-    limit: int = MAX_WEAK_TOPIC_CHUNKS,
-) -> list[ChunkWithDistance]:
-    """Pull chunks linked to quiz questions the student got wrong.
-
-    Anchored to ``module_id`` so we don't drag in unrelated misses from
-    other modules in the same course. Joins:
-
-        quiz_attempts → quiz_attempt_answers (is_correct=false) →
-        quiz_questions.source_refs[*].chunk_id → document_chunks.
-
-    The lookup is best-effort — any DB error degrades to an empty list
-    so the generation stage can still proceed with the primary
-    grounding context.
-    """
-
-    if limit <= 0:
-        return []
-
-    stmt = text(
-        "WITH wrong_chunks AS ( "
-        "  SELECT DISTINCT CAST(sr->>'chunk_id' AS uuid) AS chunk_id "
-        "  FROM quiz_attempts qa "
-        "  JOIN quiz_attempt_answers qaa ON qaa.attempt_id = qa.id "
-        "  JOIN quiz_questions qq ON qq.id = qaa.question_id "
-        "  JOIN quizzes q ON q.id = qa.quiz_id "
-        "  CROSS JOIN LATERAL jsonb_array_elements( "
-        "    CASE jsonb_typeof(qq.source_refs) "
-        "      WHEN 'array' THEN qq.source_refs ELSE '[]'::jsonb "
-        "    END "
-        "  ) AS sr "
-        "  WHERE qa.student_id = :student_id "
-        "    AND qaa.is_correct = FALSE "
-        "    AND q.module_id = :module_id "
-        "    AND qq.deleted_at IS NULL "
-        "    AND q.deleted_at IS NULL "
-        "    AND sr ? 'chunk_id' "
-        ") "
-        "SELECT dc.id AS chunk_id, dc.material_version_id, dc.course_id, "
-        "       dc.lesson_id, dc.content "
-        "FROM wrong_chunks wc "
-        "JOIN document_chunks dc ON dc.id = wc.chunk_id "
-        "LIMIT :limit"
-    )
-
-    try:
-        result = await db.execute(
-            stmt,
-            {
-                "student_id": student_id,
-                "module_id": module_id,
-                "limit": int(limit),
-            },
-        )
-    except Exception as exc:  # pragma: no cover - graceful degrade
-        logger.warning("Weak-topic chunk lookup failed: %s", exc)
-        return []
-
-    rows = result.mappings().all()
-    return [
-        ChunkWithDistance(
-            chunk_id=row["chunk_id"],
-            material_version_id=row["material_version_id"],
-            course_id=row["course_id"],
-            lesson_id=row["lesson_id"],
-            content=row["content"],
-            distance=1.0,  # weak-topic chunks have no vector similarity score
-            embedding=None,
-        )
-        for row in rows
-    ]
-
-
 async def _module_lesson_ids(db: AsyncSession, module_id: UUID | None) -> list[UUID]:
     """Resolve all non-deleted lesson ids for a module."""
 
@@ -230,7 +143,5 @@ def _dedupe_preserving_order(items: list[str]) -> list[str]:
 __all__ = [
     "MAX_ANCHORS",
     "MAX_KG_CONCEPTS_AS_ANCHORS",
-    "MAX_WEAK_TOPIC_CHUNKS",
     "build_interview_anchors",
-    "fetch_weak_topic_chunks",
 ]

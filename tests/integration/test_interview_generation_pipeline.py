@@ -226,7 +226,6 @@ def _retrieval_context() -> InterviewRetrievalContext:
     return InterviewRetrievalContext(
         chunks=[],
         kg_concepts=[],
-        weak_topic_chunks=[],
         query_embedding=[],
         anchors=["anchor"],
         metadata={"count": 0},
