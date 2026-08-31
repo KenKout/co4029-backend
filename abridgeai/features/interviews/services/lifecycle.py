@@ -63,16 +63,16 @@ async def sweep_expired_interview_sessions(
         if now < deadline:
             continue
 
-        user_turns = await sessions_queries.count_user_messages(db, session.id)
-        session.ended_at = now
-        if user_turns >= 1:
-            session.status = "timed_out"
-        else:
-            session.status = "abandoned"
-        await db.commit()
+        terminal_status = await sessions_queries.finalize_expired_in_progress_session(
+            db,
+            session.id,
+            ended_at=now,
+        )
+        if terminal_status is None:
+            continue
         finalised += 1
 
-        if user_turns >= 1 and arq_pool is not None:
+        if terminal_status == "timed_out" and arq_pool is not None:
             await arq_pool.enqueue_job(  # type: ignore[attr-defined]
                 _EVALUATE_INTERVIEW_SESSION_TASK,
                 session.student_id,
@@ -80,10 +80,9 @@ async def sweep_expired_interview_sessions(
                 _job_id=_evaluation_job_id(session.id),
             )
         logger.info(
-            "swept expired interview session %s → %s (user_turns=%d)",
+            "swept expired interview session %s → %s",
             session.id,
-            session.status,
-            user_turns,
+            terminal_status,
         )
 
     return finalised

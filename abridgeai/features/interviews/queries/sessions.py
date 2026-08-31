@@ -363,6 +363,43 @@ async def count_user_messages(db: AsyncSession, session_id: UUID) -> int:
     return int((await db.execute(stmt)).scalar_one())
 
 
+async def finalize_expired_in_progress_session(
+    db: AsyncSession,
+    session_id: UUID,
+    *,
+    ended_at: datetime,
+) -> str | None:
+    """Atomically terminalize an expired live session without overwriting a finish.
+
+    Returns the terminal status only when this caller changed an ``in_progress``
+    row. The status is derived inside the conditional update from the latest
+    committed gradeable transcript, so a concurrent natural submit wins and an
+    answer committed immediately before the sweep is not misclassified as
+    ``abandoned``.
+    """
+    from sqlalchemy import case, exists, update  # noqa: PLC0415
+
+    has_user_turn = exists().where(
+        InterviewSessionMessage.session_id == InterviewSession.id,
+        InterviewSessionMessage.role == "user",
+        InterviewSessionMessage.session_question_id.is_not(None),
+    )
+    result = await db.execute(
+        update(InterviewSession)
+        .where(
+            InterviewSession.id == session_id,
+            InterviewSession.status == "in_progress",
+        )
+        .values(
+            status=case((has_user_turn, "timed_out"), else_="abandoned"),
+            ended_at=ended_at,
+        )
+        .returning(InterviewSession.status)
+    )
+    await db.commit()
+    return result.scalar_one_or_none()
+
+
 async def list_integrity_events_for_session(db: AsyncSession, session_id: UUID) -> list[Any]:
     """Return FR-5.8 proctoring events for one interview session, oldest first.
 
@@ -389,6 +426,7 @@ async def list_integrity_events_for_session(db: AsyncSession, session_id: UUID) 
 __all__ = [
     "count_terminal_sessions",
     "count_user_messages",
+    "finalize_expired_in_progress_session",
     "get_active_session",
     "get_last_terminal_ended_at",
     "get_gap_report_for_session",

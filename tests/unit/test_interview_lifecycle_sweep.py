@@ -40,12 +40,23 @@ def _make_session(
     )
 
 
-def _patch_queries(*, candidates, user_turns=0):
-    """Patch the query helpers the deadline sweep calls."""
+def _patch_queries(*, candidates, user_turns=0, claimed=True, finalize=None):
+    """Patch the atomic lifecycle transition used by the deadline sweep."""
+    sessions_by_id = {session.id: session for session, _limit in candidates}
+
+    async def _finalize(db, session_id, *, ended_at):  # noqa: ANN001 - mock helper
+        if not claimed:
+            return None
+        session = sessions_by_id[session_id]
+        session.status = "timed_out" if user_turns >= 1 else "abandoned"
+        session.ended_at = ended_at
+        return session.status
+
+    finalize_mock = finalize or AsyncMock(side_effect=_finalize)
     return patch.multiple(
         f"{_LIFECYCLE}.sessions_queries",
         list_in_progress_sessions_with_time_limit=AsyncMock(return_value=candidates),
-        count_user_messages=AsyncMock(return_value=user_turns),
+        finalize_expired_in_progress_session=finalize_mock,
     )
 
 
@@ -127,22 +138,40 @@ async def test_untimed_stale_session_is_never_swept():
     """Untimed sessions, however old, do not reach the deadline sweep."""
     stale_untimed = _make_session(started_at=_NOW - timedelta(hours=2))
     db, arq = AsyncMock(), AsyncMock()
-    count_messages = AsyncMock(return_value=0)
+    finalize_mock = AsyncMock(return_value=None)
     with (
         patch(f"{_LIFECYCLE}.utcnow", return_value=_NOW),
-        patch.multiple(
-            f"{_LIFECYCLE}.sessions_queries",
-            list_in_progress_sessions_with_time_limit=AsyncMock(return_value=[]),
-            count_user_messages=count_messages,
-        ),
+        _patch_queries(candidates=[], finalize=finalize_mock),
     ):
         count = await lifecycle_service.sweep_expired_interview_sessions(db, arq_pool=arq)
 
     assert count == 0
     assert stale_untimed.status == "in_progress"
     assert stale_untimed.ended_at is None
-    count_messages.assert_not_awaited()
+    finalize_mock.assert_not_awaited()
     db.commit.assert_not_awaited()
+    arq.enqueue_job.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_submission_prevents_sweep_overwrite():
+    """A stale sweep snapshot must not overwrite a concurrent completion."""
+    session = _make_session(started_at=_NOW - timedelta(minutes=40))
+    db, arq = AsyncMock(), AsyncMock()
+    finalize_mock = AsyncMock(return_value=None)  # claimed=False → no transition
+    with (
+        patch(f"{_LIFECYCLE}.utcnow", return_value=_NOW),
+        _patch_queries(candidates=[(session, 30)], user_turns=1, finalize=finalize_mock),
+    ):
+        count = await lifecycle_service.sweep_expired_interview_sessions(db, arq_pool=arq)
+
+    assert count == 0
+    assert session.status == "in_progress"
+    finalize_mock.assert_awaited_once_with(
+        db,
+        session.id,
+        ended_at=_NOW,
+    )
     arq.enqueue_job.assert_not_awaited()
 
 
