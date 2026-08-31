@@ -228,9 +228,10 @@ async def create_course(
                 user_id=owner.user_id,
                 role_id=role_id,
                 organization_id=org_id,
-                # The owner is the first teacher on a brand-new course, so they
-                # are its Course Instructor (exactly one per course).
-                course_role="course_instructor",
+                # The owner is the first teacher on a brand-new course, so
+                # they are its Course Instructor.
+                is_instructor=True,
+                is_assistant=False,
                 granted_by=owner.user_id,
             )
             # Notify on THIS path too, not just the explicit assign route.
@@ -1091,7 +1092,8 @@ async def clone_course(
                 organization_id=new_course.organization_id,
                 # A clone starts with no copied assignments; the cloning manager
                 # (when a teacher) is its first teacher = Course Instructor.
-                course_role="course_instructor",
+                is_instructor=True,
+                is_assistant=False,
                 granted_by=actor.user_id,
             )
             await _notify_teacher_assigned(

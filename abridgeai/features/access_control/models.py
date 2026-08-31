@@ -283,6 +283,13 @@ class UserRoleAssignment(
             _SCOPE_KIND_CHECK,
             name="ck_user_role_assignments_scope_kind",
         ),
+        # Course-scoped teacher rows must carry at least one title (a CHECK
+        # cannot span rows, so "at least one instructor per staffed course"
+        # lives in the assignment service).
+        CheckConstraint(
+            "(scope_kind <> 'course') OR is_instructor OR is_assistant",
+            name="ck_user_role_assignments_course_title",
+        ),
     )
 
     user_id: Mapped[uuid.UUID] = mapped_column(
@@ -317,14 +324,21 @@ class UserRoleAssignment(
         DateTime(timezone=True), nullable=False, server_default=text("NOW()")
     )
     active_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    # Course-scoped TEACHER title (user decision 2026-08-18): "no catalog logic
-    # for titles". NULL (the default) for every non-course or non-teacher row;
-    # 'course_instructor' | 'teacher_assistant' for course-scoped teacher rows.
-    # At most one Course Instructor per course is enforced by the partial
-    # unique index ``uq_course_teachers_one_instructor``; at least one is
-    # enforced by the assignment service (a course with teachers has exactly
-    # one Course Instructor, others are Teacher Assistants).
-    course_role: Mapped[str | None] = mapped_column(String(30))
+    # Course-scoped TEACHER titles (user decision 2026-08-30): a course may
+    # have multiple Course Instructors and multiple Teacher Assistants, and
+    # one teacher may hold BOTH on the same course, so the single
+    # ``course_role`` string was replaced with two independent flags.
+    # ``is_instructor`` / ``is_assistant`` are both FALSE for every
+    # non-course or non-teacher row; for course-scoped teacher rows at least
+    # one is true (CHECK ``ck_user_role_assignments_course_title``). The
+    # "at least one instructor per staffed course" invariant is enforced by
+    # the assignment service, not the DB (a CHECK cannot span rows).
+    is_instructor: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+    is_assistant: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
 
 
 class UserPermissionGrant(

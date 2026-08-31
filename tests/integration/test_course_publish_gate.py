@@ -116,9 +116,9 @@ async def seed(engine: AsyncEngine) -> AsyncIterator[dict]:
             text(
                 "INSERT INTO user_role_assignments "
                 "(id, user_id, role_id, scope_kind, organization_id, course_id, "
-                "granted_by, course_role) "
+                "granted_by, is_instructor, is_assistant) "
                 "SELECT :aid, :uid, r.id, 'course', :org, :cid, :uid, "
-                "'course_instructor' FROM roles r WHERE r.code = 'teacher'"
+                "true, false FROM roles r WHERE r.code = 'teacher'"
             ),
             {
                 "aid": uuid.uuid4(),

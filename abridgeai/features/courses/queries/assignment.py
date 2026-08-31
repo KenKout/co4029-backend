@@ -154,7 +154,8 @@ async def list_teachers_for_course(db: AsyncSession, course_id: UUID) -> list[di
             StorageObject.bucket.label("avatar_bucket"),
             StorageObject.object_key.label("avatar_object_key"),
             UserRoleAssignment.id.label("assignment_id"),
-            UserRoleAssignment.course_role,
+            UserRoleAssignment.is_instructor,
+            UserRoleAssignment.is_assistant,
             UserRoleAssignment.active_from,
             UserRoleAssignment.active_until,
         )
@@ -220,20 +221,24 @@ async def get_active_teacher_assignment_row(
     return (await db.execute(stmt)).scalar_one_or_none()
 
 
-async def find_course_instructor_id(db: AsyncSession, course_id: UUID) -> UUID | None:
-    """Active Course-Instructor user id for ``course_id`` (None if none)."""
+async def count_course_instructors(db: AsyncSession, course_id: UUID) -> int:
+    """Number of active Course-Instructor flags on ``course_id`` (0..N).
+
+    Multiple instructors are legal (user decision 2026-08-30), so this is a
+    COUNT, not an existence probe — callers that used to ask "who is the one
+    instructor" now ask "how many are there".
+    """
     stmt = (
-        select(UserRoleAssignment.user_id)
+        select(func.count())
+        .select_from(UserRoleAssignment)
         .join(Role, Role.id == UserRoleAssignment.role_id)
         .where(
             UserRoleAssignment.course_id == course_id,
-            UserRoleAssignment.course_role == "course_instructor",
+            UserRoleAssignment.is_instructor.is_(True),
             *_ACTIVE_TEACHER_WHERE,
         )
-        .limit(1)
     )
-    row = (await db.execute(stmt)).scalar_one_or_none()
-    return None if row is None else UUID(str(row))
+    return int((await db.execute(stmt)).scalar_one())
 
 
 async def find_active_teacher_assignment(
@@ -278,7 +283,8 @@ async def insert_teacher_assignment(
     organization_id: UUID,
     course_id: UUID,
     granted_by: UUID,
-    course_role: str = "teacher_assistant",
+    is_instructor: bool = False,
+    is_assistant: bool = True,
 ) -> None:
     """INSERT a ``role=teacher, scope=course`` row into ``user_role_assignments``."""
     assignment = UserRoleAssignment(
@@ -289,7 +295,8 @@ async def insert_teacher_assignment(
         organization_id=organization_id,
         course_id=course_id,
         granted_by=granted_by,
-        course_role=course_role,
+        is_instructor=is_instructor,
+        is_assistant=is_assistant,
     )
     db.add(assignment)
     await db.flush()
@@ -318,8 +325,8 @@ async def list_courses_by_organization(
 
 __all__ = [
     "count_active_course_teachers",
+    "count_course_instructors",
     "find_active_teacher_assignment",
-    "find_course_instructor_id",
     "get_active_teacher_assignment_row",
     "get_teacher_role_id",
     "insert_teacher_assignment",

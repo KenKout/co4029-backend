@@ -12,6 +12,7 @@ from abridgeai.core.pagination.cursor import (
     encode_cursor,
 )
 from abridgeai.features.access_control.api import public as access_control_api
+from abridgeai.features.access_control.models import Role, UserRoleAssignment
 from abridgeai.features.courses.models import (
     Course,
     CourseLearningOutcome,
@@ -123,19 +124,21 @@ async def get_published_course_by_id(db: AsyncSession, course_id: UUID) -> Cours
 
 
 async def get_course_instructor(db: AsyncSession, course_id: UUID) -> dict[str, Any] | None:
-    """Compose the instructor block for a course's public detail page.
+    """Compose the primary instructor block for a course's public detail page.
 
-    Joins ``courses.owner_user_id → users.id → user_profiles.user_id`` and
-    returns ``{user_id, display_name, avatar_bucket, avatar_object_key,
-    headline}`` shaped for the service layer, which mints a presigned
-    ``avatar_url`` from the bucket/key. Returns ``None`` when the course is
-    unpublished, the owner row is missing, or the owner has no
-    ``user_profiles`` row.
+    With multiple Course Instructors legal (user decision 2026-08-30) the
+    "instructor" of record is the LONGEST-SERVING active Course Instructor
+    (earliest ``active_from``) — identical to the old single-CI semantics
+    when there is exactly one, and a stable pick when there are many. Joins
+    that teacher's profile and returns ``{user_id, display_name,
+    avatar_bucket, avatar_object_key, headline}`` shaped for the service
+    layer, which mints a presigned ``avatar_url``.
 
-    ``headline`` maps to ``user_profiles.bio`` (there is no dedicated
-    headline column). The avatar bucket/key are ``None`` when the instructor
-    has not uploaded an avatar; the service leaves ``avatar_url`` as ``None``
-    in that case and the SPA falls back to initials.
+    Returns ``None`` when the course is unpublished or has no active Course
+    Instructor. ``headline`` maps to ``user_profiles.bio`` (no dedicated
+    headline column). The avatar bucket/key are ``None`` when the teacher
+    has not uploaded an avatar; the service leaves ``avatar_url`` as
+    ``None`` and the SPA falls back to initials.
     """
     stmt = (
         select(
@@ -145,10 +148,23 @@ async def get_course_instructor(db: AsyncSession, course_id: UUID) -> dict[str, 
             StorageObject.bucket.label("avatar_bucket"),
             StorageObject.object_key.label("avatar_object_key"),
         )
-        .join(Course, Course.owner_user_id == User.id)
+        .join(UserRoleAssignment, UserRoleAssignment.course_id == Course.id)
+        .join(Role, Role.id == UserRoleAssignment.role_id)
+        .join(User, User.id == UserRoleAssignment.user_id)
         .outerjoin(UserProfile, UserProfile.user_id == User.id)
         .outerjoin(StorageObject, StorageObject.id == UserProfile.avatar_object_id)
-        .where(Course.id == course_id, published_course_clause())
+        .where(
+            Course.id == course_id,
+            published_course_clause(),
+            UserRoleAssignment.is_instructor.is_(True),
+            UserRoleAssignment.scope_kind == "course",
+            Role.code == "teacher",
+            UserRoleAssignment.deleted_at.is_(None),
+            (UserRoleAssignment.active_until.is_(None))
+            | (UserRoleAssignment.active_until > func.now()),
+        )
+        .order_by(UserRoleAssignment.active_from, UserRoleAssignment.id)
+        .limit(1)
     )
     row = (await db.execute(stmt)).first()
     if row is None or row.display_name is None:

@@ -314,9 +314,9 @@ async def scenario(
             text(
                 "INSERT INTO user_role_assignments "
                 "(user_id, role_id, scope_kind, organization_id, course_id, "
-                "active_from, active_until, granted_by) "
+                "active_from, active_until, granted_by, is_instructor, is_assistant) "
                 "VALUES (:uid, :rid, 'course', :org, :cid, "
-                "NOW() - INTERVAL '2 days', NOW() - INTERVAL '1 day', :gb)"
+                "NOW() - INTERVAL '2 days', NOW() - INTERVAL '1 day', :gb, true, false)"
             ),
             {
                 "uid": stale_teacher_id,
@@ -840,7 +840,7 @@ async def test_readiness_can_publish_matches_the_publish_gate(
             f"/api/v1/dept/courses/{course_id}/teachers",
             json={
                 "user_id": str(seeded_users.teacher_id),
-                "course_role": "course_instructor",
+                "is_instructor": True,
             },
             headers=headers,
         )
@@ -856,7 +856,7 @@ async def test_readiness_can_publish_matches_the_publish_gate(
             f"/api/v1/dept/courses/{course_id}/teachers",
             json={
                 "user_id": str(scenario["bob_id"]),
-                "course_role": "teacher_assistant",
+                "is_assistant": True,
             },
             headers=headers,
         )
@@ -1204,20 +1204,29 @@ async def test_manager_can_edit_course_identity_via_dept(
         )
 
 
-async def test_hod_cannot_edit_course_identity_via_dept(
+async def test_hod_can_edit_course_identity_via_dept(
     client: httpx.AsyncClient,
     hod_bearer: str,
     scenario: dict[str, uuid.UUID],
+    engine: AsyncEngine,
 ) -> None:
-    """HOD holds staffing/roster codes but NOT ``course.delete`` — identity
-    edits on the dept surface are manager-owned and 403 for them."""
+    """Dean (``hod``) subsumes Manager (role change 2026-08-25) — including
+    ``course.delete``, so identity edits on the dept surface are NOT 403 for
+    a dean; a plain TEACHER is the role that must be refused (see
+    ``test_teacher_owner_cannot_edit_identity_via_dept``).
+    """
     resp = await client.patch(
         f"/api/v1/dept/courses/{scenario['course_a']}",
         json={"title": "HOD Renamed"},
         headers={"Authorization": f"Bearer {hod_bearer}"},
     )
-    assert resp.status_code == 403, resp.text
-    assert resp.json()["detail"]["error"] == "permission_denied"
+    assert resp.status_code == 200, resp.text
+    # Restore the title for suite isolation (same pattern as the manager test).
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("UPDATE courses SET title = 'Course A' WHERE id = :cid"),
+            {"cid": scenario["course_a"]},
+        )
 
 
 async def test_teacher_owner_cannot_edit_identity_via_dept(
@@ -1400,15 +1409,17 @@ async def test_first_teacher_is_instructor_rest_are_assistants(
         headers=headers,
     )
     assert r1.status_code == 201, r1.text
-    assert r1.json()["course_role"] == "course_instructor"
+    assert r1.json()["is_instructor"] is True
+    assert r1.json()["is_assistant"] is False
 
     r2 = await client.post(
         f"/api/v1/dept/courses/{cid}/teachers",
-        json={"user_id": staffing_course["ta1_id"], "course_role": "teacher_assistant"},
+        json={"user_id": staffing_course["ta1_id"], "is_assistant": True},
         headers=headers,
     )
     assert r2.status_code == 201, r2.text
-    assert r2.json()["course_role"] == "teacher_assistant"
+    assert r2.json()["is_instructor"] is False
+    assert r2.json()["is_assistant"] is True
 
 
 async def test_assigning_beyond_max_is_rejected(
@@ -1455,10 +1466,10 @@ async def test_assigning_beyond_max_is_rejected(
     invalidate_settings_cache()
 
 
-async def test_promoting_a_second_instructor_is_rejected(
+async def test_a_second_instructor_can_be_promoted(
     client: httpx.AsyncClient, manager_bearer: str, staffing_course: dict[str, str]
 ) -> None:
-    """set_role cannot create a second Course Instructor -> 409."""
+    """Multiple Course Instructors are legal (user decision 2026-08-30)."""
     headers = {"Authorization": f"Bearer {manager_bearer}"}
     cid = staffing_course["course_id"]
     for uid in (staffing_course["ci_id"], staffing_course["ta1_id"]):
@@ -1468,10 +1479,12 @@ async def test_promoting_a_second_instructor_is_rejected(
 
     promote = await client.put(
         f"/api/v1/dept/courses/{cid}/teachers/{staffing_course['ta1_id']}/role",
-        json={"course_role": "course_instructor"},
+        json={"is_instructor": True, "is_assistant": True},
         headers=headers,
     )
-    assert promote.status_code == 409, promote.text
+    assert promote.status_code == 200, promote.text
+    assert promote.json()["is_instructor"] is True
+    assert promote.json()["is_assistant"] is True
 
 
 async def test_removing_the_sole_instructor_is_rejected_when_tas_exist(

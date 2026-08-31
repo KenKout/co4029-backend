@@ -92,8 +92,8 @@ async def list_instructors_for_courses(
 ) -> dict[UUID, dict[str, Any]]:
     """Batch instructor blocks for authoring list endpoints (drafts included).
 
-    The instructor is the teacher actually holding
-    ``course_role='course_instructor'`` on the course — NOT
+    The instructor is the teacher actually holding ``is_instructor=true``
+    on the course (the longest-serving one when several hold it) — NOT
     ``Course.owner_user_id``.
 
     This used to join the owner, which made the manager worklist wrong in
@@ -137,13 +137,14 @@ async def list_instructors_for_courses(
         .outerjoin(StorageObject, StorageObject.id == UserProfile.avatar_object_id)
         .where(
             Course.id.in_(course_ids),
-            UserRoleAssignment.course_role == "course_instructor",
+            UserRoleAssignment.is_instructor.is_(True),
             UserRoleAssignment.scope_kind == "course",
             Role.code == "teacher",
             UserRoleAssignment.deleted_at.is_(None),
             (UserRoleAssignment.active_until.is_(None))
             | (UserRoleAssignment.active_until > func.now()),
         )
+        .order_by(UserRoleAssignment.active_from, UserRoleAssignment.id)
     )
     result: dict[UUID, dict[str, Any]] = {}
     for row in (await db.execute(stmt)).all():

@@ -26,6 +26,7 @@ import abridgeai.features.access_control.models  # noqa: F401
 import abridgeai.features.career_paths.models  # noqa: F401
 import abridgeai.features.courses.models  # noqa: F401
 import abridgeai.features.identity.models  # noqa: F401
+import abridgeai.features.learning_programs.models  # noqa: F401
 import abridgeai.features.progress.models  # noqa: F401
 from abridgeai.core.config import get_settings
 from abridgeai.core.db import get_db
@@ -35,6 +36,15 @@ from abridgeai.features.career_paths.routers import (
     authoring_teacher_router,
     career_paths_learner_router,
     me_career_enrollments_router,
+)
+# The supported student-to-path route goes through a Learning Program
+# (direct career-path enrollment is disabled), so this mini-app also mounts
+# the program routers for the enroll/progress tests.
+from abridgeai.features.learning_programs.routers import (
+    learner_router as learning_programs_learner_router,
+)
+from abridgeai.features.learning_programs.routers import (
+    management_router as learning_programs_management_router,
 )
 from tests.support.db_graph import hard_delete_graph
 
@@ -85,6 +95,8 @@ async def app(
     fastapi_app.include_router(me_career_enrollments_router, prefix="/api/v1")
     fastapi_app.include_router(authoring_management_router, prefix="/api/v1")
     fastapi_app.include_router(authoring_teacher_router, prefix="/api/v1")
+    fastapi_app.include_router(learning_programs_learner_router, prefix="/api/v1")
+    fastapi_app.include_router(learning_programs_management_router, prefix="/api/v1")
     fastapi_app.dependency_overrides[get_db] = _override_get_db
     yield fastapi_app
     fastapi_app.dependency_overrides.clear()
@@ -138,6 +150,100 @@ async def student_bearer(engine: AsyncEngine, seeded_users: SeededUsers) -> Asyn
     yield create_access_token(user_id=seeded_users.student_id, session_id=sid)
     async with engine.begin() as conn:
         await conn.execute(text("DELETE FROM auth_sessions WHERE id = :id"), {"id": sid})
+
+
+async def _enroll_student_via_program(
+    client: httpx.AsyncClient,
+    engine: AsyncEngine,
+    *,
+    manager_bearer: str,
+    student_bearer: str,
+    path_id: uuid.UUID,
+    student_id: uuid.UUID,
+    suffix: str,
+) -> tuple[uuid.UUID, uuid.UUID]:
+    """Route a student onto a career path through its Learning Program.
+
+    Direct career-path enrollment is disabled (user decision: students reach
+    a path only via a Learning Program), so this is the supported route —
+    the same walk ``test_career_path_lifecycle`` uses: create a faculty unit,
+    create + publish the program pinned to the path, enroll the student,
+    then have the student select the path (which writes the
+    ``student_career_enrollments`` projection via
+    ``career_paths.api.public.ensure_program_path_access``).
+
+    Returns ``(faculty_org_unit_id, program_id)`` so teardown can remove
+    the rows this created.
+    """
+    faculty_id = uuid.uuid4()
+    org_id = await org_id_of(path_id, engine)
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO org_units (id, organization_id, unit_type, name, code) "
+                "VALUES (:id, :org, 'faculty', 'CP Enroll Faculty', :code)"
+            ),
+            {"id": faculty_id, "org": org_id, "code": f"cp-fac-{suffix}"},
+        )
+        # The scenario keeps its path VERSION draft (several suites mutate it
+        # directly), but Learning Program creation requires a PUBLISHED path
+        # version. This test's own path instance is fully built, so promoting
+        # its version is safe and only affects this fixture's copy.
+        await conn.execute(
+            text(
+                "UPDATE career_path_versions SET status = 'published' "
+                "WHERE career_path_id = :pid AND status != 'published'"
+            ),
+            {"pid": path_id},
+        )
+
+    program_resp = await client.post(
+        "/api/v1/management/learning-programs",
+        json={
+            "faculty_id": str(faculty_id),
+            "slug": f"cp-lp-{suffix}",
+            "name": f"CP LP {suffix}",
+            "career_path_ids": [str(path_id)],
+        },
+        headers={"Authorization": f"Bearer {manager_bearer}"},
+    )
+    assert program_resp.status_code == 201, program_resp.text
+    program_id = uuid.UUID(program_resp.json()["id"])
+
+    publish = await client.post(
+        f"/api/v1/management/learning-programs/{program_id}/publish",
+        headers={"Authorization": f"Bearer {manager_bearer}"},
+    )
+    assert publish.status_code == 200, publish.text
+
+    enroll = await client.post(
+        f"/api/v1/management/learning-programs/{program_id}/students",
+        json={"student_ids": [str(student_id)]},
+        headers={"Authorization": f"Bearer {manager_bearer}"},
+    )
+    assert enroll.status_code == 201, enroll.text
+    enrollment_id = enroll.json()[0]["id"]
+
+    select = await client.post(
+        f"/api/v1/me/learning-program-enrollments/{enrollment_id}/select-path",
+        json={"career_path_id": str(path_id)},
+        headers={"Authorization": f"Bearer {student_bearer}"},
+    )
+    assert select.status_code == 200, select.text
+    return faculty_id, program_id
+
+
+async def org_id_of(path_id: uuid.UUID, engine: AsyncEngine) -> uuid.UUID:
+    """Organization owning ``path_id`` (the helper's sneaky dependency)."""
+
+    async with engine.begin() as conn:
+        row = (
+            await conn.execute(
+                text("SELECT organization_id FROM career_paths WHERE id = :pid"),
+                {"pid": path_id},
+            )
+        ).scalar_one()
+    return row
 
 
 async def _insert_course_with_lesson(
@@ -304,6 +410,52 @@ async def scenario(
             text("DELETE FROM student_career_enrollments WHERE career_path_id = :pid"),
             {"pid": path_id},
         )
+        await conn.execute(
+            text(
+                "DELETE FROM course_enrollment_entitlements WHERE source_id IN "
+                "(SELECT a.id FROM program_path_attempts a JOIN program_enrollments e "
+                " ON e.id = a.program_enrollment_id WHERE e.learning_program_id IN "
+                " (SELECT id FROM learning_programs WHERE faculty_id IN "
+                "  (SELECT id FROM org_units WHERE code LIKE 'cp-fac-%')))"
+            )
+        )
+        await conn.execute(
+            text(
+                "DELETE FROM program_path_attempts WHERE program_enrollment_id IN "
+                "(SELECT id FROM program_enrollments WHERE learning_program_id IN "
+                " (SELECT id FROM learning_programs WHERE faculty_id IN "
+                "  (SELECT id FROM org_units WHERE code LIKE 'cp-fac-%')))"
+            )
+        )
+        await conn.execute(
+            text(
+                "DELETE FROM program_enrollments WHERE learning_program_id IN "
+                "(SELECT id FROM learning_programs WHERE faculty_id IN "
+                " (SELECT id FROM org_units WHERE code LIKE 'cp-fac-%'))"
+            )
+        )
+        await conn.execute(
+            text(
+                "DELETE FROM learning_program_version_paths WHERE program_version_id IN "
+                "(SELECT id FROM learning_program_versions WHERE learning_program_id IN "
+                " (SELECT id FROM learning_programs WHERE faculty_id IN "
+                "  (SELECT id FROM org_units WHERE code LIKE 'cp-fac-%')))"
+            )
+        )
+        await conn.execute(
+            text(
+                "DELETE FROM learning_program_versions WHERE learning_program_id IN "
+                "(SELECT id FROM learning_programs WHERE faculty_id IN "
+                " (SELECT id FROM org_units WHERE code LIKE 'cp-fac-%'))"
+            )
+        )
+        await conn.execute(
+            text(
+                "DELETE FROM learning_programs WHERE faculty_id IN "
+                "(SELECT id FROM org_units WHERE code LIKE 'cp-fac-%')"
+            )
+        )
+        await conn.execute(text("DELETE FROM org_units WHERE code LIKE 'cp-fac-%'"))
         await conn.execute(
             text(
                 "DELETE FROM career_course_items WHERE version_id IN "
@@ -515,6 +667,52 @@ async def test_path_impact_reports_active_students_per_stage(
         )
         await conn.execute(
             text(
+                "DELETE FROM course_enrollment_entitlements WHERE source_id IN "
+                "(SELECT a.id FROM program_path_attempts a JOIN program_enrollments e "
+                " ON e.id = a.program_enrollment_id WHERE e.learning_program_id IN "
+                " (SELECT id FROM learning_programs WHERE faculty_id IN "
+                "  (SELECT id FROM org_units WHERE code LIKE 'cp-fac-%')))"
+            )
+        )
+        await conn.execute(
+            text(
+                "DELETE FROM program_path_attempts WHERE program_enrollment_id IN "
+                "(SELECT id FROM program_enrollments WHERE learning_program_id IN "
+                " (SELECT id FROM learning_programs WHERE faculty_id IN "
+                "  (SELECT id FROM org_units WHERE code LIKE 'cp-fac-%')))"
+            )
+        )
+        await conn.execute(
+            text(
+                "DELETE FROM program_enrollments WHERE learning_program_id IN "
+                "(SELECT id FROM learning_programs WHERE faculty_id IN "
+                " (SELECT id FROM org_units WHERE code LIKE 'cp-fac-%'))"
+            )
+        )
+        await conn.execute(
+            text(
+                "DELETE FROM learning_program_version_paths WHERE program_version_id IN "
+                "(SELECT id FROM learning_program_versions WHERE learning_program_id IN "
+                " (SELECT id FROM learning_programs WHERE faculty_id IN "
+                "  (SELECT id FROM org_units WHERE code LIKE 'cp-fac-%')))"
+            )
+        )
+        await conn.execute(
+            text(
+                "DELETE FROM learning_program_versions WHERE learning_program_id IN "
+                "(SELECT id FROM learning_programs WHERE faculty_id IN "
+                " (SELECT id FROM org_units WHERE code LIKE 'cp-fac-%'))"
+            )
+        )
+        await conn.execute(
+            text(
+                "DELETE FROM learning_programs WHERE faculty_id IN "
+                "(SELECT id FROM org_units WHERE code LIKE 'cp-fac-%')"
+            )
+        )
+        await conn.execute(text("DELETE FROM org_units WHERE code LIKE 'cp-fac-%'"))
+        await conn.execute(
+            text(
                 "DELETE FROM career_course_items WHERE version_id IN "
                 "(SELECT id FROM career_path_versions WHERE career_path_id = :pid)"
             ),
@@ -540,19 +738,33 @@ async def test_path_impact_reports_active_students_per_stage(
 async def test_manager_enroll_student(
     client: httpx.AsyncClient,
     manager_bearer: str,
+    student_bearer: str,
     seeded_users: SeededUsers,
     scenario: dict[str, object],
     engine: AsyncEngine,
 ) -> None:
-    response = await client.post(
+    """A student reaches a path THROUGH its Learning Program (direct
+    enrollment is disabled), which writes the ``student_career_enrollments``
+    projection the learner endpoints authorize through.
+    """
+    direct = await client.post(
         f"/api/v1/management/career-paths/{scenario['path_id']}/students",
         json={"student_id": str(seeded_users.student_id)},
         headers={"Authorization": f"Bearer {manager_bearer}"},
     )
-    assert response.status_code == 201, response.text
-    body = response.json()
-    assert body["student_id"] == str(seeded_users.student_id)
-    assert body["status"] == "active"
+    assert direct.status_code == 409, direct.text
+    assert "direct_career_path_enrollment_disabled" in direct.json()["detail"]["message"]
+
+    suffix = uuid.uuid4().hex[:8]
+    await _enroll_student_via_program(
+        client,
+        engine,
+        manager_bearer=manager_bearer,
+        student_bearer=student_bearer,
+        path_id=scenario["path_id"],  # type: ignore[arg-type]
+        student_id=seeded_users.student_id,
+        suffix=suffix,
+    )
 
     async with engine.begin() as conn:
         row = (
@@ -574,10 +786,13 @@ async def test_manager_enroll_teacher_rejected(
     seeded_users: SeededUsers,
     scenario: dict[str, object],
 ) -> None:
-    """Career-path enrolments are student-only: a teacher target 409s.
+    """Direct career-path enrollment is DISABLED at the endpoint level.
 
-    The picker filters to students; this asserts the backend backstop so a
-    crafted request cannot attach a teacher/manager/HOD/admin to a pathway.
+    The old student-only backstop (teacher target 409s "not a student") is
+    unreachable: the endpoint short-circuits with
+    ``direct_career_path_enrollment_disabled`` before any role check. A
+    teacher is kept off a pathway by the same gate as everyone else, and in
+    the supported flow the program enrollment step validates who may join.
     """
     response = await client.post(
         f"/api/v1/management/career-paths/{scenario['path_id']}/students",
@@ -585,7 +800,7 @@ async def test_manager_enroll_teacher_rejected(
         headers={"Authorization": f"Bearer {manager_bearer}"},
     )
     assert response.status_code == 409, response.text
-    assert "not a student" in response.text
+    assert "direct_career_path_enrollment_disabled" in response.json()["detail"]["message"]
 
 
 async def test_manager_list_includes_stage_course_counts(
@@ -617,12 +832,16 @@ async def test_progress_aggregate(
     scenario: dict[str, object],
     engine: AsyncEngine,
 ) -> None:
-    enroll = await client.post(
-        f"/api/v1/management/career-paths/{scenario['path_id']}/students",
-        json={"student_id": str(seeded_users.student_id)},
-        headers={"Authorization": f"Bearer {manager_bearer}"},
+    suffix = uuid.uuid4().hex[:8]
+    await _enroll_student_via_program(
+        client,
+        engine,
+        manager_bearer=manager_bearer,
+        student_bearer=student_bearer,
+        path_id=scenario["path_id"],  # type: ignore[arg-type]
+        student_id=seeded_users.student_id,
+        suffix=suffix,
     )
-    assert enroll.status_code == 201
 
     async with engine.begin() as conn:
         await conn.execute(

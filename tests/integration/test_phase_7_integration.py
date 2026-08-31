@@ -513,12 +513,72 @@ async def test_career_path_lifecycle(
     assert publish_resp.status_code == 200, publish_resp.text
     assert publish_resp.json()["status"] == "published"
 
+    # Direct career-path enrollment is DISABLED (the endpoint 409s with
+    # `direct_career_path_enrollment_disabled`): a student reaches a path only
+    # by being enrolled in a Learning Program that pins it, then selecting it.
+    # So the scenario now walks the supported route — program -> publish ->
+    # enroll -> select-path — which is also what produces the
+    # student_career_enrollments projection the learner endpoints below read.
+    faculty_id = uuid.uuid4()
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO org_units (id, organization_id, unit_type, name, code) "
+                "VALUES (:id, :org, 'faculty', 'Phase 7 Faculty', :code)"
+            ),
+            {"id": faculty_id, "org": seeded_users.organization_id, "code": f"P7-{suffix[:6]}"},
+        )
+        # decide/approve is dean-only, but enrollment itself needs the manager
+        # to hold manager|hod at the program's org or faculty; the seeded
+        # manager is org-scoped, so no extra grant is required.
+
+    program_resp = await client.post(
+        "/api/v1/management/learning-programs",
+        json={
+            "faculty_id": str(faculty_id),
+            "slug": f"phase7-program-{suffix}",
+            "name": "Phase 7 Program",
+            "career_path_ids": [str(path_id)],
+        },
+        headers={"Authorization": f"Bearer {manager_bearer}"},
+    )
+    assert program_resp.status_code == 201, program_resp.text
+    program_id = uuid.UUID(program_resp.json()["id"])
+
+    program_publish = await client.post(
+        f"/api/v1/management/learning-programs/{program_id}/publish",
+        headers={"Authorization": f"Bearer {manager_bearer}"},
+    )
+    assert program_publish.status_code == 200, program_publish.text
+
     enroll_resp = await client.post(
+        f"/api/v1/management/learning-programs/{program_id}/students",
+        json={"student_ids": [str(seeded_users.student_id)]},
+        headers={"Authorization": f"Bearer {manager_bearer}"},
+    )
+    assert enroll_resp.status_code == 201, enroll_resp.text
+    enrollment_id = enroll_resp.json()[0]["id"]
+
+    # The student picks the path. This is what writes the career-enrollment
+    # projection (career_paths.api.public::ensure_program_path_access) that
+    # /me/career-enrollments authorizes through.
+    select_resp = await client.post(
+        f"/api/v1/me/learning-program-enrollments/{enrollment_id}/select-path",
+        json={"career_path_id": str(path_id)},
+        headers={"Authorization": f"Bearer {student_bearer}"},
+    )
+    assert select_resp.status_code == 200, select_resp.text
+
+    direct_enroll = await client.post(
         f"/api/v1/management/career-paths/{path_id}/students",
         json={"student_id": str(seeded_users.student_id)},
         headers={"Authorization": f"Bearer {manager_bearer}"},
     )
-    assert enroll_resp.status_code == 201, enroll_resp.text
+    assert direct_enroll.status_code == 409, direct_enroll.text
+    assert (
+        "direct_career_path_enrollment_disabled"
+        in direct_enroll.json()["detail"]["message"]
+    )
 
     me_resp = await client.get(
         "/api/v1/me/career-enrollments",
@@ -540,6 +600,42 @@ async def test_career_path_lifecycle(
     assert progress_body["overall_percent"] == 0
 
     async with engine.begin() as conn:
+        # Program rows first: program_path_attempts / program_enrollments FK
+        # the career path and its version (NO ACTION), and the entitlement
+        # rows written by select-path FK the courses.
+        await conn.execute(
+            text(
+                "DELETE FROM course_enrollment_entitlements WHERE source_id IN "
+                "(SELECT a.id FROM program_path_attempts a JOIN program_enrollments e "
+                " ON e.id = a.program_enrollment_id WHERE e.learning_program_id = :prog)"
+            ),
+            {"prog": program_id},
+        )
+        await conn.execute(
+            text(
+                "DELETE FROM program_path_attempts WHERE program_enrollment_id IN "
+                "(SELECT id FROM program_enrollments WHERE learning_program_id = :prog)"
+            ),
+            {"prog": program_id},
+        )
+        await conn.execute(
+            text("DELETE FROM program_enrollments WHERE learning_program_id = :prog"),
+            {"prog": program_id},
+        )
+        await conn.execute(
+            text(
+                "DELETE FROM learning_program_version_paths WHERE program_version_id IN "
+                "(SELECT id FROM learning_program_versions WHERE learning_program_id = :prog)"
+            ),
+            {"prog": program_id},
+        )
+        await conn.execute(
+            text("DELETE FROM learning_program_versions WHERE learning_program_id = :prog"),
+            {"prog": program_id},
+        )
+        await conn.execute(
+            text("DELETE FROM learning_programs WHERE id = :prog"), {"prog": program_id}
+        )
         await conn.execute(
             text(
                 "DELETE FROM student_stage_progress WHERE enrollment_id IN "
@@ -569,6 +665,7 @@ async def test_career_path_lifecycle(
             text("DELETE FROM career_paths WHERE id = :p"),
             {"p": path_id},
         )
+        await conn.execute(text("DELETE FROM org_units WHERE id = :f"), {"f": faculty_id})
         # Career enrollment auto-enrolls the student into member courses;
         # those rows FK the courses (NO ACTION) and must go first.
         await conn.execute(

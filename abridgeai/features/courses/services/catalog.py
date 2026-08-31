@@ -250,7 +250,8 @@ async def _course_with_instructor(db: AsyncSession, course: object) -> CoursePub
         )
     public.thumbnail_url = await _mint_course_thumbnail_url(db, public.id)
     # Hydrate the full teaching team, Course Instructor first then TAs, each
-    # with its course_role so the learner page can label CI vs TA. Empty (and
+    # with its title flags so the learner page can label CI vs TA (both =
+    # both titles). Empty (and
     # `instructor` null) when the course has no assigned teachers.
     teacher_rows = await list_teachers_with_emails(db, public.id)
     if teacher_rows:
@@ -261,7 +262,8 @@ async def _course_with_instructor(db: AsyncSession, course: object) -> CoursePub
                     "display_name": row["display_name"] or row["primary_email"],
                     "avatar_url": row.get("avatar_url"),
                     "headline": None,
-                    "course_role": row.get("course_role"),
+                    "is_instructor": row.get("is_instructor", False),
+                    "is_assistant": row.get("is_assistant", False),
                 }
             )
             for row in teacher_rows

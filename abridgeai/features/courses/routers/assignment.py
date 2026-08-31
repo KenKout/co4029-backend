@@ -185,7 +185,8 @@ async def assign_teacher(
             course_id,
             payload.user_id,
             current_user,
-            course_role=payload.course_role or "teacher_assistant",
+            is_instructor=payload.is_instructor,
+            is_assistant=payload.is_assistant,
             arq_pool=arq_pool,
         )
     except NotFoundError as exc:
@@ -259,10 +260,12 @@ async def get_course_readiness(
 ) -> CourseReadiness:
     """Is this course actually deliverable? Asked before publish, not after.
 
-    Four checks: an assigned teacher, at least one gradeable unit, placement on
-    a career path, and the course's own status. `can_publish` mirrors the
-    publish gate's condition exactly, so the checklist cannot promise a publish
-    the gate then refuses with a 409.
+    Three checks: an assigned teacher, at least one gradeable unit, and the
+    course's own status — plus learning outcomes, which are also a publish
+    gate. Career-path placements ride along as informational data (the
+    course detail's Career Paths tab). `can_publish` mirrors the publish
+    gate's condition exactly, so the checklist cannot promise a publish the
+    gate then refuses with a 409.
     """
     try:
         data = await assignment_service.get_course_readiness(db, course_id)
@@ -295,25 +298,27 @@ async def remove_teacher(
     "/courses/{course_id}/teachers/{user_id}/role",
     response_model=TeacherAssignmentRead,
 )
-async def set_teacher_course_role(
+async def set_teacher_titles(
     course_id: UUID,
     user_id: UUID,
     payload: CourseTeacherRoleRequest,
     current_user: Annotated[CurrentUser, Depends(_REQUIRE_COURSE_STAFFING)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> TeacherAssignmentRead:
-    """Switch a teacher's course-scoped title (Course Instructor / TA).
+    """Set a teacher's course-scoped title flags (Course Instructor / TA).
 
-    Enforces exactly one Course Instructor: promoting a second instructor is
-    rejected (409), and demoting the sole instructor when no TA exists is
-    rejected (409). Available to the manager staffing surface only.
+    Both flags may be true — one teacher holding both titles is legal (user
+    decision 2026-08-30). Rejected (409): clearing both flags, and turning
+    off the LAST Course Instructor while the course still has teachers.
+    Available to the manager staffing surface only.
     """
     try:
-        await assignment_service.set_course_role(
+        await assignment_service.set_teacher_titles(
             db,
             course_id=course_id,
             user_id=user_id,
-            course_role=payload.course_role,
+            is_instructor=payload.is_instructor,
+            is_assistant=payload.is_assistant,
             actor=current_user,
         )
     except NotFoundError as exc:

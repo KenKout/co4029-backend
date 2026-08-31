@@ -346,7 +346,7 @@ async def scenario(
         await conn.execute(
             text(
                 "DELETE FROM user_role_assignments "
-                "WHERE scope_kind = 'course' AND course_role = 'course_instructor' "
+                "WHERE scope_kind = 'course' AND is_instructor = true "
                 "AND course_id = ANY(:ids) AND user_id IN ("
                 "  SELECT owner_user_id FROM courses WHERE id = ANY(:ids))"
             ),
@@ -672,9 +672,9 @@ async def _publish_ready(engine: AsyncEngine, course_id: object) -> None:
             text(
                 "INSERT INTO user_role_assignments "
                 "(id, user_id, role_id, scope_kind, organization_id, course_id, "
-                "granted_by, course_role) "
+                "granted_by, is_instructor, is_assistant) "
                 "SELECT gen_random_uuid(), :owner, r.id, 'course', :org, :cid, :owner, "
-                "'course_instructor' FROM roles r WHERE r.code = 'teacher' "
+                "true, false FROM roles r WHERE r.code = 'teacher' "
                 "AND NOT EXISTS ("
                 "  SELECT 1 FROM user_role_assignments WHERE course_id = :cid "
                 "  AND scope_kind = 'course' AND deleted_at IS NULL "

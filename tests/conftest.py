@@ -290,8 +290,10 @@ async def _insert_assignments(
         await session.execute(
             text(
                 "INSERT INTO user_role_assignments "
-                "(user_id, role_id, scope_kind, organization_id, org_unit_id, course_id) "
-                "VALUES (:user_id, :role_id, :scope_kind, :organization_id, :org_unit_id, :course_id)"
+                "(user_id, role_id, scope_kind, organization_id, org_unit_id, course_id, "
+                "is_instructor, is_assistant) "
+                "VALUES (:user_id, :role_id, :scope_kind, :organization_id, :org_unit_id, "
+                ":course_id, :is_instructor, :is_assistant)"
             ),
             {
                 "user_id": a["user_id"],
@@ -300,6 +302,10 @@ async def _insert_assignments(
                 "organization_id": a.get("organization_id"),
                 "org_unit_id": a.get("org_unit_id"),
                 "course_id": a.get("course_id"),
+                # The seed catalog's course rows are the ongoing Course
+                # Instructor assignment the wider suite depends on.
+                "is_instructor": a.get("is_instructor", a.get("scope_kind") == "course"),
+                "is_assistant": a.get("is_assistant", False),
             },
         )
 

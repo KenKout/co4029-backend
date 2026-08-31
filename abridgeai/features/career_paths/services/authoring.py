@@ -351,13 +351,19 @@ async def create_career_path(
 async def list_course_candidates(
     db: AsyncSession, career_path_id: UUID
 ) -> list[CareerPathCourseCandidate]:
-    """Full org course catalogue (ANY status) for the attach-to-path picker.
+    """PUBLISHED org courses for the attach-to-path picker.
 
-    The learner ``/courses`` endpoint returns only published courses, but a
-    draft path may hold draft/archived courses — the publish gate
-    (``validate_path_for_publish``) re-checks every link when the path goes
-    live. So the picker shows the path's whole organization, letting the
-    manager build the skeleton before courses are published.
+    Draft and archived courses are excluded (user decision 2026-08-30). The
+    picker used to return the whole org catalogue on the theory that a draft
+    path may hold draft courses and the publish gate
+    (``validate_path_for_publish``) re-checks every link later. In practice
+    that just moved the failure: the manager staged drafts, then publishing the
+    path 409'd per course, or the attach itself 409'd on an
+    already-published path. A picker that only offers what can actually be
+    attached is the honest version of the same rule.
+
+    Already-attached courses are still filtered client-side — this endpoint
+    answers "what may be attached at all", not "what is not yet attached".
     """
     path = await _require_path(db, career_path_id)
     courses = await courses_api.list_courses_by_org(db, path.organization_id)
@@ -366,6 +372,7 @@ async def list_course_candidates(
             id=c.id, title=c.title, slug=c.slug, status=c.status
         )
         for c in courses
+        if c.status == "published"
     ]
 
 

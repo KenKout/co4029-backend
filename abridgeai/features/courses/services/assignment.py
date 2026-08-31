@@ -51,7 +51,8 @@ async def assign_teacher_to_course(
     user_id: UUID,
     actor: CurrentUser,
     *,
-    course_role: str = "teacher_assistant",
+    is_instructor: bool = False,
+    is_assistant: bool = False,
     arq_pool: object | None = None,
 ) -> dict[str, Any]:
     """Create (or no-op return) a ``role=teacher, scope=course`` assignment.
@@ -66,11 +67,17 @@ async def assign_teacher_to_course(
     * **max** — assigning when the course is already at ``courses.max_teachers
       per_course`` is rejected (hard). Existing over-cap courses are
       grandfathered: no forced removal, just no growth.
-    * **exactly one Course Instructor** — the FIRST teacher on a course is
-      always the Course Instructor; a later request to add a second CI is
-      rejected; every other teacher defaults to Teacher Assistant. The
-      ``uq_course_teachers_one_instructor`` partial index is the DB-level
-      backstop for the at-most-one half.
+    * **titles (user decision 2026-08-30)** — a course may have MULTIPLE
+      Course Instructors and MULTIPLE Teacher Assistants, and one teacher
+      may hold both. A request that sends neither flag means "Teacher
+      Assistant" (the pre-flags default). Two server-side corrections keep
+      the "at least one instructor per staffed course" invariant (which the
+      DB CHECK cannot span rows to enforce):
+      - the FIRST teacher on a course is always a Course Instructor
+        (``is_instructor`` forced true);
+      - when the course already has teachers but NO instructor (edge case
+        after a bad backfill), the new teacher is forced to be an
+        instructor.
 
     When the course is already **published**, the newly-assigned teacher is
     notified (in-app + email) with a deep-link to the course. A no-op re-assign
@@ -108,7 +115,8 @@ async def assign_teacher_to_course(
             "scope_kind": "course",
             "organization_id": course.organization_id,
             "granted_by": actor.user_id,
-            "course_role": existing_row.course_role if existing_row else "teacher_assistant",
+            "is_instructor": bool(existing_row.is_instructor) if existing_row else False,
+            "is_assistant": bool(existing_row.is_assistant) if existing_row else True,
         }
 
     max_teachers = int(
@@ -123,22 +131,14 @@ async def assign_teacher_to_course(
             f"the maximum of {max_teachers} teachers"
         )
 
-    # Resolve the title. Exactly one Course Instructor per course.
-    instructor_id = await assignment_queries.find_course_instructor_id(db, course_id)
-    if current == 0:
-        chosen = "course_instructor"
-    elif instructor_id is not None and course_role == "course_instructor":
-        raise ConflictError(
-            "course_teacher_one_instructor: a course may only have one "
-            "Course Instructor — promote or demote titles instead of adding "
-            "a second instructor"
-        )
-    elif instructor_id is None:
-        # Course has teachers but (edge case after a bad backfill) no CI —
-        # fill the gap rather than leave a titleless course.
-        chosen = "course_instructor"
-    else:
-        chosen = "teacher_assistant"
+    # Resolve the titles. Multiple CIs are fine; what must never happen is a
+    # staffed course with zero instructors.
+    has_instructor = await assignment_queries.count_course_instructors(db, course_id) > 0
+    if current == 0 or not has_instructor:
+        is_instructor = True
+    if not is_instructor and not is_assistant:
+        # Neither flag sent => "Teacher Assistant" (pre-flags default).
+        is_assistant = True
 
     role_id = await assignment_queries.get_teacher_role_id(db)
     new_id = uuid4()
@@ -150,7 +150,8 @@ async def assign_teacher_to_course(
         organization_id=course.organization_id,
         course_id=course_id,
         granted_by=actor.user_id,
-        course_role=chosen,
+        is_instructor=is_instructor,
+        is_assistant=is_assistant,
     )
 
     # Notify on assignment for draft AND published alike. The manager flow is
@@ -178,29 +179,33 @@ async def assign_teacher_to_course(
         "scope_kind": "course",
         "organization_id": course.organization_id,
         "granted_by": actor.user_id,
-        "course_role": chosen,
+        "is_instructor": is_instructor,
+        "is_assistant": is_assistant,
     }
 
 
-async def set_course_role(
+async def set_teacher_titles(
     db: AsyncSession,
     *,
     course_id: UUID,
     user_id: UUID,
-    course_role: str,
+    is_instructor: bool,
+    is_assistant: bool,
     actor: CurrentUser,
 ) -> dict[str, Any]:
-    """Switch an assigned teacher's title (Course Instructor / TA).
+    """Set an assigned teacher's title set (Course Instructor / TA).
 
-    Rules (exactly one Course Instructor per course):
+    User decision 2026-08-30: titles are flags, so a teacher can hold both.
+    The two rules that remain are invariants, not limits:
 
-    * promoting a Teacher Assistant to Course Instructor when a DIFFERENT user
-      already holds it -> rejected;
-    * demoting the sole Course Instructor when they are the only teacher ->
-      rejected (the course would be left with zero instructors);
-    * demoting the Course Instructor when Teacher Assistants exist is the
-      normal "hand off the lead" move and is allowed (a TA becomes the new CI
-      through a separate call).
+    * a course-scoped teacher must hold at least one title — clearing both is
+      rejected (409), because that row would then violate the DB CHECK;
+    * a staffed course must keep at least one Course Instructor — turning
+      off the LAST instructor is rejected (409), with the same message the
+      old single-CI code used so callers do not need to learn a new code.
+
+    Promoting additional instructors and demoting instructors who are not
+    the last one are both legal now.
     """
     del actor
     assignment = await assignment_queries.get_active_teacher_assignment_row(
@@ -210,44 +215,45 @@ async def set_course_role(
         raise NotFoundError(
             f"No active teacher assignment for course={course_id} user={user_id}"
         )
-    if course_role not in ("course_instructor", "teacher_assistant"):
-        raise AppError(f"Unknown course_role: {course_role!r}")
+    if not is_instructor and not is_assistant:
+        raise ConflictError(
+            "course_teacher_no_title: a course teacher must hold Course "
+            "Instructor and/or Teacher Assistant — clear both flags is not "
+            "a valid title set"
+        )
 
-    if assignment.course_role == course_role:
+    # Turning the instructor flag off is only legal while another active
+    # teacher remains an instructor.
+    if assignment.is_instructor and not is_instructor:
+        others = await assignment_queries.count_course_instructors(db, course_id)
+        if others <= 1:
+            raise ConflictError(
+                "course_teacher_sole_instructor: a course must have at least "
+                "one Course Instructor; promote or assign another teacher "
+                "before demoting the last instructor"
+            )
+
+    if assignment.is_instructor == is_instructor and assignment.is_assistant == is_assistant:
         return {
             "course_id": course_id,
             "user_id": user_id,
-            "course_role": assignment.course_role,
+            "is_instructor": assignment.is_instructor,
+            "is_assistant": assignment.is_assistant,
         }
 
-    current_instructor = await assignment_queries.find_course_instructor_id(db, course_id)
-    if course_role == "course_instructor":
-        if current_instructor is not None and current_instructor != user_id:
-            raise ConflictError(
-                "course_teacher_one_instructor: another teacher is already "
-                "this course's Course Instructor"
-            )
-        assignment.course_role = "course_instructor"
-    else:  # demote
-        if current_instructor == user_id:
-            total = await assignment_queries.count_active_course_teachers(db, course_id)
-            if total <= 1:
-                raise ConflictError(
-                    "course_teacher_sole_instructor: a course must have exactly "
-                    "one Course Instructor; assign or promote a Teacher "
-                    "Assistant before demoting the instructor"
-                )
-        assignment.course_role = "teacher_assistant"
+    assignment.is_instructor = is_instructor
+    assignment.is_assistant = is_assistant
     await db.flush()
     return {
         "course_id": course_id,
         "user_id": user_id,
-        "course_role": assignment.course_role,
+        "is_instructor": is_instructor,
+        "is_assistant": is_assistant,
     }
 
 
 async def get_course_readiness(db: AsyncSession, course_id: UUID) -> dict[str, Any]:
-    """The four things that decide whether a course can actually be delivered.
+    """The three things that decide whether a course can actually be delivered.
 
     Answers, before the manager presses publish, the questions that otherwise
     surface as a 409 or — worse — as silence:
@@ -259,9 +265,11 @@ async def get_course_readiness(db: AsyncSession, course_id: UUID) -> dict[str, A
     * **learning outcomes** — at least one. Also a publish gate, and the one
       most easily forgotten: unlike missing content, a course with no stated
       outcomes looks finished from the authoring screens.
-    * **career path** — a course on no path is unreachable for students; the
-      paths are how they enrol. Not a publish blocker, but it means done-looking
-      work that nobody can see.
+
+    The course's career-path placements are returned as informational data
+    (they power the course detail's Career Paths tab) but are NOT checklist
+    items and NOT publish gates — a course on no path is not broken, it is
+    simply not yet part of a pathway.
     * **published** — the course's own status.
 
     `can_publish` is exactly the publish gate's condition, so the checklist and
@@ -288,8 +296,8 @@ async def get_course_readiness(db: AsyncSession, course_id: UUID) -> dict[str, A
             db, "courses.max_teachers_per_course", course.organization_id
         )
     )
-    course_instructor_count = int(
-        await assignment_queries.find_course_instructor_id(db, course_id) is not None
+    course_instructor_count = await assignment_queries.count_course_instructors(
+        db, course_id
     )
 
     return {
@@ -392,10 +400,11 @@ async def remove_teacher_from_course(
     deleting it, preserving the audit trail (legacy parity with the
     T1.10 admin revoke flow). 404 when no active assignment exists.
 
-    Refuses to remove the ONLY Course Instructor while other teachers remain
-    (a course must keep exactly one instructor) — the manager must promote a
-    Teacher Assistant first. Removing the sole teacher (a CI with nobody else)
-    is allowed: that simply empties the course.
+    Refuses to remove the LAST Course Instructor while other teachers remain
+    (a staffed course must keep at least one instructor — user decision
+    2026-08-30 now allows several) — the manager must grant the instructor
+    title to another teacher first. Removing the sole teacher (an instructor
+    with nobody else) is allowed: that simply empties the course.
     """
     del actor
     assignment = await assignment_queries.get_active_teacher_assignment_row(
@@ -403,13 +412,14 @@ async def remove_teacher_from_course(
     )
     if assignment is None:
         raise NotFoundError(f"No active teacher assignment for course={course_id} user={user_id}")
-    if assignment.course_role == "course_instructor":
-        current = await assignment_queries.count_active_course_teachers(db, course_id)
-        if current > 1:
+    if assignment.is_instructor:
+        others = await assignment_queries.count_course_instructors(db, course_id)
+        total = await assignment_queries.count_active_course_teachers(db, course_id)
+        if others <= 1 and total > 1:
             raise ConflictError(
-                "course_teacher_remove_sole_instructor: promote a Teacher "
-                "Assistant to Course Instructor (or assign one) before "
-                "removing this course's only instructor"
+                "course_teacher_remove_sole_instructor: grant the Course "
+                "Instructor title to another teacher before removing this "
+                "course's last instructor"
             )
     await assignment_queries.revoke_teacher_assignment(db, assignment.id)
 
@@ -440,7 +450,7 @@ async def list_teachers_for_course(db: AsyncSession, course_id: UUID) -> list[In
     rows = await assignment_queries.list_teachers_for_course(db, course_id)
     ordered = sorted(
         rows,
-        key=lambda r: (r["course_role"] != "course_instructor", r["active_from"] or r["user_id"]),
+        key=lambda r: (not r["is_instructor"], r["active_from"] or r["user_id"]),
     )
     return [
         InstructorRead.model_validate(
@@ -545,7 +555,7 @@ async def list_teachers_with_emails(db: AsyncSession, course_id: UUID) -> list[d
     ordered = sorted(
         rows,
         key=lambda r: (
-            r["course_role"] != "course_instructor",
+            not r["is_instructor"],
             r["active_from"] or r["user_id"],
         ),
     )
@@ -553,6 +563,9 @@ async def list_teachers_with_emails(db: AsyncSession, course_id: UUID) -> list[d
         bucket = row.pop("avatar_bucket", None)
         object_key = row.pop("avatar_object_key", None)
         row["avatar_url"] = await _mint_avatar_url(bucket, object_key)
+        # A teacher created without a user_profiles row (test seeds, fresh
+        # accounts) has a NULL display_name; the DTO declares it non-null.
+        row["display_name"] = row["display_name"] or row["primary_email"]
     return ordered
 
 
@@ -578,5 +591,5 @@ __all__ = [
     "list_teachers_for_course",
     "list_teachers_with_emails",
     "remove_teacher_from_course",
-    "set_course_role",
+    "set_teacher_titles",
 ]
