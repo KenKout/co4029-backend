@@ -20,6 +20,8 @@ from abridgeai.features.career_paths.queries.student import (
     get_path_course_progress,
     get_roster_path_progress,
     list_my_career_enrollments,
+    list_my_enrolled_career_path_ids,
+    list_my_program_career_path_ids,
 )
 
 __all__ = [
@@ -34,6 +36,8 @@ __all__ = [
     "list_authoring_career_path_courses",
     "list_career_paths_for_org",
     "list_my_career_enrollments",
+    "list_my_enrolled_career_path_ids",
+    "list_my_program_career_path_ids",
     "list_path_course_links",
     "list_published_career_path_courses",
     "list_published_career_paths",
