@@ -189,8 +189,9 @@ class InterviewProgressRead(BaseModel):
     ``attempts_graded`` is exposed separately from ``attempts_used`` because a
     finished attempt is not necessarily a graded one: evaluation is an ARQ job,
     so a just-submitted attempt sits with ``pass_verdict IS NULL`` until the
-    worker lands. A UI can use the gap to say "being marked" rather than
-    implying a fail.
+    worker lands. ``attempts_awaiting_grade`` excludes ``abandoned`` and
+    ``failed`` rows that will never receive a verdict, letting the UI say
+    "being marked" only while evaluation can still occur.
 
     SECURITY: deliberately carries no score, rubric aggregate, outcome text or
     ``min_outcomes_to_pass``. The learner contract for interviews withholds all
@@ -203,6 +204,7 @@ class InterviewProgressRead(BaseModel):
     attempts_used: int
     attempts_in_flight: int = 0
     attempts_graded: int = 0
+    attempts_awaiting_grade: int = 0
     passed: bool = False
     completed: bool
 
