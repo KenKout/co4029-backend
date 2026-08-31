@@ -128,9 +128,13 @@ async def test_generates_n_questions() -> None:
     gateway = AsyncMock()
     gateway.generate_json = AsyncMock(return_value=_llm_result(_eight_questions()))
 
+    # question_count must be in the run's config_json: the stage keeps only
+    # that many drafts, so a bare _fake_run() (default 5) would truncate the
+    # 8 the mock gateway returns and this test would pin the default, not the
+    # "generate N" contract.
     drafts = await generate_interview_questions(
         AsyncMock(),
-        run=_fake_run(),
+        run=_fake_run(question_count=8),
         config=_fake_config(),
         context=_FakeContext(),
         outcomes=_fake_outcomes(),

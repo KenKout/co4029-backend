@@ -958,7 +958,6 @@ async def test_full_interview_lifecycle_generate_take_submit_evaluate(
     gen_resp = await client.post(
         f"/api/v1/teacher/interview-configs/{config_id}/generate",
         json={
-            "mode": "topic",
             "course_id": str(scenario["course_id"]),
             "module_id": str(scenario["module_id"]),
             "question_count": 3,
