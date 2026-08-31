@@ -636,6 +636,43 @@ async def delete_question(
     await soft_delete_cascade(db, question, actor_id=actor.user_id)
 
 
+async def delete_question_variants(
+    db: AsyncSession,
+    config_id: UUID,
+    question_id: UUID,
+    actor: CurrentUser,
+) -> int:
+    """Soft-delete every live member of one logical question.
+
+    The anchored question establishes config scope. A singleton remains a
+    one-row delete so callers can expose one grouped action without a separate
+    branch; grouped members are locked and deleted as one transaction.
+    """
+    from sqlalchemy import select  # noqa: PLC0415
+
+    config = await _require_config(db, config_id)
+    published_freeze.assert_questions_editable(config)
+    question = await _require_question(db, config_id, question_id)
+    if question.variant_group_id is None:
+        await soft_delete_cascade(db, question, actor_id=actor.user_id)
+        return 1
+
+    result = await db.execute(
+        select(InterviewQuestion)
+        .where(
+            InterviewQuestion.interview_config_id == config_id,
+            InterviewQuestion.variant_group_id == question.variant_group_id,
+            InterviewQuestion.deleted_at.is_(None),
+        )
+        .order_by(InterviewQuestion.position)
+        .with_for_update()
+    )
+    questions = list(result.scalars().all())
+    for member in questions:
+        await soft_delete_cascade(db, member, actor_id=actor.user_id)
+    return len(questions)
+
+
 async def add_outcome(
     db: AsyncSession,
     config_id: UUID,
@@ -1394,6 +1431,7 @@ __all__ = [
     "delete_interview_config",
     "delete_outcome",
     "delete_question",
+    "delete_question_variants",
     "delete_question_bank_item",
     "get_generation_run",
     "list_question_bank",

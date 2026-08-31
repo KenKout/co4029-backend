@@ -781,6 +781,28 @@ async def delete_question(
     await db.commit()
 
 
+@router.delete(
+    "/interview-configs/{config_id}/questions/{question_id}/variants",
+    response_model=dict[str, int],
+)
+async def delete_question_variants(
+    config_id: UUID,
+    question_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_QUESTION)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> dict[str, int]:
+    try:
+        deleted = await authoring_service.delete_question_variants(
+            db, config_id, question_id, current_user
+        )
+    except NotFoundError as exc:
+        raise _not_found("interview_question", question_id) from exc
+    except ConflictError as exc:
+        raise _conflict(str(exc)) from exc
+    await db.commit()
+    return {"deleted": deleted}
+
+
 @router.post(
     "/interview-configs/{config_id}/questions/{question_id}/regenerate",
     response_model=InterviewGenerationRunPublic,

@@ -2480,6 +2480,55 @@ async def test_import_bank_imports_standalone_singleton(
 
 
 @pytest.mark.asyncio
+async def test_delete_question_variants_soft_deletes_whole_logical_question(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict[str, Any],
+) -> None:
+    """Deleting one logical-question angle removes every live sibling."""
+    seeded = await _create_published_config(
+        engine,
+        course_id=scenario["course_id"],
+        module_id=scenario["module_id"],
+        teacher_id=scenario["teacher_id"],
+        questions=4,
+        outcomes=1,
+        status="draft",
+    )
+    group_id = uuid.uuid4()
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "UPDATE interview_questions SET variant_group_id = :group_id "
+                "WHERE interview_config_id = :config_id"
+            ),
+            {"group_id": group_id, "config_id": seeded["config_id"]},
+        )
+
+    async with session_factory() as session:
+        deleted = await authoring_service.delete_question_variants(
+            session,
+            seeded["config_id"],
+            seeded["question_ids"][0],
+            _actor(scenario["teacher_id"]),
+        )
+        await session.commit()
+    assert deleted == 4
+
+    async with engine.begin() as conn:
+        live = (
+            await conn.execute(
+                text(
+                    "SELECT count(*) FROM interview_questions "
+                    "WHERE interview_config_id = :config_id AND deleted_at IS NULL"
+                ),
+                {"config_id": seeded["config_id"]},
+            )
+        ).scalar_one()
+    assert live == 0
+
+
+@pytest.mark.asyncio
 async def test_import_bank_ignores_soft_deleted_config_prompt(
     engine: AsyncEngine,
     session_factory: async_sessionmaker[AsyncSession],
