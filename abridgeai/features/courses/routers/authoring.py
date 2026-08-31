@@ -246,9 +246,11 @@ async def import_course_from_syllabus(
     current_user: Annotated[CurrentUser, Depends(_REQUIRE_CREATE)],
     db: Annotated[AsyncSession, Depends(get_db)],
     filename: Annotated[str | None, Query(max_length=255)] = None,
+    mode: Annotated[Literal["attach", "override", "create"], Query()] = "create",
+    course_id: Annotated[UUID | None, Query()] = None,
     arq_pool: Annotated[object | None, Depends(get_arq_pool)] = None,
 ) -> SyllabusImportResult:
-    """Create a DRAFT course from an uploaded course-syllabus PDF.
+    """Upload a course-syllabus PDF: attach it, overwrite a draft, or create a course.
 
     The raw PDF bytes are the request body with ``application/pdf`` in
     ``Content-Type`` (no multipart wrapper — the same shape as the course
@@ -257,14 +259,30 @@ async def import_course_from_syllabus(
     because a raw body carries none, and it is only used for display and
     for the failure notification.
 
+    ``mode`` (user request 2026-08-31) picks what the upload does; ``attach``
+    and ``override`` require ``course_id``:
+
+    * ``attach`` — store the document against an existing course and change
+      nothing else. Allowed on a LIVE course: it only replaces what students
+      download, so a published course finally getting its syllabus (or a
+      corrected edition) does not have to be unpublished first.
+    * ``override`` — parse it and replace that course's title, description,
+      hours and learning outcomes. DRAFT ONLY → 409, mirroring the freeze the
+      hand-edit path enforces (outcomes are the graded scale).
+    * ``create`` — a brand-new draft course, the original behaviour.
+
     ``language`` picks which half of the bilingual syllabus is imported —
-    title, description and every learning outcome come from that side.
+    title, description and every learning outcome come from that side. It is
+    still required for ``attach`` (which does not parse) because the attempt
+    row records it; the document is bilingual either way.
 
     Manager-owned, and gated on BOTH ``course.create`` and
     ``learning_outcome.manage``: the import writes learning outcomes, which
     a course-owning teacher is never allowed to author (see
     ``_REQUIRE_OUTCOME_CREATE``). Requiring only ``course.create`` here
-    would have been a side door into LO authoring.
+    would have been a side door into LO authoring. The target course is
+    additionally org-checked in the service — the two global permissions here
+    say "may author courses", not "may author THIS course".
 
     The service commits (success and failure alike, since a failed attempt
     is still recorded and notified), so this endpoint does not.
@@ -280,7 +298,18 @@ async def import_course_from_syllabus(
             language=language,
             actor=current_user,
             arq_pool=arq_pool,
+            mode=mode,
+            target_course_id=course_id,
         )
+    except syllabus_service.SyllabusTargetError as exc:
+        # The document was never the problem — the target course was. 409 for a
+        # published course refusing an override (retrying with the same file
+        # cannot help; the manager has to pick a different mode), 404 for an id
+        # that does not exist in their org.
+        message = str(exc)
+        if message.startswith("course_not_found"):
+            raise _not_found(message) from exc
+        raise _conflict(message) from exc
     except syllabus_service.SyllabusImportError as exc:
         # 422, not 400: the request itself is well-formed — the PDF inside it
         # is what could not be turned into a course. The message is the

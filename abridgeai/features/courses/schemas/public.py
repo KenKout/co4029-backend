@@ -167,6 +167,12 @@ class CoursePublic(_ORMModel):
     contact_social_url: str | None = None
     tags: list[TagPublic] = []
     outcomes: list[CourseLearningOutcomePublic] = []
+    # Whether this course has an archived syllabus PDF a student may download
+    # (``GET /courses/{id}/syllabus/download-url``). A projection, not a
+    # column: the document lives on ``course_syllabus_imports``. The learner
+    # endpoint 404s when there is none, so without this flag the SPA would
+    # have to probe-and-swallow a 404 to decide whether to render the button.
+    has_syllabus: bool = False
 
 
 class ModulePublic(_ORMModel):

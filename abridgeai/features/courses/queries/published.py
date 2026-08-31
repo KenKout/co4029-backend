@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from abridgeai.core.pagination.cursor import (
@@ -148,6 +148,10 @@ async def get_course_instructor(db: AsyncSession, course_id: UUID) -> dict[str, 
             StorageObject.bucket.label("avatar_bucket"),
             StorageObject.object_key.label("avatar_object_key"),
         )
+        # Explicit left side: none of the selected columns comes from Course, so
+        # the join chain below has several candidate FROMs and SQLAlchemy raises
+        # "Can't determine which FROM clause to join from" without this.
+        .select_from(Course)
         .join(UserRoleAssignment, UserRoleAssignment.course_id == Course.id)
         .join(Role, Role.id == UserRoleAssignment.role_id)
         .join(User, User.id == UserRoleAssignment.user_id)
@@ -579,6 +583,17 @@ async def get_published_course_syllabus_storage_target(
     return row.bucket, row.object_key
 
 
+async def published_course_has_syllabus(db: AsyncSession, course_id: UUID) -> bool:
+    """Whether a PUBLISHED course has a downloadable syllabus document.
+
+    Exists so the learner course payload can carry ``has_syllabus`` instead of
+    the SPA probing the download endpoint and swallowing its 404. Reuses the
+    same gate as the download itself, so the flag and the endpoint can never
+    disagree — a true flag with a 404 behind it would be a broken button.
+    """
+    return await get_published_course_syllabus_storage_target(db, course_id) is not None
+
+
 async def get_published_course_thumbnail_storage_target(
     db: AsyncSession, course_id: UUID
 ) -> tuple[str, str] | None:
@@ -612,4 +627,5 @@ __all__ = [
     "list_published_lessons",
     "list_published_modules",
     "list_visible_lesson_resources",
+    "published_course_has_syllabus",
 ]
