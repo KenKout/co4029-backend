@@ -18,7 +18,6 @@ Five properties are pinned here, each because losing it fails silently:
 from __future__ import annotations
 
 import asyncio
-import time
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
@@ -1000,31 +999,84 @@ async def test_hard_stop_waits_for_pending_transcript_write() -> None:
     close.assert_awaited_once()
 
 
-async def test_transcript_flush_times_out_instead_of_hanging_finalize(
+async def test_transcript_barrier_timeout_does_not_block_finalization(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A wedged transcript write must not hang the finalizer past the cap."""
-    # A write that never completes. The real record_turn opens a DB session and
-    # can credibly wedge; the barrier must give up on it after the cap instead
-    # of blocking the anti-deadlock hard stop forever.
+    """A blocked writer cannot disable the hard stop's anti-deadlock guarantee."""
     started = asyncio.Event()
-    never_finish = asyncio.Event()
+    release = asyncio.Event()
 
-    async def _wedged_write() -> None:
+    async def _blocked_write() -> None:
         started.set()
-        await never_finish.wait()
+        await release.wait()
 
-    monkeypatch.setattr(native_runtime, "_TRANSCRIPT_FLUSH_TIMEOUT_S", 0.05)
     barrier = native_runtime.TranscriptWriteBarrier()
-    barrier.create(_wedged_write())
+    barrier.create(_blocked_write())
     await started.wait()
+    monkeypatch.setattr(native_runtime, "_TRANSCRIPT_FLUSH_TIMEOUT_S", 0.01)
+    close = AsyncMock(return_value=None)
+    timer = native_runtime.HardStopTimer(
+        native_runtime.HardStopPlan(
+            deadline_seconds=60,
+            close=close,
+            interview_session_id=uuid4(),
+            flush_transcript=barrier.flush,
+        ),
+        session=FakeSession(),  # type: ignore[arg-type]
+    )
+    try:
+        await timer._stop()  # noqa: SLF001 - deadline path
+        close.assert_awaited_once()
+    finally:
+        release.set()
+        await asyncio.sleep(0)
 
-    elapsed = time.monotonic()
+
+async def test_transcript_barrier_accepts_write_after_a_flush() -> None:
+    """A late SDK callback is persisted rather than discarded after finalization starts."""
+    barrier = native_runtime.TranscriptWriteBarrier()
     await barrier.flush()
-    elapsed = time.monotonic() - elapsed
+    persisted: list[str] = []
 
-    assert elapsed < 1.0  # returned without waiting for the wedged write
-    assert not barrier._pending  # noqa: SLF001 - wait_for cancelled the straggler
+    async def _late_write() -> None:
+        persisted.append("Final answer")
+
+    barrier.create(_late_write())
+    await barrier.flush()
+
+    assert persisted == ["Final answer"]
+
+
+async def test_transcript_barrier_drains_write_created_mid_flush() -> None:
+    """A callback landing while flush is already waiting is still drained.
+
+    The cutoff is a deadline on the whole flush, not a snapshot of the task
+    set: a conversation_item_added that fires exactly as the finalizer starts
+    waiting must not slip past the barrier into the post-submit window.
+    """
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+    persisted: list[str] = []
+
+    async def _first_write() -> None:
+        first_started.set()
+        await release_first.wait()
+
+    barrier = native_runtime.TranscriptWriteBarrier()
+    barrier.create(_first_write())
+    await first_started.wait()
+
+    flush_task = asyncio.create_task(barrier.flush())
+    await asyncio.sleep(0)  # flush is now inside asyncio.wait for _first_write
+
+    async def _second_write() -> None:
+        persisted.append("Second answer")
+
+    barrier.create(_second_write())  # arrives mid-flush, like a busy callback
+    release_first.set()
+    await flush_task
+
+    assert persisted == ["Second answer"]  # drained inside the same flush
 
 
 # ── the server owns the transition ────────────────────────────────────────────

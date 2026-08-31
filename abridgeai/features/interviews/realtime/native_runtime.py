@@ -93,6 +93,7 @@ _DEFAULT_HARD_STOP_SECONDS = 45.0 * 60.0
 # Bound on waiting for the closing to finish playing out before teardown, so a
 # stuck SpeechHandle cannot hang the job. Mirrors ``session_runtime``.
 _CLOSING_PLAYOUT_TIMEOUT_S = 30.0
+_TRANSCRIPT_FLUSH_TIMEOUT_S = 3.0
 
 
 def hard_stop_deadline_seconds(
@@ -119,12 +120,6 @@ async def _no_flush() -> None:
     return None
 
 
-# Cap on how long finalization waits for pending transcript writes. Long
-# enough that a healthy write finishes, short enough that a wedged DB session
-# cannot hang the submit (or the anti-deadlock hard stop) behind it.
-_TRANSCRIPT_FLUSH_TIMEOUT_S = 3.0
-
-
 class TranscriptWriteBarrier:
     """Track native transcript writes until session finalization.
 
@@ -136,39 +131,41 @@ class TranscriptWriteBarrier:
 
     def __init__(self) -> None:
         self._pending: set[asyncio.Task[None]] = set()
-        self._sealed = False
 
     def create(self, coro: Coroutine[Any, Any, None]) -> None:
-        if self._sealed:
-            coro.close()
-            return
         task = asyncio.create_task(coro)
         self._pending.add(task)
         task.add_done_callback(self._pending.discard)
 
     async def flush(self) -> None:
-        self._sealed = True
+        """Wait briefly for writes in flight without cancelling them.
+
+        Loop with a single deadline so a write task created WHILE the flush is
+        already running (an SDK callback landing exactly as finalization
+        begins) is also drained before submit. Writers still pending at the
+        deadline are left to finish on their own — never cancelled — so a
+        wedged DB session cannot hang the finalizer, and a merely slow write
+        is not lost, only unawaited.
+        """
+        deadline = asyncio.get_running_loop().time() + _TRANSCRIPT_FLUSH_TIMEOUT_S
         while self._pending:
-            pending = tuple(self._pending)
-            try:
-                await asyncio.wait_for(
-                    asyncio.gather(*pending, return_exceptions=True),
-                    timeout=_TRANSCRIPT_FLUSH_TIMEOUT_S,
-                )
-            except TimeoutError:
-                # A wedged DB session must not hang the finalizer (and with it
-                # the anti-deadlock hard stop): give up on the stragglers and
-                # proceed to submit. ``wait_for`` cancels the inner gather (and
-                # through it the still-pending write tasks); each wedged
-                # ``record_turn`` unwinds its own DB session on cancel, so no
-                # connection leaks — the transcript row is simply lost, which
-                # is the price of not hanging the interview close.
-                logger.warning(
-                    "transcript flush timed out after %.0fs with %d write(s) still pending",
-                    _TRANSCRIPT_FLUSH_TIMEOUT_S,
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                logger.error(
+                    "transcript flush timed out (pending=%d, timeout_seconds=%s)",
                     len(self._pending),
+                    _TRANSCRIPT_FLUSH_TIMEOUT_S,
                 )
                 return
+            done, _still = await asyncio.wait(
+                tuple(self._pending),
+                timeout=remaining,
+            )
+            for task in done:
+                try:
+                    task.result()
+                except Exception:  # noqa: BLE001 -- record_turn normally swallows failures
+                    logger.exception("unexpected transcript task failure")
 
 
 @dataclass
