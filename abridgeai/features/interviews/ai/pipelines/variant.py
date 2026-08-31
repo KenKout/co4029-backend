@@ -12,11 +12,14 @@ from __future__ import annotations
 from typing import Any
 from uuid import UUID
 
+from abridgeai.core.observability import get_logger
 from abridgeai.features.interviews.ai.stages.generation.resolve import (
     VARIANT_ANGLES,
     resolve_variant_strategy,
 )
 from abridgeai.features.interviews.models import InterviewConfig
+
+logger = get_logger(__name__)
 
 
 def resolve_variant_mode(
@@ -31,6 +34,13 @@ def resolve_variant_mode(
     multiplies the count by the angle count; ``role_only`` fixes every question
     to the config role's preferred type, degrading to legacy when the role has
     no preferred type (generic assistant).
+
+    The ``role_only`` degrade is a SAFETY NET, not the primary path:
+    ``services.authoring._assert_role_only_has_a_preferred_type`` refuses that
+    combination at enqueue so the teacher hears about it. Reaching it here means
+    a run queued before that guard existed, or a caller that bypassed the
+    service — hence the warning, so a mixed bank produced under a ``role_only``
+    request is never silent.
     """
     from abridgeai.features.interviews.orchestrator.interviewer_identity import (  # noqa: PLC0415
         identity_from_config,
@@ -44,8 +54,15 @@ def resolve_variant_mode(
     if variant_strategy == "all_angles":
         target_count = target_count * len(VARIANT_ANGLES)
     elif variant_strategy == "role_only":
-        role_type = preferred_type(identity_from_config(config.persona_profile_json).role)
+        role = identity_from_config(config.persona_profile_json).role
+        role_type = preferred_type(role)
         if role_type is None:
+            logger.warning(
+                "interview_role_only_degraded_to_mixed",
+                interview_config_id=str(config.id),
+                interviewer_role=role.value,
+                reason="role has no preferred question type",
+            )
             variant_strategy = None
     return variant_strategy, role_type, target_count
 

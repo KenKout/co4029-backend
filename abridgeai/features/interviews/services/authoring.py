@@ -710,6 +710,48 @@ async def delete_outcome(
     await soft_delete_cascade(db, outcome, actor_id=actor.user_id)
 
 
+def _assert_role_only_has_a_preferred_type(
+    config: InterviewConfig,
+    request_data: dict[str, Any],
+) -> None:
+    """Reject ``role_only`` on a config whose interviewer role has no type.
+
+    ``role_only`` means "every question is the type this interviewer role asks".
+    The mapping lives in ``orchestrator.role_question_filter.preferred_type`` and
+    is deliberately ``None`` for the GENERIC_ASSISTANT — that role has no type
+    bias, which is what keeps opted-out configs byte-identical to the pre-feature
+    engine.
+
+    The pipeline handles that case by silently dropping back to legacy mixed
+    generation (``resolve_variant_mode``). Silently is the problem: the teacher
+    picked "match the interviewer role", got a mixed bank, and nothing said so.
+    Since the generic assistant is the DEFAULT role — most configs have it — the
+    combination is easy to hit by accident.
+
+    Refused at enqueue instead, naming the fix (pick a role, or pick another
+    generation mode). The degrade in ``resolve_variant_mode`` stays as the safety
+    net for runs already queued and for callers that bypass this service.
+    """
+    if resolve_variant_strategy(request_data) != "role_only":
+        return
+    from abridgeai.features.interviews.orchestrator.interviewer_identity import (  # noqa: PLC0415
+        identity_from_config,
+    )
+    from abridgeai.features.interviews.orchestrator.role_question_filter import (  # noqa: PLC0415
+        preferred_type,
+    )
+
+    role = identity_from_config(config.persona_profile_json).role
+    if preferred_type(role) is not None:
+        return
+    raise AppError(
+        "role_only_requires_a_typed_interviewer_role: this interview's "
+        f"interviewer role ({role.value}) asks no particular question type, so "
+        "matching it would produce the ordinary mixed bank. Choose an "
+        "interviewer role in Settings, or pick a different question mode."
+    )
+
+
 def _assert_question_count_within_strategy_cap(
     request_data: dict[str, Any],
     effective_supplementary: str | None,
@@ -819,6 +861,7 @@ async def start_generation_run(
         request_data, config.supplementary_instructions
     )
     _assert_question_count_within_strategy_cap(request_data, effective_supplementary)
+    _assert_role_only_has_a_preferred_type(config, request_data)
     config_json: dict[str, Any] = dict(request_data) | {
         "interview_config_id": str(config.id),
         "type_weights": {

@@ -798,3 +798,63 @@ def test_stage_args_use_keyword_only() -> None:
     assert "retrieve_interview_context(" in orchestrator_body
     for stage_call in ("generate_interview_questions(", "validate_interview_questions("):
         assert stage_call in backfill_body, f"backfill loop must call {stage_call!r}"
+
+
+@pytest.mark.asyncio
+async def test_degraded_role_only_does_not_stamp_the_config_flag(
+    session_factory: async_sessionmaker[AsyncSession],
+    fixture_data: dict[str, UUID],
+    engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A role_only request that DEGRADED must not leave the flag set.
+
+    resolve_variant_mode drops role_only to legacy mixed when the interviewer
+    role has no preferred question type (the generic assistant). The stamp used
+    to read the REQUEST back out of config_json, so the config was marked
+    'role_only' while its bank was in fact mixed — a lie in a column that
+    outlives the run. It must reflect the RESOLVED strategy.
+
+    The service now refuses this combination at enqueue; this covers runs already
+    queued and any caller that bypasses the service.
+    """
+
+    async def _flag() -> str | None:
+        async with session_factory() as session:
+            return (
+                await session.execute(
+                    text(
+                        "SELECT generation_variant_strategy FROM interview_configs "
+                        "WHERE id = :id"
+                    ),
+                    {"id": fixture_data["cfg_id"]},
+                )
+            ).scalar_one()
+
+    assert await _flag() is None
+
+    # Ask for role_only while the config keeps the DEFAULT generic assistant
+    # (persona_profile_json stays NULL), which has no preferred type.
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "UPDATE generation_runs SET config_json = config_json || "
+                "CAST(:cfg AS jsonb) WHERE id = :id"
+            ),
+            {
+                "id": fixture_data["run_id"],
+                "cfg": json.dumps({"variant_strategy": "role_only"}),
+            },
+        )
+    _install_stage_mocks(
+        monkeypatch,
+        drafts=[_draft(1)],
+        verdicts=[_verdict(0, accepted=True)],
+    )
+    await _set_question_count(engine, fixture_data["run_id"], 1)
+
+    async with session_factory() as session:
+        await run_interview_generation(session, fixture_data["run_id"])
+
+    # The run succeeded as a MIXED run, so the flag must stay NULL.
+    assert await _flag() is None

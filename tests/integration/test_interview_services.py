@@ -3204,3 +3204,130 @@ async def test_all_angles_cap_also_bounds_a_count_from_supplementary(
                 arq_pool=arq_pool,
             )
     arq_pool.enqueue_job.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_role_only_rejected_when_the_role_has_no_preferred_type(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict[str, Any],
+) -> None:
+    """role_only on the generic assistant used to degrade to mixed SILENTLY.
+
+    preferred_type() is None for GENERIC_ASSISTANT (that role has no type bias),
+    so resolve_variant_mode dropped the strategy and produced an ordinary mixed
+    bank — the teacher picked "match the interviewer role" and was told nothing.
+    Generic is also the DEFAULT role, so the combination is easy to hit.
+    """
+    seeded = await _create_published_config(
+        engine,
+        course_id=scenario["course_id"],
+        module_id=scenario["module_id"],
+        teacher_id=scenario["teacher_id"],
+        questions=0,
+        outcomes=0,
+        status="draft",
+    )
+    arq_pool = SimpleNamespace(enqueue_job=AsyncMock(return_value=None))
+
+    async with session_factory() as session:
+        with pytest.raises(AppError, match="role_only_requires_a_typed_interviewer_role"):
+            await authoring_service.start_generation_run(
+                session,
+                seeded["config_id"],
+                _CreatePayload(
+                    course_id=scenario["course_id"],
+                    module_id=scenario["module_id"],
+                    question_count=5,
+                    variant_strategy="role_only",
+                ),
+                _actor(scenario["teacher_id"]),
+                arq_pool=arq_pool,
+            )
+
+    arq_pool.enqueue_job.assert_not_awaited()
+    async with engine.connect() as conn:
+        count = (
+            await conn.execute(
+                text("SELECT count(*) FROM generation_runs WHERE course_id = :c"),
+                {"c": scenario["course_id"]},
+            )
+        ).scalar_one()
+    assert count == 0
+
+
+@pytest.mark.asyncio
+async def test_role_only_accepted_for_a_typed_interviewer_role(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict[str, Any],
+) -> None:
+    """A role WITH a preferred type is the supported case and must still work."""
+    seeded = await _create_published_config(
+        engine,
+        course_id=scenario["course_id"],
+        module_id=scenario["module_id"],
+        teacher_id=scenario["teacher_id"],
+        questions=0,
+        outcomes=0,
+        status="draft",
+    )
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("UPDATE interview_configs SET persona_profile_json = :p WHERE id = :id"),
+            {
+                "p": json.dumps({"interviewer_role": "backend_tech_lead"}),
+                "id": seeded["config_id"],
+            },
+        )
+    arq_pool = SimpleNamespace(enqueue_job=AsyncMock(return_value=None))
+
+    async with session_factory() as session:
+        run = await authoring_service.start_generation_run(
+            session,
+            seeded["config_id"],
+            _CreatePayload(
+                course_id=scenario["course_id"],
+                module_id=scenario["module_id"],
+                question_count=5,
+                variant_strategy="role_only",
+            ),
+            _actor(scenario["teacher_id"]),
+            arq_pool=arq_pool,
+        )
+    assert run.config_json["variant_strategy"] == "role_only"
+    arq_pool.enqueue_job.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_other_strategies_are_unaffected_by_the_role_guard(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict[str, Any],
+) -> None:
+    """all_angles does not depend on the role's type, so generic stays valid."""
+    seeded = await _create_published_config(
+        engine,
+        course_id=scenario["course_id"],
+        module_id=scenario["module_id"],
+        teacher_id=scenario["teacher_id"],
+        questions=0,
+        outcomes=0,
+        status="draft",
+    )
+    arq_pool = SimpleNamespace(enqueue_job=AsyncMock(return_value=None))
+
+    async with session_factory() as session:
+        run = await authoring_service.start_generation_run(
+            session,
+            seeded["config_id"],
+            _CreatePayload(
+                course_id=scenario["course_id"],
+                module_id=scenario["module_id"],
+                question_count=3,
+                variant_strategy="all_angles",
+            ),
+            _actor(scenario["teacher_id"]),
+            arq_pool=arq_pool,
+        )
+    assert run.config_json["variant_strategy"] == "all_angles"

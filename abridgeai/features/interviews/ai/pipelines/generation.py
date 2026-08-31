@@ -213,8 +213,12 @@ async def run_interview_generation(  # noqa: C901 -- pipeline stages stay audita
             source_module_ids=_module_ids_for_questions(state.config_json, config),
             pipeline_run_id=state.id,
         )
-        strategy = state.config_json.get("variant_strategy")
-        if strategy == "role_only":
+        # Stamp the RESOLVED strategy, not the requested one. ``role_only``
+        # degrades to legacy mixed generation when the config's interviewer role
+        # has no preferred question type (the generic assistant), so reading the
+        # request back here would mark a config 'role_only' whose bank is in fact
+        # a mixed bank — a lie in the column that outlives the run.
+        if variant_strategy == "role_only":
             config.generation_variant_strategy = "role_only"
 
         state.config_json = state.config_json | {
