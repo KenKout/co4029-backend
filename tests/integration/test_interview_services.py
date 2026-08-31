@@ -3046,3 +3046,161 @@ async def test_concurrent_sibling_adds_cannot_duplicate_a_prompt(
             )
         ).scalars().all()
     assert len(prompts) == len(set(prompts)) == 3
+
+
+@pytest.mark.asyncio
+async def test_all_angles_question_count_capped_before_the_run_is_created(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict[str, Any],
+) -> None:
+    """all_angles fans each logical question into 4 rows, so 50 meant 200 rows.
+
+    The pipeline demands an EXACT hit on target_count and only accepts whole
+    4-angle groups, so such a run burns every backfill round and then dies with
+    "Generation underfilled". Reject it at enqueue time instead — before the
+    generation_runs row and the ARQ job exist, so no LLM budget is spent.
+    """
+    seeded = await _create_published_config(
+        engine,
+        course_id=scenario["course_id"],
+        module_id=scenario["module_id"],
+        teacher_id=scenario["teacher_id"],
+        questions=0,
+        outcomes=0,
+        status="draft",
+    )
+    arq_pool = SimpleNamespace(enqueue_job=AsyncMock(return_value=None))
+
+    async with session_factory() as session:
+        with pytest.raises(AppError, match="question_count_exceeds_variant_cap"):
+            await authoring_service.start_generation_run(
+                session,
+                seeded["config_id"],
+                _CreatePayload(
+                    course_id=scenario["course_id"],
+                    module_id=scenario["module_id"],
+                    question_count=13,
+                    variant_strategy="all_angles",
+                ),
+                _actor(scenario["teacher_id"]),
+                arq_pool=arq_pool,
+            )
+
+    # Nothing was enqueued and no run row was left holding the dedup key.
+    arq_pool.enqueue_job.assert_not_awaited()
+    async with engine.connect() as conn:
+        count = (
+            await conn.execute(
+                text("SELECT count(*) FROM generation_runs WHERE course_id = :c"),
+                {"c": scenario["course_id"]},
+            )
+        ).scalar_one()
+    assert count == 0
+
+
+@pytest.mark.asyncio
+async def test_all_angles_accepts_the_boundary_count(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict[str, Any],
+) -> None:
+    """12 x 4 = 48 rows fits under the 50-row cap, so the boundary is allowed."""
+    seeded = await _create_published_config(
+        engine,
+        course_id=scenario["course_id"],
+        module_id=scenario["module_id"],
+        teacher_id=scenario["teacher_id"],
+        questions=0,
+        outcomes=0,
+        status="draft",
+    )
+    arq_pool = SimpleNamespace(enqueue_job=AsyncMock(return_value=None))
+
+    async with session_factory() as session:
+        run = await authoring_service.start_generation_run(
+            session,
+            seeded["config_id"],
+            _CreatePayload(
+                course_id=scenario["course_id"],
+                module_id=scenario["module_id"],
+                question_count=12,
+                variant_strategy="all_angles",
+            ),
+            _actor(scenario["teacher_id"]),
+            arq_pool=arq_pool,
+        )
+    assert run.config_json["question_count"] == 12
+    arq_pool.enqueue_job.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_non_variant_strategy_keeps_the_full_fifty(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict[str, Any],
+) -> None:
+    """Only all_angles multiplies; legacy / role_only map 1:1 and keep 50."""
+    seeded = await _create_published_config(
+        engine,
+        course_id=scenario["course_id"],
+        module_id=scenario["module_id"],
+        teacher_id=scenario["teacher_id"],
+        questions=0,
+        outcomes=0,
+        status="draft",
+    )
+    arq_pool = SimpleNamespace(enqueue_job=AsyncMock(return_value=None))
+
+    async with session_factory() as session:
+        run = await authoring_service.start_generation_run(
+            session,
+            seeded["config_id"],
+            _CreatePayload(
+                course_id=scenario["course_id"],
+                module_id=scenario["module_id"],
+                question_count=50,
+            ),
+            _actor(scenario["teacher_id"]),
+            arq_pool=arq_pool,
+        )
+    assert run.config_json["question_count"] == 50
+
+
+@pytest.mark.asyncio
+async def test_all_angles_cap_also_bounds_a_count_from_supplementary(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict[str, Any],
+) -> None:
+    """question_count can also arrive inside supplementary_instructions JSON.
+
+    The guard resolves through the same precedence as the pipeline, so that
+    back door is bounded too rather than sneaking a 200-row target through.
+    """
+    seeded = await _create_published_config(
+        engine,
+        course_id=scenario["course_id"],
+        module_id=scenario["module_id"],
+        teacher_id=scenario["teacher_id"],
+        questions=0,
+        outcomes=0,
+        status="draft",
+    )
+    arq_pool = SimpleNamespace(enqueue_job=AsyncMock(return_value=None))
+
+    async with session_factory() as session:
+        with pytest.raises(AppError, match="question_count_exceeds_variant_cap"):
+            await authoring_service.start_generation_run(
+                session,
+                seeded["config_id"],
+                _CreatePayload(
+                    course_id=scenario["course_id"],
+                    module_id=scenario["module_id"],
+                    variant_strategy="all_angles",
+                    supplementary_instructions='{"question_count": 40}',
+                ),
+                _actor(scenario["teacher_id"]),
+                arq_pool=arq_pool,
+            )
+    arq_pool.enqueue_job.assert_not_awaited()

@@ -35,8 +35,12 @@ from abridgeai.core.security import CurrentUser, utcnow
 from abridgeai.core.slug import slugify, unique_slug
 from abridgeai.features.courses.api import public as courses_public
 from abridgeai.features.interviews.ai.stages.generation.resolve import (
+    VARIANT_ANGLES,
+    max_logical_question_count,
+    resolve_question_count,
     resolve_supplementary,
     resolve_type_mix,
+    resolve_variant_strategy,
 )
 from abridgeai.features.interviews.dedup import (
     NOT_DUPLICATE,
@@ -706,6 +710,40 @@ async def delete_outcome(
     await soft_delete_cascade(db, outcome, actor_id=actor.user_id)
 
 
+def _assert_question_count_within_strategy_cap(
+    request_data: dict[str, Any],
+    effective_supplementary: str | None,
+) -> None:
+    """Reject a count whose EFFECTIVE row budget would exceed the hard cap.
+
+    ``all_angles`` fans every logical question out into one row per angle, so a
+    typed count of N asks the pipeline for N x len(VARIANT_ANGLES) rows. The
+    schema's ``le=50`` bounds only the typed number, so 50 used to mean 200 rows
+    — a target the pipeline cannot hit (it requires an EXACT match and accepts
+    only whole 4-angle groups) and so fails AFTER burning every backfill round.
+
+    Caught here, before the run row and the ARQ job exist, so the teacher gets
+    an actionable 400 instead of a run that spends LLM budget and then dies with
+    "Generation underfilled". Resolution goes through the same precedence the
+    pipeline uses (form value -> supplementary JSON -> default), so a count
+    smuggled in via ``supplementary_instructions`` is bounded too.
+    """
+    strategy = resolve_variant_strategy(request_data)
+    cap = max_logical_question_count(strategy)
+    requested = resolve_question_count(
+        run_config_json=request_data,
+        supplementary=effective_supplementary,
+    )
+    if requested <= cap:
+        return
+    raise AppError(
+        "question_count_exceeds_variant_cap: multi-angle generation produces "
+        f"{len(VARIANT_ANGLES)} questions per logical question, so at most {cap} "
+        f"logical questions can be requested (you asked for {requested}). "
+        f"Lower the count to {cap} or switch off multi-angle mode."
+    )
+
+
 async def _assert_target_outcomes_in_config(
     db: AsyncSession, config_id: UUID, request_data: dict[str, Any]
 ) -> None:
@@ -780,6 +818,7 @@ async def start_generation_run(
     effective_supplementary = resolve_supplementary(
         request_data, config.supplementary_instructions
     )
+    _assert_question_count_within_strategy_cap(request_data, effective_supplementary)
     config_json: dict[str, Any] = dict(request_data) | {
         "interview_config_id": str(config.id),
         "type_weights": {

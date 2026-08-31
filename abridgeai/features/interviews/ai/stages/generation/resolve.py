@@ -24,6 +24,32 @@ VARIANT_ANGLES: tuple[str, ...] = (
     "behavioral",
 )
 
+#: Ceiling on the LOGICAL question count when ``all_angles`` is in play.
+#:
+#: ``all_angles`` turns each logical question into one row per angle, so the
+#: teacher's count is multiplied by ``len(VARIANT_ANGLES)`` to get the real row
+#: budget. That multiplication used to happen AFTER the [1, 50] clamp, so a
+#: typed 50 asked the pipeline for 200 rows — and the pipeline demands an EXACT
+#: hit (``accepted != target_count`` raises) with only ``MAX_BACKFILL_ATTEMPTS``
+#: rounds of recovery, where ``all_angles`` additionally only accepts whole
+#: 4-angle groups sharing one outcome and difficulty. Such a run burns four
+#: rounds of LLM spend and then fails. Capping the EFFECTIVE total at
+#: ``_MAX_QUESTION_COUNT`` keeps the teacher's number meaning "logical
+#: questions" while making the row budget honest.
+MAX_ALL_ANGLES_LOGICAL_COUNT = _MAX_QUESTION_COUNT // len(VARIANT_ANGLES)
+
+
+def max_logical_question_count(variant_strategy: str | None) -> int:
+    """Upper bound on the count a teacher may request for this strategy.
+
+    ``all_angles`` fans each logical question out into ``len(VARIANT_ANGLES)``
+    rows, so its ceiling is proportionally lower; every other strategy maps
+    1:1 and keeps the full ``_MAX_QUESTION_COUNT``.
+    """
+    if variant_strategy == "all_angles":
+        return MAX_ALL_ANGLES_LOGICAL_COUNT
+    return _MAX_QUESTION_COUNT
+
 
 def resolve_type_mix(supplementary: str | None) -> dict[str, int]:
     """Return weights summing to 100 — fall back to the 60/30/10 default."""
@@ -198,7 +224,9 @@ def resolve_variant_strategy(run_config_json: dict[str, Any] | None) -> str | No
 
 
 __all__ = [
+    "MAX_ALL_ANGLES_LOGICAL_COUNT",
     "VARIANT_ANGLES",
+    "max_logical_question_count",
     "resolve_avoid_topics",
     "resolve_persona",
     "resolve_question_count",
