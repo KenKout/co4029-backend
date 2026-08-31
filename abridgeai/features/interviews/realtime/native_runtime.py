@@ -86,9 +86,9 @@ _MIN_HARD_STOP_SECONDS = 120.0
 # reason until the limit has actually elapsed (with a 2s scheduling-tolerance
 # buffer of its own), and a hard stop that fires early therefore cannot submit.
 _DEADLINE_GRACE_SECONDS = 5.0
-# Used only when neither a time limit nor a question budget is known. Matches
-# ``interview_voice_idle_timeout_minutes``' order of magnitude: long enough that
-# no real interview trips it, short enough that an abandoned room still closes.
+# Used only when neither a time limit nor a question budget is known. Long
+# enough that no real interview trips it, short enough that an abandoned room
+# still closes.
 _DEFAULT_HARD_STOP_SECONDS = 45.0 * 60.0
 # Bound on waiting for the closing to finish playing out before teardown, so a
 # stuck SpeechHandle cannot hang the job. Mirrors ``session_runtime``.

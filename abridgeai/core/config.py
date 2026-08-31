@@ -296,11 +296,6 @@ class Settings(BaseSettings):
     livekit_api_secret: SecretStr | None = None
     livekit_agent_name: str = "interview-agent"
     interview_voice_token_ttl_seconds: int = Field(default=900, ge=60, le=24 * 60 * 60)
-    # Safety net for voice sessions whose config has no ``time_limit_minutes``:
-    # the stale-session sweep finalises them once they have been idle (no new
-    # message) for this many minutes, so a dropped/abandoned session can never
-    # stay ``in_progress`` forever. Time-limited sessions are unaffected.
-    interview_voice_idle_timeout_minutes: int = Field(default=30, ge=1, le=24 * 60)
     # Machine-CPU fraction above which the agent worker reports itself
     # unavailable, and LiveKit stops dispatching interviews to it. Every such
     # window is a candidate meeting an interview with nobody in it.

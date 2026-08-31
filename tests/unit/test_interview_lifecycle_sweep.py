@@ -1,16 +1,9 @@
-"""Unit tests for the stale voice-session sweep (Phase 4, no DB).
+"""Unit tests for the configured-deadline interview-session sweep (Phase 4).
 
-Exercises ``sweep_stale_voice_sessions`` decision logic by patching the
-``queries.sessions`` read helpers and ``utcnow`` — no postgres needed. Focus is
-the two deadline branches:
-
-* config HAS ``time_limit_minutes`` → ``started_at + limit``.
-* config has NO ``time_limit_minutes`` → idle fallback
-  (``last_activity`` or ``started_at``) ``+ idle_timeout_minutes`` so an untimed
-  session can never stay ``in_progress`` forever.
-
-and the terminal-state choice (``timed_out`` + eval enqueue when there is a
-transcript, else ``abandoned``).
+Exercises ``sweep_expired_interview_sessions`` decision logic by patching the
+``queries.sessions`` read helpers and ``utcnow`` — no postgres needed. Untimed
+sessions never enter the candidate query; only a configured ``time_limit_minutes``
+may expire an active assessment.
 """
 
 from __future__ import annotations
@@ -26,46 +19,69 @@ from abridgeai.features.interviews.services import lifecycle as lifecycle_servic
 
 _NOW = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
 _LIFECYCLE = "abridgeai.features.interviews.services.lifecycle"
+_DEFAULT_ASSESSMENT_START = object()
 
 
-def _make_session(*, started_at: datetime):
+def _make_session(
+    *,
+    started_at: datetime,
+    assessment_started_at: datetime | None | object = _DEFAULT_ASSESSMENT_START,
+):
     """Minimal stand-in for an InterviewSession ORM row the sweep mutates."""
+    if assessment_started_at is _DEFAULT_ASSESSMENT_START:
+        assessment_started_at = started_at
     return SimpleNamespace(
         id=uuid4(),
         student_id=uuid4(),
         started_at=started_at,
-        assessment_started_at=started_at,
+        assessment_started_at=assessment_started_at,
         status="in_progress",
         ended_at=None,
     )
 
 
-def _patch_queries(*, candidates, last_activity=None, user_turns=0):
-    """Patch the three query helpers the sweep calls on the queries module."""
+def _patch_queries(*, candidates, user_turns=0):
+    """Patch the query helpers the deadline sweep calls."""
     return patch.multiple(
         f"{_LIFECYCLE}.sessions_queries",
-        list_in_progress_voice_sessions_with_limit=AsyncMock(return_value=candidates),
-        get_last_activity_at=AsyncMock(return_value=last_activity),
+        list_in_progress_sessions_with_time_limit=AsyncMock(return_value=candidates),
         count_user_messages=AsyncMock(return_value=user_turns),
     )
 
 
 @pytest.mark.asyncio
 async def test_time_limit_breached_with_transcript_times_out_and_enqueues():
-    """Config time-limit passed + >=1 user turn → timed_out + eval enqueued."""
+    """Configured deadline passed + >=1 user turn → timed_out + eval enqueue."""
     session = _make_session(started_at=_NOW - timedelta(minutes=40))
     db, arq = AsyncMock(), AsyncMock()
     with (
         patch(f"{_LIFECYCLE}.utcnow", return_value=_NOW),
         _patch_queries(candidates=[(session, 30)], user_turns=2),
     ):
-        count = await lifecycle_service.sweep_stale_voice_sessions(db, arq_pool=arq)
+        count = await lifecycle_service.sweep_expired_interview_sessions(db, arq_pool=arq)
 
     assert count == 1
     assert session.status == "timed_out"
     assert session.ended_at == _NOW
     arq.enqueue_job.assert_awaited_once()
     assert arq.enqueue_job.await_args.kwargs["_job_id"] == (f"interview-evaluation:{session.id}")
+
+
+@pytest.mark.asyncio
+async def test_time_limit_breached_without_transcript_is_abandoned():
+    """Configured deadline passed + no user turn → abandoned without evaluation."""
+    session = _make_session(started_at=_NOW - timedelta(minutes=40))
+    db, arq = AsyncMock(), AsyncMock()
+    with (
+        patch(f"{_LIFECYCLE}.utcnow", return_value=_NOW),
+        _patch_queries(candidates=[(session, 30)], user_turns=0),
+    ):
+        count = await lifecycle_service.sweep_expired_interview_sessions(db, arq_pool=arq)
+
+    assert count == 1
+    assert session.status == "abandoned"
+    assert session.ended_at == _NOW
+    arq.enqueue_job.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -107,62 +123,27 @@ async def test_recover_stalled_evaluation_skips_without_queue():
 
 
 @pytest.mark.asyncio
-async def test_no_time_limit_idle_breached_with_no_transcript_is_abandoned():
-    """NEW PATH: untimed session silent past idle window + 0 turns → abandoned."""
-    # No messages → idle anchor falls back to started_at (now - 31m); window 30m.
-    session = _make_session(started_at=_NOW - timedelta(minutes=31))
+async def test_untimed_stale_session_is_never_swept():
+    """Untimed sessions, however old, do not reach the deadline sweep."""
+    stale_untimed = _make_session(started_at=_NOW - timedelta(hours=2))
     db, arq = AsyncMock(), AsyncMock()
+    count_messages = AsyncMock(return_value=0)
     with (
         patch(f"{_LIFECYCLE}.utcnow", return_value=_NOW),
-        _patch_queries(candidates=[(session, None)], last_activity=None, user_turns=0),
+        patch.multiple(
+            f"{_LIFECYCLE}.sessions_queries",
+            list_in_progress_sessions_with_time_limit=AsyncMock(return_value=[]),
+            count_user_messages=count_messages,
+        ),
     ):
-        count = await lifecycle_service.sweep_stale_voice_sessions(
-            db, arq_pool=arq, idle_timeout_minutes=30
-        )
-
-    assert count == 1
-    assert session.status == "abandoned"
-    assert session.ended_at == _NOW
-    arq.enqueue_job.assert_not_awaited()  # nothing to evaluate
-
-
-@pytest.mark.asyncio
-async def test_no_time_limit_idle_breached_with_transcript_times_out():
-    """NEW PATH: untimed session idle past window but with a turn → timed_out + eval."""
-    session = _make_session(started_at=_NOW - timedelta(hours=2))
-    last_activity = _NOW - timedelta(minutes=31)  # silent 31m > 30m window
-    db, arq = AsyncMock(), AsyncMock()
-    with (
-        patch(f"{_LIFECYCLE}.utcnow", return_value=_NOW),
-        _patch_queries(candidates=[(session, None)], last_activity=last_activity, user_turns=1),
-    ):
-        count = await lifecycle_service.sweep_stale_voice_sessions(
-            db, arq_pool=arq, idle_timeout_minutes=30
-        )
-
-    assert count == 1
-    assert session.status == "timed_out"
-    arq.enqueue_job.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_no_time_limit_recently_active_is_not_swept():
-    """NEW PATH guard: untimed session active within idle window stays in_progress."""
-    session = _make_session(started_at=_NOW - timedelta(hours=5))
-    last_activity = _NOW - timedelta(minutes=10)  # 10m < 30m window → still live
-    db, arq = AsyncMock(), AsyncMock()
-    with (
-        patch(f"{_LIFECYCLE}.utcnow", return_value=_NOW),
-        _patch_queries(candidates=[(session, None)], last_activity=last_activity),
-    ):
-        count = await lifecycle_service.sweep_stale_voice_sessions(
-            db, arq_pool=arq, idle_timeout_minutes=30
-        )
+        count = await lifecycle_service.sweep_expired_interview_sessions(db, arq_pool=arq)
 
     assert count == 0
-    assert session.status == "in_progress"  # untouched
-    assert session.ended_at is None
+    assert stale_untimed.status == "in_progress"
+    assert stale_untimed.ended_at is None
+    count_messages.assert_not_awaited()
     db.commit.assert_not_awaited()
+    arq.enqueue_job.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -174,36 +155,46 @@ async def test_time_limit_not_yet_breached_is_not_swept():
         patch(f"{_LIFECYCLE}.utcnow", return_value=_NOW),
         _patch_queries(candidates=[(session, 30)]),
     ):
-        count = await lifecycle_service.sweep_stale_voice_sessions(db, arq_pool=None)
+        count = await lifecycle_service.sweep_expired_interview_sessions(db, arq_pool=None)
 
     assert count == 0
     assert session.status == "in_progress"
+    db.commit.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_returns_count_across_mixed_candidates():
-    """Sweep returns the number actually finalised, skipping live ones."""
+async def test_session_in_onboarding_does_not_expire_before_assessment_starts():
+    """A timed session has no deadline until onboarding completes."""
+    session = _make_session(
+        started_at=_NOW - timedelta(hours=2),
+        assessment_started_at=None,
+    )
+    db = AsyncMock()
+    with (
+        patch(f"{_LIFECYCLE}.utcnow", return_value=_NOW),
+        _patch_queries(candidates=[(session, 30)]),
+    ):
+        count = await lifecycle_service.sweep_expired_interview_sessions(db)
+
+    assert count == 0
+    assert session.status == "in_progress"
+    db.commit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_returns_count_across_timed_candidates():
+    """Sweep finalises expired timed candidates and leaves fresh ones live."""
     stale_timed = _make_session(started_at=_NOW - timedelta(minutes=40))
-    stale_idle = _make_session(started_at=_NOW - timedelta(minutes=45))
-    fresh_idle = _make_session(started_at=_NOW - timedelta(minutes=45))
-    candidates = [(stale_timed, 30), (stale_idle, None), (fresh_idle, None)]
-    # Per-session async returns, in candidate order.
-    last_activity_by_call = [_NOW - timedelta(minutes=40), _NOW - timedelta(minutes=5)]
+    fresh_timed = _make_session(started_at=_NOW - timedelta(minutes=5))
+    candidates = [(stale_timed, 30), (fresh_timed, 30)]
     db, arq = AsyncMock(), AsyncMock()
     with (
         patch(f"{_LIFECYCLE}.utcnow", return_value=_NOW),
-        patch.multiple(
-            f"{_LIFECYCLE}.sessions_queries",
-            list_in_progress_voice_sessions_with_limit=AsyncMock(return_value=candidates),
-            get_last_activity_at=AsyncMock(side_effect=last_activity_by_call),
-            count_user_messages=AsyncMock(return_value=1),
-        ),
+        _patch_queries(candidates=candidates, user_turns=1),
     ):
-        count = await lifecycle_service.sweep_stale_voice_sessions(
-            db, arq_pool=arq, idle_timeout_minutes=30
-        )
+        count = await lifecycle_service.sweep_expired_interview_sessions(db, arq_pool=arq)
 
-    assert count == 2  # timed + stale-idle finalised; fresh-idle skipped
+    assert count == 1
     assert stale_timed.status == "timed_out"
-    assert stale_idle.status == "timed_out"
-    assert fresh_idle.status == "in_progress"
+    assert fresh_timed.status == "in_progress"
+    arq.enqueue_job.assert_awaited_once()

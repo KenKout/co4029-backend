@@ -307,21 +307,22 @@ async def list_session_messages(
     return list((await db.execute(stmt)).scalars().all())
 
 
-async def list_in_progress_voice_sessions_with_limit(
+async def list_in_progress_sessions_with_time_limit(
     db: AsyncSession,
-) -> list[tuple[InterviewSession, int | None]]:
-    """In-progress sessions paired with their config time-limit.
+) -> list[tuple[InterviewSession, int]]:
+    """In-progress sessions paired with their configured time-limit.
 
-    Used by the stale-session sweep (Phase 4). Returns ``(session,
-    time_limit_minutes)`` so the caller decides staleness in Python (avoids
-    per-row SQL interval math). ``time_limit_minutes`` may be ``None`` (no
-    limit configured → session is never swept on time).
+    Used by the deadline sweep. Untimed interviews never enter this result:
+    only an explicit ``time_limit_minutes`` may terminalize an active session.
+    Returns ``(session, time_limit_minutes)`` so the caller decides expiry in
+    Python without per-row SQL interval math.
     """
     stmt = (
         select(InterviewSession, InterviewConfig.time_limit_minutes)
         .join(InterviewConfig, InterviewConfig.id == InterviewSession.interview_config_id)
         .where(
             InterviewSession.status == "in_progress",
+            InterviewConfig.time_limit_minutes.is_not(None),
         )
     )
     rows = (await db.execute(stmt)).all()
@@ -362,21 +363,6 @@ async def count_user_messages(db: AsyncSession, session_id: UUID) -> int:
     return int((await db.execute(stmt)).scalar_one())
 
 
-async def get_last_activity_at(db: AsyncSession, session_id: UUID) -> datetime | None:
-    """Timestamp of the most recent message in a session, or ``None`` if the
-    session has no messages yet.
-
-    The stale-session sweep uses this as the "idle since" anchor for voice
-    sessions whose config has no ``time_limit_minutes``: a session is finalised
-    once it has been silent (no new message) for the fixed idle window. When
-    there are no messages, callers fall back to ``started_at``.
-    """
-    stmt = select(func.max(InterviewSessionMessage.created_at)).where(
-        InterviewSessionMessage.session_id == session_id,
-    )
-    return (await db.execute(stmt)).scalar_one_or_none()
-
-
 async def list_integrity_events_for_session(db: AsyncSession, session_id: UUID) -> list[Any]:
     """Return FR-5.8 proctoring events for one interview session, oldest first.
 
@@ -403,16 +389,15 @@ async def list_integrity_events_for_session(db: AsyncSession, session_id: UUID) 
 __all__ = [
     "count_terminal_sessions",
     "count_user_messages",
-    "get_last_activity_at",
-    "get_last_terminal_ended_at",
     "get_active_session",
+    "get_last_terminal_ended_at",
     "get_gap_report_for_session",
     "get_outcome_evaluations",
     "get_session",
     "get_session_attempt_number",
     "get_session_with_responses",
     "get_user_interview_sessions",
-    "list_in_progress_voice_sessions_with_limit",
+    "list_in_progress_sessions_with_time_limit",
     "list_integrity_events_for_session",
     "list_pending_evaluation_sessions",
     "list_session_messages",
