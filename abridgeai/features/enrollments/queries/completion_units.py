@@ -16,7 +16,7 @@ Completion is therefore counted over units, one per curriculum item:
 lesson     ``lesson_progress.status = 'completed'``
 quiz       passed the teacher's milestone, OR failed with every allowed
            attempt consumed and none still in flight
-interview  at least one non-practice attempt with ``pass_verdict = TRUE``
+interview  at least one attempt with ``pass_verdict = TRUE``
 =========  ==============================================================
 
 The quiz and interview rules are NOT invented here. They are the rules the
@@ -32,7 +32,7 @@ Deliberate asymmetry, kept from the source rules
 A quiz completes when it is terminal (passed OR exhausted); an interview
 completes only when PASSED. Failing every interview attempt leaves the unit
 pending, because the curriculum tag there means *đạt/passed*, not merely
-*finished* (user decision 2026-08-06). Practice runs never count.
+*finished* (user decision 2026-08-06).
 
 Populations must match the curriculum exactly
 ---------------------------------------------

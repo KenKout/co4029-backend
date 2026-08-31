@@ -7,7 +7,7 @@ verdict never surfaced on the curriculum, so an interview item stayed
 "pending" forever and a module containing one could never auto-collapse.
 
 Completion rule (user decision, 2026-08-06): an interview item is COMPLETED
-when the student has **at least one non-practice attempt with
+when the student has **at least one attempt with
 ``pass_verdict = TRUE``**.
 
 This is DELIBERATELY NOT the quiz rule. A quiz also completes on

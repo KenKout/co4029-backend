@@ -628,7 +628,7 @@ async def list_my_interview_progress(
     interview items at all — they stayed pending forever and a module holding
     one could never auto-collapse, even after the student passed.
 
-    Completed ⟺ at least one non-practice attempt has ``pass_verdict = TRUE``.
+    Completed ⟺ at least one attempt has ``pass_verdict = TRUE``.
     Deliberately stricter than the quiz rule (which also completes on
     failed-and-exhausted): the tag reads as *passed*. See
     :class:`InterviewProgressRead` for the field semantics.

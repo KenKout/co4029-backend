@@ -121,18 +121,7 @@ async def recover_stalled_evaluations(
     return enqueued
 
 
-async def mark_abandoned(db: AsyncSession, session_id: UUID) -> None:
-    """Mark a single in-progress session ``abandoned`` (idempotent)."""
-    session = await sessions_queries.get_session(db, session_id)
-    if session is None or session.status != "in_progress":
-        return
-    session.status = "abandoned"
-    session.ended_at = utcnow()
-    await db.commit()
-
-
 __all__ = [
-    "mark_abandoned",
     "recover_stalled_evaluations",
     "sweep_expired_interview_sessions",
 ]
