@@ -41,6 +41,66 @@ async def list_programs(db: AsyncSession, organization_id: UUID) -> list[Learnin
     return list((await db.scalars(stmt)).all())
 
 
+async def list_program_list_cards(
+    db: AsyncSession, program_ids: list[UUID]
+) -> dict[UUID, dict[str, int | bool]]:
+    """Batched card statistics for the management list, 3 GROUP BY queries.
+
+    Returns ``{program_id: {student_count, path_change_request_count,
+    has_draft_version}}``. ``path_change_request_count`` counts PENDING
+    change requests only — the dean's review inbox number, which is what the
+    card's dean-only flag shows.
+    """
+    if not program_ids:
+        return {}
+
+    enroll_stmt = (
+        select(
+            ProgramEnrollment.learning_program_id.label("program_id"),
+            func.count().label("n"),
+        )
+        .where(ProgramEnrollment.learning_program_id.in_(program_ids))
+        .group_by(ProgramEnrollment.learning_program_id)
+    )
+    enroll_rows = (await db.execute(enroll_stmt)).all()
+
+    requests_stmt = (
+        select(
+            ProgramEnrollment.learning_program_id.label("program_id"),
+            func.count().label("n"),
+        )
+        .join(PathChangeRequest, PathChangeRequest.program_enrollment_id == ProgramEnrollment.id)
+        .where(
+            ProgramEnrollment.learning_program_id.in_(program_ids),
+            PathChangeRequest.status == "pending",
+        )
+        .group_by(ProgramEnrollment.learning_program_id)
+    )
+    request_rows = (await db.execute(requests_stmt)).all()
+
+    draft_stmt = (
+        select(LearningProgramVersion.learning_program_id.label("program_id"))
+        .where(
+            LearningProgramVersion.learning_program_id.in_(program_ids),
+            LearningProgramVersion.status == "draft",
+        )
+        .distinct()
+    )
+    draft_ids = {row.program_id for row in (await db.execute(draft_stmt)).all()}
+
+    stats: dict[UUID, dict[str, int | bool]] = {
+        pid: {"student_count": 0, "path_change_request_count": 0, "has_draft_version": False}
+        for pid in program_ids
+    }
+    for row in enroll_rows:
+        stats[row.program_id]["student_count"] = row.n
+    for row in request_rows:
+        stats[row.program_id]["path_change_request_count"] = row.n
+    for pid in draft_ids:
+        stats[pid]["has_draft_version"] = True
+    return stats
+
+
 async def get_current_version(
     db: AsyncSession, program_id: UUID, *, published_only: bool = False
 ) -> LearningProgramVersion | None:

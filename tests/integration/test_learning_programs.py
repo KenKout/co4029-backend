@@ -311,7 +311,7 @@ async def test_it_admin_cannot_operate_academic_programs(
     factory = async_sessionmaker(engine, expire_on_commit=False, autoflush=False)
     admin = CurrentUser(seeded_users.admin_id, uuid.uuid4())
     async with factory() as db:
-        with pytest.raises(ForbiddenError, match="manager_or_faculty_dean_scope_required"):
+        with pytest.raises(ForbiddenError, match="primary_organization_required"):
             await services.create_program(
                 db,
                 ProgramCreate(
@@ -324,4 +324,70 @@ async def test_it_admin_cannot_operate_academic_programs(
                 ),
                 admin,
             )
+        await db.rollback()
+
+
+@pytest.mark.asyncio
+async def test_program_list_cards_carry_dean_and_draft_stats(
+    engine: AsyncEngine, seeded_users: SeededUsers
+) -> None:
+    """The management list card payload: students, pending change requests,
+    and the draft-exists flag (user decision 2026-08-31)."""
+    faculty_id, path_a, path_b = await _seed_program_context(engine, seeded_users)
+    factory = async_sessionmaker(engine, expire_on_commit=False, autoflush=False)
+    manager = CurrentUser(seeded_users.manager_id, uuid.uuid4())
+    student = seeded_users.student_id
+
+    async with factory() as db:
+        program = await services.create_program(
+            db,
+            ProgramCreate(
+                faculty_id=faculty_id,
+                slug=f"list-cards-{uuid.uuid4().hex[:8]}",
+                name="List Cards Program",
+                career_path_ids=[path_a, path_b],
+            ),
+            manager,
+        )
+        await services.publish_program(db, program_id=program.id, actor=manager)
+        await services.enroll_students(
+            db, program_id=program.id, student_ids=[student], actor=manager
+        )
+        selected = await services.select_path(
+            db,
+            enrollment_id=(
+                await services.list_my_enrollments(db, student)
+            )[0].id,
+            career_path_id=path_a,
+            student_id=student,
+        )
+        await services.request_path_change(
+            db,
+            enrollment_id=selected.id,
+            target_path_id=path_b,
+            reason="Prefer the other path",
+            student_id=student,
+        )
+
+        # Editing a published program opens a draft v2 (update_program creates
+        # one), which is what has_draft_version surfaces.
+        await services.update_program(
+            db,
+            program_id=program.id,
+            payload=ProgramUpdate(description="revising"),
+            actor=manager,
+        )
+
+        cards = await services.list_programs(
+            db, organization_id=seeded_users.organization_id, actor=manager
+        )
+        card = next(c for c in cards if c.id == program.id)
+        assert card.path_change_request_count == 1
+        assert card.has_draft_version is True
+        assert card.student_count == 1  # awaiting_path counts as enrolled
+
+        archived = await services.archive_program(
+            db, program_id=program.id, actor=manager
+        )
+        assert archived.status == "archived"
         await db.rollback()

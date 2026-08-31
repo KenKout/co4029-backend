@@ -310,14 +310,41 @@ async def create_program(
 async def list_programs(
     db: AsyncSession, *, organization_id: UUID, actor: CurrentUser
 ) -> list[ProgramRead]:
+    programs = await queries.list_programs(db, organization_id)
+    visible = [
+        program
+        for program in programs
+        if await _actor_can_operate(db, actor.user_id, program)
+    ]
+    if not visible:
+        return []
+    cards = await queries.list_program_list_cards(db, [p.id for p in visible])
     result: list[ProgramRead] = []
-    for program in await queries.list_programs(db, organization_id):
-        try:
-            await _require_operator(db, actor_id=actor.user_id, program=program)
-        except ForbiddenError:
-            continue
-        result.append(await _program_out(db, program))
+    for program in visible:
+        dto = await _program_out(db, program)
+        stats = cards.get(program.id, {})
+        result.append(
+            dto.model_copy(
+                update={
+                    "student_count": stats.get("student_count", 0),
+                    "path_change_request_count": stats.get(
+                        "path_change_request_count", 0
+                    ),
+                    "has_draft_version": bool(stats.get("has_draft_version", False)),
+                }
+            )
+        )
     return result
+
+
+async def _actor_can_operate(
+    db: AsyncSession, actor_id: UUID, program: LearningProgram
+) -> bool:
+    try:
+        await _require_operator(db, actor_id=actor_id, program=program)
+        return True
+    except ForbiddenError:
+        return False
 
 
 async def get_program_for_operator(
