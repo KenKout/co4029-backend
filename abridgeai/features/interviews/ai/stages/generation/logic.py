@@ -45,7 +45,10 @@ from abridgeai.features.interviews.ai.stages.generation.parsers import (
 )
 from abridgeai.features.interviews.ai.stages.generation.resolve import (
     VARIANT_ANGLES,
+    resolve_avoid_topics,
+    resolve_persona,
     resolve_question_count,
+    resolve_supplementary,
     resolve_type_mix,
 )
 
@@ -109,12 +112,19 @@ async def generate_interview_questions(
     on backfill calls so it does not repeat a question that already passed.
     """
 
-    type_mix = resolve_type_mix(config.supplementary_instructions)
+    # ONE resolved value drives every consumer of the field (type mix, count,
+    # prose). Reading the config column here while honouring the override
+    # elsewhere would desync generation from the run's persisted type_weights,
+    # which the VALIDATION stage grades the drafts against.
+    supplementary = resolve_supplementary(
+        getattr(run, "config_json", None), config.supplementary_instructions
+    )
+    type_mix = resolve_type_mix(supplementary)
     question_count = override_question_count or resolve_question_count(
         run_config_json=getattr(run, "config_json", None),
-        supplementary=config.supplementary_instructions,
+        supplementary=supplementary,
     )
-    persona = config.persona or "neutral"
+    persona = resolve_persona(getattr(run, "config_json", None), config.persona)
 
     # Variant mode: ``question_count`` is the TOTAL number of rows requested.
     # ``all_angles`` asks the LLM for whole LOGICAL questions (each spawning one
@@ -139,11 +149,11 @@ async def generate_interview_questions(
         situational_pct=type_mix["situational"],
         # Only the prose part: when the field holds structured JSON (rubric,
         # type mix, question count) the raw blob must NOT reach the prompt.
-        supplementary_instructions=resolve_supplementary_notes(config.supplementary_instructions),
+        supplementary_instructions=resolve_supplementary_notes(supplementary),
         outcomes=_outcomes_for_prompt(outcomes),
         chunks_block=_render_chunks(context),
         avoid_prompts=list(avoid_prompts or []),
-        avoid_topics=_avoid_topics(getattr(run, "config_json", None)),
+        avoid_topics=resolve_avoid_topics(getattr(run, "config_json", None)),
     )
     system_prompt = render_prompt("prompts/system.j2")
 
@@ -170,21 +180,6 @@ async def generate_interview_questions(
             # valid outcome below instead of dropping the whole draft.
             draft.linked_outcome_id = None
     return _link_outcomes_round_robin(drafts, outcomes)
-
-
-def _avoid_topics(run_config_json: dict[str, Any] | None) -> list[str]:
-    """Teacher-supplied exclusion list from the run's ``config_json``.
-
-    Cleaned here rather than trusted raw: the value round-trips through JSONB,
-    so a non-list or a list holding blanks/non-strings is possible. Blanks
-    would render as empty ``-`` bullets and dilute the instruction.
-    """
-    if not isinstance(run_config_json, dict):
-        return []
-    raw = run_config_json.get("avoid_topics")
-    if not isinstance(raw, list):
-        return []
-    return [item.strip() for item in raw if isinstance(item, str) and item.strip()]
 
 
 def _outcomes_for_prompt(outcomes: list[InterviewOutcome]) -> list[dict[str, Any]]:

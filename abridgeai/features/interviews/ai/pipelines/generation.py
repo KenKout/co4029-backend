@@ -52,6 +52,7 @@ from abridgeai.features.interviews.ai.pipelines.variant import (
     resolve_variant_mode,
 )
 from abridgeai.features.interviews.ai.stages.generation import resolve_question_count
+from abridgeai.features.interviews.ai.stages.generation.resolve import resolve_supplementary
 from abridgeai.features.interviews.ai.stages.retrieval import retrieve_interview_context
 from abridgeai.features.interviews.models import InterviewConfig
 from abridgeai.features.interviews.queries.authoring import list_outcomes_for_config
@@ -157,7 +158,12 @@ async def run_interview_generation(  # noqa: C901 -- pipeline stages stay audita
                 raise RuntimeError("targeted generation resolved no interview outcomes")
         target_count = resolve_question_count(
             run_config_json=state.config_json,
-            supplementary=config.supplementary_instructions,
+            # Same resolved value the generation stage uses, so the pipeline's
+            # target and the stage's request cannot disagree when the run
+            # overrides supplementary_instructions.
+            supplementary=resolve_supplementary(
+                state.config_json, config.supplementary_instructions
+            ),
         )
         variant_strategy, role_type, target_count = resolve_variant_mode(
             config, state.config_json, target_count

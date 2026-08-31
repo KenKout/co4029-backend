@@ -34,7 +34,10 @@ from abridgeai.core.exceptions import AppError, ConflictError, NotFoundError
 from abridgeai.core.security import CurrentUser, utcnow
 from abridgeai.core.slug import slugify, unique_slug
 from abridgeai.features.courses.api import public as courses_public
-from abridgeai.features.interviews.ai.stages.generation.resolve import resolve_type_mix
+from abridgeai.features.interviews.ai.stages.generation.resolve import (
+    resolve_supplementary,
+    resolve_type_mix,
+)
 from abridgeai.features.interviews.dedup import (
     NOT_DUPLICATE,
     check_duplicate,
@@ -769,11 +772,18 @@ async def start_generation_run(
 
     await _assert_target_outcomes_in_config(db, config_id, request_data)
 
+    # ``type_weights`` is persisted here and read back by the VALIDATION stage
+    # to police the produced type mix. It MUST be derived from the same
+    # supplementary_instructions the GENERATION stage will prompt with — if the
+    # run overrides the field, deriving the weights from the config column would
+    # make validation reject the very drafts generation was asked for.
+    effective_supplementary = resolve_supplementary(
+        request_data, config.supplementary_instructions
+    )
     config_json: dict[str, Any] = dict(request_data) | {
         "interview_config_id": str(config.id),
         "type_weights": {
-            key: value / 100
-            for key, value in resolve_type_mix(config.supplementary_instructions).items()
+            key: value / 100 for key, value in resolve_type_mix(effective_supplementary).items()
         },
         "course_id": str(config.course_id),
         "module_id": str(config.module_id),

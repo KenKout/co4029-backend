@@ -108,6 +108,77 @@ def _try_parse_rubric(supplementary: str | None) -> dict[str, Any] | None:
     return cast(dict[str, Any], parsed) if isinstance(parsed, dict) else None
 
 
+def resolve_avoid_topics(run_config_json: dict[str, Any] | None) -> list[str]:
+    """Teacher-supplied exclusion list from the run's ``config_json``.
+
+    Cleaned here rather than trusted raw: the value round-trips through JSONB,
+    so a non-list or a list holding blanks/non-strings is possible. Blanks
+    would render as empty ``-`` bullets and dilute the instruction.
+    """
+    if not isinstance(run_config_json, dict):
+        return []
+    raw = run_config_json.get("avoid_topics")
+    if not isinstance(raw, list):
+        return []
+    return [item.strip() for item in raw if isinstance(item, str) and item.strip()]
+
+
+def resolve_supplementary(
+    run_config_json: dict[str, Any] | None,
+    config_supplementary: str | None,
+) -> str | None:
+    """Pick the ``supplementary_instructions`` a generation run must use.
+
+    Precedence: the run's own value (the teacher's Generate-tab form) over the
+    saved config column. Empty string counts as "not supplied" — the form sends
+    ``null`` when the field is blank, and a blank override must not wipe the
+    config's rubric/prose.
+
+    Why this exists: the request carried ``supplementary_instructions`` since
+    the feature shipped, but every stage read ``config.supplementary_instructions``
+    instead, so the value was accepted and ignored. This is the ONE resolver all
+    call sites share, because the field feeds three different consumers —
+    :func:`resolve_type_mix` (question type mix), :func:`resolve_question_count`,
+    and the prose injected into the prompt. If generation honoured the override
+    while the run's ``type_weights`` (computed by the authoring service and read
+    back by the VALIDATION stage) still came from the config, validation would
+    reject the very drafts generation was told to produce.
+
+    Note the SCORING rubric (``evaluation_rubric``) is deliberately NOT affected
+    at grading time: ``services/evaluation.py`` reads the config column, so a
+    per-run generation override can never change how a sitting is graded.
+    """
+    if isinstance(run_config_json, dict):
+        raw = run_config_json.get("supplementary_instructions")
+        if isinstance(raw, str) and raw.strip():
+            return raw
+    return config_supplementary
+
+
+def resolve_persona(
+    run_config_json: dict[str, Any] | None,
+    config_persona: str | None,
+) -> str:
+    """Pick the persona label for the generation prompt, defaulting to neutral.
+
+    Same precedence and same rationale as :func:`resolve_supplementary` — the
+    request field was accepted and dropped. Only the three authored labels are
+    honoured; anything else (a stale client, a hand-rolled API call) falls back
+    to the config rather than reaching the prompt, since ``persona`` is rendered
+    verbatim and a free-text value here would be an injection surface.
+
+    Generation-time only: the persona that CONDUCTS the interview still comes
+    from the config (``services/taking.py`` / ``orchestrator.persona``), so this
+    cannot change the tone a candidate actually meets.
+    """
+    allowed = ("strict", "neutral", "supportive")
+    if isinstance(run_config_json, dict):
+        raw = run_config_json.get("persona")
+        if isinstance(raw, str) and raw.strip().lower() in allowed:
+            return raw.strip().lower()
+    return config_persona or "neutral"
+
+
 def resolve_variant_strategy(run_config_json: dict[str, Any] | None) -> str | None:
     """Resolve the variant generation strategy from the run's form values.
 
@@ -128,7 +199,10 @@ def resolve_variant_strategy(run_config_json: dict[str, Any] | None) -> str | No
 
 __all__ = [
     "VARIANT_ANGLES",
+    "resolve_avoid_topics",
+    "resolve_persona",
     "resolve_question_count",
+    "resolve_supplementary",
     "resolve_type_mix",
     "resolve_variant_strategy",
 ]
