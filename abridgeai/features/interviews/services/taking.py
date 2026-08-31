@@ -97,11 +97,11 @@ logger = logging.getLogger(__name__)
 
 _EVALUATE_INTERVIEW_SESSION_TASK = "evaluate_interview_session_task"
 
-# Terminal session statuses — an attempt in any of these has been "used up"
-# and its ``ended_at`` anchors the retake cooldown (FR-5.3). ``in_progress``
-# is excluded: a live session is handled by the idempotent active-session
-# short-circuit, not the cooldown gate.
-_TERMINAL_SESSION_STATUSES = ("completed", "timed_out", "abandoned", "failed")
+# Retake-consuming terminal statuses — only these learner attempts use a
+# configured attempt allowance and anchor the cooldown (FR-5.3). ``failed``
+# is a system/evaluation failure and remains auditable without penalising the
+# learner; ``in_progress`` is handled by the active-session short-circuit.
+_RETAKE_CONSUMING_SESSION_STATUSES = ("completed", "timed_out", "abandoned")
 
 
 class InterviewCooldownActive(AppError):  # noqa: N818  # mirrors quiz CooldownActive
@@ -254,12 +254,12 @@ async def compute_retake_status(
     if config is None:
         return RetakeStatus(remaining_attempts=None, retake_available_at=None, can_retake=True)
 
-    # Cooldown window — most recent terminal attempt + cooldown_hours.
+    # Cooldown window — most recent retake-consuming attempt + cooldown_hours.
     retake_available_at: datetime | None = None
     cooldown_hours = config.cooldown_hours
     if cooldown_hours is not None and cooldown_hours > 0:
         last_ended = await sessions_queries.get_last_terminal_ended_at(
-            db, student_id, config_id, _TERMINAL_SESSION_STATUSES
+            db, student_id, config_id, _RETAKE_CONSUMING_SESSION_STATUSES
         )
         if last_ended is not None:
             if last_ended.tzinfo is None:
@@ -268,12 +268,12 @@ async def compute_retake_status(
             if candidate > datetime.now(UTC):
                 retake_available_at = candidate
 
-    # Attempt ceiling — max_attempts minus terminal attempts used.
+    # Attempt ceiling — max_attempts minus retake-consuming attempts used.
     remaining_attempts: int | None = None
     max_attempts = config.max_attempts
     if max_attempts is not None and max_attempts > 0:
         used = await sessions_queries.count_terminal_sessions(
-            db, student_id, config_id, _TERMINAL_SESSION_STATUSES
+            db, student_id, config_id, _RETAKE_CONSUMING_SESSION_STATUSES
         )
         remaining_attempts = max(0, max_attempts - used)
 
@@ -295,13 +295,15 @@ async def _enforce_retake_policy(
     """FR-5.3 — block a new attempt on ``max_attempts`` / ``cooldown_hours``.
 
     Loads the config, then applies two gates against the student's
-    *terminal* sessions (live sessions never reach here):
+    *retake-consuming* sessions (live sessions never reach here). A ``failed``
+    session is a system/evaluation failure, so it remains historical but never
+    consumes an attempt or starts a cooldown:
 
     * **Cooldown** — if ``cooldown_hours`` is set and the most recent
-      terminal attempt ended less than that many hours ago, raise
+      retake-consuming attempt ended less than that many hours ago, raise
       :class:`InterviewCooldownActive` (router → 429).
     * **Max attempts** — if ``max_attempts`` is set and the count of
-      terminal attempts already meets it, raise
+      retake-consuming attempts already meet it, raise
       :class:`InterviewMaxAttemptsReached` (router → 409).
 
     NULL / non-positive knobs disable the corresponding gate. The gates
@@ -316,7 +318,7 @@ async def _enforce_retake_policy(
     cooldown_hours = config.cooldown_hours
     if cooldown_hours is not None and cooldown_hours > 0:
         last_ended = await sessions_queries.get_last_terminal_ended_at(
-            db, student_id, config_id, _TERMINAL_SESSION_STATUSES
+            db, student_id, config_id, _RETAKE_CONSUMING_SESSION_STATUSES
         )
         if last_ended is not None:
             if last_ended.tzinfo is None:
@@ -328,7 +330,7 @@ async def _enforce_retake_policy(
     max_attempts = config.max_attempts
     if max_attempts is not None and max_attempts > 0:
         used = await sessions_queries.count_terminal_sessions(
-            db, student_id, config_id, _TERMINAL_SESSION_STATUSES
+            db, student_id, config_id, _RETAKE_CONSUMING_SESSION_STATUSES
         )
         if used >= max_attempts:
             raise InterviewMaxAttemptsReached(config_id, max_attempts)

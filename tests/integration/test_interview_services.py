@@ -547,6 +547,92 @@ async def test_start_session_cooldown_elapsed_allows_new_attempt(
 
 
 @pytest.mark.asyncio
+async def test_failed_session_does_not_start_retake_cooldown(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict[str, Any],
+) -> None:
+    """FR-5.3 — an evaluation/system failure must not block a retry."""
+    seeded = await _create_published_config(
+        engine,
+        course_id=scenario["course_id"],
+        module_id=scenario["module_id"],
+        teacher_id=scenario["teacher_id"],
+        cooldown_hours=24,
+    )
+    payload = _CreatePayload(input_mode="text")
+    async with session_factory() as session, session.begin():
+        first = await taking_service.start_session(
+            session, seeded["config_id"], payload, _actor(scenario["student_id"])
+        )
+    await _finish_session(
+        engine,
+        first.id,
+        status_="failed",
+        ended_at=datetime.now(UTC) - timedelta(hours=1),
+    )
+
+    async with session_factory() as session:
+        retake = await taking_service.compute_retake_status(
+            session,
+            config_id=seeded["config_id"],
+            student_id=scenario["student_id"],
+        )
+    assert retake.retake_available_at is None
+    assert retake.can_retake is True
+
+    async with session_factory() as session, session.begin():
+        second = await taking_service.start_session(
+            session, seeded["config_id"], payload, _actor(scenario["student_id"])
+        )
+    assert second.id != first.id
+    assert second.attempt_number == 2
+
+
+@pytest.mark.asyncio
+async def test_failed_session_does_not_consume_max_attempt(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict[str, Any],
+) -> None:
+    """FR-5.3 — an evaluation/system failure leaves the full quota available."""
+    seeded = await _create_published_config(
+        engine,
+        course_id=scenario["course_id"],
+        module_id=scenario["module_id"],
+        teacher_id=scenario["teacher_id"],
+        max_attempts=1,
+    )
+    payload = _CreatePayload(input_mode="text")
+    async with session_factory() as session, session.begin():
+        first = await taking_service.start_session(
+            session, seeded["config_id"], payload, _actor(scenario["student_id"])
+        )
+    await _finish_session(
+        engine,
+        first.id,
+        status_="failed",
+        ended_at=datetime.now(UTC),
+    )
+
+    async with session_factory() as session:
+        retake = await taking_service.compute_retake_status(
+            session,
+            config_id=seeded["config_id"],
+            student_id=scenario["student_id"],
+        )
+    assert retake.remaining_attempts == 1
+    assert retake.can_retake is True
+
+    async with session_factory() as session, session.begin():
+        second = await taking_service.start_session(
+            session, seeded["config_id"], payload, _actor(scenario["student_id"])
+        )
+    assert second.id != first.id
+    assert second.attempt_number == 2
+
+
+@pytest.mark.asyncio
 async def test_start_session_max_attempts_blocks_new_attempt(
     engine: AsyncEngine,
     session_factory: async_sessionmaker[AsyncSession],
