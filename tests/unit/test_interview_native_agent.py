@@ -18,6 +18,7 @@ Five properties are pinned here, each because losing it fails silently:
 from __future__ import annotations
 
 import asyncio
+import time
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
@@ -919,6 +920,111 @@ async def test_the_conversation_is_persisted(
         assert str(recorded[1]["session_question_id"]) == "3f2a1b4c-0000-4000-8000-000000000001"
     finally:
         hard_stop.cancel()
+
+
+async def test_tool_finalizer_waits_for_pending_transcript_write(
+    monkeypatch: pytest.MonkeyPatch, job_ctx: SimpleNamespace
+) -> None:
+    """The evaluator cannot start before the final committed answer persists."""
+    fake_session = FakeSession()
+    monkeypatch.setattr(native_runtime, "build_native_session", lambda *_a, **_kw: fake_session)
+    write_started = asyncio.Event()
+    release_write = asyncio.Event()
+    persisted: list[str] = []
+
+    async def _slow_record(_session_id: Any, **kwargs: Any) -> None:
+        write_started.set()
+        await release_write.wait()
+        persisted.append(kwargs["text"])
+
+    monkeypatch.setattr(native_runtime, "record_turn", _slow_record)
+    setup = _setup()
+    submit = AsyncMock()
+    setup.userdata.finalize_session = submit
+    hard_stop = await native_runtime.run_native_interview(
+        job_ctx, settings=SimpleNamespace(), setup=setup
+    )
+    try:
+        fake_session.emit(
+            "conversation_item_added",
+            SimpleNamespace(item=SimpleNamespace(role="user", text_content="Final answer")),
+        )
+        await write_started.wait()
+
+        finalize_task = asyncio.create_task(setup.userdata.finalize_session())
+        await asyncio.sleep(0)
+        submit.assert_not_awaited()
+
+        release_write.set()
+        await finalize_task
+
+        assert persisted == ["Final answer"]
+        submit.assert_awaited_once()
+    finally:
+        hard_stop.cancel()
+
+
+async def test_hard_stop_waits_for_pending_transcript_write() -> None:
+    """The deadline path shares the same write barrier before submission."""
+    write_started = asyncio.Event()
+    release_write = asyncio.Event()
+    persisted: list[str] = []
+
+    async def _write() -> None:
+        write_started.set()
+        await release_write.wait()
+        persisted.append("Final answer")
+
+    barrier = native_runtime.TranscriptWriteBarrier()
+    barrier.create(_write())
+    await write_started.wait()
+    close = AsyncMock(return_value=None)
+    timer = native_runtime.HardStopTimer(
+        native_runtime.HardStopPlan(
+            deadline_seconds=60,
+            close=close,
+            interview_session_id=uuid4(),
+            flush_transcript=barrier.flush,
+        ),
+        session=FakeSession(),  # type: ignore[arg-type]
+    )
+
+    stop_task = asyncio.create_task(timer._stop())  # noqa: SLF001 - deadline path
+    await asyncio.sleep(0)
+    close.assert_not_awaited()
+
+    release_write.set()
+    await stop_task
+
+    assert persisted == ["Final answer"]
+    close.assert_awaited_once()
+
+
+async def test_transcript_flush_times_out_instead_of_hanging_finalize(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A wedged transcript write must not hang the finalizer past the cap."""
+    # A write that never completes. The real record_turn opens a DB session and
+    # can credibly wedge; the barrier must give up on it after the cap instead
+    # of blocking the anti-deadlock hard stop forever.
+    started = asyncio.Event()
+    never_finish = asyncio.Event()
+
+    async def _wedged_write() -> None:
+        started.set()
+        await never_finish.wait()
+
+    monkeypatch.setattr(native_runtime, "_TRANSCRIPT_FLUSH_TIMEOUT_S", 0.05)
+    barrier = native_runtime.TranscriptWriteBarrier()
+    barrier.create(_wedged_write())
+    await started.wait()
+
+    elapsed = time.monotonic()
+    await barrier.flush()
+    elapsed = time.monotonic() - elapsed
+
+    assert elapsed < 1.0  # returned without waiting for the wedged write
+    assert not barrier._pending  # noqa: SLF001 - wait_for cancelled the straggler
 
 
 # ── the server owns the transition ────────────────────────────────────────────

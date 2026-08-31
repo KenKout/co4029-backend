@@ -28,10 +28,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass
 from functools import partial
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
 
 from livekit import (
@@ -115,6 +115,62 @@ def hard_stop_deadline_seconds(
     return max(_MIN_HARD_STOP_SECONDS, budget)
 
 
+async def _no_flush() -> None:
+    return None
+
+
+# Cap on how long finalization waits for pending transcript writes. Long
+# enough that a healthy write finishes, short enough that a wedged DB session
+# cannot hang the submit (or the anti-deadlock hard stop) behind it.
+_TRANSCRIPT_FLUSH_TIMEOUT_S = 3.0
+
+
+class TranscriptWriteBarrier:
+    """Track native transcript writes until session finalization.
+
+    Conversation callbacks cannot await ``record_turn`` directly. Before either
+    native finalization path submits and enqueues evaluation, this barrier waits
+    for every write task already scheduled, so the evaluator sees the final
+    candidate answer.
+    """
+
+    def __init__(self) -> None:
+        self._pending: set[asyncio.Task[None]] = set()
+        self._sealed = False
+
+    def create(self, coro: Coroutine[Any, Any, None]) -> None:
+        if self._sealed:
+            coro.close()
+            return
+        task = asyncio.create_task(coro)
+        self._pending.add(task)
+        task.add_done_callback(self._pending.discard)
+
+    async def flush(self) -> None:
+        self._sealed = True
+        while self._pending:
+            pending = tuple(self._pending)
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*pending, return_exceptions=True),
+                    timeout=_TRANSCRIPT_FLUSH_TIMEOUT_S,
+                )
+            except TimeoutError:
+                # A wedged DB session must not hang the finalizer (and with it
+                # the anti-deadlock hard stop): give up on the stragglers and
+                # proceed to submit. ``wait_for`` cancels the inner gather (and
+                # through it the still-pending write tasks); each wedged
+                # ``record_turn`` unwinds its own DB session on cancel, so no
+                # connection leaks — the transcript row is simply lost, which
+                # is the price of not hanging the interview close.
+                logger.warning(
+                    "transcript flush timed out after %.0fs with %d write(s) still pending",
+                    _TRANSCRIPT_FLUSH_TIMEOUT_S,
+                    len(self._pending),
+                )
+                return
+
+
 @dataclass
 class HardStopPlan:
     """What the hard stop needs to close a session the model never ends.
@@ -128,6 +184,7 @@ class HardStopPlan:
     deadline_seconds: float
     close: Callable[[], Awaitable[str | None]]
     interview_session_id: UUID
+    flush_transcript: Callable[[], Awaitable[None]] = _no_flush
 
 
 class HardStopTimer:
@@ -174,6 +231,7 @@ class HardStopTimer:
             return
         self._finalized = True
         self.cancel()
+        await self._plan.flush_transcript()
         await inner()
         await self._announce_finished()
 
@@ -204,6 +262,7 @@ class HardStopTimer:
         # not be the reason a completed interview was never submitted.
         closing: str | None = None
         try:
+            await self._plan.flush_transcript()
             closing = await self._plan.close()
         except Exception:
             logger.exception(
@@ -549,6 +608,7 @@ async def run_native_interview(
     session = build_native_session(
         settings, userdata, language=setup.language, voice=setup.tts_voice
     )
+    transcript_writes = TranscriptWriteBarrier()
     hard_stop = HardStopTimer(
         HardStopPlan(
             deadline_seconds=hard_stop_deadline_seconds(
@@ -557,6 +617,7 @@ async def run_native_interview(
             ),
             close=setup.close_session,
             interview_session_id=userdata.interview_session_id,
+            flush_transcript=transcript_writes.flush,
         ),
         session=session,
     )
@@ -581,7 +642,7 @@ async def run_native_interview(
         room_input_options=room_input,
         room_output_options=room_output,
     )
-    _record_conversation(session, userdata)
+    _record_conversation(session, userdata, transcript_writes)
     hard_stop.start()
     obs.emit(
         obs.EV_AGENT_DISPATCH,
@@ -679,12 +740,17 @@ __all__ = [
     "HardStopPlan",
     "HardStopTimer",
     "NativeInterviewAgent",
+    "TranscriptWriteBarrier",
     "hard_stop_deadline_seconds",
     "run_native_interview",
 ]
 
 
-def _record_conversation(session: AgentSession, userdata: InterviewUserdata) -> None:
+def _record_conversation(
+    session: AgentSession,
+    userdata: InterviewUserdata,
+    transcript_writes: TranscriptWriteBarrier,
+) -> None:
     """Persist every committed chat item to ``interview_session_messages``.
 
     The evaluation and the gap report read that table, so without this a native
@@ -738,7 +804,7 @@ def _record_conversation(session: AgentSession, userdata: InterviewUserdata) -> 
             userdata.pending_assistant_kind = None
         else:
             kind = "answer"
-        asyncio.create_task(  # noqa: RUF006 - fire-and-forget; record_turn never raises
+        transcript_writes.create(
             record_turn(
                 userdata.interview_session_id,
                 role=str(role),
