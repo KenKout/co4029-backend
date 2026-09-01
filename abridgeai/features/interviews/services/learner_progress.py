@@ -72,15 +72,21 @@ ORDER BY m.position, mi.position
 # Per-config attempt rollup for one student.
 #
 # ``passed`` is the whole point: a single TRUE verdict on any attempt completes
-# the item. ``in_flight`` and ``attempts_used`` are reported for parity with the
-# quiz payload (the UI shows "attempt N" affordances), and because a live
-# attempt is useful context for a pending item.
+# the item. ``attempts_used`` remains the audit/history count, while
+# ``attempts_awaiting_grade`` counts only terminal statuses an evaluator can
+# actually process. ``abandoned`` and ``failed`` rows have no future verdict, so
+# including them in the grading gap made the learner-facing badge say "Being
+# marked" forever after the attempt history had already settled.
 _ATTEMPT_ROLLUP_SQL = """
 SELECT s.interview_config_id AS config_id,
        COUNT(*) AS attempts_used,
        COUNT(*) FILTER (WHERE s.status = 'in_progress') AS in_flight,
        BOOL_OR(s.pass_verdict IS TRUE) AS passed,
-       COUNT(*) FILTER (WHERE s.pass_verdict IS NOT NULL) AS graded
+       COUNT(*) FILTER (WHERE s.pass_verdict IS NOT NULL) AS graded,
+       COUNT(*) FILTER (
+           WHERE s.status IN ('completed', 'timed_out')
+             AND s.pass_verdict IS NULL
+       ) AS awaiting_grade
 FROM interview_sessions s
 WHERE s.student_id = :user_id
   AND s.interview_config_id = ANY(:config_ids)
@@ -125,6 +131,7 @@ async def list_my_interview_progress(
         attempts_used = int(row["attempts_used"]) if row else 0
         in_flight = int(row["in_flight"]) if row else 0
         graded = int(row["graded"]) if row else 0
+        awaiting_grade = int(row["awaiting_grade"]) if row else 0
         # BOOL_OR yields NULL for a group of all-NULL verdicts; treat any
         # non-TRUE as not passed rather than leaking None into `completed`.
         passed = bool(row["passed"]) if row and row["passed"] is not None else False
@@ -135,6 +142,7 @@ async def list_my_interview_progress(
                 "attempts_used": attempts_used,
                 "attempts_in_flight": in_flight,
                 "attempts_graded": graded,
+                "attempts_awaiting_grade": awaiting_grade,
                 "passed": passed,
                 # The user-chosen rule, in one place: passing is the ONLY way an
                 # interview item completes.

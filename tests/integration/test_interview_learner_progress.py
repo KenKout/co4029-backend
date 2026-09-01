@@ -221,6 +221,7 @@ async def test_interview_progress_completion_matrix(
         "mixed": uuid.uuid4(),           # fail, pass, fail -> completed
         "all_failed": uuid.uuid4(),      # 3 FALSE verdicts -> PENDING (vs quiz)
         "ungraded": uuid.uuid4(),        # verdict NULL (ARQ pending) -> pending
+        "terminal_ungraded": uuid.uuid4(),  # abandoned/failed: no future verdict
         "in_flight": uuid.uuid4(),       # live attempt -> pending
         "never": uuid.uuid4(),           # untouched -> pending
     }
@@ -263,6 +264,14 @@ async def test_interview_progress_completion_matrix(
             attempt_number=1, pass_verdict=None,
         )
         await _seed_attempt(
+            conn, config_id=configs["terminal_ungraded"], student_id=student,
+            attempt_number=1, status="abandoned", pass_verdict=None,
+        )
+        await _seed_attempt(
+            conn, config_id=configs["terminal_ungraded"], student_id=student,
+            attempt_number=2, status="failed", pass_verdict=None,
+        )
+        await _seed_attempt(
             conn, config_id=configs["in_flight"], student_id=student,
             attempt_number=1, status="in_progress", pass_verdict=None,
         )
@@ -301,7 +310,16 @@ async def test_interview_progress_completion_matrix(
         ungraded = by_id[str(configs["ungraded"])]
         assert ungraded["attempts_used"] == 1
         assert ungraded["attempts_graded"] == 0
+        assert ungraded["attempts_awaiting_grade"] == 1
         assert ungraded["completed"] is False
+
+        # These terminal rows never enqueue evaluation, so they must not keep
+        # the curriculum badge in the permanent "being marked" state.
+        terminal_ungraded = by_id[str(configs["terminal_ungraded"])]
+        assert terminal_ungraded["attempts_used"] == 2
+        assert terminal_ungraded["attempts_graded"] == 0
+        assert terminal_ungraded["attempts_awaiting_grade"] == 0
+        assert terminal_ungraded["completed"] is False
 
         in_flight = by_id[str(configs["in_flight"])]
         assert in_flight["attempts_in_flight"] == 1

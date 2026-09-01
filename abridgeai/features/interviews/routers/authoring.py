@@ -262,6 +262,27 @@ async def delete_interview_question_bank_item(
     await db.commit()
 
 
+@router.delete(
+    "/courses/{course_id}/interview-question-bank/{item_id}/group",
+    response_model=dict[str, int],
+)
+async def delete_interview_question_bank_group(
+    course_id: UUID,
+    item_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_COURSE_UPDATE)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> dict[str, int]:
+    """Soft-delete every angle of one logical question in the course bank."""
+    try:
+        deleted = await authoring_service.delete_question_bank_group(
+            db, course_id, item_id, current_user
+        )
+    except NotFoundError as exc:
+        raise _not_found("interview_question_bank_item", item_id) from exc
+    await db.commit()
+    return {"deleted": deleted}
+
+
 @router.post(
     "/courses/{course_id}/interview-configs",
     response_model=InterviewConfigAuthoring,
@@ -779,6 +800,28 @@ async def delete_question(
     except ConflictError as exc:
         raise _conflict(str(exc)) from exc
     await db.commit()
+
+
+@router.delete(
+    "/interview-configs/{config_id}/questions/{question_id}/variants",
+    response_model=dict[str, int],
+)
+async def delete_question_variants(
+    config_id: UUID,
+    question_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_QUESTION)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> dict[str, int]:
+    try:
+        deleted = await authoring_service.delete_question_variants(
+            db, config_id, question_id, current_user
+        )
+    except NotFoundError as exc:
+        raise _not_found("interview_question", question_id) from exc
+    except ConflictError as exc:
+        raise _conflict(str(exc)) from exc
+    await db.commit()
+    return {"deleted": deleted}
 
 
 @router.post(

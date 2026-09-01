@@ -62,6 +62,7 @@ from abridgeai.features.courses.queries.published import (
     list_published_modules,
     list_visible_lesson_resources,
     list_visible_module_items,
+    published_course_has_syllabus,
 )
 
 __all__ = [
@@ -114,6 +115,7 @@ __all__ = [
     "list_visible_module_items",
     "next_course_outcome_position",
     "next_module_item_position",
+    "published_course_has_syllabus",
     "reindex_course_outcome_siblings",
     "build_descendant_map",
     "build_outcome_code_map",

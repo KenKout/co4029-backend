@@ -36,6 +36,59 @@ async def list_my_career_enrollments(db: AsyncSession, student_id: UUID) -> list
     return [dict(row) for row in rows]
 
 
+# Career paths a student's OWN learning-program enrolment(s) put on the menu.
+#
+# The catalog is org-wide, but a student inside a learning program may only take
+# the paths that program version pins (see
+# ``learning_programs.services.request_path_change``, which rejects anything
+# else with ``target_path_is_not_in_the_pinned_program_version``). Showing an
+# off-menu path produced a detail page with no action on it and no explanation —
+# the path looked broken rather than simply not offered.
+#
+# Scoped to enrolments that are still live (``awaiting_path`` / ``active``): a
+# withdrawn or cancelled program must not keep widening the catalog, while
+# ``completed`` is included so a finished student can still read the paths they
+# were offered rather than watching the catalog empty out the moment they pass.
+_MY_PROGRAM_CAREER_PATH_IDS_SQL = text(
+    """
+    SELECT DISTINCT lpvp.career_path_id
+    FROM program_enrollments pe
+    JOIN learning_program_version_paths lpvp
+        ON lpvp.program_version_id = pe.program_version_id
+    WHERE pe.student_id = :student_id
+      AND pe.status IN ('awaiting_path', 'active', 'completed')
+    """
+)
+
+
+async def list_my_program_career_path_ids(db: AsyncSession, student_id: UUID) -> set[UUID]:
+    """Career-path ids the student's live program enrolments offer.
+
+    An EMPTY set is meaningful and is not the same as "no restriction": it means
+    the student is in no learning program at all, and callers treat that as
+    "show the whole org catalog" (the pre-program behaviour, which is what a
+    directly-enrolled or browsing student still needs).
+    """
+    rows = (await db.execute(_MY_PROGRAM_CAREER_PATH_IDS_SQL, {"student_id": student_id})).all()
+    return {row[0] for row in rows}
+
+
+async def list_my_enrolled_career_path_ids(db: AsyncSession, student_id: UUID) -> set[UUID]:
+    """Paths the student already has access to, regardless of program.
+
+    Unioned into the program menu so a path they are genuinely enrolled on can
+    never vanish from under them — e.g. a legacy direct enrolment, or a path
+    dropped from a later program version while their attempt is still live.
+    Being able to open a page you are enrolled on is not a privilege the program
+    pin should be able to revoke.
+    """
+    stmt = select(StudentCareerEnrollment.career_path_id).where(
+        StudentCareerEnrollment.student_id == student_id,
+        StudentCareerEnrollment.deleted_at.is_(None),
+    )
+    return set((await db.execute(stmt)).scalars().all())
+
+
 async def get_my_career_enrollment(
     db: AsyncSession, *, student_id: UUID, career_path_id: UUID
 ) -> StudentCareerEnrollment | None:

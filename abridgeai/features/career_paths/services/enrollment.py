@@ -509,6 +509,28 @@ async def get_published_path_with_courses(
     return _to_path_public(path, courses)
 
 
+async def _visible_career_path_ids(db: AsyncSession, user_id: UUID) -> set[UUID] | None:
+    """Which career paths this student may see, or ``None`` for "all of them".
+
+    A student inside a learning program may only take the paths their program
+    version pins — ``request_path_change`` enforces exactly that server-side
+    (``target_path_is_not_in_the_pinned_program_version``). Before this scope
+    existed the catalog offered every published path in the org, so an off-menu
+    path rendered a detail page with no action and no explanation; it read as a
+    broken button rather than a path that was never on offer.
+
+    ``None`` (no restriction) when the student belongs to no learning program:
+    that is the pre-program catalog behaviour and still the right answer for a
+    directly-enrolled or merely browsing student. Paths they are already
+    enrolled on are unioned in, so a live enrolment can never be hidden by a
+    program version that later dropped the path.
+    """
+    program_ids = await student_queries.list_my_program_career_path_ids(db, user_id)
+    if not program_ids:
+        return None
+    return program_ids | await student_queries.list_my_enrolled_career_path_ids(db, user_id)
+
+
 async def get_published_path_detail_for_user(
     db: AsyncSession, *, slug: str, user_id: UUID
 ) -> CareerPathDetailPublic | None:
@@ -536,6 +558,12 @@ async def get_published_path_detail_for_user(
         return None
     path = await get_published_career_path_by_slug(db, slug=slug, organization_id=organization_id)
     if path is None:
+        return None
+    # Off-menu for this student's program → treat as absent rather than serving
+    # a page whose only action would 409. 404 also keeps the org catalog from
+    # being an existence oracle for paths the student was never offered.
+    visible = await _visible_career_path_ids(db, user_id)
+    if visible is not None and path.id not in visible:
         return None
 
     published = await authoring_queries.get_published_version(db, path.id)
@@ -587,7 +615,17 @@ async def get_published_path_for_user(
     organization_id = await get_user_primary_organization_id(db, user_id)
     if organization_id is None:
         return None
-    return await get_published_path_with_courses(db, slug=slug, organization_id=organization_id)
+    result = await get_published_path_with_courses(
+        db, slug=slug, organization_id=organization_id
+    )
+    if result is None:
+        return None
+    # Same program scope as the /detail read — the two must agree, or the slim
+    # read would still hand out a path the roadmap read refuses.
+    visible = await _visible_career_path_ids(db, user_id)
+    if visible is not None and result.id not in visible:
+        return None
+    return result
 
 
 async def list_published_paths(
@@ -596,6 +634,7 @@ async def list_published_paths(
     organization_id: UUID,
     limit: int,
     cursor: str | None,
+    restrict_to_ids: set[UUID] | None = None,
 ) -> CursorPage[CareerPathPublic]:
     """Cursor-paginated published career paths ordered by ``(created_at DESC, id DESC)``."""
     from abridgeai.features.career_paths.queries import (
@@ -618,6 +657,7 @@ async def list_published_paths(
         limit=limit,
         after_created_at=after_created_at,
         after_id=after_id,
+        restrict_to_ids=restrict_to_ids,
     )
     results: list[CareerPathPublic] = []
     for path in paths:
@@ -647,7 +687,13 @@ async def list_published_paths_for_user(
     if organization_id is None:
         return CursorPage(items=[], next_cursor=None)
     return await list_published_paths(
-        db, organization_id=organization_id, limit=limit, cursor=cursor
+        db,
+        organization_id=organization_id,
+        limit=limit,
+        cursor=cursor,
+        # Scope the catalog to the paths this student's learning program offers;
+        # None when they are in no program (browse the whole org, as before).
+        restrict_to_ids=await _visible_career_path_ids(db, user_id),
     )
 
 

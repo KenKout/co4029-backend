@@ -38,6 +38,7 @@ from abridgeai.features.courses.queries import (
     list_published_modules,
     list_visible_lesson_resources,
     list_visible_module_items,
+    published_course_has_syllabus,
 )
 from abridgeai.features.courses.queries import assignment as assignment_queries
 from abridgeai.features.courses.schemas import (
@@ -249,6 +250,9 @@ async def _course_with_instructor(db: AsyncSession, course: object) -> CoursePub
             update={"instructor": InstructorRead.model_validate(instructor_data)}
         )
     public.thumbnail_url = await _mint_course_thumbnail_url(db, public.id)
+    # Does this course have a syllabus a student may download? Same gate as the
+    # download endpoint, so the button and the URL behind it agree.
+    public.has_syllabus = await published_course_has_syllabus(db, public.id)
     # Hydrate the full teaching team, Course Instructor first then TAs, each
     # with its title flags so the learner page can label CI vs TA (both =
     # both titles). Empty (and

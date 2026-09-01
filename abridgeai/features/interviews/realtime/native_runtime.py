@@ -28,10 +28,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass
 from functools import partial
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
 
 from livekit import (
@@ -86,13 +86,14 @@ _MIN_HARD_STOP_SECONDS = 120.0
 # reason until the limit has actually elapsed (with a 2s scheduling-tolerance
 # buffer of its own), and a hard stop that fires early therefore cannot submit.
 _DEADLINE_GRACE_SECONDS = 5.0
-# Used only when neither a time limit nor a question budget is known. Matches
-# ``interview_voice_idle_timeout_minutes``' order of magnitude: long enough that
-# no real interview trips it, short enough that an abandoned room still closes.
+# Used only when neither a time limit nor a question budget is known. Long
+# enough that no real interview trips it, short enough that an abandoned room
+# still closes.
 _DEFAULT_HARD_STOP_SECONDS = 45.0 * 60.0
 # Bound on waiting for the closing to finish playing out before teardown, so a
 # stuck SpeechHandle cannot hang the job. Mirrors ``session_runtime``.
 _CLOSING_PLAYOUT_TIMEOUT_S = 30.0
+_TRANSCRIPT_FLUSH_TIMEOUT_S = 3.0
 
 
 def hard_stop_deadline_seconds(
@@ -115,6 +116,58 @@ def hard_stop_deadline_seconds(
     return max(_MIN_HARD_STOP_SECONDS, budget)
 
 
+async def _no_flush() -> None:
+    return None
+
+
+class TranscriptWriteBarrier:
+    """Track native transcript writes until session finalization.
+
+    Conversation callbacks cannot await ``record_turn`` directly. Before either
+    native finalization path submits and enqueues evaluation, this barrier waits
+    for every write task already scheduled, so the evaluator sees the final
+    candidate answer.
+    """
+
+    def __init__(self) -> None:
+        self._pending: set[asyncio.Task[None]] = set()
+
+    def create(self, coro: Coroutine[Any, Any, None]) -> None:
+        task = asyncio.create_task(coro)
+        self._pending.add(task)
+        task.add_done_callback(self._pending.discard)
+
+    async def flush(self) -> None:
+        """Wait briefly for writes in flight without cancelling them.
+
+        Loop with a single deadline so a write task created WHILE the flush is
+        already running (an SDK callback landing exactly as finalization
+        begins) is also drained before submit. Writers still pending at the
+        deadline are left to finish on their own — never cancelled — so a
+        wedged DB session cannot hang the finalizer, and a merely slow write
+        is not lost, only unawaited.
+        """
+        deadline = asyncio.get_running_loop().time() + _TRANSCRIPT_FLUSH_TIMEOUT_S
+        while self._pending:
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                logger.error(
+                    "transcript flush timed out (pending=%d, timeout_seconds=%s)",
+                    len(self._pending),
+                    _TRANSCRIPT_FLUSH_TIMEOUT_S,
+                )
+                return
+            done, _still = await asyncio.wait(
+                tuple(self._pending),
+                timeout=remaining,
+            )
+            for task in done:
+                try:
+                    task.result()
+                except Exception:  # noqa: BLE001 -- record_turn normally swallows failures
+                    logger.exception("unexpected transcript task failure")
+
+
 @dataclass
 class HardStopPlan:
     """What the hard stop needs to close a session the model never ends.
@@ -128,6 +181,7 @@ class HardStopPlan:
     deadline_seconds: float
     close: Callable[[], Awaitable[str | None]]
     interview_session_id: UUID
+    flush_transcript: Callable[[], Awaitable[None]] = _no_flush
 
 
 class HardStopTimer:
@@ -174,6 +228,7 @@ class HardStopTimer:
             return
         self._finalized = True
         self.cancel()
+        await self._plan.flush_transcript()
         await inner()
         await self._announce_finished()
 
@@ -204,6 +259,7 @@ class HardStopTimer:
         # not be the reason a completed interview was never submitted.
         closing: str | None = None
         try:
+            await self._plan.flush_transcript()
             closing = await self._plan.close()
         except Exception:
             logger.exception(
@@ -549,6 +605,7 @@ async def run_native_interview(
     session = build_native_session(
         settings, userdata, language=setup.language, voice=setup.tts_voice
     )
+    transcript_writes = TranscriptWriteBarrier()
     hard_stop = HardStopTimer(
         HardStopPlan(
             deadline_seconds=hard_stop_deadline_seconds(
@@ -557,6 +614,7 @@ async def run_native_interview(
             ),
             close=setup.close_session,
             interview_session_id=userdata.interview_session_id,
+            flush_transcript=transcript_writes.flush,
         ),
         session=session,
     )
@@ -581,7 +639,7 @@ async def run_native_interview(
         room_input_options=room_input,
         room_output_options=room_output,
     )
-    _record_conversation(session, userdata)
+    _record_conversation(session, userdata, transcript_writes)
     hard_stop.start()
     obs.emit(
         obs.EV_AGENT_DISPATCH,
@@ -679,12 +737,17 @@ __all__ = [
     "HardStopPlan",
     "HardStopTimer",
     "NativeInterviewAgent",
+    "TranscriptWriteBarrier",
     "hard_stop_deadline_seconds",
     "run_native_interview",
 ]
 
 
-def _record_conversation(session: AgentSession, userdata: InterviewUserdata) -> None:
+def _record_conversation(
+    session: AgentSession,
+    userdata: InterviewUserdata,
+    transcript_writes: TranscriptWriteBarrier,
+) -> None:
     """Persist every committed chat item to ``interview_session_messages``.
 
     The evaluation and the gap report read that table, so without this a native
@@ -738,7 +801,7 @@ def _record_conversation(session: AgentSession, userdata: InterviewUserdata) -> 
             userdata.pending_assistant_kind = None
         else:
             kind = "answer"
-        asyncio.create_task(  # noqa: RUF006 - fire-and-forget; record_turn never raises
+        transcript_writes.create(
             record_turn(
                 userdata.interview_session_id,
                 role=str(role),

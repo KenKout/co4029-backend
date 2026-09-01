@@ -7,7 +7,7 @@ from importlib import resources
 from typing import Any, NamedTuple
 from uuid import UUID
 
-from sqlalchemy import delete, func, or_, select, text, true
+from sqlalchemy import delete, func, or_, select, text, true, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import InstrumentedAttribute, selectinload
 from sqlalchemy.sql.elements import ColumnElement
@@ -1367,6 +1367,34 @@ async def next_course_outcome_position(
         CourseLearningOutcome.deleted_at.is_(None),
     )
     return int((await db.execute(stmt)).scalar_one()) + 1
+
+
+async def soft_delete_all_course_outcomes(
+    db: AsyncSession, course_id: UUID, *, actor_id: UUID
+) -> int:
+    """Tombstone every live outcome on a course; returns how many were hit.
+
+    Used by the syllabus OVERRIDE path, which replaces the whole L.O. tree
+    with the one in the newly uploaded document. A bulk UPDATE rather than
+    :func:`soft_delete_cascade` per row: the whole tree is going, so there is
+    no subtree to walk, and the cascade helper would cost a ``refresh()``
+    round-trip per node to discover children it does not need.
+
+    The caller MUST flush (or let this statement's autoflush land) before
+    inserting the replacement rows: the sibling-position unique index is
+    partial (``WHERE deleted_at IS NULL``), so the old rows only stop
+    colliding with the new 1..N positions once their tombstone is written.
+    """
+    stmt = (
+        update(CourseLearningOutcome)
+        .where(
+            CourseLearningOutcome.course_id == course_id,
+            CourseLearningOutcome.deleted_at.is_(None),
+        )
+        .values(deleted_at=func.now(), deleted_by=actor_id)
+    )
+    result = await db.execute(stmt)
+    return result.rowcount or 0
 
 
 async def reindex_course_outcome_siblings(

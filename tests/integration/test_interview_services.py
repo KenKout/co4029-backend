@@ -2480,6 +2480,175 @@ async def test_import_bank_imports_standalone_singleton(
 
 
 @pytest.mark.asyncio
+async def test_delete_question_variants_soft_deletes_whole_logical_question(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict[str, Any],
+) -> None:
+    """Deleting one logical-question angle removes every live sibling."""
+    seeded = await _create_published_config(
+        engine,
+        course_id=scenario["course_id"],
+        module_id=scenario["module_id"],
+        teacher_id=scenario["teacher_id"],
+        questions=4,
+        outcomes=1,
+        status="draft",
+    )
+    group_id = uuid.uuid4()
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "UPDATE interview_questions SET variant_group_id = :group_id "
+                "WHERE interview_config_id = :config_id"
+            ),
+            {"group_id": group_id, "config_id": seeded["config_id"]},
+        )
+
+    async with session_factory() as session:
+        deleted = await authoring_service.delete_question_variants(
+            session,
+            seeded["config_id"],
+            seeded["question_ids"][0],
+            _actor(scenario["teacher_id"]),
+        )
+        await session.commit()
+    assert deleted == 4
+
+    async with engine.begin() as conn:
+        live = (
+            await conn.execute(
+                text(
+                    "SELECT count(*) FROM interview_questions "
+                    "WHERE interview_config_id = :config_id AND deleted_at IS NULL"
+                ),
+                {"config_id": seeded["config_id"]},
+            )
+        ).scalar_one()
+    assert live == 0
+
+
+@pytest.mark.asyncio
+async def test_delete_bank_group_soft_deletes_every_angle(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict[str, Any],
+) -> None:
+    """One request removes all four angles of a logical question from the bank.
+
+    The course bank is a separate table from config questions, so the config
+    side's ``delete_question_variants`` does not cover it; without this the only
+    way to clear a grouped logical question was four per-row deletes.
+    """
+    payload = InterviewQuestionBankLogicalGroupCreate(
+        items=[
+            InterviewQuestionBankItemCreate(**_bank_payload(t, f"Bank group {t}?"))
+            for t in ("technical", "system_design", "situational", "behavioral")
+        ]
+    )
+    async with session_factory() as session:
+        items = await authoring_service.create_question_bank_logical_group(
+            session,
+            scenario["course_id"],
+            payload,
+            _actor(scenario["teacher_id"]),
+        )
+        await session.commit()
+        anchor_id = items[0].id
+        group_id = items[0].variant_group_id
+
+    async with session_factory() as session:
+        deleted = await authoring_service.delete_question_bank_group(
+            session,
+            scenario["course_id"],
+            anchor_id,
+            _actor(scenario["teacher_id"]),
+        )
+        await session.commit()
+    assert deleted == 4
+
+    async with engine.begin() as conn:
+        live = (
+            await conn.execute(
+                text(
+                    "SELECT count(*) FROM interview_question_bank_items "
+                    "WHERE variant_group_id = :group_id AND deleted_at IS NULL"
+                ),
+                {"group_id": group_id},
+            )
+        ).scalar_one()
+    assert live == 0
+
+
+@pytest.mark.asyncio
+async def test_delete_bank_group_on_singleton_deletes_one_row(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict[str, Any],
+) -> None:
+    """An ungrouped bank item stays a one-row delete, so the UI needs no branch."""
+    async with session_factory() as session:
+        singleton = await authoring_service.add_to_question_bank(
+            session,
+            scenario["course_id"],
+            _CreatePayload(**_bank_payload("technical", "Lone bank item")),
+            _actor(scenario["teacher_id"]),
+        )
+        await session.commit()
+        singleton_id = singleton.id
+
+    async with session_factory() as session:
+        deleted = await authoring_service.delete_question_bank_group(
+            session,
+            scenario["course_id"],
+            singleton_id,
+            _actor(scenario["teacher_id"]),
+        )
+        await session.commit()
+    assert deleted == 1
+
+    async with engine.begin() as conn:
+        live = (
+            await conn.execute(
+                text(
+                    "SELECT deleted_at IS NOT NULL FROM interview_question_bank_items "
+                    "WHERE id = :item_id"
+                ),
+                {"item_id": singleton_id},
+            )
+        ).scalar_one()
+    assert live is True
+
+
+@pytest.mark.asyncio
+async def test_delete_bank_group_rejects_other_course(
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict[str, Any],
+) -> None:
+    """Course scope comes from the named item; a foreign course id is a 404."""
+    from abridgeai.core.exceptions import NotFoundError
+
+    async with session_factory() as session:
+        item = await authoring_service.add_to_question_bank(
+            session,
+            scenario["course_id"],
+            _CreatePayload(**_bank_payload("technical", "Scoped bank item")),
+            _actor(scenario["teacher_id"]),
+        )
+        await session.commit()
+        item_id = item.id
+
+    async with session_factory() as session:
+        with pytest.raises(NotFoundError):
+            await authoring_service.delete_question_bank_group(
+                session,
+                uuid.uuid4(),
+                item_id,
+                _actor(scenario["teacher_id"]),
+            )
+
+
+@pytest.mark.asyncio
 async def test_import_bank_ignores_soft_deleted_config_prompt(
     engine: AsyncEngine,
     session_factory: async_sessionmaker[AsyncSession],

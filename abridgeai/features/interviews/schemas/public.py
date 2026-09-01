@@ -181,18 +181,17 @@ class InterviewProgressRead(BaseModel):
     curriculum, so an interview item stayed pending forever.
 
     Completion rule (user decision, 2026-08-06): completed ⟺ at least one
-    **non-practice** attempt has ``pass_verdict = TRUE``. This is intentionally
+    attempt has ``pass_verdict = TRUE``. This is intentionally
     STRICTER than the quiz rule, which also completes on "failed with every
     attempt consumed": here the tag is meant to read as *passed*, so a student
-    who failed every attempt keeps the item pending. Practice runs never count,
-    matching the attempt gate — rehearsing must not tick off a graded
-    milestone.
+    who failed every attempt keeps the item pending.
 
     ``attempts_graded`` is exposed separately from ``attempts_used`` because a
     finished attempt is not necessarily a graded one: evaluation is an ARQ job,
     so a just-submitted attempt sits with ``pass_verdict IS NULL`` until the
-    worker lands. A UI can use the gap to say "being marked" rather than
-    implying a fail.
+    worker lands. ``attempts_awaiting_grade`` excludes ``abandoned`` and
+    ``failed`` rows that will never receive a verdict, letting the UI say
+    "being marked" only while evaluation can still occur.
 
     SECURITY: deliberately carries no score, rubric aggregate, outcome text or
     ``min_outcomes_to_pass``. The learner contract for interviews withholds all
@@ -205,6 +204,7 @@ class InterviewProgressRead(BaseModel):
     attempts_used: int
     attempts_in_flight: int = 0
     attempts_graded: int = 0
+    attempts_awaiting_grade: int = 0
     passed: bool = False
     completed: bool
 

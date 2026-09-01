@@ -921,6 +921,164 @@ async def test_the_conversation_is_persisted(
         hard_stop.cancel()
 
 
+async def test_tool_finalizer_waits_for_pending_transcript_write(
+    monkeypatch: pytest.MonkeyPatch, job_ctx: SimpleNamespace
+) -> None:
+    """The evaluator cannot start before the final committed answer persists."""
+    fake_session = FakeSession()
+    monkeypatch.setattr(native_runtime, "build_native_session", lambda *_a, **_kw: fake_session)
+    write_started = asyncio.Event()
+    release_write = asyncio.Event()
+    persisted: list[str] = []
+
+    async def _slow_record(_session_id: Any, **kwargs: Any) -> None:
+        write_started.set()
+        await release_write.wait()
+        persisted.append(kwargs["text"])
+
+    monkeypatch.setattr(native_runtime, "record_turn", _slow_record)
+    setup = _setup()
+    submit = AsyncMock()
+    setup.userdata.finalize_session = submit
+    hard_stop = await native_runtime.run_native_interview(
+        job_ctx, settings=SimpleNamespace(), setup=setup
+    )
+    try:
+        fake_session.emit(
+            "conversation_item_added",
+            SimpleNamespace(item=SimpleNamespace(role="user", text_content="Final answer")),
+        )
+        await write_started.wait()
+
+        finalize_task = asyncio.create_task(setup.userdata.finalize_session())
+        await asyncio.sleep(0)
+        submit.assert_not_awaited()
+
+        release_write.set()
+        await finalize_task
+
+        assert persisted == ["Final answer"]
+        submit.assert_awaited_once()
+    finally:
+        hard_stop.cancel()
+
+
+async def test_hard_stop_waits_for_pending_transcript_write() -> None:
+    """The deadline path shares the same write barrier before submission."""
+    write_started = asyncio.Event()
+    release_write = asyncio.Event()
+    persisted: list[str] = []
+
+    async def _write() -> None:
+        write_started.set()
+        await release_write.wait()
+        persisted.append("Final answer")
+
+    barrier = native_runtime.TranscriptWriteBarrier()
+    barrier.create(_write())
+    await write_started.wait()
+    close = AsyncMock(return_value=None)
+    timer = native_runtime.HardStopTimer(
+        native_runtime.HardStopPlan(
+            deadline_seconds=60,
+            close=close,
+            interview_session_id=uuid4(),
+            flush_transcript=barrier.flush,
+        ),
+        session=FakeSession(),  # type: ignore[arg-type]
+    )
+
+    stop_task = asyncio.create_task(timer._stop())  # noqa: SLF001 - deadline path
+    await asyncio.sleep(0)
+    close.assert_not_awaited()
+
+    release_write.set()
+    await stop_task
+
+    assert persisted == ["Final answer"]
+    close.assert_awaited_once()
+
+
+async def test_transcript_barrier_timeout_does_not_block_finalization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A blocked writer cannot disable the hard stop's anti-deadlock guarantee."""
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def _blocked_write() -> None:
+        started.set()
+        await release.wait()
+
+    barrier = native_runtime.TranscriptWriteBarrier()
+    barrier.create(_blocked_write())
+    await started.wait()
+    monkeypatch.setattr(native_runtime, "_TRANSCRIPT_FLUSH_TIMEOUT_S", 0.01)
+    close = AsyncMock(return_value=None)
+    timer = native_runtime.HardStopTimer(
+        native_runtime.HardStopPlan(
+            deadline_seconds=60,
+            close=close,
+            interview_session_id=uuid4(),
+            flush_transcript=barrier.flush,
+        ),
+        session=FakeSession(),  # type: ignore[arg-type]
+    )
+    try:
+        await timer._stop()  # noqa: SLF001 - deadline path
+        close.assert_awaited_once()
+    finally:
+        release.set()
+        await asyncio.sleep(0)
+
+
+async def test_transcript_barrier_accepts_write_after_a_flush() -> None:
+    """A late SDK callback is persisted rather than discarded after finalization starts."""
+    barrier = native_runtime.TranscriptWriteBarrier()
+    await barrier.flush()
+    persisted: list[str] = []
+
+    async def _late_write() -> None:
+        persisted.append("Final answer")
+
+    barrier.create(_late_write())
+    await barrier.flush()
+
+    assert persisted == ["Final answer"]
+
+
+async def test_transcript_barrier_drains_write_created_mid_flush() -> None:
+    """A callback landing while flush is already waiting is still drained.
+
+    The cutoff is a deadline on the whole flush, not a snapshot of the task
+    set: a conversation_item_added that fires exactly as the finalizer starts
+    waiting must not slip past the barrier into the post-submit window.
+    """
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+    persisted: list[str] = []
+
+    async def _first_write() -> None:
+        first_started.set()
+        await release_first.wait()
+
+    barrier = native_runtime.TranscriptWriteBarrier()
+    barrier.create(_first_write())
+    await first_started.wait()
+
+    flush_task = asyncio.create_task(barrier.flush())
+    await asyncio.sleep(0)  # flush is now inside asyncio.wait for _first_write
+
+    async def _second_write() -> None:
+        persisted.append("Second answer")
+
+    barrier.create(_second_write())  # arrives mid-flush, like a busy callback
+    release_first.set()
+    await flush_task
+
+    assert persisted == ["Second answer"]  # drained inside the same flush
+
+
 # ── the server owns the transition ────────────────────────────────────────────
 #
 # The model kept advancing WITHOUT calling `interview_next_question`: it said

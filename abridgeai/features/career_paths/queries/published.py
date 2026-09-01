@@ -21,6 +21,7 @@ async def list_published_career_paths(
     limit: int = 20,
     after_created_at: datetime | None = None,
     after_id: UUID | None = None,
+    restrict_to_ids: set[UUID] | None = None,
 ) -> list[CareerPath]:
     stmt = (
         select(CareerPath)
@@ -32,6 +33,14 @@ async def list_published_career_paths(
         .order_by(CareerPath.created_at.desc(), CareerPath.id.desc())
         .limit(limit)
     )
+    # Program scope belongs in the WHERE, not in a post-fetch filter: this query
+    # is cursor-paginated on (created_at, id), so dropping rows after the LIMIT
+    # would return short pages and let the next_cursor skip past paths the
+    # student SHOULD see. ``None`` = unrestricted (student is in no program).
+    if restrict_to_ids is not None:
+        if not restrict_to_ids:
+            return []
+        stmt = stmt.where(CareerPath.id.in_(restrict_to_ids))
     if after_created_at is not None and after_id is not None:
         stmt = stmt.where(
             tuple_(CareerPath.created_at, CareerPath.id) < (after_created_at, after_id)

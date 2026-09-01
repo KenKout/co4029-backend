@@ -34,7 +34,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from types import ModuleType
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 from uuid import UUID, uuid4
 
 from abridgeai.core.config import get_settings
@@ -84,6 +84,11 @@ class _StorageTarget:
 _ALLOWED_MIME_TYPES = frozenset({"application/pdf"})
 _MAX_SYLLABUS_BYTES = 20 * 1024 * 1024  # 20 MiB — a text-layer syllabus is ~250 KiB.
 
+# What an upload does. Kept as a Literal (not an enum) to match the wire
+# contract: the router declares the same three strings and FastAPI validates
+# them, so an unknown mode is a 422 at the edge rather than a branch fall-through.
+SyllabusImportMode = Literal["attach", "override", "create"]
+
 
 class SyllabusImportError(ValueError):
     """A syllabus import that produced no course.
@@ -91,6 +96,18 @@ class SyllabusImportError(ValueError):
     Carries the user-facing ``code: sentence`` reason. The router maps it
     to HTTP 422; the same string is stored on the attempt row and copied
     into the manager's failure notification, so all three agree.
+    """
+
+
+class SyllabusTargetError(ValueError):
+    """The upload is fine but the TARGET course cannot take it.
+
+    Separate from :class:`SyllabusImportError` because the two mean opposite
+    things to the caller: a bad document is 422 ("fix the file"), while a
+    published course refusing an override is 409 ("this course's outcomes are
+    frozen — nothing about the file would help"). Raised BEFORE any attempt
+    row is written: there is no import to record when the request never got
+    as far as reading the document.
     """
 
 
@@ -104,20 +121,55 @@ async def import_course_from_syllabus(
     language: SyllabusLanguage,
     actor: CurrentUser,
     arq_pool: object | None = None,
+    mode: SyllabusImportMode = "create",
+    target_course_id: UUID | None = None,
 ) -> SyllabusImportResult:
-    """Create a draft course from ``data``, or raise :class:`SyllabusImportError`.
+    """Turn ``data`` into (or onto) a course, or raise.
 
-    Every failure path — rejected upload, unparseable PDF, storage or DB
-    error — records an attempt row and notifies ``actor`` before raising,
-    so a manager who closed the dialog still learns what happened.
+    ``mode`` decides what the upload DOES, and only the third one parses at
+    all (user request 2026-08-31 — the "upload syllabus" button on a course):
+
+    * ``attach`` — archive the PDF against ``target_course_id`` and change
+      nothing else. The document a student downloads is replaced; the course's
+      title, description and learning outcomes are left exactly as authored.
+      This is the mode for a course whose fields were curated by hand and
+      whose syllabus file is merely missing or out of date.
+    * ``override`` — parse the PDF and REPLACE the target course's shell:
+      title, description, estimated hours and the entire learning-outcome
+      tree. DRAFT ONLY (:class:`SyllabusTargetError` otherwise), because the
+      outcomes double as the graded scale — the same rule
+      ``_assert_outcomes_editable`` enforces for hand edits. The slug is NOT
+      touched: it is in student-visible URLs and re-deriving it from the new
+      title would break every existing link.
+    * ``create`` — the original behaviour: a brand-new draft course.
+
+    Every failure path from the parse onward records an attempt row and
+    notifies ``actor`` before raising, so a manager who closed the dialog
+    still learns what happened. A rejected TARGET (published course, wrong
+    org) raises before any of that: there is no import attempt to record when
+    the request was never going to be read.
     """
     org_id = await get_user_primary_organization_id(db, actor.user_id)
     if org_id is None:
         raise AppError(f"User {actor.user_id} has no primary organization; cannot import a course.")
 
+    target: Course | None = None
+    if mode in ("attach", "override"):
+        if target_course_id is None:
+            raise SyllabusTargetError(
+                f"missing_target_course: mode '{mode}' requires an existing course."
+            )
+        target = await _require_target_course(
+            db, target_course_id, organization_id=org_id, mode=mode
+        )
+
     try:
         _validate_upload(data, content_type)
-        parsed = parse_syllabus_pdf(data, language)
+        # `attach` deliberately does NOT parse: the whole point of the mode is
+        # to publish the document without letting it rewrite curated fields,
+        # and a syllabus the parser cannot read is still a perfectly good
+        # download for a student.
+        parsed = None if mode == "attach" else parse_syllabus_pdf(data, language)
     except (SyllabusImportError, SyllabusParseError) as exc:
         await _record_failure(
             db,
@@ -131,6 +183,19 @@ async def import_course_from_syllabus(
         raise SyllabusImportError(str(exc)) from exc
 
     try:
+        if target is not None:
+            return await _apply_to_course(
+                db,
+                course=target,
+                parsed=parsed,
+                data=data,
+                filename=filename,
+                language=language,
+                organization_id=org_id,
+                actor=actor,
+                arq_pool=arq_pool,
+            )
+        assert parsed is not None  # noqa: S101 — mode 'create' always parses
         return await _build_course(
             db,
             parsed=parsed,
@@ -292,6 +357,137 @@ async def _build_course(
         estimated_minutes=course.estimated_minutes,
         outcome_count=outcome_count,
         warnings=list(parsed.warnings),
+    )
+
+
+async def _require_target_course(
+    db: AsyncSession,
+    course_id: UUID,
+    *,
+    organization_id: UUID,
+    mode: SyllabusImportMode,
+) -> Course:
+    """The course an ``attach`` / ``override`` upload targets, or raise.
+
+    Three guards, all raising :class:`SyllabusTargetError` (→ HTTP 409/404 at
+    the router) rather than :class:`SyllabusImportError`, because none of them
+    is about the document:
+
+    1. it must exist and not be soft-deleted;
+    2. it must live in the actor's own organization. The route's permission
+       dependency already resolves ``course.delete`` against this course, so
+       this is defence in depth against a cross-org id rather than the primary
+       gate — but a syllabus is a student-visible document and an org boundary
+       is not something to leave to one layer;
+    3. ``override`` additionally requires DRAFT. Published/archived courses
+       have their learning outcomes frozen (they are the graded scale, per
+       ``_assert_outcomes_editable``), and an override rewrites exactly that
+       tree. ``attach`` has no such restriction — it only swaps the downloadable
+       file, which is the whole reason the mode exists for a live course.
+    """
+    course = await authoring_queries.get_course_for_authoring(db, course_id)
+    if course is None or course.deleted_at is not None:
+        raise SyllabusTargetError(f"course_not_found: course {course_id} does not exist.")
+    if course.organization_id != organization_id:
+        raise SyllabusTargetError(f"course_not_found: course {course_id} does not exist.")
+    if mode == "override" and course.status != "draft":
+        raise SyllabusTargetError(
+            "course_not_draft: a syllabus can only overwrite the title, description "
+            f"and learning outcomes of a DRAFT course (course {course_id} is "
+            f"{course.status}). Upload it as the syllabus document instead, or "
+            "create a new course from it."
+        )
+    return course
+
+
+async def _apply_to_course(
+    db: AsyncSession,
+    *,
+    course: Course,
+    parsed: ParsedSyllabus | None,
+    data: bytes,
+    filename: str | None,
+    language: SyllabusLanguage,
+    organization_id: UUID,
+    actor: CurrentUser,
+    arq_pool: object | None,
+) -> SyllabusImportResult:
+    """Attach (``parsed is None``) or override an EXISTING course, in one txn.
+
+    Same transaction shape as :func:`_build_course`: the field updates, the
+    replacement outcomes, the storage row and the attempt row commit together,
+    so a course can never end up advertising a syllabus whose bytes were
+    rolled back — or carrying the new document with the old outcomes.
+    """
+    outcome_count: int
+    if parsed is None:
+        # attach: the archived document changes, the course does not. The live
+        # outcome count is still reported so the dialog can say what the course
+        # has rather than a misleading 0.
+        outcome_count = await authoring_queries.count_course_outcomes(db, course.id)
+        warnings: list[str] = []
+    else:
+        course.title = parsed.title
+        course.description = parsed.description
+        course.estimated_minutes = parsed.estimated_minutes
+        course.updated_by = actor.user_id
+        # Tombstone the old tree BEFORE inserting the new one and flush in
+        # between: `uq_course_learning_outcomes_sibling_position` is partial
+        # (WHERE deleted_at IS NULL), so an old top-level row at position 1 and
+        # a new one at position 1 collide until the tombstone is written.
+        await authoring_queries.soft_delete_all_course_outcomes(
+            db, course.id, actor_id=actor.user_id
+        )
+        await db.flush()
+        outcome_count = _create_outcomes(
+            db, parsed, course_id=course.id, actor_id=actor.user_id
+        )
+        await db.flush()
+        warnings = list(parsed.warnings)
+
+    storage_object_id = await _archive_syllabus(
+        db,
+        data=data,
+        filename=filename,
+        course_id=course.id,
+        uploaded_by=actor.user_id,
+    )
+
+    record = CourseSyllabusImport(
+        organization_id=organization_id,
+        course_id=course.id,
+        storage_object_id=storage_object_id,
+        imported_by=actor.user_id,
+        language=language,
+        status="succeeded",
+        original_filename=(filename or None),
+        warnings=warnings,
+        outcome_count=outcome_count,
+    )
+    db.add(record)
+    await db.flush()
+
+    await _notify_module().notify_syllabus_import_succeeded(
+        db,
+        manager_user_id=actor.user_id,
+        course_id=course.id,
+        course_title=course.title,
+        outcome_count=outcome_count,
+        warnings=warnings,
+        arq_pool=arq_pool,
+    )
+    await db.commit()
+
+    return SyllabusImportResult(
+        import_id=record.id,
+        course_id=course.id,
+        course_slug=course.slug,
+        title=course.title,
+        language=language,
+        description=course.description,
+        estimated_minutes=course.estimated_minutes,
+        outcome_count=outcome_count,
+        warnings=warnings,
     )
 
 
@@ -516,6 +712,8 @@ async def course_has_syllabus(db: AsyncSession, course_id: UUID) -> bool:
 
 __all__ = [
     "SyllabusImportError",
+    "SyllabusImportMode",
+    "SyllabusTargetError",
     "course_has_syllabus",
     "get_syllabus_download_url",
     "import_course_from_syllabus",

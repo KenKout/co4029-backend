@@ -636,6 +636,43 @@ async def delete_question(
     await soft_delete_cascade(db, question, actor_id=actor.user_id)
 
 
+async def delete_question_variants(
+    db: AsyncSession,
+    config_id: UUID,
+    question_id: UUID,
+    actor: CurrentUser,
+) -> int:
+    """Soft-delete every live member of one logical question.
+
+    The anchored question establishes config scope. A singleton remains a
+    one-row delete so callers can expose one grouped action without a separate
+    branch; grouped members are locked and deleted as one transaction.
+    """
+    from sqlalchemy import select  # noqa: PLC0415
+
+    config = await _require_config(db, config_id)
+    published_freeze.assert_questions_editable(config)
+    question = await _require_question(db, config_id, question_id)
+    if question.variant_group_id is None:
+        await soft_delete_cascade(db, question, actor_id=actor.user_id)
+        return 1
+
+    result = await db.execute(
+        select(InterviewQuestion)
+        .where(
+            InterviewQuestion.interview_config_id == config_id,
+            InterviewQuestion.variant_group_id == question.variant_group_id,
+            InterviewQuestion.deleted_at.is_(None),
+        )
+        .order_by(InterviewQuestion.position)
+        .with_for_update()
+    )
+    questions = list(result.scalars().all())
+    for member in questions:
+        await soft_delete_cascade(db, member, actor_id=actor.user_id)
+    return len(questions)
+
+
 async def add_outcome(
     db: AsyncSession,
     config_id: UUID,
@@ -1381,6 +1418,41 @@ async def delete_question_bank_item(
     await soft_delete_cascade(db, item, actor_id=actor.user_id)
 
 
+async def delete_question_bank_group(
+    db: AsyncSession,
+    course_id: UUID,
+    item_id: UUID,
+    actor: CurrentUser,
+) -> int:
+    """Soft-delete every live member of one logical question in the bank.
+
+    Mirrors ``delete_question_variants`` on the config side: the named item
+    establishes course scope, a singleton stays a one-row delete so the UI can
+    expose one grouped action without branching, and grouped members are taken
+    under the group advisory lock so a concurrent sibling-add cannot slip a new
+    angle in behind the delete.
+    """
+    from sqlalchemy import select  # noqa: PLC0415
+
+    stmt = select(InterviewQuestionBankItem).where(
+        InterviewQuestionBankItem.id == item_id,
+        InterviewQuestionBankItem.course_id == course_id,
+        InterviewQuestionBankItem.deleted_at.is_(None),
+    )
+    item = (await db.execute(stmt)).scalar_one_or_none()
+    if item is None:
+        raise NotFoundError(f"Question bank item {item_id} not found")
+    if item.variant_group_id is None:
+        await soft_delete_cascade(db, item, actor_id=actor.user_id)
+        return 1
+
+    await authoring_queries.lock_bank_group(db, course_id, item.variant_group_id)
+    members = await _active_bank_group(db, course_id, item.variant_group_id)
+    for member in members:
+        await soft_delete_cascade(db, member, actor_id=actor.user_id)
+    return len(members)
+
+
 __all__ = [
     "add_outcome",
     "add_question",
@@ -1394,6 +1466,8 @@ __all__ = [
     "delete_interview_config",
     "delete_outcome",
     "delete_question",
+    "delete_question_variants",
+    "delete_question_bank_group",
     "delete_question_bank_item",
     "get_generation_run",
     "list_question_bank",
