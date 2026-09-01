@@ -208,20 +208,19 @@ async def manager_org_membership(
             ),
             {"u": seeded_users.manager_id, "o": seeded_users.organization_id},
         )
-        # Did WE create it? conftest seeds this membership session-wide, so
-        # the INSERT is normally a no-op — and the teardown below used to
-        # delete unconditionally, destroying session state every later test
-        # depends on. Only remove the row if this fixture actually made one.
-        created = inserted.first() is not None
+        # There is NO unique constraint on (user_id, organization_id), so the
+        # ON CONFLICT never fires and this always inserts a SECOND membership
+        # beside the one conftest seeds session-wide. The teardown therefore
+        # has to delete exactly the row created here, by id — deleting by
+        # user+org took conftest's row with it and left the manager with no
+        # primary organization for every later test.
+        created_id = inserted.scalar_one_or_none()
     yield
-    if created:
+    if created_id is not None:
         async with engine.begin() as conn:
             await conn.execute(
-                text(
-                    "DELETE FROM organization_memberships "
-                    "WHERE user_id = :u AND organization_id = :o"
-                ),
-                {"u": seeded_users.manager_id, "o": seeded_users.organization_id},
+                text("DELETE FROM organization_memberships WHERE id = :id"),
+                {"id": created_id},
             )
 
 

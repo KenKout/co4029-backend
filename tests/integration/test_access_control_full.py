@@ -114,7 +114,9 @@ async def scenario(engine: AsyncEngine) -> AsyncIterator[_Scenario]:
         await conn.execute(
             text(
                 "INSERT INTO org_units (id, organization_id, unit_type, name, code) "
-                "VALUES (:id, :org, 'department', :name, :code)"
+                # 0094_flat_faculties: ck_org_units_live_faculty_root requires
+                # every LIVE unit to be a top-level faculty.
+                "VALUES (:id, :org, 'faculty', :name, :code)"
             ),
             {
                 "id": org_unit_id,
@@ -148,9 +150,13 @@ async def scenario(engine: AsyncEngine) -> AsyncIterator[_Scenario]:
                 text(
                     "INSERT INTO user_role_assignments "
                     "(user_id, role_id, scope_kind, organization_id, "
-                    "org_unit_id, course_id) "
+                    "org_unit_id, course_id, is_instructor) "
+                    # 0093_teacher_title_flags: a COURSE-scoped assignment
+                    # must carry at least one title
+                    # (ck_user_role_assignments_course_title). Non-course
+                    # scopes keep both flags false, which the CHECK allows.
                     "SELECT :uid, r.id, :scope_kind, :organization_id, "
-                    ":org_unit_id, :course_id "
+                    ":org_unit_id, :course_id, :is_instructor "
                     "FROM roles r WHERE r.code = :role_code"
                 ),
                 {
@@ -160,8 +166,30 @@ async def scenario(engine: AsyncEngine) -> AsyncIterator[_Scenario]:
                     "organization_id": org_id,
                     "org_unit_id": ou_id,
                     "course_id": c_id,
+                    # Computed here rather than as `:scope_kind = 'course'`
+                    # in SQL: reusing the bind param in both a value and a
+                    # comparison leaves Postgres unable to deduce its type
+                    # (text versus varchar).
+                    "is_instructor": scope_kind == "course",
                 },
             )
+
+    # 0094_flat_faculties: the org_unit branch of the permission query only
+    # counts an assignment when a matching ACTIVE user_faculty_assignments
+    # row exists, so the dean needs one for that scope to resolve at all.
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO user_faculty_assignments "
+                "(id, user_id, organization_id, faculty_id, status) "
+                "VALUES (gen_random_uuid(), :uid, :org, :faculty, 'active')"
+            ),
+            {
+                "uid": user_ids["hod"],
+                "org": organization_id,
+                "faculty": org_unit_id,
+            },
+        )
 
     yield _Scenario(
         organization_id=organization_id,
@@ -180,6 +208,11 @@ async def scenario(engine: AsyncEngine) -> AsyncIterator[_Scenario]:
             {"ids": list(user_ids.values())},
         )
         await conn.execute(text("DELETE FROM courses WHERE id = :id"), {"id": course_id})
+        # Before the faculty: the assignment FKs it.
+        await conn.execute(
+            text("DELETE FROM user_faculty_assignments WHERE faculty_id = :id"),
+            {"id": org_unit_id},
+        )
         await conn.execute(text("DELETE FROM org_units WHERE id = :id"), {"id": org_unit_id})
         await conn.execute(
             text("DELETE FROM users WHERE id = ANY(:ids)"),
@@ -269,29 +302,28 @@ async def test_teacher_course_scope_resolves_for_own_course(
     assert "quiz.manage" in perms
 
 
-async def test_hod_org_unit_scope_resolves_descendants(
+async def test_hod_org_unit_scope_resolves_courses_in_their_faculty(
     engine: AsyncEngine,
     session_factory: async_sessionmaker[AsyncSession],
     scenario: _Scenario,
 ) -> None:
-    child_unit_id = uuid.uuid4()
-    child_course_id = uuid.uuid4()
+    """A dean's org_unit-scoped role resolves on courses owned by that faculty.
+
+    This asserted a RECURSIVE walk until 0094_flat_faculties: a dean at a
+    parent unit reaching a course in a descendant unit. There are no
+    descendants any more — ck_org_units_live_faculty_root makes every live
+    unit a top-level faculty, and a course now names its owning faculty
+    directly via ``courses.faculty_id``. The permission still comes from the
+    org_unit branch of the query, so the branch stays covered; the hop it
+    used to take simply no longer exists.
+
+    A SECOND course is used rather than the scenario's own, so this proves
+    the faculty link resolves the permission rather than some property of
+    the one course every other test in this file shares.
+    """
+    sibling_course_id = uuid.uuid4()
 
     async with engine.begin() as conn:
-        await conn.execute(
-            text(
-                "INSERT INTO org_units (id, organization_id, parent_unit_id, "
-                "unit_type, name, code) "
-                "VALUES (:id, :org, :parent, 'program', :name, :code)"
-            ),
-            {
-                "id": child_unit_id,
-                "org": scenario.organization_id,
-                "parent": scenario.org_unit_id,
-                "name": "T1.13 AC Child Program",
-                "code": f"T113-AC-CHILD-{child_unit_id.hex[:6]}",
-            },
-        )
         await conn.execute(
             text(
                 "INSERT INTO courses (id, organization_id, faculty_id, "
@@ -299,33 +331,31 @@ async def test_hod_org_unit_scope_resolves_descendants(
                 "VALUES (:id, :org, :unit, :owner, :slug, :title, 'draft')"
             ),
             {
-                "id": child_course_id,
+                "id": sibling_course_id,
                 "org": scenario.organization_id,
-                "unit": child_unit_id,
+                "unit": scenario.org_unit_id,
                 "owner": scenario.admin_id,
-                "slug": f"t113-ac-child-course-{child_course_id.hex[:8]}",
-                "title": "T1.13 AC Child Course",
+                "slug": f"t113-ac-sibling-course-{sibling_course_id.hex[:8]}",
+                "title": "T1.13 AC Sibling Course",
             },
         )
 
     try:
         async with session_factory() as session:
-            perms = await load_course_permissions(session, scenario.hod_id, child_course_id)
+            perms = await load_course_permissions(
+                session, scenario.hod_id, sibling_course_id
+            )
 
         assert "course.read.draft" in perms, (
-            "HOD at parent unit must resolve permission on course in DESCENDANT unit "
-            "(recursive ancestor walk via org_unit_tree CTE)"
+            "dean at a faculty must resolve permission on a course owned by "
+            "that faculty (org_unit branch of load_course_permissions)"
         )
         assert "course.assign_teacher" in perms
     finally:
         async with engine.begin() as conn:
             await conn.execute(
                 text("DELETE FROM courses WHERE id = :id"),
-                {"id": child_course_id},
-            )
-            await conn.execute(
-                text("DELETE FROM org_units WHERE id = :id"),
-                {"id": child_unit_id},
+                {"id": sibling_course_id},
             )
 
 

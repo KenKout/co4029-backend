@@ -185,6 +185,16 @@ async def insert_assignment(
     active_until: datetime | None,
 ) -> UserRoleAssignment:
     new_id = uuid4()
+    # 0093_teacher_title_flags added ck_user_role_assignments_course_title:
+    # a COURSE-scoped assignment must carry at least one title. This generic
+    # admin path was never updated, so every course-scoped assignment made
+    # through it violated the CHECK and 500ed.
+    #
+    # Teacher Assistant is the least-privileged of the two and matches what
+    # the course staffing flow gives a newly assigned teacher; promotion to
+    # Course Instructor is an explicit, separate action
+    # (PUT /courses/{id}/teachers/{user}/role).
+    is_assistant = scope_kind == "course"
     await db.execute(
         insert(UserRoleAssignment).values(
             id=new_id,
@@ -196,6 +206,7 @@ async def insert_assignment(
             course_id=course_id,
             granted_by=granted_by,
             active_until=active_until,
+            is_assistant=is_assistant,
         )
     )
     await db.flush()

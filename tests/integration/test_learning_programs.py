@@ -35,10 +35,17 @@ async def engine() -> AsyncIterator[AsyncEngine]:  # noqa: ASYNC240
     await value.dispose()
 
 
+#: Faculties created by `_seed_program_context`, drained after each test by
+#: the autouse cleanup below. The seeder is a plain helper called mid-test
+#: rather than a fixture, so it has no teardown of its own.
+_CREATED_FACULTIES: list[uuid.UUID] = []
+
+
 async def _seed_program_context(
     engine: AsyncEngine, seeded: SeededUsers
 ) -> tuple[uuid.UUID, uuid.UUID, uuid.UUID]:
     faculty_id, path_a, path_b = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    _CREATED_FACULTIES.append(faculty_id)
     async with engine.begin() as conn:
         await conn.execute(
             text(
@@ -127,6 +134,32 @@ async def _seed_program_context(
                 {"path": path_id},
             )
     return faculty_id, path_a, path_b
+
+@pytest_asyncio.fixture(autouse=True)
+async def _drain_program_contexts(engine: AsyncEngine) -> AsyncIterator[None]:
+    """Remove grants made by `_seed_program_context` after every test."""
+    yield
+    while _CREATED_FACULTIES:
+        await _teardown_program_context(engine, _CREATED_FACULTIES.pop())
+
+
+async def _teardown_program_context(engine: AsyncEngine, faculty_id: uuid.UUID) -> None:
+    """Undo `_seed_program_context`.
+
+    The grants it makes hang off SEEDED users (dean, manager), so leaving
+    them behind inflates their assignment count for the rest of the session —
+    tests/unit/test_fixtures.py::test_seed_users counts exactly that and saw
+    17 where 5 were expected (5 + 6 tests x 2 grants).
+    """
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("DELETE FROM user_faculty_assignments WHERE faculty_id = :f"),
+            {"f": faculty_id},
+        )
+        await conn.execute(
+            text("DELETE FROM user_role_assignments WHERE org_unit_id = :f"),
+            {"f": faculty_id},
+        )
 
 
 @pytest.mark.asyncio
