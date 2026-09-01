@@ -512,10 +512,22 @@ async def test_subsequent_review_increments_n(
         ).scalar_one()
         assert state.repetition_count == 3
         assert state.total_reviews == 3
-    # SM-2 progression: n=0 -> 1 day; n=1 -> 6 days; n=2 -> ~round(6*ef)
+    # SM-2 progression: n=0 -> 1 day; n=1 -> 6 days; n=2 -> round(prev * ef).
+    #
+    # Every stored interval is jittered by +/-10% and the JITTERED value is
+    # what chains forward as the next review's ``prev_interval``, so the
+    # third interval must be checked against the second one that actually
+    # happened rather than against the nominal 6. Pinning it at ">= 13"
+    # assumed prev == 6: when jitter landed on 5 the base became
+    # round(5 * 2.5) == 12 (banker's rounding on the .5) and a further -10%
+    # took it to 11, so the assertion failed at random.
+    #
+    # q is 4 here (20s answered against a 30s expectation), and the EF delta
+    # at q=4 is exactly zero, so EF stays at the 2.5 seed for all three.
     assert intervals[0] == 1
     assert 5 <= intervals[1] <= 7
-    assert intervals[2] >= 13
+    base = round(intervals[1] * 2.5)
+    assert round(base * 0.9) <= intervals[2] <= round(base * 1.1)
 
 
 @pytest.mark.asyncio

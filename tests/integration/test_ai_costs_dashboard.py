@@ -448,11 +448,19 @@ async def test_summary_buckets_include_zero_spend_days(
 
     # The seed only touches a few recent days, so quiet days must exist and be 0
     # rather than absent.
-    zero_days = [b for b in buckets if float(b["usd"]) == 0.0]
-    assert zero_days, "expected at least one explicit zero-spend bucket"
-    for b in zero_days:
-        assert float(b["usd"]) == 0.0
-        assert int(b["tokens"]) == 0
+    #
+    # A gap-filled day is empty on BOTH axes. Filtering on usd alone is not
+    # enough: a real call can record tokens at no cost (a mocked or free
+    # model), and in a full-suite run other tests' generation pipelines log
+    # exactly that into ai_model_calls. Such a day is genuinely zero-spend
+    # but is not a gap, so asserting it has no tokens is asserting something
+    # this test never established.
+    gap_filled = [
+        b for b in buckets if float(b["usd"]) == 0.0 and int(b["tokens"]) == 0
+    ]
+    assert gap_filled, (
+        "expected at least one explicit zero bucket for a day with no calls"
+    )
 
 
 async def test_summary_default_period_30_days(

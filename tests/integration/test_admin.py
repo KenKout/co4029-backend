@@ -1335,15 +1335,31 @@ async def test_dashboard_custom_range(
     land today, which is outside the window, so the counts are exact.
     """
     token, _ = await _bearer(engine, seeded_users.admin_id)
-    # Five days back: clear of every other suite's seeds (the AI-costs suite
-    # pins calls ~2 days back for its prev-window shape, and the latency
-    # suite uses day-3) so the in-window counts are exactly ours.
+    # Five days back, away from the neighbouring suites' seeds (the AI-costs
+    # suite pins calls ~2 days back for its prev-window shape, and the
+    # latency suite uses day-3).
     d0 = datetime.now(tz=UTC).date() - timedelta(days=5)
     inside_ts = datetime.combine(d0, time(hour=1), tzinfo=UTC)
     before_ts = datetime.combine(d0 - timedelta(days=10), time(hour=1), tzinfo=UTC)
     audit_ids: list[str] = []
     call_ids: list[str] = []
     async with engine.begin() as conn:
+        # Clear the window first. Picking an "unused" day is not isolation:
+        # the suite shares one Postgres, every assertion below is an exact
+        # count, and any row another test abandoned on d0 makes them all
+        # wrong — this failed as `requests_window == 2` finding 7. Scoping
+        # the delete to [d0, d0] keeps it narrow (unlike the whole-table
+        # purge test_api_latency_trend needs for the same reason): tests run
+        # serially, so anything already sitting five days back is residue by
+        # definition, not a live fixture's rows.
+        for table, ts_col in (
+            ("http_audit_log", "created_at"),
+            ("ai_model_calls", "called_at"),
+        ):
+            await conn.execute(
+                text(f"DELETE FROM {table} WHERE {ts_col}::date = :d0"),  # noqa: S608
+                {"d0": d0},
+            )
         for created_at, latency in (
             (before_ts, 10),
             (inside_ts, 100),

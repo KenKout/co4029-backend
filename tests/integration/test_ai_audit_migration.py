@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import AsyncIterator
 from decimal import Decimal
 from pathlib import Path
 
@@ -46,6 +47,51 @@ async def engine() -> AsyncEngine:
 @pytest.fixture
 def alembic_cfg() -> Config:
     return _alembic_config()
+
+
+@pytest_asyncio.fixture
+async def throwaway_db() -> AsyncIterator[str]:
+    """A private, empty database for the migration round-trip.
+
+    The round-trip rewinds the schema from real head all the way to 0004 and
+    replays every migration after it. Run against the SHARED test database
+    that cannot work: the replay drags data-touching migrations over whatever
+    rows the other suites have left behind, and the NOT NULL columns added
+    between 0005 and head have nothing to backfill those surviving rows with.
+    The failure is an artefact of the residue, not of the migrations.
+
+    So the round-trip gets its own database, created empty and dropped
+    afterwards. Every assertion here is about SCHEMA — column and index
+    presence — which needs no seed data.
+    """
+    settings_url = get_settings().database_url
+    base, _, _ = settings_url.rpartition("/")
+    name = f"abridgeai_aiaudit_{uuid.uuid4().hex[:12]}"
+
+    admin = create_async_engine(
+        _async_url(f"{base}/postgres"), isolation_level="AUTOCOMMIT"
+    )
+    async with admin.connect() as conn:
+        await conn.execute(text(f'CREATE DATABASE "{name}"'))
+    await admin.dispose()
+
+    try:
+        yield f"{base}/{name}"
+    finally:
+        admin = create_async_engine(
+            _async_url(f"{base}/postgres"), isolation_level="AUTOCOMMIT"
+        )
+        async with admin.connect() as conn:
+            # Terminate stragglers or DROP blocks on an open connection.
+            await conn.execute(
+                text(
+                    "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                    "WHERE datname = :n AND pid <> pg_backend_pid()"
+                ),
+                {"n": name},
+            )
+            await conn.execute(text(f'DROP DATABASE IF EXISTS "{name}"'))
+        await admin.dispose()
 
 
 @pytest_asyncio.fixture
@@ -212,10 +258,25 @@ def test_write_ai_model_call_signature_accepts_new_fields() -> None:
 
 
 async def test_round_trip_upgrade_downgrade_upgrade(
-    at_new_head: None,
-    alembic_cfg: Config,
-    engine: AsyncEngine,
+    throwaway_db: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # Own database, not the shared one — see the `throwaway_db` docstring.
+    #
+    # `migrations/env.py` reads `get_settings().database_url` directly and
+    # ignores the Config's sqlalchemy.url, so redirecting the command means
+    # patching settings. env.py is re-imported per alembic command and binds
+    # the name at import time, so patching the module attribute is enough.
+    from abridgeai.core import config as app_config
+
+    redirected = app_config.get_settings().model_copy(
+        update={"database_url": throwaway_db}
+    )
+    monkeypatch.setattr(app_config, "get_settings", lambda: redirected)
+
+    alembic_cfg = _alembic_config()
+    engine = create_async_engine(_async_url(throwaway_db), pool_pre_ping=True)
+    command.upgrade(alembic_cfg, "head")
+
     cols_before = await _column_names(engine)
     indexes_before = await _index_names(engine)
     assert "pipeline_run_id" in cols_before
@@ -232,7 +293,7 @@ async def test_round_trip_upgrade_downgrade_upgrade(
     assert "pipeline_stage" in cols_down
     assert COMPOSITE_INDEX_NAME not in indexes_down
 
-    command.upgrade(alembic_cfg, "head")  # never leave the shared DB below real head
+    command.upgrade(alembic_cfg, "head")
 
     cols_after = await _column_names(engine)
     indexes_after = await _index_names(engine)
@@ -240,3 +301,5 @@ async def test_round_trip_upgrade_downgrade_upgrade(
     assert "stage_name" in cols_after
     assert "pipeline_stage" not in cols_after
     assert COMPOSITE_INDEX_NAME in indexes_after
+
+    await engine.dispose()  # or DROP DATABASE blocks on this connection
