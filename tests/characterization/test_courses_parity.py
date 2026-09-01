@@ -222,6 +222,17 @@ async def published_course(
             ),
             {"p": pub_module_id, "d": draft_module_id, "c": course_id},
         )
+        # The content endpoint gates on enrolment (`not_enrolled`, 403) —
+        # publishing a course does not make its tree readable by everyone.
+        # The parity check is about WHICH modules are returned, so the
+        # student has to be enrolled to get past the gate at all.
+        await conn.execute(
+            text(
+                "INSERT INTO course_enrollments (course_id, student_id, status, source) "
+                "VALUES (:c, :s, 'active', 'manual')"
+            ),
+            {"c": course_id, "s": seeded_users.student_id},
+        )
     data: dict[str, uuid.UUID | str] = {
         "course_id": course_id,
         "pub_module_id": pub_module_id,
@@ -230,6 +241,10 @@ async def published_course(
     }
     yield data
     async with engine.begin() as conn:
+        await conn.execute(
+            text("DELETE FROM course_enrollments WHERE course_id = :id"),
+            {"id": course_id},
+        )
         await conn.execute(
             text("DELETE FROM modules WHERE course_id = :id"),
             {"id": course_id},

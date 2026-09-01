@@ -522,7 +522,16 @@ async def test_unmark_demotes_course_but_does_not_unlatch_stage(
     stage = next(s for s in progress.stages if s.stage_id == seed["stage1"])
     assert stage.latched is True
     assert stage.complete is True
-    assert stage.satisfied_required == 0  # the asymmetry, made visible
+    # `satisfied` is "a completion award exists OR the enrolment is
+    # completed" (queries/student.py). The award arm was added with learning
+    # programs on 2026-08-22, AFTER this assertion was written expecting 0:
+    # awards are deliberately permanent so earned results keep transferring
+    # to future paths, which means demoting the enrolment no longer makes
+    # the course unsatisfied.
+    #
+    # The demotion is still asserted — above, on the enrolment status. That
+    # is the half of the asymmetry that remains observable here.
+    assert stage.satisfied_required == 1
 
 
 # --- D2 satisfied semantics -------------------------------------------

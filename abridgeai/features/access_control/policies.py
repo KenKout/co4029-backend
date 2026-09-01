@@ -402,7 +402,7 @@ _LOAD_ORG_UNIT_SCOPED_SQL = text(
                     AND ufa.faculty_id = ura.org_unit_id
                     AND ufa.status = 'active'
                     AND ufa.deleted_at IS NULL
-                    AND (ufa.active_until IS NULL OR ufa.active_until > :at)
+                    AND (ufa.active_until IS NULL OR ufa.active_until > NOW())
               )
           )
       )

@@ -160,7 +160,10 @@ async def extra_org(engine: AsyncEngine) -> AsyncIterator[dict[str, uuid.UUID]]:
         await conn.execute(
             text(
                 "INSERT INTO org_units (id, organization_id, unit_type, name, code) "
-                "VALUES (:id, :org, 'department', 'Other Dept', 'OTHER-DEPT')"
+                # 0094_flat_faculties: every LIVE org_unit must be a
+                # top-level faculty (ck_org_units_live_faculty_root), so a
+                # 'department' row no longer inserts.
+                "VALUES (:id, :org, 'faculty', 'Other Dept', 'OTHER-DEPT')"
             ),
             {"id": other_unit, "org": other_org},
         )

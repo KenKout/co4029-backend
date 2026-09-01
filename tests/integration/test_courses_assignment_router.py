@@ -328,7 +328,11 @@ async def scenario(
                 "b": course_b,
                 "org_b": seeded_users.organization_id,
                 "ou_b": org_unit_b,
-                "owner_b": seeded_users.manager_id,
+                # NOT the manager: the course owner short-circuits the
+                # permission lookup, so a manager owning course_b would be
+                # granted by OWNERSHIP and the faculty-scope assertion below
+                # would pass for the wrong reason (it returned 201, not 403).
+                "owner_b": seeded_users.admin_id,
                 "slug_b": f"course-b-{suffix}",
                 "c": course_other_org,
                 "org_c": other_org,

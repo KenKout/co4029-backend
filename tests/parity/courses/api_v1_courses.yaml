@@ -21,6 +21,12 @@ allow_extra_fields:
   - "$.items[*].contact_social_url"
   - "$.items[*].level"
   - "$.items[*].estimated_minutes"
+  # Added after the snapshot was captured. The listing is additive by
+  # design, so these are tolerated rather than re-captured:
+  # `instructors` (plural) superseded the singular `instructor` above.
+  - "$.items[*].instructors"
+  - "$.items[*].career_paths"
+  - "$.items[*].has_syllabus"
 strict_match_fields: []
 behavior:
   status_code: null
