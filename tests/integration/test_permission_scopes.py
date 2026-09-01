@@ -52,6 +52,7 @@ async def session_factory(
 @dataclass
 class _Scenario:
     perm_id: uuid.UUID
+    master_dean_id: uuid.UUID
     other_org_id: uuid.UUID
     other_org_course_id: uuid.UUID
     sibling_unit_id: uuid.UUID
@@ -62,6 +63,7 @@ class _Scenario:
 @pytest_asyncio.fixture
 async def scenario(engine: AsyncEngine, seeded_users: SeededUsers) -> AsyncIterator[_Scenario]:
     perm_id = uuid.uuid4()
+    master_dean_id = uuid.uuid4()
     other_org_id = uuid.uuid4()
     other_org_course_id = uuid.uuid4()
     sibling_unit_id = uuid.uuid4()
@@ -80,6 +82,28 @@ async def scenario(engine: AsyncEngine, seeded_users: SeededUsers) -> AsyncItera
                 "WHERE code IN ('student','teacher','hod','manager','admin')"
             ),
             {"perm_id": perm_id},
+        )
+        await conn.execute(
+            text("INSERT INTO users (id, primary_email, status) VALUES (:id, :email, 'active')"),
+            {
+                "id": master_dean_id,
+                "email": f"master-dean-{master_dean_id.hex[:8]}@test.local",
+            },
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO organization_memberships "
+                "(user_id, organization_id, status) VALUES (:id, :org, 'active')"
+            ),
+            {"id": master_dean_id, "org": seeded_users.organization_id},
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO user_role_assignments "
+                "(user_id, role_id, scope_kind, organization_id) "
+                "SELECT :id, id, 'organization', :org FROM roles WHERE code = 'hod'"
+            ),
+            {"id": master_dean_id, "org": seeded_users.organization_id},
         )
 
         await conn.execute(
@@ -153,6 +177,7 @@ async def scenario(engine: AsyncEngine, seeded_users: SeededUsers) -> AsyncItera
 
     yield _Scenario(
         perm_id=perm_id,
+        master_dean_id=master_dean_id,
         other_org_id=other_org_id,
         other_org_course_id=other_org_course_id,
         sibling_unit_id=sibling_unit_id,
@@ -161,6 +186,14 @@ async def scenario(engine: AsyncEngine, seeded_users: SeededUsers) -> AsyncItera
     )
 
     async with engine.begin() as conn:
+        await conn.execute(
+            text("DELETE FROM user_role_assignments WHERE user_id = :id"),
+            {"id": master_dean_id},
+        )
+        await conn.execute(
+            text("DELETE FROM organization_memberships WHERE user_id = :id"),
+            {"id": master_dean_id},
+        )
         await conn.execute(
             text("DELETE FROM courses WHERE id = ANY(:ids)"),
             {
@@ -184,6 +217,7 @@ async def scenario(engine: AsyncEngine, seeded_users: SeededUsers) -> AsyncItera
             {"id": perm_id},
         )
         await conn.execute(text("DELETE FROM permissions WHERE id = :id"), {"id": perm_id})
+        await conn.execute(text("DELETE FROM users WHERE id = :id"), {"id": master_dean_id})
 
 
 async def test_global_scope_resolves(
@@ -210,17 +244,17 @@ async def test_organization_scope_resolves(
 ) -> None:
     async with session_factory() as session:
         same_org = await load_course_permissions(
-            session, seeded_users.manager_id, seeded_users.course_id
+            session, scenario.master_dean_id, seeded_users.course_id
         )
         assert _TEST_PERM_CODE in same_org
 
         same_org_no_unit = await load_course_permissions(
-            session, seeded_users.manager_id, scenario.extra_course_same_org_id
+            session, scenario.master_dean_id, scenario.extra_course_same_org_id
         )
         assert _TEST_PERM_CODE in same_org_no_unit
 
         other_org = await load_course_permissions(
-            session, seeded_users.manager_id, scenario.other_org_course_id
+            session, scenario.master_dean_id, scenario.other_org_course_id
         )
         assert _TEST_PERM_CODE not in other_org
 

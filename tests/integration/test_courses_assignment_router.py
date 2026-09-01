@@ -18,12 +18,12 @@ The acceptance criteria from plan §4485-4489 + §4491-4505 map to:
 * ``test_admin_can_assign_globally`` -- Admin -> 201 across org boundary.
 * ``test_remove_sets_active_until`` -- DELETE flips ``active_until`` to
   NOW (within 5s); preserves audit trail.
-* ``test_list_courses_filters_by_caller_scope`` -- HOD sees only dept
-  courses; admin sees all; manager sees org courses.
+* ``test_list_courses_filters_by_caller_scope`` -- Faculty staff see only
+  courses in their Faculty; Admin sees all.
 * ``test_get_teachers_for_course_returns_active_only`` -- teachers with
   ``active_until`` in the past are excluded.
-* ``test_get_org_unit_courses_hod_blocked_outside`` -- HOD passing a
-  sibling org_unit_id -> 403.
+* ``test_get_faculty_courses_dean_blocked_outside`` -- Dean passing a
+  sibling Faculty id -> 403.
 * ``test_get_roster_returns_enrolled_students`` -- raw-SQL roster shape.
 * ``test_no_bare_get_current_user`` -- source-level FIX-CRIT-4 guard.
 """
@@ -919,7 +919,6 @@ async def test_readiness_can_publish_matches_the_publish_gate(
 async def test_readiness_counts_assigned_teachers(
     client: httpx.AsyncClient,
     admin_bearer: str,
-    seeded_users: SeededUsers,
     scenario: dict[str, uuid.UUID],
 ) -> None:
     headers = {"Authorization": f"Bearer {admin_bearer}"}
@@ -930,7 +929,7 @@ async def test_readiness_counts_assigned_teachers(
 
     assign = await client.post(
         f"/api/v1/dept/courses/{scenario['course_b']}/teachers",
-        json={"user_id": str(seeded_users.teacher_id)},
+        json={"user_id": str(scenario["bob_id"])},
         headers=headers,
     )
     assert assign.status_code == 201, assign.text
@@ -1103,7 +1102,7 @@ async def test_list_courses_filters_by_caller_scope(
     assert mgr_resp.status_code == 200
     mgr_ids = {c["id"] for c in mgr_resp.json()}
     assert str(scenario["course_a"]) in mgr_ids
-    assert str(scenario["course_b"]) in mgr_ids
+    assert str(scenario["course_b"]) not in mgr_ids
     assert str(scenario["course_other_org"]) not in mgr_ids
 
     admin_resp = await client.get(
@@ -1140,7 +1139,7 @@ async def test_get_teachers_for_course_returns_active_only(
     assert str(scenario["stale_teacher_id"]) not in user_ids
 
 
-async def test_get_org_unit_courses_hod_blocked_outside(
+async def test_get_faculty_courses_dean_blocked_outside(
     client: httpx.AsyncClient,
     hod_bearer: str,
     scenario: dict[str, uuid.UUID],
