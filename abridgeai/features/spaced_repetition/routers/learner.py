@@ -87,6 +87,7 @@ _CARDS_DUE_SQL = text(
         scs.question_id,
         qq.quiz_id,
         qsl.lesson_id,
+        l.slug AS lesson_slug,
         l.title AS lesson_title,
         c.slug AS course_slug,
         c.title AS course_title,
@@ -108,6 +109,12 @@ _CARDS_DUE_SQL = text(
       AND l.deleted_at IS NULL
       AND qq.review_status = 'approved'
       AND (CAST(:lesson_id AS uuid) IS NULL OR qsl.lesson_id = CAST(:lesson_id AS uuid))
+      -- Lesson slugs are unique per MODULE (uq_lessons_module_slug), not per
+      -- course, so this filter can match two lessons in the same course when
+      -- both are titled e.g. "Introduction". That is deliberate: pulling the
+      -- cards of both beats silently picking one of them, which is what a
+      -- client-side `.find()` on the slug would do.
+      AND (CAST(:lesson_slug AS text) IS NULL OR l.slug = CAST(:lesson_slug AS text))
       AND (CAST(:course_slug AS text) IS NULL OR c.slug = CAST(:course_slug AS text))
       AND (
             CAST(:after_due AS timestamptz) IS NULL
@@ -144,12 +151,18 @@ def _build_cards_due_cache_key(
     *,
     user_id: UUID,
     lesson_id: UUID | None,
+    lesson_slug: str | None,
     course_slug: str | None,
     cursor: str | None,
     limit: int,
 ) -> str:
     base = CARDS_DUE.format(user_id=user_id)
-    return f"{base}:{lesson_id or 'all'}:{course_slug or 'all'}:{cursor or 'first'}:{limit}"
+    # lesson_slug is part of the key: without it a slug-scoped request would
+    # be served the cached page of an unscoped one (same key, wrong rows).
+    return (
+        f"{base}:{lesson_id or 'all'}:{lesson_slug or 'all'}"
+        f":{course_slug or 'all'}:{cursor or 'first'}:{limit}"
+    )
 
 
 async def _load_cards_due(
@@ -157,6 +170,7 @@ async def _load_cards_due(
     *,
     student_id: UUID,
     lesson_id: UUID | None,
+    lesson_slug: str | None,
     course_slug: str | None,
     cursor: str | None,
     limit: int,
@@ -175,6 +189,7 @@ async def _load_cards_due(
             {
                 "student_id": str(student_id),
                 "lesson_id": str(lesson_id) if lesson_id else None,
+                "lesson_slug": lesson_slug,
                 "course_slug": course_slug,
                 "after_due": after_due.isoformat() if after_due is not None else None,
                 "after_qid": str(after_qid) if after_qid else None,
@@ -187,12 +202,13 @@ async def _load_cards_due(
             question_id=row[0] if isinstance(row[0], UUID) else UUID(str(row[0])),
             quiz_id=row[1] if isinstance(row[1], UUID) else UUID(str(row[1])),
             lesson_id=row[2] if isinstance(row[2], UUID) else UUID(str(row[2])),
-            lesson_title=str(row[3]),
-            course_slug=str(row[4]),
-            course_title=str(row[5]),
-            due_at=row[6],
-            last_q=int(row[7]) if row[7] is not None else None,
-            ef=float(row[8]),
+            lesson_slug=str(row[3]),
+            lesson_title=str(row[4]),
+            course_slug=str(row[5]),
+            course_title=str(row[6]),
+            due_at=row[7],
+            last_q=int(row[8]) if row[8] is not None else None,
+            ef=float(row[9]),
         )
         for row in rows
     ]
@@ -209,6 +225,7 @@ async def list_my_cards_due(
     current_user: Annotated[CurrentUser, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
     lesson_id: Annotated[UUID | None, Query()] = None,
+    lesson_slug: Annotated[str | None, Query()] = None,
     course_slug: Annotated[str | None, Query()] = None,
     cursor: Annotated[str | None, Query()] = None,
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
@@ -230,6 +247,7 @@ async def list_my_cards_due(
     cache_key = _build_cards_due_cache_key(
         user_id=current_user.user_id,
         lesson_id=lesson_id,
+        lesson_slug=lesson_slug,
         course_slug=course_slug,
         cursor=cursor,
         limit=limit,
@@ -255,6 +273,7 @@ async def list_my_cards_due(
         db,
         student_id=current_user.user_id,
         lesson_id=lesson_id,
+        lesson_slug=lesson_slug,
         course_slug=course_slug,
         cursor=cursor,
         limit=limit,
@@ -274,6 +293,7 @@ async def get_review_queue(
     current_user: Annotated[CurrentUser, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
     lesson_id: Annotated[UUID | None, Query()] = None,
+    lesson_slug: Annotated[str | None, Query()] = None,
     course_slug: Annotated[str | None, Query()] = None,
     limit: Annotated[int, Query(ge=1, le=50)] = 20,
 ) -> ReviewQueue:
@@ -336,6 +356,7 @@ async def get_review_queue(
         db,
         student_id=current_user.user_id,
         lesson_id=lesson_id,
+        lesson_slug=lesson_slug,
         course_slug=course_slug,
         cursor=None,
         limit=effective_limit,
@@ -352,6 +373,7 @@ async def get_review_queue(
                 question_id=item.question_id,
                 quiz_id=item.quiz_id,
                 lesson_id=item.lesson_id,
+                lesson_slug=item.lesson_slug,
                 lesson_title=item.lesson_title,
                 course_slug=item.course_slug,
                 course_title=item.course_title,

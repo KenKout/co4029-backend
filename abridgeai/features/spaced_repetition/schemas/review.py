@@ -27,6 +27,9 @@ class ReviewCard(BaseModel):
     question_id: UUID
     quiz_id: UUID
     lesson_id: UUID
+    #: Mirrors ``CardsDueItem.lesson_slug`` so the review screen can build
+    #: slug URLs without a second lookup.
+    lesson_slug: str
     lesson_title: str
     course_slug: str
     course_title: str

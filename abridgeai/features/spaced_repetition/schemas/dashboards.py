@@ -15,6 +15,11 @@ class CardsDueItem(BaseModel):
     question_id: UUID
     quiz_id: UUID
     lesson_id: UUID
+    #: URL slug of the lesson, so review links read as
+    #: ``?course=<course-slug>&lesson=<lesson-slug>`` instead of carrying a
+    #: raw UUID. Unique per module, not per course — see the filter comment
+    #: in ``routers/learner.py``.
+    lesson_slug: str
     lesson_title: str
     course_slug: str
     course_title: str
