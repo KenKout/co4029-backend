@@ -19,6 +19,7 @@ from abridgeai.features.learning_programs import services
 from abridgeai.features.learning_programs.schemas import (
     ChangePathRequestCreate,
     ChangeRequestDecision,
+    ChangeRequestRejection,
     PathChangeRequestRead,
     ProgramAuthoringOptions,
     ProgramCreate,
@@ -39,6 +40,16 @@ _REQUIRE_READ = require_any_permission("learning_program.read", "learning_progra
 _REQUIRE_MANAGE = require_any_permission("learning_program.manage")
 _REQUIRE_ENROLL = require_any_permission("learning_program.enroll")
 _REQUIRE_REVIEW = require_any_permission("learning_program.switch.review")
+
+
+async def get_arq_pool() -> object | None:
+    """ARQ Redis pool dependency (email dispatch for path-review notifications).
+
+    Returns ``None`` until the app factory overrides it; the notification path
+    accepts ``None`` and writes the in-app row without enqueuing email. Mirrors
+    the identical dependency in the courses / materials / enrollments routers.
+    """
+    return None
 
 
 def _http_error(exc: Exception) -> HTTPException:
@@ -323,6 +334,7 @@ async def approve_change_request(
     payload: ChangeRequestDecision,
     actor: Annotated[CurrentUser, Depends(_REQUIRE_REVIEW)],
     db: Annotated[AsyncSession, Depends(get_db)],
+    arq_pool: Annotated[object | None, Depends(get_arq_pool)] = None,
 ) -> PathChangeRequestRead:
     try:
         result = await services.decide_change_request(
@@ -331,6 +343,35 @@ async def approve_change_request(
             approve=True,
             decision_reason=payload.reason,
             actor=actor,
+            arq_pool=arq_pool,
+        )
+        await db.commit()
+        return result
+    except (NotFoundError, ForbiddenError, ConflictError) as exc:
+        raise _http_error(exc) from exc
+
+
+@management_router.post(
+    "/path-change-requests/{request_id}/in-progress", response_model=PathChangeRequestRead
+)
+async def mark_change_request_in_progress(
+    request_id: UUID,
+    actor: Annotated[CurrentUser, Depends(_REQUIRE_REVIEW)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    arq_pool: Annotated[object | None, Depends(get_arq_pool)] = None,
+) -> PathChangeRequestRead:
+    """Acknowledge a request without deciding it.
+
+    Same permission as approve/reject (``learning_program.switch.review``) and
+    the same owning-dean check in the service: signalling "I am looking at your
+    record" is a review action, and letting anyone with read access emit it
+    would make the signal meaningless.
+
+    No body: there is nothing to say yet. That is the point.
+    """
+    try:
+        result = await services.mark_change_request_in_progress(
+            db, request_id=request_id, actor=actor, arq_pool=arq_pool
         )
         await db.commit()
         return result
@@ -343,17 +384,26 @@ async def approve_change_request(
 )
 async def reject_change_request(
     request_id: UUID,
-    payload: ChangeRequestDecision,
+    payload: ChangeRequestRejection,
     actor: Annotated[CurrentUser, Depends(_REQUIRE_REVIEW)],
     db: Annotated[AsyncSession, Depends(get_db)],
+    arq_pool: Annotated[object | None, Depends(get_arq_pool)] = None,
 ) -> PathChangeRequestRead:
+    """Reject a request with a structured reason.
+
+    ``reason_code`` is mandatory (unlike approval, which needs no
+    justification): the student is told why, the rejection is filterable in
+    reporting, and ``other`` forces the dean to type the specifics.
+    """
     try:
         result = await services.decide_change_request(
             db,
             request_id=request_id,
             approve=False,
             decision_reason=payload.reason,
+            decision_reason_code=payload.reason_code,
             actor=actor,
+            arq_pool=arq_pool,
         )
         await db.commit()
         return result
@@ -430,4 +480,4 @@ async def cancel_change_request(
         raise _http_error(exc) from exc
 
 
-__all__ = ["learner_router", "management_router"]
+__all__ = ["get_arq_pool", "learner_router", "management_router"]

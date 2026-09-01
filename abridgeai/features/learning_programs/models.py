@@ -27,6 +27,31 @@ from abridgeai.core.db import (
     UUIDPrimaryKeyMixin,
 )
 
+PATH_CHANGE_OPEN_STATUSES = ("pending", "in_progress")
+"""Statuses that occupy the one-open-request-per-enrolment slot.
+
+Mirrors the partial unique index ``uq_path_change_requests_one_open``
+(migration 0097). ``in_progress`` is an acknowledgement, not a decision, so it
+must keep blocking a second request the same way ``pending`` does.
+"""
+
+PATH_CHANGE_REJECTION_REASON_CODES = (
+    "insufficient_justification",
+    "progress_loss_too_high",
+    "target_path_not_suitable",
+    "preserve_remaining_switch",
+    "advising_required",
+    "documentation_missing",
+    "other",
+)
+"""Fixed vocabulary a Faculty Dean picks from when rejecting a request.
+
+Kept in sync with ``ck_path_change_requests_decision_reason_code`` and with the
+frontend's reject dialog. ``other`` exists so a dean is never forced into a
+wrong bucket, and it REQUIRES the free-text ``decision_reason`` — a bare
+"other" would tell the student nothing.
+"""
+
 
 class LearningProgram(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftDeleteMixin, Base):
     __tablename__ = "learning_programs"
@@ -164,8 +189,15 @@ class PathChangeRequest(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, Bas
     __tablename__ = "path_change_requests"
     __table_args__ = (
         CheckConstraint(
-            "status IN ('pending','approved','rejected','cancelled','invalidated')",
+            "status IN ('pending','in_progress','approved','rejected','cancelled','invalidated')",
             name="ck_path_change_requests_status",
+        ),
+        CheckConstraint(
+            "decision_reason_code IS NULL OR decision_reason_code IN ("
+            "'insufficient_justification','progress_loss_too_high',"
+            "'target_path_not_suitable','preserve_remaining_switch',"
+            "'advising_required','documentation_missing','other')",
+            name="ck_path_change_requests_decision_reason_code",
         ),
     )
 
@@ -183,10 +215,22 @@ class PathChangeRequest(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, Bas
     )
     reason: Mapped[str] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String(20), server_default=text("'pending'"))
+    # Acknowledgement (``in_progress``) is distinct from the decision: the dean
+    # has opened the request and is verifying data, but nothing about the
+    # student's path has changed yet. Kept in its own columns so a later
+    # approve/reject does not overwrite who first picked the request up.
+    in_progress_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    in_progress_by: Mapped[uuid.UUID | None] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("users.id", ondelete="NO ACTION")
+    )
     reviewed_by: Mapped[uuid.UUID | None] = mapped_column(
         PGUUID(as_uuid=True), ForeignKey("users.id", ondelete="NO ACTION")
     )
     reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Fixed vocabulary for a rejection (filterable / reportable);
+    # ``decision_reason`` keeps the dean's own sentence and is REQUIRED when
+    # the code is ``other``.
+    decision_reason_code: Mapped[str | None] = mapped_column(String(40))
     decision_reason: Mapped[str | None] = mapped_column(Text)
     new_attempt_id: Mapped[uuid.UUID | None] = mapped_column(
         PGUUID(as_uuid=True), ForeignKey("program_path_attempts.id", ondelete="NO ACTION")
@@ -250,6 +294,8 @@ class CourseEnrollmentEntitlement(UUIDPrimaryKeyMixin, Base):
 
 
 __all__ = [
+    "PATH_CHANGE_OPEN_STATUSES",
+    "PATH_CHANGE_REJECTION_REASON_CODES",
     "CourseCompletionAward",
     "CourseEnrollmentEntitlement",
     "LearningProgram",

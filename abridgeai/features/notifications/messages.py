@@ -287,6 +287,144 @@ def syllabus_import_failed_title(*, filename: str | None, locale: str | None) ->
     return f"Course import failed: {name}"[:255]
 
 
+def _rejection_reason_sentence(*, reason_code: str, locale: str | None) -> str:
+    """The dean's canned rejection reason, in the student's language.
+
+    The codes are a closed set (``PATH_CHANGE_REJECTION_REASON_CODES``) and the
+    student must read the reason in their own language, so the mapping lives
+    here rather than passing the dean's UI label through the API. ``other``
+    carries no canned sentence — its detail text is mandatory and is appended
+    by the caller.
+    """
+    lang = _norm(locale)
+    if lang == "vi":
+        table = {
+            "insufficient_justification": "Lý do đề nghị chưa đủ thuyết phục.",
+            "progress_loss_too_high": (
+                "Tiến độ sẽ mất khi chuyển lộ trình là quá lớn ở thời điểm này."
+            ),
+            "target_path_not_suitable": (
+                "Lộ trình muốn chuyển sang chưa phù hợp với hồ sơ học tập hiện tại."
+            ),
+            "preserve_remaining_switch": (
+                "Nên giữ lại quyền đổi lộ trình còn lại cho một thay đổi cần thiết hơn."
+            ),
+            "advising_required": "Cần trao đổi trực tiếp với cố vấn học tập trước khi đổi.",
+            "documentation_missing": "Thiếu minh chứng hoặc thông tin cần thiết cho đề nghị.",
+        }
+    else:
+        table = {
+            "insufficient_justification": "The stated justification was not sufficient.",
+            "progress_loss_too_high": (
+                "The progress you would lose by switching now is too high."
+            ),
+            "target_path_not_suitable": (
+                "The target path is not a suitable fit for your current record."
+            ),
+            "preserve_remaining_switch": (
+                "Your remaining path change is better kept for a more necessary switch."
+            ),
+            "advising_required": "An advising conversation is needed before a switch.",
+            "documentation_missing": "Supporting information for the request was missing.",
+        }
+    return table.get(reason_code, "")
+
+
+def path_change_in_progress_title(*, program_name: str, locale: str | None) -> str:
+    """Title: the Faculty Dean has picked the request up (no decision yet)."""
+    lang = _norm(locale)
+    if lang == "vi":
+        return f"Đề nghị đổi lộ trình đang được xem xét: {program_name}"[:255]
+    return f"Path change request under review: {program_name}"[:255]
+
+
+def path_change_in_progress_body(*, target_path_name: str, locale: str | None) -> str:
+    """Body: says explicitly that nothing has changed yet.
+
+    The whole value of this signal is removing the "has anyone even looked at
+    this?" doubt, so it states both facts: seen, and not decided.
+    """
+    lang = _norm(locale)
+    if lang == "vi":
+        return (
+            f'Trưởng khoa đã nhận đề nghị chuyển sang "{target_path_name}" và đang '
+            "kiểm tra dữ liệu học tập của bạn. Lộ trình hiện tại chưa thay đổi; "
+            "bạn sẽ được thông báo khi có quyết định."
+        )
+    return (
+        f'Your Faculty Dean has opened your request to switch to "{target_path_name}" '
+        "and is checking your record. Nothing has changed yet — you will be "
+        "notified when a decision is made."
+    )
+
+
+def path_change_rejected_title(*, program_name: str, locale: str | None) -> str:
+    """Title: the request was rejected."""
+    lang = _norm(locale)
+    if lang == "vi":
+        return f"Đề nghị đổi lộ trình bị từ chối: {program_name}"[:255]
+    return f"Path change request rejected: {program_name}"[:255]
+
+
+def path_change_rejected_body(
+    *,
+    target_path_name: str,
+    reason_code: str,
+    reason_detail: str | None,
+    locale: str | None,
+) -> str:
+    """Body: the reason, then what it means for the student.
+
+    Both the canned sentence and any free text are included — the code says
+    which bucket, the detail says what specifically, and a student reading only
+    the notification should not have to open the app to learn why.
+    """
+    lang = _norm(locale)
+    canned = _rejection_reason_sentence(reason_code=reason_code, locale=locale)
+    detail = (reason_detail or "").strip()
+    parts: list[str] = []
+    if lang == "vi":
+        parts.append(f'Đề nghị chuyển sang "{target_path_name}" đã bị từ chối.')
+        if canned:
+            parts.append(f"Lý do: {canned}")
+        if detail:
+            parts.append(f"Ghi chú của trưởng khoa: {detail}")
+        parts.append(
+            "Bạn vẫn tiếp tục lộ trình hiện tại và quyền đổi lộ trình chưa bị trừ."
+        )
+        return " ".join(parts)
+    parts.append(f'Your request to switch to "{target_path_name}" was rejected.')
+    if canned:
+        parts.append(f"Reason: {canned}")
+    if detail:
+        parts.append(f"Dean's note: {detail}")
+    parts.append(
+        "You stay on your current path, and this does not use up a path change."
+    )
+    return " ".join(parts)
+
+
+def path_change_approved_title(*, program_name: str, locale: str | None) -> str:
+    """Title: the request was approved and the switch has happened."""
+    lang = _norm(locale)
+    if lang == "vi":
+        return f"Đề nghị đổi lộ trình được chấp thuận: {program_name}"[:255]
+    return f"Path change approved: {program_name}"[:255]
+
+
+def path_change_approved_body(*, target_path_name: str, locale: str | None) -> str:
+    lang = _norm(locale)
+    if lang == "vi":
+        return (
+            f'Bạn đã được chuyển sang lộ trình "{target_path_name}". Tiến độ trên lộ '
+            "trình cũ đã được lưu lại; các khóa học đã hoàn thành vẫn được tính."
+        )
+    return (
+        f'You have been moved to "{target_path_name}". Your progress on the previous '
+        "path was snapshotted, and completed courses still count."
+    )
+
+
 def syllabus_import_failed_body(*, reason: str, locale: str | None) -> str:
     """Body: the failure reason verbatim.
 
@@ -314,6 +452,12 @@ __all__ = [
     "course_teacher_assigned_title",
     "due_cards_body",
     "due_cards_title",
+    "path_change_approved_body",
+    "path_change_approved_title",
+    "path_change_in_progress_body",
+    "path_change_in_progress_title",
+    "path_change_rejected_body",
+    "path_change_rejected_title",
     "remediation_body",
     "remediation_title",
 ]

@@ -1,9 +1,28 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+PathChangeRejectionReasonCode = Literal[
+    "insufficient_justification",
+    "progress_loss_too_high",
+    "target_path_not_suitable",
+    "preserve_remaining_switch",
+    "advising_required",
+    "documentation_missing",
+    "other",
+]
+"""Reason a Faculty Dean rejects a path-change request.
+
+Duplicated as a ``Literal`` (rather than derived from
+``models.PATH_CHANGE_REJECTION_REASON_CODES``) so the OpenAPI schema carries the
+enum and the frontend's dialog is generated against it; the DB CHECK constraint
+in migration 0097 is the third copy and the authority. Adding a code means
+touching all three.
+"""
 
 
 class ProgramCreate(BaseModel):
@@ -182,7 +201,16 @@ class ProgramEnrollmentRead(BaseModel):
     current_total_courses: int = 0
     paths: list[ProgramPathRead] = Field(default_factory=list)
     attempts: list[PathAttemptRead] = Field(default_factory=list)
+    # The student's OPEN request — ``pending`` *or* ``in_progress``. The name
+    # predates the ``in_progress`` status and is kept because it is the field
+    # the student UI gates "you already have a request in flight" on, which is
+    # true of both statuses. ``status`` inside tells them which.
     pending_change_request: dict[str, object] | None = None
+    # Every request this enrolment ever filed, newest first — including
+    # rejections with their reason. This is the student-side rejection history;
+    # without it a rejected request vanished from their view entirely and the
+    # only record was in the dean's queue.
+    change_request_history: list[PathChangeRequestRead] = Field(default_factory=list)
 
 
 class SelectPathRequest(BaseModel):
@@ -195,7 +223,35 @@ class ChangePathRequestCreate(BaseModel):
 
 
 class ChangeRequestDecision(BaseModel):
+    """Approval payload (and the legacy reject shape).
+
+    Free-text only. Rejections go through :class:`ChangeRequestRejection`,
+    which additionally demands a reason CODE — an approval needs no
+    justification, a rejection does.
+    """
+
     reason: str | None = Field(default=None, max_length=4000)
+
+
+class ChangeRequestRejection(BaseModel):
+    """Rejection payload: a code from the fixed list, plus optional detail.
+
+    ``reason_code='other'`` REQUIRES ``reason``: the whole point of ``other``
+    is that the dean types what actually happened, and a bare "other" in the
+    student's notification and in the rejection history would be worse than the
+    canned codes it escapes.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    reason_code: PathChangeRejectionReasonCode
+    reason: str | None = Field(default=None, max_length=4000)
+
+    @model_validator(mode="after")
+    def _require_detail_for_other(self) -> ChangeRequestRejection:
+        if self.reason_code == "other" and not (self.reason or "").strip():
+            raise ValueError("reason_is_required_when_reason_code_is_other")
+        return self
 
 
 class PathChangeRequestRead(BaseModel):
@@ -208,8 +264,11 @@ class PathChangeRequestRead(BaseModel):
     target_career_path_version_id: UUID
     reason: str
     status: str
+    in_progress_at: datetime | None = None
+    in_progress_by: UUID | None = None
     reviewed_by: UUID | None
     reviewed_at: datetime | None
+    decision_reason_code: str | None = None
     decision_reason: str | None
     new_attempt_id: UUID | None
     created_at: datetime
@@ -219,6 +278,8 @@ __all__ = [
     "CareerPathOptionRead",
     "ChangePathRequestCreate",
     "ChangeRequestDecision",
+    "ChangeRequestRejection",
+    "PathChangeRejectionReasonCode",
     "PathAttemptRead",
     "PathChangeRequestRead",
     "ProgramCreate",

@@ -11,8 +11,10 @@ from abridgeai.features.access_control.api import public as access_control_api
 from abridgeai.features.access_control.models import CareerPath
 from abridgeai.features.career_paths.api import public as career_paths_api
 from abridgeai.features.identity.api import public as identity_api
-from abridgeai.features.learning_programs import queries
+from abridgeai.features.learning_programs import notify, queries
 from abridgeai.features.learning_programs.models import (
+    PATH_CHANGE_OPEN_STATUSES,
+    PATH_CHANGE_REJECTION_REASON_CODES,
     LearningProgram,
     LearningProgramVersion,
     LearningProgramVersionPath,
@@ -116,6 +118,16 @@ async def _paths_for_version(db: AsyncSession, version_id: UUID) -> list[Program
         ProgramPathRead.model_validate(row)
         for row in await queries.list_version_paths(db, version_id)
     ]
+
+
+async def _target_path_name(db: AsyncSession, career_path_id: UUID) -> str:
+    """Career-path display name for student-facing notification copy.
+
+    Falls back to a generic noun instead of raising: a request whose target path
+    row has since disappeared should still produce a readable notification, and
+    the request record itself keeps the ID.
+    """
+    return await queries.get_career_path_name(db, career_path_id) or "the requested path"
 
 
 async def _program_out(
@@ -830,6 +842,10 @@ async def _enrollment_out(db: AsyncSession, enrollment: ProgramEnrollment) -> Pr
                 if pending is not None
                 else None
             ),
+            "change_request_history": [
+                PathChangeRequestRead.model_validate(row)
+                for row in await queries.list_enrollment_change_requests(db, enrollment.id)
+            ],
         }
     )
 
@@ -939,14 +955,22 @@ async def request_path_change(
 async def cancel_change_request(
     db: AsyncSession, *, request_id: UUID, student_id: UUID
 ) -> PathChangeRequestRead:
+    """Student withdraws their own request.
+
+    Allowed while the request is OPEN — including ``in_progress``. A student who
+    changed their mind should not be forced to wait for a decision just because
+    a dean opened the request, and a rejection costs no switch budget, so there
+    is nothing to game by cancelling late. The cancellation stays in the
+    request history either way.
+    """
     request = await queries.get_change_request(db, request_id, lock=True)
     if request is None:
         raise NotFoundError("path_change_request_not_found")
     enrollment = await queries.get_enrollment(db, request.program_enrollment_id)
     if enrollment is None or enrollment.student_id != student_id:
         raise NotFoundError("path_change_request_not_found")
-    if request.status != "pending":
-        raise ConflictError("only_pending_requests_can_be_cancelled")
+    if request.status not in PATH_CHANGE_OPEN_STATUSES:
+        raise ConflictError("only_open_requests_can_be_cancelled")
     request.status = "cancelled"
     request.reviewed_at = _now()
     request.updated_by = student_id
@@ -974,6 +998,8 @@ async def decide_change_request(  # noqa: C901 - approval is one atomic invarian
     approve: bool,
     decision_reason: str | None,
     actor: CurrentUser,
+    decision_reason_code: str | None = None,
+    arq_pool: object | None = None,
 ) -> PathChangeRequestRead:
     request = await queries.get_change_request(db, request_id, lock=True)
     if request is None:
@@ -987,15 +1013,39 @@ async def decide_change_request(  # noqa: C901 - approval is one atomic invarian
     await _require_owner_dean(db, actor_id=actor.user_id, program=program)
     if actor.user_id == enrollment.student_id:
         raise ForbiddenError("self_approval_is_not_allowed")
-    if request.status != "pending":
-        raise ConflictError("request_is_not_pending")
+    # Both OPEN statuses are decidable: a dean can approve/reject straight from
+    # the queue, or acknowledge first and decide after checking the data. Only
+    # terminal states are refused.
+    if request.status not in PATH_CHANGE_OPEN_STATUSES:
+        raise ConflictError("request_is_not_open")
+    target_path_name = await _target_path_name(db, request.target_career_path_id)
     if not approve:
+        if decision_reason_code is None:
+            raise ConflictError("rejection_reason_code_is_required")
+        if decision_reason_code not in PATH_CHANGE_REJECTION_REASON_CODES:
+            raise ConflictError("unknown_rejection_reason_code")
+        # 'other' is the escape hatch from the fixed list, so it has to carry
+        # the words the list could not express — otherwise the student receives
+        # a rejection whose reason is literally "other".
+        if decision_reason_code == "other" and not (decision_reason or "").strip():
+            raise ConflictError("rejection_reason_is_required_when_code_is_other")
         request.status = "rejected"
         request.reviewed_by = actor.user_id
         request.reviewed_at = _now()
+        request.decision_reason_code = decision_reason_code
         request.decision_reason = decision_reason
         request.updated_by = actor.user_id
         await flush_or_conflict(db)
+        await notify.notify_path_change_rejected(
+            db,
+            student_user_id=enrollment.student_id,
+            request_id=request.id,
+            program_name=program.name,
+            target_path_name=target_path_name,
+            reason_code=decision_reason_code,
+            reason_detail=decision_reason,
+            arq_pool=arq_pool,
+        )
         return PathChangeRequestRead.model_validate(request)
     if enrollment.status != "active":
         raise ConflictError("program_is_not_active")
@@ -1070,6 +1120,66 @@ async def decide_change_request(  # noqa: C901 - approval is one atomic invarian
             actor_id=actor.user_id,
         )
     await flush_or_conflict(db)
+    await notify.notify_path_change_approved(
+        db,
+        student_user_id=enrollment.student_id,
+        request_id=request.id,
+        program_name=program.name,
+        target_path_name=target_path_name,
+        arq_pool=arq_pool,
+    )
+    return PathChangeRequestRead.model_validate(request)
+
+
+async def mark_change_request_in_progress(
+    db: AsyncSession,
+    *,
+    request_id: UUID,
+    actor: CurrentUser,
+    arq_pool: object | None = None,
+) -> PathChangeRequestRead:
+    """Acknowledge a request: the dean has seen it and is checking the data.
+
+    Deliberately NOT a decision. Nothing about the student's enrolment, attempt,
+    or switch budget moves, and every approval-time recheck still runs later —
+    this only records that the request has an owner and lets the student stop
+    wondering whether it was received.
+
+    Idempotent by design: re-acknowledging an already ``in_progress`` request is
+    a no-op rather than a 409, because two deans opening the same queue is
+    normal and the second one should not see an error. The notification is
+    therefore sent once, on the pending → in_progress edge only.
+    """
+    request = await queries.get_change_request(db, request_id, lock=True)
+    if request is None:
+        raise NotFoundError("path_change_request_not_found")
+    enrollment = await queries.get_enrollment(db, request.program_enrollment_id)
+    if enrollment is None:
+        raise NotFoundError("program_enrollment_not_found")
+    program = await queries.get_program(db, enrollment.learning_program_id)
+    if program is None:
+        raise NotFoundError("learning_program_not_found")
+    await _require_owner_dean(db, actor_id=actor.user_id, program=program)
+    if actor.user_id == enrollment.student_id:
+        raise ForbiddenError("self_approval_is_not_allowed")
+    if request.status == "in_progress":
+        return PathChangeRequestRead.model_validate(request)
+    if request.status != "pending":
+        raise ConflictError("only_pending_requests_can_be_marked_in_progress")
+
+    request.status = "in_progress"
+    request.in_progress_at = _now()
+    request.in_progress_by = actor.user_id
+    request.updated_by = actor.user_id
+    await flush_or_conflict(db)
+    await notify.notify_path_change_in_progress(
+        db,
+        student_user_id=enrollment.student_id,
+        request_id=request.id,
+        program_name=program.name,
+        target_path_name=await _target_path_name(db, request.target_career_path_id),
+        arq_pool=arq_pool,
+    )
     return PathChangeRequestRead.model_validate(request)
 
 
@@ -1084,6 +1194,7 @@ __all__ = [
     "list_my_enrollments",
     "list_programs",
     "list_roster",
+    "mark_change_request_in_progress",
     "publish_program",
     "request_path_change",
     "select_path",

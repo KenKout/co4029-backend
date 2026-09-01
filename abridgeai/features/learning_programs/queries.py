@@ -15,6 +15,7 @@ from abridgeai.features.access_control.models import (
 )
 from abridgeai.features.career_paths.models import CareerPathVersion
 from abridgeai.features.learning_programs.models import (
+    PATH_CHANGE_OPEN_STATUSES,
     LearningProgram,
     LearningProgramVersion,
     LearningProgramVersionPath,
@@ -53,9 +54,11 @@ async def list_program_list_cards(
     """Batched card statistics for the management list, 3 GROUP BY queries.
 
     Returns ``{program_id: {student_count, path_change_request_count,
-    has_draft_version}}``. ``path_change_request_count`` counts PENDING
-    change requests only — the dean's review inbox number, which is what the
-    card's dean-only flag shows.
+    has_draft_version}}``. ``path_change_request_count`` counts OPEN change
+    requests — ``pending`` plus ``in_progress`` — because that is the dean's
+    review inbox: a request they already acknowledged is still theirs to
+    finish, and dropping it from the badge the moment it is picked up would
+    hide half the queue.
     """
     if not program_ids:
         return {}
@@ -78,7 +81,7 @@ async def list_program_list_cards(
         .join(PathChangeRequest, PathChangeRequest.program_enrollment_id == ProgramEnrollment.id)
         .where(
             ProgramEnrollment.learning_program_id.in_(program_ids),
-            PathChangeRequest.status == "pending",
+            PathChangeRequest.status.in_(PATH_CHANGE_OPEN_STATUSES),
         )
         .group_by(ProgramEnrollment.learning_program_id)
     )
@@ -489,11 +492,46 @@ async def get_change_request(
 
 
 async def get_pending_request(db: AsyncSession, enrollment_id: UUID) -> PathChangeRequest | None:
+    """The enrolment's single OPEN request, if any.
+
+    "Open" is ``pending`` OR ``in_progress`` — the dean acknowledging a request
+    must not free the slot, or a student could file a second one mid-review.
+    Enforced in the DB by the partial unique index
+    ``uq_path_change_requests_one_open`` (migration 0097); this query is the
+    read side of the same invariant, which is why it can still use
+    ``one_or_none()``.
+    """
     stmt = select(PathChangeRequest).where(
         PathChangeRequest.program_enrollment_id == enrollment_id,
-        PathChangeRequest.status == "pending",
+        PathChangeRequest.status.in_(PATH_CHANGE_OPEN_STATUSES),
     )
     return (await db.scalars(stmt)).one_or_none()
+
+
+async def list_enrollment_change_requests(
+    db: AsyncSession, enrollment_id: UUID
+) -> list[PathChangeRequest]:
+    """Full request history for one enrolment, newest first.
+
+    Feeds the student's own view: a rejected request must remain visible with
+    its reason, not disappear the moment it stops being pending.
+    """
+    stmt = (
+        select(PathChangeRequest)
+        .where(PathChangeRequest.program_enrollment_id == enrollment_id)
+        .order_by(PathChangeRequest.created_at.desc())
+    )
+    return list((await db.scalars(stmt)).all())
+
+
+async def get_career_path_name(db: AsyncSession, career_path_id: UUID) -> str | None:
+    """Display name of one career path, for notification copy.
+
+    ``career_paths`` has ``name`` (not ``title``). Returns ``None`` when the row
+    is gone so callers can fall back rather than crash a notification.
+    """
+    stmt = select(CareerPath.name).where(CareerPath.id == career_path_id)
+    return await db.scalar(stmt)
 
 
 async def list_program_change_requests(

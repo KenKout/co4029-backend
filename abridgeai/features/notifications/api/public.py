@@ -44,6 +44,12 @@ syllabus_import_succeeded_title = messages.syllabus_import_succeeded_title
 syllabus_import_succeeded_body = messages.syllabus_import_succeeded_body
 syllabus_import_failed_title = messages.syllabus_import_failed_title
 syllabus_import_failed_body = messages.syllabus_import_failed_body
+path_change_in_progress_title = messages.path_change_in_progress_title
+path_change_in_progress_body = messages.path_change_in_progress_body
+path_change_rejected_title = messages.path_change_rejected_title
+path_change_rejected_body = messages.path_change_rejected_body
+path_change_approved_title = messages.path_change_approved_title
+path_change_approved_body = messages.path_change_approved_body
 
 __all__ = [
     "EMAIL_NOTIFICATION_TASK_NAME",
@@ -55,6 +61,12 @@ __all__ = [
     "course_published_teacher_title",
     "course_teacher_assigned_body",
     "course_teacher_assigned_title",
+    "path_change_approved_body",
+    "path_change_approved_title",
+    "path_change_in_progress_body",
+    "path_change_in_progress_title",
+    "path_change_rejected_body",
+    "path_change_rejected_title",
     "send_notification",
     "syllabus_import_failed_body",
     "syllabus_import_failed_title",
