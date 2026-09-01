@@ -99,8 +99,11 @@ async def scenario(engine: AsyncEngine) -> AsyncIterator[_AdminScenario]:
         )
         await conn.execute(
             text(
+                # Migration 0094 flattened org units into FACULTY roots
+                # (ck_org_units_live_faculty_root forbids a live non-faculty
+                # unit). This scenario's unit is the Dean's faculty.
                 "INSERT INTO org_units (id, organization_id, unit_type, name, code) "
-                "VALUES (:id, :org, 'department', :name, :code)"
+                "VALUES (:id, :org, 'faculty', :name, :code)"
             ),
             {
                 "id": org_unit_id,
@@ -113,6 +116,22 @@ async def scenario(engine: AsyncEngine) -> AsyncIterator[_AdminScenario]:
             await conn.execute(
                 text("INSERT INTO users (id, primary_email, status) VALUES (:id, :em, 'active')"),
                 {"id": uid, "em": f"adminsuite-{role}-{uid.hex[:6]}@test.local"},
+            )
+        # 0094's faculty-scoped assignment guard requires the TARGET to be an
+        # active org member (active_org_member_user_ids). Every user in the
+        # scenario is in the org; the fixture inserts memberships directly.
+        for role, uid in user_ids.items():
+            await conn.execute(
+                text(
+                    "INSERT INTO organization_memberships "
+                    "(id, user_id, organization_id, status, joined_at) "
+                    "VALUES (:id, :u, :org, 'active', NOW())"
+                ),
+                {
+                    "id": uuid.uuid4(),
+                    "u": uid,
+                    "org": organization_id,
+                },
             )
         await conn.execute(
             text(
@@ -131,13 +150,20 @@ async def scenario(engine: AsyncEngine) -> AsyncIterator[_AdminScenario]:
 
         for role_code, scope_kind, org_id, ou_id, c_id in role_assignments:
             assignment_id = uuid.uuid4()
+            # Migration 0093 made course-scoped assignments require a title
+            # flag (is_instructor/is_assistant, checked by
+            # ck_user_role_assignments_course_title). The fixture's teacher
+            # row is course-scoped, so it must carry one or the seed itself
+            # violates the constraint before any test runs.
+            is_instructor = scope_kind == "course"
             await conn.execute(
                 text(
                     "INSERT INTO user_role_assignments "
                     "(id, user_id, role_id, scope_kind, organization_id, "
-                    "org_unit_id, course_id) "
+                    "org_unit_id, course_id, is_instructor, is_assistant) "
                     "SELECT :assignment_id, :user_id, r.id, :scope_kind, "
-                    ":organization_id, :org_unit_id, :course_id "
+                    ":organization_id, :org_unit_id, :course_id, "
+                    ":is_instructor, FALSE "
                     "FROM roles r WHERE r.code = :role_code"
                 ),
                 {
@@ -148,8 +174,31 @@ async def scenario(engine: AsyncEngine) -> AsyncIterator[_AdminScenario]:
                     "organization_id": org_id,
                     "org_unit_id": ou_id,
                     "course_id": c_id,
+                    "is_instructor": is_instructor,
                 },
             )
+            # Migration 0094 flattened units into FACULTIES and made faculty-
+            # scoped staff roles (hod in this scenario) require the matching
+            # user_faculty_assignments affiliation: user_has_role_scope() only
+            # sees a faculty-scoped Dean when the affiliation row exists. The
+            # service normally creates it in the same transaction; the fixture
+            # seeds rows directly, so it must seed the affiliation too.
+            if scope_kind == "org_unit" and ou_id is not None:
+                await conn.execute(
+                    text(
+                        "INSERT INTO user_faculty_assignments "
+                        "(id, user_id, organization_id, faculty_id, status, "
+                        "active_from, created_at, updated_at) "
+                        "VALUES (:id, :user_id, :org, :faculty_id, 'active', "
+                        "NOW(), NOW(), NOW())"
+                    ),
+                    {
+                        "id": uuid.uuid4(),
+                        "user_id": user_ids[role_code],
+                        "org": org_id,
+                        "faculty_id": ou_id,
+                    },
+                )
 
         for uid in user_ids.values():
             sid = uuid.uuid4()
@@ -182,6 +231,10 @@ async def scenario(engine: AsyncEngine) -> AsyncIterator[_AdminScenario]:
         )
         await conn.execute(
             text("DELETE FROM user_role_assignments WHERE user_id = ANY(:ids)"),
+            {"ids": list(user_ids.values())},
+        )
+        await conn.execute(
+            text("DELETE FROM user_faculty_assignments WHERE user_id = ANY(:ids)"),
             {"ids": list(user_ids.values())},
         )
         await conn.execute(
@@ -233,11 +286,22 @@ def _hdr(token: str) -> dict[str, str]:
 
 
 @pytest.mark.asyncio
-async def test_list_permissions_admin_200_manager_403(
+async def test_catalog_readable_by_role_assign_holders_forbidden_for_others(
     http_client: AsyncClient, scenario: _AdminScenario
 ) -> None:
+    """The role/permission catalog must follow the ASSIGNMENT gate, not out-rank it.
+
+    The SPA loads ``/admin/roles`` to build the role filter AND to resolve role
+    ids when posting an assignment. Gating the catalog tighter than the write
+    (admin-only) left a Dean/manager holding ``user.role_assign`` able to POST
+    ``/admin/users/{id}/assignments`` but 403'd on the catalog their own
+    management-users page needs — the Make/Remove-manager flow threw "Role
+    catalog not loaded". Admin still gets the full catalog; a user with NO
+    role-assign permission (student) is still refused.
+    """
     admin_token = _token_for(scenario.admin_id, scenario.auth_sessions[scenario.admin_id])
     manager_token = _token_for(scenario.manager_id, scenario.auth_sessions[scenario.manager_id])
+    student_token = _token_for(scenario.student_id, scenario.auth_sessions[scenario.student_id])
 
     r_admin = await http_client.get("/api/v1/admin/permissions", headers=_hdr(admin_token))
     assert r_admin.status_code == 200, r_admin.text
@@ -245,9 +309,16 @@ async def test_list_permissions_admin_200_manager_403(
     assert isinstance(body, list)
     assert any(p["code"] == "user.role_assign" for p in body)
 
-    r_mgr = await http_client.get("/api/v1/admin/permissions", headers=_hdr(manager_token))
-    assert r_mgr.status_code == 403, r_mgr.text
-    assert r_mgr.json()["detail"]["error"] == "permission_denied"
+    # manager holds user.role_assign (and user.role_assign.hod is the Dean's) —
+    # the same perms the assignment-write endpoint requires, so the catalog
+    # read must be open to them or the assign flows cannot render.
+    r_mgr = await http_client.get("/api/v1/admin/roles", headers=_hdr(manager_token))
+    assert r_mgr.status_code == 200, r_mgr.text
+    assert isinstance(r_mgr.json(), list)
+
+    r_student = await http_client.get("/api/v1/admin/roles", headers=_hdr(student_token))
+    assert r_student.status_code == 403, r_student.text
+    assert r_student.json()["detail"]["error"] == "permission_denied"
 
 
 @pytest.mark.asyncio
@@ -315,14 +386,20 @@ async def test_create_role_assignment_validates_scope_shape(
 async def test_manager_cannot_promote_to_hod_admin_can(
     http_client: AsyncClient, scenario: _AdminScenario, engine: AsyncEngine
 ) -> None:
+    """manager may not grant ANY hod; a system admin may bootstrap a Master Dean.
+
+    Migration 0094 split the Dean role: a Master Dean is the organization-scoped
+    hod (only a system admin may bootstrap one) and appoints Faculty Deans at
+    faculty scope. A plain manager holds neither ``user.role_assign.hod`` nor
+    ``system.administer``, so both attempts must be 403.
+    """
     manager_token = _token_for(scenario.manager_id, scenario.auth_sessions[scenario.manager_id])
     admin_token = _token_for(scenario.admin_id, scenario.auth_sessions[scenario.admin_id])
 
     payload = {
         "role_code": "hod",
-        "scope_kind": "org_unit",
+        "scope_kind": "organization",
         "organization_id": str(scenario.organization_id),
-        "org_unit_id": str(scenario.org_unit_id),
     }
     r_mgr = await http_client.post(
         f"/api/v1/admin/users/{scenario.teacher_id}/assignments",
@@ -351,14 +428,22 @@ async def test_manager_cannot_promote_to_hod_admin_can(
 async def test_manager_cannot_promote_to_manager_hod_can(
     http_client: AsyncClient, scenario: _AdminScenario, engine: AsyncEngine
 ) -> None:
-    """manager may not grant the manager role (HOD-gated); HOD may."""
+    """manager may not grant the manager role (HOD-gated); a Faculty Dean may.
+
+    Migration 0094 made delegated manager assignments faculty-scoped: the Dean
+    grants at his OWN faculty (``org_unit``), where he holds both the hod role
+    and the matching affiliation, and the target gets the manager role for that
+    faculty. A plain manager holds ``user.role_assign`` but not
+    ``user.role_assign.hod``, so his attempt is forbidden before scope matters.
+    """
     manager_token = _token_for(scenario.manager_id, scenario.auth_sessions[scenario.manager_id])
     hod_token = _token_for(scenario.hod_id, scenario.auth_sessions[scenario.hod_id])
 
     payload = {
         "role_code": "manager",
-        "scope_kind": "organization",
+        "scope_kind": "org_unit",
         "organization_id": str(scenario.organization_id),
+        "org_unit_id": str(scenario.org_unit_id),
     }
     r_mgr = await http_client.post(
         f"/api/v1/admin/users/{scenario.teacher_id}/assignments",
@@ -379,6 +464,10 @@ async def test_manager_cannot_promote_to_manager_hod_can(
         await conn.execute(
             text("DELETE FROM user_role_assignments WHERE id = :id"),
             {"id": assignment_id},
+        )
+        await conn.execute(
+            text("DELETE FROM user_faculty_assignments WHERE user_id = :id"),
+            {"id": scenario.teacher_id},
         )
 
 
@@ -475,7 +564,13 @@ async def test_cannot_assign_role_to_self(
 async def test_manager_cannot_revoke_manager_role(
     http_client: AsyncClient, scenario: _AdminScenario, engine: AsyncEngine
 ) -> None:
-    """Revoke mirrors the HOD gate: a manager cannot strip a manager role."""
+    """Revoke mirrors the HOD gate: a manager cannot strip a manager role.
+
+    The manager role being revoked lives at FACULTY scope (0094): the Dean who
+    granted it (master, org-scope hod in this scenario) created it against his
+    faculty. The plain manager's revoke attempt is forbidden; an admin may
+    revoke anything.
+    """
     admin_token = _token_for(scenario.admin_id, scenario.auth_sessions[scenario.admin_id])
     manager_token = _token_for(scenario.manager_id, scenario.auth_sessions[scenario.manager_id])
 
@@ -484,8 +579,9 @@ async def test_manager_cannot_revoke_manager_role(
         headers=_hdr(admin_token),
         json={
             "role_code": "manager",
-            "scope_kind": "organization",
+            "scope_kind": "org_unit",
             "organization_id": str(scenario.organization_id),
+            "org_unit_id": str(scenario.org_unit_id),
         },
     )
     assert r.status_code == 201, r.text
@@ -501,6 +597,10 @@ async def test_manager_cannot_revoke_manager_role(
         await conn.execute(
             text("DELETE FROM user_role_assignments WHERE id = :id"),
             {"id": assignment_id},
+        )
+        await conn.execute(
+            text("DELETE FROM user_faculty_assignments WHERE user_id = :id"),
+            {"id": scenario.teacher_id},
         )
 
 
@@ -606,7 +706,11 @@ async def test_hod_cannot_assign_or_revoke_hod(
 async def test_hod_can_revoke_manager_they_granted(
     http_client: AsyncClient, scenario: _AdminScenario, engine: AsyncEngine
 ) -> None:
-    """HOD grants manager, then revokes it — the happy path."""
+    """A Faculty Dean grants manager, then revokes it — the happy path.
+
+    Faculty-scoped (0094): the Dean creates the manager role against his own
+    faculty and revokes the same assignment he created.
+    """
     hod_token = _token_for(scenario.hod_id, scenario.auth_sessions[scenario.hod_id])
 
     r = await http_client.post(
@@ -614,8 +718,9 @@ async def test_hod_can_revoke_manager_they_granted(
         headers=_hdr(hod_token),
         json={
             "role_code": "manager",
-            "scope_kind": "organization",
+            "scope_kind": "org_unit",
             "organization_id": str(scenario.organization_id),
+            "org_unit_id": str(scenario.org_unit_id),
         },
     )
     assert r.status_code == 201, r.text
@@ -626,6 +731,12 @@ async def test_hod_can_revoke_manager_they_granted(
         headers=_hdr(hod_token),
     )
     assert r_revoke.status_code == 204, r_revoke.text
+
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("DELETE FROM user_faculty_assignments WHERE user_id = :id"),
+            {"id": scenario.teacher_id},
+        )
 
 
 def _walk_dependants(dependant: object, names: list[str]) -> None:

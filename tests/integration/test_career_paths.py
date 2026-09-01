@@ -185,6 +185,33 @@ async def _enroll_student_via_program(
             ),
             {"id": faculty_id, "org": org_id, "code": f"cp-fac-{suffix}"},
         )
+        # 0094 scoped program-authoring to the program's faculty: an operator
+        # must hold manager/hod AT that faculty (with the matching affiliation
+        # row), not merely at some org-unit. The seeded manager is scoped to
+        # the seed faculty only, so grant him a faculty-scoped manager role +
+        # affiliation for THIS throwaway faculty to operate here.
+        manager_id = (
+            await conn.execute(
+                text("SELECT id FROM users WHERE primary_email = 'test-manager@abridgeai.local'")
+            )
+        ).scalar_one()
+        await conn.execute(
+            text(
+                "INSERT INTO user_role_assignments "
+                "(id, user_id, role_id, scope_kind, organization_id, org_unit_id) "
+                "SELECT gen_random_uuid(), :uid, r.id, 'org_unit', :org, :fid "
+                "FROM roles r WHERE r.code = 'manager'"
+            ),
+            {"uid": manager_id, "org": org_id, "fid": faculty_id},
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO user_faculty_assignments "
+                "(id, user_id, organization_id, faculty_id, status) "
+                "VALUES (gen_random_uuid(), :uid, :org, :fid, 'active')"
+            ),
+            {"uid": manager_id, "org": org_id, "fid": faculty_id},
+        )
         # The scenario keeps its path VERSION draft (several suites mutate it
         # directly), but Learning Program creation requires a PUBLISHED path
         # version. This test's own path instance is fully built, so promoting
@@ -455,6 +482,20 @@ async def scenario(
                 "(SELECT id FROM org_units WHERE code LIKE 'cp-fac-%')"
             )
         )
+        # The enroll helper grants the seeded manager a faculty-scoped manager
+        # role + affiliation for each throwaway faculty it creates.
+        await conn.execute(
+            text(
+                "DELETE FROM user_role_assignments WHERE org_unit_id IN "
+                "(SELECT id FROM org_units WHERE code LIKE 'cp-fac-%')"
+            )
+        )
+        await conn.execute(
+            text(
+                "DELETE FROM user_faculty_assignments WHERE faculty_id IN "
+                "(SELECT id FROM org_units WHERE code LIKE 'cp-fac-%')"
+            )
+        )
         await conn.execute(text("DELETE FROM org_units WHERE code LIKE 'cp-fac-%'"))
         await conn.execute(
             text(
@@ -707,6 +748,20 @@ async def test_path_impact_reports_active_students_per_stage(
         await conn.execute(
             text(
                 "DELETE FROM learning_programs WHERE faculty_id IN "
+                "(SELECT id FROM org_units WHERE code LIKE 'cp-fac-%')"
+            )
+        )
+        # The enroll helper grants the seeded manager a faculty-scoped manager
+        # role + affiliation for each throwaway faculty it creates.
+        await conn.execute(
+            text(
+                "DELETE FROM user_role_assignments WHERE org_unit_id IN "
+                "(SELECT id FROM org_units WHERE code LIKE 'cp-fac-%')"
+            )
+        )
+        await conn.execute(
+            text(
+                "DELETE FROM user_faculty_assignments WHERE faculty_id IN "
                 "(SELECT id FROM org_units WHERE code LIKE 'cp-fac-%')"
             )
         )

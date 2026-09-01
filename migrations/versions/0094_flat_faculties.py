@@ -95,7 +95,7 @@ def upgrade() -> None:
 
     op.create_table(
         "user_faculty_assignments",
-        sa.Column("id", sa.Uuid(), nullable=False),
+        sa.Column("id", sa.Uuid(), nullable=False, server_default=sa.text("uuid_generate_v4()")),
         sa.Column("user_id", sa.Uuid(), nullable=False),
         sa.Column("organization_id", sa.Uuid(), nullable=False),
         sa.Column("faculty_id", sa.Uuid(), nullable=False),

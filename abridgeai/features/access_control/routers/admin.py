@@ -11,7 +11,7 @@ factory in each route's dependency chain.
 Permission map:
 
 * catalog reads -> ``require_any_permission("system.administer",
-  "audit.read")``
+  "audit.read", "user.role_assign", "user.role_assign.hod")``
 * assignments / grants -> ``require_any_permission("user.role_assign",
   "user.role_assign.hod", "system.administer")``
 * org memberships -> ``require_any_permission("org_unit.manage",
@@ -53,7 +53,19 @@ from abridgeai.features.access_control.services import admin as admin_service
 router = APIRouter(tags=["admin", "access_control"])
 
 
-_REQUIRE_CATALOG = require_any_permission("system.administer", "audit.read")
+# Catalog reads feed the assignment UI: the SPA loads /admin/roles to build
+# the role filter and to resolve role ids when posting an assignment. Gating
+# the catalog tighter than the assignment write (`_REQUIRE_ASSIGN` below)
+# left a Dean holding user.role_assign(+.hod) able to POST /admin/users/{id}/
+# assignments but unable to load the catalog his own management-users page
+# needs — the promote-manager flow threw "Role catalog not loaded" on a 403.
+# A role catalog is read-only, non-org data; the write gates stay as-is.
+_REQUIRE_CATALOG = require_any_permission(
+    "system.administer",
+    "audit.read",
+    "user.role_assign",
+    "user.role_assign.hod",
+)
 _REQUIRE_ASSIGN = require_any_permission(
     "user.role_assign", "user.role_assign.hod", "system.administer"
 )

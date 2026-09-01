@@ -177,6 +177,14 @@ async def _authorize_delegated_assignment(
         or payload.org_unit_id is None
     ):
         raise ScopeValidationError("Manager role assigned by a Dean requires a faculty scope")
+    # System administrators bypass the "dean of this faculty" requirement —
+    # the same bypass the hod branch grants at organization scope. Without it
+    # a global admin (who holds user.role_assign.hod via the admin role but is
+    # NOT a dean of any faculty) could never promote anyone to manager, which
+    # contradicts create_role_assignment's documented "Admin holds ALL so
+    # promotes freely".
+    if "system.administer" in actor_permissions:
+        return
     is_master = await org_queries.user_has_role_scope(
         db,
         user_id=actor_id,
