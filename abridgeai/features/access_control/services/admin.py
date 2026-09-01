@@ -270,6 +270,12 @@ async def _ensure_staff_faculty_affiliation(
     if user_id not in active_members:
         raise ScopeValidationError("target user must be an active organization member")
 
+    target_role_codes = await org_queries.active_role_codes_for_user(
+        db, user_id, payload.organization_id
+    )
+    if "student" in target_role_codes:
+        raise ScopeValidationError("student accounts cannot receive Faculty staff roles")
+
     existing = await org_queries.get_active_faculty_assignment(
         db, user_id=user_id, faculty_id=payload.org_unit_id
     )
