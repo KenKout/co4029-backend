@@ -156,9 +156,13 @@ async def scenario(engine: AsyncEngine) -> AsyncIterator[_Scenario]:
                 text(
                     "INSERT INTO user_role_assignments "
                     "(user_id, role_id, scope_kind, organization_id, "
-                    "org_unit_id, course_id) "
+                    "org_unit_id, course_id, is_instructor) "
+                    # 0093_teacher_title_flags: a COURSE-scoped assignment
+                    # must carry at least one title
+                    # (ck_user_role_assignments_course_title). Other scopes
+                    # keep both flags false, which the CHECK allows.
                     "SELECT :uid, r.id, :scope_kind, :organization_id, "
-                    ":org_unit_id, :course_id "
+                    ":org_unit_id, :course_id, :is_instructor "
                     "FROM roles r WHERE r.code = :role_code"
                 ),
                 {
@@ -168,6 +172,10 @@ async def scenario(engine: AsyncEngine) -> AsyncIterator[_Scenario]:
                     "organization_id": org_id,
                     "org_unit_id": ou_id,
                     "course_id": c_id,
+                    # Computed here rather than as `:scope_kind = 'course'`
+                    # in SQL: reusing one bind param as both a value and a
+                    # comparison leaves Postgres unable to deduce its type.
+                    "is_instructor": scope_kind == "course",
                 },
             )
 
