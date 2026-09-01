@@ -47,7 +47,7 @@ import abridgeai.features.interviews.models  # noqa: F401  -- T6.1 registers int
 import abridgeai.features.materials.models  # noqa: F401  -- register learning_* tables
 import abridgeai.features.quizzes.models  # noqa: F401  -- register quiz_attempts
 from abridgeai.core.config import get_settings
-from abridgeai.core.exceptions import AppError, ForbiddenError, NotFoundError
+from abridgeai.core.exceptions import AppError, ConflictError, ForbiddenError, NotFoundError
 from abridgeai.core.security import CurrentUser
 from abridgeai.features.interviews.ai.stages.evaluation.outcome_verdicts import (
     OutcomeVerdict,
@@ -375,6 +375,125 @@ async def test_create_interview_config_basic(
     assert config.course_id == scenario["course_id"]
     assert config.module_id == scenario["module_id"]
     assert config.status == "draft"
+
+
+@pytest.mark.asyncio
+async def test_create_interview_config_rejects_duplicate_title_in_module(
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict[str, Any],
+) -> None:
+    """Two interviews with the same title in one module are indistinguishable."""
+    async with session_factory() as session, session.begin():
+        await authoring_service.create_interview_config(
+            session,
+            scenario["course_id"],
+            _CreatePayload(title="DW Interview", module_id=scenario["module_id"]),
+            _actor(scenario["teacher_id"]),
+        )
+
+    # Same title, differing only by case + surrounding whitespace: a teacher
+    # reads these as the same name, so the guard must too.
+    with pytest.raises(ConflictError, match="interview_title_duplicate"):
+        async with session_factory() as session, session.begin():
+            await authoring_service.create_interview_config(
+                session,
+                scenario["course_id"],
+                _CreatePayload(title="  dw   interview ", module_id=scenario["module_id"]),
+                _actor(scenario["teacher_id"]),
+            )
+
+
+@pytest.mark.asyncio
+async def test_create_interview_config_allows_same_title_in_another_module(
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict[str, Any],
+) -> None:
+    """Uniqueness is scoped to the module, matching the slug's scope."""
+    other_module_id = uuid.uuid4()
+    async with session_factory() as session, session.begin():
+        await session.execute(
+            text(
+                "INSERT INTO modules (id, course_id, title, position, status) "
+                "VALUES (:id, :course, 'Module 2', 2, 'draft')"
+            ),
+            {"id": other_module_id, "course": scenario["course_id"]},
+        )
+
+    async with session_factory() as session, session.begin():
+        first = await authoring_service.create_interview_config(
+            session,
+            scenario["course_id"],
+            _CreatePayload(title="Shared Name", module_id=scenario["module_id"]),
+            _actor(scenario["teacher_id"]),
+        )
+    async with session_factory() as session, session.begin():
+        second = await authoring_service.create_interview_config(
+            session,
+            scenario["course_id"],
+            _CreatePayload(title="Shared Name", module_id=other_module_id),
+            _actor(scenario["teacher_id"]),
+        )
+
+    assert first.id != second.id
+    assert first.title == second.title == "Shared Name"
+
+    # The `scenario` teardown only cleans rows scoped to ITS module_id, so this
+    # test removes the extra module it introduced — otherwise the orphaned
+    # interview_configs block the fixture's course DELETE (FK violation).
+    async with session_factory() as session, session.begin():
+        await session.execute(
+            text("DELETE FROM module_items WHERE module_id = :m"), {"m": other_module_id}
+        )
+        await session.execute(
+            text("DELETE FROM interview_outcomes WHERE interview_config_id = :c"),
+            {"c": second.id},
+        )
+        await session.execute(
+            text("DELETE FROM interview_configs WHERE module_id = :m"),
+            {"m": other_module_id},
+        )
+        await session.execute(text("DELETE FROM modules WHERE id = :m"), {"m": other_module_id})
+
+
+@pytest.mark.asyncio
+async def test_update_interview_config_rejects_rename_onto_sibling(
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict[str, Any],
+) -> None:
+    """The PATCH path is guarded too, or create-time uniqueness is bypassable."""
+    async with session_factory() as session, session.begin():
+        await authoring_service.create_interview_config(
+            session,
+            scenario["course_id"],
+            _CreatePayload(title="Taken Name", module_id=scenario["module_id"]),
+            _actor(scenario["teacher_id"]),
+        )
+        other = await authoring_service.create_interview_config(
+            session,
+            scenario["course_id"],
+            _CreatePayload(title="Free Name", module_id=scenario["module_id"]),
+            _actor(scenario["teacher_id"]),
+        )
+    other_id = other.id
+
+    with pytest.raises(ConflictError, match="interview_title_duplicate"):
+        async with session_factory() as session, session.begin():
+            await authoring_service.update_interview_config(
+                session,
+                other_id,
+                _CreatePayload(title="Taken Name"),
+                _actor(scenario["teacher_id"]),
+            )
+
+    # Renaming to its OWN current title is not a collision with itself.
+    async with session_factory() as session, session.begin():
+        same = await authoring_service.update_interview_config(
+            session,
+            other_id,
+            _CreatePayload(title="Free Name"),
+            _actor(scenario["teacher_id"]),
+        )
+    assert same.title == "Free Name"
 
 
 @pytest.mark.asyncio

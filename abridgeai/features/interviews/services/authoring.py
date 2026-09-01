@@ -105,6 +105,50 @@ async def _require_lessons_in_course(
             raise AppError(f"Lesson {lesson_id} is not part of course {course_id}")
 
 
+async def _assert_title_free_in_module(
+    db: AsyncSession,
+    *,
+    module_id: UUID,
+    title: str,
+    exclude_config_id: UUID | None = None,
+) -> None:
+    """Reject a title already used by another live interview in the module.
+
+    Titles are the only handle a teacher has on an interview in the curriculum
+    accordion and in every picker, so two interviews called "DW Interview" in
+    one module are indistinguishable in the UI. The slug is already unique per
+    module (``uq_interview_configs_module_slug``); this applies the SAME scope
+    to the human-readable name so the two never disagree.
+
+    Enforced in the service, not as a UNIQUE index: rows created before this
+    rule exists already collide, and a migration adding the index would fail on
+    that data. Comparison ignores case and surrounding whitespace, which is how
+    a teacher reads two titles as "the same".
+    """
+    from sqlalchemy import select  # noqa: PLC0415
+
+    normalised = _normalise_title(title)
+    if not normalised:
+        return
+    stmt = select(InterviewConfig.id, InterviewConfig.title).where(
+        InterviewConfig.module_id == module_id,
+        InterviewConfig.deleted_at.is_(None),
+    )
+    if exclude_config_id is not None:
+        stmt = stmt.where(InterviewConfig.id != exclude_config_id)
+    rows = await db.execute(stmt)
+    for _existing_id, existing_title in rows.all():
+        if _normalise_title(existing_title or "") == normalised:
+            raise ConflictError(
+                "interview_title_duplicate: another interview in this module "
+                "already uses this title"
+            )
+
+
+def _normalise_title(value: str) -> str:
+    return " ".join(value.split()).casefold()
+
+
 register_conflict_mappings(
     {
         "interview_outcomes_interview_config_id_position_key": "interview_outcome_position_taken: another outcome already occupies this position in the config",  # noqa: E501
@@ -205,6 +249,10 @@ async def create_interview_config(
         raise AppError("module_id is required to create an interview config")
     module_id = UUID(str(module_id))
     await _require_module_in_course(db, module_id, course_id)
+    # Reject a title another live interview in this module already uses, before
+    # anything is written — two same-named interviews are indistinguishable in
+    # the curriculum accordion.
+    await _assert_title_free_in_module(db, module_id=module_id, title=data["title"])
     # Auto-generate the URL slug from the title (unique per module over live
     # rows; collisions get -1, -2, … incrementing from 1).
     from sqlalchemy import select  # noqa: PLC0415
@@ -287,6 +335,15 @@ async def update_interview_config(
     data = payload.model_dump(exclude_unset=True)
     changed = set(data)
     published_freeze.assert_config_settings_editable(config, changed)
+    # Renaming into a sibling's title is the same collision as creating one —
+    # guard the PATCH too, or the create-time rule is trivially bypassed.
+    if "title" in data:
+        await _assert_title_free_in_module(
+            db,
+            module_id=config.module_id,
+            title=str(data["title"] or ""),
+            exclude_config_id=config.id,
+        )
     if "min_outcomes_to_pass" in data:
         outcomes = await authoring_queries.list_outcomes_for_config(db, config_id)
         _assert_threshold_within_outcome_count(

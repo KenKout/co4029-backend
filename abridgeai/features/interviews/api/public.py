@@ -129,6 +129,23 @@ async def deep_clone_interview_config(
     # rows, so append -1, -2, ... on collision (same policy as create).
     from sqlalchemy import select as _select  # noqa: PLC0415
 
+    # Title must not collide with a live sibling either — authoring rejects
+    # duplicate titles per module, and duplicating twice would otherwise leave
+    # two identical "X (Copy)" rows that are indistinguishable in the UI. A
+    # duplicate action must not FAIL, so uniquify with a counter instead.
+    _title_rows = await db.execute(
+        _select(InterviewConfig.title).where(
+            InterviewConfig.module_id == target_module_id,
+            InterviewConfig.deleted_at.is_(None),
+        )
+    )
+    _titles_taken = {" ".join((row[0] or "").split()).casefold() for row in _title_rows.all()}
+    if " ".join(clone_title.split()).casefold() in _titles_taken:
+        _n = 2
+        while " ".join(f"{clone_title} {_n}".split()).casefold() in _titles_taken:
+            _n += 1
+        clone_title = f"{clone_title} {_n}"
+
     _base = slugify(clone_title) or "interview"
     _taken_rows = await db.execute(
         _select(InterviewConfig.slug).where(
