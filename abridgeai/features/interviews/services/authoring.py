@@ -227,7 +227,7 @@ async def create_interview_config(
         tts_voice=data.get("tts_voice"),
         time_limit_minutes=data.get("time_limit_minutes"),
         max_attempts=data.get("max_attempts"),
-        cooldown_hours=data.get("cooldown_hours"),
+        cooldown_minutes=data.get("cooldown_minutes"),
         max_follow_ups_per_question=data.get("max_follow_ups_per_question", 2),
         max_hints_per_question=data.get("max_hints_per_question", 3),
         min_outcomes_to_pass=data.get("min_outcomes_to_pass"),

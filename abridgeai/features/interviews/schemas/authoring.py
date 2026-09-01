@@ -177,7 +177,10 @@ class InterviewConfigCreate(BaseModel):
     tts_voice: TtsVoiceLiteral | None = None
     time_limit_minutes: int | None = Field(default=None, ge=1)
     max_attempts: int | None = Field(default=None, ge=1)
-    cooldown_hours: int | None = Field(default=None, ge=1)
+    # FR-5.3 retake cooldown, in MINUTES (migration 0099 — was whole hours, which
+    # could not express a short breather). Capped at 7 days so a mistyped value
+    # cannot strand a cohort indefinitely.
+    cooldown_minutes: int | None = Field(default=None, ge=1, le=10080)
     max_follow_ups_per_question: int = Field(default=2, ge=0, le=50)
     max_hints_per_question: int = Field(default=3, ge=0, le=10)
     supplementary_instructions: str | None = None
@@ -208,7 +211,7 @@ class InterviewConfigUpdate(BaseModel):
     tts_voice: TtsVoiceLiteral | None = None
     time_limit_minutes: int | None = Field(default=None, ge=1)
     max_attempts: int | None = Field(default=None, ge=1)
-    cooldown_hours: int | None = Field(default=None, ge=1)
+    cooldown_minutes: int | None = Field(default=None, ge=1, le=10080)
     min_outcomes_to_pass: int | None = Field(default=None, ge=1)
     max_follow_ups_per_question: int | None = Field(default=None, ge=0, le=50)
     max_hints_per_question: int | None = Field(default=None, ge=0, le=10)

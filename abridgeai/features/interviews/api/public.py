@@ -144,7 +144,7 @@ async def deep_clone_interview_config(
         slug=unique_slug(_base, _taken),
         status="draft",
         max_attempts=source.max_attempts,
-        cooldown_hours=source.cooldown_hours,
+        cooldown_minutes=source.cooldown_minutes,
         min_outcomes_to_pass=source.min_outcomes_to_pass,
         time_limit_minutes=source.time_limit_minutes,
         persona=source.persona,

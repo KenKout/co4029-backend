@@ -106,7 +106,7 @@ _RETAKE_CONSUMING_SESSION_STATUSES = ("completed", "timed_out", "abandoned")
 
 class InterviewCooldownActive(AppError):  # noqa: N818  # mirrors quiz CooldownActive
     """FR-5.3 — student tried to start a new attempt inside the config's
-    ``cooldown_hours`` window since their last attempt ended.
+    ``cooldown_minutes`` window since their last attempt ended.
 
     Carries ``retry_after`` so the router can surface a ``Retry-After``
     hint (mapped to HTTP 429). Mirrors the quiz-side
@@ -254,17 +254,17 @@ async def compute_retake_status(
     if config is None:
         return RetakeStatus(remaining_attempts=None, retake_available_at=None, can_retake=True)
 
-    # Cooldown window — most recent retake-consuming attempt + cooldown_hours.
+    # Cooldown window — most recent retake-consuming attempt + cooldown_minutes.
     retake_available_at: datetime | None = None
-    cooldown_hours = config.cooldown_hours
-    if cooldown_hours is not None and cooldown_hours > 0:
+    cooldown_minutes = config.cooldown_minutes
+    if cooldown_minutes is not None and cooldown_minutes > 0:
         last_ended = await sessions_queries.get_last_terminal_ended_at(
             db, student_id, config_id, _RETAKE_CONSUMING_SESSION_STATUSES
         )
         if last_ended is not None:
             if last_ended.tzinfo is None:
                 last_ended = last_ended.replace(tzinfo=UTC)
-            candidate = last_ended + timedelta(hours=cooldown_hours)
+            candidate = last_ended + timedelta(minutes=cooldown_minutes)
             if candidate > datetime.now(UTC):
                 retake_available_at = candidate
 
@@ -292,15 +292,15 @@ async def _enforce_retake_policy(
     config_id: UUID,
     student_id: UUID,
 ) -> None:
-    """FR-5.3 — block a new attempt on ``max_attempts`` / ``cooldown_hours``.
+    """FR-5.3 — block a new attempt on ``max_attempts`` / ``cooldown_minutes``.
 
     Loads the config, then applies two gates against the student's
     *retake-consuming* sessions (live sessions never reach here). A ``failed``
     session is a system/evaluation failure, so it remains historical but never
     consumes an attempt or starts a cooldown:
 
-    * **Cooldown** — if ``cooldown_hours`` is set and the most recent
-      retake-consuming attempt ended less than that many hours ago, raise
+    * **Cooldown** — if ``cooldown_minutes`` is set and the most recent
+      retake-consuming attempt ended less than that many minutes ago, raise
       :class:`InterviewCooldownActive` (router → 429).
     * **Max attempts** — if ``max_attempts`` is set and the count of
       retake-consuming attempts already meet it, raise
@@ -315,15 +315,15 @@ async def _enforce_retake_policy(
     if config is None:
         return
 
-    cooldown_hours = config.cooldown_hours
-    if cooldown_hours is not None and cooldown_hours > 0:
+    cooldown_minutes = config.cooldown_minutes
+    if cooldown_minutes is not None and cooldown_minutes > 0:
         last_ended = await sessions_queries.get_last_terminal_ended_at(
             db, student_id, config_id, _RETAKE_CONSUMING_SESSION_STATUSES
         )
         if last_ended is not None:
             if last_ended.tzinfo is None:
                 last_ended = last_ended.replace(tzinfo=UTC)
-            retry_after = last_ended + timedelta(hours=cooldown_hours)
+            retry_after = last_ended + timedelta(minutes=cooldown_minutes)
             if retry_after > datetime.now(UTC):
                 raise InterviewCooldownActive(config_id, retry_after)
 
@@ -387,7 +387,7 @@ async def start_session(
         return existing
 
     # FR-5.3 retake policy — gate a *new* attempt on the config's
-    # ``max_attempts`` ceiling and ``cooldown_hours`` window. Only reached
+    # ``max_attempts`` ceiling and ``cooldown_minutes`` window. Only reached
     # when there is no live session (the idempotent short-circuit above
     # returns the in-progress row without consuming a fresh attempt).
     await _enforce_retake_policy(db, config_id=config_id, student_id=actor.user_id)

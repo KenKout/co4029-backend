@@ -29,7 +29,7 @@ from abridgeai.features.interviews.models import InterviewConfig
 #   security_incident_summary_enabled  controls a teacher-side report only
 #                                      (routers/authoring.py), never the run
 #
-# ``max_attempts`` and ``cooldown_hours`` are deliberately NOT here, even though
+# ``max_attempts`` and ``cooldown_minutes`` are deliberately NOT here, even though
 # they are only read before a session exists and so cannot disturb a run in
 # flight. They are still the terms of assessment: lowering ``max_attempts``
 # mid-cohort can retroactively strand a student who already used an attempt in

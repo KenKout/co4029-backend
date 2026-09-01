@@ -142,7 +142,7 @@ class InterviewConfigPublic(_ORMModel):
     tts_voice: str | None = None
     time_limit_minutes: int | None = None
     max_attempts: int | None = None
-    cooldown_hours: int | None = None
+    cooldown_minutes: int | None = None
     max_follow_ups_per_question: int = 2
     max_hints_per_question: int = 3
     published_at: datetime | None = None

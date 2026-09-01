@@ -251,10 +251,13 @@ class InterviewConfig(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftD
     slug: Mapped[str] = mapped_column(String(100), nullable=False)
     status: Mapped[str] = mapped_column(String(20), nullable=False, server_default=text("'draft'"))
     max_attempts: Mapped[int | None] = mapped_column(Integer)
-    # FR-5.3 retake cooldown: minimum hours between the end of one attempt and
-    # the start of the next. NULL / <=0 disables the gate. Mirrors
-    # ``Quiz.cooldown_hours``; enforced in ``services/taking.start_session``.
-    cooldown_hours: Mapped[int | None] = mapped_column(Integer)
+    # FR-5.3 retake cooldown: minimum MINUTES between the end of one attempt and
+    # the start of the next. NULL / <=0 disables the gate. Minutes, not hours
+    # (migration 0099), so a teacher can ask for a short breather (15/30 min)
+    # instead of being forced up to a whole hour; enforced in
+    # ``services/taking.start_session``. NOTE: ``Quiz.cooldown_hours`` is a
+    # separate column and is still in hours.
+    cooldown_minutes: Mapped[int | None] = mapped_column(Integer)
     min_outcomes_to_pass: Mapped[int | None] = mapped_column(Integer)
     time_limit_minutes: Mapped[int | None] = mapped_column(Integer)
     # Per-question budgets the interviewer operates under. Defaults mirror the

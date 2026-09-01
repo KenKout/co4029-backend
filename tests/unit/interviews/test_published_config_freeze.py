@@ -43,7 +43,7 @@ FROZEN_FIELDS = [
     # student who already spent one; raising it gives later students more chances
     # than earlier ones got.
     "max_attempts",
-    "cooldown_hours",
+    "cooldown_minutes",
     # The budgets are read into the session at dispatch; changing them mid-cohort
     # changes how hard the interviewer presses for students who start later.
     "max_follow_ups_per_question",

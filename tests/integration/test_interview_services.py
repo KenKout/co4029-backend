@@ -298,7 +298,7 @@ async def _create_published_config(
     questions: int = 2,
     outcomes: int = 1,
     max_attempts: int | None = None,
-    cooldown_hours: int | None = None,
+    cooldown_minutes: int | None = None,
     status: str = "published",
 ) -> dict[str, Any]:
     config_id = uuid.uuid4()
@@ -307,7 +307,7 @@ async def _create_published_config(
     async with engine.begin() as conn:
         await conn.execute(
             text(
-                "INSERT INTO interview_configs (id, course_id, module_id, title, status, created_by, max_attempts, cooldown_hours, slug) VALUES (:id, :c, :m, 'Pub Interview', :status, :t, :max_attempts, :cooldown_hours, 'slug-' || uuid_generate_v4()::text);"
+                "INSERT INTO interview_configs (id, course_id, module_id, title, status, created_by, max_attempts, cooldown_minutes, slug) VALUES (:id, :c, :m, 'Pub Interview', :status, :t, :max_attempts, :cooldown_minutes, 'slug-' || uuid_generate_v4()::text);"
             ),
             {
                 "id": config_id,
@@ -316,7 +316,7 @@ async def _create_published_config(
                 "t": teacher_id,
                 "status": status,
                 "max_attempts": max_attempts,
-                "cooldown_hours": cooldown_hours,
+                "cooldown_minutes": cooldown_minutes,
             },
         )
         for idx, qid in enumerate(question_ids, start=1):
@@ -482,20 +482,20 @@ async def test_start_session_cooldown_blocks_new_attempt(
     session_factory: async_sessionmaker[AsyncSession],
     scenario: dict[str, Any],
 ) -> None:
-    """FR-5.3 — a new attempt inside ``cooldown_hours`` is rejected."""
+    """FR-5.3 — a new attempt inside ``cooldown_minutes`` is rejected."""
     seeded = await _create_published_config(
         engine,
         course_id=scenario["course_id"],
         module_id=scenario["module_id"],
         teacher_id=scenario["teacher_id"],
-        cooldown_hours=24,
+        cooldown_minutes=1440,
     )
     payload = _CreatePayload(input_mode="text")
     async with session_factory() as session, session.begin():
         first = await taking_service.start_session(
             session, seeded["config_id"], payload, _actor(scenario["student_id"])
         )
-    # Finish it one hour ago — well inside the 24h cooldown.
+    # Finish it one hour ago — well inside the 1440-minute (24h) cooldown.
     await _finish_session(
         engine,
         first.id,
@@ -523,14 +523,14 @@ async def test_start_session_cooldown_elapsed_allows_new_attempt(
         course_id=scenario["course_id"],
         module_id=scenario["module_id"],
         teacher_id=scenario["teacher_id"],
-        cooldown_hours=2,
+        cooldown_minutes=120,
     )
     payload = _CreatePayload(input_mode="text")
     async with session_factory() as session, session.begin():
         first = await taking_service.start_session(
             session, seeded["config_id"], payload, _actor(scenario["student_id"])
         )
-    # Finished 3h ago — the 2h cooldown has lapsed.
+    # Finished 3h ago — the 120-minute cooldown has lapsed.
     await _finish_session(
         engine,
         first.id,
@@ -558,7 +558,7 @@ async def test_failed_session_does_not_start_retake_cooldown(
         course_id=scenario["course_id"],
         module_id=scenario["module_id"],
         teacher_id=scenario["teacher_id"],
-        cooldown_hours=24,
+        cooldown_minutes=1440,
     )
     payload = _CreatePayload(input_mode="text")
     async with session_factory() as session, session.begin():

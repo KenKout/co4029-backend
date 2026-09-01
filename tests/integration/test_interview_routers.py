@@ -2315,7 +2315,7 @@ async def test_published_config_allows_student_safe_setting_edits(
 ) -> None:
     """Renaming and retake limits stay editable on a published interview.
 
-    ``max_attempts`` / ``cooldown_hours`` are read before a session exists, so
+    ``max_attempts`` / ``cooldown_minutes`` are read before a session exists, so
     they gate starting a NEW attempt and cannot disturb one in flight.
     """
     config_id = await _seed_published_config(
@@ -2343,7 +2343,7 @@ async def test_published_config_rejects_attempt_limit_edits(
 ) -> None:
     """Retake limits are frozen once published, despite not touching a live run.
 
-    ``max_attempts`` / ``cooldown_hours`` are read before a session exists, so
+    ``max_attempts`` / ``cooldown_minutes`` are read before a session exists, so
     editing them cannot corrupt an interview in flight. They are frozen anyway
     because they are the terms of assessment: lowering the cap mid-cohort strands
     a student who already spent an attempt in good faith, and raising it gives
@@ -2358,7 +2358,7 @@ async def test_published_config_rejects_attempt_limit_edits(
 
     for payload, field in (
         ({"max_attempts": 3}, "max_attempts"),
-        ({"cooldown_hours": 12}, "cooldown_hours"),
+        ({"cooldown_minutes": 30}, "cooldown_minutes"),
     ):
         resp = await client.patch(
             f"/api/v1/teacher/interview-configs/{config_id}",

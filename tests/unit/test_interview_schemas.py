@@ -291,19 +291,19 @@ def test_create_schemas_basic_validation() -> None:
         persona="strict",
         time_limit_minutes=30,
         max_attempts=3,
-        cooldown_hours=24,
+        cooldown_minutes=1440,
         supplementary_instructions="Probe deeply on edge cases",
     )
     assert config.title == "ML Foundations"
     assert config.persona == "strict"
-    # FR-5.3 retake cooldown knob is accepted at config creation.
-    assert config.cooldown_hours == 24
+    # FR-5.3 retake cooldown knob is accepted at config creation (minutes).
+    assert config.cooldown_minutes == 1440
 
     # ``status`` is NOT a patchable field — transitions go through the
     # dedicated /publish|/archive|/unarchive endpoints (extra="forbid").
-    update = InterviewConfigUpdate(title="Renamed", cooldown_hours=12)
+    update = InterviewConfigUpdate(title="Renamed", cooldown_minutes=30)
     assert update.title == "Renamed"
-    assert update.cooldown_hours == 12
+    assert update.cooldown_minutes == 30
     assert update.persona is None
 
     outcome = InterviewOutcomeCreate(
