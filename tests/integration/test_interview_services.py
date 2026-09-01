@@ -2205,7 +2205,6 @@ def _bank_payload(question_type: str, prompt: str, *, difficulty: str | None = N
         "question_type": question_type,
         "difficulty": difficulty,
         "model_answer": f"Answer for {prompt}",
-        "tags": [],
     }
 
 
@@ -3029,7 +3028,6 @@ async def test_update_bank_item_keeps_group_invariants(
                 prompt_text="Edit guard technical, revised?",
                 difficulty="senior",
                 model_answer="Revised answer",
-                tags=["revised"],
             ),
             _actor(scenario["teacher_id"]),
         )
@@ -3037,7 +3035,7 @@ async def test_update_bank_item_keeps_group_invariants(
     assert updated.question_type == "technical"
     assert updated.prompt_text == "Edit guard technical, revised?"
     assert updated.difficulty == "senior"
-    assert updated.tags_json == ["revised"]
+    assert updated.model_answer == "Revised answer"
 
     async with session_factory() as session:
         angles = (

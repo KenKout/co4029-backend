@@ -704,7 +704,6 @@ class InterviewQuestionBankItemCreate(BaseModel):
     question_type: QuestionTypeLiteral
     difficulty: DifficultyLiteral | None = None
     model_answer: str | None = None
-    tags: list[str] = Field(default_factory=list)
     source_config_id: UUID | None = None
 
 
@@ -719,7 +718,6 @@ class InterviewQuestionBankItemRead(BaseModel):
     question_type: QuestionTypeLiteral
     difficulty: DifficultyLiteral | None = None
     model_answer: str | None = None
-    tags: list[str] = Field(default_factory=list, validation_alias="tags_json")
     variant_group_id: UUID | None = None
     source_config_id: UUID | None = None
     created_at: datetime
@@ -777,7 +775,6 @@ class InterviewQuestionBankItemUpdate(BaseModel):
     question_type: QuestionTypeLiteral | None = None
     difficulty: DifficultyLiteral | None = None
     model_answer: str | None = None
-    tags: list[str] | None = None
 
 
 # Suppress unused-import warning — Decimal is exported in case downstream

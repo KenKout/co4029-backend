@@ -1067,7 +1067,6 @@ async def _create_bank_item(
         question_type=question_type,
         difficulty=data.get("difficulty"),
         model_answer=(data.get("model_answer") or "").strip() or None,
-        tags_json=data.get("tags", []),
         variant_group_id=variant_group_id,
         source_config_id=source_config_id,
         created_by=actor.user_id,
@@ -1388,8 +1387,6 @@ async def update_question_bank_item(
             final_prompt=final_prompt,
         )
 
-    if "tags" in data:
-        item.tags_json = data.pop("tags")
     for key, value in data.items():
         setattr(item, key, value)
     item.updated_by = actor.user_id

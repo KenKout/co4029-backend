@@ -846,10 +846,6 @@ class InterviewQuestionBankItem(
     question_type: Mapped[str] = mapped_column(String(30), nullable=False)
     difficulty: Mapped[str | None] = mapped_column(String(20))
     model_answer: Mapped[str | None] = mapped_column(Text)
-    # Free-text tags for filtering the bank (topic labels). Optional.
-    tags_json: Mapped[Any] = mapped_column(
-        JSONB, nullable=False, server_default=text("'[]'::jsonb")
-    )
     # Course-bank logical-question membership. NULL remains an ordinary
     # standalone item; a non-null id links 1-4 distinct interviewer angles.
     variant_group_id: Mapped[uuid.UUID | None] = mapped_column(
