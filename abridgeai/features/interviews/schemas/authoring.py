@@ -243,9 +243,7 @@ class InterviewConfigAuthoring(InterviewConfigPublic):
     security_custom_refusal_vi: str | None = None
     security_incident_summary_enabled: bool = True
     generation_run_id: UUID | None = None
-    generation_variant_strategy: Literal["role_only"] | None = None
     draft_question_count: int | None = None
-    total_importance_weight: int | None = None
     published_at: datetime | None = None
     created_by: UUID | None = None
     updated_by: UUID | None = None
@@ -257,14 +255,18 @@ class InterviewConfigAuthoring(InterviewConfigPublic):
     @model_validator(mode="before")
     @classmethod
     def _populate_aggregates(cls, data: Any) -> Any:  # noqa: ANN401 -- ORM/Pydantic boundary
-        """Sum importance_weight + count active questions when the caller
-        passes the raw ORM model with the ``questions`` relationship already
-        loaded. Skipped when data is a Pydantic model (nested in
-        InterviewForAuthoringPublic) or when the relationship is unloaded —
-        accessing an unloaded relationship under an AsyncSession raises
-        MissingGreenlet, which previously surfaced as a 500 on
+        """Count active questions when the caller passes the raw ORM model with
+        the ``questions`` relationship already loaded. Skipped when data is a
+        Pydantic model (nested in InterviewForAuthoringPublic) or when the
+        relationship is unloaded — accessing an unloaded relationship under an
+        AsyncSession raises MissingGreenlet, which previously surfaced as a 500 on
         GET /teacher/interview-configs/{config_id}. Callers that need the
-        aggregates set must eager-load (selectinload) ``InterviewConfig.questions``.
+        aggregate set must eager-load (selectinload) ``InterviewConfig.questions``.
+
+        A sibling ``total_importance_weight`` sum lived here until 2026-09-01. No
+        client ever read it — the teacher UI shows per-outcome weights from the
+        outcome rows themselves (``WeightStepper``) — so it was removed rather
+        than kept as an aggregate nobody renders.
         """
         if isinstance(data, BaseModel):
             return data
@@ -277,13 +279,8 @@ class InterviewConfigAuthoring(InterviewConfigPublic):
         unloaded: set[str] = getattr(insp, "unloaded", set()) if insp is not None else set()
         if "questions" not in unloaded:
             questions = getattr(data, "questions", None)
-            if questions is not None:
-                if getattr(data, "total_importance_weight", None) is None:
-                    data.total_importance_weight = sum(
-                        q.importance_weight or 0 for q in questions if q.deleted_at is None
-                    )
-                if getattr(data, "draft_question_count", None) is None:
-                    data.draft_question_count = sum(1 for q in questions if q.deleted_at is None)
+            if questions is not None and getattr(data, "draft_question_count", None) is None:
+                data.draft_question_count = sum(1 for q in questions if q.deleted_at is None)
         # Resolve the effective persona profile (preset + any per-trait
         # overrides) for the teacher projection. Best-effort: a bad override can
         # never raise (profile_from_config is defensive) and a failure here just

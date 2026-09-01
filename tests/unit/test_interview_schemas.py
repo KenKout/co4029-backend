@@ -68,7 +68,6 @@ _PUBLIC_FORBIDDEN_CONFIG = frozenset(
         "generation_run_id",
         "min_outcomes_to_pass",
         "draft_question_count",
-        "total_importance_weight",
         "created_by",
         "updated_by",
         "deleted_at",

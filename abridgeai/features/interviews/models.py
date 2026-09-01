@@ -296,9 +296,6 @@ class InterviewConfig(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftD
         PGUUID(as_uuid=True),
         ForeignKey("generation_runs.id", ondelete="SET NULL"),
     )
-    # Successful role-only generation opts this config into strict runtime
-    # question-type selection. NULL keeps legacy/all-angle configs unchanged.
-    generation_variant_strategy: Mapped[str | None] = mapped_column(String(20))
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     questions: Mapped[list[InterviewQuestion]] = relationship(

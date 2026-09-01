@@ -627,25 +627,48 @@ async def test_pipeline_persists_question_with_correct_fields(
 
 
 @pytest.mark.asyncio
-async def test_pipeline_strict_role_only_flag_is_sticky(
+async def test_pipeline_records_resolved_role_only_on_the_run(
     session_factory: async_sessionmaker[AsyncSession],
     fixture_data: dict[str, UUID],
     engine: AsyncEngine,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """role_only enables strict; later mixed/failed runs never clear it."""
+    """The RESOLVED strategy is recorded per run, and only on the run.
 
-    async def _flag() -> str | None:
+    This used to be a sticky ``interview_configs.generation_variant_strategy``
+    flag: once a role_only run succeeded, the column stayed 'role_only' forever —
+    a later mixed run never cleared it, so the config claimed a role-only bank it
+    no longer had. Nothing read the column (migration 0098 dropped it); the fact
+    is per-run, so it now lives in ``generation_runs.config_json`` where a mixed
+    run records its own resolved value instead of overwriting the config's.
+    """
+
+    async def _resolved(run_id: UUID) -> str | None:
         async with session_factory() as session:
-            return (
+            cfg = (
                 await session.execute(
-                    text(
-                        "SELECT generation_variant_strategy FROM interview_configs "
-                        "WHERE id = :id"
-                    ),
-                    {"id": fixture_data["cfg_id"]},
+                    text("SELECT config_json FROM generation_runs WHERE id = :id"),
+                    {"id": run_id},
                 )
             ).scalar_one()
+        return (cfg or {}).get("pipeline", {}).get("generation", {}).get(
+            "variant_strategy_resolved"
+        )
+
+    async def _config_columns() -> set[str]:
+        async with session_factory() as session:
+            rows = (
+                await session.execute(
+                    text(
+                        "SELECT column_name FROM information_schema.columns "
+                        "WHERE table_name = 'interview_configs'"
+                    )
+                )
+            ).scalars()
+        return set(rows)
+
+    # The dropped column must not come back: the sticky-flag design is the bug.
+    assert "generation_variant_strategy" not in await _config_columns()
 
     async def _insert_run(run_id: UUID, strategy: str | None = None) -> None:
         cfg = {"interview_config_id": str(fixture_data["cfg_id"]), "question_count": 1}
@@ -665,9 +688,6 @@ async def test_pipeline_strict_role_only_flag_is_sticky(
                     "cfg": json.dumps(cfg),
                 },
             )
-
-    # Never role_only -> stays NULL (legacy).
-    assert await _flag() is None
 
     # Non-generic role so resolve_variant_mode keeps role_only (generic degrades).
     async with engine.begin() as conn:
@@ -697,24 +717,27 @@ async def test_pipeline_strict_role_only_flag_is_sticky(
 
     async with session_factory() as session:
         await run_interview_generation(session, fixture_data["run_id"])
-    assert await _flag() == "role_only"
+    assert await _resolved(fixture_data["run_id"]) == "role_only"
 
-    # A later successful mixed/all-angles run KEEPS strict mode.
+    # A LATER mixed run records its own resolution and does not inherit — the
+    # exact case the sticky config flag got wrong.
     second_run_id = uuid4()
     third_run_id = uuid4()
     try:
         await _insert_run(second_run_id)
         async with session_factory() as session:
             await run_interview_generation(session, second_run_id)
-        assert await _flag() == "role_only"
+        assert await _resolved(second_run_id) is None
+        # ...and the earlier run's record is untouched by it.
+        assert await _resolved(fixture_data["run_id"]) == "role_only"
 
-        # A later FAILED run (underfill: nothing accepted) leaves it untouched.
+        # A FAILED run (underfill: nothing accepted) records nothing.
         _install_stage_mocks(monkeypatch, drafts=[], verdicts=[])
         await _insert_run(third_run_id)
         async with session_factory() as session:
             with pytest.raises(RuntimeError, match="underfilled"):
                 await run_interview_generation(session, third_run_id)
-        assert await _flag() == "role_only"
+        assert await _resolved(third_run_id) is None
     finally:
         async with engine.begin() as conn:
             await conn.execute(
@@ -800,37 +823,36 @@ def test_stage_args_use_keyword_only() -> None:
 
 
 @pytest.mark.asyncio
-async def test_degraded_role_only_does_not_stamp_the_config_flag(
+async def test_degraded_role_only_records_the_resolved_strategy(
     session_factory: async_sessionmaker[AsyncSession],
     fixture_data: dict[str, UUID],
     engine: AsyncEngine,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A role_only request that DEGRADED must not leave the flag set.
+    """A role_only request that DEGRADED must record mixed, not role_only.
 
     resolve_variant_mode drops role_only to legacy mixed when the interviewer
-    role has no preferred question type (the generic assistant). The stamp used
-    to read the REQUEST back out of config_json, so the config was marked
-    'role_only' while its bank was in fact mixed — a lie in a column that
-    outlives the run. It must reflect the RESOLVED strategy.
+    role has no preferred question type (the generic assistant). The record must
+    reflect the RESOLVED strategy: reading the REQUEST back out of config_json
+    would claim a role-only bank that is in fact mixed.
 
-    The service now refuses this combination at enqueue; this covers runs already
+    The service refuses this combination at enqueue; this covers runs already
     queued and any caller that bypasses the service.
     """
 
-    async def _flag() -> str | None:
+    async def _resolved() -> str | None:
         async with session_factory() as session:
-            return (
+            cfg = (
                 await session.execute(
-                    text(
-                        "SELECT generation_variant_strategy FROM interview_configs "
-                        "WHERE id = :id"
-                    ),
-                    {"id": fixture_data["cfg_id"]},
+                    text("SELECT config_json FROM generation_runs WHERE id = :id"),
+                    {"id": fixture_data["run_id"]},
                 )
             ).scalar_one()
+        return (cfg or {}).get("pipeline", {}).get("generation", {}).get(
+            "variant_strategy_resolved"
+        )
 
-    assert await _flag() is None
+    assert await _resolved() is None
 
     # Ask for role_only while the config keeps the DEFAULT generic assistant
     # (persona_profile_json stays NULL), which has no preferred type.
@@ -855,5 +877,14 @@ async def test_degraded_role_only_does_not_stamp_the_config_flag(
     async with session_factory() as session:
         await run_interview_generation(session, fixture_data["run_id"])
 
-    # The run succeeded as a MIXED run, so the flag must stay NULL.
-    assert await _flag() is None
+    # The run succeeded as a MIXED run, so the resolved value is None (legacy
+    # mixed), NOT the requested "role_only" still sitting in config_json.
+    assert await _resolved() is None
+    async with session_factory() as session:
+        requested = (
+            await session.execute(
+                text("SELECT config_json ->> 'variant_strategy' FROM generation_runs WHERE id=:id"),
+                {"id": fixture_data["run_id"]},
+            )
+        ).scalar_one()
+    assert requested == "role_only", "the REQUEST is preserved; only the resolution differs"

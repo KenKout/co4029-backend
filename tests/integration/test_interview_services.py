@@ -742,9 +742,10 @@ async def test_runtime_group_collapse_selects_role_preferred_angle(
 ) -> None:
     """A complete 4-angle group serves the role's preferred angle at runtime.
 
-    generation_variant_strategy is generation-time metadata only: selection
-    follows interviewer_role (tech_lead -> technical, hr -> behavioral),
-    regardless of the flag value.
+    Selection follows interviewer_role alone (tech_lead -> technical,
+    hr -> behavioral). The old ``generation_variant_strategy`` column used to sit
+    beside this as generation-time metadata and is gone (migration 0098); this
+    test proves the runtime never needed it.
     """
     seeded = await _create_published_config(
         engine,
@@ -759,10 +760,7 @@ async def test_runtime_group_collapse_selects_role_preferred_angle(
     group_id = str(uuid.uuid4())
     async with engine.begin() as conn:
         await conn.execute(
-            text(
-                "UPDATE interview_configs SET persona_profile_json=:p, "
-                "generation_variant_strategy='role_only' WHERE id=:id"
-            ),
+            text("UPDATE interview_configs SET persona_profile_json=:p WHERE id=:id"),
             {"p": json.dumps({"interviewer_role": "backend_tech_lead"}), "id": seeded["config_id"]},
         )
         for qid, qtype in zip(
@@ -812,8 +810,7 @@ async def test_runtime_group_collapse_selects_role_preferred_angle(
     assert qtype == "technical"
     await _finalize(sid)
 
-    # Same group, HR role: behavioral is served instead; the flag value
-    # ("role_only") does not force anything.
+    # Same group, HR role: behavioral is served instead.
     async with engine.begin() as conn:
         await conn.execute(
             text("UPDATE interview_configs SET persona_profile_json=:p WHERE id=:id"),
@@ -823,12 +820,7 @@ async def test_runtime_group_collapse_selects_role_preferred_angle(
     assert qtype == "behavioral"
     await _finalize(sid)
 
-    # Flag cleared to NULL: runtime outcome is unchanged (metadata only).
-    async with engine.begin() as conn:
-        await conn.execute(
-            text("UPDATE interview_configs SET generation_variant_strategy=NULL WHERE id=:id"),
-            {"id": seeded["config_id"]},
-        )
+    # Repeat with the same role: the collapse is stable, not a one-off.
     qtype, _sid = await _start_and_read()
     assert qtype == "behavioral"
 

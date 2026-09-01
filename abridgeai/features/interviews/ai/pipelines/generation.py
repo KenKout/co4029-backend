@@ -212,14 +212,15 @@ async def run_interview_generation(  # noqa: C901 -- pipeline stages stay audita
             source_module_ids=_module_ids_for_questions(state.config_json, config),
             pipeline_run_id=state.id,
         )
-        # Stamp the RESOLVED strategy, not the requested one. ``role_only``
-        # degrades to legacy mixed generation when the config's interviewer role
-        # has no preferred question type (the generic assistant), so reading the
-        # request back here would mark a config 'role_only' whose bank is in fact
-        # a mixed bank — a lie in the column that outlives the run.
-        if variant_strategy == "role_only":
-            config.generation_variant_strategy = "role_only"
-
+        # The resolved strategy is NOT stamped on the config. It used to live in
+        # ``interview_configs.generation_variant_strategy`` (migration 0091) to
+        # drive strict runtime selection, but since c923073 the runtime decides
+        # purely from the interviewer role, leaving the column write-only —
+        # dropped in migration 0098. It is recorded per RUN below instead, which
+        # is where a per-run fact belongs: config_json already carries the
+        # REQUESTED ``variant_strategy``, and ``resolve_variant_mode`` can degrade
+        # role_only to legacy mixed (generic assistant has no preferred type), so
+        # the resolved value is the one that explains the bank that came out.
         state.config_json = state.config_json | {
             "pipeline": {
                 "stage": "completed",
@@ -231,6 +232,7 @@ async def run_interview_generation(  # noqa: C901 -- pipeline stages stay audita
                     "drafts_accepted": len(accepted),
                     "drafts_rejected": len(all_drafts) - len(accepted),
                     "backfill_rounds": backfill_rounds,
+                    "variant_strategy_resolved": variant_strategy,
                 },
                 "validation": validation_summary(all_verdicts),
             }
