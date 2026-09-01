@@ -16,6 +16,7 @@ T1.10 admin", which is the soft-revoke.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
@@ -409,40 +410,71 @@ async def _user_is_in_org(db: AsyncSession, *, user_id: UUID, org_id: UUID) -> b
     return await access_api.is_user_member_of_org(db, user_id=user_id, org_id=org_id)
 
 
+async def remove_teachers_from_course(
+    db: AsyncSession,
+    course_id: UUID,
+    user_ids: Sequence[UUID],
+    actor: CurrentUser,
+) -> int:
+    """Soft-revoke the active teacher assignments for ``user_ids``.
+
+    Sets ``active_until = NOW()`` on each row rather than deleting it,
+    preserving the audit trail (legacy parity with the T1.10 admin revoke
+    flow). 404 when any of the users has no active assignment.
+
+    All-or-nothing. The caller ticked these people, so a partial result is a
+    surprise — and a half-applied removal can leave the course in a staffing
+    state the manager never asked for.
+
+    The instructor guard is evaluated against the state the course is LEFT
+    in, not per row. A staffed course must keep at least one Course
+    Instructor; removing everyone is allowed, since that simply empties the
+    course. Looping the single-row version instead would make the outcome
+    depend on the order the ids arrived in: removing [instructor, assistant]
+    would 409 on the first id, while [assistant, instructor] would succeed —
+    same request, same final state, different answer.
+    """
+    del actor
+    wanted = list(dict.fromkeys(user_ids))
+    if not wanted:
+        return 0
+
+    active = await assignment_queries.list_active_teacher_assignment_rows(
+        db, course_id=course_id
+    )
+    by_user = {row.user_id: row for row in active}
+    missing = [uid for uid in wanted if uid not in by_user]
+    if missing:
+        raise NotFoundError(
+            f"No active teacher assignment for course={course_id} "
+            f"user={missing[0]}"
+        )
+
+    removing = set(wanted)
+    remaining = [row for row in active if row.user_id not in removing]
+    if remaining and not any(row.is_instructor for row in remaining):
+        raise ConflictError(
+            "course_teacher_remove_sole_instructor: grant the Course "
+            "Instructor title to another teacher before removing this "
+            "course's last instructor"
+        )
+
+    for uid in wanted:
+        await assignment_queries.revoke_teacher_assignment(db, by_user[uid].id)
+    return len(wanted)
+
+
 async def remove_teacher_from_course(
     db: AsyncSession,
     course_id: UUID,
     user_id: UUID,
     actor: CurrentUser,
 ) -> None:
-    """Soft-revoke the active teacher assignment for ``(course_id, user_id)``.
+    """Single-teacher wrapper over :func:`remove_teachers_from_course`.
 
-    Sets ``active_until = NOW()`` on the assignment row rather than
-    deleting it, preserving the audit trail (legacy parity with the
-    T1.10 admin revoke flow). 404 when no active assignment exists.
-
-    Refuses to remove the LAST Course Instructor while other teachers remain
-    (a staffed course must keep at least one instructor — user decision
-    2026-08-30 now allows several) — the manager must grant the instructor
-    title to another teacher first. Removing the sole teacher (an instructor
-    with nobody else) is allowed: that simply empties the course.
+    One implementation of the instructor guard, not two.
     """
-    del actor
-    assignment = await assignment_queries.get_active_teacher_assignment_row(
-        db, course_id=course_id, user_id=user_id
-    )
-    if assignment is None:
-        raise NotFoundError(f"No active teacher assignment for course={course_id} user={user_id}")
-    if assignment.is_instructor:
-        others = await assignment_queries.count_course_instructors(db, course_id)
-        total = await assignment_queries.count_active_course_teachers(db, course_id)
-        if others <= 1 and total > 1:
-            raise ConflictError(
-                "course_teacher_remove_sole_instructor: grant the Course "
-                "Instructor title to another teacher before removing this "
-                "course's last instructor"
-            )
-    await assignment_queries.revoke_teacher_assignment(db, assignment.id)
+    await remove_teachers_from_course(db, course_id, [user_id], actor)
 
 
 async def _mint_avatar_url(bucket: str | None, object_key: str | None) -> str | None:

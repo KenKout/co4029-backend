@@ -237,6 +237,26 @@ async def get_active_teacher_assignment_row(
     return (await db.execute(stmt)).scalar_one_or_none()
 
 
+async def list_active_teacher_assignment_rows(
+    db: AsyncSession, *, course_id: UUID
+) -> list[UserRoleAssignment]:
+    """Every active course-scoped teacher row on ``course_id``.
+
+    Backs the bulk remove, which has to reason about the state the course
+    will be left in rather than about one row at a time: "does an instructor
+    remain afterwards" is not answerable from a single assignment.
+    """
+    stmt = (
+        select(UserRoleAssignment)
+        .join(Role, Role.id == UserRoleAssignment.role_id)
+        .where(
+            UserRoleAssignment.course_id == course_id,
+            *_ACTIVE_TEACHER_WHERE,
+        )
+    )
+    return list((await db.execute(stmt)).scalars().all())
+
+
 async def count_course_instructors(db: AsyncSession, course_id: UUID) -> int:
     """Number of active Course-Instructor flags on ``course_id`` (0..N).
 

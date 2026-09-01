@@ -8,9 +8,10 @@ the assign-teacher request body.
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Annotated
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class TeacherAssignmentRead(BaseModel):
@@ -105,6 +106,29 @@ class AssignTeacherRequest(BaseModel):
     # a client cannot create a titleless staffed course.
     is_instructor: bool = False
     is_assistant: bool = False
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class CourseTeacherBulkRemoveRequest(BaseModel):
+    """Remove several teachers from a course in one call.
+
+    All-or-nothing: the caller selected these people, so a partial result is
+    a surprise, and a half-applied removal can leave the course in a
+    staffing state nobody asked for. The instructor guard is checked against
+    the state the course is LEFT in — see
+    ``courses.services.assignment.remove_teachers_from_course``.
+    """
+
+    user_ids: Annotated[list[UUID], Field(min_length=1, max_length=100)]
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class CourseTeacherBulkRemoveResult(BaseModel):
+    """How many assignments were revoked."""
+
+    removed: int
 
     model_config = ConfigDict(extra="forbid")
 

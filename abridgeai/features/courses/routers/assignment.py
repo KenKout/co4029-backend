@@ -44,6 +44,8 @@ from abridgeai.features.courses.schemas import (
     CourseAuthoring,
     CourseCloneRequest,
     CourseReadiness,
+    CourseTeacherBulkRemoveRequest,
+    CourseTeacherBulkRemoveResult,
     CourseTeacherRoleRequest,
     CourseUpdate,
     RosterEntry,
@@ -296,6 +298,40 @@ async def get_course_readiness(
     except NotFoundError as exc:
         raise _not_found(str(exc)) from exc
     return CourseReadiness.model_validate(data)
+
+
+@router.post(
+    "/courses/{course_id}/teachers/bulk-remove",
+    response_model=CourseTeacherBulkRemoveResult,
+)
+async def bulk_remove_teachers(
+    course_id: UUID,
+    payload: CourseTeacherBulkRemoveRequest,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_COURSE_STAFFING)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> CourseTeacherBulkRemoveResult:
+    """Soft-revoke several teacher assignments at once.
+
+    POST rather than DELETE because the ids travel in a body, and DELETE
+    with a body is poorly supported by proxies and clients alike.
+
+    All-or-nothing, and the sole-instructor guard is evaluated against the
+    state the course is LEFT in — so removing a course's whole roster is
+    allowed (it empties the course), while removing everyone EXCEPT a
+    lone assistant is refused. The single-teacher DELETE below now routes
+    through the same service function, so there is one implementation of
+    that rule rather than two that can drift.
+    """
+    try:
+        removed = await assignment_service.remove_teachers_from_course(
+            db, course_id, payload.user_ids, current_user
+        )
+    except NotFoundError as exc:
+        raise _not_found(str(exc)) from exc
+    except ConflictError as exc:
+        raise _conflict(str(exc)) from exc
+    await db.commit()
+    return CourseTeacherBulkRemoveResult(removed=removed)
 
 
 @router.delete(
