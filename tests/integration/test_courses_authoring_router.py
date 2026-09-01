@@ -206,6 +206,7 @@ async def scenario(
       teacher has NO scope here -- this is the FIX-SEC-1 perimeter target.
     """
     course_b = uuid.uuid4()
+    manager_org_assignment_id = uuid.uuid4()
     module_a = uuid.uuid4()
     module_b = uuid.uuid4()
     lesson_a = uuid.uuid4()
@@ -296,6 +297,28 @@ async def scenario(
             },
         )
 
+        # This file's manager tests assert ORGANIZATION-scope propagation
+        # (see the module docstring). roles.yaml now pins the seeded manager
+        # to a single faculty via scope_kind='org_unit', which is the normal
+        # case and is covered in test_courses_assignment_router. An
+        # organization-scoped manager is a real, separate role (the
+        # `has_organization_scope` branch in get_user_faculty_access), so
+        # grant one here rather than reinterpret these tests as faculty
+        # binding and lose the coverage.
+        await conn.execute(
+            text(
+                "INSERT INTO user_role_assignments "
+                "(id, user_id, role_id, scope_kind, organization_id, granted_by) "
+                "SELECT :aid, :uid, id, 'organization', :org, :uid "
+                "FROM roles WHERE code = 'manager' AND deleted_at IS NULL"
+            ),
+            {
+                "aid": manager_org_assignment_id,
+                "uid": seeded_users.manager_id,
+                "org": seeded_users.organization_id,
+            },
+        )
+
     data: dict[str, uuid.UUID | str] = {
         "course_a": seeded_users.course_id,
         "course_b": course_b,
@@ -351,6 +374,10 @@ async def scenario(
                 "  SELECT owner_user_id FROM courses WHERE id = ANY(:ids))"
             ),
             {"ids": [seeded_users.course_id, course_b]},
+        )
+        await conn.execute(
+            text("DELETE FROM user_role_assignments WHERE id = :id"),
+            {"id": manager_org_assignment_id},
         )
         await conn.execute(
             text("DELETE FROM system_settings WHERE organization_id = :o"),

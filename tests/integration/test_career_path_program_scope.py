@@ -143,10 +143,14 @@ async def graph(engine: AsyncEngine) -> AsyncIterator[_Fixture]:
         ):
             await conn.execute(
                 text(
-                    "INSERT INTO career_paths (id, organization_id, org_unit_id, slug, name, status)"
-                    " VALUES (:i, :o, :ou, :s, :n, 'published')"
+                    # 0094_flat_faculties dropped career_paths.org_unit_id:
+                    # "Career paths are organization-wide and intentionally
+                    # have no faculty." The learning program below still
+                    # carries one — that is what scopes a student's menu.
+                    "INSERT INTO career_paths (id, organization_id, slug, name, status)"
+                    " VALUES (:i, :o, :s, :n, 'published')"
                 ),
-                {"i": pid, "o": org_id, "ou": unit_id, "s": slug, "n": slug},
+                {"i": pid, "o": org_id, "s": slug, "n": slug},
             )
             await conn.execute(
                 text(

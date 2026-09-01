@@ -88,7 +88,11 @@ async def scenario(engine: AsyncEngine, seeded_users: SeededUsers) -> AsyncItera
         await conn.execute(
             text(
                 "INSERT INTO org_units (id, organization_id, unit_type, name, code) "
-                "VALUES (:id, :org, 'department', :name, :code)"
+                # 0094_flat_faculties: every LIVE unit must be a top-level
+                # faculty. Still a SIBLING of the dean's own faculty, which
+                # is what this scenario needs — the dean holds no faculty
+                # assignment here, so the org_unit branch must not resolve.
+                "VALUES (:id, :org, 'faculty', :name, :code)"
             ),
             {
                 "id": sibling_unit_id,
