@@ -3,10 +3,16 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from uuid import UUID
 
-from sqlalchemy import delete, func, select, text
+from sqlalchemy import delete, exists, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from abridgeai.features.access_control.models import CareerPath, OrgUnit, Role, UserRoleAssignment
+from abridgeai.features.access_control.models import (
+    CareerPath,
+    OrgUnit,
+    Role,
+    UserFacultyAssignment,
+    UserRoleAssignment,
+)
 from abridgeai.features.career_paths.models import CareerPathVersion
 from abridgeai.features.learning_programs.models import (
     LearningProgram,
@@ -246,10 +252,7 @@ async def list_unpublishable_version_path_ids(
                 | CareerPathVersion.id.is_(None)
                 | CareerPathVersion.deleted_at.is_not(None)
                 | (CareerPathVersion.status != "published")
-                | (
-                    CareerPathVersion.career_path_id
-                    != LearningProgramVersionPath.career_path_id
-                )
+                | (CareerPathVersion.career_path_id != LearningProgramVersionPath.career_path_id)
             ),
         )
     )
@@ -294,9 +297,7 @@ async def resolve_published_path_versions(
     return [by_id[path_id] for path_id in career_path_ids if path_id in by_id]
 
 
-async def list_all_org_paths(
-    db: AsyncSession, *, organization_id: UUID
-) -> list[CareerPath]:
+async def list_all_org_paths(db: AsyncSession, *, organization_id: UUID) -> list[CareerPath]:
     """Every live career path in the org regardless of publish status.
 
     Feeds the authoring-options picker: published paths come back
@@ -342,6 +343,17 @@ async def actor_has_program_role(
                 | (
                     (UserRoleAssignment.scope_kind == "org_unit")
                     & (UserRoleAssignment.org_unit_id == faculty_id)
+                    & exists(
+                        select(UserFacultyAssignment.id).where(
+                            UserFacultyAssignment.user_id == user_id,
+                            UserFacultyAssignment.organization_id == organization_id,
+                            UserFacultyAssignment.faculty_id == faculty_id,
+                            UserFacultyAssignment.status == "active",
+                            UserFacultyAssignment.deleted_at.is_(None),
+                            (UserFacultyAssignment.active_until.is_(None))
+                            | (UserFacultyAssignment.active_until > now),
+                        )
+                    )
                 )
             ),
         )

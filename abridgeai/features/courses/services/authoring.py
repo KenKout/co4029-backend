@@ -42,6 +42,7 @@ from abridgeai.core.exceptions import AppError, ConflictError, NotFoundError
 from abridgeai.core.runtime_settings import resolve_setting
 from abridgeai.core.security import CurrentUser
 from abridgeai.core.slug import slugify, unique_slug
+from abridgeai.features.access_control.api import public as access_api
 from abridgeai.features.courses.models import (
     Course,
     CourseLearningOutcome,
@@ -208,6 +209,12 @@ async def create_course(
     """
     org_id = await _resolve_owner_org(db, owner)
     data = payload.model_dump()
+    data["faculty_id"] = await resolve_new_course_faculty(
+        db,
+        actor=owner,
+        organization_id=org_id,
+        requested_faculty_id=payload.faculty_id,
+    )
     data["organization_id"] = org_id
     data["owner_user_id"] = owner.user_id
     course = Course(**data)
@@ -253,6 +260,47 @@ async def create_course(
             )
 
     return CourseAuthoring.model_validate(course)
+
+
+async def resolve_new_course_faculty(
+    db: AsyncSession,
+    *,
+    actor: CurrentUser,
+    organization_id: UUID,
+    requested_faculty_id: UUID | None,
+) -> UUID | None:
+    """Resolve immutable course ownership for manual and imported creation."""
+    access = await access_api.get_user_faculty_access(
+        db,
+        user_id=actor.user_id,
+        organization_id=organization_id,
+        permission_code="course.create",
+    )
+    affiliations = set(access.faculty_ids)
+
+    if requested_faculty_id is not None:
+        ancestors = await access_api.get_org_unit_ancestors(db, requested_faculty_id)
+        faculty = ancestors[0] if ancestors else None
+        if (
+            faculty is None
+            or faculty.organization_id != organization_id
+            or faculty.unit_type != "faculty"
+            or faculty.parent_unit_id is not None
+        ):
+            raise AppError(
+                "faculty_id must reference a live top-level faculty in your organization"
+            )
+        if requested_faculty_id not in affiliations and not access.has_organization_scope:
+            raise AppError("you cannot create a course for a faculty outside your assignments")
+        return requested_faculty_id
+
+    if len(affiliations) == 1:
+        return next(iter(affiliations))
+    if len(affiliations) > 1:
+        raise AppError("faculty_required: choose a faculty for this course")
+    if access.has_organization_scope:
+        return None
+    raise AppError("faculty_required: you are not assigned to a faculty")
 
 
 async def _notify_teacher_assigned(
@@ -382,9 +430,7 @@ async def _require_course_teacher_minimum(db: AsyncSession, course: Course) -> N
     later raises the min.
     """
     min_teachers = int(
-        await resolve_setting(
-            db, "courses.min_teachers_per_course", course.organization_id
-        )
+        await resolve_setting(db, "courses.min_teachers_per_course", course.organization_id)
     )
     count = await assignment_queries.count_active_course_teachers(db, course.id)
     if count < min_teachers:
@@ -507,9 +553,7 @@ async def archive_course(db: AsyncSession, course_id: UUID, actor: CurrentUser) 
     # block the archive and name the affected paths.
     live_paths = [
         p
-        for p in await assignment_queries.list_career_paths_containing_course(
-            db, course_id
-        )
+        for p in await assignment_queries.list_career_paths_containing_course(db, course_id)
         if p["career_path_status"] == "published"
     ]
     if live_paths:
@@ -634,9 +678,7 @@ async def update_lesson(
     lesson = await _require_lesson(db, lesson_id)
     data = payload.model_dump(exclude_unset=True)
 
-    slug_change = (
-        "slug" in data and data["slug"] is not None and data["slug"] != lesson.slug
-    )
+    slug_change = "slug" in data and data["slug"] is not None and data["slug"] != lesson.slug
     if slug_change and lesson.status == "published":
         raise ConflictError(
             "lesson_slug_frozen: the slug of a published lesson is "
@@ -674,9 +716,7 @@ async def update_lesson(
                 )
             )
             taken = {row[0] for row in taken_rows.all()}
-            data["slug"] = unique_slug(
-                slugify(data["title"]) or "lesson", taken
-            )
+            data["slug"] = unique_slug(slugify(data["title"]) or "lesson", taken)
 
     for key, value in data.items():
         setattr(lesson, key, value)
@@ -992,6 +1032,7 @@ async def duplicate_module(
 # status, fresh slug, " (Copy)" title suffix). Runtime data (enrollments,
 # attempts, sessions, grades) is never copied.
 
+
 async def clone_course(
     db: AsyncSession,
     *,
@@ -1030,7 +1071,7 @@ async def clone_course(
 
     new_course = Course(
         organization_id=source.organization_id,
-        org_unit_id=source.org_unit_id,
+        faculty_id=source.faculty_id,
         owner_user_id=actor.user_id,
         slug=slug,
         title=f"{source.title}{_DUP_SUFFIX}",
@@ -1210,9 +1251,7 @@ async def _copy_course_module_prerequisites(
     """
     if not module_id_map:
         return
-    rows = await authoring_queries.list_course_module_prerequisites(
-        db, source_course_id
-    )
+    rows = await authoring_queries.list_course_module_prerequisites(db, source_course_id)
     for module_id, prereq_id in rows:
         new_module_id = module_id_map.get(module_id)
         new_prereq_id = module_id_map.get(prereq_id)
@@ -1313,9 +1352,7 @@ async def _copy_course_lesson_prerequisites(
     """
     if not lesson_id_map:
         return
-    rows = await authoring_queries.list_course_lesson_prerequisites(
-        db, list(lesson_id_map)
-    )
+    rows = await authoring_queries.list_course_lesson_prerequisites(db, list(lesson_id_map))
     for lesson_id, prereq_id in rows:
         new_lesson_id = lesson_id_map.get(lesson_id)
         new_prereq_id = lesson_id_map.get(prereq_id)
@@ -1474,9 +1511,7 @@ async def _list_authorable_courses(db: AsyncSession, user: CurrentUser) -> list[
     two lists overlap; without the dedupe a co-owned course would be
     counted twice in every dashboard aggregate.
     """
-    owned = await authoring_queries.list_courses_for_owner(
-        db, user.user_id, include_archived=False
-    )
+    owned = await authoring_queries.list_courses_for_owner(db, user.user_id, include_archived=False)
     assigned = await authoring_queries.list_courses_assigned_to_teacher(
         db, user.user_id, include_archived=False
     )
@@ -1522,9 +1557,7 @@ async def get_teacher_dashboard_stats(
     # Cross-feature read: the risk definition (thresholds + new-enrolment
     # grace period) lives in progress and is administrator-tunable, so the
     # dashboard asks that engine rather than re-deriving a second opinion.
-    students_needing_attention = await progress_api.count_students_needing_attention(
-        db, course_ids
-    )
+    students_needing_attention = await progress_api.count_students_needing_attention(db, course_ids)
     return TeacherDashboardStats(
         draft_courses=draft_courses,
         ungraded_quizzes=ungraded_quizzes,
@@ -1663,9 +1696,7 @@ def _course_severity(
     return "none", None
 
 
-async def list_course_health(
-    db: AsyncSession, *, user: CurrentUser
-) -> list[CourseHealthRow]:
+async def list_course_health(db: AsyncSession, *, user: CurrentUser) -> list[CourseHealthRow]:
     """The caller's courses as comparable health rows, worst first.
 
     Every number is sourced from the feature that owns it -- progress for
@@ -1707,9 +1738,7 @@ async def list_course_health(
                 slug=course.slug,
                 status=course.status,
                 students=students,
-                avg_progress_percent=(
-                    signal.avg_completion_percent if signal else None
-                ),
+                avg_progress_percent=(signal.avg_completion_percent if signal else None),
                 at_risk_students=at_risk,
                 pass_rate_percent=pass_rate,
                 pass_sample=metric.pass_sample if metric else 0,
@@ -1760,9 +1789,7 @@ async def list_priority_tasks(
     course_ids = list(titles)
 
     at_risk = await progress_api.list_students_needing_attention(db, course_ids)
-    review = await authoring_queries.count_review_queue_and_retention_for_courses(
-        db, course_ids
-    )
+    review = await authoring_queries.count_review_queue_and_retention_for_courses(db, course_ids)
     ages = await authoring_queries.review_backlog_ages_for_courses(db, course_ids)
 
     tasks: list[PriorityTask] = []
@@ -1788,9 +1815,7 @@ async def list_priority_tasks(
     # --- Students. Named individually: "3 students need attention" is a
     # statistic, "Nguyen Van A, silent 12 days" is something to act on.
     high_risk = [row for row in at_risk if row.severity == "high"]
-    users = await identity_api.get_users_by_ids(
-        db, [row.user_id for row in high_risk[:limit]]
-    )
+    users = await identity_api.get_users_by_ids(db, [row.user_id for row in high_risk[:limit]])
     for row in high_risk[:limit]:
         student = users.get(row.user_id)
         if student is None:
@@ -2093,7 +2118,7 @@ async def get_authoring_content(
     course_dict = {
         "id": course.id,
         "organization_id": course.organization_id,
-        "org_unit_id": course.org_unit_id,
+        "faculty_id": course.faculty_id,
         "owner_user_id": course.owner_user_id,
         "slug": course.slug,
         "title": course.title,
@@ -2555,9 +2580,7 @@ async def duplicate_course_outcome(
         new_row.parent_id = new_parent.id if new_parent else None
 
     # Position the root copy right after the original among its siblings.
-    siblings = await authoring_queries.list_course_outcome_siblings(
-        db, course_id, source.parent_id
-    )
+    siblings = await authoring_queries.list_course_outcome_siblings(db, course_id, source.parent_id)
     insert_at = next((i for i, s in enumerate(siblings) if s.id == source.id), len(siblings)) + 1
     db.add_all(new_by_old.values())
     await _flush_or_conflict(db)

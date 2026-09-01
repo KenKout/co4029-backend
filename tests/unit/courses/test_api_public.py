@@ -146,7 +146,7 @@ def test_course_dto_has_only_public_fields() -> None:
     assert fields == {
         "id",
         "organization_id",
-        "org_unit_id",
+        "faculty_id",
         "owner_user_id",
         "slug",
         "title",
@@ -180,7 +180,7 @@ def test_content_tree_dto_round_trip() -> None:
         "course": {
             "id": course_id,
             "organization_id": org_id,
-            "org_unit_id": None,
+            "faculty_id": None,
             "owner_user_id": owner_id,
             "slug": "intro",
             "title": "Intro",
@@ -229,7 +229,7 @@ def test_content_tree_dto_drops_extra_fields() -> None:
         "course": {
             "id": course_id,
             "organization_id": org_id,
-            "org_unit_id": None,
+            "faculty_id": None,
             "owner_user_id": owner_id,
             "slug": "intro",
             "title": "Intro",

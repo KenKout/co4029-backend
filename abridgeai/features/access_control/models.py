@@ -41,6 +41,7 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
@@ -113,6 +114,10 @@ class OrgUnit(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftDeleteMix
         CheckConstraint(
             "unit_type IN ('faculty', 'department', 'office', 'program', 'campus', 'other')",
             name="ck_org_units_unit_type",
+        ),
+        CheckConstraint(
+            "deleted_at IS NOT NULL OR (unit_type = 'faculty' AND parent_unit_id IS NULL)",
+            name="ck_org_units_live_faculty_root",
         ),
     )
 
@@ -201,6 +206,59 @@ class OrganizationMembership(
         DateTime(timezone=True), nullable=False, server_default=text("NOW()")
     )
     left_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class UserFacultyAssignment(
+    UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftDeleteMixin, Base
+):
+    """Active staff affiliation with one top-level faculty.
+
+    Organization membership remains the tenant/account boundary.  This table
+    is deliberately separate because a dean, manager, or teacher may work in
+    several faculties at the same time.  Academic authority is still granted
+    by :class:`UserRoleAssignment`; affiliation alone never grants a role.
+    """
+
+    __tablename__ = "user_faculty_assignments"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('active', 'inactive')",
+            name="ck_user_faculty_assignments_status",
+        ),
+        Index(
+            "uq_user_faculty_assignments_active",
+            "user_id",
+            "faculty_id",
+            unique=True,
+            postgresql_where=text(
+                "deleted_at IS NULL AND status = 'active' AND active_until IS NULL"
+            ),
+        ),
+    )
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("organizations.id", ondelete="NO ACTION"),
+        nullable=False,
+        index=True,
+    )
+    faculty_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("org_units.id", ondelete="NO ACTION"),
+        nullable=False,
+        index=True,
+    )
+    status: Mapped[str] = mapped_column(String(20), nullable=False, server_default=text("'active'"))
+    active_from: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("NOW()")
+    )
+    active_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 # ---------------------------------------------------------------------------
@@ -425,10 +483,6 @@ class CareerPath(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftDelete
         PGUUID(as_uuid=True),
         ForeignKey("organizations.id", ondelete="NO ACTION"),
         nullable=False,
-    )
-    org_unit_id: Mapped[uuid.UUID | None] = mapped_column(
-        PGUUID(as_uuid=True),
-        ForeignKey("org_units.id", ondelete="SET NULL"),
     )
     slug: Mapped[str] = mapped_column(String(100), nullable=False)
     name: Mapped[str] = mapped_column(String(255), nullable=False)

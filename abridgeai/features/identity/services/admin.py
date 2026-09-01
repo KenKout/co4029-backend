@@ -167,17 +167,12 @@ async def search_users(
     if role:
         restrict_sets.append(set(await access_control_api.list_user_ids_with_role(db, role)))
     if organization:
-        restrict_sets.append(
-            set(await access_control_api.list_user_ids_in_org(db, organization))
-        )
+        restrict_sets.append(set(await access_control_api.list_user_ids_in_org(db, organization)))
     if org_unit:
-        # Narrows to the unit's whole subtree, so selecting a faculty in the
-        # org tree lists its departments' people too. Intersects with the
-        # org filter above rather than replacing it — a unit id is only ever
-        # meaningful inside its own organization.
-        restrict_sets.append(
-            set(await access_control_api.list_user_ids_in_org_unit(db, org_unit))
-        )
+        # The parameter name remains backward compatible; it now narrows to
+        # active staff affiliations in one top-level Faculty. Students are
+        # intentionally excluded because they have no Faculty affiliation.
+        restrict_sets.append(set(await access_control_api.list_user_ids_in_org_unit(db, org_unit)))
 
     restrict_ids: list[UUID] | None = None
     if restrict_sets:
@@ -197,27 +192,17 @@ async def search_users(
         page_size=page_size,
     )
     user_ids = [u.id for u in result.items]
-    profiles = {
-        p.user_id: p for p in await user_queries.list_profiles(db, user_ids)
-    }
+    profiles = {p.user_id: p for p in await user_queries.list_profiles(db, user_ids)}
     # Batch-load avatar storage objects for the page, then presign each (the
     # sign call is local-only, so minting stays O(1) network for the page).
-    avatar_ids = [
-        p.avatar_object_id
-        for p in profiles.values()
-        if p.avatar_object_id is not None
-    ]
+    avatar_ids = [p.avatar_object_id for p in profiles.values() if p.avatar_object_id is not None]
     storage_map = await user_queries.list_storage_objects(db, avatar_ids)
     role_map = await access_control_api.get_role_codes_for_users(db, user_ids)
     org_map = await access_control_api.get_primary_orgs_for_users(db, user_ids)
     items = []
     for u in result.items:
         org = org_map.get(u.id)
-        items.append(
-            await _serialize_search_row(
-                u, profiles.get(u.id), storage_map, role_map, org
-            )
-        )
+        items.append(await _serialize_search_row(u, profiles.get(u.id), storage_map, role_map, org))
     return Page(
         items=items,
         total=result.total,
@@ -227,9 +212,7 @@ async def search_users(
     )
 
 
-async def get_user_overview(
-    db: AsyncSession, *, user_id: UUID
-) -> UserOverviewRead:
+async def get_user_overview(db: AsyncSession, *, user_id: UUID) -> UserOverviewRead:
     """Assemble the manager/HOD user-detail payload for ``user_id``.
 
     Starts from the user's identity (same ``UserRead`` the list rows use),
@@ -263,9 +246,7 @@ async def get_user_overview(
 
         assigned = await courses_api.list_courses_for_teacher(db, user_id)
         overview.assigned_courses = [
-            AssignedCourseRead(
-                course_id=c.id, title=c.title, slug=c.slug, status=c.status
-            )
+            AssignedCourseRead(course_id=c.id, title=c.title, slug=c.slug, status=c.status)
             for c in assigned
         ]
     return overview
@@ -285,9 +266,7 @@ async def _attach_student_sections(
 
     active_at: datetime | None = overview.user.last_login_at
 
-    enrollments = await enrollments_api.list_user_course_enrollments(
-        db, user_id=student_id
-    )
+    enrollments = await enrollments_api.list_user_course_enrollments(db, user_id=student_id)
     courses: list[CourseProgressRead] = []
     for enrollment in enrollments:
         # Dropped enrolments are KEPT. They were skipped, which meant a
@@ -304,9 +283,7 @@ async def _attach_student_sections(
         completion = float(progress.get("completion_percent") or 0)
         last = progress.get("last_activity_at")
         if last is not None:
-            last_dt = (
-                last if isinstance(last, datetime) else datetime.fromisoformat(str(last))
-            )
+            last_dt = last if isinstance(last, datetime) else datetime.fromisoformat(str(last))
             active_at = max(active_at, last_dt) if active_at else last_dt
         courses.append(
             CourseProgressRead(
@@ -323,9 +300,7 @@ async def _attach_student_sections(
         )
     overview.courses = courses
 
-    path_rows = await career_paths_api.list_user_career_enrollments(
-        db, student_id=student_id
-    )
+    path_rows = await career_paths_api.list_user_career_enrollments(db, student_id=student_id)
     paths: list[CareerPathProgressRead] = []
     for row in path_rows:
         career_path_id = UUID(str(row["career_path_id"]))
@@ -336,8 +311,7 @@ async def _attach_student_sections(
         total = len(course_rows)
         percent = (
             round(
-                sum(float(r.get("completion_percent") or 0) for r in course_rows)
-                / total,
+                sum(float(r.get("completion_percent") or 0) for r in course_rows) / total,
                 2,
             )
             if total
@@ -388,9 +362,7 @@ async def create_user_account(
     """
     existing = await user_queries.get_user_by_email(db, payload.primary_email)
     if existing is not None:
-        raise ConflictError(
-            f"user with email '{payload.primary_email}' already exists"
-        )
+        raise ConflictError(f"user with email '{payload.primary_email}' already exists")
 
     user = User(primary_email=payload.primary_email, status="active")
     db.add(user)

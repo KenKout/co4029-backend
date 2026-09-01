@@ -126,7 +126,7 @@ async def scenario(engine: AsyncEngine, seeded_users: SeededUsers) -> AsyncItera
         )
         await conn.execute(
             text(
-                "INSERT INTO courses (id, organization_id, org_unit_id, "
+                "INSERT INTO courses (id, organization_id, faculty_id, "
                 "owner_user_id, slug, title, status) "
                 "VALUES (:id, :org, :unit, :owner, :slug, :title, 'draft')"
             ),
@@ -156,7 +156,7 @@ async def scenario(engine: AsyncEngine, seeded_users: SeededUsers) -> AsyncItera
         )
         await conn.execute(
             text(
-                "INSERT INTO courses (id, organization_id, org_unit_id, "
+                "INSERT INTO courses (id, organization_id, faculty_id, "
                 "owner_user_id, slug, title, status) "
                 "VALUES (:id, :org, :unit, :owner, :slug, :title, 'draft')"
             ),

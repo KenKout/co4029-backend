@@ -331,32 +331,40 @@ async def review_backlog_ages_for_courses(
     if not course_ids:
         return empty
 
-    quiz_stmt = select(
-        func.count(),
-        # Blocking: the parent quiz is still a draft, so these pending
-        # questions are what stands between it and publication.
-        func.count().filter(Quiz.status == "draft"),
-        func.count(func.distinct(Quiz.course_id)),
-        func.min(QuizQuestion.created_at),
-    ).select_from(QuizQuestion).join(Quiz, Quiz.id == QuizQuestion.quiz_id).where(
-        Quiz.course_id.in_(course_ids),
-        Quiz.deleted_at.is_(None),
-        QuizQuestion.deleted_at.is_(None),
-        QuizQuestion.review_status == "pending",
+    quiz_stmt = (
+        select(
+            func.count(),
+            # Blocking: the parent quiz is still a draft, so these pending
+            # questions are what stands between it and publication.
+            func.count().filter(Quiz.status == "draft"),
+            func.count(func.distinct(Quiz.course_id)),
+            func.min(QuizQuestion.created_at),
+        )
+        .select_from(QuizQuestion)
+        .join(Quiz, Quiz.id == QuizQuestion.quiz_id)
+        .where(
+            Quiz.course_id.in_(course_ids),
+            Quiz.deleted_at.is_(None),
+            QuizQuestion.deleted_at.is_(None),
+            QuizQuestion.review_status == "pending",
+        )
     )
     q_count, q_blocking, q_courses, q_oldest = (await db.execute(quiz_stmt)).one()
 
-    iv_stmt = select(
-        func.count(),
-        func.count(func.distinct(InterviewConfig.course_id)),
-        func.min(InterviewQuestion.created_at),
-    ).select_from(InterviewQuestion).join(
-        InterviewConfig, InterviewConfig.id == InterviewQuestion.interview_config_id
-    ).where(
-        InterviewConfig.course_id.in_(course_ids),
-        InterviewConfig.deleted_at.is_(None),
-        InterviewQuestion.deleted_at.is_(None),
-        InterviewQuestion.review_status == "pending",
+    iv_stmt = (
+        select(
+            func.count(),
+            func.count(func.distinct(InterviewConfig.course_id)),
+            func.min(InterviewQuestion.created_at),
+        )
+        .select_from(InterviewQuestion)
+        .join(InterviewConfig, InterviewConfig.id == InterviewQuestion.interview_config_id)
+        .where(
+            InterviewConfig.course_id.in_(course_ids),
+            InterviewConfig.deleted_at.is_(None),
+            InterviewQuestion.deleted_at.is_(None),
+            InterviewQuestion.review_status == "pending",
+        )
     )
     i_count, i_courses, i_oldest = (await db.execute(iv_stmt)).one()
 
@@ -544,14 +552,11 @@ async def count_review_queue_and_retention_for_courses(
     )
     card_count, avg_ef, cards_overdue = (await db.execute(card_totals_stmt)).one()
 
-    below_threshold_stmt = (
-        select(func.count())
-        .select_from(
-            card_scope.with_only_columns(StudentCardState.student_id)
-            .group_by(StudentCardState.student_id)
-            .having(func.avg(StudentCardState.ef) < _EF_STRUGGLING_THRESHOLD)
-            .subquery()
-        )
+    below_threshold_stmt = select(func.count()).select_from(
+        card_scope.with_only_columns(StudentCardState.student_id)
+        .group_by(StudentCardState.student_id)
+        .having(func.avg(StudentCardState.ef) < _EF_STRUGGLING_THRESHOLD)
+        .subquery()
     )
     students_below_ef_threshold = int((await db.execute(below_threshold_stmt)).scalar_one())
 
@@ -821,8 +826,8 @@ async def list_courses_assigned_to_teacher(
     return list((await db.execute(stmt)).scalars().all())
 
 
-async def list_courses_in_org_units(db: AsyncSession, org_unit_ids: Sequence[UUID]) -> list[Course]:
-    """Courses attached to ANY of ``org_unit_ids``, newest first.
+async def list_courses_in_faculties(db: AsyncSession, faculty_ids: Sequence[UUID]) -> list[Course]:
+    """Courses owned by any of ``faculty_ids``, newest first.
 
     Takes a set of units rather than one because the caller expands a unit
     into its subtree first: a faculty's course list has to include the
@@ -832,15 +837,15 @@ async def list_courses_in_org_units(db: AsyncSession, org_unit_ids: Sequence[UUI
     with the permissions — courses the HOD could open never appeared in the
     list they opened them from.
 
-    An empty ``org_unit_ids`` returns no rows, NOT every course: the caller
+    An empty ``faculty_ids`` returns no rows, NOT every course: the caller
     passes empty only when the unit was missing or deleted, and widening
     that to "all courses" would leak the whole org.
     """
-    if not org_unit_ids:
+    if not faculty_ids:
         return []
     stmt = (
         select(Course)
-        .where(Course.org_unit_id.in_(list(org_unit_ids)))
+        .where(Course.faculty_id.in_(list(faculty_ids)))
         .order_by(Course.created_at.desc())
     )
     return list((await db.execute(stmt)).scalars().all())
@@ -1167,11 +1172,13 @@ async def list_course_module_prerequisites(
     prerequisite graph without an N+1 per module. Both endpoints are remapped
     by the caller (they reference sibling modules, all of which are cloned).
     """
-    stmt = select(
-        ModulePrerequisite.module_id, ModulePrerequisite.prerequisite_module_id
-    ).join(Module, Module.id == ModulePrerequisite.module_id).where(
-        Module.course_id == course_id,
-        Module.deleted_at.is_(None),
+    stmt = (
+        select(ModulePrerequisite.module_id, ModulePrerequisite.prerequisite_module_id)
+        .join(Module, Module.id == ModulePrerequisite.module_id)
+        .where(
+            Module.course_id == course_id,
+            Module.deleted_at.is_(None),
+        )
     )
     return [(row[0], row[1]) for row in (await db.execute(stmt)).all()]
 
@@ -1187,9 +1194,9 @@ async def list_course_lesson_prerequisites(
     """
     if not lesson_ids:
         return []
-    stmt = select(
-        LessonPrerequisite.lesson_id, LessonPrerequisite.prereq_lesson_id
-    ).where(LessonPrerequisite.lesson_id.in_(lesson_ids))
+    stmt = select(LessonPrerequisite.lesson_id, LessonPrerequisite.prereq_lesson_id).where(
+        LessonPrerequisite.lesson_id.in_(lesson_ids)
+    )
     return [(row[0], row[1]) for row in (await db.execute(stmt)).all()]
 
 
@@ -1463,7 +1470,7 @@ __all__ = [
     "list_course_roster_with_progress",
     "list_courses_assigned_to_teacher",
     "list_courses_for_owner",
-    "list_courses_in_org_units",
+    "list_courses_in_faculties",
     "list_lessons_for_authoring",
     "list_module_items",
     "list_module_prerequisites",
@@ -1505,9 +1512,7 @@ async def course_health_metrics_for_courses(
         row.course_id: CourseHealthMetricsRow(
             course_id=row.course_id,
             pass_rate_percent=(
-                float(row.pass_rate_percent)
-                if row.pass_rate_percent is not None
-                else None
+                float(row.pass_rate_percent) if row.pass_rate_percent is not None else None
             ),
             pass_sample=int(row.pass_sample),
             last_activity_at=row.last_activity_at,

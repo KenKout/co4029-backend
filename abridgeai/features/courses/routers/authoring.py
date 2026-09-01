@@ -148,7 +148,7 @@ _TEACHER_PATCHABLE_COURSE_FIELDS: frozenset[str] = frozenset(
 )
 
 # Everything else on CourseUpdate is manager-owned (needs course.delete):
-# title, slug, status, org_unit_id, thumbnail_object_id.
+# title, slug, status, faculty_id, thumbnail_object_id.
 # (`level`, `expected_completion_days` and `enrollment_cap` were removed from
 # the schema: level is now DERIVED from career-path placement, completion days
 # is gone, and enrollment is ALWAYS unlimited — so none of them is user-set
@@ -223,9 +223,7 @@ async def create_course(
     :func:`require_course_permission`.
     """
     try:
-        course = await authoring_service.create_course(
-            db, payload, current_user, arq_pool=arq_pool
-        )
+        course = await authoring_service.create_course(db, payload, current_user, arq_pool=arq_pool)
     except ConflictError as exc:
         raise _conflict(str(exc)) from exc
     except AppError as exc:
@@ -246,6 +244,7 @@ async def import_course_from_syllabus(
     current_user: Annotated[CurrentUser, Depends(_REQUIRE_CREATE)],
     db: Annotated[AsyncSession, Depends(get_db)],
     filename: Annotated[str | None, Query(max_length=255)] = None,
+    faculty_id: Annotated[UUID | None, Query()] = None,
     arq_pool: Annotated[object | None, Depends(get_arq_pool)] = None,
 ) -> SyllabusImportResult:
     """Create a DRAFT course from an uploaded course-syllabus PDF.
@@ -277,6 +276,7 @@ async def import_course_from_syllabus(
             data=data,
             content_type=content_type,
             filename=filename,
+            faculty_id=faculty_id,
             language=language,
             actor=current_user,
             arq_pool=arq_pool,
@@ -407,9 +407,7 @@ async def list_priority_tasks(
     Same lax permission as the courses list — scope is enforced in the
     service via owner/assignment match.
     """
-    return await authoring_service.list_priority_tasks(
-        db, user=current_user, limit=limit
-    )
+    return await authoring_service.list_priority_tasks(db, user=current_user, limit=limit)
 
 
 @router.get("/dashboard/course-health", response_model=list[CourseHealthRow])
@@ -465,9 +463,7 @@ async def list_review_queue_items(
 ) -> list[ReviewQueueItem]:
     """Drill-down rows behind one "Needs your review" category."""
     try:
-        return await authoring_service.list_review_queue_items(
-            db, user=current_user, kind=kind
-        )
+        return await authoring_service.list_review_queue_items(db, user=current_user, kind=kind)
     except NotFoundError as exc:
         raise _not_found(str(exc)) from exc
 
@@ -559,9 +555,7 @@ async def update_course(
         course_perms = await load_course_permissions(db, current_user.user_id, course_id)
         if "course.delete" not in course_perms:
             raise _forbidden(
-                "Only managers may change "
-                + ", ".join(sorted(manager_only))
-                + " on a course."
+                "Only managers may change " + ", ".join(sorted(manager_only)) + " on a course."
             )
     try:
         course = await authoring_service.update_course(db, course_id, payload, current_user)

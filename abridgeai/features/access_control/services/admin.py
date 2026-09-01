@@ -13,6 +13,7 @@ Import-linter posture: services do not import :mod:`sqlalchemy` directly
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from uuid import UUID
 
@@ -23,6 +24,7 @@ from abridgeai.features.access_control.models import (
     UserRoleAssignment,
 )
 from abridgeai.features.access_control.queries import admin as admin_queries
+from abridgeai.features.access_control.queries import organizations as org_queries
 from abridgeai.features.access_control.queries.permissions import (
     invalidate_user_permissions,
 )
@@ -38,8 +40,8 @@ if TYPE_CHECKING:
 VALID_SCOPE_KINDS = frozenset({"global", "organization", "org_unit", "course"})
 
 # Roles that only a platform admin (``system.administer``) may assign or
-# revoke. A HOD manages managers, not other HODs.
-ADMIN_ONLY_ROLES = frozenset({"hod"})
+# revoke. Master Dean and Faculty Dean delegation is enforced separately.
+ADMIN_ONLY_ROLES: frozenset[str] = frozenset()
 
 # Roles that escalate beyond the plain ``user.role_assign`` authority a
 # manager holds. Assigning or revoking these requires ``user.role_assign.hod``
@@ -138,6 +140,149 @@ async def list_user_assignments(
     return [r for r in rows if r.organization_id in assign_orgs]
 
 
+async def _authorize_delegated_assignment(
+    db: AsyncSession,
+    *,
+    payload: RoleAssignmentCreate,
+    actor_id: UUID,
+    actor_permissions: frozenset[str],
+) -> None:
+    if payload.role_code == "hod":
+        if payload.scope_kind == "organization":
+            if "system.administer" not in actor_permissions:
+                raise ForbiddenError("only a system administrator may bootstrap a Master Dean")
+            return
+        if (
+            payload.scope_kind != "org_unit"
+            or payload.organization_id is None
+            or payload.org_unit_id is None
+        ):
+            raise ScopeValidationError(
+                "Faculty Dean role supports organization or faculty scope only"
+            )
+        is_master = await org_queries.user_has_role_scope(
+            db,
+            user_id=actor_id,
+            role_code="hod",
+            organization_id=payload.organization_id,
+        )
+        if not is_master:
+            raise ForbiddenError("only a Master Dean may appoint another Faculty Dean")
+
+    if payload.role_code != "manager":
+        return
+    if (
+        payload.scope_kind != "org_unit"
+        or payload.organization_id is None
+        or payload.org_unit_id is None
+    ):
+        raise ScopeValidationError("Manager role assigned by a Dean requires a faculty scope")
+    is_master = await org_queries.user_has_role_scope(
+        db,
+        user_id=actor_id,
+        role_code="hod",
+        organization_id=payload.organization_id,
+    )
+    is_faculty_dean = await org_queries.user_has_role_scope(
+        db,
+        user_id=actor_id,
+        role_code="hod",
+        organization_id=payload.organization_id,
+        faculty_id=payload.org_unit_id,
+    )
+    if not is_master and not is_faculty_dean:
+        raise ForbiddenError("you may assign managers only inside a faculty you lead")
+
+
+async def _authorize_delegated_revoke(
+    db: AsyncSession,
+    *,
+    assignment: UserRoleAssignment,
+    role_code: str,
+    actor_id: UUID,
+) -> None:
+    if role_code == "hod":
+        if assignment.scope_kind == "organization":
+            raise ForbiddenError(
+                "Master Dean assignments may only be revoked by a system administrator"
+            )
+        if assignment.organization_id is None:
+            raise ForbiddenError("Faculty Dean assignment has no organization scope")
+        is_master = await org_queries.user_has_role_scope(
+            db,
+            user_id=actor_id,
+            role_code="hod",
+            organization_id=assignment.organization_id,
+        )
+        if not is_master:
+            raise ForbiddenError("only a Master Dean may revoke another Faculty Dean")
+
+    if role_code != "manager":
+        return
+    if assignment.organization_id is None or assignment.org_unit_id is None:
+        raise ForbiddenError("only faculty-scoped manager assignments are delegated")
+    is_master = await org_queries.user_has_role_scope(
+        db,
+        user_id=actor_id,
+        role_code="hod",
+        organization_id=assignment.organization_id,
+    )
+    is_faculty_dean = await org_queries.user_has_role_scope(
+        db,
+        user_id=actor_id,
+        role_code="hod",
+        organization_id=assignment.organization_id,
+        faculty_id=assignment.org_unit_id,
+    )
+    if not is_master and not is_faculty_dean:
+        raise ForbiddenError("you may revoke managers only inside a faculty you lead")
+
+
+async def _ensure_staff_faculty_affiliation(
+    db: AsyncSession,
+    *,
+    user_id: UUID,
+    payload: RoleAssignmentCreate,
+    actor_id: UUID,
+) -> None:
+    """Keep Faculty-scoped staff roles and affiliations in one transaction."""
+    if payload.role_code not in {"hod", "manager", "teacher"}:
+        return
+    if (
+        payload.scope_kind != "org_unit"
+        or payload.organization_id is None
+        or payload.org_unit_id is None
+    ):
+        return
+
+    faculty = await org_queries.get_unit(db, payload.org_unit_id)
+    if (
+        faculty is None
+        or faculty.organization_id != payload.organization_id
+        or faculty.unit_type != "faculty"
+        or faculty.parent_unit_id is not None
+    ):
+        raise ScopeValidationError("org_unit_id must identify a live top-level faculty")
+
+    active_members = await org_queries.active_org_member_user_ids(
+        db, payload.organization_id, [user_id]
+    )
+    if user_id not in active_members:
+        raise ScopeValidationError("target user must be an active organization member")
+
+    existing = await org_queries.get_active_faculty_assignment(
+        db, user_id=user_id, faculty_id=payload.org_unit_id
+    )
+    if existing is None:
+        await org_queries.insert_faculty_assignment(
+            db,
+            user_id=user_id,
+            organization_id=payload.organization_id,
+            faculty_id=payload.org_unit_id,
+            actor_id=actor_id,
+        )
+
+
 async def create_role_assignment(
     db: AsyncSession,
     *,
@@ -161,16 +306,15 @@ async def create_role_assignment(
       (``has_global`` bypasses). A manager cannot assign roles in a
       tenant they have no authority in, even if the target user belongs
       to it.
-    * HOD-promotion gate: assigning a role in :data:`HOD_GATED_ROLES`
+    * Dean/manager-promotion gate: assigning a role in :data:`HOD_GATED_ROLES`
       (``hod``, ``manager``) requires the caller to hold
       ``user.role_assign.hod`` (or ``system.administer``). Plain
       ``user.role_assign`` (held by ``manager`` per T1.3
       ``role_seeds.yaml``) is NOT sufficient — this is what stops a
       manager from promoting peers to manager. Admin holds ALL so
       promotes freely.
-    * admin-only roles: assigning a role in :data:`ADMIN_ONLY_ROLES`
-      (``hod``) additionally requires ``system.administer`` — a HOD
-      manages managers, never other HODs.
+    * faculty role/affiliation consistency: Faculty-scoped staff roles create
+      the matching affiliation in the same transaction.
     """
     role = await admin_queries.get_role_by_code(db, payload.role_code)
     if role is None:
@@ -179,16 +323,8 @@ async def create_role_assignment(
     if user_id == actor_id and "system.administer" not in actor_permissions:
         raise ForbiddenError("you cannot assign a role to yourself")
 
-    if payload.role_code in ADMIN_ONLY_ROLES and (
-        "system.administer" not in actor_permissions
-    ):
-        raise ForbiddenError(
-            f"role '{payload.role_code}' requires the 'system.administer' permission"
-        )
-
     if payload.role_code in HOD_GATED_ROLES and not (
-        "user.role_assign.hod" in actor_permissions
-        or "system.administer" in actor_permissions
+        "user.role_assign.hod" in actor_permissions or "system.administer" in actor_permissions
     ):
         raise ForbiddenError(
             f"role '{payload.role_code}' requires the 'user.role_assign.hod' permission"
@@ -201,19 +337,43 @@ async def create_role_assignment(
         course_id=payload.course_id,
     )
 
+    await _authorize_delegated_assignment(
+        db,
+        payload=payload,
+        actor_id=actor_id,
+        actor_permissions=actor_permissions,
+    )
+
     if "system.administer" not in actor_permissions:
         if payload.scope_kind == "global":
-            raise ForbiddenError(
-                "scope_kind='global' requires the 'system.administer' permission"
-            )
-        assign_orgs, has_global = await admin_queries.assign_org_ids_for_user(
-            db, actor_id
-        )
+            raise ForbiddenError("scope_kind='global' requires the 'system.administer' permission")
+        assign_orgs, has_global = await admin_queries.assign_org_ids_for_user(db, actor_id)
         if not has_global and payload.organization_id not in assign_orgs:
             raise ForbiddenError(
                 "you can only assign roles in organizations where you hold "
                 "'user.role_assign' or 'user.role_assign.hod'"
             )
+
+    await _ensure_staff_faculty_affiliation(
+        db,
+        user_id=user_id,
+        payload=payload,
+        actor_id=actor_id,
+    )
+
+    # A Faculty Dean may legitimately lead several Faculties, but retrying
+    # the same appointment must not duplicate active authority rows.
+    now = datetime.now(UTC)
+    for existing in await admin_queries.list_assignments_for_user(db, user_id):
+        if (
+            existing.role_id == role.id
+            and existing.scope_kind == payload.scope_kind
+            and existing.organization_id == payload.organization_id
+            and existing.org_unit_id == payload.org_unit_id
+            and existing.course_id == payload.course_id
+            and (existing.active_until is None or existing.active_until > now)
+        ):
+            return existing
 
     created = await admin_queries.insert_assignment(
         db,
@@ -251,10 +411,12 @@ async def revoke_role_assignment(
         raise NotFoundError(f"role assignment {assignment_id} not found")
     assignment, role_code = pair
 
-    if actor_permissions and "system.administer" in actor_permissions:
-        await admin_queries.soft_delete_assignment(
-            db, assignment_id, actor_id=actor_id
-        )
+    system_admin = bool(actor_permissions and "system.administer" in actor_permissions)
+    delegated_academic_role = role_code == "manager" or (
+        role_code == "hod" and assignment.scope_kind == "org_unit"
+    )
+    if system_admin and not delegated_academic_role:
+        await admin_queries.soft_delete_assignment(db, assignment_id, actor_id=actor_id)
         invalidate_user_permissions(assignment.user_id)
         return
 
@@ -265,23 +427,22 @@ async def revoke_role_assignment(
     if role_code in ADMIN_ONLY_ROLES and not (
         actor_permissions and "system.administer" in actor_permissions
     ):
-        raise ForbiddenError(
-            f"role '{role_code}' requires the 'system.administer' permission"
-        )
+        raise ForbiddenError(f"role '{role_code}' requires the 'system.administer' permission")
     if role_code in HOD_GATED_ROLES and not (
         actor_permissions and "user.role_assign.hod" in actor_permissions
     ):
-        raise ForbiddenError(
-            f"role '{role_code}' requires the 'user.role_assign.hod' permission"
-        )
+        raise ForbiddenError(f"role '{role_code}' requires the 'user.role_assign.hod' permission")
+
+    await _authorize_delegated_revoke(
+        db,
+        assignment=assignment,
+        role_code=role_code,
+        actor_id=actor_id,
+    )
 
     if assignment.scope_kind == "global":
-        raise ForbiddenError(
-            "global role assignments require the 'system.administer' permission"
-        )
-    assign_orgs, has_global = await admin_queries.assign_org_ids_for_user(
-        db, actor_id
-    )
+        raise ForbiddenError("global role assignments require the 'system.administer' permission")
+    assign_orgs, has_global = await admin_queries.assign_org_ids_for_user(db, actor_id)
     if not has_global and assignment.organization_id not in assign_orgs:
         raise ForbiddenError(
             "you can only revoke role assignments in organizations where you "

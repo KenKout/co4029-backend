@@ -5,9 +5,9 @@ test_organization:
 
 test_org_unit:
   id: "00000000-0000-0000-0000-000000000030"
-  unit_type: "department"
-  name: "Test Department"
-  code: "TEST-DEPT"
+  unit_type: "faculty"
+  name: "Test Faculty"
+  code: "TEST-FAC"
 
 test_course:
   id: "00000000-0000-0000-0000-000000000040"
@@ -51,8 +51,9 @@ assignments:
 
   - user_id: "00000000-0000-0000-0000-000000000013"
     role_code: "manager"
-    scope_kind: "organization"
+    scope_kind: "org_unit"
     organization_id: "00000000-0000-0000-0000-000000000020"
+    org_unit_id: "00000000-0000-0000-0000-000000000030"
 
   - user_id: "00000000-0000-0000-0000-000000000014"
     role_code: "admin"

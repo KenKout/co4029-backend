@@ -81,8 +81,8 @@ _REQUIRE_STAFFING = require_any_permission(
 _REQUIRE_COURSE_STAFFING = require_course_permission(
     "course_id", "course.assign_teacher", "user.role_assign", "system.administer"
 )
-_REQUIRE_ORG_UNIT_STAFFING = require_org_unit_permission(
-    "org_unit_id", "course.assign_teacher", "user.role_assign", "system.administer"
+_REQUIRE_FACULTY_STAFFING = require_org_unit_permission(
+    "faculty_id", "course.assign_teacher", "user.role_assign", "system.administer"
 )
 # Course deletion is manager-owned: only an explicit ``course.delete`` grant
 # passes. ``allow_owner=False`` kills the ownership short-circuit so a
@@ -135,7 +135,17 @@ async def list_dept_courses(
     """
     scope_kind, organization_id, org_unit_id = await _resolve_caller_scope(db, current_user.user_id)
     if scope_kind == "org_unit" and org_unit_id is not None:
-        return await assignment_service.list_courses_in_dept(db, UUID(str(org_unit_id)))
+        assignments = await access_control_api.get_role_assignments_for_user(
+            db, current_user.user_id
+        )
+        faculty_ids = list(
+            {
+                UUID(str(row.org_unit_id))
+                for row in assignments
+                if row.scope_kind == "org_unit" and row.org_unit_id is not None
+            }
+        )
+        return await assignment_service.list_courses_in_faculties(db, faculty_ids)
 
     org_filter = (
         UUID(str(organization_id)) if scope_kind == "organization" and organization_id else None
@@ -206,6 +216,7 @@ async def assign_teacher(
 async def list_assignable_teachers_for_new_course(
     current_user: Annotated[CurrentUser, Depends(_REQUIRE_STAFFING)],
     db: Annotated[AsyncSession, Depends(get_db)],
+    faculty_id: UUID | None = None,
 ) -> list[AssignableTeacher]:
     """Teachers for a course that does not exist yet — the create wizard's picker.
 
@@ -222,7 +233,20 @@ async def list_assignable_teachers_for_new_course(
     Declared BEFORE ``/courses/{course_id}/...`` deliberately — a literal path
     segment must not be shadowed by a parameterised route.
     """
-    rows = await assignment_service.list_assignable_teachers_for_creator(db, current_user)
+    try:
+        rows = await assignment_service.list_assignable_teachers_for_creator(
+            db, current_user, faculty_id=faculty_id
+        )
+    except ForbiddenError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"error": "forbidden", "message": str(exc)},
+        ) from exc
+    except AppError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": "bad_request", "message": str(exc)},
+        ) from exc
     return [AssignableTeacher.model_validate(row) for row in rows]
 
 
@@ -446,20 +470,20 @@ async def update_dept_course(
     return course
 
 
-@router.get("/org-units/{org_unit_id}/courses", response_model=list[CourseAuthoring])
-async def list_org_unit_courses(
-    org_unit_id: UUID,
-    _current_user: Annotated[CurrentUser, Depends(_REQUIRE_ORG_UNIT_STAFFING)],
+@router.get("/faculties/{faculty_id}/courses", response_model=list[CourseAuthoring])
+async def list_faculty_courses(
+    faculty_id: UUID,
+    _current_user: Annotated[CurrentUser, Depends(_REQUIRE_FACULTY_STAFFING)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> list[CourseAuthoring]:
-    """All courses in ``org_unit_id``.
+    """All courses owned by ``faculty_id``.
 
     HOD can only pass their own org_unit (the org-unit-scoped permission
     factory walks the unit's ancestor chain and rejects cross-dept
     requests with 403). Manager (``scope_kind=organization``) and Admin
     (``scope_kind=global``) pass for any org_unit.
     """
-    return await assignment_service.list_courses_in_dept(db, org_unit_id)
+    return await assignment_service.list_courses_in_faculty(db, faculty_id)
 
 
 __all__ = ["router"]

@@ -72,6 +72,7 @@ def clear_permissions_cache() -> None:
     _COURSE_PERMS_CACHE.clear()
     _ORG_PERMS_CACHE.clear()
 
+
 _ORG_UNIT_TREE_SQL = (
     resources.files("abridgeai.features.access_control.queries.sql")
     .joinpath("org_unit_tree.sql")
@@ -108,7 +109,7 @@ _LOAD_USER_PERMISSIONS_SQL = text(
 _LOAD_COURSE_PERMISSIONS_SQL = text(
     f"""
     WITH RECURSIVE course_ctx AS (
-        SELECT id AS course_id, organization_id, org_unit_id
+        SELECT id AS course_id, organization_id, faculty_id AS org_unit_id
         FROM courses
         WHERE id = :course_id
     ),
@@ -129,6 +130,14 @@ _LOAD_COURSE_PERMISSIONS_SQL = text(
           OR (
               ura.scope_kind = 'org_unit'
               AND ura.org_unit_id IN (SELECT unit_id FROM org_unit_tree)
+              AND EXISTS (
+                  SELECT 1 FROM user_faculty_assignments ufa
+                  WHERE ufa.user_id = ura.user_id
+                    AND ufa.faculty_id = ura.org_unit_id
+                    AND ufa.status = 'active'
+                    AND ufa.deleted_at IS NULL
+                    AND (ufa.active_until IS NULL OR ufa.active_until > :at)
+              )
           )
           OR (
               ura.scope_kind = 'organization'
@@ -181,6 +190,14 @@ _LOAD_ORG_PERMISSIONS_SQL = text(
               AND ura.org_unit_id IN (
                   SELECT id FROM org_units
                   WHERE organization_id = :organization_id AND deleted_at IS NULL
+              )
+              AND EXISTS (
+                  SELECT 1 FROM user_faculty_assignments ufa
+                  WHERE ufa.user_id = ura.user_id
+                    AND ufa.faculty_id = ura.org_unit_id
+                    AND ufa.status = 'active'
+                    AND ufa.deleted_at IS NULL
+                    AND (ufa.active_until IS NULL OR ufa.active_until > :at)
               )
           )
       )

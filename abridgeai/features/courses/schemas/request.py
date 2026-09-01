@@ -58,7 +58,7 @@ class LessonUnlockConfig(_StrictRequest):
 
 
 class CourseCreate(_StrictRequest):
-    org_unit_id: UUID | None = None
+    faculty_id: UUID | None = None
     slug: str = Field(max_length=100)
     title: str = Field(max_length=255)
     description: str | None = None
@@ -74,7 +74,6 @@ class CourseCreate(_StrictRequest):
 class CourseUpdate(_StrictRequest):
     """Partial update for a course. State transitions checked in service."""
 
-    org_unit_id: UUID | None = None
     slug: str | None = Field(default=None, max_length=100)
     title: str | None = Field(default=None, max_length=255)
     description: str | None = None

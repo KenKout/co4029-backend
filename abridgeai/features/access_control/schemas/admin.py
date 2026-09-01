@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 ScopeKind = Literal["global", "organization", "org_unit", "course"]
 OrganizationStatus = Literal["active", "inactive", "archived"]
-UnitType = Literal["faculty", "department", "office", "program", "campus", "other"]
+UnitType = Literal["faculty"]
 MembershipStatus = Literal["active", "inactive", "suspended"]
 
 
@@ -208,8 +208,7 @@ class OrgUnitCreate(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    parent_unit_id: UUID | None = None
-    unit_type: UnitType
+    unit_type: UnitType = "faculty"
     name: str = Field(min_length=1, max_length=255)
     code: str | None = Field(default=None, max_length=50)
 
@@ -217,8 +216,6 @@ class OrgUnitCreate(BaseModel):
 class OrgUnitPatch(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    parent_unit_id: UUID | None = None
-    unit_type: UnitType | None = None
     name: str | None = Field(default=None, min_length=1, max_length=255)
     code: str | None = Field(default=None, max_length=50)
 
@@ -251,6 +248,26 @@ class BulkAssignUnitResult(BaseModel):
 
     assigned: int
     skipped: list[UUID] = Field(default_factory=list)
+
+
+class FacultyMembersAddRequest(BaseModel):
+    """Add staff affiliations without moving them out of other faculties."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    user_ids: list[UUID] = Field(min_length=1, max_length=500)
+
+
+class FacultyAssignmentRead(_ORM):
+    id: UUID
+    user_id: UUID
+    organization_id: UUID
+    faculty_id: UUID
+    status: str
+    active_from: datetime
+    active_until: datetime | None = None
+    created_by: UUID | None = None
+    role_codes: list[str] = Field(default_factory=list)
 
 
 class OrgUnitNode(_ORM):
@@ -296,6 +313,8 @@ class OrgUnitRead(_ORM):
 
 
 __all__ = [
+    "FacultyAssignmentRead",
+    "FacultyMembersAddRequest",
     "GrantCreate",
     "GrantRead",
     "MembershipCreate",

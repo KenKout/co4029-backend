@@ -100,6 +100,7 @@ async def import_course_from_syllabus(
     data: bytes,
     content_type: str | None,
     filename: str | None,
+    faculty_id: UUID | None,
     language: SyllabusLanguage,
     actor: CurrentUser,
     arq_pool: object | None = None,
@@ -137,6 +138,7 @@ async def import_course_from_syllabus(
             filename=filename,
             language=language,
             organization_id=org_id,
+            faculty_id=faculty_id,
             actor=actor,
             arq_pool=arq_pool,
         )
@@ -204,6 +206,7 @@ async def _build_course(
     filename: str | None,
     language: SyllabusLanguage,
     organization_id: UUID,
+    faculty_id: UUID | None,
     actor: CurrentUser,
     arq_pool: object | None,
 ) -> SyllabusImportResult:
@@ -212,8 +215,22 @@ async def _build_course(
         db, organization_id=organization_id, preferred=parsed.suggested_slug()
     )
 
+    # Lazy sibling import avoids an import-time service cycle while keeping
+    # manual creation and syllabus import on one ownership rule.
+    from abridgeai.features.courses.services.authoring import (  # noqa: PLC0415
+        resolve_new_course_faculty,
+    )
+
+    resolved_faculty_id = await resolve_new_course_faculty(
+        db,
+        actor=actor,
+        organization_id=organization_id,
+        requested_faculty_id=faculty_id,
+    )
+
     course = Course(
         organization_id=organization_id,
+        faculty_id=resolved_faculty_id,
         owner_user_id=actor.user_id,
         slug=slug,
         title=parsed.title,

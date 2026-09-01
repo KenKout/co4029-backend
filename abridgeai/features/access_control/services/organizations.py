@@ -13,11 +13,10 @@ parameter is annotated under ``TYPE_CHECKING`` only.
 from __future__ import annotations
 
 from datetime import UTC, datetime
-
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
-from abridgeai.core.exceptions import AppError, NotFoundError
+from abridgeai.core.exceptions import AppError, ForbiddenError, NotFoundError
 from abridgeai.core.pagination import (
     CursorPage,
     Page,
@@ -29,11 +28,13 @@ from abridgeai.features.access_control.models import (
     OrganizationDomain,
     OrganizationMembership,
     OrgUnit,
+    UserFacultyAssignment,
 )
 from abridgeai.features.access_control.queries import organizations as org_queries
 from abridgeai.features.access_control.schemas.admin import (
     BulkAssignUnitRequest,
     BulkAssignUnitResult,
+    FacultyMembersAddRequest,
     MembershipPatch,
     OrganizationCreate,
     OrganizationDomainCreate,
@@ -86,9 +87,7 @@ async def organization_id_for_unit(db: AsyncSession, unit_id: UUID) -> UUID | No
     return row.organization_id
 
 
-async def organization_id_for_membership(
-    db: AsyncSession, membership_id: UUID
-) -> UUID | None:
+async def organization_id_for_membership(db: AsyncSession, membership_id: UUID) -> UUID | None:
     row = await org_queries.get_membership(db, membership_id)
     if row is None or row.deleted_at is not None:
         return None
@@ -134,9 +133,7 @@ async def list_organizations(
         visible_to_ids=visible_to_ids,
     )
     next_cursor = (
-        encode_composite_cursor(rows[-1].name, rows[-1].id)
-        if len(rows) == limit
-        else None
+        encode_composite_cursor(rows[-1].name, rows[-1].id) if len(rows) == limit else None
     )
     return CursorPage(items=rows, next_cursor=next_cursor)
 
@@ -207,9 +204,7 @@ async def count_organizations(
     include_deleted: bool = False,
     status: str | None = None,
 ) -> int:
-    return await org_queries.count_organizations(
-        db, include_deleted=include_deleted, status=status
-    )
+    return await org_queries.count_organizations(db, include_deleted=include_deleted, status=status)
 
 
 async def get_organization(db: AsyncSession, organization_id: UUID) -> Organization:
@@ -259,9 +254,7 @@ async def delete_organization(
     *,
     actor_id: UUID | None,
 ) -> None:
-    deleted = await org_queries.soft_delete_organization(
-        db, organization_id, actor_id=actor_id
-    )
+    deleted = await org_queries.soft_delete_organization(db, organization_id, actor_id=actor_id)
     if not deleted:
         raise NotFoundError("Organization not found")
 
@@ -271,9 +264,7 @@ async def delete_organization(
 # ---------------------------------------------------------------------------
 
 
-async def list_domains(
-    db: AsyncSession, organization_id: UUID
-) -> list[OrganizationDomain]:
+async def list_domains(db: AsyncSession, organization_id: UUID) -> list[OrganizationDomain]:
     await get_organization(db, organization_id)  # raises 404 if missing
     return await org_queries.list_domains_for_organization(db, organization_id)
 
@@ -421,19 +412,22 @@ async def create_unit(
     db: AsyncSession,
     organization_id: UUID,
     payload: OrgUnitCreate,
+    *,
+    actor_id: UUID,
 ) -> OrgUnit:
     await get_organization(db, organization_id)
-    if payload.parent_unit_id is not None:
-        parent = await org_queries.get_unit(db, payload.parent_unit_id)
-        if parent is None or parent.deleted_at is not None:
-            raise AppError("parent_unit_id does not exist or is deleted")
-        if parent.organization_id != organization_id:
-            raise AppError("parent_unit_id belongs to a different organization")
+    if not await org_queries.user_has_role_scope(
+        db,
+        user_id=actor_id,
+        role_code="hod",
+        organization_id=organization_id,
+    ):
+        raise ForbiddenError("only a Master Dean may create a faculty")
     return await org_queries.insert_unit(
         db,
         organization_id=organization_id,
-        parent_unit_id=payload.parent_unit_id,
-        unit_type=payload.unit_type,
+        parent_unit_id=None,
+        unit_type="faculty",
         name=payload.name,
         code=payload.code,
     )
@@ -443,30 +437,20 @@ async def patch_unit(
     db: AsyncSession,
     unit_id: UUID,
     payload: OrgUnitPatch,
+    *,
+    actor_id: UUID,
 ) -> OrgUnit:
     current = await get_unit(db, unit_id)
+    if not await org_queries.user_has_role_scope(
+        db,
+        user_id=actor_id,
+        role_code="hod",
+        organization_id=current.organization_id,
+    ):
+        raise ForbiddenError("only a Master Dean may edit a faculty")
     fields = payload.model_dump(exclude_unset=True)
-    if "parent_unit_id" in fields and fields["parent_unit_id"] is not None:
-        if fields["parent_unit_id"] == unit_id:
-            raise AppError("parent_unit_id cannot reference the unit itself")
-        parent = await org_queries.get_unit(db, fields["parent_unit_id"])
-        if parent is None or parent.deleted_at is not None:
-            raise AppError("parent_unit_id does not exist or is deleted")
-        if parent.organization_id != current.organization_id:
-            raise AppError("parent_unit_id belongs to a different organization")
-        # Reject re-parenting a unit under its OWN descendant. The self-check
-        # above only catches the one-hop case (A -> A); moving Faculty under
-        # one of its departments detaches the whole branch into a ring that
-        # no longer reaches a root. Nothing downstream survives that: the
-        # ancestor walk in org_unit_tree.sql stops being able to decide
-        # whether a course is in an HOD's scope, and the tree UI has no node
-        # to render it under.
-        descendants = await org_queries.list_descendant_unit_ids(db, unit_id)
-        if fields["parent_unit_id"] in descendants:
-            raise AppError(
-                "parent_unit_id would create a cycle: the chosen parent is "
-                "inside this unit's own subtree"
-            )
+    if current.unit_type != "faculty" or current.parent_unit_id is not None:
+        raise AppError("only top-level faculties can be edited")
     updated = await org_queries.update_unit(db, unit_id, fields=fields)
     if updated is None:
         raise NotFoundError("Org unit not found")
@@ -509,9 +493,7 @@ async def assign_memberships_to_unit(
 
     foreign = [r.id for r in rows if r.organization_id != organization_id]
     if foreign:
-        raise AppError(
-            "membership_ids contains memberships from a different organization"
-        )
+        raise AppError("membership_ids contains memberships from a different organization")
 
     skipped = [mid for mid in payload.membership_ids if mid not in found]
     assigned = await org_queries.bulk_update_membership_unit(
@@ -524,11 +506,176 @@ async def delete_unit(
     db: AsyncSession,
     unit_id: UUID,
     *,
-    actor_id: UUID | None,
+    actor_id: UUID,
 ) -> None:
+    unit = await get_unit(db, unit_id)
+    if not await org_queries.user_has_role_scope(
+        db,
+        user_id=actor_id,
+        role_code="hod",
+        organization_id=unit.organization_id,
+    ):
+        raise ForbiddenError("only a Master Dean may archive a faculty")
+    if unit.unit_type != "faculty":
+        raise AppError("only faculties can be archived")
+    if await org_queries.faculty_has_live_dependencies(db, unit_id):
+        raise AppError(
+            "faculty_has_dependencies: remove or archive its programs, courses, "
+            "and staff assignments first"
+        )
     deleted = await org_queries.soft_delete_unit(db, unit_id, actor_id=actor_id)
     if not deleted:
         raise NotFoundError("Org unit not found")
+
+
+async def _faculty_management_level(
+    db: AsyncSession,
+    *,
+    actor_id: UUID,
+    organization_id: UUID,
+    faculty_id: UUID,
+) -> str | None:
+    """Return ``master`` / ``dean`` for an authorized Faculty Dean."""
+    if await org_queries.user_has_role_scope(
+        db,
+        user_id=actor_id,
+        role_code="hod",
+        organization_id=organization_id,
+    ):
+        return "master"
+    if await org_queries.user_has_role_scope(
+        db,
+        user_id=actor_id,
+        role_code="hod",
+        organization_id=organization_id,
+        faculty_id=faculty_id,
+    ):
+        return "dean"
+    return None
+
+
+async def list_faculty_assignments(
+    db: AsyncSession,
+    organization_id: UUID,
+    *,
+    faculty_id: UUID | None = None,
+    actor_id: UUID,
+    allow_system_admin: bool = False,
+) -> list[UserFacultyAssignment]:
+    await get_organization(db, organization_id)
+    if faculty_id is not None:
+        faculty = await get_unit(db, faculty_id)
+        if faculty.organization_id != organization_id or faculty.unit_type != "faculty":
+            raise NotFoundError("Faculty not found")
+    rows = await org_queries.list_faculty_assignments(db, organization_id, faculty_id=faculty_id)
+    if allow_system_admin or await org_queries.user_has_role_scope(
+        db,
+        user_id=actor_id,
+        role_code="hod",
+        organization_id=organization_id,
+    ):
+        visible_rows = rows
+    else:
+        actor_faculty_ids = set(
+            await org_queries.list_active_faculty_ids_for_user(db, actor_id, organization_id)
+        )
+        if faculty_id is not None and faculty_id not in actor_faculty_ids:
+            raise ForbiddenError("you may only view staff in your assigned faculties")
+        visible_rows = [row for row in rows if row.faculty_id in actor_faculty_ids]
+
+    roles_by_assignment = await org_queries.faculty_role_codes(
+        db, [(row.user_id, row.faculty_id) for row in visible_rows]
+    )
+    for row in visible_rows:
+        row.role_codes = roles_by_assignment.get((row.user_id, row.faculty_id), [])
+    return visible_rows
+
+
+async def add_faculty_members(
+    db: AsyncSession,
+    faculty_id: UUID,
+    payload: FacultyMembersAddRequest,
+    *,
+    actor_id: UUID,
+) -> list[UserFacultyAssignment]:
+    faculty = await get_unit(db, faculty_id)
+    if faculty.unit_type != "faculty" or faculty.parent_unit_id is not None:
+        raise AppError("faculty_id must reference a live top-level faculty")
+    level = await _faculty_management_level(
+        db,
+        actor_id=actor_id,
+        organization_id=faculty.organization_id,
+        faculty_id=faculty_id,
+    )
+    if level is None:
+        raise ForbiddenError("only the Faculty Dean may assign faculty staff")
+    if actor_id in payload.user_ids:
+        raise ForbiddenError("you cannot add yourself to a faculty")
+
+    members = await org_queries.active_org_member_user_ids(
+        db, faculty.organization_id, payload.user_ids
+    )
+    missing = [user_id for user_id in payload.user_ids if user_id not in members]
+    if missing:
+        raise AppError("all selected staff must be active members of this organization")
+
+    result: list[UserFacultyAssignment] = []
+    for user_id in payload.user_ids:
+        role_codes = await org_queries.active_role_codes_for_user(
+            db, user_id, faculty.organization_id
+        )
+        staff_roles = role_codes & {"hod", "manager", "teacher"}
+        if not staff_roles:
+            raise AppError(
+                f"user {user_id} is not eligible faculty staff; students are not assignable"
+            )
+        if level != "master" and "hod" in role_codes:
+            raise ForbiddenError("a Faculty Dean cannot assign another Faculty Dean")
+        existing = await org_queries.get_active_faculty_assignment(
+            db, user_id=user_id, faculty_id=faculty_id
+        )
+        if existing is not None:
+            result.append(existing)
+            continue
+        result.append(
+            await org_queries.insert_faculty_assignment(
+                db,
+                user_id=user_id,
+                organization_id=faculty.organization_id,
+                faculty_id=faculty_id,
+                actor_id=actor_id,
+            )
+        )
+    return result
+
+
+async def remove_faculty_member(
+    db: AsyncSession,
+    faculty_id: UUID,
+    user_id: UUID,
+    *,
+    actor_id: UUID,
+) -> None:
+    faculty = await get_unit(db, faculty_id)
+    level = await _faculty_management_level(
+        db,
+        actor_id=actor_id,
+        organization_id=faculty.organization_id,
+        faculty_id=faculty_id,
+    )
+    if level is None:
+        raise ForbiddenError("only the Faculty Dean may remove faculty staff")
+    if actor_id == user_id:
+        raise ForbiddenError("you cannot remove yourself from a faculty")
+    role_codes = await org_queries.active_role_codes_for_user(db, user_id, faculty.organization_id)
+    if level != "master" and "hod" in role_codes:
+        raise ForbiddenError("a Faculty Dean cannot remove another Faculty Dean")
+    assignment = await org_queries.get_active_faculty_assignment(
+        db, user_id=user_id, faculty_id=faculty_id
+    )
+    if assignment is None:
+        raise NotFoundError("Faculty staff assignment not found")
+    await org_queries.deactivate_faculty_assignment(db, assignment, actor_id=actor_id)
 
 
 # ---------------------------------------------------------------------------
@@ -551,11 +698,7 @@ async def patch_membership(
             raise AppError("org_unit_id does not exist or is deleted")
         if unit.organization_id != current.organization_id:
             raise AppError("org_unit_id belongs to a different organization")
-    if (
-        fields.get("status") == "left"
-        and current.status != "left"
-        and current.left_at is None
-    ):
+    if fields.get("status") == "left" and current.status != "left" and current.left_at is None:
         fields["left_at"] = org_queries.now_utc()
     updated = await org_queries.update_membership(db, membership_id, fields=fields)
     if updated is None:
@@ -590,6 +733,7 @@ async def delete_membership(
 
 
 __all__ = [
+    "add_faculty_members",
     "count_organizations",
     "create_domain",
     "create_organization",
@@ -601,10 +745,12 @@ __all__ = [
     "get_organization",
     "get_unit",
     "list_domains",
+    "list_faculty_assignments",
     "list_organizations",
     "list_units",
     "patch_domain",
     "patch_membership",
     "patch_organization",
     "patch_unit",
+    "remove_faculty_member",
 ]

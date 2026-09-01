@@ -7,7 +7,7 @@ the actor user id (plan §4243).
 
 Also exercises :func:`list_teachers_for_course`,
 :func:`remove_teacher_from_course` (soft-revoke via ``active_until``),
-and :func:`list_courses_in_dept` for HOD overview.
+and :func:`list_courses_in_faculty` for Faculty Dean overview.
 """
 
 from __future__ import annotations
@@ -119,7 +119,7 @@ async def scenario(engine: AsyncEngine) -> AsyncIterator[dict]:
         await conn.execute(
             text(
                 "INSERT INTO courses "
-                "(id, organization_id, org_unit_id, owner_user_id, slug, title, status) "
+                "(id, organization_id, faculty_id, owner_user_id, slug, title, status) "
                 "VALUES (:id, :org, :unit, :owner, :slug, 'Assigned Course', 'draft')"
             ),
             {
@@ -279,12 +279,14 @@ async def test_remove_teacher_soft_revokes_assignment(
     assert row["active_until"] is not None
 
 
-async def test_list_courses_in_dept_returns_org_unit_courses(
+async def test_list_courses_in_faculty_returns_owned_courses(
     session_factory: async_sessionmaker[AsyncSession],
     scenario: dict,
 ) -> None:
     async with session_factory() as session:
-        rows = await assignment_service.list_courses_in_dept(session, scenario["org_unit_id"])
+        rows = await assignment_service.list_courses_in_faculty(
+            session, scenario["org_unit_id"]
+        )
     assert any(course.id == scenario["course_id"] for course in rows)
 
 

@@ -171,9 +171,7 @@ async def require_org_access(
             return
         raise _not_found(resource, resource_id)
 
-    if await user_is_org_member(
-        db, user_id=current_user.user_id, organization_id=organization_id
-    ):
+    if await user_is_org_member(db, user_id=current_user.user_id, organization_id=organization_id):
         return
     raise _not_found(resource, resource_id)
 
@@ -395,7 +393,18 @@ _LOAD_ORG_UNIT_SCOPED_SQL = text(
       AND (
           ura.scope_kind = 'global'
           OR (ura.scope_kind = 'organization' AND ura.organization_id = :organization_id)
-          OR (ura.scope_kind = 'org_unit' AND ura.org_unit_id = ANY(:ancestor_ids))
+          OR (
+              ura.scope_kind = 'org_unit'
+              AND ura.org_unit_id = ANY(:ancestor_ids)
+              AND EXISTS (
+                  SELECT 1 FROM user_faculty_assignments ufa
+                  WHERE ufa.user_id = ura.user_id
+                    AND ufa.faculty_id = ura.org_unit_id
+                    AND ufa.status = 'active'
+                    AND ufa.deleted_at IS NULL
+                    AND (ufa.active_until IS NULL OR ufa.active_until > :at)
+              )
+          )
       )
 
     UNION

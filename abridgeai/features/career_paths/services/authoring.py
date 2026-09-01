@@ -64,7 +64,6 @@ def _to_authoring(
     return CareerPathAuthoring(
         id=path.id,
         organization_id=path.organization_id,
-        org_unit_id=path.org_unit_id,
         slug=path.slug,
         name=path.name,
         description=path.description,
@@ -106,9 +105,7 @@ async def _require_draft_version(db: AsyncSession, version_id: UUID) -> CareerPa
     return version
 
 
-async def _require_authoring_version(
-    db: AsyncSession, career_path_id: UUID
-) -> CareerPathVersion:
+async def _require_authoring_version(db: AsyncSession, career_path_id: UUID) -> CareerPathVersion:
     """The version authoring reads/writes for this path (latest draft, else
     the latest published pre-fork)."""
     version = await authoring_queries.get_current_authoring_version(db, career_path_id)
@@ -266,9 +263,7 @@ def classify_path_edit(
     return "safe"
 
 
-async def list_path_versions(
-    db: AsyncSession, career_path_id: UUID
-) -> list[CareerPathVersionRead]:
+async def list_path_versions(db: AsyncSession, career_path_id: UUID) -> list[CareerPathVersionRead]:
     """All versions of a path, newest first (Gap 3 manager surface)."""
     await _require_path(db, career_path_id)
     versions = await authoring_queries.list_versions(db, career_path_id)
@@ -281,9 +276,7 @@ async def list_path_versions(
         CareerPathVersionRead.model_validate(
             {
                 **version.__dict__,
-                "published_by": version.updated_by
-                if version.published_at is not None
-                else None,
+                "published_by": version.updated_by if version.published_at is not None else None,
                 "published_by_name": users[version.updated_by].display_name
                 if version.updated_by in users
                 else None,
@@ -323,7 +316,6 @@ async def create_career_path(
         )
     path = CareerPath(
         organization_id=org_id,
-        org_unit_id=payload.org_unit_id,
         slug=payload.slug,
         name=payload.name,
         description=payload.description,
@@ -368,9 +360,7 @@ async def list_course_candidates(
     path = await _require_path(db, career_path_id)
     courses = await courses_api.list_courses_by_org(db, path.organization_id)
     return [
-        CareerPathCourseCandidate(
-            id=c.id, title=c.title, slug=c.slug, status=c.status
-        )
+        CareerPathCourseCandidate(id=c.id, title=c.title, slug=c.slug, status=c.status)
         for c in courses
         if c.status == "published"
     ]
@@ -653,9 +643,7 @@ async def list_path_stages(
         version = await authoring_queries.get_version(db, version_id)
         if version is None or version.career_path_id != career_path_id:
             raise NotFoundError("career_path_version_not_found")
-    stages = await authoring_queries.list_path_stages(
-        db, career_path_id, version_id=version_id
-    )
+    stages = await authoring_queries.list_path_stages(db, career_path_id, version_id=version_id)
     return [await _to_stage_authoring(db, stage) for stage in stages]
 
 
@@ -1083,9 +1071,7 @@ async def archive_path(
 async def soft_delete_path(db: AsyncSession, career_path_id: UUID, actor: CurrentUser) -> None:
     path = await _require_path(db, career_path_id)
     if path.status != "draft":
-        raise AppError(
-            "published_or_archived_career_path_cannot_be_deleted: archive it instead"
-        )
+        raise AppError("published_or_archived_career_path_cannot_be_deleted: archive it instead")
     await soft_delete_cascade(db, path, actor_id=actor.user_id)
 
 

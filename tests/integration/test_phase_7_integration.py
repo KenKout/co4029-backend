@@ -258,7 +258,7 @@ async def test_enroll_progress_notify_lifecycle(
     async with engine.begin() as conn:
         await conn.execute(
             text(
-                "INSERT INTO courses (id, organization_id, org_unit_id, owner_user_id, "
+                "INSERT INTO courses (id, organization_id, faculty_id, owner_user_id, "
                 "slug, title, status) "
                 "VALUES (:id, :org, :ou, :owner, :slug, :title, 'published')"
             ),

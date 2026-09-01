@@ -10,7 +10,6 @@ from pydantic import BaseModel, ConfigDict, Field
 class CareerPathAuthoring(BaseModel):
     id: UUID
     organization_id: UUID
-    org_unit_id: UUID | None = None
     slug: str
     name: str
     description: str | None = None
@@ -191,7 +190,6 @@ class CareerPathCourseMove(BaseModel):
 
 
 class CareerPathCreate(BaseModel):
-    org_unit_id: UUID | None = None
     slug: str = Field(min_length=1, max_length=100)
     name: str = Field(min_length=1, max_length=255)
     description: str | None = None
@@ -202,11 +200,8 @@ class CareerPathCreate(BaseModel):
 class CareerPathUpdate(BaseModel):
     """Editable metadata for an existing path.
 
-    ``org_unit_id`` is deliberately ABSENT: a path's organization is fixed at
-    creation (server-derived from the actor's primary org), the column is not
-    consumed by any backend read path, and a stray unit write on a locked-org
-    path would silently re-scope metadata nothing reads. The create schema
-    keeps the field for completeness; updates never touch it.
+    A path is organization-wide.  Faculty ownership belongs to Learning
+    Programs and Courses, never to Career Paths.
     """
 
     name: str | None = Field(default=None, min_length=1, max_length=255)

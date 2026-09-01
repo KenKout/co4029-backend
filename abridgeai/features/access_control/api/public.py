@@ -31,7 +31,11 @@ from abridgeai.features.access_control.models import (
     Organization,
     OrganizationDomain,
     OrganizationMembership,
+    OrgUnit,
+    Permission,
     Role,
+    RolePermission,
+    UserFacultyAssignment,
     UserRoleAssignment,
 )
 from abridgeai.features.access_control.policies import (
@@ -42,6 +46,55 @@ from abridgeai.features.access_control.policies import (
     require_permission,
 )
 from abridgeai.features.access_control.queries import organizations as org_queries
+
+
+@dataclass(frozen=True)
+class FacultyAccessDTO:
+    faculty_ids: tuple[UUID, ...]
+    has_organization_scope: bool
+
+
+async def get_user_faculty_access(
+    db: AsyncSession,
+    *,
+    user_id: UUID,
+    organization_id: UUID,
+    permission_code: str,
+) -> FacultyAccessDTO:
+    """Faculty affiliations plus whether ``permission_code`` is org-wide.
+
+    Affiliation chooses the owning faculty for new resources.  The scoped
+    permission flag is kept separate so a Master Dean may deliberately create
+    an organization-wide resource without being assigned to a faculty.
+    """
+    faculty_ids = await org_queries.list_active_faculty_ids_for_user(db, user_id, organization_id)
+    stmt = (
+        select(UserRoleAssignment.scope_kind)
+        .join(Role, Role.id == UserRoleAssignment.role_id)
+        .join(RolePermission, RolePermission.role_id == Role.id)
+        .join(Permission, Permission.id == RolePermission.permission_id)
+        .where(
+            UserRoleAssignment.user_id == user_id,
+            Permission.code == permission_code,
+            UserRoleAssignment.deleted_at.is_(None),
+            UserRoleAssignment.active_from <= datetime.now(UTC),
+            (UserRoleAssignment.active_until.is_(None))
+            | (UserRoleAssignment.active_until > datetime.now(UTC)),
+            Permission.deleted_at.is_(None),
+            Role.deleted_at.is_(None),
+            or_(
+                UserRoleAssignment.scope_kind == "global",
+                (
+                    (UserRoleAssignment.scope_kind == "organization")
+                    & (UserRoleAssignment.organization_id == organization_id)
+                ),
+            ),
+        )
+        .limit(1)
+    )
+    has_org = (await db.execute(stmt)).scalar_one_or_none() is not None
+    return FacultyAccessDTO(tuple(faculty_ids), has_org)
+
 
 # Recursive CTE — the cleanest expression of the ancestor walk is the raw
 # SQL form. SQLAlchemy supports recursive CTEs via Query.cte(recursive=True)
@@ -360,6 +413,19 @@ async def get_role_codes_for_users(
             UserRoleAssignment.user_id.in_(list(user_ids)),
             UserRoleAssignment.deleted_at.is_(None),
             Role.deleted_at.is_(None),
+            or_(
+                UserRoleAssignment.scope_kind != "org_unit",
+                exists(
+                    select(UserFacultyAssignment.id).where(
+                        UserFacultyAssignment.user_id == UserRoleAssignment.user_id,
+                        UserFacultyAssignment.faculty_id == UserRoleAssignment.org_unit_id,
+                        UserFacultyAssignment.status == "active",
+                        UserFacultyAssignment.deleted_at.is_(None),
+                        (UserFacultyAssignment.active_until.is_(None))
+                        | (UserFacultyAssignment.active_until > at_value),
+                    )
+                ),
+            ),
             UserRoleAssignment.active_from <= at_value,
             or_(
                 UserRoleAssignment.active_until.is_(None),
@@ -455,26 +521,26 @@ async def list_user_ids_in_org(db: AsyncSession, org_id: UUID) -> list[UUID]:
 
 
 async def list_user_ids_in_org_unit(db: AsyncSession, org_unit_id: UUID) -> list[UUID]:
-    """User ids whose active membership sits in ``org_unit_id`` or below it.
+    """User ids with an active affiliation to a live top-level Faculty.
 
-    The people-side twin of the course scope filter: picking a faculty in
-    the org tree has to include everyone in its departments, not just the
-    handful of memberships pinned to the faculty row itself.
-
-    Returns ``[]`` for a missing or deleted unit — the caller intersects
-    this into an allowlist, so an empty result correctly narrows to nobody
-    rather than silently disabling the filter.
+    The legacy function name is retained for API compatibility while the
+    physical ``org_units`` table now represents Faculties only. Students are
+    absent because they never receive a Faculty affiliation.
     """
-    unit_ids = await get_org_unit_subtree_ids(db, org_unit_id)
-    if not unit_ids:
-        return []
-    om = OrganizationMembership
     stmt = (
-        select(om.user_id)
+        select(UserFacultyAssignment.user_id)
+        .join(OrgUnit, OrgUnit.id == UserFacultyAssignment.faculty_id)
         .where(
-            om.org_unit_id.in_(unit_ids),
-            om.status == "active",
-            om.deleted_at.is_(None),
+            UserFacultyAssignment.faculty_id == org_unit_id,
+            UserFacultyAssignment.status == "active",
+            UserFacultyAssignment.deleted_at.is_(None),
+            or_(
+                UserFacultyAssignment.active_until.is_(None),
+                UserFacultyAssignment.active_until > _now_at(None),
+            ),
+            OrgUnit.unit_type == "faculty",
+            OrgUnit.parent_unit_id.is_(None),
+            OrgUnit.deleted_at.is_(None),
         )
         .distinct()
     )
@@ -533,6 +599,7 @@ async def list_inactive_organizations(
 
 
 __all__ = [
+    "FacultyAccessDTO",
     "InactiveOrgDTO",
     "list_inactive_organizations",
     "get_org_unit_subtree_ids",
@@ -544,6 +611,7 @@ __all__ = [
     "can_manage_course",
     "find_auto_provision_org_id",
     "get_active_permissions",
+    "get_user_faculty_access",
     "get_org_unit_ancestors",
     "get_role_assignments_for_user",
     "get_role_codes_for_users",

@@ -62,17 +62,28 @@ async def _seed_program_context(
                 "manager": seeded.manager_id,
             },
         )
+        await conn.execute(
+            text(
+                "INSERT INTO user_faculty_assignments "
+                "(id, user_id, organization_id, faculty_id, status) "
+                "VALUES (gen_random_uuid(), :dean, :org, :faculty, 'active')"
+            ),
+            {
+                "dean": seeded.hod_id,
+                "org": seeded.organization_id,
+                "faculty": faculty_id,
+            },
+        )
         for index, path_id in enumerate((path_a, path_b), start=1):
             await conn.execute(
                 text(
                     "INSERT INTO career_paths "
-                    "(id, organization_id, org_unit_id, slug, name, status) "
-                    "VALUES (:id, :org, :faculty, :slug, :name, 'published')"
+                    "(id, organization_id, slug, name, status) "
+                    "VALUES (:id, :org, :slug, :name, 'published')"
                 ),
                 {
                     "id": path_id,
                     "org": seeded.organization_id,
-                    "faculty": faculty_id,
                     "slug": f"program-path-{uuid.uuid4().hex[:8]}",
                     "name": f"Program Path {index}",
                 },
@@ -355,9 +366,7 @@ async def test_program_list_cards_carry_dean_and_draft_stats(
         )
         selected = await services.select_path(
             db,
-            enrollment_id=(
-                await services.list_my_enrollments(db, student)
-            )[0].id,
+            enrollment_id=(await services.list_my_enrollments(db, student))[0].id,
             career_path_id=path_a,
             student_id=student,
         )
@@ -386,8 +395,6 @@ async def test_program_list_cards_carry_dean_and_draft_stats(
         assert card.has_draft_version is True
         assert card.student_count == 1  # awaiting_path counts as enrolled
 
-        archived = await services.archive_program(
-            db, program_id=program.id, actor=manager
-        )
+        archived = await services.archive_program(db, program_id=program.id, actor=manager)
         assert archived.status == "archived"
         await db.rollback()

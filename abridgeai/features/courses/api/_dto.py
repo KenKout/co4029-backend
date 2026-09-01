@@ -23,7 +23,7 @@ class OrgDTO(_DTOBase):
 class CourseDTO(_DTOBase):
     id: UUID
     organization_id: UUID
-    org_unit_id: UUID | None
+    faculty_id: UUID | None
     owner_user_id: UUID
     slug: str
     title: str

@@ -155,7 +155,7 @@ class CourseAuthoring(CoursePublic):
     """
 
     status: Literal["draft", "published", "archived"]  # type: ignore[assignment]
-    org_unit_id: UUID | None = None
+    faculty_id: UUID | None = None
     owner_user_id: UUID
     thumbnail_object_id: UUID | None = None
     # Short-TTL presigned GET URL for the course thumbnail, minted by the

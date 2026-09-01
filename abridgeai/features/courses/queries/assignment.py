@@ -20,6 +20,7 @@ from abridgeai.features.access_control.models import (
     CareerPath,
     OrganizationMembership,
     Role,
+    UserFacultyAssignment,
     UserRoleAssignment,
 )
 from abridgeai.features.career_paths.models import (
@@ -71,7 +72,11 @@ async def list_career_paths_containing_course(
 
 
 async def list_assignable_teachers(
-    db: AsyncSession, *, organization_id: UUID, course_id: UUID | None = None
+    db: AsyncSession,
+    *,
+    organization_id: UUID,
+    course_id: UUID | None = None,
+    faculty_id: UUID | None = None,
 ) -> list[dict[str, Any]]:
     """Users holding the ``teacher`` role who are members of ``organization_id``.
 
@@ -133,6 +138,18 @@ async def list_assignable_teachers(
         .distinct()
         .order_by(UserProfile.display_name, User.primary_email)
     )
+    if faculty_id is not None:
+        stmt = stmt.join(
+            UserFacultyAssignment,
+            (UserFacultyAssignment.user_id == User.id)
+            & (UserFacultyAssignment.organization_id == organization_id),
+        ).where(
+            UserFacultyAssignment.faculty_id == faculty_id,
+            UserFacultyAssignment.status == "active",
+            UserFacultyAssignment.deleted_at.is_(None),
+            (UserFacultyAssignment.active_until.is_(None))
+            | (UserFacultyAssignment.active_until > func.now()),
+        )
     rows = (await db.execute(stmt)).mappings().all()
     return [dict(row) for row in rows]
 
@@ -199,8 +216,7 @@ _ACTIVE_TEACHER_WHERE: tuple = (
     UserRoleAssignment.scope_kind == "course",
     Role.code == "teacher",
     UserRoleAssignment.deleted_at.is_(None),
-    (UserRoleAssignment.active_until.is_(None))
-    | (UserRoleAssignment.active_until > func.now()),
+    (UserRoleAssignment.active_until.is_(None)) | (UserRoleAssignment.active_until > func.now()),
 )
 
 

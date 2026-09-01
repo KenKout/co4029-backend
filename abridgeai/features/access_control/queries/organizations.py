@@ -17,12 +17,11 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from datetime import UTC, datetime
+from importlib import resources
 from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
 
-from importlib import resources
-
-from sqlalchemy import insert, select, text, tuple_, update
+from sqlalchemy import exists, func, insert, select, text, tuple_, update
 
 from abridgeai.core.db.recursive_delete import soft_delete_cascade
 from abridgeai.core.pagination import Page, paginate
@@ -31,6 +30,9 @@ from abridgeai.features.access_control.models import (
     OrganizationDomain,
     OrganizationMembership,
     OrgUnit,
+    Role,
+    UserFacultyAssignment,
+    UserRoleAssignment,
 )
 
 if TYPE_CHECKING:
@@ -60,9 +62,7 @@ async def list_organizations(
     if visible_to_ids is not None:
         stmt = stmt.where(Organization.id.in_(visible_to_ids))
     if after_name is not None and after_id is not None:
-        stmt = stmt.where(
-            tuple_(Organization.name, Organization.id) > (after_name, after_id)
-        )
+        stmt = stmt.where(tuple_(Organization.name, Organization.id) > (after_name, after_id))
     stmt = stmt.order_by(Organization.name, Organization.id).limit(limit)
     result = await db.execute(stmt)
     return list(result.scalars().all())
@@ -271,9 +271,7 @@ async def insert_domain(
         )
     )
     await db.flush()
-    fetched = await db.execute(
-        select(OrganizationDomain).where(OrganizationDomain.id == new_id)
-    )
+    fetched = await db.execute(select(OrganizationDomain).where(OrganizationDomain.id == new_id))
     return fetched.scalar_one()
 
 
@@ -367,8 +365,10 @@ async def list_descendant_unit_ids(
         .where(OrgUnit.id == unit_id, OrgUnit.deleted_at.is_(None))
         .cte("unit_subtree", recursive=True)
     )
-    descendants = select(OrgUnit.id).join(roots, OrgUnit.parent_unit_id == roots.c.id).where(
-        OrgUnit.deleted_at.is_(None)
+    descendants = (
+        select(OrgUnit.id)
+        .join(roots, OrgUnit.parent_unit_id == roots.c.id)
+        .where(OrgUnit.deleted_at.is_(None))
     )
     subtree = roots.union(descendants)
 
@@ -417,9 +417,7 @@ async def update_unit(
     if not fields:
         return await get_unit(db, unit_id)
     await db.execute(
-        update(OrgUnit)
-        .where(OrgUnit.id == unit_id, OrgUnit.deleted_at.is_(None))
-        .values(**fields)
+        update(OrgUnit).where(OrgUnit.id == unit_id, OrgUnit.deleted_at.is_(None)).values(**fields)
     )
     await db.flush()
     return await get_unit(db, unit_id)
@@ -436,6 +434,228 @@ async def soft_delete_unit(
         return False
     await soft_delete_cascade(db, row, actor_id=actor_id)
     return True
+
+
+# ---------------------------------------------------------------------------
+# Faculty staff affiliations
+# ---------------------------------------------------------------------------
+
+
+async def list_faculty_assignments(
+    db: AsyncSession,
+    organization_id: UUID,
+    *,
+    faculty_id: UUID | None = None,
+) -> list[UserFacultyAssignment]:
+    stmt = select(UserFacultyAssignment).where(
+        UserFacultyAssignment.organization_id == organization_id,
+        UserFacultyAssignment.status == "active",
+        UserFacultyAssignment.deleted_at.is_(None),
+        (UserFacultyAssignment.active_until.is_(None))
+        | (UserFacultyAssignment.active_until > func.now()),
+    )
+    if faculty_id is not None:
+        stmt = stmt.where(UserFacultyAssignment.faculty_id == faculty_id)
+    return list(
+        (await db.execute(stmt.order_by(UserFacultyAssignment.active_from.desc()))).scalars().all()
+    )
+
+
+async def faculty_role_codes(
+    db: AsyncSession,
+    assignment_keys: Sequence[tuple[UUID, UUID]],
+) -> dict[tuple[UUID, UUID], list[str]]:
+    """Active role codes scoped exactly to each ``(user, Faculty)`` pair."""
+    if not assignment_keys:
+        return {}
+    stmt = (
+        select(
+            UserRoleAssignment.user_id,
+            UserRoleAssignment.org_unit_id,
+            Role.code,
+        )
+        .join(Role, Role.id == UserRoleAssignment.role_id)
+        .where(
+            tuple_(UserRoleAssignment.user_id, UserRoleAssignment.org_unit_id).in_(
+                list(assignment_keys)
+            ),
+            UserRoleAssignment.scope_kind == "org_unit",
+            UserRoleAssignment.deleted_at.is_(None),
+            UserRoleAssignment.active_from <= func.now(),
+            (UserRoleAssignment.active_until.is_(None))
+            | (UserRoleAssignment.active_until > func.now()),
+            Role.deleted_at.is_(None),
+        )
+        .distinct()
+    )
+    result: dict[tuple[UUID, UUID], set[str]] = {}
+    for user_id, faculty_id, code in (await db.execute(stmt)).all():
+        if faculty_id is not None:
+            result.setdefault((user_id, faculty_id), set()).add(code)
+    return {key: sorted(codes) for key, codes in result.items()}
+
+
+async def list_active_faculty_ids_for_user(
+    db: AsyncSession, user_id: UUID, organization_id: UUID
+) -> list[UUID]:
+    stmt = (
+        select(UserFacultyAssignment.faculty_id)
+        .where(
+            UserFacultyAssignment.user_id == user_id,
+            UserFacultyAssignment.organization_id == organization_id,
+            UserFacultyAssignment.status == "active",
+            UserFacultyAssignment.deleted_at.is_(None),
+            (UserFacultyAssignment.active_until.is_(None))
+            | (UserFacultyAssignment.active_until > func.now()),
+        )
+        .distinct()
+    )
+    return [UUID(str(value)) for value in (await db.execute(stmt)).scalars().all()]
+
+
+async def get_active_faculty_assignment(
+    db: AsyncSession, *, user_id: UUID, faculty_id: UUID
+) -> UserFacultyAssignment | None:
+    stmt = (
+        select(UserFacultyAssignment)
+        .where(
+            UserFacultyAssignment.user_id == user_id,
+            UserFacultyAssignment.faculty_id == faculty_id,
+            UserFacultyAssignment.status == "active",
+            UserFacultyAssignment.deleted_at.is_(None),
+            (UserFacultyAssignment.active_until.is_(None))
+            | (UserFacultyAssignment.active_until > func.now()),
+        )
+        .limit(1)
+    )
+    return (await db.execute(stmt)).scalar_one_or_none()
+
+
+async def insert_faculty_assignment(
+    db: AsyncSession,
+    *,
+    user_id: UUID,
+    organization_id: UUID,
+    faculty_id: UUID,
+    actor_id: UUID,
+) -> UserFacultyAssignment:
+    row = UserFacultyAssignment(
+        user_id=user_id,
+        organization_id=organization_id,
+        faculty_id=faculty_id,
+        status="active",
+        created_by=actor_id,
+        updated_by=actor_id,
+    )
+    db.add(row)
+    await db.flush()
+    await db.refresh(row)
+    return row
+
+
+async def deactivate_faculty_assignment(
+    db: AsyncSession, assignment: UserFacultyAssignment, *, actor_id: UUID
+) -> None:
+    assignment.status = "inactive"
+    assignment.active_until = func.now()
+    assignment.updated_by = actor_id
+    await db.flush()
+
+
+async def active_role_codes_for_user(
+    db: AsyncSession, user_id: UUID, organization_id: UUID
+) -> set[str]:
+    stmt = (
+        select(Role.code)
+        .join(UserRoleAssignment, UserRoleAssignment.role_id == Role.id)
+        .where(
+            UserRoleAssignment.user_id == user_id,
+            UserRoleAssignment.organization_id == organization_id,
+            UserRoleAssignment.deleted_at.is_(None),
+            UserRoleAssignment.active_from <= func.now(),
+            (UserRoleAssignment.active_until.is_(None))
+            | (UserRoleAssignment.active_until > func.now()),
+            Role.deleted_at.is_(None),
+        )
+        .distinct()
+    )
+    return set((await db.execute(stmt)).scalars().all())
+
+
+async def user_has_role_scope(
+    db: AsyncSession,
+    *,
+    user_id: UUID,
+    role_code: str,
+    organization_id: UUID,
+    faculty_id: UUID | None = None,
+) -> bool:
+    stmt = (
+        select(UserRoleAssignment.id)
+        .join(Role, Role.id == UserRoleAssignment.role_id)
+        .where(
+            UserRoleAssignment.user_id == user_id,
+            UserRoleAssignment.organization_id == organization_id,
+            Role.code == role_code,
+            UserRoleAssignment.deleted_at.is_(None),
+            UserRoleAssignment.active_from <= func.now(),
+            (UserRoleAssignment.active_until.is_(None))
+            | (UserRoleAssignment.active_until > func.now()),
+        )
+    )
+    if faculty_id is None:
+        stmt = stmt.where(UserRoleAssignment.scope_kind == "organization")
+    else:
+        stmt = stmt.where(
+            UserRoleAssignment.scope_kind == "org_unit",
+            UserRoleAssignment.org_unit_id == faculty_id,
+            exists(
+                select(UserFacultyAssignment.id).where(
+                    UserFacultyAssignment.user_id == user_id,
+                    UserFacultyAssignment.organization_id == organization_id,
+                    UserFacultyAssignment.faculty_id == faculty_id,
+                    UserFacultyAssignment.status == "active",
+                    UserFacultyAssignment.deleted_at.is_(None),
+                    (UserFacultyAssignment.active_until.is_(None))
+                    | (UserFacultyAssignment.active_until > func.now()),
+                )
+            ),
+        )
+    return (await db.execute(stmt.limit(1))).scalar_one_or_none() is not None
+
+
+async def active_org_member_user_ids(
+    db: AsyncSession, organization_id: UUID, user_ids: Sequence[UUID]
+) -> set[UUID]:
+    if not user_ids:
+        return set()
+    stmt = select(OrganizationMembership.user_id).where(
+        OrganizationMembership.organization_id == organization_id,
+        OrganizationMembership.user_id.in_(list(user_ids)),
+        OrganizationMembership.status == "active",
+        OrganizationMembership.deleted_at.is_(None),
+    )
+    return {UUID(str(value)) for value in (await db.execute(stmt)).scalars().all()}
+
+
+async def faculty_has_live_dependencies(db: AsyncSession, faculty_id: UUID) -> bool:
+    stmt = text(
+        """
+        SELECT EXISTS (
+            SELECT 1 FROM learning_programs
+            WHERE faculty_id = :faculty_id AND deleted_at IS NULL
+            UNION ALL
+            SELECT 1 FROM courses
+            WHERE faculty_id = :faculty_id AND deleted_at IS NULL
+            UNION ALL
+            SELECT 1 FROM user_faculty_assignments
+            WHERE faculty_id = :faculty_id AND deleted_at IS NULL
+              AND status = 'active'
+              AND (active_until IS NULL OR active_until > NOW())
+        )
+        """
+    )
+    return bool((await db.execute(stmt, {"faculty_id": faculty_id})).scalar_one())
 
 
 # ---------------------------------------------------------------------------
@@ -535,20 +755,29 @@ def now_utc() -> datetime:
 
 
 __all__ = [
+    "active_org_member_user_ids",
+    "active_role_codes_for_user",
     "count_organizations",
     "get_domain",
     "get_domain_by_name",
     "get_membership",
+    "get_active_faculty_assignment",
+    "faculty_has_live_dependencies",
+    "faculty_role_codes",
     "get_organization",
     "get_organization_by_slug",
     "get_unit",
     "insert_domain",
+    "insert_faculty_assignment",
     "insert_organization",
     "insert_unit",
     "list_domains_for_organization",
+    "list_active_faculty_ids_for_user",
+    "list_faculty_assignments",
     "list_organizations",
     "list_units_for_organization",
     "now_utc",
+    "deactivate_faculty_assignment",
     "soft_delete_domain",
     "soft_delete_membership",
     "soft_delete_organization",
@@ -557,6 +786,7 @@ __all__ = [
     "update_membership",
     "update_organization",
     "update_unit",
+    "user_has_role_scope",
 ]
 
 

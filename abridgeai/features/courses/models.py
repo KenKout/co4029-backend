@@ -114,9 +114,10 @@ class Course(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftDeleteMixi
         nullable=False,
         index=True,
     )
-    org_unit_id: Mapped[uuid.UUID | None] = mapped_column(
+    faculty_id: Mapped[uuid.UUID | None] = mapped_column(
         PGUUID(as_uuid=True),
         ForeignKey("org_units.id", ondelete="SET NULL"),
+        index=True,
     )
     owner_user_id: Mapped[uuid.UUID] = mapped_column(
         PGUUID(as_uuid=True),

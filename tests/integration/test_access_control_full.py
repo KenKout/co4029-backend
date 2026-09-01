@@ -130,7 +130,7 @@ async def scenario(engine: AsyncEngine) -> AsyncIterator[_Scenario]:
             )
         await conn.execute(
             text(
-                "INSERT INTO courses (id, organization_id, org_unit_id, owner_user_id, "
+                "INSERT INTO courses (id, organization_id, faculty_id, owner_user_id, "
                 "slug, title, status) "
                 "VALUES (:id, :org, :unit, :owner, :slug, :title, 'draft')"
             ),
@@ -294,7 +294,7 @@ async def test_hod_org_unit_scope_resolves_descendants(
         )
         await conn.execute(
             text(
-                "INSERT INTO courses (id, organization_id, org_unit_id, "
+                "INSERT INTO courses (id, organization_id, faculty_id, "
                 "owner_user_id, slug, title, status) "
                 "VALUES (:id, :org, :unit, :owner, :slug, :title, 'draft')"
             ),

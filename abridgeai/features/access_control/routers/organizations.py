@@ -23,7 +23,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from abridgeai.core.db import get_db
-from abridgeai.core.exceptions import AppError, NotFoundError
+from abridgeai.core.exceptions import AppError, ForbiddenError, NotFoundError
 from abridgeai.core.pagination import PageResponse
 from abridgeai.core.security import CurrentUser
 from abridgeai.features.access_control.policies import (
@@ -33,6 +33,8 @@ from abridgeai.features.access_control.policies import (
 from abridgeai.features.access_control.schemas.admin import (
     BulkAssignUnitRequest,
     BulkAssignUnitResult,
+    FacultyAssignmentRead,
+    FacultyMembersAddRequest,
     MembershipPatch,
     MembershipRead,
     OrganizationCreate,
@@ -74,7 +76,6 @@ def _not_found(detail: str) -> HTTPException:
     )
 
 
-
 async def _require_access_to(
     db: AsyncSession,
     current_user: CurrentUser,
@@ -107,11 +108,7 @@ async def _require_access_to(
 # ---------------------------------------------------------------------------
 
 
-
-
-async def _visible_org_ids(
-    db: AsyncSession, current_user: CurrentUser
-) -> list[UUID] | None:
+async def _visible_org_ids(db: AsyncSession, current_user: CurrentUser) -> list[UUID] | None:
     """Organizations this caller may see in a listing; ``None`` == unrestricted.
 
     ``_REQUIRE_ORG_MANAGE`` accepts ``org_unit.manage`` / ``user.bulk_import``,
@@ -295,9 +292,7 @@ async def delete_organization_endpoint(
         permissions=_ORG_MANAGE_CODES,
     )
     try:
-        await org_service.delete_organization(
-            db, org_id, actor_id=current_user.user_id
-        )
+        await org_service.delete_organization(db, org_id, actor_id=current_user.user_id)
     except NotFoundError as exc:
         raise _not_found(str(exc)) from exc
     await db.commit()
@@ -405,9 +400,7 @@ async def delete_domain_endpoint(
         resource_id=domain_id,
     )
     try:
-        await org_service.delete_domain(
-            db, domain_id, actor_id=current_user.user_id
-        )
+        await org_service.delete_domain(db, domain_id, actor_id=current_user.user_id)
     except NotFoundError as exc:
         raise _not_found(str(exc)) from exc
     await db.commit()
@@ -498,9 +491,16 @@ async def create_unit_endpoint(
         permissions=_ORG_MANAGE_CODES,
     )
     try:
-        unit = await org_service.create_unit(db, org_id, payload)
+        unit = await org_service.create_unit(
+            db,
+            org_id,
+            payload,
+            actor_id=current_user.user_id,
+        )
     except NotFoundError as exc:
         raise _not_found(str(exc)) from exc
+    except ForbiddenError as exc:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
     except AppError as exc:
         raise _bad_request(str(exc)) from exc
     await db.commit()
@@ -548,9 +548,16 @@ async def patch_unit_endpoint(
         resource_id=unit_id,
     )
     try:
-        unit = await org_service.patch_unit(db, unit_id, payload)
+        unit = await org_service.patch_unit(
+            db,
+            unit_id,
+            payload,
+            actor_id=current_user.user_id,
+        )
     except NotFoundError as exc:
         raise _not_found(str(exc)) from exc
+    except ForbiddenError as exc:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
     except AppError as exc:
         raise _bad_request(str(exc)) from exc
     await db.commit()
@@ -575,10 +582,95 @@ async def delete_unit_endpoint(
     )
     try:
         await org_service.delete_unit(
-            db, unit_id, actor_id=current_user.user_id
+            db,
+            unit_id,
+            actor_id=current_user.user_id,
         )
     except NotFoundError as exc:
         raise _not_found(str(exc)) from exc
+    except ForbiddenError as exc:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
+    except AppError as exc:
+        raise _bad_request(str(exc)) from exc
+    await db.commit()
+
+
+@router.get(
+    "/admin/organizations/{org_id}/faculty-assignments",
+    response_model=list[FacultyAssignmentRead],
+)
+async def list_faculty_assignments_endpoint(
+    org_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_ORG_MANAGE)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    faculty_id: UUID | None = None,
+) -> list[FacultyAssignmentRead]:
+    await require_org_access(
+        db,
+        current_user,
+        org_id,
+        resource="organization",
+        resource_id=org_id,
+        permissions=_ORG_MANAGE_CODES,
+    )
+    try:
+        rows = await org_service.list_faculty_assignments(
+            db,
+            org_id,
+            faculty_id=faculty_id,
+            actor_id=current_user.user_id,
+            allow_system_admin=current_user.has_permission("system.administer"),
+        )
+    except NotFoundError as exc:
+        raise _not_found(str(exc)) from exc
+    except ForbiddenError as exc:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
+    return [FacultyAssignmentRead.model_validate(row) for row in rows]
+
+
+@router.post(
+    "/admin/faculties/{faculty_id}/members",
+    response_model=list[FacultyAssignmentRead],
+    status_code=status.HTTP_201_CREATED,
+)
+async def add_faculty_members_endpoint(
+    faculty_id: UUID,
+    payload: FacultyMembersAddRequest,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_ORG_MANAGE)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> list[FacultyAssignmentRead]:
+    try:
+        rows = await org_service.add_faculty_members(
+            db, faculty_id, payload, actor_id=current_user.user_id
+        )
+    except NotFoundError as exc:
+        raise _not_found(str(exc)) from exc
+    except ForbiddenError as exc:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
+    except AppError as exc:
+        raise _bad_request(str(exc)) from exc
+    await db.commit()
+    return [FacultyAssignmentRead.model_validate(row) for row in rows]
+
+
+@router.delete(
+    "/admin/faculties/{faculty_id}/members/{user_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def remove_faculty_member_endpoint(
+    faculty_id: UUID,
+    user_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_ORG_MANAGE)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> None:
+    try:
+        await org_service.remove_faculty_member(
+            db, faculty_id, user_id, actor_id=current_user.user_id
+        )
+    except NotFoundError as exc:
+        raise _not_found(str(exc)) from exc
+    except ForbiddenError as exc:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
     await db.commit()
 
 
@@ -674,9 +766,7 @@ async def delete_membership_endpoint(
         resource_id=membership_id,
     )
     try:
-        await org_service.delete_membership(
-            db, membership_id, actor_id=current_user.user_id
-        )
+        await org_service.delete_membership(db, membership_id, actor_id=current_user.user_id)
     except NotFoundError as exc:
         raise _not_found(str(exc)) from exc
     await db.commit()

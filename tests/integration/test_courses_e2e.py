@@ -301,7 +301,7 @@ async def test_full_course_lifecycle_manager_teacher_student(
 
     # 1. Manager creates the course in HOD's org_unit so the HOD can staff it.
     create_payload = {
-        "org_unit_id": str(seeded_users.org_unit_id),
+        "faculty_id": str(seeded_users.org_unit_id),
         "slug": new_slug,
         "title": "E2E Lifecycle Course",
         "description": "Phase 3 e2e proof",
@@ -500,7 +500,7 @@ async def test_hod_oversight_dept_courses_view(
     create_response = await client.post(
         "/api/v1/teacher/courses",
         json={
-            "org_unit_id": str(seeded_users.org_unit_id),
+            "faculty_id": str(seeded_users.org_unit_id),
             "slug": f"hod-dept-{suffix}",
             "title": "HOD Oversight Course",
         },
@@ -530,7 +530,7 @@ async def test_hod_oversight_dept_courses_view(
     # HOD walks the org_unit-scoped browse path too (separate endpoint, separate
     # require_org_unit_permission factory).
     by_unit = await client.get(
-        f"/api/v1/dept/org-units/{seeded_users.org_unit_id}/courses",
+        f"/api/v1/dept/faculties/{seeded_users.org_unit_id}/courses",
         headers={"Authorization": f"Bearer {hod_bearer}"},
     )
     assert by_unit.status_code == 200, by_unit.text
@@ -562,7 +562,7 @@ async def test_admin_soft_delete_then_restore(
     create_response = await client.post(
         "/api/v1/teacher/courses",
         json={
-            "org_unit_id": str(seeded_users.org_unit_id),
+            "faculty_id": str(seeded_users.org_unit_id),
             "slug": f"admin-restore-{suffix}",
             "title": "Admin Restore Course",
         },
@@ -635,7 +635,7 @@ async def test_draft_module_excluded_from_student_content_tree(
     create_response = await client.post(
         "/api/v1/teacher/courses",
         json={
-            "org_unit_id": str(seeded_users.org_unit_id),
+            "faculty_id": str(seeded_users.org_unit_id),
             "slug": f"draft-module-{suffix}",
             "title": "Draft Visibility Course",
         },

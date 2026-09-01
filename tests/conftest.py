@@ -15,10 +15,10 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engin
 # cross-feature relationships (ModuleItem -> "Quiz"/"InterviewConfig")
 # resolve even when a single test file is run in isolation.
 import abridgeai.core.db.all_models  # noqa: F401
-from tests.support.db_graph import hard_delete_graph as _hard_delete_graph
 from abridgeai.access_control.permissions.loader import load_catalog, load_role_seeds
 from abridgeai.core.config import get_settings
 from abridgeai.core.security import create_access_token
+from tests.support.db_graph import hard_delete_graph as _hard_delete_graph
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
@@ -155,7 +155,11 @@ async def _purge(session: AsyncSession, users_data: dict, roles_data: dict) -> N
         text("DELETE FROM user_role_assignments WHERE user_id = ANY(:ids)"),
         {"ids": user_ids},
     )
-    # 2. Remove memberships + profiles.
+    # 2. Remove Faculty affiliations, memberships + profiles.
+    await session.execute(
+        text("DELETE FROM user_faculty_assignments WHERE user_id = ANY(:ids)"),
+        {"ids": user_ids},
+    )
     await session.execute(
         text("DELETE FROM organization_memberships WHERE user_id = ANY(:ids)"),
         {"ids": user_ids},
@@ -256,15 +260,24 @@ async def _insert_users(session: AsyncSession, users: list[dict]) -> None:
         )
 
 
-async def _insert_course(session: AsyncSession, course: dict, org_id: str, owner_id: str) -> None:
+async def _insert_course(
+    session: AsyncSession,
+    course: dict,
+    org_id: str,
+    faculty_id: str,
+    owner_id: str,
+) -> None:
     await session.execute(
         text(
-            "INSERT INTO courses (id, organization_id, owner_user_id, slug, title, status) "
-            "VALUES (:id, :organization_id, :owner_user_id, :slug, :title, 'draft')"
+            "INSERT INTO courses "
+            "(id, organization_id, faculty_id, owner_user_id, slug, title, status) "
+            "VALUES (:id, :organization_id, :faculty_id, :owner_user_id, "
+            ":slug, :title, 'draft')"
         ),
         {
             "id": course["id"],
             "organization_id": org_id,
+            "faculty_id": faculty_id,
             "owner_user_id": owner_id,
             "slug": course["slug"],
             "title": course["title"],
@@ -315,6 +328,7 @@ async def _insert_memberships(
     *,
     org_id: str,
     user_ids: list[str],
+    faculty_user_ids: set[str],
     org_unit_id: str | None,
 ) -> None:
     """Seed organization_memberships rows for the test cohort.
@@ -333,7 +347,29 @@ async def _insert_memberships(
                 "(id, user_id, organization_id, org_unit_id, status) "
                 "VALUES (gen_random_uuid(), :user_id, :org_id, :org_unit_id, 'active')"
             ),
-            {"user_id": uid, "org_id": org_id, "org_unit_id": org_unit_id},
+            {
+                "user_id": uid,
+                "org_id": org_id,
+                "org_unit_id": org_unit_id if uid in faculty_user_ids else None,
+            },
+        )
+
+
+async def _insert_faculty_assignments(
+    session: AsyncSession,
+    *,
+    org_id: str,
+    faculty_id: str,
+    user_ids: set[str],
+) -> None:
+    for uid in user_ids:
+        await session.execute(
+            text(
+                "INSERT INTO user_faculty_assignments "
+                "(id, user_id, organization_id, faculty_id, status) "
+                "VALUES (gen_random_uuid(), :user_id, :org_id, :faculty_id, 'active')"
+            ),
+            {"user_id": uid, "org_id": org_id, "faculty_id": faculty_id},
         )
 
 
@@ -349,6 +385,13 @@ async def seeded_users(test_engine: AsyncEngine) -> SeededUsers:
         u["id"] for u in users_data["users"] if u["primary_email"].endswith("admin@abridgeai.local")
     )
     member_user_ids = [u["id"] for u in users_data["users"] if u["id"] != admin_id]
+    faculty_user_ids = {
+        u["id"]
+        for u in users_data["users"]
+        if u["primary_email"].endswith(
+            ("teacher@abridgeai.local", "hod@abridgeai.local", "manager@abridgeai.local")
+        )
+    }
 
     async with test_engine.begin() as conn:
         session = AsyncSession(bind=conn, expire_on_commit=False)
@@ -357,14 +400,21 @@ async def seeded_users(test_engine: AsyncEngine) -> SeededUsers:
         await _insert_organization(session, org)
         await _insert_org_unit(session, org_unit, org["id"])
         await _insert_users(session, users_data["users"])
-        await _insert_course(session, course, org["id"], admin_id)
+        await _insert_course(session, course, org["id"], org_unit["id"], admin_id)
         role_id_by_code = await _lookup_role_ids(session, [r["code"] for r in roles_data["roles"]])
         await _insert_assignments(session, roles_data["assignments"], role_id_by_code)
         await _insert_memberships(
             session,
             org_id=org["id"],
             user_ids=member_user_ids,
+            faculty_user_ids=faculty_user_ids,
             org_unit_id=org_unit["id"],
+        )
+        await _insert_faculty_assignments(
+            session,
+            org_id=org["id"],
+            faculty_id=org_unit["id"],
+            user_ids=faculty_user_ids,
         )
         await session.flush()
 

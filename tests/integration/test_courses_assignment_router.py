@@ -284,7 +284,7 @@ async def scenario(
         )
         await conn.execute(
             text(
-                "INSERT INTO courses (id, organization_id, org_unit_id, owner_user_id, "
+                "INSERT INTO courses (id, organization_id, faculty_id, owner_user_id, "
                 "slug, title, status) VALUES "
                 "(:a, :org_a, :ou_a, :owner_a, :slug_a, 'Course A', 'draft'), "
                 "(:b, :org_b, :ou_b, :owner_b, :slug_b, 'Course B', 'draft'), "
@@ -402,7 +402,7 @@ def test_router_metadata() -> None:
         ("/dept/courses/{course_id}/teachers", ("POST",)),
         ("/dept/courses/{course_id}/teachers/{user_id}", ("DELETE",)),
         ("/dept/courses/{course_id}/roster", ("GET",)),
-        ("/dept/org-units/{org_unit_id}/courses", ("GET",)),
+        ("/dept/faculties/{faculty_id}/courses", ("GET",)),
     }
     assert expected.issubset(paths)
     assert assignment_router.prefix == "/dept"
@@ -442,7 +442,7 @@ async def test_student_403_on_assignment(
     )
     assert response.status_code == 403
     response = await client.get(
-        f"/api/v1/dept/org-units/{scenario['org_unit_a']}/courses",
+        f"/api/v1/dept/faculties/{scenario['org_unit_a']}/courses",
         headers=headers,
     )
     assert response.status_code == 403
@@ -1125,12 +1125,12 @@ async def test_get_org_unit_courses_hod_blocked_outside(
     scenario: dict[str, uuid.UUID],
 ) -> None:
     same = await client.get(
-        f"/api/v1/dept/org-units/{scenario['org_unit_a']}/courses",
+        f"/api/v1/dept/faculties/{scenario['org_unit_a']}/courses",
         headers={"Authorization": f"Bearer {hod_bearer}"},
     )
     assert same.status_code == 200, same.text
     other = await client.get(
-        f"/api/v1/dept/org-units/{scenario['org_unit_b']}/courses",
+        f"/api/v1/dept/faculties/{scenario['org_unit_b']}/courses",
         headers={"Authorization": f"Bearer {hod_bearer}"},
     )
     assert other.status_code == 403

@@ -121,7 +121,7 @@ async def search_users(
     display name), optional ``status`` / ``role`` / ``organization`` filters,
     and whitelisted sort (``email`` / ``status`` / ``created_at``). ``role``
     filters to users holding that role code at any scope; ``organization``
-    filters to members of that org; ``org_unit`` narrows to one org-unit
+    filters to members of that org; ``org_unit`` narrows to one Faculty
     **and every unit beneath it**, backing the org-tree scope picker.
 
     Org scope: callers holding ``system.administer`` may search globally and
@@ -131,9 +131,7 @@ async def search_users(
     org, so a manager can never enumerate users outside their org.
     """
     if not current_user.has_permission("system.administer"):
-        caller_org = await access_control_api.get_user_primary_org(
-            db, current_user.user_id
-        )
+        caller_org = await access_control_api.get_user_primary_org(db, current_user.user_id)
         if caller_org is None:
             return PageResponse[UserRead](
                 items=[],
@@ -195,14 +193,10 @@ async def get_users_by_ids(
             detail={"error": "too_many_ids", "message": "at most 100 ids"},
         )
     if not current_user.has_permission("system.administer"):
-        caller_org = await access_control_api.get_user_primary_org(
-            db, current_user.user_id
-        )
+        caller_org = await access_control_api.get_user_primary_org(db, current_user.user_id)
         if caller_org is None:
             return []
-        org_members = set(
-            await access_control_api.list_user_ids_in_org(db, caller_org.id)
-        )
+        org_members = set(await access_control_api.list_user_ids_in_org(db, caller_org.id))
         user_ids = [uid for uid in user_ids if uid in org_members]
     users = []
     for uid in user_ids:

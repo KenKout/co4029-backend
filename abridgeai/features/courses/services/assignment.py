@@ -99,6 +99,20 @@ async def assign_teacher_to_course(
             f"teacher_not_in_course_org: user {user_id} is not a member of the "
             f"organization that owns course {course_id}"
         )
+    if course.faculty_id is not None:
+        from abridgeai.features.access_control.api import public as access_api  # noqa: PLC0415
+
+        access = await access_api.get_user_faculty_access(
+            db,
+            user_id=user_id,
+            organization_id=course.organization_id,
+            permission_code="course.update",
+        )
+        if course.faculty_id not in access.faculty_ids:
+            raise ForbiddenError(
+                "teacher_not_in_course_faculty: the instructor must be active "
+                "staff of the faculty that owns this course"
+            )
 
     existing = await assignment_queries.find_active_teacher_assignment(
         db, course_id=course_id, user_id=user_id
@@ -120,9 +134,7 @@ async def assign_teacher_to_course(
         }
 
     max_teachers = int(
-        await resolve_setting(
-            db, "courses.max_teachers_per_course", course.organization_id
-        )
+        await resolve_setting(db, "courses.max_teachers_per_course", course.organization_id)
     )
     current = await assignment_queries.count_active_course_teachers(db, course_id)
     if current >= max_teachers:
@@ -212,9 +224,7 @@ async def set_teacher_titles(
         db, course_id=course_id, user_id=user_id
     )
     if assignment is None:
-        raise NotFoundError(
-            f"No active teacher assignment for course={course_id} user={user_id}"
-        )
+        raise NotFoundError(f"No active teacher assignment for course={course_id} user={user_id}")
     if not is_instructor and not is_assistant:
         raise ConflictError(
             "course_teacher_no_title: a course teacher must hold Course "
@@ -287,18 +297,12 @@ async def get_course_readiness(db: AsyncSession, course_id: UUID) -> dict[str, A
     paths = await assignment_queries.list_career_paths_containing_course(db, course_id)
 
     min_teachers = int(
-        await resolve_setting(
-            db, "courses.min_teachers_per_course", course.organization_id
-        )
+        await resolve_setting(db, "courses.min_teachers_per_course", course.organization_id)
     )
     max_teachers = int(
-        await resolve_setting(
-            db, "courses.max_teachers_per_course", course.organization_id
-        )
+        await resolve_setting(db, "courses.max_teachers_per_course", course.organization_id)
     )
-    course_instructor_count = await assignment_queries.count_course_instructors(
-        db, course_id
-    )
+    course_instructor_count = await assignment_queries.count_course_instructors(db, course_id)
 
     return {
         "course_id": course_id,
@@ -314,12 +318,10 @@ async def get_course_readiness(db: AsyncSession, course_id: UUID) -> dict[str, A
         # complete: it locks its stage and every stage behind it, for every
         # student on that path. Surfaced separately because the fix is urgent
         # in a way the plain "no content" row is not.
-        "blocks_required_stage": units == 0
-        and any(path["is_required"] for path in paths),
+        "blocks_required_stage": units == 0 and any(path["is_required"] for path in paths),
         # The staffing minimum is a first-publish gate; a course that is
         # already published is grandfathered and shows as ready on staffing.
-        "staffing_ok": len(teachers) >= min_teachers
-        or course.status != "draft",
+        "staffing_ok": len(teachers) >= min_teachers or course.status != "draft",
         # Must stay the EXACT conjunction publish_course gates on. A checklist
         # that says "ready" and a publish that answers 409 is worse than no
         # checklist: the manager trusts the green tick and blames the button.
@@ -328,14 +330,15 @@ async def get_course_readiness(db: AsyncSession, course_id: UUID) -> dict[str, A
         "can_publish": units > 0
         and outcomes > 0
         and course.status != "archived"
-        and (
-            len(teachers) >= min_teachers or course.status != "draft"
-        ),
+        and (len(teachers) >= min_teachers or course.status != "draft"),
     }
 
 
 async def list_assignable_teachers_for_creator(
-    db: AsyncSession, creator: CurrentUser
+    db: AsyncSession,
+    creator: CurrentUser,
+    *,
+    faculty_id: UUID | None = None,
 ) -> list[dict[str, Any]]:
     """Teachers the creator could staff a course with, BEFORE the course exists.
 
@@ -359,7 +362,22 @@ async def list_assignable_teachers_for_creator(
         raise AppError(
             f"User {creator.user_id} has no primary organization; cannot staff a course."
         )
-    return await assignment_queries.list_assignable_teachers(db, organization_id=org_id)
+    if faculty_id is not None:
+        from abridgeai.features.access_control.api import public as access_api  # noqa: PLC0415
+
+        access = await access_api.get_user_faculty_access(
+            db,
+            user_id=creator.user_id,
+            organization_id=org_id,
+            permission_code="course.create",
+        )
+        if faculty_id not in access.faculty_ids and not access.has_organization_scope:
+            raise ForbiddenError(
+                "you cannot list instructors for a faculty outside your assignments"
+            )
+    return await assignment_queries.list_assignable_teachers(
+        db, organization_id=org_id, faculty_id=faculty_id
+    )
 
 
 async def list_assignable_teachers(db: AsyncSession, course_id: UUID) -> list[dict[str, Any]]:
@@ -373,7 +391,10 @@ async def list_assignable_teachers(db: AsyncSession, course_id: UUID) -> list[di
     if course is None:
         raise NotFoundError(f"Course {course_id} not found")
     return await assignment_queries.list_assignable_teachers(
-        db, organization_id=course.organization_id, course_id=course_id
+        db,
+        organization_id=course.organization_id,
+        course_id=course_id,
+        faculty_id=course.faculty_id,
     )
 
 
@@ -489,9 +510,7 @@ async def _attach_health_projections(
     counts = await authoring_queries.count_students_and_modules_for_courses(
         db, [c.id for c in courses]
     )
-    instructors = await authoring_queries.list_instructors_for_courses(
-        db, [c.id for c in courses]
-    )
+    instructors = await authoring_queries.list_instructors_for_courses(db, [c.id for c in courses])
     for dto, orm in zip(dtos, courses, strict=True):
         students, modules = counts.get(orm.id, (0, 0))
         dto.student_count = students
@@ -513,22 +532,16 @@ async def _attach_health_projections(
             dto.instructor = InstructorAuthoring.model_validate(instructor_data)
 
 
-async def list_courses_in_dept(db: AsyncSession, org_unit_id: UUID) -> list[CourseAuthoring]:
-    """All courses in ``org_unit_id`` **and every unit below it**.
+async def list_courses_in_faculty(db: AsyncSession, faculty_id: UUID) -> list[CourseAuthoring]:
+    """All courses owned by one top-level faculty."""
+    return await list_courses_in_faculties(db, [faculty_id])
 
-    Serves both the HOD's default list and the manager's "filter by node"
-    picker, which is why it expands the subtree: standing on a faculty and
-    seeing none of its departments' courses would make the org tree useless
-    as a filter, and it is also what the permission engine already grants
-    (see :func:`access_control.api.public.get_org_unit_subtree_ids`).
-    """
-    # Lazy import, matching the sibling helpers in this module: a
-    # module-level courses.services -> access_control edge would be a new
-    # import-time cross-feature dependency.
-    from abridgeai.features.access_control.api import public as access_api  # noqa: PLC0415
 
-    unit_ids = await access_api.get_org_unit_subtree_ids(db, org_unit_id)
-    courses = await authoring_queries.list_courses_in_org_units(db, unit_ids)
+async def list_courses_in_faculties(
+    db: AsyncSession, faculty_ids: list[UUID]
+) -> list[CourseAuthoring]:
+    """All courses owned by any Faculty in the caller's active scopes."""
+    courses = await authoring_queries.list_courses_in_faculties(db, faculty_ids)
     dtos = [CourseAuthoring.model_validate(course) for course in courses]
     await _attach_health_projections(db, courses, dtos)
     return dtos
@@ -587,7 +600,8 @@ __all__ = [
     "assign_teacher_to_course",
     "list_course_roster",
     "list_courses_for_organization",
-    "list_courses_in_dept",
+    "list_courses_in_faculty",
+    "list_courses_in_faculties",
     "list_teachers_for_course",
     "list_teachers_with_emails",
     "remove_teacher_from_course",
