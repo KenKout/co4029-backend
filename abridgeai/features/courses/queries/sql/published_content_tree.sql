@@ -25,7 +25,7 @@ WITH course_root AS (
     SELECT
         c.id,
         c.organization_id,
-        c.org_unit_id,
+        c.faculty_id,
         c.owner_user_id,
         c.slug,
         c.title,

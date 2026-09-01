@@ -61,7 +61,7 @@ PermissionDependency = Callable[..., Awaitable[CurrentUser]]
 
 _COURSE_OWNER_CTX_SQL = text(
     """
-    SELECT owner_user_id, organization_id, org_unit_id
+    SELECT owner_user_id, organization_id, faculty_id
     FROM courses
     WHERE id = :course_id
       AND deleted_at IS NULL

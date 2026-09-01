@@ -30,12 +30,17 @@ def test_decorator_reexport_usable_from_sibling() -> None:
 
 
 @pytest.mark.asyncio
-async def test_org_ancestors_4_level_tree(test_engine: AsyncEngine) -> None:
+async def test_org_ancestors_single_faculty_root(test_engine: AsyncEngine) -> None:
+    """Ancestor walk under the post-0094 unit shape.
+
+    Migration 0094 flattened org units: ck_org_units_live_faculty_root makes
+    every LIVE unit a top-level faculty (parent NULL) — a live 4-level tree is
+    no longer legal schema. The walk still returns the unit itself and, if a
+    child were ever allowed to reference a parent, would resolve ancestors;
+    here the only constructible row is the root, so the walk is [self].
+    """
     org_id = uuid4()
     root_id = uuid4()
-    l1_id = uuid4()
-    l2_id = uuid4()
-    leaf_id = uuid4()
 
     async with test_engine.connect() as conn:
         trans = await conn.begin()
@@ -48,38 +53,31 @@ async def test_org_ancestors_4_level_tree(test_engine: AsyncEngine) -> None:
                 ),
                 {"id": str(org_id), "slug": f"t-{org_id.hex[:8]}", "name": "T Org"},
             )
-            for unit_id, parent_id, name in (
-                (root_id, None, "root"),
-                (l1_id, root_id, "l1"),
-                (l2_id, l1_id, "l2"),
-                (leaf_id, l2_id, "leaf"),
-            ):
-                await session.execute(
-                    text(
-                        "INSERT INTO org_units "
-                        "(id, organization_id, parent_unit_id, unit_type, name, "
-                        " created_at, updated_at) "
-                        "VALUES (:id, :org, :parent, 'department', :name, NOW(), NOW())"
-                    ),
-                    {
-                        "id": str(unit_id),
-                        "org": str(org_id),
-                        "parent": str(parent_id) if parent_id else None,
-                        "name": name,
-                    },
-                )
+            await session.execute(
+                text(
+                    "INSERT INTO org_units "
+                    "(id, organization_id, parent_unit_id, unit_type, name, "
+                    " created_at, updated_at) "
+                    "VALUES (:id, :org, :parent, 'faculty', :name, NOW(), NOW())"
+                ),
+                {
+                    "id": str(root_id),
+                    "org": str(org_id),
+                    "parent": None,
+                    "name": "root",
+                },
+            )
             await session.flush()
 
-            ancestors = await get_org_unit_ancestors(session, leaf_id)
+            ancestors = await get_org_unit_ancestors(session, root_id)
         finally:
             await trans.rollback()
 
     assert all(isinstance(a, OrgUnitDTO) for a in ancestors)
-    assert [a.id for a in ancestors] == [leaf_id, l2_id, l1_id, root_id]
-    assert [a.depth for a in ancestors] == [0, 1, 2, 3]
+    assert [a.id for a in ancestors] == [root_id]
+    assert [a.depth for a in ancestors] == [0]
     assert all(a.organization_id == org_id for a in ancestors)
-    assert ancestors[0].parent_unit_id == l2_id
-    assert ancestors[-1].parent_unit_id is None
+    assert ancestors[0].parent_unit_id is None
 
 
 @pytest.mark.asyncio
