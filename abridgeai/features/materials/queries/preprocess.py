@@ -60,6 +60,7 @@ async def get_quarantine_row(
                 FROM material_preprocess_quarantine q
                 JOIN learning_material_versions lmv ON lmv.id = q.material_version_id
                 WHERE q.id = :qid
+                  AND lmv.deleted_at IS NULL
                 """
             ),
             {"qid": str(quarantine_id)},
@@ -148,6 +149,8 @@ async def get_current_version_and_mode(
                 FROM learning_materials lm
                 JOIN learning_material_versions lmv ON lmv.id = lm.current_version_id
                 WHERE lm.id = :mid
+                  AND lm.deleted_at IS NULL
+                  AND lmv.deleted_at IS NULL
                 """
             ),
             {"mid": str(material_id)},

@@ -65,6 +65,10 @@ async def _resolve_material_context(
                 JOIN lessons l            ON l.id = lm.lesson_id
                 JOIN modules m            ON m.id = l.module_id
                 WHERE lmv.id = :version_id
+                  AND lmv.deleted_at IS NULL
+                  AND lm.deleted_at IS NULL
+                  AND l.deleted_at IS NULL
+                  AND m.deleted_at IS NULL
                 """
             ),
             {"version_id": str(material_version_id)},

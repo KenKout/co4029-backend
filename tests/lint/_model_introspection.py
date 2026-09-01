@@ -110,6 +110,12 @@ PATTERN3_ALLOWLIST: Final[frozenset[str]] = frozenset(
         "abridgeai/features/spaced_repetition/routers/teacher.py",
         "abridgeai/features/spaced_repetition/services/remediation.py",
         "abridgeai/features/spaced_repetition/services/review.py",
+        # Tenancy resolution: "which organization owns this lesson /
+        # course". It must still answer for SOFT-DELETED rows — KG data
+        # outlives the course row's visibility, and returning "unknown"
+        # for a deleted course would remove the only signal the caller
+        # has to refuse a cross-tenant read.
+        "abridgeai/ai/knowledge_graph/tenancy.py",
     }
 )
 

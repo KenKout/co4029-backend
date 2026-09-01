@@ -92,10 +92,22 @@ class TestEveryByIdRouteIsGated:
     a new endpoint added later fails here even if nobody writes a test for it.
     """
 
+    #: Handlers that resolve no tenant row, so there is nothing to scope to.
+    #: Both are disabled stubs: they raise 409 unconditionally and `del`
+    #: their arguments without touching the database. Direct path
+    #: enrolment/withdrawal moved to Learning Programs. Gating them would
+    #: mean resolving a path's organization purely to refuse everyone a
+    #: line later.
+    DISABLED_STUBS = frozenset(
+        {"enroll_student_in_path", "unenroll_student_from_path"}
+    )
+
     def test_all_career_path_id_handlers_call_the_gate(self) -> None:
         ungated: list[str] = []
         for name, fn in vars(router).items():
             if not inspect.isfunction(fn) or name.startswith("_"):
+                continue
+            if name in self.DISABLED_STUBS:
                 continue
             signature = inspect.signature(fn)
             if "career_path_id" not in signature.parameters:

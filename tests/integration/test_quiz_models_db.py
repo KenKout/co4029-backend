@@ -9,6 +9,7 @@ flips the baseline ``NOT NULL`` to ``NULL`` for that purpose.
 from __future__ import annotations
 
 import uuid
+from collections.abc import AsyncIterator
 from pathlib import Path
 
 import pytest
@@ -52,6 +53,51 @@ async def engine() -> AsyncEngine:
 @pytest.fixture
 def alembic_cfg() -> Config:
     return _alembic_config()
+
+
+@pytest_asyncio.fixture
+async def throwaway_db() -> AsyncIterator[str]:
+    """A private, empty database for the migration round-trip.
+
+    The round-trip rewinds the schema to 0006 and replays ~93 migrations.
+    Run against the SHARED test database that is hopeless: it replays
+    data-touching migrations over whatever rows other tests happen to have
+    left, and each one is a fresh way to fail. 0059's downgrade re-adds a
+    unique constraint that per-parent outcome positions violate; 0087's
+    upgrade re-slugs lessons into collisions. Both are artefacts of the
+    residue, not of the migrations.
+
+    So the round-trip gets its own database, created empty and dropped
+    afterwards. The assertions are about SCHEMA, which needs no seed data.
+    """
+    settings_url = get_settings().database_url
+    base, _, _ = settings_url.rpartition("/")
+    name = f"abridgeai_roundtrip_{uuid.uuid4().hex[:12]}"
+
+    admin = create_async_engine(
+        _async_url(f"{base}/postgres"), isolation_level="AUTOCOMMIT"
+    )
+    async with admin.connect() as conn:
+        await conn.execute(text(f'CREATE DATABASE "{name}"'))
+    await admin.dispose()
+
+    try:
+        yield f"{base}/{name}"
+    finally:
+        admin = create_async_engine(
+            _async_url(f"{base}/postgres"), isolation_level="AUTOCOMMIT"
+        )
+        async with admin.connect() as conn:
+            # Terminate stragglers or DROP blocks on an open connection.
+            await conn.execute(
+                text(
+                    "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                    "WHERE datname = :n AND pid <> pg_backend_pid()"
+                ),
+                {"n": name},
+            )
+            await conn.execute(text(f'DROP DATABASE IF EXISTS "{name}"'))
+        await admin.dispose()
 
 
 @pytest_asyncio.fixture
@@ -211,10 +257,25 @@ async def test_t_actual_ms_renamed_in_db(
 
 
 async def test_migration_round_trip(
-    alembic_cfg: Config,
-    engine: AsyncEngine,
+    throwaway_db: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    command.upgrade(alembic_cfg, "head")  # never leave the shared DB below real head
+    # Own database, not the shared one — see the `throwaway_db` docstring.
+    #
+    # `migrations/env.py` reads `get_settings().database_url` directly and
+    # ignores the Config's sqlalchemy.url, so redirecting the command means
+    # patching settings. env.py is re-imported per alembic command and binds
+    # the name at import time, so patching the module attribute is enough.
+    from abridgeai.core import config as app_config
+
+    redirected = app_config.get_settings().model_copy(
+        update={"database_url": throwaway_db}
+    )
+    monkeypatch.setattr(app_config, "get_settings", lambda: redirected)
+
+    alembic_cfg = _alembic_config()
+    engine = create_async_engine(_async_url(throwaway_db), pool_pre_ping=True)
+
+    command.upgrade(alembic_cfg, "head")
     command.downgrade(alembic_cfg, PRIOR_HEAD)
 
     async with engine.connect() as conn:
@@ -233,7 +294,7 @@ async def test_migration_round_trip(
     assert "expected_response_time_ms" not in cols_at_prior
     assert "source_refs" not in cols_at_prior
 
-    command.upgrade(alembic_cfg, "head")  # never leave the shared DB below real head
+    command.upgrade(alembic_cfg, "head")
 
     async with engine.connect() as conn:
         result = await conn.execute(

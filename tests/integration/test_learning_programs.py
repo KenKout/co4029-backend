@@ -74,6 +74,36 @@ async def _seed_program_context(
                 "faculty": faculty_id,
             },
         )
+        # The manager operates on programs in this faculty too (create /
+        # enrol / withdraw). `actor_has_program_role` accepts an org-scoped
+        # role OR an org_unit-scoped one backed by a matching active faculty
+        # assignment — conftest grants the manager the latter for ITS faculty,
+        # not this one, so both rows are needed here as well.
+        await conn.execute(
+            text(
+                "INSERT INTO user_role_assignments "
+                "(id, user_id, role_id, scope_kind, organization_id, org_unit_id, granted_by) "
+                "SELECT gen_random_uuid(), :mgr, id, 'org_unit', :org, :faculty, :mgr "
+                "FROM roles WHERE code = 'manager' AND deleted_at IS NULL"
+            ),
+            {
+                "mgr": seeded.manager_id,
+                "org": seeded.organization_id,
+                "faculty": faculty_id,
+            },
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO user_faculty_assignments "
+                "(id, user_id, organization_id, faculty_id, status) "
+                "VALUES (gen_random_uuid(), :mgr, :org, :faculty, 'active')"
+            ),
+            {
+                "mgr": seeded.manager_id,
+                "org": seeded.organization_id,
+                "faculty": faculty_id,
+            },
+        )
         for index, path_id in enumerate((path_a, path_b), start=1):
             await conn.execute(
                 text(

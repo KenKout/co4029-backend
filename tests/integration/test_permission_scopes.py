@@ -21,6 +21,9 @@ from abridgeai.features.access_control.queries import (
     load_course_permissions,
     load_user_permissions,
 )
+from abridgeai.features.access_control.queries.permissions import (
+    clear_permissions_cache,
+)
 
 _TEST_PERM_CODE = "_test.scope_probe"
 
@@ -174,6 +177,15 @@ async def scenario(engine: AsyncEngine, seeded_users: SeededUsers) -> AsyncItera
                 "title": "Extra Org Course (no unit)",
             },
         )
+
+    # Effective permissions are cached process-locally for 30s
+    # (queries/permissions.py). This fixture grants the probe by writing
+    # role_permissions directly, bypassing the service write paths that
+    # normally invalidate — so any user whose permissions were resolved
+    # earlier in the session (another test file making authenticated
+    # requests) would be answered from a pre-probe cache entry. The grant
+    # spans five roles, so every holder is affected: clear the lot.
+    clear_permissions_cache()
 
     yield _Scenario(
         perm_id=perm_id,

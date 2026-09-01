@@ -146,7 +146,11 @@ _CARD_STUDENT_RESULTS_SQL = text(
         stats.review_count AS review_count
     FROM student_card_state scs
     JOIN users u ON u.id = scs.student_id
-    LEFT JOIN user_profiles up ON up.user_id = scs.student_id
+    -- In the JOIN, not the WHERE: this is a LEFT JOIN and moving the
+    -- predicate would drop the student entirely rather than falling
+    -- back to their email in the COALESCE above.
+    LEFT JOIN user_profiles up
+           ON up.user_id = scs.student_id AND up.deleted_at IS NULL
     LEFT JOIN LATERAL (
         SELECT cr.correct
         FROM card_reviews cr

@@ -543,6 +543,20 @@ async def test_dry_run_then_real_cascade(
         assert active_course is None
 
 
+@pytest.mark.skip(
+    reason=(
+        "0094_flat_faculties made this scenario unconstructable. "
+        "ck_org_units_live_faculty_root requires every LIVE org_unit to be "
+        "a top-level faculty with parent_unit_id IS NULL, so a cycle can no "
+        "longer be seeded — the CHECK rejects both the non-faculty insert and "
+        "the parent UPDATE. org_units is also the only self-referential table "
+        "soft_delete_cascade traverses (course_learning_outcomes has the "
+        "parent column but no `children` relationship), so there is nowhere "
+        "to port this to. The cycle guard remains in soft_delete_cascade as "
+        "defence; this test is kept, skipped, rather than deleted so the "
+        "coverage gap stays visible."
+    )
+)
 async def test_cycle_safety_two_node_ring(
     session_factory: async_sessionmaker[AsyncSession],
     engine: AsyncEngine,

@@ -108,6 +108,7 @@ async def session_factory(engine: AsyncEngine) -> async_sessionmaker[AsyncSessio
 async def scenario(engine: AsyncEngine) -> AsyncIterator[dict]:
     org_id = uuid.uuid4()
     owner_id = uuid.uuid4()
+    faculty_id = uuid.uuid4()
     course_id = uuid.uuid4()
     module_id = uuid.uuid4()
     suffix = org_id.hex[:8]
@@ -146,6 +147,27 @@ async def scenario(engine: AsyncEngine) -> AsyncIterator[dict]:
                 "VALUES (gen_random_uuid(), :user, :org, 'active')"
             ),
             {"user": owner_id, "org": org_id},
+        )
+        # 0094_flat_faculties: a new course takes an immutable owning
+        # faculty, resolved from the actor's affiliations. The owner holds
+        # `teacher`, which does NOT carry `course.create`, so the org-scope
+        # escape hatch in resolve_new_course_faculty does not apply and a
+        # faculty affiliation is the only way create_course can pick one.
+        # Exactly one, so the resolution is unambiguous.
+        await conn.execute(
+            text(
+                "INSERT INTO org_units (id, organization_id, unit_type, name, code) "
+                "VALUES (:id, :org, 'faculty', 'Authoring Test Faculty', :code)"
+            ),
+            {"id": faculty_id, "org": org_id, "code": f"AUTH-{suffix}"},
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO user_faculty_assignments "
+                "(id, user_id, organization_id, faculty_id, status) "
+                "VALUES (gen_random_uuid(), :user, :org, :fac, 'active')"
+            ),
+            {"user": owner_id, "org": org_id, "fac": faculty_id},
         )
         await conn.execute(
             text(
@@ -216,7 +238,17 @@ async def scenario(engine: AsyncEngine) -> AsyncIterator[dict]:
             text("DELETE FROM organization_memberships WHERE user_id = :id"),
             {"id": owner_id},
         )
+        # Before users and organizations: the assignment FKs both, and the
+        # faculty row FKs the organization.
+        await conn.execute(
+            text("DELETE FROM user_faculty_assignments WHERE user_id = :id"),
+            {"id": owner_id},
+        )
         await conn.execute(text("DELETE FROM users WHERE id = :id"), {"id": owner_id})
+        await conn.execute(
+            text("DELETE FROM org_units WHERE organization_id = :o"),
+            {"o": org_id},
+        )
         await conn.execute(
             text("DELETE FROM system_settings WHERE organization_id = :o"),
             {"o": org_id},

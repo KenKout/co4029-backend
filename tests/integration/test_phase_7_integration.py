@@ -200,21 +200,29 @@ async def manager_org_membership(
     here keeps the setup local to this scenario.
     """
     async with engine.begin() as conn:
-        await conn.execute(
+        inserted = await conn.execute(
             text(
                 "INSERT INTO organization_memberships (user_id, organization_id, status) "
-                "VALUES (:u, :o, 'active') ON CONFLICT DO NOTHING"
+                "VALUES (:u, :o, 'active') ON CONFLICT DO NOTHING "
+                "RETURNING id"
             ),
             {"u": seeded_users.manager_id, "o": seeded_users.organization_id},
         )
+        # Did WE create it? conftest seeds this membership session-wide, so
+        # the INSERT is normally a no-op — and the teardown below used to
+        # delete unconditionally, destroying session state every later test
+        # depends on. Only remove the row if this fixture actually made one.
+        created = inserted.first() is not None
     yield
-    async with engine.begin() as conn:
-        await conn.execute(
-            text(
-                "DELETE FROM organization_memberships WHERE user_id = :u AND organization_id = :o"
-            ),
-            {"u": seeded_users.manager_id, "o": seeded_users.organization_id},
-        )
+    if created:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text(
+                    "DELETE FROM organization_memberships "
+                    "WHERE user_id = :u AND organization_id = :o"
+                ),
+                {"u": seeded_users.manager_id, "o": seeded_users.organization_id},
+            )
 
 
 def test_create_app_mounts_phase_7_routes() -> None:
@@ -528,9 +536,37 @@ async def test_career_path_lifecycle(
             ),
             {"id": faculty_id, "org": seeded_users.organization_id, "code": f"P7-{suffix[:6]}"},
         )
-        # decide/approve is dean-only, but enrollment itself needs the manager
-        # to hold manager|hod at the program's org or faculty; the seeded
-        # manager is org-scoped, so no extra grant is required.
+        # decide/approve is dean-only, but creating and enrolling needs the
+        # manager to hold manager|hod at the program's org OR faculty. The
+        # seeded manager is org_UNIT-scoped (roles.yaml pins them to the
+        # conftest faculty), not organization-scoped as this once assumed, so
+        # they need an explicit grant on THIS faculty — plus the matching
+        # active user_faculty_assignments row the org_unit branch requires.
+        await conn.execute(
+            text(
+                "INSERT INTO user_role_assignments "
+                "(id, user_id, role_id, scope_kind, organization_id, org_unit_id, granted_by) "
+                "SELECT gen_random_uuid(), :mgr, id, 'org_unit', :org, :faculty, :mgr "
+                "FROM roles WHERE code = 'manager' AND deleted_at IS NULL"
+            ),
+            {
+                "mgr": seeded_users.manager_id,
+                "org": seeded_users.organization_id,
+                "faculty": faculty_id,
+            },
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO user_faculty_assignments "
+                "(id, user_id, organization_id, faculty_id, status) "
+                "VALUES (gen_random_uuid(), :mgr, :org, :faculty, 'active')"
+            ),
+            {
+                "mgr": seeded_users.manager_id,
+                "org": seeded_users.organization_id,
+                "faculty": faculty_id,
+            },
+        )
 
     program_resp = await client.post(
         "/api/v1/management/learning-programs",
@@ -664,6 +700,15 @@ async def test_career_path_lifecycle(
         await conn.execute(
             text("DELETE FROM career_paths WHERE id = :p"),
             {"p": path_id},
+        )
+        # The manager grants added above FK the faculty, so they go first.
+        await conn.execute(
+            text("DELETE FROM user_faculty_assignments WHERE faculty_id = :f"),
+            {"f": faculty_id},
+        )
+        await conn.execute(
+            text("DELETE FROM user_role_assignments WHERE org_unit_id = :f"),
+            {"f": faculty_id},
         )
         await conn.execute(text("DELETE FROM org_units WHERE id = :f"), {"f": faculty_id})
         # Career enrollment auto-enrolls the student into member courses;

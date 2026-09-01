@@ -99,7 +99,9 @@ async def _insert_org_unit(conn: AsyncConnection) -> PrimaryKey:
     await conn.execute(
         text(
             "INSERT INTO org_units (id, organization_id, unit_type, name, code) "
-            "VALUES (:id, :org, 'department', :name, :code)"
+            # 0094_flat_faculties: ck_org_units_live_faculty_root requires
+            # every LIVE unit to be a top-level faculty.
+            "VALUES (:id, :org, 'faculty', :name, :code)"
         ),
         {"id": uid, "org": org_id, "name": "trig unit", "code": f"u-{uid.hex[:8]}"},
     )

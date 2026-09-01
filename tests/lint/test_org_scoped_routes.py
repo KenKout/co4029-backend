@@ -96,6 +96,31 @@ _GLOBAL_BY_DESIGN: dict[tuple[str, str], str] = {
         "It can never widen what a scoped caller sees."
     ),
     (
+        "career_paths/routers/authoring.py",
+        "enroll_student_in_path",
+    ): (
+        "Disabled stub: raises 409 unconditionally and never touches the "
+        "database. Direct path enrolment moved to Learning Programs, so "
+        "there is no tenant row to reach."
+    ),
+    (
+        "career_paths/routers/authoring.py",
+        "unenroll_student_from_path",
+    ): (
+        "Disabled stub: raises 409 unconditionally and never touches the "
+        "database. Withdrawal moved to the Learning Program enrolment."
+    ),
+    (
+        "career_paths/routers/learner.py",
+        "start_course_in_path",
+    ): (
+        "Student-scoped, not permission-scoped: student_id comes from the "
+        "JWT and the service 403s unless the course sits in a stage of a "
+        "path the caller is ALREADY actively enrolled in. A student cannot "
+        "be enrolled in another tenant's path, so the cross-tenant reach "
+        "this check guards against is unreachable here."
+    ),
+    (
         "admin/routers/security.py",
         "get_security_summary",
     ): (
