@@ -302,6 +302,59 @@ async def test_db_failure_does_not_crash_request() -> None:
     assert resp.headers["X-Request-ID"]
 
 
+async def test_uncaught_route_exception_persists_500_row(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A 500 must NOT vanish from the audit trail.
+
+    The regression this guards: FastAPI's ServerErrorMiddleware lives OUTSIDE
+    the audit middleware's stack, so an uncaught route exception re-raises out
+    of ``call_next`` instead of handing over a 500 Response — the original
+    middleware only persisted the normal path, leaving every 5xx invisible
+    (confirmed: zero 5xx rows in the live table across 48h of real 500s, while
+    the read-side SQL already maps ``status_code >= 500`` to 'server_error').
+    dispatch now catches, persists status_code=500, and re-raises so the
+    response the client receives is unchanged.
+    """
+    cutoff = datetime.now(tz=UTC) - timedelta(seconds=1)
+    boom_app = FastAPI(raise_server_exceptions=False)
+    boom_app.add_middleware(AuditLogMiddleware, sessionmaker=session_factory)
+
+    @boom_app.get("/boom")
+    async def _boom() -> None:
+        raise RuntimeError("deliberate crash")
+
+    transport = httpx.ASGITransport(app=boom_app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
+        try:
+            await ac.get("/boom")
+            status = 200  # unexpected: ServerErrorMiddleware would make it 500
+        except RuntimeError:
+            # The route exception propagates through the ASGI transport in a
+            # bare-test harness; in the real app stack it surfaces as the 500
+            # response via ServerErrorMiddleware. Either way the row must exist.
+            status = 500
+    assert status == 500
+
+    async with engine.begin() as conn:
+        rows = (
+            await conn.execute(
+                text(
+                    "SELECT status_code FROM http_audit_log "
+                    "WHERE path = '/boom' AND created_at >= :c"
+                ),
+                {"c": cutoff},
+            )
+        ).all()
+        await conn.execute(
+            text("DELETE FROM http_audit_log WHERE path = '/boom' AND created_at >= :c"),
+            {"c": cutoff},
+        )
+    assert len(rows) >= 1, "the 500 must be persisted even though the route crashed"
+    assert all(row[0] == 500 for row in rows)
+
+
 async def test_admin_audit_http_endpoint_now_returns_200(
     client: httpx.AsyncClient,
     engine: AsyncEngine,

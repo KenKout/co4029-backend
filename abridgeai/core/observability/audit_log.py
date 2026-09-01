@@ -3,6 +3,16 @@
 Persists every non-skip request to ``http_audit_log`` (migration 0011) with
 header/query redaction and a propagated ``X-Request-ID``. Best-effort: a DB
 failure NEVER crashes the request, the structlog event always fires.
+
+Request BODY content is not stored — only ``body_size_bytes`` (size, never the
+bytes) for mutations — and response bodies are never captured. ``failure_reason``
+on the read side is derived from ``status_code``, so this store carries no
+payload beyond request metadata.
+
+500s are persisted too: an uncaught route exception re-raises out of
+``call_next`` (ServerErrorMiddleware is outside this stack), so ``dispatch``
+must catch it, write the row with ``status_code=500`` and re-raise — otherwise
+the failures an audit log exists to surface would vanish from the trail.
 """
 
 from __future__ import annotations
@@ -188,12 +198,78 @@ class AuditLogMiddleware(BaseHTTPMiddleware):
         request_id = uuid.uuid4()
         bind_request_context(request_id=str(request_id))
         start = time.perf_counter()
+        response: Response | None = None
+        app_exc: Exception | None = None
         try:
             response = await call_next(request)
-        finally:
-            pass
+        except Exception as exc:  # noqa: BLE001 — any route crash, see below
+            app_exc = exc
 
         latency_ms = int((time.perf_counter() - start) * 1000)
+
+        # An UNCAUGHT route exception never yields a Response here: FastAPI's
+        # ServerErrorMiddleware lives OUTSIDE this middleware's stack, so
+        # ``call_next`` re-raises instead of returning the 500 it generates.
+        # Without this branch the audit trail would silently skip every 5xx —
+        # the exact failures an audit log exists to surface (confirmed: 0 rows
+        # of 5xx in the table across 48h of real 500s, while the read-side SQL
+        # already maps status_code >= 500 to 'server_error'). Persist the row,
+        # log the crash, then re-raise so the response the client gets is
+        # unchanged. The exception TYPE is not persisted — the read-side CASE
+        # derives the display reason from the status code, and storing raw
+        # exception text would leak internals into the audit store.
+        if app_exc is not None:
+            await self._persist(
+                request_id=request_id,
+                method=request.method.upper(),
+                path=_truncate(request.url.path, 2000) or "",
+                query_params=_redact_query_params(list(request.query_params.multi_items())),
+                headers_meta=_redact_headers(request.headers),
+                status_code=500,
+                latency_ms=latency_ms,
+                user_id=_user_id(request),
+                session_id=_session_id(request),
+                ip_address=_client_ip(request),
+                user_agent=_truncate(request.headers.get("user-agent"), 500),
+                path_params=(
+                    _path_params(request)
+                    if request.method.upper() in _MUTATION_METHODS
+                    else None
+                ),
+                body_size_bytes=(
+                    _body_size(request)
+                    if request.method.upper() in _MUTATION_METHODS
+                    else None
+                ),
+                log_payload={
+                    "request_id": str(request_id),
+                    "method": request.method.upper(),
+                    "path": _truncate(request.url.path, 2000) or "",
+                    "status_code": 500,
+                    "latency_ms": latency_ms,
+                    "user_id": str(_user_id(request)) if _user_id(request) else None,
+                    "ip_address": _client_ip(request),
+                },
+            )
+            self._log.error(
+                "http_request_500",
+                error=str(app_exc),
+                error_type=type(app_exc).__name__,
+                **{
+                    "request_id": str(request_id),
+                    "method": request.method.upper(),
+                    "path": _truncate(request.url.path, 2000) or "",
+                    "latency_ms": latency_ms,
+                    "user_id": str(_user_id(request)) if _user_id(request) else None,
+                },
+            )
+            # Must run before re-raise: ServerErrorMiddleware also runs in this
+            # task, and the NEXT request's coroutine must not inherit this
+            # request's correlation context.
+            clear_request_context()
+            raise app_exc
+
+        assert response is not None  # noqa: S101 — reached only when no exception
         response.headers[_REQUEST_ID_HEADER] = str(request_id)
 
         if request.url.path in _SKIP_PATHS and request.method == "GET":
