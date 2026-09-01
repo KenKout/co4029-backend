@@ -123,12 +123,12 @@ async def scenario(engine: AsyncEngine) -> AsyncIterator[_Scenario]:
         await conn.execute(
             text(
                 "INSERT INTO org_units (id, organization_id, unit_type, name, code) "
-                "VALUES (:id, :org, 'department', :name, :code)"
+                "VALUES (:id, :org, 'faculty', :name, :code)"
             ),
             {
                 "id": org_unit_id,
                 "org": organization_id,
-                "name": "T1.13 Identity Dept",
+                "name": "T1.13 Identity Faculty",
                 "code": f"T113-ID-{org_unit_id.hex[:6]}",
             },
         )

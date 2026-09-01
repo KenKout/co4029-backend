@@ -70,7 +70,7 @@ async def session_factory(engine: AsyncEngine) -> async_sessionmaker[AsyncSessio
 @pytest_asyncio.fixture
 async def scenario(engine: AsyncEngine) -> AsyncIterator[dict]:
     org_id = uuid.uuid4()
-    org_unit_id = uuid.uuid4()
+    faculty_id = uuid.uuid4()
     actor_id = uuid.uuid4()
     teacher_id = uuid.uuid4()
     course_id = uuid.uuid4()
@@ -84,12 +84,12 @@ async def scenario(engine: AsyncEngine) -> AsyncIterator[dict]:
         await conn.execute(
             text(
                 "INSERT INTO org_units (id, organization_id, unit_type, name, code) "
-                "VALUES (:id, :org, 'department', :name, :code)"
+                "VALUES (:id, :org, 'faculty', :name, :code)"
             ),
             {
-                "id": org_unit_id,
+                "id": faculty_id,
                 "org": org_id,
-                "name": "Test Department",
+                "name": "Test Faculty",
                 "code": f"D-{suffix}",
             },
         )
@@ -118,6 +118,14 @@ async def scenario(engine: AsyncEngine) -> AsyncIterator[dict]:
         )
         await conn.execute(
             text(
+                "INSERT INTO user_faculty_assignments "
+                "(user_id, organization_id, faculty_id, status) "
+                "VALUES (:t, :org, :faculty, 'active')"
+            ),
+            {"t": teacher_id, "org": org_id, "faculty": faculty_id},
+        )
+        await conn.execute(
+            text(
                 "INSERT INTO courses "
                 "(id, organization_id, faculty_id, owner_user_id, slug, title, status) "
                 "VALUES (:id, :org, :unit, :owner, :slug, 'Assigned Course', 'draft')"
@@ -125,7 +133,7 @@ async def scenario(engine: AsyncEngine) -> AsyncIterator[dict]:
             {
                 "id": course_id,
                 "org": org_id,
-                "unit": org_unit_id,
+                "unit": faculty_id,
                 "owner": actor_id,
                 "slug": f"course-{suffix}",
             },
@@ -136,7 +144,7 @@ async def scenario(engine: AsyncEngine) -> AsyncIterator[dict]:
         "teacher_id": teacher_id,
         "course_id": course_id,
         "org_id": org_id,
-        "org_unit_id": org_unit_id,
+        "faculty_id": faculty_id,
     }
 
     async with engine.begin() as conn:
@@ -146,6 +154,10 @@ async def scenario(engine: AsyncEngine) -> AsyncIterator[dict]:
         )
         await conn.execute(text("DELETE FROM courses WHERE id = :id"), {"id": course_id})
         await conn.execute(
+            text("DELETE FROM user_faculty_assignments WHERE user_id = :t"),
+            {"t": teacher_id},
+        )
+        await conn.execute(
             text("DELETE FROM organization_memberships WHERE user_id = :t"), {"t": teacher_id}
         )
         await conn.execute(text("DELETE FROM user_profiles WHERE user_id = :t"), {"t": teacher_id})
@@ -153,7 +165,7 @@ async def scenario(engine: AsyncEngine) -> AsyncIterator[dict]:
             text("DELETE FROM users WHERE id = ANY(:ids)"),
             {"ids": [actor_id, teacher_id]},
         )
-        await conn.execute(text("DELETE FROM org_units WHERE id = :id"), {"id": org_unit_id})
+        await conn.execute(text("DELETE FROM org_units WHERE id = :id"), {"id": faculty_id})
         await conn.execute(text("DELETE FROM organizations WHERE id = :id"), {"id": org_id})
 
 
@@ -284,9 +296,7 @@ async def test_list_courses_in_faculty_returns_owned_courses(
     scenario: dict,
 ) -> None:
     async with session_factory() as session:
-        rows = await assignment_service.list_courses_in_faculty(
-            session, scenario["org_unit_id"]
-        )
+        rows = await assignment_service.list_courses_in_faculty(session, scenario["faculty_id"])
     assert any(course.id == scenario["course_id"] for course in rows)
 
 
@@ -404,4 +414,3 @@ async def test_assign_teacher_to_published_course_notifies(
                 text("DELETE FROM notifications WHERE user_id = :u"),
                 {"u": scenario["teacher_id"]},
             )
-

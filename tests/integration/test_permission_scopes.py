@@ -56,8 +56,6 @@ class _Scenario:
     other_org_course_id: uuid.UUID
     sibling_unit_id: uuid.UUID
     sibling_unit_course_id: uuid.UUID
-    child_unit_id: uuid.UUID
-    child_unit_course_id: uuid.UUID
     extra_course_same_org_id: uuid.UUID
 
 
@@ -68,8 +66,6 @@ async def scenario(engine: AsyncEngine, seeded_users: SeededUsers) -> AsyncItera
     other_org_course_id = uuid.uuid4()
     sibling_unit_id = uuid.uuid4()
     sibling_unit_course_id = uuid.uuid4()
-    child_unit_id = uuid.uuid4()
-    child_unit_course_id = uuid.uuid4()
     extra_course_same_org_id = uuid.uuid4()
 
     async with engine.begin() as conn:
@@ -115,12 +111,12 @@ async def scenario(engine: AsyncEngine, seeded_users: SeededUsers) -> AsyncItera
         await conn.execute(
             text(
                 "INSERT INTO org_units (id, organization_id, unit_type, "
-                "name, code) VALUES (:id, :org, 'department', :name, :code)"
+                "name, code) VALUES (:id, :org, 'faculty', :name, :code)"
             ),
             {
                 "id": sibling_unit_id,
                 "org": seeded_users.organization_id,
-                "name": "Sibling Dept",
+                "name": "Sibling Faculty",
                 "code": f"SIB-{sibling_unit_id.hex[:6]}",
             },
         )
@@ -137,36 +133,6 @@ async def scenario(engine: AsyncEngine, seeded_users: SeededUsers) -> AsyncItera
                 "owner": seeded_users.admin_id,
                 "slug": f"sib-course-{sibling_unit_course_id.hex[:8]}",
                 "title": "Sibling Unit Course",
-            },
-        )
-
-        await conn.execute(
-            text(
-                "INSERT INTO org_units (id, organization_id, parent_unit_id, "
-                "unit_type, name, code) VALUES (:id, :org, :parent, "
-                "'program', :name, :code)"
-            ),
-            {
-                "id": child_unit_id,
-                "org": seeded_users.organization_id,
-                "parent": seeded_users.org_unit_id,
-                "name": "Child Program",
-                "code": f"CHILD-{child_unit_id.hex[:6]}",
-            },
-        )
-        await conn.execute(
-            text(
-                "INSERT INTO courses (id, organization_id, faculty_id, "
-                "owner_user_id, slug, title, status) "
-                "VALUES (:id, :org, :unit, :owner, :slug, :title, 'draft')"
-            ),
-            {
-                "id": child_unit_course_id,
-                "org": seeded_users.organization_id,
-                "unit": child_unit_id,
-                "owner": seeded_users.admin_id,
-                "slug": f"child-course-{child_unit_course_id.hex[:8]}",
-                "title": "Child Unit Course",
             },
         )
 
@@ -191,8 +157,6 @@ async def scenario(engine: AsyncEngine, seeded_users: SeededUsers) -> AsyncItera
         other_org_course_id=other_org_course_id,
         sibling_unit_id=sibling_unit_id,
         sibling_unit_course_id=sibling_unit_course_id,
-        child_unit_id=child_unit_id,
-        child_unit_course_id=child_unit_course_id,
         extra_course_same_org_id=extra_course_same_org_id,
     )
 
@@ -203,14 +167,13 @@ async def scenario(engine: AsyncEngine, seeded_users: SeededUsers) -> AsyncItera
                 "ids": [
                     other_org_course_id,
                     sibling_unit_course_id,
-                    child_unit_course_id,
                     extra_course_same_org_id,
                 ]
             },
         )
         await conn.execute(
             text("DELETE FROM org_units WHERE id = ANY(:ids)"),
-            {"ids": [sibling_unit_id, child_unit_id]},
+            {"ids": [sibling_unit_id]},
         )
         await conn.execute(
             text("DELETE FROM organizations WHERE id = :id"),
@@ -232,7 +195,6 @@ async def test_global_scope_resolves(
         for course_id in (
             seeded_users.course_id,
             scenario.other_org_course_id,
-            scenario.child_unit_course_id,
             scenario.sibling_unit_course_id,
         ):
             perms = await load_course_permissions(session, seeded_users.admin_id, course_id)
@@ -263,31 +225,29 @@ async def test_organization_scope_resolves(
         assert _TEST_PERM_CODE not in other_org
 
 
-async def test_org_unit_scope_resolves_with_descendants(
+async def test_faculty_scope_resolves_only_its_courses(
     session_factory: async_sessionmaker[AsyncSession],
     seeded_users: SeededUsers,
     scenario: _Scenario,
 ) -> None:
     async with session_factory() as session:
-        direct = await load_course_permissions(
-            session, seeded_users.hod_id, scenario.child_unit_course_id
-        )
+        direct = await load_course_permissions(session, seeded_users.hod_id, seeded_users.course_id)
         assert _TEST_PERM_CODE in direct, (
-            "hod at parent unit must resolve perm on course in child unit (recursive ancestor walk)"
+            "Faculty Dean must resolve permissions on a course owned by their Faculty"
         )
 
         sibling = await load_course_permissions(
             session, seeded_users.hod_id, scenario.sibling_unit_course_id
         )
         assert _TEST_PERM_CODE not in sibling, (
-            "hod must NOT resolve perm on course in unrelated sibling unit"
+            "Faculty Dean must NOT resolve permissions in an unrelated Faculty"
         )
 
         no_unit = await load_course_permissions(
             session, seeded_users.hod_id, scenario.extra_course_same_org_id
         )
         assert _TEST_PERM_CODE not in no_unit, (
-            "hod scope must not leak to a course with NULL org_unit"
+            "Faculty scope must not leak to an organization-wide course"
         )
 
 

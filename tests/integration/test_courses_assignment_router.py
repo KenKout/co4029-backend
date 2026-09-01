@@ -8,13 +8,13 @@ The acceptance criteria from plan §4485-4489 + §4491-4505 map to:
 * ``test_student_403_on_assignment`` -- seeded student lacks
   ``course.assign_teacher`` / ``user.role_assign`` / ``system.administer``;
   every endpoint returns 403.
-* ``test_hod_scope_bound_can_assign_in_dept`` -- HOD assigns Teacher-Bob
-  to a course in their org_unit -> 201, ``user_role_assignments`` row
+* ``test_faculty_dean_can_assign_in_faculty`` -- Faculty Dean assigns Teacher-Bob
+  to a course in their Faculty -> 201, ``user_role_assignments`` row
   created with role=teacher, scope_kind=course, granted_by=HOD.
-* ``test_hod_scope_bound_blocks_outside_dept`` -- HOD assigning to a
-  course in a sibling org_unit -> 403.
-* ``test_manager_can_assign_org_wide`` -- Manager (scope=organization)
-  assigns within own org -> 201; outside org -> 403.
+* ``test_faculty_dean_blocks_outside_faculty`` -- Faculty Dean assigning to a
+  course in a sibling Faculty -> 403.
+* ``test_manager_is_bound_to_assigned_faculty`` -- Faculty-scoped Manager can
+  assign inside their Faculty, but not in another Faculty or Organization.
 * ``test_admin_can_assign_globally`` -- Admin -> 201 across org boundary.
 * ``test_remove_sets_active_until`` -- DELETE flips ``active_until`` to
   NOW (within 5s); preserves audit trail.
@@ -189,11 +189,11 @@ async def teacher_bearer(engine: AsyncEngine, seeded_users: SeededUsers) -> Asyn
 async def scenario(
     engine: AsyncEngine, seeded_users: SeededUsers
 ) -> AsyncIterator[dict[str, uuid.UUID]]:
-    """Two-org / two-dept staffing layout.
+    """Two-organization / two-Faculty staffing layout.
 
-    * ``course_a`` -- in HOD's ``org_unit`` (seeded test_org_unit).
-    * ``org_unit_b`` -- sibling dept in same organization.
-    * ``course_b`` -- in ``org_unit_b``; HOD has NO scope here.
+    * ``course_a`` -- in the Dean's seeded Faculty.
+    * ``org_unit_b`` -- sibling Faculty in the same Organization.
+    * ``course_b`` -- in ``org_unit_b``; the Dean has NO scope here.
     * ``other_org`` + ``course_other_org`` -- separate organization.
     * ``bob_id`` -- the teacher being staffed.
     * ``stale_teacher_id`` -- staffed on course_a but with
@@ -215,12 +215,12 @@ async def scenario(
         await conn.execute(
             text(
                 "INSERT INTO org_units (id, organization_id, unit_type, name, code) "
-                "VALUES (:id, :org, 'department', :name, :code)"
+                "VALUES (:id, :org, 'faculty', :name, :code)"
             ),
             {
                 "id": org_unit_b,
                 "org": seeded_users.organization_id,
-                "name": f"Other Dept {suffix}",
+                "name": f"Other Faculty {suffix}",
                 "code": f"OTHER-{suffix}",
             },
         )
@@ -282,6 +282,35 @@ async def scenario(
                 "org": seeded_users.organization_id,
             },
         )
+        teacher_role_id = (
+            await conn.execute(text("SELECT id FROM roles WHERE code = 'teacher'"))
+        ).scalar_one()
+        await conn.execute(
+            text(
+                "INSERT INTO user_role_assignments "
+                "(user_id, role_id, scope_kind, organization_id) "
+                "VALUES (:uid, :rid, 'organization', :org)"
+            ),
+            {
+                "uid": bob_id,
+                "rid": teacher_role_id,
+                "org": seeded_users.organization_id,
+            },
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO user_faculty_assignments "
+                "(user_id, organization_id, faculty_id, status) VALUES "
+                "(:uid, :org, :faculty_a, 'active'), "
+                "(:uid, :org, :faculty_b, 'active')"
+            ),
+            {
+                "uid": bob_id,
+                "org": seeded_users.organization_id,
+                "faculty_a": seeded_users.org_unit_id,
+                "faculty_b": org_unit_b,
+            },
+        )
         await conn.execute(
             text(
                 "INSERT INTO courses (id, organization_id, faculty_id, owner_user_id, "
@@ -307,9 +336,6 @@ async def scenario(
                 "slug_c": f"other-course-{suffix}",
             },
         )
-        teacher_role_id = (
-            await conn.execute(text("SELECT id FROM roles WHERE code = 'teacher'"))
-        ).scalar_one()
         await conn.execute(
             text(
                 "INSERT INTO user_role_assignments "
@@ -367,6 +393,10 @@ async def scenario(
         await conn.execute(
             text("DELETE FROM courses WHERE id = ANY(:ids)"),
             {"ids": [course_a, course_b, course_other_org]},
+        )
+        await conn.execute(
+            text("DELETE FROM user_faculty_assignments WHERE user_id = :uid"),
+            {"uid": bob_id},
         )
         await conn.execute(
             text("DELETE FROM org_units WHERE id = :id"),
@@ -448,7 +478,7 @@ async def test_student_403_on_assignment(
     assert response.status_code == 403
 
 
-async def test_hod_scope_bound_can_assign_in_dept(
+async def test_faculty_dean_can_assign_in_faculty(
     client: httpx.AsyncClient,
     hod_bearer: str,
     scenario: dict[str, uuid.UUID],
@@ -486,7 +516,7 @@ async def test_hod_scope_bound_can_assign_in_dept(
     assert row.granted_by == seeded_users.hod_id
 
 
-async def test_hod_scope_bound_blocks_outside_dept(
+async def test_faculty_dean_blocks_outside_faculty(
     client: httpx.AsyncClient,
     hod_bearer: str,
     scenario: dict[str, uuid.UUID],
@@ -502,7 +532,7 @@ async def test_hod_scope_bound_blocks_outside_dept(
     assert body["detail"]["scope"] == "course"
 
 
-async def test_manager_can_assign_org_wide(
+async def test_manager_is_bound_to_assigned_faculty(
     client: httpx.AsyncClient,
     manager_bearer: str,
     scenario: dict[str, uuid.UUID],
@@ -519,7 +549,7 @@ async def test_manager_can_assign_org_wide(
         json={"user_id": str(scenario["bob_id"])},
         headers=headers,
     )
-    assert response.status_code == 201, response.text
+    assert response.status_code == 403, response.text
     response = await client.post(
         f"/api/v1/dept/courses/{scenario['course_other_org']}/teachers",
         json={"user_id": str(scenario["bob_id"])},
@@ -622,11 +652,12 @@ async def test_assignable_teachers_excludes_users_without_the_teacher_role(
     client: httpx.AsyncClient,
     scenario: dict[str, uuid.UUID],
     admin_bearer: str,
+    seeded_users: SeededUsers,
 ) -> None:
     """Org membership alone is not enough — the picker offers TEACHERS.
 
-    Bob and the enrolled student are both active members of org A; neither
-    holds the teacher role, so neither may be staffed onto a course.
+    The enrolled student and Faculty Manager are active members of the
+    Organization, but neither holds the Teacher role.
     """
     response = await client.get(
         f"/api/v1/dept/courses/{scenario['course_a']}/assignable-teachers",
@@ -635,7 +666,7 @@ async def test_assignable_teachers_excludes_users_without_the_teacher_role(
     assert response.status_code == 200, response.text
     ids = {row["user_id"] for row in response.json()}
     assert str(scenario["enrolled_student_id"]) not in ids
-    assert str(scenario["bob_id"]) not in ids
+    assert str(seeded_users.manager_id) not in ids
 
 
 async def test_assignable_teachers_flags_already_assigned(
@@ -659,9 +690,7 @@ async def test_assignable_teachers_flags_already_assigned(
         headers=headers,
     )
     assert response.status_code == 200, response.text
-    row = next(
-        r for r in response.json() if r["user_id"] == str(seeded_users.teacher_id)
-    )
+    row = next(r for r in response.json() if r["user_id"] == str(seeded_users.teacher_id))
     assert row["already_assigned"] is True
     # And carries something human-readable — the whole point of the selector.
     assert row["primary_email"]
@@ -804,9 +833,7 @@ async def test_readiness_can_publish_matches_the_publish_gate(
         # Content but no outcomes: the second gate is unmet, so the checklist
         # must NOT show green. Asserted before satisfying it — a checklist that
         # only ever gets checked in the ready state cannot catch disagreement.
-        partial = await client.get(
-            f"/api/v1/dept/courses/{course_id}/readiness", headers=headers
-        )
+        partial = await client.get(f"/api/v1/dept/courses/{course_id}/readiness", headers=headers)
         assert partial.status_code == 200, partial.text
         assert partial.json()["gradeable_unit_count"] == 1
         assert partial.json()["learning_outcome_count"] == 0
@@ -822,9 +849,7 @@ async def test_readiness_can_publish_matches_the_publish_gate(
                 {"id": outcome_id, "cid": course_id},
             )
 
-        readiness = await client.get(
-            f"/api/v1/dept/courses/{course_id}/readiness", headers=headers
-        )
+        readiness = await client.get(f"/api/v1/dept/courses/{course_id}/readiness", headers=headers)
         assert readiness.status_code == 200, readiness.text
         assert readiness.json()["gradeable_unit_count"] == 1
         assert readiness.json()["learning_outcome_count"] == 1
@@ -845,9 +870,7 @@ async def test_readiness_can_publish_matches_the_publish_gate(
             headers=headers,
         )
         assert assign_ci.status_code == 201, assign_ci.text
-        one = await client.get(
-            f"/api/v1/dept/courses/{course_id}/readiness", headers=headers
-        )
+        one = await client.get(f"/api/v1/dept/courses/{course_id}/readiness", headers=headers)
         assert one.json()["teacher_count"] == 1
         assert one.json()["can_publish"] is False
 
@@ -861,9 +884,7 @@ async def test_readiness_can_publish_matches_the_publish_gate(
             headers=headers,
         )
         assert assign_ta.status_code == 201, assign_ta.text
-        ready = await client.get(
-            f"/api/v1/dept/courses/{course_id}/readiness", headers=headers
-        )
+        ready = await client.get(f"/api/v1/dept/courses/{course_id}/readiness", headers=headers)
         assert ready.json()["teacher_count"] == 2
         assert ready.json()["course_instructor_count"] == 1
         assert ready.json()["can_publish"] is True
@@ -1287,10 +1308,7 @@ async def test_manager_can_clone_course_via_dept(
         ).one()
         clone_org, clone_owner, clone_status = (
             await conn.execute(
-                text(
-                    "SELECT organization_id, owner_user_id, status FROM courses "
-                    "WHERE id = :cid"
-                ),
+                text("SELECT organization_id, owner_user_id, status FROM courses WHERE id = :cid"),
                 {"cid": uuid.UUID(body["id"])},
             )
         ).one()
@@ -1363,15 +1381,19 @@ async def staffing_course(
                 {"id": uid, "e": f"{email}-{uuid.uuid4().hex[:6]}@abridgeai.local"},
             )
             await conn.execute(
-                text("INSERT INTO organization_memberships (id, user_id, organization_id, status) "
-                     "VALUES (gen_random_uuid(), :u, :org, 'active')"),
+                text(
+                    "INSERT INTO organization_memberships (id, user_id, organization_id, status) "
+                    "VALUES (gen_random_uuid(), :u, :org, 'active')"
+                ),
                 {"u": uid, "org": seeded_users.organization_id},
             )
             await conn.execute(
-                text("INSERT INTO user_role_assignments (id, user_id, role_id, scope_kind, "
-                     "organization_id, granted_by) "
-                     "SELECT gen_random_uuid(), :u, r.id, 'organization', :org, :g "
-                     "FROM roles r WHERE r.code = 'teacher'"),
+                text(
+                    "INSERT INTO user_role_assignments (id, user_id, role_id, scope_kind, "
+                    "organization_id, granted_by) "
+                    "SELECT gen_random_uuid(), :u, r.id, 'organization', :org, :g "
+                    "FROM roles r WHERE r.code = 'teacher'"
+                ),
                 {"u": uid, "org": seeded_users.organization_id, "g": seeded_users.admin_id},
             )
     yield {
@@ -1388,8 +1410,11 @@ async def staffing_course(
         await conn.execute(text("DELETE FROM courses WHERE id = :c"), {"c": course_id})
         for uid in (ta1, ta2):
             await conn.execute(
-                text("DELETE FROM user_role_assignments WHERE user_id = :u "
-                     "AND scope_kind = 'organization'"), {"u": uid}
+                text(
+                    "DELETE FROM user_role_assignments WHERE user_id = :u "
+                    "AND scope_kind = 'organization'"
+                ),
+                {"u": uid},
             )
             await conn.execute(
                 text("DELETE FROM organization_memberships WHERE user_id = :u"), {"u": uid}
@@ -1434,8 +1459,10 @@ async def test_assigning_beyond_max_is_rejected(
     # Cap this course's org at 2 teachers.
     async with engine.begin() as conn:
         await conn.execute(
-            text("INSERT INTO system_settings (organization_id, setting_key, "
-                 "setting_value_json) VALUES (:o, 'courses.max_teachers_per_course', '2')"),
+            text(
+                "INSERT INTO system_settings (organization_id, setting_key, "
+                "setting_value_json) VALUES (:o, 'courses.max_teachers_per_course', '2')"
+            ),
             {"o": uuid.UUID(staffing_course["org_id"])},
         )
     from abridgeai.core.runtime_settings import invalidate_settings_cache
@@ -1459,8 +1486,10 @@ async def test_assigning_beyond_max_is_rejected(
     # Restore the org cap (affects the shared seeded org).
     async with engine.begin() as conn:
         await conn.execute(
-            text("DELETE FROM system_settings WHERE organization_id = :o "
-                 "AND setting_key = 'courses.max_teachers_per_course'"),
+            text(
+                "DELETE FROM system_settings WHERE organization_id = :o "
+                "AND setting_key = 'courses.max_teachers_per_course'"
+            ),
             {"o": uuid.UUID(staffing_course["org_id"])},
         )
     invalidate_settings_cache()
@@ -1493,10 +1522,14 @@ async def test_removing_the_sole_instructor_is_rejected_when_tas_exist(
     headers = {"Authorization": f"Bearer {manager_bearer}"}
     cid = staffing_course["course_id"]
     await client.post(
-        f"/api/v1/dept/courses/{cid}/teachers", json={"user_id": staffing_course["ci_id"]}, headers=headers
+        f"/api/v1/dept/courses/{cid}/teachers",
+        json={"user_id": staffing_course["ci_id"]},
+        headers=headers,
     )
     await client.post(
-        f"/api/v1/dept/courses/{cid}/teachers", json={"user_id": staffing_course["ta1_id"]}, headers=headers
+        f"/api/v1/dept/courses/{cid}/teachers",
+        json={"user_id": staffing_course["ta1_id"]},
+        headers=headers,
     )
 
     remove = await client.delete(
@@ -1520,18 +1553,24 @@ async def test_publish_below_min_teachers_is_rejected(
     module_id, lesson_id, outcome_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
     async with engine.begin() as conn:
         await conn.execute(
-            text("INSERT INTO modules (id, course_id, title, position, status) "
-                 "VALUES (:id, :c, 'M1', 1, 'published')"),
+            text(
+                "INSERT INTO modules (id, course_id, title, position, status) "
+                "VALUES (:id, :c, 'M1', 1, 'published')"
+            ),
             {"id": module_id, "c": cid},
         )
         await conn.execute(
-            text("INSERT INTO lessons (id, module_id, slug, title, status, lesson_type) "
-                 "VALUES (:id, :m, :s, 'L1', 'published', 'video')"),
+            text(
+                "INSERT INTO lessons (id, module_id, slug, title, status, lesson_type) "
+                "VALUES (:id, :m, :s, 'L1', 'published', 'video')"
+            ),
             {"id": lesson_id, "m": module_id, "s": f"pl-{uuid.uuid4().hex[:6]}"},
         )
         await conn.execute(
-            text("INSERT INTO course_learning_outcomes (id, course_id, position, outcome_text) "
-                 "VALUES (:id, :c, 1, 'Outcome')"),
+            text(
+                "INSERT INTO course_learning_outcomes (id, course_id, position, outcome_text) "
+                "VALUES (:id, :c, 1, 'Outcome')"
+            ),
             {"id": outcome_id, "c": cid},
         )
     # One teacher only: below the default min of 2.
@@ -1546,9 +1585,7 @@ async def test_publish_below_min_teachers_is_rejected(
     async with session_factory() as db:
         # publish_course ignores the actor's identity, so a throwaway actor is fine.
         with pytest.raises(ConflictError, match="course_teacher_min_not_met"):
-            await authoring_service.publish_course(
-                db, cid, _service_actor(uuid.uuid4())
-            )
+            await authoring_service.publish_course(db, cid, _service_actor(uuid.uuid4()))
         await db.rollback()
 
     # Tidy the content added above so the fixture teardown can drop the course.
@@ -1559,10 +1596,6 @@ async def test_publish_below_min_teachers_is_rejected(
         await conn.execute(
             text("DELETE FROM lesson_resources WHERE lesson_id = :l"), {"l": lesson_id}
         )
-        await conn.execute(
-            text("DELETE FROM module_items WHERE module_id = :m"), {"m": module_id}
-        )
-        await conn.execute(
-            text("DELETE FROM lessons WHERE module_id = :m"), {"m": module_id}
-        )
+        await conn.execute(text("DELETE FROM module_items WHERE module_id = :m"), {"m": module_id})
+        await conn.execute(text("DELETE FROM lessons WHERE module_id = :m"), {"m": module_id})
         await conn.execute(text("DELETE FROM modules WHERE id = :m"), {"m": module_id})
