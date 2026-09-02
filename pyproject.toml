@@ -323,6 +323,13 @@ ignore_imports = [
     "abridgeai.features.interviews.services.taking -> sqlalchemy",
     "abridgeai.features.interviews.services.evaluation -> sqlalchemy",
     "abridgeai.features.interviews.services.generation -> sqlalchemy",
+    "abridgeai.features.interviews.services.outcomes -> sqlalchemy",
+    "abridgeai.features.interviews.services.generation_runs -> sqlalchemy",
+    "abridgeai.features.interviews.services.bank -> sqlalchemy",
+    "abridgeai.features.interviews.services.retake -> sqlalchemy",
+    # _shared only imports AsyncSession for TYPE_CHECKING + AppError/guards;
+    # all reads/writes go through queries like its siblings.
+    "abridgeai.features.interviews.services._shared -> sqlalchemy",
     # lifecycle only imports AsyncSession for type hints (TYPE_CHECKING);
     # reads go through queries, writes mutate ORM objects. Same carve-out
     # as the sibling interview services above.
@@ -367,6 +374,11 @@ allow_indirect_imports = true
 ignore_imports = [
     "abridgeai.features.spaced_repetition.routers.learner -> abridgeai.features.spaced_repetition.queries",
     "abridgeai.features.spaced_repetition.routers.teacher -> abridgeai.features.spaced_repetition.queries",
+    # Read-only session VIEWS (transcript / integrity / gap-report). The session
+    # read queries are shared with the services layer; the teacher-facing view
+    # routers compose them directly. Pre-existing carve-out, moved verbatim
+    # from routers.authoring with the endpoints (LOC-ratchet split).
+    "abridgeai.features.interviews.routers.authoring_sessions -> abridgeai.features.interviews.queries.sessions",
     # Sub-resource permission deps resolve child-id → course_id via ORM JOINs.
     # No business logic — pure FK-chain resolution for the permission check.
     "abridgeai.features.courses.routers._deps -> abridgeai.features.courses.queries.resolution",

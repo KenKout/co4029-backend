@@ -44,15 +44,13 @@ def _savepoint_cm() -> MagicMock:
 def _db(*, existing_followup: bool = False, recent: list[str] | None = None) -> AsyncMock:
     """A db whose two SELECTs answer independently.
 
-    ``maybe_generate_followup`` issues the cap check first (``scalar_one_or_none``)
-    and then the recent-questions query (``scalars().all()``), so one shared
-    result object would conflate them.
+    ``maybe_generate_followup`` issues the cap check first (count via
+    ``scalar_one``) and then the recent-questions query (``scalars().all()``),
+    so one shared result object would conflate them.
     """
     db = AsyncMock()
     cap_result = MagicMock()
-    cap_result.scalar_one_or_none = MagicMock(
-        return_value=uuid.uuid4() if existing_followup else None
-    )
+    cap_result.scalar_one = MagicMock(return_value=1 if existing_followup else 0)
     recent_result = MagicMock()
     recent_result.scalars = MagicMock(
         return_value=MagicMock(all=MagicMock(return_value=list(recent or [])))
@@ -169,6 +167,10 @@ async def test_cap_rule_still_short_circuits_before_any_llm_call() -> None:
         current_question=SimpleNamespace(id=uuid.uuid4(), prompt_text="Q?"),
         student_answer="A.",
         gateway=gateway,
+        # The cap became a configurable budget (default 2); the rule this test
+        # pins is "an exhausted budget short-circuits before any LLM call", so
+        # exercise it with a 1-cap and one existing follow-up.
+        max_follow_ups_per_question=1,
     )
 
     assert result is None

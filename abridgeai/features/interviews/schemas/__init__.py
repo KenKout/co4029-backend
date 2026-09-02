@@ -39,13 +39,6 @@ from abridgeai.features.interviews.schemas.authoring import (
     InterviewOutcomeCreate,
     InterviewOutcomeUpdate,
     InterviewQuestionAuthoring,
-    InterviewQuestionBankImportRequest,
-    InterviewQuestionBankImportResult,
-    InterviewQuestionBankItemCreate,
-    InterviewQuestionBankItemRead,
-    InterviewQuestionBankItemUpdate,
-    InterviewQuestionBankLogicalGroupCreate,
-    InterviewQuestionBankSiblingCreate,
     InterviewQuestionCreate,
     InterviewQuestionDuplicateCheck,
     InterviewQuestionDuplicateCheckRequest,
@@ -58,6 +51,15 @@ from abridgeai.features.interviews.schemas.authoring import (
     SecurityResponsePolicyLiteral,
     SecuritySessionSummary,
 )
+from abridgeai.features.interviews.schemas.bank import (
+    InterviewQuestionBankImportRequest,
+    InterviewQuestionBankImportResult,
+    InterviewQuestionBankItemCreate,
+    InterviewQuestionBankItemRead,
+    InterviewQuestionBankItemUpdate,
+    InterviewQuestionBankLogicalGroupCreate,
+    InterviewQuestionBankSiblingCreate,
+)  # noqa: F401  -- re-exported (bank DTOs) from schemas.bank
 from abridgeai.features.interviews.schemas.integrity import (
     IntegrityEventBatchRequest,
     IntegrityEventItem,
