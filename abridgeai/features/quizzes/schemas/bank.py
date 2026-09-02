@@ -194,6 +194,18 @@ class QuizQuestionBankCopyRequest(BaseModel):
     question_ids: list[UUID] = Field(min_length=1, max_length=100)
 
 
+class QuizQuestionBankCopyResult(BaseModel):
+    """Outcome of copying Quiz questions into the curated bank.
+
+    ``skipped`` lists the SOURCE question ids whose content already has a
+    live bank copy in this course — they are not copied again, and the
+    caller can report them to the teacher instead of failing the batch.
+    """
+
+    created: list[QuizQuestionBankItemRead]
+    skipped: list[UUID]
+
+
 class QuizQuestionBankImportRequest(BaseModel):
     item_ids: list[UUID] = Field(min_length=1, max_length=100)
 
@@ -203,6 +215,7 @@ __all__ = [
     "QuestionBankImportRequest",
     "QuestionBankPage",
     "QuizQuestionBankCopyRequest",
+    "QuizQuestionBankCopyResult",
     "QuizQuestionBankImportRequest",
     "QuizQuestionBankItemCreate",
     "QuizQuestionBankItemRead",

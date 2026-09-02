@@ -503,14 +503,15 @@ async def test_curated_bank_snapshot_diverges_from_source_and_imports_with_bank_
 ) -> None:
     """Bank content is a durable snapshot; source edits do not rewrite it."""
     async with session_factory() as session:
-        bank_items = await curated_bank_service.copy_questions_to_curated_bank(
+        result = await curated_bank_service.copy_questions_to_curated_bank(
             session,
             course_id=bank_fixture.course_id,
             question_ids=[bank_fixture.approved_question_id],
             actor=bank_fixture.actor,
         )
-        bank_item_id = bank_items[0].id
-        assert bank_items[0].status == "approved"
+        assert result.skipped_question_ids == []
+        bank_item_id = result.created[0].id
+        assert result.created[0].status == "approved"
 
         await session.execute(
             text("UPDATE quiz_questions SET prompt_text = 'Source changed' WHERE id = :id"),
@@ -531,6 +532,81 @@ async def test_curated_bank_snapshot_diverges_from_source_and_imports_with_bank_
         stored_bank = await session.get(QuizQuestionBankItem, bank_item_id)
         assert stored_bank is not None
         assert stored_bank.prompt_text == "Approved stem?"
+
+
+async def test_curated_bank_copy_skips_existing_and_still_creates_new(
+    session_factory: async_sessionmaker[AsyncSession],
+    bank_fixture: BankFixture,
+) -> None:
+    """A batch containing an already-banked question copies the rest and
+    reports the source ids that were skipped instead of failing wholesale."""
+    async with session_factory() as session:
+        # approved_question_id lands in the bank once.
+        first = await curated_bank_service.copy_questions_to_curated_bank(
+            session,
+            course_id=bank_fixture.course_id,
+            question_ids=[bank_fixture.approved_question_id],
+            actor=bank_fixture.actor,
+        )
+        await session.commit()
+        assert first.skipped_question_ids == []
+        assert len(first.created) == 1
+
+        # The fixture seeds no options for the true_false pending question;
+        # bank validation needs its T/F pair, so supply them.
+        await session.execute(
+            text(
+                "INSERT INTO quiz_question_options "
+                "(id, question_id, option_key, option_text, is_correct, position) "
+                "VALUES (:o1, :q, 'T', 'True', TRUE, 1), "
+                "(:o2, :q, 'F', 'False', FALSE, 2)"
+            ),
+            {
+                "o1": uuid.uuid4(),
+                "o2": uuid.uuid4(),
+                "q": bank_fixture.pending_question_id,
+            },
+        )
+        await session.commit()
+
+        # Re-send the SAME question + the pending one (different content).
+        second = await curated_bank_service.copy_questions_to_curated_bank(
+            session,
+            course_id=bank_fixture.course_id,
+            question_ids=[
+                bank_fixture.approved_question_id,
+                bank_fixture.pending_question_id,
+            ],
+            actor=bank_fixture.actor,
+        )
+        await session.commit()
+
+        assert [
+            item.prompt_text for item in second.created
+        ] == ["Pending stem?"]
+        assert second.skipped_question_ids == [bank_fixture.approved_question_id]
+        # The re-sent question still has exactly one live bank copy.
+        copies = (
+            await session.execute(
+                select(QuizQuestionBankItem).where(
+                    QuizQuestionBankItem.course_id == bank_fixture.course_id,
+                    QuizQuestionBankItem.source_question_id
+                    == bank_fixture.approved_question_id,
+                )
+            )
+        ).scalars().all()
+        assert len(copies) == 1
+
+        # An all-duplicate batch skips everything and creates nothing.
+        all_dup = await curated_bank_service.copy_questions_to_curated_bank(
+            session,
+            course_id=bank_fixture.course_id,
+            question_ids=[bank_fixture.approved_question_id],
+            actor=bank_fixture.actor,
+        )
+        await session.commit()
+        assert all_dup.created == []
+        assert all_dup.skipped_question_ids == [bank_fixture.approved_question_id]
 
 
 async def test_curated_bank_manual_lifecycle_and_option_replacement(

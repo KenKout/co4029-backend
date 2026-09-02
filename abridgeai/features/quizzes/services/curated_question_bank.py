@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 from uuid import UUID
@@ -33,6 +34,20 @@ from abridgeai.features.quizzes.services.question_bank import (
 )
 
 """Course-scoped curated Quiz Question Bank service."""
+
+
+@dataclass
+class CuratedBankCopyResult:
+    """Outcome of a copy-into-bank batch: what got created, what was skipped.
+
+    ``skipped_question_ids`` are the SOURCE Quiz question ids whose content
+    already has a live (non-archived) bank copy in the same course. They
+    are not copied again; the router surfaces them so the caller can tell
+    the teacher exactly which questions already existed.
+    """
+
+    created: list[QuizQuestionBankItem]
+    skipped_question_ids: list[UUID]
 
 
 async def _require_course(db: AsyncSession, course_id: UUID) -> None:
@@ -236,7 +251,7 @@ async def copy_questions_to_curated_bank(
     course_id: UUID,
     question_ids: list[UUID],
     actor: CurrentUser,
-) -> list[QuizQuestionBankItem]:
+) -> CuratedBankCopyResult:
     await _require_course(db, course_id)
     if len(question_ids) != len(set(question_ids)):
         raise AppError("question_ids contains duplicates")
@@ -260,14 +275,50 @@ async def copy_questions_to_curated_bank(
         raise NotFoundError("One or more Quiz questions were not found in course")
     by_id = {question.id: question for question in questions}
     options_by_question = await _load_options_for_questions(db, question_ids)
-    created: list[QuizQuestionBankItem] = []
+
+    # Snapshot every requested question up front so duplicates can be named
+    # in the response. The per-item guard inside ``_persist_bank_item`` stays:
+    # it races against a concurrent request landing the same content between
+    # this scan and the insert.
+    portables: list[tuple[UUID, dict[str, Any], list[dict[str, Any]], str]] = []
     for question_id in question_ids:
         source = by_id[question_id]
         content = _portable_question_content(source)
         option_content = [
-            _portable_option_content(option) for option in options_by_question.get(question_id, [])
+            _portable_option_content(option)
+            for option in options_by_question.get(question_id, [])
         ]
         _validate_bank_content(content, option_content)
+        digest = _content_hash(content, option_content)
+        portables.append((question_id, content, option_content, digest))
+
+    existing_hashes = set(
+        (
+            await db.execute(
+                select(QuizQuestionBankItem.content_hash).where(
+                    QuizQuestionBankItem.course_id == course_id,
+                    QuizQuestionBankItem.content_hash.in_(
+                        [digest for _, _, _, digest in portables]
+                    ),
+                    QuizQuestionBankItem.deleted_at.is_(None),
+                    QuizQuestionBankItem.status != "archived",
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    skipped_ids = {
+        question_id
+        for question_id, _, _, digest in portables
+        if digest in existing_hashes
+    }
+
+    created: list[QuizQuestionBankItem] = []
+    for question_id, content, option_content, _ in portables:
+        if question_id in skipped_ids:
+            continue
+        source = by_id[question_id]
         created.append(
             await _persist_bank_item(
                 db,
@@ -279,7 +330,7 @@ async def copy_questions_to_curated_bank(
                 source_question_id=source.id,
             )
         )
-    return created
+    return CuratedBankCopyResult(created=created, skipped_question_ids=list(skipped_ids))
 
 
 async def list_curated_bank_items(  # noqa: PLR0913 -- explicit API filters

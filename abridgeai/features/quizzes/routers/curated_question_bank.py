@@ -16,6 +16,7 @@ from abridgeai.features.quizzes.routers._deps import require_quiz_authoring_acce
 from abridgeai.features.quizzes.schemas import (
     QuizQuestionAuthoring,
     QuizQuestionBankCopyRequest,
+    QuizQuestionBankCopyResult,
     QuizQuestionBankImportRequest,
     QuizQuestionBankItemCreate,
     QuizQuestionBankItemRead,
@@ -43,10 +44,22 @@ def _bad_request(message: str) -> HTTPException:
     )
 
 
+# Service error codes the teacher should never see verbatim. The raw code
+# stays in the response for machines; `message` carries the human sentence.
+_HUMAN_CONFLICT_MESSAGES = {
+    "quiz_question_bank_duplicate_content": (
+        "This question already exists in the curated question bank."
+    ),
+}
+
+
 def _conflict(message: str) -> HTTPException:
     return HTTPException(
         status_code=status.HTTP_409_CONFLICT,
-        detail={"error": "conflict", "message": message},
+        detail={
+            "error": "conflict",
+            "message": _HUMAN_CONFLICT_MESSAGES.get(message, message),
+        },
     )
 
 
@@ -120,7 +133,7 @@ async def create_curated_quiz_question_bank_item(
 
 @router.post(
     "/courses/{course_id}/quiz-question-bank/from-questions",
-    response_model=list[QuizQuestionBankItemRead],
+    response_model=QuizQuestionBankCopyResult,
     status_code=status.HTTP_201_CREATED,
 )
 async def copy_quiz_questions_to_curated_bank(
@@ -128,9 +141,9 @@ async def copy_quiz_questions_to_curated_bank(
     payload: QuizQuestionBankCopyRequest,
     current_user: Annotated[CurrentUser, Depends(_REQUIRE_COURSE_UPDATE)],
     db: Annotated[AsyncSession, Depends(get_db)],
-) -> list[QuizQuestionBankItemRead]:
+) -> QuizQuestionBankCopyResult:
     try:
-        items = await curated_bank_service.copy_questions_to_curated_bank(
+        result = await curated_bank_service.copy_questions_to_curated_bank(
             db,
             course_id=course_id,
             question_ids=payload.question_ids,
@@ -143,7 +156,12 @@ async def copy_quiz_questions_to_curated_bank(
     except AppError as exc:
         raise _bad_request(str(exc)) from exc
     await db.commit()
-    return [QuizQuestionBankItemRead.model_validate(item) for item in items]
+    return QuizQuestionBankCopyResult(
+        created=[
+            QuizQuestionBankItemRead.model_validate(item) for item in result.created
+        ],
+        skipped=result.skipped_question_ids,
+    )
 
 
 @router.patch(
