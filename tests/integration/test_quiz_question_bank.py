@@ -35,7 +35,17 @@ from abridgeai.features.interviews import (
 )
 from abridgeai.features.quizzes.models import (
     QuizQuestion,
+    QuizQuestionBankItem,
     QuizQuestionOption,
+)
+from abridgeai.features.quizzes.schemas.bank import (
+    QuizQuestionBankItemCreate,
+    QuizQuestionBankItemRead,
+    QuizQuestionBankItemUpdate,
+    QuizQuestionBankOptionCreate,
+)
+from abridgeai.features.quizzes.services import (
+    curated_question_bank as curated_bank_service,
 )
 from abridgeai.features.quizzes.services import question_bank as bank_service
 
@@ -421,5 +431,195 @@ async def test_duplicate_question_missing_raises_not_found(
             await bank_service.duplicate_question(
                 session,
                 question_id=uuid.uuid4(),
+                actor=bank_fixture.actor,
+            )
+
+
+async def test_legacy_import_rejects_published_target(
+    session_factory: async_sessionmaker[AsyncSession],
+    bank_fixture: BankFixture,
+) -> None:
+    """The API guard is backed by a service invariant, not only a hidden FE button."""
+    from abridgeai.core.exceptions import ConflictError
+
+    async with session_factory() as session:
+        await session.execute(
+            text("UPDATE quizzes SET status = 'published' WHERE id = :quiz_id"),
+            {"quiz_id": bank_fixture.target_quiz_id},
+        )
+        with pytest.raises(ConflictError, match="quiz_published_readonly"):
+            await bank_service.import_questions(
+                session,
+                target_quiz_id=bank_fixture.target_quiz_id,
+                source_question_ids=[bank_fixture.approved_question_id],
+                actor=bank_fixture.actor,
+            )
+
+
+async def test_legacy_import_preserves_matching_answer_content(
+    session_factory: async_sessionmaker[AsyncSession],
+    bank_fixture: BankFixture,
+) -> None:
+    """Expanded question types keep their hidden answer key during a deep copy."""
+    question_id = uuid.uuid4()
+    pairs = '[{"left":"A","right":"1"},{"left":"B","right":"2"}]'
+    async with session_factory() as session:
+        await session.execute(
+            text(
+                "INSERT INTO quiz_questions ("
+                "id, quiz_id, position, question_type, prompt_text, review_status, "
+                "difficulty, bloom_level, source_refs, match_pairs, match_distractors, "
+                "prompt_format, hint_format, explanation_format) VALUES ("
+                ":id, :quiz_id, 3, 'matching', 'Match these', 'approved', "
+                "'hard', 'analyze', '[]'::jsonb, CAST(:pairs AS jsonb), "
+                "'[\"3\"]'::jsonb, 'markdown', 'html', 'markdown')"
+            ),
+            {
+                "id": question_id,
+                "quiz_id": bank_fixture.source_quiz_id,
+                "pairs": pairs,
+            },
+        )
+        created = await bank_service.import_questions(
+            session,
+            target_quiz_id=bank_fixture.target_quiz_id,
+            source_question_ids=[question_id],
+            actor=bank_fixture.actor,
+        )
+        clone = created[0]
+        assert clone.match_pairs == [
+            {"left": "A", "right": "1"},
+            {"left": "B", "right": "2"},
+        ]
+        assert clone.match_distractors == ["3"]
+        assert clone.prompt_format == "markdown"
+        assert clone.hint_format == "html"
+        assert clone.explanation_format == "markdown"
+
+
+async def test_curated_bank_snapshot_diverges_from_source_and_imports_with_bank_lineage(
+    session_factory: async_sessionmaker[AsyncSession],
+    bank_fixture: BankFixture,
+) -> None:
+    """Bank content is a durable snapshot; source edits do not rewrite it."""
+    async with session_factory() as session:
+        bank_items = await curated_bank_service.copy_questions_to_curated_bank(
+            session,
+            course_id=bank_fixture.course_id,
+            question_ids=[bank_fixture.approved_question_id],
+            actor=bank_fixture.actor,
+        )
+        bank_item_id = bank_items[0].id
+        assert bank_items[0].status == "approved"
+
+        await session.execute(
+            text("UPDATE quiz_questions SET prompt_text = 'Source changed' WHERE id = :id"),
+            {"id": bank_fixture.approved_question_id},
+        )
+        imported = await curated_bank_service.import_curated_bank_items(
+            session,
+            target_quiz_id=bank_fixture.target_quiz_id,
+            item_ids=[bank_item_id],
+            actor=bank_fixture.actor,
+        )
+        await session.commit()
+
+        clone = imported[0]
+        assert clone.prompt_text == "Approved stem?"
+        assert clone.imported_from_bank_item_id == bank_item_id
+        assert clone.imported_from_question_id is None
+        stored_bank = await session.get(QuizQuestionBankItem, bank_item_id)
+        assert stored_bank is not None
+        assert stored_bank.prompt_text == "Approved stem?"
+
+
+async def test_curated_bank_manual_lifecycle_and_option_replacement(
+    session_factory: async_sessionmaker[AsyncSession],
+    bank_fixture: BankFixture,
+) -> None:
+    """Manual draft → edit → approve is validated and serializable."""
+    async with session_factory() as session:
+        item = await curated_bank_service.create_curated_bank_item(
+            session,
+            course_id=bank_fixture.course_id,
+            actor=bank_fixture.actor,
+            payload=QuizQuestionBankItemCreate(
+                question_type="multiple_choice",
+                prompt_text="Which value is correct?",
+                options=[
+                    QuizQuestionBankOptionCreate(
+                        option_key="A",
+                        option_text="One",
+                        is_correct=True,
+                        position=1,
+                    ),
+                    QuizQuestionBankOptionCreate(
+                        option_key="B",
+                        option_text="Two",
+                        is_correct=False,
+                        position=2,
+                    ),
+                ],
+            ),
+        )
+        assert item.status == "draft"
+        item = await curated_bank_service.update_curated_bank_item(
+            session,
+            course_id=bank_fixture.course_id,
+            item_id=item.id,
+            actor=bank_fixture.actor,
+            payload=QuizQuestionBankItemUpdate(
+                prompt_text="Which value is definitely correct?",
+                options=[
+                    QuizQuestionBankOptionCreate(
+                        option_key="A",
+                        option_text="First",
+                        is_correct=False,
+                        position=1,
+                    ),
+                    QuizQuestionBankOptionCreate(
+                        option_key="B",
+                        option_text="Second",
+                        is_correct=True,
+                        position=2,
+                    ),
+                ],
+            ),
+        )
+        item = await curated_bank_service.set_curated_bank_item_status(
+            session,
+            course_id=bank_fixture.course_id,
+            item_id=item.id,
+            status="approved",
+            actor=bank_fixture.actor,
+        )
+        view = QuizQuestionBankItemRead.model_validate(item)
+        assert view.status == "approved"
+        assert view.prompt_text == "Which value is definitely correct?"
+        assert [option.option_text for option in view.options] == ["First", "Second"]
+        assert view.options[1].is_correct is True
+
+
+async def test_curated_bank_import_rejects_draft_item(
+    session_factory: async_sessionmaker[AsyncSession],
+    bank_fixture: BankFixture,
+) -> None:
+    from abridgeai.core.exceptions import NotFoundError
+
+    async with session_factory() as session:
+        item = await curated_bank_service.create_curated_bank_item(
+            session,
+            course_id=bank_fixture.course_id,
+            actor=bank_fixture.actor,
+            payload=QuizQuestionBankItemCreate(
+                question_type="short_answer",
+                prompt_text="Draft-only question",
+            ),
+        )
+        with pytest.raises(NotFoundError, match="approved bank items"):
+            await curated_bank_service.import_curated_bank_items(
+                session,
+                target_quiz_id=bank_fixture.target_quiz_id,
+                item_ids=[item.id],
                 actor=bank_fixture.actor,
             )

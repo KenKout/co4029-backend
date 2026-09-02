@@ -18,14 +18,16 @@ boundary itself.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import and_, func, or_, select, tuple_
+from sqlalchemy import and_, func, or_, select, text, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from abridgeai.core.exceptions import AppError, NotFoundError
+from abridgeai.core.exceptions import AppError, ConflictError, NotFoundError
 from abridgeai.core.pagination import (
     CursorPage,
     decode_composite_cursor,
@@ -36,6 +38,8 @@ from abridgeai.features.courses.models import Module
 from abridgeai.features.quizzes.models import (
     Quiz,
     QuizQuestion,
+    QuizQuestionBankItem,
+    QuizQuestionBankOption,
     QuizQuestionOption,
     QuizSourceLesson,
 )
@@ -53,20 +57,171 @@ async def _load_options_for_questions(
     if not question_ids:
         return {}
     rows = (
-        await db.execute(
-            select(QuizQuestionOption)
-            .where(QuizQuestionOption.question_id.in_(question_ids))
-            .where(QuizQuestionOption.deleted_at.is_(None))
-            .order_by(QuizQuestionOption.position)
+        (
+            await db.execute(
+                select(QuizQuestionOption)
+                .where(QuizQuestionOption.question_id.in_(question_ids))
+                .where(QuizQuestionOption.deleted_at.is_(None))
+                .order_by(QuizQuestionOption.position)
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     grouped: dict[UUID, list[QuizQuestionOption]] = {}
     for option in rows:
         grouped.setdefault(option.question_id, []).append(option)
     return grouped
 
 
-async def list_bank_entries(  # noqa: PLR0913 -- filter knobs are intentionally explicit
+async def _load_options_for_bank_items(
+    db: AsyncSession, item_ids: list[UUID]
+) -> dict[UUID, list[QuizQuestionBankOption]]:
+    if not item_ids:
+        return {}
+    rows = list(
+        (
+            await db.execute(
+                select(QuizQuestionBankOption)
+                .where(QuizQuestionBankOption.bank_item_id.in_(item_ids))
+                .where(QuizQuestionBankOption.deleted_at.is_(None))
+                .order_by(QuizQuestionBankOption.position)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    grouped: dict[UUID, list[QuizQuestionBankOption]] = {}
+    for option in rows:
+        grouped.setdefault(option.bank_item_id, []).append(option)
+    return grouped
+
+
+_QUESTION_CONTENT_FIELDS = (
+    "learning_outcome_id",
+    "question_type",
+    "prompt_text",
+    "hint_text",
+    "explanation",
+    "difficulty",
+    "bloom_level",
+    "expected_response_time_ms",
+    "expected_ef_ceiling",
+    "source_refs",
+    "original_generated_payload",
+    "prompt_format",
+    "hint_format",
+    "explanation_format",
+    "single_answer",
+    "answer_numbering",
+    "numeric_answer",
+    "numeric_tolerance",
+    "match_pairs",
+    "match_distractors",
+    "ordering_sequence",
+    "category_id",
+)
+
+_OPTION_CONTENT_FIELDS = (
+    "option_key",
+    "option_text",
+    "is_correct",
+    "position",
+    "option_format",
+    "grade_fraction",
+    "feedback_text",
+    "feedback_format",
+)
+
+
+def _plain_copy(value: Any) -> Any:  # noqa: ANN401 -- arbitrary JSON/Decimal content
+    if isinstance(value, dict):
+        return {key: _plain_copy(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_plain_copy(item) for item in value]
+    return value
+
+
+def _portable_question_content(source: Any) -> dict[str, Any]:  # noqa: ANN401
+    return {field: _plain_copy(getattr(source, field, None)) for field in _QUESTION_CONTENT_FIELDS}
+
+
+def _portable_option_content(source: Any) -> dict[str, Any]:  # noqa: ANN401
+    return {field: _plain_copy(getattr(source, field, None)) for field in _OPTION_CONTENT_FIELDS}
+
+
+def _content_hash(content: dict[str, Any], options: list[dict[str, Any]]) -> str:
+    canonical = {
+        **content,
+        "prompt_text": str(content.get("prompt_text") or "").strip(),
+        "options": sorted(options, key=lambda option: int(option.get("position") or 0)),
+    }
+    encoded = json.dumps(
+        canonical,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+        ensure_ascii=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+async def _lock_question_append(db: AsyncSession, quiz_id: UUID) -> None:
+    await db.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+        {"key": f"quiz_question_append:{quiz_id}"},
+    )
+
+
+def _assert_target_editable(quiz: Quiz) -> None:
+    if quiz.status == "published":
+        raise ConflictError(
+            "quiz_published_readonly: a published quiz cannot accept imported questions"
+        )
+
+
+async def _clone_question_into_quiz(
+    db: AsyncSession,
+    *,
+    source: QuizQuestion | QuizQuestionBankItem,
+    source_options: list[QuizQuestionOption] | list[QuizQuestionBankOption],
+    target_quiz_id: UUID,
+    position: int,
+    actor: CurrentUser,
+    source_question_id: UUID | None = None,
+    source_bank_item_id: UUID | None = None,
+) -> QuizQuestion:
+    """Canonical deep copy used by both legacy and curated-bank imports."""
+    content = _portable_question_content(source)
+    clone = QuizQuestion(
+        quiz_id=target_quiz_id,
+        position=position,
+        **content,
+        review_status="pending",
+        imported_from_question_id=source_question_id,
+        imported_from_bank_item_id=source_bank_item_id,
+        reviewed_by=None,
+        reviewed_at=None,
+        published_at=None,
+        created_by=actor.user_id,
+        updated_by=actor.user_id,
+    )
+    db.add(clone)
+    await db.flush()
+    for option in source_options:
+        db.add(
+            QuizQuestionOption(
+                question_id=clone.id,
+                **_portable_option_content(option),
+                created_by=actor.user_id,
+                updated_by=actor.user_id,
+            )
+        )
+    await db.flush()
+    return clone
+
+
+async def list_bank_entries(  # noqa: C901, PLR0913 -- explicit filter composition
     db: AsyncSession,
     *,
     course_id: UUID,
@@ -116,8 +271,7 @@ async def list_bank_entries(  # noqa: PLR0913 -- filter knobs are intentionally 
 
     if after_updated_at is not None and after_id is not None:
         stmt = stmt.where(
-            tuple_(QuizQuestion.updated_at, QuizQuestion.id)
-            < (after_updated_at, after_id)
+            tuple_(QuizQuestion.updated_at, QuizQuestion.id) < (after_updated_at, after_id)
         )
 
     if module_id is not None:
@@ -127,9 +281,7 @@ async def list_bank_entries(  # noqa: PLR0913 -- filter knobs are intentionally 
         # quizzes that source the requested lesson.
         stmt = stmt.where(
             QuizQuestion.quiz_id.in_(
-                select(QuizSourceLesson.quiz_id).where(
-                    QuizSourceLesson.lesson_id == lesson_id
-                )
+                select(QuizSourceLesson.quiz_id).where(QuizSourceLesson.lesson_id == lesson_id)
             )
         )
     if question_type is not None:
@@ -153,9 +305,7 @@ async def list_bank_entries(  # noqa: PLR0913 -- filter knobs are intentionally 
 
     rows = (await db.execute(stmt)).all()
     questions = [row[0] for row in rows]
-    options_by_question = await _load_options_for_questions(
-        db, [q.id for q in questions]
-    )
+    options_by_question = await _load_options_for_questions(db, [q.id for q in questions])
     for question in questions:
         # Pydantic from_attributes reads the dynamic attribute we set
         # here so the bank entry serialiser sees options without the
@@ -208,26 +358,34 @@ async def import_questions(
     ).scalar_one_or_none()
     if target_quiz is None or target_quiz.deleted_at is not None:
         raise NotFoundError(f"Quiz {target_quiz_id} not found")
+    _assert_target_editable(target_quiz)
 
     if not source_question_ids:
         raise AppError("source_question_ids must not be empty")
 
     sources = (
-        await db.execute(
-            select(QuizQuestion)
-            .where(QuizQuestion.id.in_(source_question_ids))
-            .where(QuizQuestion.deleted_at.is_(None))
+        (
+            await db.execute(
+                select(QuizQuestion)
+                .where(QuizQuestion.id.in_(source_question_ids))
+                .where(QuizQuestion.deleted_at.is_(None))
+            )
         )
-    ).scalars().all()
-    options_by_question = await _load_options_for_questions(
-        db, [q.id for q in sources]
+        .scalars()
+        .all()
     )
+    options_by_question = await _load_options_for_questions(db, [q.id for q in sources])
 
     found_ids = {q.id for q in sources}
     missing = [qid for qid in source_question_ids if qid not in found_ids]
     if missing:
-        raise NotFoundError(
-            f"Source question(s) not found: {', '.join(str(m) for m in missing)}"
+        raise NotFoundError(f"Source question(s) not found: {', '.join(str(m) for m in missing)}")
+
+    unapproved = [question.id for question in sources if question.review_status != "approved"]
+    if unapproved:
+        raise ConflictError(
+            "Only approved source questions can be imported: "
+            + ", ".join(str(question_id) for question_id in unapproved)
         )
 
     # Course-scope guard: every source must belong to the same course
@@ -236,63 +394,31 @@ async def import_questions(
     quiz_courses: dict[UUID, UUID] = {
         row.id: row.course_id
         for row in (
-            await db.execute(
-                select(Quiz.id, Quiz.course_id).where(Quiz.id.in_(source_quiz_ids))
-            )
+            await db.execute(select(Quiz.id, Quiz.course_id).where(Quiz.id.in_(source_quiz_ids)))
         ).all()
     }
-    foreign = [
-        qid
-        for qid, course_id in quiz_courses.items()
-        if course_id != target_quiz.course_id
-    ]
+    foreign = [qid for qid, course_id in quiz_courses.items() if course_id != target_quiz.course_id]
     if foreign:
         raise AppError(
             "Cannot import questions across course boundaries: "
             f"sources in quizzes {foreign} belong to a different course"
         )
 
+    await _lock_question_append(db, target_quiz_id)
     next_position = await _next_position(db, target_quiz_id)
     cloned: list[QuizQuestion] = []
     sources_by_id = {q.id: q for q in sources}
     for src_id in source_question_ids:  # preserve caller order
         source = sources_by_id[src_id]
-        clone = QuizQuestion(
-            quiz_id=target_quiz_id,
+        clone = await _clone_question_into_quiz(
+            db,
+            source=source,
+            source_options=options_by_question.get(source.id, []),
+            target_quiz_id=target_quiz_id,
             position=next_position,
-            question_type=source.question_type,
-            prompt_text=source.prompt_text,
-            hint_text=source.hint_text,
-            explanation=source.explanation,
-            difficulty=source.difficulty,
-            bloom_level=source.bloom_level,
-            review_status="pending",
-            expected_response_time_ms=source.expected_response_time_ms,
-            expected_ef_ceiling=source.expected_ef_ceiling,
-            source_refs=list(source.source_refs or []),
-            original_generated_payload=(
-                dict(source.original_generated_payload)
-                if source.original_generated_payload
-                else None
-            ),
-            imported_from_question_id=source.id,
-            created_by=actor.user_id,
-            updated_by=actor.user_id,
+            actor=actor,
+            source_question_id=source.id,
         )
-        db.add(clone)
-        await db.flush()  # populate clone.id for option FK
-        for option in options_by_question.get(source.id, []):
-            db.add(
-                QuizQuestionOption(
-                    question_id=clone.id,
-                    option_key=option.option_key,
-                    option_text=option.option_text,
-                    is_correct=option.is_correct,
-                    position=option.position,
-                    created_by=actor.user_id,
-                    updated_by=actor.user_id,
-                )
-            )
         cloned.append(clone)
         next_position += 1
 
@@ -366,9 +492,7 @@ async def duplicate_question(
         expected_ef_ceiling=source.expected_ef_ceiling,
         source_refs=list(source.source_refs or []),
         original_generated_payload=(
-            dict(source.original_generated_payload)
-            if source.original_generated_payload
-            else None
+            dict(source.original_generated_payload) if source.original_generated_payload else None
         ),
         imported_from_question_id=source.id,
         prompt_format=source.prompt_format,
@@ -412,4 +536,8 @@ async def duplicate_question(
     return clone
 
 
-__all__ = ["duplicate_question", "import_questions", "list_bank_entries"]
+__all__ = [
+    "duplicate_question",
+    "import_questions",
+    "list_bank_entries",
+]

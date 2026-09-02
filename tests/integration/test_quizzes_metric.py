@@ -60,7 +60,7 @@ def test_no_god_file_under_quizzes_feature() -> None:
     over_cap = [
         (loc, p)
         for loc, p in sized
-        if loc > _GRANDFATHERED.get(str(p.relative_to(QUIZZES_FEATURE)), LOC_CAP)
+        if loc > _GRANDFATHERED.get(p.relative_to(QUIZZES_FEATURE).as_posix(), LOC_CAP)
     ]
 
     if over_cap:
@@ -80,7 +80,7 @@ def test_no_god_file_under_quizzes_feature() -> None:
     non_grandfathered = [
         (loc, p)
         for loc, p in sized
-        if str(p.relative_to(QUIZZES_FEATURE)) not in _GRANDFATHERED
+        if p.relative_to(QUIZZES_FEATURE).as_posix() not in _GRANDFATHERED
     ]
     if non_grandfathered:
         largest_loc, _ = non_grandfathered[0]

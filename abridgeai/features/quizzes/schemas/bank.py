@@ -15,11 +15,15 @@ Why a bank entry vs reusing :class:`QuizQuestionAuthoring`?
 
 from __future__ import annotations
 
+from datetime import datetime
+from decimal import Decimal
+from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from abridgeai.features.quizzes.schemas.authoring import QuizQuestionAuthoring
+from abridgeai.features.quizzes.schemas.public import QuestionTypeLiteral
 
 
 class QuestionBankEntry(BaseModel):
@@ -61,8 +65,149 @@ class QuestionBankImportRequest(BaseModel):
     )
 
 
+BankStatus = Literal["draft", "approved", "archived"]
+Difficulty = Literal["easy", "medium", "hard"]
+BloomLevel = Literal[
+    "remember", "understand", "apply", "analyze", "evaluate", "create"
+]
+
+
+class QuizQuestionBankOptionCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    option_key: str
+    option_text: str
+    is_correct: bool = False
+    position: int
+    option_format: str = "plain"
+    grade_fraction: Decimal | None = None
+    feedback_text: str | None = None
+    feedback_format: str | None = None
+
+
+class QuizQuestionBankOptionRead(QuizQuestionBankOptionCreate):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+
+
+class QuizQuestionBankItemCreate(BaseModel):
+    """Portable Quiz question content authored directly in the course bank."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    question_type: QuestionTypeLiteral
+    prompt_text: str
+    hint_text: str | None = None
+    explanation: str | None = None
+    difficulty: Difficulty | None = None
+    bloom_level: BloomLevel | None = None
+    expected_response_time_ms: int | None = None
+    expected_ef_ceiling: Decimal | None = None
+    learning_outcome_id: UUID | None = None
+    source_refs: list[Any] = []
+    original_generated_payload: dict[str, Any] | None = None
+    prompt_format: str = "plain"
+    hint_format: str = "plain"
+    explanation_format: str = "plain"
+    single_answer: bool = True
+    answer_numbering: str = "abc"
+    numeric_answer: Decimal | None = None
+    numeric_tolerance: Decimal | None = None
+    match_pairs: list[dict[str, Any]] | None = None
+    match_distractors: list[str] | None = None
+    ordering_sequence: list[Any] | None = None
+    category_id: UUID | None = None
+    options: list[QuizQuestionBankOptionCreate] = []
+    status: BankStatus = "draft"
+
+
+class QuizQuestionBankItemUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    question_type: QuestionTypeLiteral | None = None
+    prompt_text: str | None = None
+    hint_text: str | None = None
+    explanation: str | None = None
+    difficulty: Difficulty | None = None
+    bloom_level: BloomLevel | None = None
+    expected_response_time_ms: int | None = None
+    expected_ef_ceiling: Decimal | None = None
+    learning_outcome_id: UUID | None = None
+    prompt_format: str | None = None
+    hint_format: str | None = None
+    explanation_format: str | None = None
+    single_answer: bool | None = None
+    answer_numbering: str | None = None
+    numeric_answer: Decimal | None = None
+    numeric_tolerance: Decimal | None = None
+    match_pairs: list[dict[str, Any]] | None = None
+    match_distractors: list[str] | None = None
+    ordering_sequence: list[Any] | None = None
+    category_id: UUID | None = None
+    options: list[QuizQuestionBankOptionCreate] | None = None
+
+
+class QuizQuestionBankItemRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    course_id: UUID
+    source_question_id: UUID | None = None
+    status: BankStatus
+    content_hash: str
+    question_type: QuestionTypeLiteral
+    prompt_text: str
+    hint_text: str | None = None
+    explanation: str | None = None
+    difficulty: Difficulty | None = None
+    bloom_level: BloomLevel | None = None
+    expected_response_time_ms: int | None = None
+    expected_ef_ceiling: Decimal | None = None
+    learning_outcome_id: UUID | None = None
+    source_refs: list[Any] = []
+    original_generated_payload: dict[str, Any] | None = None
+    prompt_format: str = "plain"
+    hint_format: str = "plain"
+    explanation_format: str = "plain"
+    single_answer: bool = True
+    answer_numbering: str = "abc"
+    numeric_answer: Decimal | None = None
+    numeric_tolerance: Decimal | None = None
+    match_pairs: list[dict[str, Any]] | None = None
+    match_distractors: list[str] | None = None
+    ordering_sequence: list[Any] | None = None
+    category_id: UUID | None = None
+    options: list[QuizQuestionBankOptionRead] = []
+    created_by: UUID | None = None
+    updated_by: UUID | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class QuizQuestionBankPage(BaseModel):
+    items: list[QuizQuestionBankItemRead]
+    next_cursor: str | None = None
+
+
+class QuizQuestionBankCopyRequest(BaseModel):
+    question_ids: list[UUID] = Field(min_length=1, max_length=100)
+
+
+class QuizQuestionBankImportRequest(BaseModel):
+    item_ids: list[UUID] = Field(min_length=1, max_length=100)
+
+
 __all__ = [
     "QuestionBankEntry",
     "QuestionBankImportRequest",
     "QuestionBankPage",
+    "QuizQuestionBankCopyRequest",
+    "QuizQuestionBankImportRequest",
+    "QuizQuestionBankItemCreate",
+    "QuizQuestionBankItemRead",
+    "QuizQuestionBankItemUpdate",
+    "QuizQuestionBankOptionCreate",
+    "QuizQuestionBankOptionRead",
+    "QuizQuestionBankPage",
 ]

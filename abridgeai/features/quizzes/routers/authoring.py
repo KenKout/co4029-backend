@@ -51,6 +51,9 @@ from abridgeai.features.quizzes.routers._deps import (
     require_question_authoring_access,
     require_quiz_authoring_access,
 )
+from abridgeai.features.quizzes.routers.curated_question_bank import (
+    router as curated_question_bank_router,
+)
 from abridgeai.features.quizzes.schemas import (
     FeedbackBandIn,
     FeedbackBandRead,
@@ -93,6 +96,7 @@ from abridgeai.features.quizzes.services.authoring import QuizPublishValidationE
 from abridgeai.features.quizzes.services.publish_gate import QuizApprovalRequiredError
 
 router = APIRouter(prefix="/teacher", tags=["quizzes-authoring"])
+router.include_router(curated_question_bank_router)
 
 _REQUIRE_COURSE_UPDATE = require_course_permission("course_id", "course.update")
 _REQUIRE_QUIZ = require_quiz_authoring_access()
@@ -406,9 +410,7 @@ async def get_course_quiz_attempt_detail(
     return QuizAttemptTeacherReview(
         attempt=_attempt_teacher_view(attempt, row.title, names.get(attempt.student_id)),
         questions=review_questions,
-        integrity_events=[
-            QuizAttemptIntegrityEvent.model_validate(ev) for ev in integrity_rows
-        ],
+        integrity_events=[QuizAttemptIntegrityEvent.model_validate(ev) for ev in integrity_rows],
     )
 
 
@@ -927,6 +929,8 @@ async def import_questions_from_bank(
         )
     except NotFoundError as exc:
         raise _not_found("quiz_question", quiz_id) from exc
+    except ConflictError as exc:
+        raise _conflict(str(exc)) from exc
     except AppError as exc:
         raise _bad_request(str(exc)) from exc
     await db.commit()
@@ -1083,7 +1087,7 @@ def _fill_outcome_positions(
         question.outcome_code = resolved[1] if resolved else None  # type: ignore[attr-defined]
 
 
-def _serialize_regrade_run(run: Any) -> RegradeRunRead:
+def _serialize_regrade_run(run: Any) -> RegradeRunRead:  # noqa: ANN401 -- ORM projection
     """Project a QuizRegradeRun (+ loaded items) to the API DTO."""
     from abridgeai.features.quizzes.schemas import RegradeItemRead  # noqa: PLC0415
 
@@ -1178,9 +1182,7 @@ async def commit_regrade_run(
     except NotFoundError as exc:
         raise _not_found("regrade run", run_id) from exc
     except AppError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT, detail=str(exc)
-        ) from exc
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     await db.commit()
     run = await _regrade.get_regrade_run(db, quiz_id=quiz_id, run_id=run_id)
     return _serialize_regrade_run(run)
@@ -1431,23 +1433,15 @@ def _report_download(
         content = _exp.build_xlsx(headers, rows)
         return Response(
             content=content,
-            media_type=(
-                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            ),
+            media_type=("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
             headers={
-                "Content-Disposition": (
-                    f'attachment; filename="{filename_stem}-{stamp}.xlsx"'
-                )
+                "Content-Disposition": (f'attachment; filename="{filename_stem}-{stamp}.xlsx"')
             },
         )
     return StreamingResponse(
         _exp.stream_csv(headers, rows),
         media_type="text/csv",
-        headers={
-            "Content-Disposition": (
-                f'attachment; filename="{filename_stem}-{stamp}.csv"'
-            )
-        },
+        headers={"Content-Disposition": (f'attachment; filename="{filename_stem}-{stamp}.csv"')},
     )
 
 
@@ -1471,9 +1465,7 @@ async def get_responses_report(
         raise _not_found("quiz", quiz_id) from exc
     if format in ("csv", "xlsx"):
         headers, rows = _exp.responses_to_table(report)
-        return _report_download(
-            headers, rows, format, filename_stem=f"quiz-{quiz_id}-responses"
-        )
+        return _report_download(headers, rows, format, filename_stem=f"quiz-{quiz_id}-responses")
     return report
 
 
@@ -1497,9 +1489,7 @@ async def get_statistics_report(
         raise _not_found("quiz", quiz_id) from exc
     if format in ("csv", "xlsx"):
         headers, rows = _exp.statistics_to_table(report)
-        return _report_download(
-            headers, rows, format, filename_stem=f"quiz-{quiz_id}-statistics"
-        )
+        return _report_download(headers, rows, format, filename_stem=f"quiz-{quiz_id}-statistics")
     return report
 
 

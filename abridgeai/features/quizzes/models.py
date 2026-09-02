@@ -313,6 +313,16 @@ class QuizQuestion(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftDele
         ForeignKey("quiz_questions.id", ondelete="SET NULL"),
         nullable=True,
     )
+    # Dedicated curated-bank lineage. ``imported_from_question_id`` remains
+    # the source pointer for in-quiz duplicate and the legacy cross-quiz
+    # importer; bank imports use this FK so deleting/archiving the source quiz
+    # cannot erase where the reusable snapshot came from.
+    imported_from_bank_item_id: Mapped[uuid.UUID | None] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("quiz_question_bank_items.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     reviewed_by: Mapped[uuid.UUID | None] = mapped_column(
         PGUUID(as_uuid=True),
         ForeignKey("users.id", ondelete="SET NULL"),
@@ -808,6 +818,7 @@ class QuizAuditEvent(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
     occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
+from abridgeai.features.quizzes.bank_models import QuizQuestionBankItem, QuizQuestionBankOption  # noqa: E402, E501, I001
 __all__ = [
     "QuestionCategory",
     "QuestionTag",
@@ -821,6 +832,8 @@ __all__ = [
     "QuizGradeItem",
     "QuizOverride",
     "QuizQuestion",
+    "QuizQuestionBankItem",
+    "QuizQuestionBankOption",
     "QuizQuestionOption",
     "QuizQuestionRevision",
     "QuizRegradeItem",
