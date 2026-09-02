@@ -68,9 +68,7 @@ async def throwaway_db() -> AsyncIterator[str]:
     base, _, _ = settings_url.rpartition("/")
     name = f"abridgeai_aiaudit_{uuid.uuid4().hex[:12]}"
 
-    admin = create_async_engine(
-        _async_url(f"{base}/postgres"), isolation_level="AUTOCOMMIT"
-    )
+    admin = create_async_engine(_async_url(f"{base}/postgres"), isolation_level="AUTOCOMMIT")
     async with admin.connect() as conn:
         await conn.execute(text(f'CREATE DATABASE "{name}"'))
     await admin.dispose()
@@ -78,9 +76,7 @@ async def throwaway_db() -> AsyncIterator[str]:
     try:
         yield f"{base}/{name}"
     finally:
-        admin = create_async_engine(
-            _async_url(f"{base}/postgres"), isolation_level="AUTOCOMMIT"
-        )
+        admin = create_async_engine(_async_url(f"{base}/postgres"), isolation_level="AUTOCOMMIT")
         async with admin.connect() as conn:
             # Terminate stragglers or DROP blocks on an open connection.
             await conn.execute(
@@ -268,9 +264,7 @@ async def test_round_trip_upgrade_downgrade_upgrade(
     # the name at import time, so patching the module attribute is enough.
     from abridgeai.core import config as app_config
 
-    redirected = app_config.get_settings().model_copy(
-        update={"database_url": throwaway_db}
-    )
+    redirected = app_config.get_settings().model_copy(update={"database_url": throwaway_db})
     monkeypatch.setattr(app_config, "get_settings", lambda: redirected)
 
     alembic_cfg = _alembic_config()

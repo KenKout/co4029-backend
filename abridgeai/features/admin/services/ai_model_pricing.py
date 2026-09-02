@@ -95,6 +95,14 @@ async def update_pricing(
 
     await db.flush()
     await db.commit()
+    # ``TimestampMixin.updated_at`` carries ``onupdate=text("NOW()")``. That is
+    # a SQL expression, so after the UPDATE SQLAlchemy cannot know the new
+    # value and marks the attribute expired. Reading it in ``_to_dict`` below
+    # then triggers a lazy refresh -- synchronous IO inside an async session,
+    # which raises MissingGreenlet and made every PATCH fail. Refresh once,
+    # explicitly and awaited, so the caller also gets the real timestamp
+    # rather than the pre-update one.
+    await db.refresh(row)
     invalidate_pricing_cache()
     return _to_dict(row)
 
