@@ -29,9 +29,7 @@ from abridgeai.features.interviews.dedup import (
 
 
 def _candidate(text: str = "What is an index?", distance: float = 0.1) -> ShortlistedQuestion:
-    return ShortlistedQuestion(
-        question_id=uuid.uuid4(), prompt_text=text, distance=distance
-    )
+    return ShortlistedQuestion(question_id=uuid.uuid4(), prompt_text=text, distance=distance)
 
 
 # ── verdict parsing ──────────────────────────────────────────────────────────
@@ -469,12 +467,18 @@ async def test_generation_pipeline_embeds_the_questions_it_persists() -> None:
     """
     from unittest.mock import AsyncMock, patch
 
-    from abridgeai.features.interviews.ai.pipelines import generation as gen
+    from abridgeai.features.interviews.ai.pipelines import (
+        generation as gen,
+    )
+    from abridgeai.features.interviews.ai.pipelines import (
+        persistence as pers,
+    )
 
     class _Draft:
         def __init__(self, prompt: str) -> None:
             self.prompt_text = prompt
             self.linked_outcome_id = None
+            self.variant_group_id = None
             self.question_type = "conceptual"
             self.difficulty = None
             self.model_answer = ""
@@ -499,8 +503,9 @@ async def test_generation_pipeline_embeds_the_questions_it_persists() -> None:
     drafts = [_Draft("first question"), _Draft("second question")]
 
     with (
-        patch.object(gen, "next_question_position", AsyncMock(side_effect=[1, 2])),
-        patch.object(gen, "store_question_embeddings", AsyncMock(return_value=2)) as spy,
+        patch.object(pers, "next_question_position", AsyncMock(side_effect=[1, 2])),
+        patch.object(pers, "store_question_embeddings", AsyncMock(return_value=2)) as spy,
+        patch(pers.__name__ + ".lock_question_append", AsyncMock()),
     ):
         await gen._persist_questions(
             _Db(),  # type: ignore[arg-type]
@@ -523,11 +528,17 @@ async def test_generation_pipeline_survives_an_embedding_failure() -> None:
     """A provider outage must not fail a run whose questions are otherwise fine."""
     from unittest.mock import AsyncMock, patch
 
-    from abridgeai.features.interviews.ai.pipelines import generation as gen
+    from abridgeai.features.interviews.ai.pipelines import (
+        generation as gen,
+    )
+    from abridgeai.features.interviews.ai.pipelines import (
+        persistence as pers,
+    )
 
     class _Draft:
         prompt_text = "q"
         linked_outcome_id = None
+        variant_group_id = None
         question_type = "conceptual"
         difficulty = None
         model_answer = ""
@@ -547,8 +558,9 @@ async def test_generation_pipeline_survives_an_embedding_failure() -> None:
     # store_question_embeddings swallows internally and returns 0; assert the
     # pipeline treats that as a non-event rather than propagating.
     with (
-        patch.object(gen, "next_question_position", AsyncMock(return_value=1)),
-        patch.object(gen, "store_question_embeddings", AsyncMock(return_value=0)),
+        patch.object(pers, "next_question_position", AsyncMock(return_value=1)),
+        patch.object(pers, "store_question_embeddings", AsyncMock(return_value=0)),
+        patch(pers.__name__ + ".lock_question_append", AsyncMock()),
     ):
         await gen._persist_questions(
             _Db(),  # type: ignore[arg-type]

@@ -52,6 +52,7 @@ from abridgeai.core.db import Base, get_db
 from abridgeai.core.security import create_access_token, generate_token, hash_secret
 from abridgeai.features.interviews.routers import (
     authoring_router,
+    authoring_sessions_router,
     learner_router,
     learner_sessions_router,
 )
@@ -118,6 +119,7 @@ async def app(
 
     fastapi_app = FastAPI()
     fastapi_app.include_router(authoring_router, prefix="/api/v1")
+    fastapi_app.include_router(authoring_sessions_router, prefix="/api/v1")
     fastapi_app.include_router(learner_router, prefix="/api/v1")
     fastapi_app.include_router(learner_sessions_router, prefix="/api/v1")
     fastapi_app.dependency_overrides[get_db] = _override_get_db
@@ -300,7 +302,16 @@ def _auth(token: str) -> dict[str, str]:
 
 def test_authoring_endpoints_registered() -> None:
     assert authoring_router.prefix == "/teacher"
-    paths = {route.path for route in authoring_router.routes}  # type: ignore[attr-defined]
+    assert authoring_sessions_router.prefix == "/teacher"
+    # Session/transcript/gap-report routes live in authoring_sessions_router
+    # (LOC-ratchet split); everything else stays on authoring_router.
+    paths = {
+        route.path
+        for route in [
+            *authoring_router.routes,  # type: ignore[attr-defined]
+            *authoring_sessions_router.routes,  # type: ignore[attr-defined]
+        ]
+    }
     expected = {
         "/teacher/courses/{course_id}/interview-configs",
         "/teacher/interview-configs/{config_id}",

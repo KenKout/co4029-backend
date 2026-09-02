@@ -137,6 +137,9 @@ from abridgeai.features.interviews.routers import (
     authoring_router as interviews_authoring_router,
 )
 from abridgeai.features.interviews.routers import (
+    authoring_sessions_router as interviews_authoring_sessions_router,
+)
+from abridgeai.features.interviews.routers import (
     learner_router as interviews_learner_router,
 )
 from abridgeai.features.interviews.routers import (
@@ -316,6 +319,7 @@ def create_app() -> FastAPI:
     app.include_router(interviews_learner_router, prefix=API_V1_PREFIX)
     app.include_router(interviews_learner_sessions_router, prefix=API_V1_PREFIX)
     app.include_router(interviews_authoring_router, prefix=API_V1_PREFIX)
+    app.include_router(interviews_authoring_sessions_router, prefix=API_V1_PREFIX)
 
     # Phase 7 -- enrollments (T7.1)
     app.include_router(me_enrollments_router, prefix=API_V1_PREFIX)

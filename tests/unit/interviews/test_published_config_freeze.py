@@ -159,18 +159,28 @@ class TestLearningOutcomesFreeze:
         """
         from unittest.mock import AsyncMock, patch
 
-        from abridgeai.features.interviews.services import authoring as svc  # noqa: PLC0415
+        from abridgeai.features.interviews.services import (
+            authoring as svc,  # noqa: PLC0415
+        )
+        from abridgeai.features.interviews.services import (
+            outcomes as outcome_svc,  # noqa: PLC0415
+        )
 
         published = _config("published")
         db = AsyncMock()
         config_id = "00000000-0000-0000-0000-000000000001"
         outcome_id = "00000000-0000-0000-0000-000000000002"
 
-        with patch.object(svc, "_require_config", new=AsyncMock(return_value=published)):
+        # The outcome CRUD lives in services.outcomes (LOC-ratchet split); the
+        # guards resolve from ITS namespace, so that is where the patches land.
+        # svc (authoring) re-exports the functions for the public call sites.
+        with patch.object(outcome_svc, "_require_config", new=AsyncMock(return_value=published)):
             # add_outcome: refuses before computing a position or inserting.
             with (
-                patch.object(svc.authoring_queries, "next_outcome_position", new=AsyncMock()) as pos,
-                patch.object(svc, "flush_or_conflict", new=AsyncMock()) as flush,
+                patch.object(
+                    outcome_svc.authoring_queries, "next_outcome_position", new=AsyncMock()
+                ) as pos,
+                patch.object(outcome_svc, "flush_or_conflict", new=AsyncMock()) as flush,
             ):
                 with pytest.raises(ConflictError):
                     asyncio.run(
@@ -191,9 +201,8 @@ class TestLearningOutcomesFreeze:
 
             # update_outcome: refuses before touching the existing row.
             with (
-                patch.object(svc, "_require_outcome", new=AsyncMock()) as require_outcome,
-                patch.object(svc, "_apply_patch") as apply_patch,
-                patch.object(svc, "flush_or_conflict", new=AsyncMock()) as flush,
+                patch.object(outcome_svc, "_require_outcome", new=AsyncMock()) as require_outcome,
+                patch.object(outcome_svc, "flush_or_conflict", new=AsyncMock()) as flush,
             ):
                 with pytest.raises(ConflictError):
                     asyncio.run(
@@ -202,13 +211,12 @@ class TestLearningOutcomesFreeze:
                         )
                     )
                 require_outcome.assert_not_awaited()
-                apply_patch.assert_not_called()
                 flush.assert_not_awaited()
 
             # delete_outcome: refuses before loading or soft-deleting the row.
             with (
-                patch.object(svc, "_require_outcome", new=AsyncMock()) as require_outcome,
-                patch.object(svc, "soft_delete_cascade", new=AsyncMock()) as soft_delete,
+                patch.object(outcome_svc, "_require_outcome", new=AsyncMock()) as require_outcome,
+                patch.object(outcome_svc, "soft_delete_cascade", new=AsyncMock()) as soft_delete,
             ):
                 with pytest.raises(ConflictError):
                     asyncio.run(
