@@ -543,7 +543,9 @@ async def _attach_health_projections(
         db, [c.id for c in courses]
     )
     instructors = await authoring_queries.list_instructors_for_courses(db, [c.id for c in courses])
+    syllabus_ids = await authoring_queries.course_ids_with_syllabus(db, [c.id for c in courses])
     for dto, orm in zip(dtos, courses, strict=True):
+        dto.has_syllabus = orm.id in syllabus_ids
         students, modules = counts.get(orm.id, (0, 0))
         dto.student_count = students
         dto.module_count = modules

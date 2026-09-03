@@ -173,6 +173,62 @@ def _actor(user_id: uuid.UUID) -> CurrentUser:
     return CurrentUser(user_id=user_id, session_id=uuid.uuid4())
 
 
+async def test_dept_list_carries_has_syllabus_projection(
+    engine: AsyncEngine, scenario: dict, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """The dept course list reports which courses already have a syllabus.
+
+    Drives the manager upload dialog's existing-syllabus warning: the flag
+    comes from ANY successful import on the course (draft included — the
+    authoring twin of the publish-gated public one).
+    """
+    course_id = scenario["course_id"]
+    suffix = str(course_id).replace("-", "")[:10]
+
+    async with session_factory() as db:
+        before = await assignment_service.list_courses_in_faculties(
+            db, [scenario["faculty_id"]]
+        )
+        assert {d.id for d in before} == {course_id}
+        assert {d.id: d.has_syllabus for d in before}[course_id] is False
+
+    storage_obj_id = uuid.uuid4()
+    import_id = uuid.uuid4()
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("INSERT INTO storage_objects (id, bucket, object_key) VALUES (:id, :b, :k)"),
+            {"id": storage_obj_id, "b": "test-bucket", "k": f"syllabi/{suffix}.pdf"},
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO course_syllabus_imports "
+                "(id, organization_id, course_id, status, language, storage_object_id, imported_by) "
+                "VALUES (:id, :org, :course, 'succeeded', 'vi', :so, :actor)"
+            ),
+            {
+                "id": import_id,
+                "org": scenario["org_id"],
+                "course": course_id,
+                "so": storage_obj_id,
+                "actor": scenario["actor_id"],
+            },
+        )
+    try:
+        async with session_factory() as db:
+            after = await assignment_service.list_courses_in_faculties(
+                db, [scenario["faculty_id"]]
+            )
+            assert {d.id: d.has_syllabus for d in after}[course_id] is True
+    finally:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("DELETE FROM course_syllabus_imports WHERE id = :id"), {"id": import_id}
+            )
+            await conn.execute(
+                text("DELETE FROM storage_objects WHERE id = :id"), {"id": storage_obj_id}
+            )
+
+
 async def test_assign_teacher_creates_role_assignment(
     session_factory: async_sessionmaker[AsyncSession],
     scenario: dict,
