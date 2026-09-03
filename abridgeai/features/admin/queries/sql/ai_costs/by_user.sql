@@ -20,6 +20,7 @@ WITH bounded AS (
         amc.total_tokens
     FROM ai_model_calls amc
     WHERE amc.called_at >= CAST(:since AS timestamptz)
+      AND (CAST(:until AS timestamptz) IS NULL OR amc.called_at < CAST(:until AS timestamptz))
 ),
 attributed AS (
     SELECT

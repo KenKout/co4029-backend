@@ -104,13 +104,14 @@ async def summary(
     db: AsyncSession,
     *,
     since: datetime,
+    until: datetime | None = None,
     period: str,
     model: str | None = None,
     role: str | None = None,
     operation: str | None = None,
     status: str | None = None,
 ) -> dict[str, Any]:
-    cacheable = _cacheable_since(since)
+    cacheable = _cacheable_since(since) and until is None
     cache_key: tuple[Any, ...] | None = (
         ("summary", since, period, model, role, operation, status) if cacheable else None
     )
@@ -121,6 +122,7 @@ async def summary(
     row = await ai_costs_queries.summary(
         db,
         since=since,
+        until=until,
         period=period,
         model=model,
         role=role,
@@ -190,10 +192,11 @@ async def by_user(
     db: AsyncSession,
     *,
     since: datetime,
+    until: datetime | None = None,
     top_n: int,
     is_today_window: bool,
 ) -> list[dict[str, Any]]:
-    rows = await ai_costs_queries.by_user(db, since=since, top_n=top_n)
+    rows = await ai_costs_queries.by_user(db, since=since, until=until, top_n=top_n)
     result = [
         {
             "user_id": r["user_id"],
@@ -214,6 +217,7 @@ async def by_category(
     *,
     dimension: str,
     since: datetime,
+    until: datetime | None = None,
     top_n: int,
     model: str | None = None,
     role: str | None = None,
@@ -224,6 +228,7 @@ async def by_category(
         db,
         dimension=dimension,
         since=since,
+        until=until,
         top_n=top_n,
         model=model,
         role=role,
@@ -248,9 +253,12 @@ async def by_pipeline(
     db: AsyncSession,
     *,
     since: datetime,
+    until: datetime | None = None,
     top_n: int,
 ) -> list[dict[str, Any]]:
-    rows = await ai_costs_queries.by_pipeline(db, since=since, top_n=top_n)
+    rows = await ai_costs_queries.by_pipeline(
+        db, since=since, until=until, top_n=top_n
+    )
     return [
         {
             "pipeline_run_id": r["pipeline_run_id"],
@@ -300,6 +308,7 @@ async def by_model(
     db: AsyncSession,
     *,
     since: datetime,
+    until: datetime | None = None,
     top_n: int,
     model: str | None = None,
     role: str | None = None,
@@ -309,6 +318,7 @@ async def by_model(
     rows = await ai_costs_queries.by_model(
         db,
         since=since,
+        until=until,
         top_n=top_n,
         model=model,
         role=role,

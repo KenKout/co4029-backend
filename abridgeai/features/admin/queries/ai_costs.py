@@ -75,6 +75,7 @@ async def summary(
     db: AsyncSession,
     *,
     since: datetime,
+    until: datetime | None = None,
     period: str,
     model: str | None = None,
     role: str | None = None,
@@ -83,7 +84,7 @@ async def summary(
 ) -> dict[str, Any]:
     if period not in _VALID_PERIODS:
         raise ValueError(f"invalid period {period!r}; expected one of {sorted(_VALID_PERIODS)}")
-    params: dict[str, Any] = {"since": since, "period": period}
+    params: dict[str, Any] = {"since": since, "until": until, "period": period}
     params.update(_filter_binds(model=model, role=role, operation=operation, status=status))
     row = (await db.execute(_SUMMARY_SQL, params)).mappings().one()
     return dict(row)
@@ -93,9 +94,14 @@ async def by_user(
     db: AsyncSession,
     *,
     since: datetime,
+    until: datetime | None = None,
     top_n: int,
 ) -> list[dict[str, Any]]:
-    rows = (await db.execute(_BY_USER_SQL, {"since": since, "top_n": top_n})).mappings()
+    rows = (
+        await db.execute(
+            _BY_USER_SQL, {"since": since, "until": until, "top_n": top_n}
+        )
+    ).mappings()
     return [dict(r) for r in rows]
 
 
@@ -126,9 +132,14 @@ async def by_pipeline(
     db: AsyncSession,
     *,
     since: datetime,
+    until: datetime | None = None,
     top_n: int,
 ) -> list[dict[str, Any]]:
-    rows = (await db.execute(_BY_PIPELINE_SQL, {"since": since, "top_n": top_n})).mappings()
+    rows = (
+        await db.execute(
+            _BY_PIPELINE_SQL, {"since": since, "until": until, "top_n": top_n}
+        )
+    ).mappings()
     return [dict(r) for r in rows]
 
 
@@ -137,6 +148,7 @@ async def by_category(
     *,
     dimension: str,
     since: datetime,
+    until: datetime | None = None,
     top_n: int,
     model: str | None = None,
     role: str | None = None,
@@ -156,7 +168,7 @@ async def by_category(
             f"invalid dimension {dimension!r}; expected one of {sorted(_CATEGORY_DIMENSIONS)}"
         )
     sql = text(_BY_CATEGORY_TEMPLATE.format(dimension_col=column))
-    params: dict[str, Any] = {"since": since, "top_n": top_n}
+    params: dict[str, Any] = {"since": since, "until": until, "top_n": top_n}
     params.update(_filter_binds(model=model, role=role, operation=operation, status=status))
     rows = (await db.execute(sql, params)).mappings()
     return [dict(r) for r in rows]
@@ -166,6 +178,7 @@ async def by_model(
     db: AsyncSession,
     *,
     since: datetime,
+    until: datetime | None = None,
     top_n: int,
     model: str | None = None,
     role: str | None = None,
@@ -173,7 +186,7 @@ async def by_model(
     status: str | None = None,
 ) -> list[dict[str, Any]]:
     """Per-model efficiency: spend, tokens, latency p50/p95, blended $/1k."""
-    params: dict[str, Any] = {"since": since, "top_n": top_n}
+    params: dict[str, Any] = {"since": since, "until": until, "top_n": top_n}
     params.update(_filter_binds(model=model, role=role, operation=operation, status=status))
     rows = (await db.execute(_BY_MODEL_SQL, params)).mappings()
     return [dict(r) for r in rows]

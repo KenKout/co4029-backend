@@ -22,6 +22,7 @@ WITH bounded AS (
         amc.cached_input_tokens
     FROM ai_model_calls amc
     WHERE amc.called_at >= CAST(:since AS timestamptz)
+      AND (CAST(:until AS timestamptz) IS NULL OR amc.called_at < CAST(:until AS timestamptz))
       AND (CAST(:f_model AS text) IS NULL OR amc.model_name = CAST(:f_model AS text))
       AND (CAST(:f_role AS text) IS NULL OR amc.role = CAST(:f_role AS text))
       AND (CAST(:f_operation AS text) IS NULL OR amc.operation = CAST(:f_operation AS text))

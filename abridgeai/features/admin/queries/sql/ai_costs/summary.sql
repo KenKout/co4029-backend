@@ -23,6 +23,7 @@ WITH bounded AS (
         amc.called_at
     FROM ai_model_calls amc
     WHERE amc.called_at >= CAST(:since AS timestamptz)
+      AND (CAST(:until AS timestamptz) IS NULL OR amc.called_at < CAST(:until AS timestamptz))
       AND (CAST(:f_model AS text) IS NULL OR amc.model_name = CAST(:f_model AS text))
       AND (CAST(:f_role AS text) IS NULL OR amc.role = CAST(:f_role AS text))
       AND (CAST(:f_operation AS text) IS NULL OR amc.operation = CAST(:f_operation AS text))
@@ -75,7 +76,10 @@ buckets AS (
         COALESCE(agg.usd, 0)::numeric(18, 6) AS usd
     FROM generate_series(
         date_trunc(:period, CAST(:since AS timestamptz)),
-        date_trunc(:period, NOW()),
+        date_trunc(
+            :period,
+            COALESCE(CAST(:until AS timestamptz), NOW()) - INTERVAL '1 microsecond'
+        ),
         CASE :period
             WHEN 'week' THEN INTERVAL '1 week'
             WHEN 'month' THEN INTERVAL '1 month'

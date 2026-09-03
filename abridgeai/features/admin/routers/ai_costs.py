@@ -131,24 +131,54 @@ class ModelEfficiencyOut(BaseModel):
 
 
 def _parse_since(raw: str | None, default_days: int) -> datetime:
-    if raw is None:
-        return ai_costs_service.default_since(default_days)
+    return _parse_window(raw, None, default_days=default_days)[0]
+
+
+def _parse_window(
+    raw_since: str | None, raw_until: str | None, *, default_days: int
+) -> tuple[datetime, datetime | None]:
+    """Resolve the ``since``/``until`` pair to UTC datetimes.
+
+    ``until`` is the window END as an EXCLUSIVE bound — the client sends local
+    midnight after its last labelled day — or ``None`` for the legacy
+    open-ended window ``[since, NOW())``. Omitting ``until`` keeps the old
+    behaviour bit-for-bit: existing callers (and the integration tests that
+    seed rows "since 5 days ago") keep their full open-ended span.
+    """
+    if raw_since is None:
+        return ai_costs_service.default_since(default_days), None
     try:
-        if "T" in raw or " " in raw:
-            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if "T" in raw_since or " " in raw_since:
+            since = datetime.fromisoformat(raw_since.replace("Z", "+00:00"))
         else:
-            parsed = datetime.strptime(raw, "%Y-%m-%d").replace(tzinfo=UTC)
+            since = datetime.strptime(raw_since, "%Y-%m-%d").replace(tzinfo=UTC)
+        if raw_until is None:
+            until_dt = None
+        elif "T" in raw_until or " " in raw_until:
+            until_dt = datetime.fromisoformat(raw_until.replace("Z", "+00:00"))
+        else:
+            until_dt = datetime.strptime(raw_until, "%Y-%m-%d").replace(tzinfo=UTC)
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={
                 "error": "invalid_since",
-                "message": "since must be YYYY-MM-DD or ISO-8601 datetime",
+                "message": "since/until must be YYYY-MM-DD or ISO-8601 datetime",
             },
         ) from exc
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=UTC)
-    return parsed
+    if since.tzinfo is None:
+        since = since.replace(tzinfo=UTC)
+    if until_dt is not None and until_dt.tzinfo is None:
+        until_dt = until_dt.replace(tzinfo=UTC)
+    if until_dt is not None and until_dt <= since:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "error": "invalid_window",
+                "message": "until must not be on or before since",
+            },
+        )
+    return since, until_dt
 
 
 @router.get("/summary", response_model=SummaryOut)
@@ -166,6 +196,15 @@ async def get_summary(
         str | None,
         Query(description="ISO date or datetime; defaults to NOW() - 30 days."),
     ] = None,
+    until: Annotated[
+        str | None,
+        Query(
+            description=(
+                "Exclusive window end (ISO date or datetime); omit for an "
+                "open-ended window ending at NOW()."
+            )
+        ),
+    ] = None,
     model: Annotated[
         str | None, Query(description="Filter to one model_name.")
     ] = None,
@@ -179,10 +218,11 @@ async def get_summary(
         Query(alias="status", description="Filter to one call status."),
     ] = None,
 ) -> SummaryOut:
-    since_dt = _parse_since(since, default_days=30)
+    since_dt, until_dt = _parse_window(since, until, default_days=30)
     payload: dict[str, Any] = await ai_costs_service.summary(
         db,
         since=since_dt,
+        until=until_dt,
         period=period,
         model=model,
         role=role,
@@ -200,14 +240,26 @@ async def get_by_user(
         str | None,
         Query(description="ISO date or datetime; defaults to NOW() - 30 days."),
     ] = None,
+    until: Annotated[
+        str | None,
+        Query(
+            description=(
+                "Exclusive window end (ISO date or datetime); omit for an "
+                "open-ended window ending at NOW()."
+            )
+        ),
+    ] = None,
     top_n: Annotated[int, Query(ge=1, le=200)] = 20,
 ) -> list[UserSpendOut]:
-    since_dt = _parse_since(since, default_days=30)
+    since_dt, until_dt = _parse_window(since, until, default_days=30)
+    # The soft-spend warning is a TODAY-window behaviour; a closed historical
+    # window is not "today" regardless of what since resolves to.
+    warn = until_dt is None and ai_costs_service.is_today_window(since_dt)
     rows = await ai_costs_service.by_user(
         db,
         since=since_dt,
         top_n=top_n,
-        is_today_window=ai_costs_service.is_today_window(since_dt),
+        is_today_window=warn,
     )
     return [UserSpendOut.model_validate(r) for r in rows]
 
@@ -252,11 +304,25 @@ async def get_by_organization(
         str | None,
         Query(description="ISO date or datetime; defaults to NOW() - 30 days."),
     ] = None,
+    until: Annotated[
+        str | None,
+        Query(
+            description=(
+                "Exclusive window end (ISO date or datetime); defaults to "
+                "NOW() -- kept open by default so freshly-written calls stay "
+                "attributable until the caller sends a bounded window."
+            )
+        ),
+    ] = None,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
 ) -> OrganizationSpendPage:
     """AI spend attributed to organizations (PRD ADM-040)."""
+    since_dt, until_dt = _parse_window(since, until, default_days=30)
     result = await ai_costs_service.by_organization(
-        db, since=_parse_since(since, default_days=30), limit=limit
+        db,
+        since=since_dt,
+        until=until_dt or datetime.now(tz=UTC),
+        limit=limit,
     )
     return OrganizationSpendPage(
         items=[OrganizationSpendOut.model_validate(r) for r in result["items"]],
@@ -274,10 +340,21 @@ async def get_by_pipeline(
         str | None,
         Query(description="ISO date or datetime; defaults to NOW() - 30 days."),
     ] = None,
+    until: Annotated[
+        str | None,
+        Query(
+            description=(
+                "Exclusive window end (ISO date or datetime); omit for an "
+                "open-ended window ending at NOW()."
+            )
+        ),
+    ] = None,
     top_n: Annotated[int, Query(ge=1, le=200)] = 20,
 ) -> list[PipelineSpendOut]:
-    since_dt = _parse_since(since, default_days=30)
-    rows = await ai_costs_service.by_pipeline(db, since=since_dt, top_n=top_n)
+    since_dt, until_dt = _parse_window(since, until, default_days=30)
+    rows = await ai_costs_service.by_pipeline(
+        db, since=since_dt, until=until_dt, top_n=top_n
+    )
     return [PipelineSpendOut.model_validate(r) for r in rows]
 
 
@@ -299,6 +376,15 @@ async def get_by_category(
         str | None,
         Query(description="ISO date or datetime; defaults to NOW() - 30 days."),
     ] = None,
+    until: Annotated[
+        str | None,
+        Query(
+            description=(
+                "Exclusive window end (ISO date or datetime); omit for an "
+                "open-ended window ending at NOW()."
+            )
+        ),
+    ] = None,
     top_n: Annotated[int, Query(ge=1, le=200)] = 20,
     model: Annotated[
         str | None, Query(description="Filter to one model_name.")
@@ -313,11 +399,12 @@ async def get_by_category(
         Query(alias="status", description="Filter to one call status."),
     ] = None,
 ) -> list[CategorySpendOut]:
-    since_dt = _parse_since(since, default_days=30)
+    since_dt, until_dt = _parse_window(since, until, default_days=30)
     rows = await ai_costs_service.by_category(
         db,
         dimension=dimension,
         since=since_dt,
+        until=until_dt,
         top_n=top_n,
         model=model,
         role=role,
@@ -335,6 +422,15 @@ async def get_by_model(
         str | None,
         Query(description="ISO date or datetime; defaults to NOW() - 30 days."),
     ] = None,
+    until: Annotated[
+        str | None,
+        Query(
+            description=(
+                "Exclusive window end (ISO date or datetime); omit for an "
+                "open-ended window ending at NOW()."
+            )
+        ),
+    ] = None,
     top_n: Annotated[int, Query(ge=1, le=200)] = 20,
     model: Annotated[
         str | None, Query(description="Filter to one model_name.")
@@ -349,10 +445,11 @@ async def get_by_model(
         Query(alias="status", description="Filter to one call status."),
     ] = None,
 ) -> list[ModelEfficiencyOut]:
-    since_dt = _parse_since(since, default_days=30)
+    since_dt, until_dt = _parse_window(since, until, default_days=30)
     rows = await ai_costs_service.by_model(
         db,
         since=since_dt,
+        until=until_dt,
         top_n=top_n,
         model=model,
         role=role,

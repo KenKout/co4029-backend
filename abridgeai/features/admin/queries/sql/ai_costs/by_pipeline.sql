@@ -22,6 +22,7 @@ WITH bounded AS (
         amc.called_at
     FROM ai_model_calls amc
     WHERE amc.called_at >= CAST(:since AS timestamptz)
+      AND (CAST(:until AS timestamptz) IS NULL OR amc.called_at < CAST(:until AS timestamptz))
       AND amc.pipeline_run_id IS NOT NULL
 ),
 per_pipeline AS (
