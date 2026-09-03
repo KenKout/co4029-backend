@@ -49,6 +49,54 @@ Deliberately not a career-path deep link: after a rejection the interesting
 screen is their own request record, not the path they were refused.
 """
 
+_DEAN_ACTION_URL = "/management/learning-programs/{program_id}?tab=requests"
+"""Dean deep link: the targeted program's Path changes review tab.
+
+Built per-program because the dean's inbox is organized by program — the
+badge on a program card is where they notice, so the notification must
+land them on exactly that program's request queue.
+"""
+
+
+async def notify_dean_path_change_requested(
+    db: AsyncSession,
+    *,
+    dean_user_id: UUID,
+    request_id: UUID,
+    program_id: UUID,
+    program_name: str,
+    student_label: str,
+    target_path_name: str,
+    arq_pool: object | None = None,
+) -> None:
+    """Tell every owning Faculty Dean a student filed a path change request."""
+    try:
+        locale = await get_user_locale(db, dean_user_id)
+        await notifications_api.send_notification(
+            db,
+            recipient_user_id=dean_user_id,
+            notification_type=_CATEGORY,
+            title=notifications_api.path_change_requested_title(
+                student_label=student_label, locale=locale
+            ),
+            body=notifications_api.path_change_requested_body(
+                student_label=student_label,
+                target_path_name=target_path_name,
+                program_name=program_name,
+                locale=locale,
+            ),
+            entity_type="path_change_request",
+            entity_id=request_id,
+            action_url=_DEAN_ACTION_URL.format(program_id=program_id),
+            arq_pool=arq_pool,
+        )
+    except Exception:  # noqa: BLE001 — never break the request on a notify failure
+        _logger.exception(
+            "path_change_requested_dean_notify_failed",
+            dean_user_id=str(dean_user_id),
+            request_id=str(request_id),
+        )
+
 
 async def notify_path_change_in_progress(
     db: AsyncSession,
@@ -161,6 +209,7 @@ async def notify_path_change_approved(
 
 
 __all__ = [
+    "notify_dean_path_change_requested",
     "notify_path_change_approved",
     "notify_path_change_in_progress",
     "notify_path_change_rejected",

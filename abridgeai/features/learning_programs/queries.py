@@ -319,6 +319,56 @@ async def list_all_org_paths(db: AsyncSession, *, organization_id: UUID) -> list
     return list((await db.scalars(stmt)).all())
 
 
+async def list_owning_deans(
+    db: AsyncSession,
+    *,
+    organization_id: UUID,
+    faculty_id: UUID,
+) -> list[UUID]:
+    """User ids holding the ``hod`` role for a program's org + faculty.
+
+    The inverse of :func:`actor_has_program_role` for the dean check: every
+    user with an active Faculty-Dean assignment at the organization scope OR
+    at this faculty (org_unit scope backed by an active affiliation). Used to
+    fan out the "student filed a path change request" notification.
+    """
+    now = datetime.now(UTC)
+    stmt = (
+        select(UserRoleAssignment.user_id)
+        .join(Role, Role.id == UserRoleAssignment.role_id)
+        .where(
+            UserRoleAssignment.deleted_at.is_(None),
+            UserRoleAssignment.active_from <= now,
+            (UserRoleAssignment.active_until.is_(None) | (UserRoleAssignment.active_until > now)),
+            Role.code == "hod",
+            Role.deleted_at.is_(None),
+            (
+                (
+                    (UserRoleAssignment.scope_kind == "organization")
+                    & (UserRoleAssignment.organization_id == organization_id)
+                )
+                | (
+                    (UserRoleAssignment.scope_kind == "org_unit")
+                    & (UserRoleAssignment.org_unit_id == faculty_id)
+                    & exists(
+                        select(UserFacultyAssignment.id).where(
+                            UserFacultyAssignment.user_id == UserRoleAssignment.user_id,
+                            UserFacultyAssignment.organization_id == organization_id,
+                            UserFacultyAssignment.faculty_id == faculty_id,
+                            UserFacultyAssignment.status == "active",
+                            UserFacultyAssignment.deleted_at.is_(None),
+                            (UserFacultyAssignment.active_until.is_(None))
+                            | (UserFacultyAssignment.active_until > now),
+                        )
+                    )
+                )
+            ),
+        )
+        .distinct()
+    )
+    return list((await db.scalars(stmt)).all())
+
+
 async def actor_has_program_role(
     db: AsyncSession,
     *,

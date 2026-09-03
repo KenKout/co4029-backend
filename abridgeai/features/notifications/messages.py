@@ -330,6 +330,34 @@ def _rejection_reason_sentence(*, reason_code: str, locale: str | None) -> str:
     return table.get(reason_code, "")
 
 
+def path_change_requested_title(*, student_label: str, locale: str | None) -> str:
+    """Dean-facing title: a student filed a path change request."""
+    lang = _norm(locale)
+    if lang == "vi":
+        return f"Đề nghị đổi lộ trình từ {student_label}"[:255]
+    return f"Path change request from {student_label}"[:255]
+
+
+def path_change_requested_body(
+    *,
+    student_label: str,
+    target_path_name: str,
+    program_name: str,
+    locale: str | None,
+) -> str:
+    """Dean-facing body: who wants to move where, and where to review it."""
+    lang = _norm(locale)
+    if lang == "vi":
+        return (
+            f'{student_label} muốn chuyển sang lộ trình "{target_path_name}" '
+            f'trong chương trình {program_name}. Mở đề nghị để xem xét.'
+        )
+    return (
+        f'{student_label} wants to switch to "{target_path_name}" in '
+        f"{program_name}. Open the request to review it."
+    )
+
+
 def path_change_in_progress_title(*, program_name: str, locale: str | None) -> str:
     """Title: the Faculty Dean has picked the request up (no decision yet)."""
     lang = _norm(locale)
