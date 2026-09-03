@@ -394,15 +394,27 @@ async def test_inactivity_filter_narrows_and_never_widens(db: AsyncSession, tena
     assert tenant.other_org_id not in {o.id for o in page.items}
 
 
-async def test_an_empty_intersection_pages_to_zero_rows(db: AsyncSession, tenant: Tenant) -> None:
+async def test_an_empty_intersection_pages_to_zero_rows(
+    db: AsyncSession, engine: AsyncEngine, tenant: Tenant
+) -> None:
     """An empty allowlist must mean "nothing", not "unrestricted".
 
     Passing an empty list down to the query layer would be read as None —
     the exact bug that turns a filter into a full-table leak.
+
+    ``inactive_days=100000`` only yields an EMPTY set if the visible tenant
+    has recorded activity: the inactivity definition treats a never-active
+    org (NULL last activity) as qualifying at ANY threshold, so the tenant
+    is pinned as active (member sign-in) first.
     """
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("UPDATE users SET last_login_at = NOW() WHERE id = :uid"),
+            {"uid": tenant.master},
+        )
     page = await svc.search_organizations(
         db,
-        inactive_days=100000,  # no tenant has been quiet that long
+        inactive_days=100000,  # no tenant with real activity has been quiet that long
         visible_to_ids=[tenant.org_id],
     )
     assert page.items == []
@@ -1026,7 +1038,9 @@ async def test_membership_operations_on_unknown_ids_are_not_found(
 ) -> None:
     missing = uuid.uuid4()
     with pytest.raises(NotFoundError):
-        await svc.patch_membership(db, missing, MembershipPatch(status="left"))
+        # Valid status literal — 'left' is deliberately not expressible via
+        # MembershipPatch (see test_patch_cannot_express_left_so_only_delete_can_set_it).
+        await svc.patch_membership(db, missing, MembershipPatch(status="suspended"))
     with pytest.raises(NotFoundError):
         await svc.delete_membership(db, missing, actor_id=None)
 

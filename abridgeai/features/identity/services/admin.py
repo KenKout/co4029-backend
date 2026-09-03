@@ -19,7 +19,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 from uuid import UUID
 
-from abridgeai.core.exceptions import ConflictError, NotFoundError
+from abridgeai.core.exceptions import ConflictError, ForbiddenError, NotFoundError
 from abridgeai.core.pagination import Page
 from abridgeai.features.access_control.api import public as access_control_api
 from abridgeai.features.identity.models import User, UserProfile
@@ -34,7 +34,10 @@ from abridgeai.features.identity.schemas import (
     UserOverviewRead,
     UserRead,
 )
-from abridgeai.features.identity.services.profile import serialize_user
+from abridgeai.features.identity.services.profile import (
+    serialize_user,
+    serialize_user_async,
+)
 from abridgeai.infrastructure.s3 import create_stream_url
 
 if TYPE_CHECKING:
@@ -102,12 +105,18 @@ def _decode_cursor(cursor: str) -> UUID:
 
 
 async def get_user_with_profile(db: AsyncSession, user_id: UUID) -> UserRead | None:
-    """Return ``UserRead`` for ``user_id`` (with profile if present), or ``None``."""
+    """Return ``UserRead`` for ``user_id`` (with profile if present), or ``None``.
+
+    Uses the async serializer so the profile carries a freshly-minted
+    presigned ``avatar_url`` — the audit screens and user detail both read
+    through this lookup and must not fall back to initials for users who
+    have an avatar set.
+    """
     user = await user_queries.get_user(db, user_id)
     if user is None:
         return None
     profile = await user_queries.get_profile(db, user_id)
-    return serialize_user(user, profile)
+    return await serialize_user_async(db, user, profile)
 
 
 async def list_users(
@@ -363,6 +372,19 @@ async def create_user_account(
     existing = await user_queries.get_user_by_email(db, payload.primary_email)
     if existing is not None:
         raise ConflictError(f"user with email '{payload.primary_email}' already exists")
+
+    if payload.role_code == "admin":
+        raise ForbiddenError(
+            "the 'admin' role cannot be granted through an org invite: it carries "
+            "every permission and is global-scope only; invite the account with a "
+            "tenant role (student/teacher/hod/manager) instead"
+        )
+
+    # Router guarantees a non-None org (admin must send it, manager gets the
+    # caller's org forced). Backstop for direct service callers so a missing
+    # org can never produce a NULL membership row.
+    if payload.organization_id is None:
+        raise ConflictError("organization_id is required when creating an account")
 
     user = User(primary_email=payload.primary_email, status="active")
     db.add(user)

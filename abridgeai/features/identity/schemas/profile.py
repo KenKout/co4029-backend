@@ -62,13 +62,18 @@ class UserCreate(BaseModel):
     invited email can sign in via Google OAuth immediately (the
     pre-registration gate accepts existing ``users`` rows) and is already
     scoped to its organization.
+
+    ``organization_id`` is optional at the schema level because a non-admin
+    inviter (manager) is never allowed to pick: the router forces the
+    caller's own primary organization server-side. Platform admins MUST
+    still provide it.
     """
 
     primary_email: str = Field(min_length=3, max_length=320)
     given_name: str | None = Field(default=None, max_length=100)
     family_name: str | None = Field(default=None, max_length=100)
     display_name: str | None = Field(default=None, max_length=200)
-    organization_id: UUID
+    organization_id: UUID | None = None
     role_code: str = Field(default="student", min_length=1, max_length=50)
     student_code: str | None = Field(default=None, max_length=50)
     employee_code: str | None = Field(default=None, max_length=50)

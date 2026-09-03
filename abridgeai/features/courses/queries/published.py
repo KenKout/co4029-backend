@@ -33,6 +33,8 @@ from abridgeai.features.courses.visibility import (
 )
 from abridgeai.features.enrollments.models import Enrollment
 from abridgeai.features.identity.models import StorageObject, User, UserProfile
+from abridgeai.features.progress.models import LessonProgress
+from abridgeai.features.quizzes.models import Quiz, QuizAttempt
 
 _DEFAULT_LIMIT = 20
 _MAX_LIMIT = 100
@@ -79,9 +81,45 @@ async def list_enrolled_courses(
     limit: int = _DEFAULT_LIMIT,
     cursor: str | None = None,
 ) -> CursorPage[Course]:
-    """Active enrollments -> published courses for a student."""
+    """Active enrollments -> published courses, most recently active first.
+
+    "Recent activity" = the latest lesson-progress heartbeat or quiz-attempt
+    start on the course, so the dashboard's my-courses rows lead with the
+    course the student was last studying. Enrollments with no activity yet
+    fall to the tail in stable id order (pagination order stays total).
+    """
     capped = _clamp(limit)
     after = decode_cursor(cursor) if cursor else None
+    lesson_activity = (
+        select(func.max(LessonProgress.last_activity_at))
+        .select_from(LessonProgress)
+        .join(Lesson, Lesson.id == LessonProgress.lesson_id)
+        .join(Module, Module.id == Lesson.module_id)
+        .where(
+            LessonProgress.user_id == user_id,
+            Module.course_id == Course.id,
+        )
+        .correlate(Course)
+        .scalar_subquery()
+    )
+    quiz_activity = (
+        select(func.max(QuizAttempt.started_at))
+        .select_from(QuizAttempt)
+        .join(Quiz, Quiz.id == QuizAttempt.quiz_id)
+        .where(
+            QuizAttempt.student_id == user_id,
+            Quiz.course_id == Course.id,
+        )
+        .correlate(Course)
+        .scalar_subquery()
+    )
+    # GREATEST is NULL when either side is NULL, so fall back to whichever
+    # side exists for courses with only one kind of activity.
+    last_active = func.coalesce(
+        func.greatest(lesson_activity, quiz_activity),
+        lesson_activity,
+        quiz_activity,
+    )
     stmt = (
         select(Course)
         .join(Enrollment, Enrollment.course_id == Course.id)
@@ -90,7 +128,7 @@ async def list_enrolled_courses(
             Enrollment.status == "active",
             published_course_clause(),
         )
-        .order_by(Course.id)
+        .order_by(last_active.desc().nulls_last(), Course.id)
         .limit(capped)
     )
     if after is not None:

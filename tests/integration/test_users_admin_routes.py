@@ -112,6 +112,17 @@ async def student_auth(
         await _close_session(test_engine_local, session_id)
 
 
+@pytest_asyncio.fixture
+async def manager_auth(
+    test_engine_local: AsyncEngine, seeded_users: SeededUsers
+) -> AsyncIterator[tuple[uuid.UUID, str]]:
+    session_id, token = await _open_session(test_engine_local, seeded_users.manager_id)
+    try:
+        yield session_id, token
+    finally:
+        await _close_session(test_engine_local, session_id)
+
+
 def test_router_metadata() -> None:
     assert users_router.prefix == "/users"
     assert "users" in users_router.tags
@@ -519,3 +530,181 @@ async def test_create_user_student_token_403(
         },
     )
     assert response.status_code == 403, response.text
+
+
+async def test_create_user_unknown_role_404(
+    client: httpx.AsyncClient,
+    admin_auth: tuple[uuid.UUID, str],
+    seeded_users: SeededUsers,
+) -> None:
+    """A role code that does not exist is rejected cleanly — not a 500.
+
+    Regression: ``grant_org_role_access`` used ``scalar_one()`` so an unknown
+    ``role_code`` surfaced as ``sqlalchemy.exc.NoResultFound`` -> HTTP 500.
+    """
+    _, token = admin_auth
+    email = f"invite-unknown-role-{uuid.uuid4().hex[:8]}@test.local"
+    response = await client.post(
+        "/api/v1/users",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "primary_email": email,
+            "display_name": "Unknown Role",
+            "organization_id": str(seeded_users.organization_id),
+            "role_code": "astronaut",
+        },
+    )
+    assert response.status_code == 404, response.text
+    assert response.json()["detail"]["error"] == "role_not_found"
+
+    # The failed invite must not leave a half-created user behind.
+    search = await client.get(
+        f"/api/v1/users/search?search={email}&page_size=10",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert search.status_code == 200, search.text
+    assert search.json()["items"] == []
+
+
+async def test_create_user_as_manager_201(
+    client: httpx.AsyncClient,
+    manager_auth: tuple[uuid.UUID, str],
+    seeded_users: SeededUsers,
+) -> None:
+    """A manager may invite a teacher into their OWN org.
+
+    The payload's ``organization_id`` is ignored and replaced with the
+    caller's primary org (same forcing precedent as GET /users/search), so
+    even a foreign org id in the body cannot leak a user into another
+    tenant.
+    """
+    _, token = manager_auth
+    email = f"invite-mgr-teacher-{uuid.uuid4().hex[:8]}@test.local"
+    response = await client.post(
+        "/api/v1/users",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "primary_email": email,
+            "display_name": "Manager-Invited Teacher",
+            # Deliberately a foreign org: must be ignored, not honored.
+            "organization_id": str(uuid.uuid4()),
+            "role_code": "teacher",
+        },
+    )
+    assert response.status_code == 201, response.text
+
+    search = await client.get(
+        f"/api/v1/users/search?search={email}&page_size=10",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert search.status_code == 200, search.text
+    items = search.json()["items"]
+    assert len(items) == 1
+    assert "teacher" in items[0]["roles"]
+    # Landed in the manager's org, NOT the foreign id from the payload.
+    assert items[0]["organization_id"] == str(seeded_users.organization_id)
+
+
+async def test_create_user_as_manager_without_org_201(
+    client: httpx.AsyncClient,
+    manager_auth: tuple[uuid.UUID, str],
+    seeded_users: SeededUsers,
+) -> None:
+    """A manager invite may omit organization_id entirely (schema-optional;
+    the router still forces the caller's org)."""
+    _, token = manager_auth
+    email = f"invite-mgr-no-org-{uuid.uuid4().hex[:8]}@test.local"
+    response = await client.post(
+        "/api/v1/users",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "primary_email": email,
+            "display_name": "No Org Field",
+            "role_code": "student",
+        },
+    )
+    assert response.status_code == 201, response.text
+
+    search = await client.get(
+        f"/api/v1/users/search?search={email}&page_size=10",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert search.status_code == 200, search.text
+    items = search.json()["items"]
+    assert len(items) == 1
+    assert items[0]["organization_id"] == str(seeded_users.organization_id)
+
+
+async def test_create_user_manager_peer_role_403(
+    client: httpx.AsyncClient,
+    manager_auth: tuple[uuid.UUID, str],
+    seeded_users: SeededUsers,
+) -> None:
+    """A manager cannot invite peer roles (hod / manager) — same peer guard
+    as disable/enable; only student and teacher are creatable."""
+    _, token = manager_auth
+    for role_code in ("hod", "manager"):
+        email = f"invite-mgr-peer-{role_code}-{uuid.uuid4().hex[:8]}@test.local"
+        response = await client.post(
+            "/api/v1/users",
+            headers={"Authorization": f"Bearer {token}"},
+            json={
+                "primary_email": email,
+                "organization_id": str(seeded_users.organization_id),
+                "role_code": role_code,
+            },
+        )
+        assert response.status_code == 403, (role_code, response.text)
+        assert response.json()["detail"]["error"] == "forbidden"
+
+
+async def test_create_user_admin_without_org_422(
+    client: httpx.AsyncClient,
+    admin_auth: tuple[uuid.UUID, str],
+) -> None:
+    """For a platform admin the org is still mandatory: the schema is
+    optional only so managers can omit it."""
+    _, token = admin_auth
+    response = await client.post(
+        "/api/v1/users",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "primary_email": f"admin-no-org-{uuid.uuid4().hex[:8]}@test.local",
+            "role_code": "student",
+        },
+    )
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"]["error"] == "organization_required"
+
+
+async def test_create_user_admin_role_org_scope_403(
+    client: httpx.AsyncClient,
+    admin_auth: tuple[uuid.UUID, str],
+    seeded_users: SeededUsers,
+) -> None:
+    """The ``admin`` role (permissions: ALL) is global-only and cannot be
+    granted through the org-scoped invite path.
+
+    Permission resolution ignores assignment scope, so an org-scoped admin
+    assignment would mint a full platform admin — reject it here.
+    """
+    _, token = admin_auth
+    email = f"invite-org-admin-{uuid.uuid4().hex[:8]}@test.local"
+    response = await client.post(
+        "/api/v1/users",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "primary_email": email,
+            "display_name": "Org Admin",
+            "organization_id": str(seeded_users.organization_id),
+            "role_code": "admin",
+        },
+    )
+    assert response.status_code == 403, response.text
+
+    search = await client.get(
+        f"/api/v1/users/search?search={email}&page_size=10",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert search.status_code == 200, search.text
+    assert search.json()["items"] == []

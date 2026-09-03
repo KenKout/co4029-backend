@@ -89,6 +89,44 @@ async def _student_label(db: AsyncSession, student_id: UUID) -> str:
     return (user.display_name or "").strip() or user.primary_email
 
 
+async def _notify_owning_deans(
+    db: AsyncSession,
+    *,
+    program: LearningProgram,
+    request_id: UUID,
+    student_id: UUID,
+    target_path_id: UUID,
+    arq_pool: object | None = None,
+) -> None:
+    """Fan out the "student filed a path change request" notification.
+
+    Pull-based badges on the program card exist, but a filed request is
+    exactly the push moment: without it the dean only finds out by
+    browsing. Notification failures are swallowed inside ``notify`` — a
+    notification must never roll back the request creation.
+    """
+    dean_ids = await queries.list_owning_deans(
+        db,
+        organization_id=program.organization_id,
+        faculty_id=program.faculty_id,
+    )
+    student_label = await _student_label(db, student_id)
+    target_path_name = await _target_path_name(db, target_path_id)
+    for dean_id in dean_ids:
+        if dean_id == student_id:
+            continue
+        await notify.notify_dean_path_change_requested(
+            db,
+            dean_user_id=dean_id,
+            request_id=request_id,
+            program_id=program.id,
+            program_name=program.name,
+            student_label=student_label,
+            target_path_name=target_path_name,
+            arq_pool=arq_pool,
+        )
+
+
 async def _require_operator(db: AsyncSession, *, actor_id: UUID, program: LearningProgram) -> None:
     if not await queries.actor_has_program_role(
         db,
@@ -913,6 +951,7 @@ async def request_path_change(
     target_path_id: UUID,
     reason: str,
     student_id: UUID,
+    arq_pool: object | None = None,
 ) -> PathChangeRequestRead:
     enrollment = await queries.get_enrollment(db, enrollment_id, lock=True)
     if enrollment is None or enrollment.student_id != student_id:
@@ -949,6 +988,20 @@ async def request_path_change(
     )
     db.add(request)
     await flush_or_conflict(db)
+
+    # Every owning Faculty Dean of the program should learn about the new
+    # request (see _notify_owning_deans).
+    program = await queries.get_program(db, version.learning_program_id)
+    if program is not None:
+        await _notify_owning_deans(
+            db,
+            program=program,
+            request_id=request.id,
+            student_id=student_id,
+            target_path_id=target_path_id,
+            arq_pool=arq_pool,
+        )
+
     return PathChangeRequestRead.model_validate(request)
 
 

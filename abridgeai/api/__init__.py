@@ -102,6 +102,9 @@ from abridgeai.features.courses.routers.assignment import (
 from abridgeai.features.courses.routers.authoring import (
     get_arq_pool as courses_authoring_get_arq_pool,
 )
+from abridgeai.features.discussions.router import (
+    get_arq_pool as discussions_get_arq_pool,
+)
 from abridgeai.features.discussions.router import router as discussions_router
 from abridgeai.features.enrollments.routers import (
     assignment_dept_router as enrollments_dept_router,
@@ -252,6 +255,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.dependency_overrides[courses_authoring_get_arq_pool] = _provide_arq_pool
     app.dependency_overrides[enrollments_assignment_get_arq_pool] = _provide_arq_pool
     app.dependency_overrides[learning_programs_get_arq_pool] = _provide_arq_pool
+    app.dependency_overrides[discussions_get_arq_pool] = _provide_arq_pool
 
     # Best-effort embedding provider probe (non-fatal — logs, never raises).
     await _probe_embedding_health()

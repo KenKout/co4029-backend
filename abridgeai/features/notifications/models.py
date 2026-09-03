@@ -61,6 +61,8 @@ NOTIFICATION_CATEGORIES = (
     # Faculty-Dean review of a student's career-path change request:
     # acknowledged (in progress), approved, or rejected with a reason.
     "path_change_review",
+    # Lesson discussion activity (new comment on a discussion topic).
+    "course_discussion",
 )
 """Categories accepted by the ``notifications`` CHECK constraint."""
 
@@ -85,7 +87,7 @@ class Notification(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             "category IN ('spaced_repetition', 'lesson_unlock', "
             "'interview_result', 'course_announcement', 'system', "
             "'material_processing', 'quiz_generation', 'interview_generation', "
-            "'path_change_review')",
+            "'path_change_review', 'course_discussion')",
             name="ck_notifications_category",
         ),
         CheckConstraint(
@@ -137,7 +139,7 @@ class NotificationPreference(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             "'spaced_repetition', 'lesson_unlock', 'interview_result', "
             "'course_announcement', 'system', "
             "'material_processing', 'quiz_generation', 'interview_generation', "
-            "'path_change_review')",
+            "'path_change_review', 'course_discussion')",
             name="ck_notification_preferences_category",
         ),
         CheckConstraint(

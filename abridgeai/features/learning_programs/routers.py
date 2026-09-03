@@ -449,6 +449,7 @@ async def request_path_change(
     payload: ChangePathRequestCreate,
     actor: Annotated[CurrentUser, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
+    arq_pool: Annotated[object | None, Depends(get_arq_pool)] = None,
 ) -> PathChangeRequestRead:
     try:
         result = await services.request_path_change(
@@ -457,6 +458,7 @@ async def request_path_change(
             target_path_id=payload.target_career_path_id,
             reason=payload.reason,
             student_id=actor.user_id,
+            arq_pool=arq_pool,
         )
         await db.commit()
         return result

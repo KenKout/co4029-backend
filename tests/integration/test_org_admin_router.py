@@ -322,7 +322,9 @@ async def test_reading_another_tenants_organization_is_refused(
     ("template", "foreign_attr"),
     [
         ("/api/v1/admin/org-units/{id}", "faculty_b"),
-        ("/api/v1/admin/organization-memberships/{id}", "membership_b"),
+        # NOTE: no membership row has a GET-by-id route (only PATCH/DELETE on
+        # /admin/organization-memberships/{id}), so that child route cannot be
+        # probed with a GET and is deliberately absent from this matrix.
     ],
 )
 async def test_child_routes_hide_foreign_and_absent_alike(
@@ -352,7 +354,18 @@ async def test_child_routes_hide_foreign_and_absent_alike(
         f"foreign={foreign.status_code} absent={absent.status_code}: "
         "a resource in another tenant must look exactly like a missing one"
     )
-    assert foreign.json() == absent.json(), "the bodies must not differ either"
+
+    # Compare the SHAPE minus the echoed id: the body legitimately repeats the
+    # id the caller asked about (they already know it), so the two bodies can
+    # never be byte-identical — what must not differ is error/resource and the
+    # overall 404 framing.
+    def _detail_without_id(detail: object) -> dict[str, object]:
+        assert isinstance(detail, dict)
+        return {k: v for k, v in detail.items() if k != "id"}
+
+    assert _detail_without_id(foreign.json()["detail"]) == _detail_without_id(
+        absent.json()["detail"]
+    ), "the bodies must not differ either (except the echoed id)"
 
 
 # ---------------------------------------------------------------------------

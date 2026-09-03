@@ -43,6 +43,24 @@ async def get_course_by_id(db: AsyncSession, course_id: UUID) -> CourseDTO | Non
     return CourseDTO.model_validate(course) if course else None
 
 
+async def list_course_manager_ids(db: AsyncSession, course_id: UUID) -> list[UUID]:
+    """User ids who can manage a course: owner + active assigned teachers.
+
+    For discussion notification fan-out: the people who should learn about a
+    student's comment. Same definition as ``can_manage_course`` — the owner,
+    plus every active course-scoped ``teacher`` role assignment.
+    """
+    from abridgeai.features.courses.queries import assignment as assignment_queries  # noqa: PLC0415
+
+    course = await queries.get_course(db, course_id)
+    if course is None:
+        return []
+    ids = {course.owner_user_id}
+    for row in await assignment_queries.list_teachers_for_course(db, course_id):
+        ids.add(row["user_id"])
+    return list(ids)
+
+
 async def list_courses_by_org(db: AsyncSession, organization_id: UUID) -> list[CourseDTO]:
     """All non-deleted courses of an organization (any status), newest first.
 

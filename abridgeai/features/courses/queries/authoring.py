@@ -48,6 +48,30 @@ def _archived_filter(
     return status_col != "archived"
 
 
+async def course_ids_with_syllabus(
+    db: AsyncSession, course_ids: list[UUID]
+) -> set[UUID]:
+    """Course ids that have at least one SUCCESSFUL syllabus import.
+
+    The authoring twin of the published ``published_course_has_syllabus``:
+    same ``course_syllabus_imports`` source, but NOT publish-gated — a draft
+    course whose syllabus was attached/overridden still counts as "has a
+    document", which is exactly what the manager upload UI needs to warn
+    before replacing it.
+    """
+    if not course_ids:
+        return set()
+    stmt = (
+        select(CourseSyllabusImport.course_id)
+        .where(
+            CourseSyllabusImport.course_id.in_(course_ids),
+            CourseSyllabusImport.status == "succeeded",
+        )
+        .distinct()
+    )
+    return set((await db.scalars(stmt)).all())
+
+
 async def count_students_and_modules_for_courses(
     db: AsyncSession, course_ids: list[UUID]
 ) -> dict[UUID, tuple[int, int]]:

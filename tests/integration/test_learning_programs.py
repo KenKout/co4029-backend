@@ -222,6 +222,75 @@ async def test_program_selection_and_dean_approved_switch_are_historical(
 
 
 @pytest.mark.asyncio
+async def test_request_path_change_notifies_faculty_dean_with_deep_link(
+    engine: AsyncEngine, seeded_users: SeededUsers
+) -> None:
+    """Filing a path change request pushes an in-app notification to every
+    owning Faculty Dean, deep-linking the targeted program's review tab."""
+    faculty_id, path_a, path_b = await _seed_program_context(engine, seeded_users)
+    factory = async_sessionmaker(engine, expire_on_commit=False, autoflush=False)
+    manager = CurrentUser(seeded_users.manager_id, uuid.uuid4())
+    student = seeded_users.student_id
+
+    async with factory() as db:
+        program = await services.create_program(
+            db,
+            ProgramCreate(
+                organization_id=seeded_users.organization_id,
+                faculty_id=faculty_id,
+                owner_faculty_dean_id=seeded_users.hod_id,
+                slug=f"program-{uuid.uuid4().hex[:8]}",
+                name="Dean Notify Program",
+                career_path_ids=[path_a, path_b],
+            ),
+            manager,
+        )
+        await services.publish_program(db, program_id=program.id, actor=manager)
+        enrollments = await services.enroll_students(
+            db, program_id=program.id, student_ids=[student], actor=manager
+        )
+        enrollment = enrollments[0]
+        await services.select_path(
+            db,
+            enrollment_id=enrollment.id,
+            career_path_id=path_a,
+            student_id=student,
+        )
+        request = await services.request_path_change(
+            db,
+            enrollment_id=enrollment.id,
+            target_path_id=path_b,
+            reason="Dean notify test",
+            student_id=student,
+        )
+        await db.flush()
+
+        rows = (
+            await db.execute(
+                text(
+                    "SELECT category, entity_type, entity_id, action_url, title "
+                    "FROM notifications WHERE user_id = :uid ORDER BY created_at DESC"
+                ),
+                {"uid": seeded_users.hod_id},
+            )
+        ).mappings().all()
+        assert rows, "dean received no notification after a path change request"
+        match = next(
+            (r for r in rows if r["entity_id"] == request.id),
+            None,
+        )
+        assert match is not None, f"no notification for request id {request.id}"
+        assert match["category"] == "path_change_review"
+        assert match["entity_type"] == "path_change_request"
+        assert (
+            match["action_url"]
+            == f"/management/learning-programs/{program.id}?tab=requests"
+        )
+        assert "Path change request from" in match["title"]
+        await db.rollback()
+
+
+@pytest.mark.asyncio
 async def test_removing_path_from_new_draft_preserves_pinned_versions_and_old_enrollment(
     engine: AsyncEngine, seeded_users: SeededUsers
 ) -> None:

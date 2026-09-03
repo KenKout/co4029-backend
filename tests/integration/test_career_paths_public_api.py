@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest_asyncio
@@ -135,13 +136,23 @@ async def graph(engine: AsyncEngine) -> AsyncIterator[Graph]:
         # v1 published, v2 draft — the pair that makes the pin observable.
         for vid, no, status in ((g.v1, 1, "published"), (g.v2, 2, "draft")):
             await conn.execute(
+                # NOTE: :name binds only — this SQLAlchemy's text() no longer
+                # recognises %(name)s pyformat placeholders (they pass through
+                # literally and psycopg chokes on the "%"). published_at is
+                # computed in Python so no bind is reused in two type
+                # positions (psycopg3 rejects that as ambiguous).
                 text(
                     "INSERT INTO career_path_versions "
                     "(id, career_path_id, version_no, status, published_at) "
-                    "VALUES (:id, :path, :no, :status, "
-                    "        CASE WHEN :status = 'published' THEN NOW() ELSE NULL END)"
+                    "VALUES (:id, :path, :no, :status, :published_at)"
                 ),
-                {"id": vid, "path": g.path_id, "no": no, "status": status},
+                {
+                    "id": vid,
+                    "path": g.path_id,
+                    "no": no,
+                    "status": status,
+                    "published_at": datetime.now(tz=UTC) if status == "published" else None,
+                },
             )
         for sid, vid in ((g.stage_v1, g.v1), (g.stage_v2, g.v2)):
             await conn.execute(
