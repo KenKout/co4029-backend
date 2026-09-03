@@ -34,7 +34,10 @@ from abridgeai.features.identity.schemas import (
     UserOverviewRead,
     UserRead,
 )
-from abridgeai.features.identity.services.profile import serialize_user
+from abridgeai.features.identity.services.profile import (
+    serialize_user,
+    serialize_user_async,
+)
 from abridgeai.infrastructure.s3 import create_stream_url
 
 if TYPE_CHECKING:
@@ -102,12 +105,18 @@ def _decode_cursor(cursor: str) -> UUID:
 
 
 async def get_user_with_profile(db: AsyncSession, user_id: UUID) -> UserRead | None:
-    """Return ``UserRead`` for ``user_id`` (with profile if present), or ``None``."""
+    """Return ``UserRead`` for ``user_id`` (with profile if present), or ``None``.
+
+    Uses the async serializer so the profile carries a freshly-minted
+    presigned ``avatar_url`` — the audit screens and user detail both read
+    through this lookup and must not fall back to initials for users who
+    have an avatar set.
+    """
     user = await user_queries.get_user(db, user_id)
     if user is None:
         return None
     profile = await user_queries.get_profile(db, user_id)
-    return serialize_user(user, profile)
+    return await serialize_user_async(db, user, profile)
 
 
 async def list_users(
