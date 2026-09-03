@@ -23,7 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from abridgeai.core.db import get_db
 from abridgeai.core.security import CurrentUser, get_current_user
-from abridgeai.features.discussions import deps, queries
+from abridgeai.features.discussions import deps, notify, queries
 from abridgeai.features.discussions.models import (
     LessonDiscussionComment,
     LessonDiscussionTopic,
@@ -41,6 +41,17 @@ from abridgeai.features.discussions.schemas import (
 from abridgeai.features.identity.api import public as identity_api
 
 router = APIRouter(tags=["discussions"])
+
+
+async def get_arq_pool() -> object | None:
+    """ARQ Redis pool dependency (email dispatch for discussion notifications).
+
+    Returns ``None`` until the app factory overrides it; the notification
+    path accepts ``None`` and writes the in-app row without enqueueing
+    email. Mirrors the identical dependency in the courses / materials /
+    learning-programs routers.
+    """
+    return None
 
 
 # ── helpers ────────────────────────────────────────────────────────────────
@@ -279,11 +290,16 @@ async def create_comment(
     payload: DiscussionCommentCreate,
     current_user: Annotated[CurrentUser, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
+    arq_pool: Annotated[object | None, Depends(get_arq_pool)] = None,
 ) -> DiscussionCommentRead:
     """Post a comment (enrolled students + course managers).
 
     Rejects with 404 when the topic is closed for viewers who cannot
     manage the course — a closed topic accepts no new student comments.
+
+    Notifies thread participants (and course teachers when the author is a
+    student) — see :mod:`abridgeai.features.discussions.notify`. The
+    notification rows join this transaction; failures are swallowed.
     """
     topic = await deps.get_topic_or_404(db, topic_id)
     course_id = await _topic_course_or_404(db, topic)
@@ -299,6 +315,15 @@ async def create_comment(
     )
     db.add(comment)
     await db.flush()
+    await db.refresh(comment)
+    await notify.notify_comment_participants(
+        db,
+        comment=comment,
+        topic=topic,
+        actor_id=current_user.user_id,
+        actor_can_manage=viewer_can_manage,
+        arq_pool=arq_pool,
+    )
     await db.commit()
     await db.refresh(comment)
     dto = (await identity_api.get_users_by_ids(db, [current_user.user_id])).get(
@@ -363,4 +388,4 @@ async def delete_comment(
     await db.commit()
 
 
-__all__ = ["router"]
+__all__ = ["get_arq_pool", "router"]

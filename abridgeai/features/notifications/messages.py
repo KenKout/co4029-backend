@@ -330,6 +330,35 @@ def _rejection_reason_sentence(*, reason_code: str, locale: str | None) -> str:
     return table.get(reason_code, "")
 
 
+def discussion_comment_title(*, topic_title: str, locale: str | None) -> str:
+    """New comment on a lesson discussion topic (title)."""
+    lang = _norm(locale)
+    if lang == "vi":
+        return f"Bình luận mới trong thảo luận: {topic_title}"[:255]
+    return f"New comment on: {topic_title}"[:255]
+
+
+def discussion_comment_body(
+    *,
+    commenter_label: str,
+    topic_title: str,
+    course_title: str,
+    comment_snippet: str,
+    locale: str | None,
+) -> str:
+    """Who said what where (body) — the snippet answers the "do I care" test."""
+    lang = _norm(locale)
+    if lang == "vi":
+        return (
+            f'{commenter_label} vừa bình luận trong "{topic_title}" '
+            f"({course_title}): “{comment_snippet}”"
+        )
+    return (
+        f'{commenter_label} commented on "{topic_title}" in '
+        f"{course_title}: “{comment_snippet}”"
+    )
+
+
 def path_change_requested_title(*, student_label: str, locale: str | None) -> str:
     """Dean-facing title: a student filed a path change request."""
     lang = _norm(locale)
