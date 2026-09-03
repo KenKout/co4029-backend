@@ -601,7 +601,7 @@ async def create_question(
 
     # Phase 3: sanitize rich content on write per each field's format
     # discriminator (plain passes through; markdown/html are nh3-cleaned).
-    from abridgeai.features.quizzes.services.sanitize import (  # noqa: PLC0415
+    from abridgeai.core.sanitize import (  # noqa: PLC0415
         sanitize_rich_content,
     )
 
@@ -716,7 +716,7 @@ async def update_question(
     # explanation, which the client renders as HTML for the ``html`` format —
     # i.e. stored XSS against every student taking the quiz. The format used is
     # the one in this payload when supplied, else the value already on the row.
-    from abridgeai.features.quizzes.services.sanitize import (  # noqa: PLC0415
+    from abridgeai.core.sanitize import (  # noqa: PLC0415
         sanitize_rich_content,
     )
 

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from abridgeai.features.quizzes.services.sanitize import sanitize_rich_content
+from abridgeai.core.sanitize import sanitize_rich_content
 
 
 def test_plain_is_returned_unchanged():

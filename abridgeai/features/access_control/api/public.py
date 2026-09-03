@@ -601,7 +601,44 @@ async def list_inactive_organizations(
     ]
 
 
+@dataclass(frozen=True)
+class RoleDTO:
+    """A role from the catalogue.
+
+    Carries the display ``name`` alongside the ``code`` so a caller can label
+    a role without keeping its own copy of the wording — the whole point of
+    reading the catalogue rather than hardcoding "Faculty Dean" a second time.
+    """
+
+    id: UUID
+    code: str
+    name: str
+
+
+async def list_roles(db: AsyncSession) -> list[RoleDTO]:
+    """Every live role, ordered by display name."""
+    stmt = select(Role).where(Role.deleted_at.is_(None)).order_by(Role.name)
+    rows = (await db.execute(stmt)).scalars().all()
+    return [RoleDTO(id=r.id, code=r.code, name=r.name) for r in rows]
+
+
+async def get_roles_by_codes(db: AsyncSession, codes: Sequence[str]) -> dict[str, RoleDTO]:
+    """``{code: RoleDTO}`` for the given codes; unknown codes are absent.
+
+    Returning a mapping rather than a list lets the caller detect unknown
+    codes by set difference instead of scanning.
+    """
+    if not codes:
+        return {}
+    stmt = select(Role).where(Role.code.in_(list(codes)), Role.deleted_at.is_(None))
+    rows = (await db.execute(stmt)).scalars().all()
+    return {r.code: RoleDTO(id=r.id, code=r.code, name=r.name) for r in rows}
+
+
 __all__ = [
+    "RoleDTO",
+    "get_roles_by_codes",
+    "list_roles",
     "FacultyAccessDTO",
     "InactiveOrgDTO",
     "list_inactive_organizations",

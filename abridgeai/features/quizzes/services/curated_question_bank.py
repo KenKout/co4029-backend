@@ -136,7 +136,7 @@ def _validate_bank_content(content: dict[str, Any], options: list[Any]) -> list[
 def _sanitize_bank_content(
     content: dict[str, Any], options: list[dict[str, Any]]
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    from abridgeai.features.quizzes.services.sanitize import (  # noqa: PLC0415
+    from abridgeai.core.sanitize import (  # noqa: PLC0415
         sanitize_rich_content,
     )
 

@@ -167,6 +167,7 @@ max-complexity = 12
 # design: it sweeps historical rows, so an ORM round-trip per row would be
 # both slower and less atomic than one UPDATE.
 "scripts/backfill_ai_call_costs.py" = ["T20", "E501"]
+"scripts/seed_policies.py" = ["T20", "E501"]
 # Org-tenancy audit — a manual-trigger, read-only forensic CLI. Prints a
 # human report to stdout (T20) and builds its SQL by formatting a table name
 # into a template (S608): the names come from a module-level tuple, never from

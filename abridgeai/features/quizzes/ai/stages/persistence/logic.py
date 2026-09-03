@@ -43,7 +43,7 @@ _VALID_FORMATS = frozenset({"plain", "markdown", "html"})
 
 
 def _sanitize_rich_content(value: str | None, *, fmt: str) -> str | None:
-    """Deferred import of ``services.sanitize``.
+    """Deferred import of ``core.sanitize``.
 
     A module-level import here is circular: importing the ``services``
     package eagerly imports ``generation`` -> ``ai.pipelines`` -> this
@@ -51,7 +51,7 @@ def _sanitize_rich_content(value: str | None, *, fmt: str) -> str | None:
     any entry point that imports the persistence stage directly — tests,
     scripts — blew up with 'partially initialized module'.
     """
-    from abridgeai.features.quizzes.services.sanitize import sanitize_rich_content
+    from abridgeai.core.sanitize import sanitize_rich_content
 
     return sanitize_rich_content(value, fmt=fmt)
 

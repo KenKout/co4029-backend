@@ -176,6 +176,8 @@ from abridgeai.features.materials.routers.authoring import get_arq_pool as mater
 from abridgeai.features.notifications.routers import (
     learner_router as notifications_learner_router,
 )
+from abridgeai.features.policies.routers import admin_router as policies_admin_router
+from abridgeai.features.policies.routers import public_router as policies_public_router
 from abridgeai.features.progress.routers import (
     authoring_router as progress_authoring_router,
 )
@@ -314,6 +316,11 @@ def create_app() -> FastAPI:
 
     # Lesson discussions (teacher topics + student comments)
     app.include_router(discussions_router, prefix=API_V1_PREFIX)
+
+    # Policy documents. The public router is deliberately unauthenticated —
+    # the terms must be readable before an account exists.
+    app.include_router(policies_public_router, prefix=API_V1_PREFIX)
+    app.include_router(policies_admin_router, prefix=API_V1_PREFIX)
 
     # Phase 5 -- quizzes
     app.include_router(quizzes_learner_router, prefix=API_V1_PREFIX)

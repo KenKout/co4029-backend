@@ -14,7 +14,7 @@ so they run without a DB.
 
 from __future__ import annotations
 
-from abridgeai.features.quizzes.services.sanitize import sanitize_rich_content
+from abridgeai.core.sanitize import sanitize_rich_content
 
 HOSTILE = '<p>hello</p><script>alert("pwned")</script><img src=x onerror="steal()">'
 
