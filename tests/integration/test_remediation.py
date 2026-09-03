@@ -51,6 +51,7 @@ from abridgeai.features.spaced_repetition.services import (
     dispatch_remediation_for_card_failure,
     record_card_review,
 )
+from tests.support.db_graph import hard_delete_graph
 
 _REMEDIATION_MODULE = "abridgeai.features.spaced_repetition.services.remediation"
 
@@ -90,6 +91,36 @@ async def session_factory(
     engine: AsyncEngine,
 ) -> async_sessionmaker[AsyncSession]:
     return async_sessionmaker(engine, expire_on_commit=False, autoflush=False)
+
+
+# Roots seeded by ``_seed_world``, drained by ``_purge_seeded_worlds``. The
+# seed is a plain helper rather than a fixture -- every test calls it with a
+# different material type -- so the ids it creates are recorded here.
+_SEEDED_ROOTS: list[tuple[str, str]] = []
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def _purge_seeded_worlds(engine: AsyncEngine) -> AsyncIterator[None]:
+    """Undo every ``_seed_world`` tree, pass or fail.
+
+    The seed COMMITS (``engine.begin()``), so without this each test leaves an
+    organization -> course -> lesson -> material -> chunk tree plus its quiz
+    behind. Nothing here notices -- every call mints fresh uuids -- but the
+    rows accumulate in the shared test database across the run.
+
+    Graph-delete rather than a DELETE chain: it walks the LIVE FK graph, so a
+    new table hanging off courses or materials is cleaned the day its
+    migration lands. ``storage_objects`` is listed separately because it is a
+    PARENT of ``learning_material_versions``, not a child of the org tree, so
+    the walk down from the organization never reaches it.
+    """
+    yield
+    if not _SEEDED_ROOTS:
+        return
+    async with engine.begin() as conn:
+        for table, row_id in _SEEDED_ROOTS:
+            await hard_delete_graph(conn, table, [row_id])
+    _SEEDED_ROOTS.clear()
 
 
 async def _seed_world(
@@ -276,6 +307,10 @@ async def _seed_world(
             {"id": attempt_id, "quiz": quiz_id, "student": student_id},
         )
 
+    _SEEDED_ROOTS.append(("organizations", str(org_id)))
+    _SEEDED_ROOTS.append(("users", str(student_id)))
+    _SEEDED_ROOTS.append(("storage_objects", str(seed_storage_id)))
+    _SEEDED_ROOTS.append(("storage_objects", str(related_storage_id)))
     return {
         "student_id": student_id,
         "course_id": course_id,

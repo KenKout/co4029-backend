@@ -48,6 +48,7 @@ from abridgeai.features.quizzes.services import (
     curated_question_bank as curated_bank_service,
 )
 from abridgeai.features.quizzes.services import question_bank as bank_service
+from tests.support.db_graph import hard_delete_graph
 
 pytestmark = pytest.mark.asyncio
 
@@ -105,12 +106,17 @@ class BankFixture:
 
 
 @pytest_asyncio.fixture
-async def bank_fixture(engine: AsyncEngine) -> BankFixture:
+async def bank_fixture(engine: AsyncEngine) -> AsyncIterator[BankFixture]:
     """Seed two courses, two quizzes in one, plus a foreign quiz.
 
     Bank list defaults filter by ``review_status='approved'`` and scope
     to the calling course; the foreign-course quiz must NEVER appear in
     a bank query for the primary course, even when filters widen.
+
+    The seed COMMITS (``engine.begin()``), so it is undone on the way out:
+    the whole suite shares one Postgres, and an org -> course -> quiz tree
+    left behind is invisible here (every run mints fresh uuids) but inflates
+    the platform-wide counts other suites assert on.
     """
     org_id = uuid.uuid4()
     user_id = uuid.uuid4()
@@ -228,7 +234,7 @@ async def bank_fixture(engine: AsyncEngine) -> BankFixture:
             },
         )
 
-    return BankFixture(
+    yield BankFixture(
         actor=CurrentUser(user_id=user_id, session_id=uuid.uuid4()),
         course_id=course_id,
         other_course_id=other_course_id,
@@ -241,6 +247,13 @@ async def bank_fixture(engine: AsyncEngine) -> BankFixture:
         pending_question_id=pending_question_id,
         other_course_question_id=other_course_question_id,
     )
+
+    async with engine.begin() as conn:
+        # Graph-delete rather than a DELETE chain: it walks the LIVE FK graph,
+        # so a new table hanging off quizzes or courses is cleaned the day its
+        # migration lands instead of breaking this teardown.
+        await hard_delete_graph(conn, "organizations", [str(org_id)])
+        await hard_delete_graph(conn, "users", [str(user_id)])
 
 
 async def test_list_bank_returns_only_approved_within_course(

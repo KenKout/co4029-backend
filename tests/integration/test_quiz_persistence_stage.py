@@ -46,6 +46,7 @@ from abridgeai.features.quizzes.models import (
     QuizQuestionRevision,
 )
 from abridgeai.workers.actor import set_worker_actor
+from tests.support.db_graph import hard_delete_graph
 
 register_audit_listener()
 
@@ -109,7 +110,14 @@ class _Scaffold:
 async def scaffold(
     engine: AsyncEngine,
     session_factory: async_sessionmaker[AsyncSession],
-) -> _Scaffold:
+) -> AsyncIterator[_Scaffold]:
+    """Seed org -> user -> course -> module -> quiz, then undo it.
+
+    The seed COMMITS (``engine.begin()``), so without the teardown every test
+    leaves a whole content tree in the shared test database. The rows are
+    invisible to this file -- each run mints fresh uuids -- but they inflate
+    the platform-wide counts other suites assert on.
+    """
     org_id = uuid.uuid4()
     user_id = uuid.uuid4()
     course_id = uuid.uuid4()
@@ -161,13 +169,20 @@ async def scaffold(
         quiz = (await session.execute(select(Quiz).where(Quiz.id == quiz_id))).scalar_one()
         session.expunge(quiz)
 
-    return _Scaffold(
+    yield _Scaffold(
         org_id=org_id,
         user_id=user_id,
         course_id=course_id,
         module_id=module_id,
         quiz=quiz,
     )
+
+    async with engine.begin() as conn:
+        # Graph-delete rather than a DELETE chain: it walks the LIVE FK graph,
+        # so a new table hanging off quizzes or courses is cleaned the day its
+        # migration lands instead of breaking this teardown.
+        await hard_delete_graph(conn, "organizations", [str(org_id)])
+        await hard_delete_graph(conn, "users", [str(user_id)])
 
 
 def _chunks() -> tuple[list[ChunkWithDistance], list[str]]:

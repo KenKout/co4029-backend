@@ -42,6 +42,7 @@ from abridgeai.features.interviews import (
 )
 from abridgeai.features.quizzes.models import QuizQuestion, QuizQuestionOption
 from abridgeai.features.quizzes.services.grader import grade_answer
+from tests.support.db_graph import hard_delete_graph
 
 pytestmark = pytest.mark.asyncio
 
@@ -75,8 +76,14 @@ async def session_factory(
 
 
 @pytest_asyncio.fixture
-async def grader_quiz_id(engine: AsyncEngine) -> uuid.UUID:
-    """Create the org/user/course/module/quiz scaffold needed for FKs."""
+async def grader_quiz_id(engine: AsyncEngine) -> AsyncIterator[uuid.UUID]:
+    """Create the org/user/course/module/quiz scaffold needed for FKs.
+
+    The seed COMMITS (``engine.begin()``), so it must be undone explicitly:
+    the whole suite shares one Postgres, and an org -> course -> quiz tree
+    left behind is invisible here (every test mints fresh uuids) but shows
+    up in the platform-wide counts the admin suites assert on.
+    """
     org_id = uuid.uuid4()
     user_id = uuid.uuid4()
     course_id = uuid.uuid4()
@@ -122,7 +129,13 @@ async def grader_quiz_id(engine: AsyncEngine) -> uuid.UUID:
                 "title": "Grader Quiz",
             },
         )
-    return quiz_id
+    yield quiz_id
+    async with engine.begin() as conn:
+        # Graph-delete rather than a DELETE chain: it walks the LIVE FK graph,
+        # so a new table hanging off quizzes or courses is cleaned the day its
+        # migration lands instead of breaking this teardown.
+        await hard_delete_graph(conn, "organizations", [str(org_id)])
+        await hard_delete_graph(conn, "users", [str(user_id)])
 
 
 async def _make_question(

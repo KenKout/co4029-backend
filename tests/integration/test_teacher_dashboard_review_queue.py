@@ -383,8 +383,15 @@ async def review_scenario(
     # Teardown: drop the fixture's OWN rows (both courses) so the next test
     # re-seeds cleanly. Course-B children are deleted by course_id; the
     # seeded course-A rows are deleted by the explicit ids this fixture
-    # created. Leftover processing_jobs / storage_objects rows are wiped by
-    # the session-scoped purge on the next run.
+    # created.
+    #
+    # processing_jobs and storage_objects are deleted here too. An earlier
+    # version of this comment claimed a "session-scoped purge" swept them on
+    # the next run -- there is no such purge, and processing_jobs is exactly
+    # the table the admin job metrics count, so every run of this file was
+    # inflating the queue numbers another suite asserts on. storage_objects
+    # goes LAST because learning_material_versions references it; the jobs
+    # carry a polymorphic entity_id with no FK, so their order is free.
     async with engine.begin() as conn:
         await conn.execute(
             text(
@@ -455,6 +462,13 @@ async def review_scenario(
         )
         await conn.execute(text("DELETE FROM lessons WHERE id = :lid"), {"lid": lesson_a})
         await conn.execute(text("DELETE FROM modules WHERE id = :mid"), {"mid": module_a})
+        await conn.execute(
+            text("DELETE FROM processing_jobs WHERE id = ANY(CAST(:ids AS uuid[]))"),
+            {"ids": [str(job_a), str(job_b)]},
+        )
+        await conn.execute(
+            text("DELETE FROM storage_objects WHERE id = :id"), {"id": storage_obj}
+        )
 
 
 async def _stats(client: httpx.AsyncClient, bearer: str) -> dict:

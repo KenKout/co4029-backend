@@ -232,6 +232,14 @@ async def seed(engine: AsyncEngine) -> AsyncIterator[dict]:
             ),
             {"p": path_id}
         )
+        # Versions sit BETWEEN the stage/item rows deleted above and the path
+        # deleted below: their FK to career_paths is ON DELETE NO ACTION
+        # (migration 0074), so skipping them both leaks the rows and makes the
+        # parent delete raise once a test has published a version.
+        await conn.execute(
+            text("DELETE FROM career_path_versions WHERE career_path_id = :p"),
+            {"p": path_id},
+        )
         await conn.execute(text("DELETE FROM career_paths WHERE id = :p"), {"p": path_id})
         # Scoped by organization_id (not the fixed [req_course, opt_course] ids)
         # so it also sweeps up any course a test creates mid-run, e.g. the

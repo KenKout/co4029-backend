@@ -379,6 +379,17 @@ async def scenario(
         await conn.execute(text("DELETE FROM storage_objects WHERE id = :id"), {"id": storage_id})
         await conn.execute(text("DELETE FROM lessons WHERE id = :l"), {"l": lesson_id})
         await conn.execute(text("DELETE FROM modules WHERE id = :m"), {"m": module_id})
+        # The enrollment above is on the SHARED seeded course and student, not
+        # on a throwaway pair, so nothing else here sweeps it up. Left behind
+        # it outlives this file and changes what later suites see -- course
+        # rosters, learner content visibility, enrollment counts.
+        await conn.execute(
+            text(
+                "DELETE FROM course_enrollments "
+                "WHERE course_id = :c AND student_id = :s"
+            ),
+            {"c": seeded_users.course_id, "s": seeded_users.student_id},
+        )
 
 
 def _ideation_templates(chunk_ids: list[UUID], n: int = 3) -> list[Any]:

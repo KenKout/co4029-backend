@@ -50,6 +50,7 @@ from abridgeai.features.spaced_repetition.queries import (
     review_compliance_rate,
     student_lesson_summary,
 )
+from tests.support.db_graph import hard_delete_graph
 
 register_audit_listener()
 
@@ -104,6 +105,37 @@ def _isolate_cache() -> AsyncIterator[None]:
         ),
     ):
         yield
+
+
+# Roots seeded by ``_seed_lesson``, drained by ``_purge_seeded_trees``. It is
+# a plain helper rather than a fixture -- tests seed several trees each, and
+# some deliberately reuse an existing org or student -- so the ids are
+# recorded here. Repeats are harmless: deleting an id twice is a no-op.
+_SEEDED_ROOTS: list[tuple[str, str]] = []
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def _purge_seeded_trees(engine: AsyncEngine) -> AsyncIterator[None]:
+    """Undo every ``_seed_lesson`` tree, pass or fail.
+
+    The seed COMMITS (``engine.begin()``), so without this each test leaves an
+    organization -> course -> module -> lesson -> quiz -> question tree plus
+    its card state and reviews behind. The file's own assertions never notice
+    -- each tree is uniquely scoped -- but the class-wide queries here scan
+    globally, so the residue is exactly the kind of row these tests would
+    later trip over.
+
+    Graph-delete rather than a DELETE chain: it walks the LIVE FK graph, so a
+    new table hanging off courses or quizzes is cleaned the day its migration
+    lands instead of breaking this teardown.
+    """
+    yield
+    if not _SEEDED_ROOTS:
+        return
+    async with engine.begin() as conn:
+        for table, row_id in _SEEDED_ROOTS:
+            await hard_delete_graph(conn, table, [row_id])
+    _SEEDED_ROOTS.clear()
 
 
 async def _seed_lesson(
@@ -208,6 +240,8 @@ async def _seed_lesson(
                 ),
                 {"id": q, "quiz": quiz_id, "pos": idx},
             )
+    _SEEDED_ROOTS.append(("organizations", str(org_id)))
+    _SEEDED_ROOTS.append(("users", str(sid)))
     return sid, cid, lesson_id, question_ids
 
 

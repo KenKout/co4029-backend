@@ -511,6 +511,14 @@ async def scenario(
             ),
             {"pid": path_id},
         )
+        # Versions sit BETWEEN the stage/item rows deleted above and the path
+        # deleted below: their FK to career_paths is ON DELETE NO ACTION
+        # (migration 0074), so skipping them both leaks the rows and makes the
+        # parent delete raise once a test has published a version.
+        await conn.execute(
+            text("DELETE FROM career_path_versions WHERE career_path_id = :pid"),
+            {"pid": path_id},
+        )
         await conn.execute(
             text("DELETE FROM career_paths WHERE id = :pid"),
             {"pid": path_id},
@@ -778,6 +786,10 @@ async def test_path_impact_reports_active_students_per_stage(
                 "DELETE FROM career_path_stages WHERE version_id IN "
                 "(SELECT id FROM career_path_versions WHERE career_path_id = :pid)"
             ),
+            {"pid": path_id},
+        )
+        await conn.execute(
+            text("DELETE FROM career_path_versions WHERE career_path_id = :pid"),
             {"pid": path_id},
         )
         await conn.execute(text("DELETE FROM career_paths WHERE id = :pid"), {"pid": path_id})
@@ -1118,6 +1130,10 @@ async def test_create_publish_lifecycle(
             ),
             {"id": path_id}
         )
+        await conn.execute(
+            text("DELETE FROM career_path_versions WHERE career_path_id = :id"),
+            {"id": path_id},
+        )
         await conn.execute(text("DELETE FROM career_paths WHERE id = :id"), {"id": path_id})
         await conn.execute(text("DELETE FROM lessons WHERE id = :id"), {"id": lesson_id})
         await conn.execute(text("DELETE FROM modules WHERE course_id = :id"), {"id": course_id})
@@ -1160,6 +1176,10 @@ async def test_create_career_path_resolves_org_from_token(
         assert row.organization_id == seeded_users.organization_id
     finally:
         async with engine.begin() as conn:
+            await conn.execute(
+                text("DELETE FROM career_path_versions WHERE career_path_id = :id"),
+                {"id": body["id"]},
+            )
             await conn.execute(text("DELETE FROM career_paths WHERE id = :id"), {"id": body["id"]})
 
 
@@ -1209,6 +1229,10 @@ async def test_create_career_path_duplicate_slug_returns_409(
         assert "career_path_slug_taken" in detail["message"]
     finally:
         async with engine.begin() as conn:
+            await conn.execute(
+                text("DELETE FROM career_path_versions WHERE career_path_id = :id"),
+                {"id": created_id},
+            )
             await conn.execute(text("DELETE FROM career_paths WHERE id = :id"), {"id": created_id})
 
 
@@ -1365,6 +1389,10 @@ async def test_add_unpublished_course_to_published_path_is_rejected(
                 {"pid": fresh_path_id},
             )
             await conn.execute(
+                text("DELETE FROM career_path_versions WHERE career_path_id = :id"),
+                {"id": fresh_path_id},
+            )
+            await conn.execute(
                 text("DELETE FROM career_paths WHERE id = :id"), {"id": fresh_path_id}
             )
 
@@ -1434,6 +1462,10 @@ async def test_add_draft_course_to_draft_path_is_allowed(
                 "(SELECT id FROM career_path_versions WHERE career_path_id = :pid)"
             ),
                 {"pid": fresh_path_id},
+            )
+            await conn.execute(
+                text("DELETE FROM career_path_versions WHERE career_path_id = :id"),
+                {"id": fresh_path_id},
             )
             await conn.execute(
                 text("DELETE FROM career_paths WHERE id = :id"), {"id": fresh_path_id}

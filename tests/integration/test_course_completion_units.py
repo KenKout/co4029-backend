@@ -575,6 +575,14 @@ async def test_publish_gate_rejects_course_with_no_gradeable_units(
             await conn.execute(
                 text("DELETE FROM career_path_stages WHERE version_id IN (SELECT id FROM career_path_versions WHERE career_path_id=:p)"), {"p": path_id}
             )
+            # Versions sit BETWEEN the stage/item rows deleted above and the path
+            # deleted below: their FK to career_paths is ON DELETE NO ACTION
+            # (migration 0074), so skipping them both leaks the rows and makes the
+            # parent delete raise once a test has published a version.
+            await conn.execute(
+                text("DELETE FROM career_path_versions WHERE career_path_id = :p"),
+                {"p": path_id},
+            )
             await conn.execute(text("DELETE FROM career_paths WHERE id=:p"), {"p": path_id})
 
 
@@ -629,6 +637,10 @@ async def test_publish_gate_accepts_a_course_whose_only_unit_is_a_quiz(
             )
             await conn.execute(
                 text("DELETE FROM career_path_stages WHERE version_id IN (SELECT id FROM career_path_versions WHERE career_path_id=:p)"), {"p": path_id}
+            )
+            await conn.execute(
+                text("DELETE FROM career_path_versions WHERE career_path_id = :p"),
+                {"p": path_id},
             )
             await conn.execute(text("DELETE FROM career_paths WHERE id=:p"), {"p": path_id})
 

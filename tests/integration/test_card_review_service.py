@@ -44,6 +44,7 @@ from abridgeai.features.spaced_repetition.services import (
     CardReviewResult,
     record_card_review,
 )
+from tests.support.db_graph import hard_delete_graph
 
 register_audit_listener()
 
@@ -83,6 +84,35 @@ async def session_factory(
     engine: AsyncEngine,
 ) -> async_sessionmaker[AsyncSession]:
     return async_sessionmaker(engine, expire_on_commit=False, autoflush=False)
+
+
+# Roots seeded by ``_seed_quiz``, drained by ``_purge_seeded_trees``. The seed
+# is a plain helper rather than a fixture -- most tests call it with different
+# arguments -- so the ids it creates are recorded here for teardown instead.
+_SEEDED_ROOTS: list[tuple[str, str]] = []
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def _purge_seeded_trees(engine: AsyncEngine) -> AsyncIterator[None]:
+    """Undo every ``_seed_quiz`` tree, pass or fail.
+
+    The seed COMMITS (``engine.begin()``), so without this each test leaves an
+    organization -> user -> course -> quiz -> attempt tree in the shared test
+    database. Nothing here notices -- every call mints fresh uuids -- but the
+    rows accumulate across the run and inflate the platform-wide counts the
+    admin suites assert on.
+
+    Graph-delete rather than a DELETE chain: it walks the LIVE FK graph, so a
+    new table hanging off quizzes or courses is cleaned the day its migration
+    lands instead of breaking this teardown.
+    """
+    yield
+    if not _SEEDED_ROOTS:
+        return
+    async with engine.begin() as conn:
+        for table, row_id in _SEEDED_ROOTS:
+            await hard_delete_graph(conn, table, [row_id])
+    _SEEDED_ROOTS.clear()
 
 
 async def _seed_quiz(
@@ -163,6 +193,8 @@ async def _seed_quiz(
             ),
             {"id": attempt_id, "quiz": quiz_id, "student": student_id},
         )
+    _SEEDED_ROOTS.append(("organizations", str(org_id)))
+    _SEEDED_ROOTS.append(("users", str(student_id)))
     return student_id, question_id, attempt_id
 
 

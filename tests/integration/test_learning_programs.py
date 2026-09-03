@@ -15,6 +15,7 @@ from abridgeai.core.exceptions import ConflictError, ForbiddenError
 from abridgeai.core.security import CurrentUser
 from abridgeai.features.learning_programs import services
 from abridgeai.features.learning_programs.schemas import ProgramCreate, ProgramUpdate
+from tests.support.db_graph import hard_delete_graph
 
 
 def _async_url(url: str) -> str:
@@ -35,17 +36,17 @@ async def engine() -> AsyncIterator[AsyncEngine]:  # noqa: ASYNC240
     await value.dispose()
 
 
-#: Faculties created by `_seed_program_context`, drained after each test by
-#: the autouse cleanup below. The seeder is a plain helper called mid-test
-#: rather than a fixture, so it has no teardown of its own.
-_CREATED_FACULTIES: list[uuid.UUID] = []
+#: `(faculty_id, path_ids)` created by `_seed_program_context`, drained after
+#: each test by the autouse cleanup below. The seeder is a plain helper called
+#: mid-test rather than a fixture, so it has no teardown of its own.
+_CREATED_CONTEXTS: list[tuple[uuid.UUID, list[uuid.UUID]]] = []
 
 
 async def _seed_program_context(
     engine: AsyncEngine, seeded: SeededUsers
 ) -> tuple[uuid.UUID, uuid.UUID, uuid.UUID]:
     faculty_id, path_a, path_b = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
-    _CREATED_FACULTIES.append(faculty_id)
+    _CREATED_CONTEXTS.append((faculty_id, [path_a, path_b]))
     async with engine.begin() as conn:
         await conn.execute(
             text(
@@ -137,19 +138,28 @@ async def _seed_program_context(
 
 @pytest_asyncio.fixture(autouse=True)
 async def _drain_program_contexts(engine: AsyncEngine) -> AsyncIterator[None]:
-    """Remove grants made by `_seed_program_context` after every test."""
+    """Remove everything `_seed_program_context` created, after every test."""
     yield
-    while _CREATED_FACULTIES:
-        await _teardown_program_context(engine, _CREATED_FACULTIES.pop())
+    while _CREATED_CONTEXTS:
+        faculty_id, path_ids = _CREATED_CONTEXTS.pop()
+        await _teardown_program_context(engine, faculty_id, path_ids)
 
 
-async def _teardown_program_context(engine: AsyncEngine, faculty_id: uuid.UUID) -> None:
+async def _teardown_program_context(
+    engine: AsyncEngine, faculty_id: uuid.UUID, path_ids: list[uuid.UUID]
+) -> None:
     """Undo `_seed_program_context`.
 
     The grants it makes hang off SEEDED users (dean, manager), so leaving
     them behind inflates their assignment count for the rest of the session —
     tests/unit/test_fixtures.py::test_seed_users counts exactly that and saw
     17 where 5 were expected (5 + 6 tests x 2 grants).
+
+    The org_unit and the two career paths hang off the SEEDED organization for
+    the same reason, and used to survive: only the grants were removed. Their
+    versions are graph-deleted rather than dropped by hand because
+    `career_path_versions.career_path_id` is ON DELETE NO ACTION (migration
+    0074) and the program tables reference the versions in turn.
     """
     async with engine.begin() as conn:
         await conn.execute(
@@ -160,6 +170,8 @@ async def _teardown_program_context(engine: AsyncEngine, faculty_id: uuid.UUID) 
             text("DELETE FROM user_role_assignments WHERE org_unit_id = :f"),
             {"f": faculty_id},
         )
+        await hard_delete_graph(conn, "career_paths", [str(p) for p in path_ids])
+        await hard_delete_graph(conn, "org_units", [str(faculty_id)])
 
 
 @pytest.mark.asyncio

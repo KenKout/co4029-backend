@@ -41,6 +41,7 @@ from abridgeai.features.spaced_repetition.sm2 import (
     LessonUnlockStatus,
     check_lesson_unlock,
 )
+from tests.support.db_graph import hard_delete_graph
 
 TEST_REDIS_URL = os.environ.get("TEST_REDIS_URL", "redis://localhost:6380/15")
 
@@ -122,6 +123,35 @@ async def _conn(engine: AsyncEngine):
         yield conn
 
 
+# Roots seeded by ``_seed_org_user_course_module``, drained by
+# ``_purge_seeded_trees``. The seeds are plain helpers rather than fixtures --
+# each test builds a differently shaped tree -- so the ids are recorded here.
+_SEEDED_ROOTS: list[tuple[str, str]] = []
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def _purge_seeded_trees(engine: AsyncEngine) -> AsyncIterator[None]:
+    """Undo every seeded tree, pass or fail.
+
+    The seeds COMMIT (``engine.begin()``), so without this each test leaves an
+    organization -> user -> course -> module -> lesson/quiz/interview tree in
+    the shared test database. Nothing here notices -- every call mints fresh
+    uuids -- but the rows accumulate across the run and inflate the
+    platform-wide counts the admin suites assert on.
+
+    Graph-delete rather than a DELETE chain: it walks the LIVE FK graph, so a
+    new table hanging off courses or quizzes is cleaned the day its migration
+    lands instead of breaking this teardown.
+    """
+    yield
+    if not _SEEDED_ROOTS:
+        return
+    async with engine.begin() as conn:
+        for table, row_id in _SEEDED_ROOTS:
+            await hard_delete_graph(conn, table, [row_id])
+    _SEEDED_ROOTS.clear()
+
+
 async def _seed_org_user_course_module(engine: AsyncEngine) -> dict[str, UUID]:
     org_id = uuid.uuid4()
     student_id = uuid.uuid4()
@@ -163,6 +193,8 @@ async def _seed_org_user_course_module(engine: AsyncEngine) -> dict[str, UUID]:
             ),
             {"id": module_id, "course": course_id},
         )
+    _SEEDED_ROOTS.append(("organizations", str(org_id)))
+    _SEEDED_ROOTS.append(("users", str(student_id)))
     return {
         "org_id": org_id,
         "student_id": student_id,

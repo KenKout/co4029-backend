@@ -44,6 +44,7 @@ from abridgeai.features.quizzes import models as _quiz_models  # noqa: F401
 from abridgeai.features.spaced_repetition.workers import JOBS, scan_due_cards_task
 from abridgeai.features.spaced_repetition.workers import scan_due_cards as worker_mod
 from abridgeai.workers.arq_app import WorkerSettings
+from tests.support.db_graph import hard_delete_graph
 
 register_audit_listener()
 
@@ -83,18 +84,34 @@ async def session_factory(engine: AsyncEngine) -> async_sessionmaker[AsyncSessio
     return async_sessionmaker(engine, expire_on_commit=False, autoflush=False)
 
 
+# Roots seeded by ``_seed_quiz_root`` / ``_seed_card``, drained by
+# ``_purge_sr_state``. They are plain helpers rather than fixtures -- each test
+# builds a different due-card shape -- so the ids are recorded here.
+_SEEDED_ROOTS: list[tuple[str, str]] = []
+
+
 @pytest_asyncio.fixture(autouse=True)
 async def _purge_sr_state(engine: AsyncEngine) -> AsyncIterator[None]:
     """Wipe SR + quiz state so each test sees an empty due-card set.
 
     Tests share a single DB and the worker scans globally, so residual
     rows from earlier tests would otherwise leak into later assertions.
+
+    ``student_card_state`` alone was not enough: the seeds COMMIT their
+    organization -> course -> module -> quiz -> question tree too, and only
+    the card rows were being removed, so every test left the rest behind.
+    Graph-delete rather than a DELETE chain: it walks the LIVE FK graph, so a
+    new table hanging off courses or quizzes is cleaned the day its migration
+    lands instead of breaking this teardown.
     """
     async with engine.begin() as conn:
         await conn.execute(text("DELETE FROM student_card_state"))
     yield
     async with engine.begin() as conn:
         await conn.execute(text("DELETE FROM student_card_state"))
+        for table, row_id in _SEEDED_ROOTS:
+            await hard_delete_graph(conn, table, [row_id])
+    _SEEDED_ROOTS.clear()
 
 
 async def _seed_card(
@@ -118,6 +135,7 @@ async def _seed_card(
                 text("INSERT INTO users (id, primary_email) VALUES (:id, :email)"),
                 {"id": student_id, "email": f"sr-due-{student_id.hex[:8]}@test.local"},
             )
+            _SEEDED_ROOTS.append(("users", str(student_id)))
         await conn.execute(
             text(
                 "INSERT INTO quiz_questions ("
@@ -215,6 +233,8 @@ async def _seed_quiz_root(engine: AsyncEngine) -> tuple[UUID, UUID, UUID, UUID, 
             ),
             {"q": quiz_id, "l": lesson_id},
         )
+    _SEEDED_ROOTS.append(("organizations", str(org_id)))
+    _SEEDED_ROOTS.append(("users", str(owner_id)))
     return org_id, course_id, module_id, quiz_id, owner_id
 
 

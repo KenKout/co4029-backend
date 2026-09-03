@@ -125,6 +125,9 @@ async def client(app: FastAPI) -> AsyncIterator[httpx.AsyncClient]:
         yield ac
 
 
+_ISSUED_SESSIONS: list[uuid.UUID] = []
+
+
 async def _bearer(engine: AsyncEngine, user_id: uuid.UUID) -> str:
     sid = uuid.uuid4()
     async with engine.begin() as conn:
@@ -135,7 +138,26 @@ async def _bearer(engine: AsyncEngine, user_id: uuid.UUID) -> str:
             ),
             {"id": sid, "uid": user_id, "h": hash_secret(generate_token())},
         )
+    _ISSUED_SESSIONS.append(sid)
     return create_access_token(user_id=user_id, session_id=sid)
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def _purge_issued_sessions(engine: AsyncEngine) -> AsyncIterator[None]:
+    """Delete every session ``_bearer`` handed out, pass or fail.
+
+    Purging by recorded id rather than by user leaves sessions belonging to
+    other suites alone -- the whole file shares one Postgres.
+    """
+    yield
+    if not _ISSUED_SESSIONS:
+        return
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("DELETE FROM auth_sessions WHERE id = ANY(CAST(:ids AS uuid[]))"),
+            {"ids": [str(s) for s in _ISSUED_SESSIONS]},
+        )
+    _ISSUED_SESSIONS.clear()
 
 
 def _auth(token: str) -> dict[str, str]:
