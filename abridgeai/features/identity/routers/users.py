@@ -32,7 +32,10 @@ from abridgeai.core.exceptions import ConflictError, ForbiddenError, NotFoundErr
 from abridgeai.core.pagination import PageResponse
 from abridgeai.core.security import CurrentUser
 from abridgeai.features.access_control.api import public as access_control_api
-from abridgeai.features.access_control.policies import require_permission
+from abridgeai.features.access_control.policies import (
+    require_any_permission,
+    require_permission,
+)
 from abridgeai.features.identity.schemas import (
     UserCreate,
     UserListPage,
@@ -44,7 +47,15 @@ from abridgeai.features.identity.services import admin as admin_service
 router = APIRouter(prefix="/users", tags=["users", "admin"])
 
 _REQUIRE_USER_READ = require_permission("user.read")
-_REQUIRE_SYSTEM_ADMINISTER = require_permission("system.administer")
+# Account creation: platform admins anywhere; managers within their own org
+# (the ``user.bulk_import`` permission the manager role is seeded with).
+_REQUIRE_USER_CREATE = require_any_permission("user.bulk_import", "system.administer")
+
+# Roles a manager may never INVITE — mirror of the disable/enable peer guard
+# (`admin/users.py`): managers administer teachers and students, not their
+# peers. ``admin`` is additionally blocked globally in the service (it is
+# global-scope with ALL permissions).
+_PEER_INVITE_ROLE_CODES = frozenset({"hod", "manager"})
 
 
 def _not_found(user_id: UUID) -> HTTPException:
@@ -77,16 +88,57 @@ async def list_users(
 @router.post("", response_model=UserRead, status_code=status.HTTP_201_CREATED)
 async def create_user(
     payload: UserCreate,
-    current_user: Annotated[CurrentUser, Depends(_REQUIRE_SYSTEM_ADMINISTER)],
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_USER_CREATE)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> UserRead:
-    """Admin invite — create a user + profile + org membership + role.
+    """Admin or manager invite — create a user + profile + org + role.
 
-    Only a platform admin (``system.administer``) may provision accounts
-    manually: this bypasses the invite-only pre-registration gate by
-    design, so the audience is deliberately narrow. The created account
-    is ``active`` and can sign in via Google OAuth immediately.
+    Platform admins (``system.administer``) may provision into ANY
+    organization (``organization_id`` is required for them).
+
+    A manager (``user.bulk_import``) may provision too, with two guards:
+    the account is ALWAYS attached to the caller's own primary
+    organization — the payload's ``organization_id`` is ignored and
+    replaced, the same forcing precedent ``GET /users/search`` uses — and
+    peer roles (``hod`` / ``manager``) are forbidden: like disable/enable,
+    managers administer teachers and students, not their peers.
+
+    Either way the created account is ``active`` and can sign in via
+    Google OAuth immediately.
     """
+    if current_user.has_permission("system.administer"):
+        if payload.organization_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail={
+                    "error": "organization_required",
+                    "message": "organization_id is required for platform admin invites",
+                },
+            )
+    else:
+        if payload.role_code in _PEER_INVITE_ROLE_CODES:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={
+                    "error": "forbidden",
+                    "message": (
+                        f"cannot invite role '{payload.role_code}': managers "
+                        "administer teachers and students, not peer accounts"
+                    ),
+                },
+            )
+        caller_org = await access_control_api.get_user_primary_org(
+            db, current_user.user_id
+        )
+        if caller_org is None:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={
+                    "error": "forbidden",
+                    "message": "no organization scope for account creation",
+                },
+            )
+        payload = payload.model_copy(update={"organization_id": caller_org.id})
     try:
         result = await admin_service.create_user_account(
             db, payload=payload, actor_id=current_user.user_id

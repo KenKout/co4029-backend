@@ -380,6 +380,12 @@ async def create_user_account(
             "tenant role (student/teacher/hod/manager) instead"
         )
 
+    # Router guarantees a non-None org (admin must send it, manager gets the
+    # caller's org forced). Backstop for direct service callers so a missing
+    # org can never produce a NULL membership row.
+    if payload.organization_id is None:
+        raise ConflictError("organization_id is required when creating an account")
+
     user = User(primary_email=payload.primary_email, status="active")
     db.add(user)
     await db.flush()
