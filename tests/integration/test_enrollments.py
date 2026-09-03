@@ -634,3 +634,112 @@ async def test_me_enrollments_returns_my_courses(
 async def test_me_enrollments_requires_auth(client: httpx.AsyncClient, path: str) -> None:
     response = await client.get(path)
     assert response.status_code == 401
+
+
+async def test_my_courses_ordered_by_recent_activity(
+    engine: AsyncEngine,
+    seeded_users: SeededUsers,
+) -> None:
+    """``/me/courses`` leads with the course the student last touched.
+
+    Activity means the latest lesson-progress heartbeat or quiz attempt on
+    the course; enrollments with no activity sort to the tail in stable id
+    order (the previous behaviour).
+    """
+    from abridgeai.features.courses.queries.published import list_enrolled_courses
+
+    suffix = uuid.uuid4().hex[:8]
+    student_id = uuid.uuid4()
+    c_old, c_new, c_idle = (uuid.uuid4() for _ in range(3))
+    m_old, m_new = uuid.uuid4(), uuid.uuid4()
+    l_old, l_new = uuid.uuid4(), uuid.uuid4()
+    progress_ids = [uuid.uuid4(), uuid.uuid4()]
+
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("INSERT INTO users (id, primary_email, status) VALUES (:id, :email, 'active')"),
+            {"id": student_id, "email": f"order-{suffix}@abridgeai.local"},
+        )
+        for cid, slug in (
+            (c_old, f"order-old-{suffix}"),
+            (c_new, f"order-new-{suffix}"),
+            (c_idle, f"order-idle-{suffix}"),
+        ):
+            await conn.execute(
+                text(
+                    "INSERT INTO courses (id, organization_id, faculty_id, owner_user_id, "
+                    "slug, title, status) "
+                    "VALUES (:id, :org, :ou, :owner, :slug, :title, 'published')"
+                ),
+                {
+                    "id": cid,
+                    "org": seeded_users.organization_id,
+                    "ou": seeded_users.org_unit_id,
+                    "owner": seeded_users.admin_id,
+                    "slug": slug,
+                    "title": slug,
+                },
+            )
+            await conn.execute(
+                text(
+                    "INSERT INTO course_enrollments (id, course_id, student_id, status, "
+                    "enrolled_at) VALUES (:id, :c, :s, 'active', NOW())"
+                ),
+                {"id": uuid.uuid4(), "c": cid, "s": student_id},
+            )
+        for mid, cid in ((m_old, c_old), (m_new, c_new)):
+            await conn.execute(
+                text(
+                    "INSERT INTO modules (id, course_id, title, position, status) "
+                    "VALUES (:id, :c, 'Order Module', 1, 'published')"
+                ),
+                {"id": mid, "c": cid},
+            )
+        for lid, mid in ((l_old, m_old), (l_new, m_new)):
+            await conn.execute(
+                text(
+                    "INSERT INTO lessons (id, module_id, slug, title, status) "
+                    "VALUES (:id, :m, :s, 'Order Lesson', 'published')"
+                ),
+                {"id": lid, "m": mid, "s": f"order-lesson-{lid.hex[:6]}"},
+            )
+        # Old course touched 3 days ago; new course touched 1 hour ago;
+        # c_idle is enrolled but never visited.
+        await conn.execute(
+            text(
+                "INSERT INTO lesson_progress (id, user_id, lesson_id, status, "
+                "completion_percent, last_activity_at) "
+                "VALUES (:id1, :u, :l1, 'in_progress', 50, :at1), "
+                "(:id2, :u, :l2, 'in_progress', 50, :at2)"
+            ),
+            {
+                "id1": progress_ids[0],
+                "id2": progress_ids[1],
+                "u": student_id,
+                "l1": l_old,
+                "l2": l_new,
+                "at1": datetime.now(UTC) - timedelta(days=3),
+                "at2": datetime.now(UTC) - timedelta(hours=1),
+            },
+        )
+
+    try:
+        factory = async_sessionmaker(engine, expire_on_commit=False, autoflush=False)
+        async with factory() as session:
+            page = await list_enrolled_courses(session, student_id, limit=10)
+        assert [course.id for course in page.items] == [c_new, c_old, c_idle]
+    finally:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("DELETE FROM lesson_progress WHERE user_id = :u"), {"u": student_id}
+            )
+            await conn.execute(
+                text("DELETE FROM course_enrollments WHERE student_id = :u"), {"u": student_id}
+            )
+            await conn.execute(text("DELETE FROM lessons WHERE id IN (:l1, :l2)"), {"l1": l_old, "l2": l_new})
+            await conn.execute(text("DELETE FROM modules WHERE id IN (:m1, :m2)"), {"m1": m_old, "m2": m_new})
+            await conn.execute(
+                text("DELETE FROM courses WHERE id IN (:c1, :c2, :c3)"),
+                {"c1": c_old, "c2": c_new, "c3": c_idle},
+            )
+            await conn.execute(text("DELETE FROM users WHERE id = :u"), {"u": student_id})
