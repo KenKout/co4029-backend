@@ -53,11 +53,14 @@ from abridgeai.features.quizzes.services import taking as taking_service
 # redefinition — ruff F811).
 from abridgeai.features.quizzes.services.taking import (
     AllCardsInCooldownError,
+    AttemptNotInProgress,
     CooldownActive,
+    InvalidAnswerOption,
     MaxAttemptsReached,
     QuizPasswordIncorrect,
     QuizPasswordRequired,
     QuizSubnetBlocked,
+    QuestionNotInAttempt,
 )
 from abridgeai.features.spaced_repetition.api.public import (
     dispatch_remediation_for_card_failure,
@@ -154,6 +157,11 @@ async def get_published_quiz(
         db, user_id=current_user.user_id, course_id=quiz.course_id
     ):
         raise _not_found("quiz", quiz_id)
+    from abridgeai.features.quizzes.services.overrides import (  # noqa: PLC0415
+        resolve_policy_for_student,
+    )
+
+    effective = await resolve_policy_for_student(db, quiz, current_user.user_id)
     # Count-only signal: how many approved questions the student will face.
     # Counts rows (matching the taking filter: approved + non-deleted) so no
     # question text / options / is_correct is materialized here. See
@@ -172,7 +180,18 @@ async def get_published_quiz(
         )
     ).scalar_one()
     payload = QuizPublic.model_validate(quiz)
-    return payload.model_copy(update={"question_count": int(question_count)})
+    return payload.model_copy(
+        update={
+            "question_count": int(question_count),
+            "available_from": effective.available_from,
+            "available_until": effective.available_until,
+            "due_at": effective.due_at,
+            "time_limit_seconds": effective.time_limit_seconds,
+            "max_attempts": effective.max_attempts,
+            "allow_retakes": effective.allow_retakes,
+            "cooldown_hours": effective.cooldown_hours,
+        }
+    )
 
 
 @router.post(
@@ -264,6 +283,11 @@ async def start_attempt(
                 "max_attempts": exc.max_attempts,
             },
         ) from exc
+    except AttemptNotInProgress as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"reason": "idempotency_replay_closed"},
+        ) from exc
     except QuizNotYetOpen as exc:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -322,6 +346,21 @@ async def record_answer(
         answer, review = await taking_service.answer_attempt(db, attempt_id, payload, current_user)
     except NotFoundError as exc:
         raise _not_found("quiz_attempt", attempt_id) from exc
+    except AttemptNotInProgress as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"reason": "attempt_not_in_progress"},
+        ) from exc
+    except QuestionNotInAttempt as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"reason": "question_not_in_attempt"},
+        ) from exc
+    except InvalidAnswerOption as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"reason": "invalid_answer_option"},
+        ) from exc
     await db.commit()
 
     for event in review.pending_events if review else []:
@@ -396,8 +435,13 @@ async def submit_attempt(
         attempt = await taking_service.submit_attempt(db, attempt_id, current_user)
     except NotFoundError as exc:
         raise _not_found("quiz_attempt", attempt_id) from exc
+    except AttemptNotInProgress as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"reason": "attempt_not_in_progress"},
+        ) from exc
     await db.commit()
-    return QuizAttemptRead.model_validate(attempt)
+    return await taking_service.project_attempt_summary(db, attempt)
 
 
 @router.get("/attempts/{attempt_id}", response_model=QuizAttemptRead)
@@ -412,7 +456,7 @@ async def get_attempt(
     attempt = await db.get(QuizAttempt, attempt_id)
     if attempt is None or attempt.student_id != current_user.user_id:
         raise _not_found("quiz_attempt", attempt_id)
-    return QuizAttemptRead.model_validate(attempt)
+    return await taking_service.project_attempt_summary(db, attempt)
 
 
 @router.get(
@@ -472,7 +516,7 @@ async def list_my_attempts(
 ) -> list[QuizAttemptRead]:
     """List the calling student's attempts on this quiz."""
     attempts = await taking_service.get_attempt_history(db, quiz_id, current_user)
-    return [QuizAttemptRead.model_validate(a) for a in attempts]
+    return attempts
 
 
 @router.get(

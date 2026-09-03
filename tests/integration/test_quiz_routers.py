@@ -837,6 +837,119 @@ async def test_attempt_progress_404_for_other_student(
         await conn.execute(text("DELETE FROM auth_sessions WHERE id = :id"), {"id": student_sid})
 
 
+async def test_other_user_cannot_answer_or_submit_attempt(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    scenario: dict[str, uuid.UUID],
+    engine: AsyncEngine,
+    seeded_users: SeededUsers,
+) -> None:
+    quiz_id, question_id, option_ids = await _seed_published_quiz_with_question(
+        client, admin_bearer, engine, scenario, title="Attempt ownership quiz"
+    )
+    student_sid = await _seed_session(engine, seeded_users.student_id)
+    student_token = create_access_token(
+        user_id=seeded_users.student_id, session_id=student_sid
+    )
+    started = await client.post(
+        f"/api/v1/quizzes/{quiz_id}/attempts",
+        json={"quiz_id": str(quiz_id)},
+        headers=_auth(student_token),
+    )
+    attempt_id = started.json()["attempt_id"]
+
+    foreign_answer = await client.post(
+        f"/api/v1/attempts/{attempt_id}/answers",
+        json={
+            "question_id": str(question_id),
+            "selected_option_id": str(option_ids["B"]),
+        },
+        headers=_auth(admin_bearer),
+    )
+    foreign_submit = await client.post(
+        f"/api/v1/attempts/{attempt_id}/submit",
+        headers=_auth(admin_bearer),
+    )
+
+    assert foreign_answer.status_code == 404
+    assert foreign_submit.status_code == 404
+    async with engine.begin() as conn:
+        await conn.execute(text("DELETE FROM auth_sessions WHERE id = :id"), {"id": student_sid})
+
+
+async def test_closed_attempt_rejects_answer_edit(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    scenario: dict[str, uuid.UUID],
+    engine: AsyncEngine,
+    seeded_users: SeededUsers,
+) -> None:
+    quiz_id, question_id, option_ids = await _seed_published_quiz_with_question(
+        client, admin_bearer, engine, scenario, title="Closed attempt quiz"
+    )
+    student_sid = await _seed_session(engine, seeded_users.student_id)
+    token = create_access_token(user_id=seeded_users.student_id, session_id=student_sid)
+    started = await client.post(
+        f"/api/v1/quizzes/{quiz_id}/attempts",
+        json={"quiz_id": str(quiz_id)},
+        headers=_auth(token),
+    )
+    attempt_id = started.json()["attempt_id"]
+    submitted = await client.post(
+        f"/api/v1/attempts/{attempt_id}/submit", headers=_auth(token)
+    )
+    assert submitted.status_code == 200
+
+    edit = await client.post(
+        f"/api/v1/attempts/{attempt_id}/answers",
+        json={
+            "question_id": str(question_id),
+            "selected_option_id": str(option_ids["B"]),
+        },
+        headers=_auth(token),
+    )
+    assert edit.status_code == 409
+    assert edit.json()["detail"]["reason"] == "attempt_not_in_progress"
+    async with engine.begin() as conn:
+        await conn.execute(text("DELETE FROM auth_sessions WHERE id = :id"), {"id": student_sid})
+
+
+async def test_start_attempt_idempotency_key_replays_same_attempt(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    scenario: dict[str, uuid.UUID],
+    engine: AsyncEngine,
+    seeded_users: SeededUsers,
+) -> None:
+    quiz_id, _question_id, _option_ids = await _seed_published_quiz_with_question(
+        client, admin_bearer, engine, scenario, title="Idempotent start quiz"
+    )
+    student_sid = await _seed_session(engine, seeded_users.student_id)
+    token = create_access_token(user_id=seeded_users.student_id, session_id=student_sid)
+    key = str(uuid.uuid4())
+    payload = {"quiz_id": str(quiz_id), "idempotency_key": key}
+
+    first = await client.post(
+        f"/api/v1/quizzes/{quiz_id}/attempts", json=payload, headers=_auth(token)
+    )
+    replay = await client.post(
+        f"/api/v1/quizzes/{quiz_id}/attempts", json=payload, headers=_auth(token)
+    )
+
+    assert first.status_code == 201
+    assert replay.status_code == 201
+    assert replay.json()["attempt_id"] == first.json()["attempt_id"]
+    async with engine.begin() as conn:
+        count = (
+            await conn.execute(
+                text("SELECT count(*) FROM quiz_attempts WHERE quiz_id = :quiz"),
+                {"quiz": quiz_id},
+            )
+        ).scalar_one()
+        assert count == 1
+        await conn.execute(text("DELETE FROM auth_sessions WHERE id = :id"), {"id": student_sid})
+
+
 def test_no_bare_get_current_user_on_quiz_authoring_endpoints() -> None:
     src = (
         Path(__file__).resolve().parent.parent.parent

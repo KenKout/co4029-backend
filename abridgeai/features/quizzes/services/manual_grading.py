@@ -111,13 +111,6 @@ async def grade_answer_manually(
     attempt = await db.get(QuizAttempt, answer.attempt_id)
     quiz = await db.get(Quiz, quiz_id)
     if attempt is not None and quiz is not None:
-        score_points, score_percent, _correct, _count = await _recompute_attempt_score(
-            db, attempt, quiz
-        )
-        attempt.score_points = score_points
-        attempt.score_percent = score_percent
-        attempt.passed = score_percent >= quiz.passing_score_percent
-
         # If nothing on this attempt still needs a human, mark it graded.
         remaining = (
             await db.execute(
@@ -128,7 +121,24 @@ async def grade_answer_manually(
             )
         ).first()
         if remaining is None:
+            score_points, score_percent, _correct, _count = (
+                await _recompute_attempt_score(db, attempt, quiz)
+            )
+            attempt.score_points = score_points
+            attempt.score_percent = score_percent
+            attempt.passed = score_percent >= quiz.passing_score_percent
             attempt.status = "graded"
+            attempt.graded_at = utcnow()
+            await flush_or_conflict(db)
+            from abridgeai.features.quizzes.services.gradebook import (  # noqa: PLC0415
+                recompute_final_grade,
+            )
+
+            await recompute_final_grade(db, quiz, attempt.student_id)
+        else:
+            attempt.score_points = None
+            attempt.score_percent = None
+            attempt.passed = None
         await flush_or_conflict(db)
 
         # Phase 13: correctness-bearing audit event in the same transaction.

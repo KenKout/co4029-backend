@@ -6,20 +6,23 @@ review, in-flight resume) stay under the feature's god-file cap. The
 three functions are pure projections over rows the learner already owns —
 no mutation, no gates other than ownership.
 
-Cross-module helpers that the write path also needs (``_require_quiz``,
-``_load_quiz_questions_for_taking``, ``_renumber_display_positions``)
+Cross-module helpers that the write path also needs
+(``_load_quiz_questions_for_taking``, ``_renumber_display_positions``)
 stay in :mod:`services.taking` and are imported lazily here to avoid a
-module-level import cycle (taking re-exports these three functions).
+module-level import cycle (taking re-exports both functions).
 """
 
 from __future__ import annotations
 
+from datetime import datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING
 from uuid import UUID
 
+from abridgeai.core.exceptions import NotFoundError
 from abridgeai.core.security import CurrentUser, utcnow
 from abridgeai.features.quizzes.models import (
+    Quiz,
     QuizAttempt,
     QuizAttemptAnswer,
 )
@@ -42,11 +45,50 @@ if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
 
+async def project_attempt_summary(
+    db: AsyncSession,
+    attempt: QuizAttempt,
+    *,
+    now: datetime | None = None,
+) -> QuizAttemptRead:
+    """Return a learner-safe attempt summary for the active review window."""
+    from sqlalchemy import select  # noqa: PLC0415
+
+    from abridgeai.features.quizzes.services.review_visibility import (  # noqa: PLC0415
+        resolve_review_visibility,
+    )
+
+    pending = (
+        await db.execute(
+            select(QuizAttemptAnswer.id).where(
+                QuizAttemptAnswer.attempt_id == attempt.id,
+                QuizAttemptAnswer.needs_manual_grade.is_(True),
+            )
+        )
+    ).first() is not None
+    payload = QuizAttemptRead.model_validate(attempt).model_copy(
+        update={"grading_pending": pending}
+    )
+    if attempt.status == "in_progress":
+        return payload
+
+    quiz = await db.get(Quiz, attempt.quiz_id)
+    if quiz is None:
+        raise NotFoundError(f"Quiz {attempt.quiz_id} not found")
+    visibility = resolve_review_visibility(quiz, attempt, now or utcnow())
+    if pending or not visibility.show_score:
+        payload.score_points = None
+        payload.score_percent = None
+        payload.passed = None
+        payload.correct_count = None
+    return payload
+
+
 async def get_attempt_history(
     db: AsyncSession,
     quiz_id: UUID,
     actor: CurrentUser,
-) -> list[QuizAttempt]:
+) -> list[QuizAttemptRead]:
     """Return every attempt the calling student has against ``quiz_id``."""
     from sqlalchemy import select  # noqa: PLC0415
 
@@ -64,7 +106,7 @@ async def get_attempt_history(
         .scalars()
         .all()
     )
-    return list(attempts)
+    return [await project_attempt_summary(db, attempt) for attempt in attempts]
 
 
 async def get_attempt_review(
@@ -100,10 +142,20 @@ async def get_attempt_review(
     from abridgeai.features.quizzes.services.review_visibility import (  # noqa: PLC0415
         resolve_review_visibility,
     )
-    from abridgeai.features.quizzes.services.taking import _require_quiz  # noqa: PLC0415
 
-    quiz = await _require_quiz(db, attempt.quiz_id)
+    quiz = await db.get(Quiz, attempt.quiz_id)
+    if quiz is None:
+        raise NotFoundError(f"Quiz {attempt.quiz_id} not found")
     vis = resolve_review_visibility(quiz, attempt, utcnow())
+    attempt_read = await project_attempt_summary(db, attempt)
+    if attempt_read.grading_pending:
+        vis = vis.model_copy(
+            update={
+                "show_score": False,
+                "show_correctness": False,
+                "show_points": False,
+            }
+        )
 
     review_questions: list[QuizAttemptReviewQuestion] = []
     for question, options in questions_with_options:
@@ -162,7 +214,6 @@ async def get_attempt_review(
             )
         )
 
-    attempt_read = QuizAttemptRead.model_validate(attempt)
     if not vis.show_score:
         attempt_read.score_points = None
         attempt_read.score_percent = None
@@ -273,4 +324,5 @@ __all__ = [
     "get_attempt_history",
     "get_attempt_progress",
     "get_attempt_review",
+    "project_attempt_summary",
 ]

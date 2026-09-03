@@ -21,12 +21,17 @@ gate exactly (``allow_retakes=FALSE`` clamps to 1; Phase 5 overrides win).
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 from sqlalchemy import select, text
 
 from abridgeai.features.quizzes.models import Quiz
 from abridgeai.features.quizzes.services.overrides import resolve_policy_for_student
+from abridgeai.features.quizzes.services.review_visibility import (
+    resolve_review_visibility,
+)
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -47,7 +52,8 @@ ORDER BY m.position, mi.position
 _ATTEMPT_COUNTS_SQL = """
 SELECT quiz_id,
        COUNT(*) AS used,
-       COUNT(*) FILTER (WHERE status = 'in_progress') AS in_flight
+       COUNT(*) FILTER (WHERE status = 'in_progress') AS in_flight,
+       MAX(submitted_at) AS latest_submitted_at
 FROM quiz_attempts
 WHERE student_id = :user_id
   AND quiz_id = ANY(:quiz_ids)
@@ -123,12 +129,20 @@ async def list_my_quiz_progress(
         grade_row = grades.get(quiz.id)
         passed = bool(grade_row["passed"]) if grade_row else None
         grade_percent = grade_row["grade_percent"] if grade_row else None
+        latest_submitted_at = used_row["latest_submitted_at"] if used_row else None
 
         # Effective ceiling mirrors the start-attempt gate:
         # allow_retakes=FALSE clamps to 1 regardless of max_attempts.
         eff_max: int | None = 1 if not policy.allow_retakes else policy.max_attempts
         exhausted = eff_max is not None and used >= eff_max
         completed = bool(passed) or (exhausted and in_flight == 0)
+        visibility = resolve_review_visibility(
+            quiz,
+            SimpleNamespace(submitted_at=latest_submitted_at),
+            datetime.now(UTC),
+        )
+        public_passed = passed if visibility.show_score else None
+        public_grade_percent = grade_percent if visibility.show_score else None
 
         payload.append(
             {
@@ -136,8 +150,8 @@ async def list_my_quiz_progress(
                 "attempts_used": used,
                 "max_attempts": eff_max,
                 "allow_retakes": bool(policy.allow_retakes),
-                "passed": passed,
-                "grade_percent": grade_percent,
+                "passed": public_passed,
+                "grade_percent": public_grade_percent,
                 "completed": completed,
                 "attempts_remaining": (
                     None if eff_max is None else max(0, eff_max - used)

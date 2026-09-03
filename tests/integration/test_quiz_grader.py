@@ -194,6 +194,17 @@ async def test_grade_multiple_choice_correct_and_wrong(
         wrong = await _make_option(
             session, question.id, key="B", text_="beta", is_correct=False, position=2
         )
+        other_question = await _make_question(
+            session, grader_quiz_id, "multiple_choice", position=2
+        )
+        foreign_correct = await _make_option(
+            session,
+            other_question.id,
+            key="A",
+            text_="other answer",
+            is_correct=True,
+            position=1,
+        )
         await session.commit()
 
     async with session_factory() as session:
@@ -214,6 +225,15 @@ async def test_grade_multiple_choice_correct_and_wrong(
         )
         assert bad.is_correct is False
         assert bad.points_awarded == Decimal("0")
+
+        foreign = await grade_answer(
+            session,
+            question_id=question.id,
+            selected_option_id=foreign_correct.id,
+            answer_text=None,
+        )
+        assert foreign.is_correct is False
+        assert foreign.points_awarded == Decimal("0")
 
 
 async def test_grade_true_false_uses_option_lookup(

@@ -56,6 +56,7 @@ from abridgeai.features.quizzes.services.attempt_reading import (  # noqa: F401
     get_attempt_history,
     get_attempt_progress,
     get_attempt_review,
+    project_attempt_summary,
 )
 from abridgeai.features.quizzes.services.grader import grade_answer, needs_manual_grade
 from abridgeai.features.spaced_repetition.api.public import (
@@ -93,6 +94,18 @@ class AllCardsInCooldownError(AppError):
         self.cards_due_at = cards_due_at
 
 
+class AttemptNotInProgress(AppError):
+    """The learner tried to mutate an attempt that is already closed."""
+
+
+class QuestionNotInAttempt(AppError):
+    """The submitted question was not part of this attempt's take snapshot."""
+
+
+class InvalidAnswerOption(AppError):
+    """The selected option does not belong to the submitted question."""
+
+
 async def get_published_quiz(db: AsyncSession, quiz_id: UUID | str) -> Quiz | None:
     """Pass-through to :func:`published_queries.get_published_quiz`.
 
@@ -114,6 +127,22 @@ async def _require_attempt(db: AsyncSession, attempt_id: UUID) -> QuizAttempt:
     attempt = await db.get(QuizAttempt, attempt_id)
     if attempt is None:
         raise NotFoundError(f"Quiz attempt {attempt_id} not found")
+    return attempt
+
+
+async def _require_owned_attempt(
+    db: AsyncSession,
+    attempt_id: UUID,
+    actor: CurrentUser,
+    *,
+    writable: bool = False,
+) -> QuizAttempt:
+    """Load a learner-owned attempt without disclosing foreign UUIDs."""
+    attempt = await _require_attempt(db, attempt_id)
+    if attempt.student_id != actor.user_id:
+        raise NotFoundError(f"Quiz attempt {attempt_id} not found")
+    if writable and attempt.status != "in_progress":
+        raise AttemptNotInProgress(f"Quiz attempt {attempt_id} is not in progress")
     return attempt
 
 
@@ -331,21 +360,10 @@ async def start_attempt(
     )
 
     _quiz_for_policy = await published_queries.get_published_quiz(db, quiz_id)
-    effective = (
-        await resolve_policy_for_student(db, _quiz_for_policy, actor.user_id)
-        if _quiz_for_policy is not None
-        else None
-    )
-    quiz = await published_queries.get_quiz_for_taking(
-        db,
-        quiz_id,
-        actor.user_id,
-        effective=effective,
-        password=password,
-        client_ip=client_ip,
-    )
-    if quiz is None:
+    if _quiz_for_policy is None:
         raise NotFoundError(f"Quiz {quiz_id} not found")
+
+    effective = await resolve_policy_for_student(db, _quiz_for_policy, actor.user_id)
 
     # Tenancy gate: organizations do not share quizzes. A student may only
     # attempt a quiz whose course belongs to an organization they actively
@@ -359,10 +377,46 @@ async def start_attempt(
     )
     from abridgeai.features.courses.api import public as courses_api  # noqa: PLC0415
 
-    course = await courses_api.get_course_by_id(db, quiz.course_id)
+    course = await courses_api.get_course_by_id(db, _quiz_for_policy.course_id)
     if course is None or not await is_user_member_of_org(
         db, user_id=actor.user_id, org_id=course.organization_id
     ):
+        raise NotFoundError(f"Quiz {quiz_id} not found")
+
+    # Network retries must resolve to the attempt created by the first request,
+    # not consume another attempt slot. Ownership + quiz are included even
+    # though the key is globally unique, so a foreign key is never replayed.
+    if idempotency_key is not None:
+        from sqlalchemy import select  # noqa: PLC0415
+
+        existing = (
+            await db.execute(
+                select(QuizAttempt).where(
+                    QuizAttempt.idempotency_key == idempotency_key,
+                    QuizAttempt.quiz_id == quiz_id,
+                    QuizAttempt.student_id == actor.user_id,
+                )
+            )
+        ).scalar_one_or_none()
+        if existing is not None:
+            progress = await get_attempt_progress(
+                db, attempt_id=existing.id, actor=actor
+            )
+            if progress is None:
+                raise AttemptNotInProgress(
+                    f"Quiz attempt {existing.id} is not in progress"
+                )
+            return existing, progress
+
+    quiz = await published_queries.get_quiz_for_taking(
+        db,
+        quiz_id,
+        actor.user_id,
+        effective=effective,
+        password=password,
+        client_ip=client_ip,
+    )
+    if quiz is None:
         raise NotFoundError(f"Quiz {quiz_id} not found")
 
     questions = await _load_quiz_questions_for_taking(db, quiz_id)
@@ -397,29 +451,27 @@ async def start_attempt(
         {"question_id": qid, "due_at": due_at} for qid, due_at in cooldown_map.items()
     ]
 
-    # Phase 6: when the quiz enables shuffling, deterministically realize a
-    # per-attempt question/option order seeded by the attempt id, persist it to
-    # attempt.layout, and reorder the take payload. Resume/review re-read layout
-    # verbatim so the student always sees the same order.
-    if quiz.shuffle_questions or quiz.shuffle_options:
-        from abridgeai.features.quizzes.services.shuffle import (  # noqa: PLC0415
-            apply_layout,
-            build_layout,
-        )
+    # Persist the exact question set for every attempt, even when shuffling is
+    # disabled. The set may be smaller than the authored quiz after SR cooldown
+    # filtering and is the authoritative grading denominator.
+    from abridgeai.features.quizzes.services.shuffle import (  # noqa: PLC0415
+        apply_layout,
+        build_layout,
+    )
 
-        options_by_question = {
-            q.id: [o.id for o in getattr(q, "options", []) or []] for q in available_questions
-        }
-        layout = build_layout(
-            attempt.id,
-            [q.id for q in available_questions],
-            options_by_question,
-            shuffle_questions=quiz.shuffle_questions,
-            shuffle_options=quiz.shuffle_options,
-        )
-        attempt.layout = layout
-        await flush_or_conflict(db)
-        available_questions = apply_layout(available_questions, layout)
+    options_by_question = {
+        q.id: [o.id for o in getattr(q, "options", []) or []] for q in available_questions
+    }
+    layout = build_layout(
+        attempt.id,
+        [q.id for q in available_questions],
+        options_by_question,
+        shuffle_questions=quiz.shuffle_questions,
+        shuffle_options=quiz.shuffle_options,
+    )
+    attempt.layout = layout
+    await flush_or_conflict(db)
+    available_questions = apply_layout(available_questions, layout)
 
     public_quiz = QuizPublic.model_validate(quiz)
     public_questions = [
@@ -469,14 +521,29 @@ async def answer_attempt(
     ``uq_quiz_attempt_answers_question`` constraint rejects a second
     answer for the same question before the review would fire.
     """
-    del actor
     from sqlalchemy import select  # noqa: PLC0415
 
-    attempt = await _require_attempt(db, attempt_id)
+    attempt = await _require_owned_attempt(db, attempt_id, actor, writable=True)
 
     question_id = payload.question_id  # type: ignore[attr-defined]
+    question = await db.get(QuizQuestion, question_id)
+    snapshot_ids = {
+        UUID(value) for value in (attempt.layout or {}).get("question_order", [])
+    }
+    if question is None or question.quiz_id != attempt.quiz_id or (
+        snapshot_ids and question_id not in snapshot_ids
+    ):
+        raise QuestionNotInAttempt(
+            f"Question {question_id} was not served in attempt {attempt_id}"
+        )
     selected_option_id = getattr(payload, "selected_option_id", None)
     answer_text = getattr(payload, "answer_text", None)
+    if selected_option_id is not None:
+        option = await db.get(QuizQuestionOption, selected_option_id)
+        if option is None or option.question_id != question_id:
+            raise InvalidAnswerOption(
+                f"Option {selected_option_id} does not belong to question {question_id}"
+            )
     grade = await grade_answer(
         db,
         question_id=question_id,
@@ -491,9 +558,7 @@ async def answer_attempt(
 
     # Phase 4: flag open-response answers that need a human grader (code always;
     # short_answer/fill_blank only when the exact-match auto-grade missed).
-    question_type_row = (
-        await db.execute(select(QuizQuestion.question_type).where(QuizQuestion.id == question_id))
-    ).scalar_one_or_none()
+    question_type_row = question.question_type
     needs_manual = (
         needs_manual_grade(question_type_row, grade) if question_type_row is not None else False
     )
@@ -602,22 +667,33 @@ async def _recompute_attempt_score(
     """
     from sqlalchemy import func, select  # noqa: PLC0415
 
+    snapshot_order = (attempt.layout or {}).get("question_order")
+    answers_stmt = select(QuizAttemptAnswer).where(
+        QuizAttemptAnswer.attempt_id == attempt.id
+    )
+    if isinstance(snapshot_order, list) and snapshot_order:
+        answers_stmt = answers_stmt.where(
+            QuizAttemptAnswer.question_id.in_([UUID(value) for value in snapshot_order])
+        )
     answers = (
         (
-            await db.execute(
-                select(QuizAttemptAnswer).where(QuizAttemptAnswer.attempt_id == attempt.id)
-            )
+            await db.execute(answers_stmt)
         )
         .scalars()
         .all()
     )
-    question_count_row = await db.execute(
-        select(func.count(QuizQuestion.id)).where(
-            QuizQuestion.quiz_id == quiz.id,
-            QuizQuestion.review_status == "approved",
+    if isinstance(snapshot_order, list) and snapshot_order:
+        question_count = len(snapshot_order)
+    else:
+        # Backward compatibility for attempts created before snapshots were
+        # persisted unconditionally.
+        question_count_row = await db.execute(
+            select(func.count(QuizQuestion.id)).where(
+                QuizQuestion.quiz_id == quiz.id,
+                QuizQuestion.review_status == "approved",
+            )
         )
-    )
-    question_count = int(question_count_row.scalar_one()) or len(answers) or 1
+        question_count = int(question_count_row.scalar_one()) or len(answers) or 1
     score_points = sum((answer.points_awarded for answer in answers), Decimal("0"))
     score_percent = (score_points / Decimal(question_count)) * Decimal("100")
     correct_count = sum(1 for answer in answers if answer.is_correct)
@@ -636,8 +712,7 @@ async def submit_attempt(
     division uses the quiz's question count (not the answer count) so
     skipped questions count against the score — matching legacy parity.
     """
-    del actor
-    attempt = await _require_attempt(db, attempt_id)
+    attempt = await _require_owned_attempt(db, attempt_id, actor)
     quiz = await _require_quiz(db, attempt.quiz_id)
 
     # Phase 6: deadline enforcement at submit time. If the attempt is past its
@@ -681,15 +756,32 @@ async def _finalize_attempt(
     if attempt.status != "in_progress":
         return attempt
 
-    score_points, score_percent, correct_count, question_count = await _recompute_attempt_score(
-        db, attempt, quiz
-    )
     attempt.status = "submitted"
     attempt.submitted_at = now
     attempt.time_taken_seconds = int((now - attempt.started_at).total_seconds())
-    attempt.score_points = score_points
-    attempt.score_percent = score_percent
-    attempt.passed = score_percent >= quiz.passing_score_percent
+    from sqlalchemy import select  # noqa: PLC0415
+
+    pending_manual = (
+        await db.execute(
+            select(QuizAttemptAnswer.id).where(
+                QuizAttemptAnswer.attempt_id == attempt.id,
+                QuizAttemptAnswer.needs_manual_grade.is_(True),
+            )
+        )
+    ).first()
+    if pending_manual is None:
+        score_points, score_percent, correct_count, question_count = (
+            await _recompute_attempt_score(db, attempt, quiz)
+        )
+        attempt.score_points = score_points
+        attempt.score_percent = score_percent
+        attempt.passed = score_percent >= quiz.passing_score_percent
+    else:
+        correct_count = 0
+        question_count = len((attempt.layout or {}).get("question_order", [])) or None
+        attempt.score_points = None
+        attempt.score_percent = None
+        attempt.passed = None
     await flush_or_conflict(db)
     # Phase 9: refresh the student's materialised grade-of-record from all their
     # completed attempts (grading_method-aware). Participates in this transaction.
@@ -697,7 +789,8 @@ async def _finalize_attempt(
         recompute_final_grade,
     )
 
-    await recompute_final_grade(db, quiz, attempt.student_id)
+    if pending_manual is None:
+        await recompute_final_grade(db, quiz, attempt.student_id)
     await db.refresh(attempt)
     setattr(attempt, "correct_count", correct_count)  # noqa: B010 -- dynamic, not column
     setattr(attempt, "total_questions", question_count)  # noqa: B010 -- dynamic, not column
@@ -724,18 +817,22 @@ async def _expire_attempt(
 
 
 __all__ = [
+    "AttemptNotInProgress",
     "AllCardsInCooldownError",
     "CooldownActive",
+    "InvalidAnswerOption",
     "MaxAttemptsReached",
     "QuizClosed",
     "QuizNotYetOpen",
     "QuizPasswordIncorrect",
     "QuizPasswordRequired",
     "QuizSubnetBlocked",
+    "QuestionNotInAttempt",
     "answer_attempt",
     "get_attempt_history",
     "get_attempt_progress",
     "get_attempt_review",
+    "project_attempt_summary",
     "get_published_quiz",
     "start_attempt",
     "submit_attempt",

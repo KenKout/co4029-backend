@@ -64,7 +64,7 @@ async def grade_answer(
         # single-select keeps the legacy single selected_option_id path.
         if not getattr(question, "single_answer", True):
             return await _grade_multi_select(db, question.id, answer_text)
-        return await _grade_by_option(db, selected_option_id)
+        return await _grade_by_option(db, question.id, selected_option_id)
     if qtype == "short_answer":
         return _grade_short_answer(question, answer_text)
     if qtype == "fill_blank":
@@ -166,11 +166,20 @@ def _parse_id_list(answer_text: str | None) -> list[str]:
 
 
 async def _grade_by_option(
-    db: AsyncSession, selected_option_id: UUID | None
+    db: AsyncSession, question_id: UUID, selected_option_id: UUID | None
 ) -> GradeResult:
     if selected_option_id is None:
         return _ZERO
-    option = await db.get(QuizQuestionOption, selected_option_id)
+    from sqlalchemy import select  # noqa: PLC0415
+
+    option = (
+        await db.execute(
+            select(QuizQuestionOption).where(
+                QuizQuestionOption.id == selected_option_id,
+                QuizQuestionOption.question_id == question_id,
+            )
+        )
+    ).scalar_one_or_none()
     if option is None:
         return _ZERO
     return _ONE if option.is_correct else _ZERO

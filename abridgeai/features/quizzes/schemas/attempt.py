@@ -107,6 +107,7 @@ class QuizAttemptRead(BaseModel):
     passed: bool | None = None
     total_questions: int | None = None
     correct_count: int | None = None
+    grading_pending: bool = False
 
 
 class QuizAttemptReviewOption(BaseModel):
