@@ -521,9 +521,9 @@ async def test_a_global_admin_has_no_primary_org(
             text(
                 "INSERT INTO user_role_assignments "
                 "(user_id, role_id, scope_kind, organization_id) "
-                "SELECT :uid, r.id, 'global', :org FROM roles r WHERE r.code = 'admin'"
+                "SELECT :uid, r.id, 'global', NULL FROM roles r WHERE r.code = 'admin'"
             ),
-            {"uid": graph.teacher_id, "org": graph.org_id},
+            {"uid": graph.teacher_id},
         )
     assert await q.get_user_primary_org_id(db, graph.teacher_id) is None
 

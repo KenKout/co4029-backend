@@ -90,9 +90,16 @@ async def _require_access_to(
     Raising the same 404 as a foreign-org caller keeps the two responses
     identical, so the endpoint cannot be used to probe which ids exist in
     another tenant.
+
+    The absent branch emits the SAME structured shape (``error`` /
+    ``resource`` / ``id``) that :func:`require_org_access` raises for the
+    foreign branch — two code paths must not produce two 404 body shapes.
     """
     if organization_id is None:
-        raise _not_found(f"{resource} {resource_id} not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"error": "not_found", "resource": resource, "id": str(resource_id)},
+        )
     await require_org_access(
         db,
         current_user,
@@ -219,6 +226,7 @@ async def create_organization_endpoint(
     except AppError as exc:
         raise _bad_request(str(exc)) from exc
     await db.commit()
+    await db.refresh(org)
     return OrganizationRead.model_validate(org)
 
 
@@ -271,6 +279,7 @@ async def patch_organization_endpoint(
     except AppError as exc:
         raise _bad_request(str(exc)) from exc
     await db.commit()
+    await db.refresh(org)
     return OrganizationRead.model_validate(org)
 
 
@@ -353,6 +362,7 @@ async def create_domain_endpoint(
     except AppError as exc:
         raise _bad_request(str(exc)) from exc
     await db.commit()
+    await db.refresh(dom)
     return OrganizationDomainRead.model_validate(dom)
 
 
@@ -380,6 +390,7 @@ async def patch_domain_endpoint(
     except AppError as exc:
         raise _bad_request(str(exc)) from exc
     await db.commit()
+    await db.refresh(dom)
     return OrganizationDomainRead.model_validate(dom)
 
 
@@ -504,6 +515,7 @@ async def create_unit_endpoint(
     except AppError as exc:
         raise _bad_request(str(exc)) from exc
     await db.commit()
+    await db.refresh(unit)
     return OrgUnitRead.model_validate(unit)
 
 
@@ -561,6 +573,7 @@ async def patch_unit_endpoint(
     except AppError as exc:
         raise _bad_request(str(exc)) from exc
     await db.commit()
+    await db.refresh(unit)
     return OrgUnitRead.model_validate(unit)
 
 
