@@ -21,6 +21,7 @@ from uuid import UUID
 from sqlalchemy import exists, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from abridgeai.core.exceptions import NotFoundError
 from abridgeai.features.access_control.api._dto import (
     OrgDTO,
     OrgUnitDTO,
@@ -362,7 +363,9 @@ async def grant_org_role_access(
     """
     role_id = (
         await db.execute(select(Role.id).where(Role.code == role_code, Role.deleted_at.is_(None)))
-    ).scalar_one()
+    ).scalar_one_or_none()
+    if role_id is None:
+        raise NotFoundError(f"role '{role_code}' not found")
     db.add(
         OrganizationMembership(
             user_id=user_id,

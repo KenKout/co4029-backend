@@ -519,3 +519,70 @@ async def test_create_user_student_token_403(
         },
     )
     assert response.status_code == 403, response.text
+
+
+async def test_create_user_unknown_role_404(
+    client: httpx.AsyncClient,
+    admin_auth: tuple[uuid.UUID, str],
+    seeded_users: SeededUsers,
+) -> None:
+    """A role code that does not exist is rejected cleanly — not a 500.
+
+    Regression: ``grant_org_role_access`` used ``scalar_one()`` so an unknown
+    ``role_code`` surfaced as ``sqlalchemy.exc.NoResultFound`` -> HTTP 500.
+    """
+    _, token = admin_auth
+    email = f"invite-unknown-role-{uuid.uuid4().hex[:8]}@test.local"
+    response = await client.post(
+        "/api/v1/users",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "primary_email": email,
+            "display_name": "Unknown Role",
+            "organization_id": str(seeded_users.organization_id),
+            "role_code": "astronaut",
+        },
+    )
+    assert response.status_code == 404, response.text
+    assert response.json()["detail"]["error"] == "role_not_found"
+
+    # The failed invite must not leave a half-created user behind.
+    search = await client.get(
+        f"/api/v1/users/search?search={email}&page_size=10",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert search.status_code == 200, search.text
+    assert search.json()["items"] == []
+
+
+async def test_create_user_admin_role_org_scope_403(
+    client: httpx.AsyncClient,
+    admin_auth: tuple[uuid.UUID, str],
+    seeded_users: SeededUsers,
+) -> None:
+    """The ``admin`` role (permissions: ALL) is global-only and cannot be
+    granted through the org-scoped invite path.
+
+    Permission resolution ignores assignment scope, so an org-scoped admin
+    assignment would mint a full platform admin — reject it here.
+    """
+    _, token = admin_auth
+    email = f"invite-org-admin-{uuid.uuid4().hex[:8]}@test.local"
+    response = await client.post(
+        "/api/v1/users",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "primary_email": email,
+            "display_name": "Org Admin",
+            "organization_id": str(seeded_users.organization_id),
+            "role_code": "admin",
+        },
+    )
+    assert response.status_code == 403, response.text
+
+    search = await client.get(
+        f"/api/v1/users/search?search={email}&page_size=10",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert search.status_code == 200, search.text
+    assert search.json()["items"] == []

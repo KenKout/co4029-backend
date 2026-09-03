@@ -19,7 +19,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 from uuid import UUID
 
-from abridgeai.core.exceptions import ConflictError, NotFoundError
+from abridgeai.core.exceptions import ConflictError, ForbiddenError, NotFoundError
 from abridgeai.core.pagination import Page
 from abridgeai.features.access_control.api import public as access_control_api
 from abridgeai.features.identity.models import User, UserProfile
@@ -372,6 +372,13 @@ async def create_user_account(
     existing = await user_queries.get_user_by_email(db, payload.primary_email)
     if existing is not None:
         raise ConflictError(f"user with email '{payload.primary_email}' already exists")
+
+    if payload.role_code == "admin":
+        raise ForbiddenError(
+            "the 'admin' role cannot be granted through an org invite: it carries "
+            "every permission and is global-scope only; invite the account with a "
+            "tenant role (student/teacher/hod/manager) instead"
+        )
 
     user = User(primary_email=payload.primary_email, status="active")
     db.add(user)
