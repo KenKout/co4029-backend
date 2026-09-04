@@ -1,9 +1,13 @@
 """Identity ``/users/me`` router — self-service profile + permissions.
 
-Three endpoints under ``/users/me`` that the SPA uses for the signed-in user:
+Self-scoped endpoints under ``/users/me`` that the SPA uses for the signed-in
+user:
 
 * ``GET /users/me`` — current user details (with profile if present).
 * ``PATCH /users/me/profile`` — partial update of the user's profile fields.
+* ``PUT /users/me/avatar`` — replace the caller's avatar image.
+* ``GET|POST /users/me/links`` and ``PATCH|DELETE /users/me/links/{link_id}``
+  — the caller's external profile links (FR-2.8).
 * ``GET /users/me/permissions`` — effective global permission codes.
 
 Auth: every endpoint requires a valid bearer token via
@@ -20,8 +24,9 @@ read-only wrapper over the canonical scope-aware query (T1.4a).
 from __future__ import annotations
 
 from typing import Annotated
+from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from abridgeai.core.db import get_db
@@ -37,6 +42,9 @@ from abridgeai.features.access_control.services import (
 from abridgeai.features.identity.models import User
 from abridgeai.features.identity.schemas import (
     UserPermissionsRead,
+    UserProfileLinkIn,
+    UserProfileLinkRead,
+    UserProfileLinkUpdate,
     UserProfileUpdate,
     UserRead,
 )
@@ -54,6 +62,13 @@ def _unauthorized(detail: str) -> HTTPException:
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail=detail,
         headers={"WWW-Authenticate": "Bearer"},
+    )
+
+
+def _link_not_found(link_id: UUID) -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail={"error": "not_found", "resource": "profile_link", "id": str(link_id)},
     )
 
 
@@ -133,6 +148,72 @@ async def upload_my_avatar(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=str(exc),
         ) from exc
+
+
+@router.get("/links", response_model=list[UserProfileLinkRead])
+async def list_my_links(
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> list[UserProfileLinkRead]:
+    """List the caller's external profile links (FR-2.8).
+
+    The same links also ride along on ``GET /users/me`` under
+    ``profile.links``; this endpoint exists so the profile editor can refetch
+    just the list after a write without re-reading the whole user.
+    """
+    user = await _load_user(db, current_user)
+    return await profile_service.list_links(db, user)
+
+
+@router.post("/links", response_model=UserProfileLinkRead, status_code=status.HTTP_201_CREATED)
+async def create_my_link(
+    payload: UserProfileLinkIn,
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> UserProfileLinkRead:
+    """Add an external link (website / GitHub / LinkedIn / portfolio / other)."""
+    user = await _load_user(db, current_user)
+    try:
+        return await profile_service.create_link(db, user, payload)
+    except profile_service.ProfileLinkError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+
+
+@router.patch("/links/{link_id}", response_model=UserProfileLinkRead)
+async def update_my_link(
+    link_id: UUID,
+    payload: UserProfileLinkUpdate,
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> UserProfileLinkRead:
+    """Update one of the caller's own links.
+
+    404 (not 403) when the link belongs to somebody else: the service scopes
+    the lookup by owner, so a foreign id is never confirmed to exist.
+    """
+    user = await _load_user(db, current_user)
+    try:
+        return await profile_service.update_link(db, user, link_id=link_id, payload=payload)
+    except profile_service.ProfileLinkNotFoundError as exc:
+        raise _link_not_found(link_id) from exc
+
+
+@router.delete("/links/{link_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_my_link(
+    link_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> Response:
+    """Remove one of the caller's own links (soft-delete)."""
+    user = await _load_user(db, current_user)
+    try:
+        await profile_service.delete_link(db, user, link_id=link_id)
+    except profile_service.ProfileLinkNotFoundError as exc:
+        raise _link_not_found(link_id) from exc
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.get("/permissions", response_model=UserPermissionsRead)

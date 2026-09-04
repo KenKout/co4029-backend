@@ -34,6 +34,7 @@ import abridgeai.features.notifications.models  # noqa: F401
 import abridgeai.features.progress.models  # noqa: F401
 import abridgeai.features.quizzes.models  # noqa: F401
 from abridgeai.api import create_app
+from abridgeai.core.audit import audit_maintenance
 from abridgeai.core.config import get_settings
 from abridgeai.core.db import get_db
 from abridgeai.core.observability.audit_log import AuditLogMiddleware
@@ -97,6 +98,7 @@ async def purge_audit(engine: AsyncEngine) -> AsyncIterator[None]:
     cutoff = datetime.now(tz=UTC) - timedelta(seconds=1)
     yield
     async with engine.begin() as conn:
+        await audit_maintenance(conn)
         await conn.execute(
             text("DELETE FROM http_audit_log WHERE created_at >= :c"),
             {"c": cutoff},
@@ -347,6 +349,7 @@ async def test_uncaught_route_exception_persists_500_row(
                 {"c": cutoff},
             )
         ).all()
+        await audit_maintenance(conn)
         await conn.execute(
             text("DELETE FROM http_audit_log WHERE path = '/boom' AND created_at >= :c"),
             {"c": cutoff},

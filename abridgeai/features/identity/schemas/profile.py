@@ -4,11 +4,83 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+# Mirrors the ``ck_user_profile_links_link_type`` CHECK constraint in the
+# baseline schema. Declared as a Literal so an unknown type is a 422 from the
+# request model rather than an IntegrityError surfacing as a 500.
+ProfileLinkType = Literal["website", "github", "linkedin", "portfolio", "other"]
+
+_ALLOWED_LINK_SCHEMES = ("http://", "https://")
+
+# Postgres ``url`` is TEXT (unbounded); the cap is a payload-abuse guard, and
+# 2048 is the ceiling browsers and proxies converge on anyway.
+_MAX_LINK_URL_LENGTH = 2048
+
+
+def _validate_link_url(value: str) -> str:
+    """Normalise and bound a profile link URL.
+
+    A profile link is rendered as an anchor other users click, so the scheme
+    is the security boundary: without this check ``javascript:`` and ``data:``
+    URLs are storable and become stored XSS the moment any surface renders
+    them as ``href``. Allow-list rather than deny-list -- only http(s) can
+    ever be a legitimate external profile link.
+    """
+    url = value.strip()
+    if not url:
+        raise ValueError("url must not be empty")
+    if len(url) > _MAX_LINK_URL_LENGTH:
+        raise ValueError(f"url must be at most {_MAX_LINK_URL_LENGTH} characters")
+    if not url.lower().startswith(_ALLOWED_LINK_SCHEMES):
+        raise ValueError("url must start with http:// or https://")
+    return url
 
 
 class _ORMModel(BaseModel):
     model_config = ConfigDict(from_attributes=True)
+
+
+class UserProfileLinkIn(BaseModel):
+    """Create payload for one external profile link (FR-2.8)."""
+
+    link_type: ProfileLinkType
+    url: str
+    label: str | None = Field(default=None, max_length=100)
+
+    @field_validator("url")
+    @classmethod
+    def _check_url(cls, value: str) -> str:
+        return _validate_link_url(value)
+
+
+class UserProfileLinkUpdate(BaseModel):
+    """Partial update of an existing link.
+
+    Every field is optional and ``exclude_unset`` is what the service reads,
+    so omitting a field leaves it alone. ``label`` is the one field a caller
+    may legitimately want to CLEAR, so an explicit ``null`` is honoured for it
+    -- distinguished from "omitted" by the unset check, not by the value.
+    """
+
+    link_type: ProfileLinkType | None = None
+    url: str | None = None
+    label: str | None = Field(default=None, max_length=100)
+
+    @field_validator("url")
+    @classmethod
+    def _check_url(cls, value: str | None) -> str | None:
+        return None if value is None else _validate_link_url(value)
+
+
+class UserProfileLinkRead(_ORMModel):
+    id: UUID
+    user_id: UUID
+    link_type: str
+    url: str
+    label: str | None = None
+    created_at: datetime
+    updated_at: datetime
 
 
 class UserProfileRead(_ORMModel):
@@ -22,6 +94,9 @@ class UserProfileRead(_ORMModel):
     avatar_url: str | None = None
     bio: str | None = None
     locale: str | None = None
+    # External profile links (FR-2.8), newest last. Populated by the identity
+    # profile service; producers that do not load the relationship leave [].
+    links: list[UserProfileLinkRead] = Field(default_factory=list)
 
 
 class UserRead(_ORMModel):
@@ -77,22 +152,6 @@ class UserCreate(BaseModel):
     role_code: str = Field(default="student", min_length=1, max_length=50)
     student_code: str | None = Field(default=None, max_length=50)
     employee_code: str | None = Field(default=None, max_length=50)
-
-
-class UserProfileLinkIn(BaseModel):
-    link_type: str = Field(max_length=30)
-    url: str
-    label: str | None = Field(default=None, max_length=100)
-
-
-class UserProfileLinkRead(_ORMModel):
-    id: UUID
-    user_id: UUID
-    link_type: str
-    url: str
-    label: str | None = None
-    created_at: datetime
-    updated_at: datetime
 
 
 class AuthSessionRead(_ORMModel):

@@ -28,6 +28,7 @@ import abridgeai.features.identity.models  # noqa: F401
 import abridgeai.features.interviews.models  # noqa: F401
 import abridgeai.features.materials.models  # noqa: F401
 import abridgeai.features.quizzes.models  # noqa: F401
+from abridgeai.core.audit import audit_maintenance
 from abridgeai.core.config import get_settings
 from abridgeai.core.db import get_db
 from abridgeai.core.security import create_access_token, generate_token, hash_secret
@@ -1147,6 +1148,7 @@ async def test_api_latency_trend(
         # accumulation intact, which made the "today == 1 row" assertion
         # depend on how many requests earlier tests made. Clean the whole
         # table — tests run serially and every test creates its own rows.
+        await audit_maintenance(conn)
         await conn.execute(text("DELETE FROM http_audit_log"))
         for offset_min, latency in ((10, 10), (40, 30)):
             row_id = str(uuid.uuid4())
@@ -1190,6 +1192,7 @@ async def test_api_latency_trend(
         )
     finally:
         async with engine.begin() as conn:
+            await audit_maintenance(conn)
             await conn.execute(
                 text("DELETE FROM http_audit_log WHERE id = ANY(:ids)"),
                 {"ids": inserted_ids},
@@ -1404,6 +1407,7 @@ async def test_dashboard_custom_range(
     finally:
         async with engine.begin() as conn:
             if audit_ids:
+                await audit_maintenance(conn)
                 await conn.execute(
                     text("DELETE FROM http_audit_log WHERE id = ANY(:ids)"),
                     {"ids": audit_ids},

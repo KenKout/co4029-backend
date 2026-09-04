@@ -5,9 +5,18 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from abridgeai.core.config import get_settings
-from abridgeai.features.identity.models import StorageObject, User, UserProfile
+from abridgeai.core.db.recursive_delete import soft_delete_cascade
+from abridgeai.features.identity.models import (
+    StorageObject,
+    User,
+    UserProfile,
+    UserProfileLink,
+)
 from abridgeai.features.identity.queries import users as user_queries
 from abridgeai.features.identity.schemas import (
+    UserProfileLinkIn,
+    UserProfileLinkRead,
+    UserProfileLinkUpdate,
     UserProfileRead,
     UserProfileUpdate,
     UserRead,
@@ -26,9 +35,22 @@ _AVATAR_MIME_TYPES: dict[str, str] = {
 }
 _AVATAR_MAX_BYTES = 2 * 1024 * 1024
 
+# Upper bound on live links per profile. A profile page shows a handful of
+# external destinations; the cap stops a single account turning its profile
+# into an unbounded, self-service link farm.
+MAX_PROFILE_LINKS = 10
+
 
 class AvatarUploadError(ValueError):
     """Raised when an uploaded avatar fails validation (type / size)."""
+
+
+class ProfileLinkError(ValueError):
+    """Raised when a profile-link write breaks a service-level rule."""
+
+
+class ProfileLinkNotFoundError(LookupError):
+    """Raised when a link id does not exist on the caller's own profile."""
 
 
 async def _mint_avatar_url(db: AsyncSession, profile: UserProfile | None) -> str | None:
@@ -54,8 +76,15 @@ async def serialize_user_async(
     avatar_url = await _mint_avatar_url(db, profile)
     profile_payload = None
     if profile is not None:
+        # Links are a separate table, so ``model_validate(profile)`` cannot
+        # reach them — load them here rather than relying on lazy loading,
+        # which would emit IO during serialization on an async session.
+        links = await user_queries.list_profile_links(db, profile.user_id)
         profile_payload = UserProfileRead.model_validate(profile).model_copy(
-            update={"avatar_url": avatar_url}
+            update={
+                "avatar_url": avatar_url,
+                "links": [UserProfileLinkRead.model_validate(link) for link in links],
+            }
         )
     return UserRead.model_validate(
         {
@@ -154,6 +183,86 @@ class _StorageRef:
         self.object_key = object_key
 
 
+async def list_links(db: AsyncSession, user: User) -> list[UserProfileLinkRead]:
+    """Every external link on the caller's own profile (FR-2.8)."""
+    links = await user_queries.list_profile_links(db, user.id)
+    return [UserProfileLinkRead.model_validate(link) for link in links]
+
+
+async def create_link(
+    db: AsyncSession, user: User, payload: UserProfileLinkIn
+) -> UserProfileLinkRead:
+    """Add one external link to the caller's profile.
+
+    Raises :class:`ProfileLinkError` when the profile is already at
+    :data:`MAX_PROFILE_LINKS`. Scheme and length of ``url`` are already
+    validated by :class:`UserProfileLinkIn`, and ``link_type`` is a Literal
+    matching the table's CHECK constraint, so nothing else needs re-checking
+    here.
+    """
+    existing = await user_queries.list_profile_links(db, user.id)
+    if len(existing) >= MAX_PROFILE_LINKS:
+        raise ProfileLinkError(
+            f"too_many_links: a profile may hold at most {MAX_PROFILE_LINKS} links."
+        )
+
+    link = UserProfileLink(
+        user_id=user.id,
+        link_type=payload.link_type,
+        url=payload.url,
+        label=payload.label,
+    )
+    db.add(link)
+    await db.commit()
+    await db.refresh(link)
+    return UserProfileLinkRead.model_validate(link)
+
+
+async def update_link(
+    db: AsyncSession,
+    user: User,
+    *,
+    link_id: uuid.UUID,
+    payload: UserProfileLinkUpdate,
+) -> UserProfileLinkRead:
+    """Partially update one of the caller's own links.
+
+    Raises :class:`ProfileLinkNotFoundError` when the id is not a live link on
+    THIS user's profile — the ownership check is inside the query, so another
+    user's link is indistinguishable from one that never existed.
+    """
+    link = await user_queries.get_profile_link(db, link_id=link_id, user_id=user.id)
+    if link is None:
+        raise ProfileLinkNotFoundError(str(link_id))
+
+    # ``exclude_unset`` (not ``exclude_none``): an explicit ``"label": null``
+    # is how a caller clears a label, and only the unset check can tell that
+    # apart from omitting the field.
+    for key, value in payload.model_dump(exclude_unset=True).items():
+        if key == "label" or value is not None:
+            setattr(link, key, value)
+
+    await db.commit()
+    await db.refresh(link)
+    return UserProfileLinkRead.model_validate(link)
+
+
+async def delete_link(db: AsyncSession, user: User, *, link_id: uuid.UUID) -> None:
+    """Remove one of the caller's own links.
+
+    Soft-delete, not a physical DELETE: ``user_profile_links`` carries
+    ``SoftDeleteMixin``, and the hard-delete guard rejects ``session.delete()``
+    on such rows outright. The read-side filter hides the tombstone, so the
+    link disappears from every profile read.
+    """
+    link = await user_queries.get_profile_link(db, link_id=link_id, user_id=user.id)
+    if link is None:
+        raise ProfileLinkNotFoundError(str(link_id))
+
+    await soft_delete_cascade(db, link, user.id)
+    await db.commit()
+
+
 async def update_profile(
     db: AsyncSession, user: User, payload: UserProfileUpdate
 ) -> UserProfileRead:
@@ -175,4 +284,15 @@ async def update_profile(
     return UserProfileRead.model_validate(profile)
 
 
-__all__ = ["get_current_user_read", "serialize_user", "update_profile"]
+__all__ = [
+    "MAX_PROFILE_LINKS",
+    "ProfileLinkError",
+    "ProfileLinkNotFoundError",
+    "create_link",
+    "delete_link",
+    "get_current_user_read",
+    "list_links",
+    "serialize_user",
+    "update_link",
+    "update_profile",
+]

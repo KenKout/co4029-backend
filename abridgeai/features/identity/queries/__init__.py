@@ -19,8 +19,10 @@ from abridgeai.features.identity.queries.sessions import (
 )
 from abridgeai.features.identity.queries.users import (
     get_profile,
+    get_profile_link,
     get_user,
     get_user_by_email,
+    list_profile_links,
     list_profiles,
     list_users,
 )
@@ -28,10 +30,12 @@ from abridgeai.features.identity.queries.users import (
 __all__ = [
     "get_active_challenge",
     "get_profile",
+    "get_profile_link",
     "get_session_by_refresh_hash",
     "get_user",
     "get_user_by_email",
     "get_verified_totp_factor",
+    "list_profile_links",
     "list_profiles",
     "list_users",
     "user_has_verified_mfa",

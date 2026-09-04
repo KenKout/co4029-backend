@@ -14,7 +14,13 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from abridgeai.core.pagination import Page, paginate
-from abridgeai.features.identity.models import AuthIdentity, StorageObject, User, UserProfile
+from abridgeai.features.identity.models import (
+    AuthIdentity,
+    StorageObject,
+    User,
+    UserProfile,
+    UserProfileLink,
+)
 
 
 async def get_user(db: AsyncSession, user_id: UUID) -> User | None:
@@ -46,6 +52,40 @@ async def get_identity_by_provider_subject(
 
 async def get_profile(db: AsyncSession, user_id: UUID) -> UserProfile | None:
     return await db.get(UserProfile, user_id)
+
+
+async def list_profile_links(db: AsyncSession, user_id: UUID) -> list[UserProfileLink]:
+    """Every live external link on a user's profile, oldest first.
+
+    Soft-deleted rows are excluded by the global read-side filter
+    (``core/db/soft_delete.py``), so no ``deleted_at`` predicate belongs here.
+    Ordered by ``created_at`` so the profile page renders links in the order
+    the user added them rather than in whatever order the heap returns.
+    """
+    result = await db.execute(
+        select(UserProfileLink)
+        .where(UserProfileLink.user_id == user_id)
+        .order_by(UserProfileLink.created_at, UserProfileLink.id)
+    )
+    return list(result.scalars().all())
+
+
+async def get_profile_link(
+    db: AsyncSession, *, link_id: UUID, user_id: UUID
+) -> UserProfileLink | None:
+    """One link, scoped to its owner.
+
+    ``user_id`` is part of the lookup rather than checked afterwards: it makes
+    another user's link indistinguishable from a nonexistent one, so the
+    self-scoped endpoints can 404 without leaking that the id exists.
+    """
+    result = await db.execute(
+        select(UserProfileLink).where(
+            UserProfileLink.id == link_id,
+            UserProfileLink.user_id == user_id,
+        )
+    )
+    return result.scalar_one_or_none()
 
 
 async def list_users(
