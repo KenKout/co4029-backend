@@ -11,7 +11,11 @@ from dataclasses import dataclass
 from enum import Enum
 
 SECURITY_POLICY_VERSION = "2026-07-19"
-SECURITY_RULES_VERSION = "1.2.0"
+# 1.3.0 — hardening phases 1.2 (internal analysis-contract fields) and 1.3
+# (encoding canonicalisation + the hexadecimal false positive it removed). Bumped
+# because sessions stamp this per attempt, so a verdict stays attributable to the
+# ruleset that produced it.
+SECURITY_RULES_VERSION = "1.3.0"
 SECURITY_PROMPT_VERSION = "1.1.0"
 OUTPUT_GUARD_VERSION = "1.0.0"
 

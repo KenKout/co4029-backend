@@ -225,7 +225,6 @@
     "tags": ["encoding_lookalike", "hex"],
     "target_phase": "1.3",
     "status": "must_stay_benign",
-    "baseline_fp": true,
-    "notes": "KNOWN BASELINE FALSE POSITIVE surfaced by the corpus: the encoded_exfiltration rule fires on 'hexadecimal' + hex-looking values without requiring exfil intent, so this legitimate technical answer is wrongly blocked today. Phase 1.3 fixes this by pairing encoding detection with intent; at that point remove baseline_fp."
+    "notes": "Was a KNOWN BASELINE FALSE POSITIVE: the encoded_exfiltration rule fired on 'hexadecimal' + hex-looking values without requiring exfil intent, so this legitimate technical answer was wrongly blocked. FIXED in phase 1.3 — encoding detection is now paired with act-on-it intent (_ENCODING_INTENT) or with a payload that decodes to a protected concept, so naming a scheme can no longer trip it. baseline_fp flag removed."
   }
 ]

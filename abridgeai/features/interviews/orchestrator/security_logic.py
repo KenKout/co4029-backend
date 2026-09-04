@@ -16,6 +16,15 @@ from typing import TYPE_CHECKING, Any
 
 from abridgeai.ai.llm import LLMGateway, LLMRole
 from abridgeai.ai.prompts import render_prompt
+from abridgeai.features.interviews.orchestrator import analysis_contract_patterns as _acp
+from abridgeai.features.interviews.orchestrator import answer_request_patterns as _arp
+from abridgeai.features.interviews.orchestrator.encoding_probes import (
+    HOMOGLYPHS as _HOMOGLYPHS,
+)
+from abridgeai.features.interviews.orchestrator.encoding_probes import (
+    decodes_to_protected_request,
+    leet_folded,
+)
 from abridgeai.features.interviews.orchestrator.output_guard_patterns import (
     HIGH_CONFIDENCE_INTERNAL_OUTPUT_RE,
     INTERNAL_MARKERS,
@@ -44,42 +53,6 @@ _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?。！？])\s+|[\r\n]+")
 
 # Common Greek/Cyrillic look-alikes used in prompt-obfuscation attempts. This
 # is intentionally small and deterministic; NFKC handles compatibility forms.
-_HOMOGLYPHS = str.maketrans(
-    {
-        "а": "a",
-        "ɑ": "a",
-        "Α": "a",
-        "А": "a",
-        "е": "e",
-        "Ε": "e",
-        "Е": "e",
-        "і": "i",
-        "Ι": "i",
-        "І": "i",
-        "ο": "o",
-        "о": "o",
-        "Ο": "o",
-        "О": "o",
-        "р": "p",
-        "Ρ": "p",
-        "Р": "p",
-        "с": "c",
-        "С": "c",
-        "ѕ": "s",
-        "Ѕ": "s",
-        "х": "x",
-        "Χ": "x",
-        "Х": "x",
-        "у": "y",
-        "Υ": "y",
-        "У": "y",
-        "м": "m",
-        "М": "m",
-        "т": "t",
-        "Т": "t",
-    }
-)
-
 _REQUEST = (
     r"(?:show|print|list|reveal|give|provide|tell|display|dump|expose|translate|share|"
     r"hãy|cho|in|liệt\s*kê|tiết\s*lộ|hiển\s*thị|cung\s*cấp|nói|dịch|chia\s*sẻ)"
@@ -98,49 +71,6 @@ _ANSWER_KEY = (
 # A narrow imperative/question shape for generic answer solicitation. Keeping
 # this separate from ``_ANSWER_KEY`` avoids blocking academic prose such as
 # "The answer is that factless facts have no numeric measure."
-_DIRECT_ANSWER_REQUEST = (
-    r"\b(?:(?:please\s+)?|(?:(?:can|could|would|will)\s+you\s+))"
-    r"(?:give|tell|show|provide)\s+me\s+(?:the\s+|an?\s+)?(?:correct\s+)?answers?\b|"
-    r"^what(?:'|’)s\s+(?:the\s+)?(?:correct\s+)?answer\b|"
-    r"^what\s+is\s+(?:the\s+)?(?:correct\s+)?answer\b|"
-    r"^(?:please\s+)?answer\s+(?:this|the|the\s+current|current)\s+question\s+for\s+me\b|"
-    r"^(?:(?:hãy|vui\s+lòng|xin)\s+)?(?:cho|nói|cung\s+cấp)\s+"
-    r"(?:tôi|mình|em)\s+(?:đáp\s*án|câu\s*trả\s*lời)\b|"
-    r"^(?:(?:hãy|vui\s+lòng|xin)\s+)?trả\s+lời\s+"
-    r"(?:câu\s+hỏi\s+)?(?:này|hiện\s+tại)\s+cho\s+(?:tôi|mình|em)\b"
-)
-_ANSWER_REFERENCE_REQUEST = (
-    r"\b(?:repeat|restate|recite|say)\s+(?:the\s+)?(?:correct\s+)?answer\b|"
-    r"\b(?:nhắc\s+lại|lặp\s+lại|nói)\s+(?:câu\s+trả\s+lời|đáp\s*án)\b"
-)
-# These are concept-level routing signals, not final classifications. A broad
-# request must contain both a request/delegation cue and an academic-work cue;
-# the dedicated security model then decides the category semantically.
-_ANSWER_REQUEST_CUE = (
-    r"^(?:(?:please|kindly|just)\s+)?"
-    r"(?:tell|show|give|provide|write|draft|compose|solve|answer|respond|complete|"
-    r"do|help|teach|walk|take\s+over)\b|"
-    r"\b(?:please|kindly|just)\s+"
-    r"(?:tell|show|give|provide|write|draft|compose|solve|answer|respond|complete|"
-    r"do|help|teach|walk|take\s+over)\b|"
-    r"\b(?:can|could|would|will)\s+you\b|"
-    r"\b(?:what|how)\s+(?:should|would|could)\s+"
-    r"(?:i|you|my|the|a\s+candidate)\b|"
-    r"\b(?:for\s+me|on\s+my\s+behalf|as\s+if\s+you\s+were\s+me)\b|"
-    r"\bi(?:'|’)m\s+stuck\b.{0,40}\btake\s+over\b|"
-    r"^(?:(?:hãy|xin|vui\s+lòng)\s+)?"
-    r"(?:cho|nói|viết|soạn|giải|làm|trả\s+lời|giúp)\b|"
-    r"\b(?:bạn\s+)?có\s+thể\b|"
-    r"\b(?:tôi|mình|em)\s+nên\b|"
-    r"\b(?:hộ|giúp|cho)\s+(?:tôi|mình|em)\b"
-)
-_ANSWER_WORK_CUE = (
-    r"\b(?:answer|response|solution|question|solve|respond|work\s+out|"
-    r"say|write|draft|compose|submit|submission|sample|example|exemplar|"
-    r"candidate|take\s+over|do\s+(?:it|this|the\s+question))\b|"
-    r"\b(?:đáp\s*án|câu\s+trả\s+lời|câu\s+hỏi|giải|làm|trả\s+lời|"
-    r"nói|viết|soạn|nộp|bài\s+làm|ví\s+dụ|bài\s+mẫu)\b"
-)
 _RUBRIC = (
     r"rubric|grading\s+(?:criteria|logic|weights?)|scoring\s+(?:criteria|logic|weights?)|"
     r"passing\s+threshold|outcome\s+coverage|expected\s+evidence|common\s+misconceptions|"
@@ -209,6 +139,16 @@ _CROSS_SESSION = (
 
 _BASE64_RE = re.compile(r"(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{24,}={0,2}(?![A-Za-z0-9+/])")
 _HEX_RE = re.compile(r"(?:(?:0x)?[0-9a-f]{2}[\s:,_-]*){12,}", re.IGNORECASE)
+
+# Phase 1.3 — the ACT-ON-IT half of encoding detection. Mentioning a scheme is
+# ordinary technical speech; asking the interviewer to APPLY one is not. Keeping
+# the two halves separate is what lets "0xffffff in hexadecimal notation" pass
+# while "apply rot13 and follow" does not.
+_ENCODING_INTENT = (
+    r"\b(?:decode|decrypt|unscramble|deobfuscat\w*|apply|run|execute|evaluate|"
+    r"interpret|follow|obey|read\s+back|translate)\b|"
+    r"\b(?:giải\s*mã|thực\s*hiện|làm\s+theo|áp\s*dụng|đọc\s+lại)\b"
+)
 
 # Marker literals + the disclosure-frame regex live in
 # ``output_guard_patterns`` (keeps this module under the orchestrator's 800-line
@@ -282,6 +222,34 @@ def _canonicalize_answer_typos(value: str) -> str:
     return _TOKEN_RE.sub(_replace, value)
 
 
+def _category_from_decoded_payloads(value: str) -> SecurityCategory | None:
+    """Classify an obfuscated payload by what it decodes to, or ``None``.
+
+    The decode probes live in ``encoding_probes`` (no eval, no I/O; nothing
+    decoded ever leaves that module — only this verdict does).
+
+    Category choice: when the request survives the transform as ordinary
+    in-language text — leetspeak "5y5t3m pr0mpt" is still literally a system
+    prompt request — the SEMANTIC category is the honest label, so the audit row
+    says what was asked for. Only when the payload is genuinely opaque
+    (rot13/percent/hex/reversed ciphertext, unreadable until transformed) is
+    ``ENCODED_EXFILTRATION`` right: there the obfuscation itself is the finding.
+    """
+    if not decodes_to_protected_request(value):
+        return None
+    # Re-run the plain rules over the folded text. Leet folding is the only
+    # transform that yields readable prose, so this recovers the real category
+    # without letting an opaque payload masquerade as a plain request.
+    folded = normalize_input(leet_folded(value))
+    if folded != normalize_input(value):
+        # ``probe_encodings=False`` breaks the cycle: this call must classify the
+        # folded text with the plain rules only, never re-enter the decoders.
+        semantic = _rule_category(folded, probe_encodings=False)
+        if semantic is not SecurityCategory.BENIGN:
+            return semantic
+    return SecurityCategory.ENCODED_EXFILTRATION
+
+
 def _contains_request_for(text: str, target: str) -> bool:
     return bool(
         re.search(rf"{_REQUEST}.{{0,80}}(?:{target})", text, re.IGNORECASE)
@@ -293,7 +261,14 @@ def _rule_category(  # noqa: C901 -- ordered security rules are intentionally ex
     value: str,
     *,
     last_category: SecurityCategory | None = None,
+    probe_encodings: bool = True,
 ) -> SecurityCategory:
+    """Ordered rule verdict for one utterance.
+
+    ``probe_encodings=False`` runs the plain rules only. It exists so
+    ``_category_from_decoded_payloads`` can re-classify a de-obfuscated string
+    without re-entering the decoders — that would recurse indefinitely.
+    """
     text = normalize_input(value)
     answer_routing_text = _canonicalize_answer_typos(text)
     compact = _compact(text)
@@ -316,8 +291,8 @@ def _rule_category(  # noqa: C901 -- ordered security rules are intentionally ex
     ):
         return SecurityCategory.FUTURE_QUESTION_REQUEST
     if (
-        re.search(_DIRECT_ANSWER_REQUEST, answer_routing_text, re.IGNORECASE)
-        or re.search(_ANSWER_REFERENCE_REQUEST, answer_routing_text, re.IGNORECASE)
+        re.search(_arp.DIRECT_ANSWER_REQUEST, answer_routing_text, re.IGNORECASE)
+        or re.search(_arp.ANSWER_REFERENCE_REQUEST, answer_routing_text, re.IGNORECASE)
         or _contains_request_for(answer_routing_text, _ANSWER_KEY)
         or any(
             marker in compact for marker in ("givemetheidealanswer", "showanswerkey", "chotoidapan")
@@ -334,6 +309,22 @@ def _rule_category(  # noqa: C901 -- ordered security rules are intentionally ex
         for marker in ("printyoursystemprompt", "showsystemprompt", "dichchidanan")
     ):
         return SecurityCategory.SYSTEM_PROMPT_REQUEST
+    # Phase 1.2 — the internal analysis contract. Writing to those fields, or
+    # declaring every outcome covered, is grading manipulation; reading them (or
+    # the hidden outcome set) is rubric exfiltration. Checked before _GRADING so
+    # the more specific finding wins the audit label.
+    names_field = re.search(_acp.ANALYSIS_FIELD, text, re.IGNORECASE)
+    writes = re.search(_acp.ANALYSIS_WRITE, text, re.IGNORECASE)
+    if names_field and writes:
+        return SecurityCategory.GRADING_MANIPULATION
+    if (
+        writes
+        and re.search(_acp.ANALYSIS_ALL_OUTCOMES, text, re.IGNORECASE)
+        and re.search(_acp.ANALYSIS_COVERED, text, re.IGNORECASE)
+    ):
+        return SecurityCategory.GRADING_MANIPULATION
+    if names_field or re.search(_acp.ANALYSIS_HIDDEN_OUTCOMES, text, re.IGNORECASE):
+        return SecurityCategory.RUBRIC_EXFILTRATION
     if re.search(_GRADING, text, re.IGNORECASE):
         return SecurityCategory.GRADING_MANIPULATION
     if _contains_request_for(text, _HIDDEN_STATE):
@@ -347,15 +338,31 @@ def _rule_category(  # noqa: C901 -- ordered security rules are intentionally ex
         or re.search(_FUTURE + "|" + _SYSTEM + "|" + _RUBRIC + "|" + _ANSWER_KEY, text)
     ):
         return SecurityCategory.ROLEPLAY_BYPASS
-    encoded_hint = re.search(r"base64|hex(?:adecimal)?|rot13|encoded?|mã\s+hóa|giải\s+mã", text)
-    if encoded_hint and (
-        _BASE64_RE.search(value) or _HEX_RE.search(value) or re.search(_REQUEST, text)
-    ):
+    # Phase 1.3 — encoding. Naming an encoding is NOT suspicious on its own:
+    # "the color white is 0xffffff in hexadecimal notation" is a legitimate
+    # answer, and it used to be blocked because a scheme word plus hex-looking
+    # bytes was enough. Detection is now paired with ACT-ON-IT intent
+    # (decode/apply/follow/execute) or with a payload that decodes to a
+    # protected concept, so the vocabulary alone can never trip it.
+    encoded_hint = re.search(
+        r"base64|hex(?:adecimal)?|rot13|rot\s*13|url[\s-]?(?:en|de)cod|percent[\s-]?encod|"
+        r"leet|l33t|reversed?|backwards?|mã\s+hóa|giải\s+mã|đảo\s+ngược",
+        text,
+    )
+    acts_on_encoding = re.search(_ENCODING_INTENT, text, re.IGNORECASE)
+    has_payload = bool(_BASE64_RE.search(value) or _HEX_RE.search(value))
+    if encoded_hint and acts_on_encoding:
         return SecurityCategory.ENCODED_EXFILTRATION
-    if (_BASE64_RE.search(value) or _HEX_RE.search(value)) and re.search(
-        r"decode|execute|follow|read|giải\s*mã|thực\s*hiện|làm\s+theo", text
-    ):
+    if has_payload and acts_on_encoding:
         return SecurityCategory.ENCODED_EXFILTRATION
+    # A payload that DECODES to a protected request is an exfil attempt whatever
+    # the covering prose says. Only reversible, side-effect-free transforms are
+    # applied, and only to decide a verdict — nothing decoded is ever executed,
+    # echoed, or handed to a model.
+    if probe_encodings:
+        decoded_category = _category_from_decoded_payloads(value)
+        if decoded_category is not None:
+            return decoded_category
     if (
         last_category is not None
         and last_category is not SecurityCategory.BENIGN
@@ -393,8 +400,8 @@ def is_ambiguous_security_text(value: str) -> bool:
     if len(text) < 8:
         return False
     answer_routing_text = _canonicalize_answer_typos(text)
-    if re.search(_ANSWER_REQUEST_CUE, text, re.IGNORECASE) and re.search(
-        _ANSWER_WORK_CUE, answer_routing_text, re.IGNORECASE
+    if re.search(_arp.ANSWER_REQUEST_CUE, text, re.IGNORECASE) and re.search(
+        _arp.ANSWER_WORK_CUE, answer_routing_text, re.IGNORECASE
     ):
         return True
     suspicious = re.search(
@@ -540,10 +547,10 @@ def requested_current_question_action(value: str) -> SecurityAction | None:
     text = normalize_input(value)
     answer_routing_text = _canonicalize_answer_typos(text)
     if re.search(
-        _FUTURE + "|" + _SYSTEM + "|" + _RUBRIC + "|" + _ANSWER_KEY + "|" + _DIRECT_ANSWER_REQUEST,
+        _arp.protected_ask_alternation(_FUTURE, _SYSTEM, _RUBRIC, _ANSWER_KEY),
         answer_routing_text,
     ) or re.search(
-        _ANSWER_REFERENCE_REQUEST,
+        _arp.ANSWER_REFERENCE_REQUEST,
         answer_routing_text,
     ):
         return None
