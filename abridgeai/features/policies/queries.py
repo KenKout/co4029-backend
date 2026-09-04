@@ -142,6 +142,13 @@ async def supersede_published(
     Publishing v3 must retire v2 in the same transaction, or two rows both
     claim to be current and ``published_version`` silently picks one by
     ordering.
+
+    ``published_at`` is cleared alongside the status because
+    ``ck_policy_versions_published_at`` is a strict biconditional
+    (``status = 'published'`` ⇔ ``published_at IS NOT NULL``): an archived row
+    that kept its date would violate it and fail the publish with a 500. The
+    retirement moment is still recorded — the server onupdate stamps
+    ``updated_at`` on this same UPDATE.
     """
     stmt = select(PolicyVersion).where(
         PolicyVersion.policy_id == policy_id,
@@ -151,6 +158,7 @@ async def supersede_published(
     )
     for row in (await db.execute(stmt)).scalars().all():
         row.status = "archived"
+        row.published_at = None
 
 
 # ---------------------------------------------------------------------------
@@ -177,6 +185,10 @@ async def replace_audience(
     unchanged role keeps its original ``created_at`` — the audit trail should
     say when a role was actually added to the policy, not when the set was
     last saved.
+
+    Removal soft-deletes: PolicyAudienceRole carries SoftDeleteMixin, the
+    global hard-delete guard rejects ``session.delete()``, and the
+    soft-delete loader criteria already exclude the row from every read.
     """
     existing = {
         row.role_id: row
@@ -192,7 +204,8 @@ async def replace_audience(
 
     for role_id, row in existing.items():
         if role_id not in wanted:
-            await db.delete(row)
+            row.deleted_at = func.now()
+            row.deleted_by = actor_id
 
     for role_id in wanted - set(existing):
         db.add(

@@ -181,6 +181,12 @@ async def update_draft(
     version.updated_by = actor_id
 
     await db.flush()
+    # ``updated_at`` is a SERVER onupdate (TimestampMixin): the flush pushes the
+    # UPDATE but leaves the column unloaded on the instance, and reading it
+    # during response validation triggers a synchronous lazy load — which on an
+    # AsyncSession raises MissingGreenlet (the 500 every draft save hit). An
+    # explicit await refresh loads it greenlet-safely.
+    await db.refresh(version, attribute_names=["updated_at"])
     return PolicyVersionSummary.model_validate(version)
 
 
@@ -224,6 +230,8 @@ async def publish_version(
         db, version.policy_id, language=version.language, keep_id=version.id
     )
     await db.flush()
+    # Same server-onupdate lazy-load trap as update_draft — see there.
+    await db.refresh(version, attribute_names=["updated_at"])
     return PolicyVersionSummary.model_validate(version)
 
 
