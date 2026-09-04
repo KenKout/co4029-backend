@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from abridgeai.core.db import get_db
 from abridgeai.core.security import CurrentUser, get_current_user
+from abridgeai.features.discussions import authors as author_resolver
 from abridgeai.features.discussions import deps, notify, queries
 from abridgeai.features.discussions.models import (
     LessonDiscussionComment,
@@ -38,7 +39,6 @@ from abridgeai.features.discussions.schemas import (
     DiscussionTopicRead,
     DiscussionTopicUpdate,
 )
-from abridgeai.features.identity.api import public as identity_api
 
 router = APIRouter(tags=["discussions"])
 
@@ -90,7 +90,11 @@ async def _topic_course_or_404(
 
 
 def _topic_read(
-    topic: LessonDiscussionTopic, *, comment_count: int, can_manage: bool
+    topic: LessonDiscussionTopic,
+    *,
+    comment_count: int,
+    can_manage: bool,
+    author: DiscussionCommentAuthor | None = None,
 ) -> DiscussionTopicRead:
     return DiscussionTopicRead(
         id=topic.id,
@@ -103,6 +107,7 @@ def _topic_read(
         updated_at=topic.updated_at,
         comment_count=comment_count,
         can_manage=can_manage,
+        author=author,
     )
 
 
@@ -149,6 +154,11 @@ async def list_lesson_topics(
     viewer_can_manage = await deps.can_manage(db, current_user, course_id)
     topics = await queries.list_topics_for_lesson(db, lesson_id)
     counts = await queries.comment_counts_for_topics(db, [t.id for t in topics])
+    # One batched identity+avatar resolve for every distinct topic author, so
+    # the client can render "opened by X" without a request per row.
+    resolved = await author_resolver.resolve_authors(
+        db, [t.created_by for t in topics if t.created_by is not None]
+    )
     return DiscussionTopicList(
         can_manage=viewer_can_manage,
         topics=[
@@ -156,6 +166,7 @@ async def list_lesson_topics(
                 t,
                 comment_count=counts.get(t.id, 0),
                 can_manage=viewer_can_manage,
+                author=author_resolver.author_or_bare(resolved, t.created_by),
             )
             for t in topics
         ],
@@ -186,7 +197,13 @@ async def create_lesson_topic(
     await db.flush()
     await db.commit()
     await db.refresh(topic)
-    return _topic_read(topic, comment_count=0, can_manage=True)
+    resolved = await author_resolver.resolve_authors(db, [current_user.user_id])
+    return _topic_read(
+        topic,
+        comment_count=0,
+        can_manage=True,
+        author=author_resolver.author_or_bare(resolved, topic.created_by),
+    )
 
 
 @router.patch(
@@ -213,7 +230,15 @@ async def update_topic(
     await db.commit()
     await db.refresh(topic)
     counts = await queries.comment_counts_for_topics(db, [topic.id])
-    return _topic_read(topic, comment_count=counts.get(topic.id, 0), can_manage=True)
+    resolved = await author_resolver.resolve_authors(
+        db, [topic.created_by] if topic.created_by else []
+    )
+    return _topic_read(
+        topic,
+        comment_count=counts.get(topic.id, 0),
+        can_manage=True,
+        author=author_resolver.author_or_bare(resolved, topic.created_by),
+    )
 
 
 @router.delete(
@@ -257,22 +282,16 @@ async def list_topic_comments(
         raise deps.not_found("discussion_topic", topic_id)
     viewer_can_manage = await deps.can_manage(db, current_user, course_id)
     comments = await queries.list_comments_for_topic(db, topic_id)
-    authors = await identity_api.get_users_by_ids(
+    resolved = await author_resolver.resolve_authors(
         db, [c.author_id for c in comments]
     )
     result: list[DiscussionCommentRead] = []
     for c in comments:
-        dto = authors.get(c.author_id)
-        author = (
-            DiscussionCommentAuthor(id=c.author_id, display_name=dto.display_name)
-            if dto is not None
-            else DiscussionCommentAuthor(id=c.author_id)
-        )
         is_own = c.author_id == current_user.user_id
         result.append(
             _comment_read(
                 c,
-                author=author,
+                author=author_resolver.author_or_bare(resolved, c.author_id),
                 is_own=is_own,
                 can_delete=is_own or viewer_can_manage,
             )
@@ -326,15 +345,13 @@ async def create_comment(
     )
     await db.commit()
     await db.refresh(comment)
-    dto = (await identity_api.get_users_by_ids(db, [current_user.user_id])).get(
-        current_user.user_id
+    resolved = await author_resolver.resolve_authors(db, [current_user.user_id])
+    return _comment_read(
+        comment,
+        author=author_resolver.author_or_bare(resolved, current_user.user_id),
+        is_own=True,
+        can_delete=True,
     )
-    author = (
-        DiscussionCommentAuthor(id=current_user.user_id, display_name=dto.display_name)
-        if dto is not None
-        else DiscussionCommentAuthor(id=current_user.user_id)
-    )
-    return _comment_read(comment, author=author, is_own=True, can_delete=True)
 
 
 @router.patch(
@@ -354,15 +371,13 @@ async def update_comment(
     comment.body = payload.body
     await db.commit()
     await db.refresh(comment)
-    dto = (await identity_api.get_users_by_ids(db, [comment.author_id])).get(
-        comment.author_id
+    resolved = await author_resolver.resolve_authors(db, [comment.author_id])
+    return _comment_read(
+        comment,
+        author=author_resolver.author_or_bare(resolved, comment.author_id),
+        is_own=True,
+        can_delete=True,
     )
-    author = (
-        DiscussionCommentAuthor(id=comment.author_id, display_name=dto.display_name)
-        if dto is not None
-        else DiscussionCommentAuthor(id=comment.author_id)
-    )
-    return _comment_read(comment, author=author, is_own=True, can_delete=True)
 
 
 @router.delete(

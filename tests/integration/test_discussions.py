@@ -269,7 +269,12 @@ async def test_teacher_creates_topic_and_student_posts_comment(
     assert match is not None, "teacher got no notification for the student comment"
     assert match["category"] == "course_discussion"
     assert match["entity_type"] == "lesson_discussion_comment"
-    assert match["action_url"] == f"/courses/{g.course_slug}/learn?item={g.lesson_slug}"
+    # `&tab=discussion` is part of the contract: the learn page defaults to
+    # Lesson Notes, so without it the recipient lands on the right lesson
+    # but has to hunt for the Discussion panel the notification is about.
+    assert match["action_url"] == (
+        f"/courses/{g.course_slug}/learn?item={g.lesson_slug}&tab=discussion"
+    )
     assert "Cauchy" in str(match["body"])
 
     # no self-notification for the student
@@ -460,3 +465,61 @@ async def test_outsiders_are_invisible_and_topic_delete_cascades(
     )
     assert listed.status_code == 200
     assert listed.json()["topics"] == []
+
+
+async def test_topic_and_comment_carry_author_identity(
+    engine: AsyncEngine,
+    client: httpx.AsyncClient,
+    seeded_users: SeededUsers,
+    teacher_auth: tuple[uuid.UUID, str],
+) -> None:
+    """Topics and comments both expose a resolved author block.
+
+    Regression guard for two separate omissions found together: the topic read
+    carried no author at all (the card could not say who opened it), and the
+    comment author was built without ``avatar_url`` so the field was ALWAYS
+    null and the client fell back to initials for everyone. ``avatar_url``
+    itself is None here because the seeded user has no avatar object — the
+    assertion is that the KEY is present and the identity resolves, which is
+    what the serializer previously got wrong.
+    """
+    _, teacher_token = teacher_auth
+    g = await _seed_graph(engine, seeded_users)
+
+    created = await client.post(
+        f"/api/v1/lessons/{g.lesson_id}/discussion/topics",
+        headers=_auth(teacher_token),
+        json={"title": "Who wrote this?"},
+    )
+    assert created.status_code == 201, created.text
+    author = created.json()["author"]
+    assert author is not None, "topic create response dropped the author block"
+    assert author["id"] == str(seeded_users.teacher_id)
+    assert "avatar_url" in author
+
+    listed = await client.get(
+        f"/api/v1/lessons/{g.lesson_id}/discussion/topics",
+        headers=_auth(teacher_token),
+    )
+    assert listed.status_code == 200, listed.text
+    listed_topic = listed.json()["topics"][0]
+    assert listed_topic["author"] is not None, "topic listing dropped the author"
+    assert listed_topic["author"]["id"] == str(seeded_users.teacher_id)
+    assert "avatar_url" in listed_topic["author"]
+
+    topic_id = created.json()["id"]
+    commented = await client.post(
+        f"/api/v1/discussion/topics/{topic_id}/comments",
+        headers=_auth(teacher_token),
+        json={"body": "Me, apparently."},
+    )
+    assert commented.status_code == 201, commented.text
+    assert "avatar_url" in commented.json()["author"]
+
+    comments = await client.get(
+        f"/api/v1/discussion/topics/{topic_id}/comments",
+        headers=_auth(teacher_token),
+    )
+    assert comments.status_code == 200, comments.text
+    assert "avatar_url" in comments.json()[0]["author"]
+    assert comments.json()[0]["author"]["id"] == str(seeded_users.teacher_id)

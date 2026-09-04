@@ -44,7 +44,14 @@ _CATEGORY = "course_discussion"
 # Where the comment lives: the lesson's discussion panel on the course learn
 # page. Both students and course teachers can open it (teachers pass the
 # discussion gate via course-manage rights).
-_ACTION_URL = "/courses/{course_slug}/learn?item={lesson_slug}"
+#
+# ``&tab=discussion`` is load-bearing, not decoration: the learn page defaults
+# to the Lesson Notes tab, so without it the recipient landed on the right
+# LESSON but had to find and click "Discussion" to reach the comment the
+# notification was about. The learn route reads the param and opens that tab
+# (see the SPA's LearnSearch.tab); an unknown value falls back to the default
+# tab, so this link degrades safely if the tab set is ever renamed.
+_ACTION_URL = "/courses/{course_slug}/learn?item={lesson_slug}&tab=discussion"
 
 _SNIPPET_LEN = 120
 
