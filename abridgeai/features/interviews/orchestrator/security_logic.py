@@ -16,6 +16,10 @@ from typing import TYPE_CHECKING, Any
 
 from abridgeai.ai.llm import LLMGateway, LLMRole
 from abridgeai.ai.prompts import render_prompt
+from abridgeai.features.interviews.orchestrator.output_guard_patterns import (
+    HIGH_CONFIDENCE_INTERNAL_OUTPUT_RE,
+    INTERNAL_MARKERS,
+)
 from abridgeai.features.interviews.orchestrator.security import (
     OutputLeakageAssessment,
     ProtectedContent,
@@ -206,30 +210,12 @@ _CROSS_SESSION = (
 _BASE64_RE = re.compile(r"(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{24,}={0,2}(?![A-Za-z0-9+/])")
 _HEX_RE = re.compile(r"(?:(?:0x)?[0-9a-f]{2}[\s:,_-]*){12,}", re.IGNORECASE)
 
-_INTERNAL_MARKERS = (
-    "system prompt",
-    "developer prompt",
-    "tool definitions",
-    "tool arguments",
-    "candidate question scores",
-    "internal decision rationale",
-    "expected evidence",
-    "common misconceptions",
-    "security_policy_version",
-    "security_rules_version",
-    "security_prompt_version",
-    "output_guard_version",
-)
-
-_HIGH_CONFIDENCE_INTERNAL_OUTPUT_RE = re.compile(
-    r"(?:my|the|our)\s+(?:system|developer)\s+prompt\s+(?:is|says|contains|:)|"
-    r"(?:tool\s+(?:definitions?|arguments?)|candidate\s+question\s+scores?)\s+(?:are|:)|"
-    r"(?:internal\s+decision\s+rationale|expected\s+evidence|common\s+misconceptions)\s+"
-    r"(?:is|are|includes?|:)|"
-    r"(?:rubric|scoring|grading|outcome).{0,30}(?:weights?|threshold).{0,20}(?:is|are|:|\d)|"
-    r"security_(?:policy|rules|prompt)_version|output_guard_version",
-    re.IGNORECASE,
-)
+# Marker literals + the disclosure-frame regex live in
+# ``output_guard_patterns`` (keeps this module under the orchestrator's 800-line
+# ceiling). Re-exported under the historical private names so existing importers
+# and tests keep working.
+_INTERNAL_MARKERS = INTERNAL_MARKERS
+_HIGH_CONFIDENCE_INTERNAL_OUTPUT_RE = HIGH_CONFIDENCE_INTERNAL_OUTPUT_RE
 
 
 def normalize_input(value: str) -> str:
@@ -746,6 +732,13 @@ def assess_output_leakage(  # noqa: C901 -- ordered leak checks remain auditable
         ProtectedContent(category="internal_prompt_marker", text=marker)
         for marker in _INTERNAL_MARKERS
     ]
+    # One matcher reused across the corpus with the PROPOSED text pinned as
+    # seq2: SequenceMatcher caches its b2j index per seq2, so pinning the
+    # constant side and swapping seq1 per secret avoids rebuilding that index
+    # ~550 times (the internal-prompt corpus alone is that big once every
+    # ``*system.j2`` is loaded). Measured 373ms -> single-digit ms per call.
+    matcher = SequenceMatcher(None, "", guardable_norm, autojunk=False)
+    guardable_len = len(guardable_norm)
     for item in corpus:
         secret_norm = normalize_input(item.text)
         secret_tokens = set(_TOKEN_RE.findall(secret_norm))
@@ -764,9 +757,18 @@ def assess_output_leakage(  # noqa: C901 -- ordered leak checks remain auditable
         overlap = matched_tokens / max(1, len(secret_tokens))
         if len(secret_tokens) >= 8 and matched_tokens >= 7 and overlap >= 0.68:
             return OutputLeakageAssessment(True, item.category, fingerprint, "token_overlap")
-        if len(secret_norm) >= 48 and len(guardable_norm) >= 32:
-            ratio = SequenceMatcher(None, secret_norm, guardable_norm, autojunk=False).ratio()
-            if ratio >= 0.88:
+        if len(secret_norm) >= 48 and guardable_len >= 32:
+            matcher.set_seq1(secret_norm)
+            # ``real_quick_ratio``/``quick_ratio`` are the stdlib's own cheap
+            # UPPER bounds on ``ratio()`` (length-based, then multiset-based).
+            # Skipping when a bound is already below the threshold cannot change
+            # the verdict — it only avoids the O(n*m) diff for the vast majority
+            # of phrases that share almost nothing with the proposal.
+            if (
+                matcher.real_quick_ratio() >= 0.88
+                and matcher.quick_ratio() >= 0.88
+                and matcher.ratio() >= 0.88
+            ):
                 return OutputLeakageAssessment(True, item.category, fingerprint, "fuzzy")
     return OutputLeakageAssessment(blocked=False)
 
