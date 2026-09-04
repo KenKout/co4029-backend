@@ -112,9 +112,19 @@ services:
       - abridgeai_neo4j_logs:/logs
       - abridgeai_neo4j_plugins:/plugins
     healthcheck:
+      # Single ``$`` so COMPOSE interpolates the credentials from .env when it
+      # renders the config. The previous ``$$`` deferred expansion to the
+      # container's shell, where NEO4J_USER/NEO4J_PASSWORD do not exist (the
+      # image only receives NEO4J_AUTH, and exporting NEO4J_PASSWORD is not an
+      # option — the entrypoint maps every other NEO4J_* var to a server setting
+      # and refuses to boot on the unknown "PASSWORD" one). The probe therefore
+      # fell back to the 'abridgeai-neo4j-dev' default and failed auth every
+      # 10s. Three bad attempts trip Neo4j's AuthenticationRateLimit, which
+      # locks out the APPLICATION too even though its own credentials are
+      # correct — so a broken healthcheck was taking the KG feature down.
       test:
         - "CMD-SHELL"
-        - "cypher-shell -u $${NEO4J_USER:-neo4j} -p $${NEO4J_PASSWORD:-abridgeai-neo4j-dev} 'RETURN 1' || exit 1"
+        - "cypher-shell -u ${NEO4J_USER:-neo4j} -p ${NEO4J_PASSWORD:-abridgeai-neo4j-dev} 'RETURN 1' || exit 1"
       interval: 10s
       timeout: 10s
       retries: 20
