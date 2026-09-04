@@ -83,6 +83,13 @@ async def _security_summary_view(
         security_fallback_rate=metrics.security_fallback_rate,
         average_classification_latency_ms=metrics.average_classification_latency_ms,
         session_flagged=bool(session.session_security_flagged),
+        # Read straight off the session row: these are per-attempt provenance,
+        # NOT the current deployment's constants. ``getattr`` because some
+        # callers pass a lightweight row shim rather than the full ORM object.
+        policy_version=getattr(session, "security_policy_version", None),
+        rules_version=getattr(session, "security_rules_version", None),
+        prompt_version=getattr(session, "security_prompt_version", None),
+        output_guard_version=getattr(session, "output_guard_version", None),
     )
 
 

@@ -569,6 +569,16 @@ class SecuritySessionSummary(BaseModel):
     security_fallback_rate: float = 0.0
     average_classification_latency_ms: float | None = None
     session_flagged: bool = False
+    # Which guard actually ran for THIS attempt. The four columns are stamped on
+    # the session row at creation from the code constants (services/taking.py),
+    # so an attempt graded months ago still reports the policy that judged it
+    # rather than today's. Surfaced because a flagged session is evidence in a
+    # cohort dispute, and "flagged under which rules?" was previously
+    # unanswerable from the API — the columns were written and never read.
+    policy_version: str | None = None
+    rules_version: str | None = None
+    prompt_version: str | None = None
+    output_guard_version: str | None = None
 
 
 class InterviewSessionSummary(BaseModel):
