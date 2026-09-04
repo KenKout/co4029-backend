@@ -320,9 +320,12 @@ async def generate_question_assistance(
     # asks the candidate to define/compare, explaining it hands over the answer.
     # Refuse-and-redirect BEFORE the LLM call (the model prompt can't see the
     # whole question's intent, only the isolated term, so it can't catch this).
-    if action is SecurityAction.EXPLAIN_CURRENT_TERM and term is not None:
-        if term_is_question_subject(term, question_text):
-            return _subject_redirect(language)
+    if (
+        action is SecurityAction.EXPLAIN_CURRENT_TERM
+        and term is not None
+        and term_is_question_subject(term, question_text)
+    ):
+        return _subject_redirect(language)
 
     try:
         system_prompt = render_prompt(

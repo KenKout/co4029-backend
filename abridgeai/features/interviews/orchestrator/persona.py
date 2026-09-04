@@ -35,6 +35,7 @@ not replace the label the fallback path depends on.
 
 from __future__ import annotations
 
+import contextlib
 from dataclasses import dataclass, replace
 from enum import Enum
 
@@ -205,10 +206,10 @@ def profile_from_config(
 
     raw_opening = persona_profile_json.get("opening_style")
     if raw_opening is not None:
-        try:
+        # Unknown opening style → keep the preset value. An override that names a
+        # style this build does not know must not break persona resolution.
+        with contextlib.suppress(ValueError):
             updates["opening_style"] = OpeningStyle(raw_opening)
-        except ValueError:
-            pass  # unknown opening style → keep the preset value
 
     if not updates:
         return base
