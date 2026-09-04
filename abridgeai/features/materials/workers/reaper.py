@@ -497,7 +497,7 @@ async def _run_reconcile_quiz(*, arq_pool: Any) -> None:
             await db.commit()
 
             try:
-                await arq_pool.enqueue_job(  # type: ignore[attr-defined]
+                await arq_pool.enqueue_job(
                     "run_quiz_generation_task", actor_id, run.id
                 )
             except Exception:  # noqa: BLE001 -- log + continue; next run retries
@@ -698,7 +698,7 @@ async def _run_reconcile_interview(*, arq_pool: Any) -> None:
             await db.commit()
 
             try:
-                await arq_pool.enqueue_job(  # type: ignore[attr-defined]
+                await arq_pool.enqueue_job(
                     "run_interview_generation_task", actor_id, run.id
                 )
             except Exception:  # noqa: BLE001 -- log + continue; next run retries

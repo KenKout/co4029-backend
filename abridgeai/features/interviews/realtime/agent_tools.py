@@ -133,7 +133,7 @@ class InterviewToolsMixin:
         await _publish_state(ctx)
         # A stale assistance marker would mislabel the question reading; the
         # next utterance is the question.
-        userdata = ctx.userdata  # type: ignore[attr-defined]
+        userdata = ctx.userdata
         userdata.pending_assistant_kind = None  # type: ignore[attr-defined]
         await userdata.publish_agent_action(kind="question")  # type: ignore[attr-defined]
         return (
@@ -157,7 +157,7 @@ class InterviewToolsMixin:
         # let the model's scaffolding instinct fire mid-transition: the marker
         # then landed on the question's own reading and the transcript showed
         # the new question as a "hint".
-        userdata = ctx.userdata  # type: ignore[attr-defined]
+        userdata = ctx.userdata
         if getattr(userdata, "pending_new_question", False):
             raise ToolError(
                 "Ask the current question first — hints come after the "
@@ -223,7 +223,7 @@ class InterviewToolsMixin:
         # question away (session e972fade: end_interview fired 0.8s after the
         # advance selected Q3, the gate saw remaining=0 and allowed it, and Q3
         # was never asked).
-        userdata = ctx.userdata  # type: ignore[attr-defined]
+        userdata = ctx.userdata
         if getattr(userdata, "pending_new_question", False):
             raise ToolError(
                 "A question has already been selected and has NOT been asked "
@@ -353,7 +353,7 @@ async def _inject_todo_note(ctx: RunContext[object]) -> None:
                 f"{remaining} question(s) left in the bank — call "
                 "interview_next_question rather than ending now."
             )
-        agent = ctx.session.current_agent  # type: ignore[attr-defined]
+        agent = ctx.session.current_agent
         note = ChatMessage(role="user", content=["\n".join(lines)])
         # REPLACE the previous checklist note: appending stacked a stale
         # checklist under the fresh one, and the model had to guess which one

@@ -332,14 +332,14 @@ async def get_my_path_progress(
 
 def _to_course_summary(row: dict[str, object]) -> CourseProgressSummary:
     return CourseProgressSummary(
-        course_id=row["course_id"],  # type: ignore[arg-type]
-        slug=row["slug"],  # type: ignore[arg-type]
-        title=row["title"],  # type: ignore[arg-type]
-        status=row["status"],  # type: ignore[arg-type]
+        course_id=row["course_id"],
+        slug=row["slug"],
+        title=row["title"],
+        status=row["status"],
         completion_percent=float(row["completion_percent"]),  # type: ignore[arg-type]
-        unit_total=int(row.get("unit_total") or 0),  # type: ignore[arg-type]
-        unit_done=int(row.get("unit_done") or 0),  # type: ignore[arg-type]
-        stage_id=row.get("stage_id"),  # type: ignore[arg-type]
+        unit_total=int(row.get("unit_total") or 0),
+        unit_done=int(row.get("unit_done") or 0),
+        stage_id=row.get("stage_id"),
         is_required=bool(row["is_required"]),
         satisfied=bool(row["satisfied"]),
         is_enrolled=bool(row["is_enrolled"]),

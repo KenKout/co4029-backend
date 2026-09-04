@@ -35,7 +35,7 @@ from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
 
 from livekit import (
-    rtc,  # type: ignore[attr-defined]  # rtc is a lazy submodule; livekit ships no stubs
+    rtc,  # rtc is a lazy submodule; livekit ships no stubs
 )
 from livekit.agents import Agent, AgentSession, ChatContext, ChatMessage, get_job_context
 

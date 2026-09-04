@@ -9,7 +9,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 
 from livekit.agents import (
-    AgentSession,  # type: ignore[import-untyped]  # noqa: F401  -- annotation target
+    AgentSession,  # noqa: F401  -- annotation target
 )
 
 from abridgeai.core.observability import get_logger

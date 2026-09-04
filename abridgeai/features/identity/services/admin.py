@@ -332,8 +332,8 @@ async def _attach_student_sections(
                 name=str(row["name"]),
                 slug=str(row["slug"]),
                 status=str(row["status"]),
-                started_at=row["started_at"],  # type: ignore[arg-type]
-                completed_at=row.get("completed_at"),  # type: ignore[arg-type]
+                started_at=row["started_at"],
+                completed_at=row.get("completed_at"),
                 completed_courses=completed,
                 course_count=total,
                 completion_percent=percent,

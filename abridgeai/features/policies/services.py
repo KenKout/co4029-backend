@@ -101,7 +101,7 @@ async def policy_detail(db: AsyncSession, policy_id: UUID) -> PolicyDetail:
     return PolicyDetail(
         id=policy.id,
         slug=policy.slug,
-        category=policy.category,  # type: ignore[arg-type]
+        category=policy.category,
         audience=[PolicyAudienceRoleRead(role_id=r.id, code=r.code, name=r.name) for r in roles],
         versions=[PolicyVersionSummary.model_validate(v) for v in versions],
     )
@@ -280,7 +280,7 @@ def _published_at(version: PolicyVersion) -> datetime:
 def _document(policy: Policy, version: PolicyVersion, publisher: str | None) -> PolicyDocument:
     return PolicyDocument(
         slug=policy.slug,
-        category=policy.category,  # type: ignore[arg-type]
+        category=policy.category,
         title=version.title,
         body=version.body,
         format=version.format,
@@ -358,7 +358,7 @@ async def list_documents(
         out.append(
             PolicySummary(
                 slug=policy.slug,
-                category=policy.category,  # type: ignore[arg-type]
+                category=policy.category,
                 title=version.title,
                 language=version.language,
                 version_no=version.version_no,

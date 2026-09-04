@@ -120,7 +120,7 @@ def _clamp_int(raw: object, low: int, high: int) -> int:
     if isinstance(raw, bool):
         return low
     try:
-        value = int(raw)  # type: ignore[arg-type]
+        value = int(raw)
     except (TypeError, ValueError):
         return low
     return max(low, min(high, value))
@@ -139,7 +139,7 @@ def _coerce_drift_turns(raw: object) -> list[int]:
         if isinstance(item, bool):
             continue
         try:
-            turn = int(item)  # type: ignore[arg-type]
+            turn = int(item)
         except (TypeError, ValueError):
             continue
         if turn < 0 or turn in seen:

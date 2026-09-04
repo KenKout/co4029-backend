@@ -58,7 +58,7 @@ async def get_preprocess_report(
     units = await list_quarantine_for_version(db, version_id)
     return PreprocessReportView(
         material_version_id=version_id,
-        preprocess_mode=mode,  # type: ignore[arg-type]  # DB CHECK constrains the value set
+        preprocess_mode=mode,  # DB CHECK constrains the value set
         summary=summary if isinstance(summary, dict) else None,
         units=[QuarantinedUnit.model_validate(u) for u in units],
     )
