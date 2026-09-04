@@ -17,6 +17,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from abridgeai.features.policies.models import Policy, PolicyAudienceRole, PolicyVersion
 
+#: The universal audience. Every role is a party to the student policies —
+#: teachers and admins are people too — and an anonymous reader is treated
+#: as a student (a prospective student is exactly who reads the terms).
+STUDENT_ROLE_CODE = "student"
+
 
 async def get_policy(db: AsyncSession, policy_id: UUID) -> Policy | None:
     return await db.get(Policy, policy_id)
@@ -225,13 +230,19 @@ async def replace_audience(
 
 
 async def published_documents(
-    db: AsyncSession, *, language: str, role_ids: Sequence[UUID] | None
+    db: AsyncSession,
+    *,
+    language: str,
+    role_ids: Sequence[UUID] | None,
+    universal_role_id: UUID | None = None,
 ) -> list[tuple[Policy, PolicyVersion]]:
     """Every policy with a published version, scoped to ``role_ids``.
 
-    ``role_ids=None`` returns only policies with NO audience rows — the public
-    set, which is what an unauthenticated reader gets. A non-empty list
-    returns those plus every policy naming one of the given roles.
+    ``role_ids=None`` is the anonymous reader. A policy is visible when it
+    has NO audience rows, names one of the reader's roles, or names the
+    UNIVERSAL role (student) — student policies bind every reader, signed in
+    or not. A non-empty ``role_ids`` list adds those roles to the same
+    predicate.
 
     Takes role IDS rather than codes because resolving a code to a role is the
     roles catalogue's job, and that lives behind another feature's public API.
@@ -253,6 +264,19 @@ async def published_documents(
         )
     )
 
+    matches_universal = None
+    if universal_role_id is not None:
+        matches_universal = (
+            select(func.count())
+            .select_from(PolicyAudienceRole)
+            .where(
+                PolicyAudienceRole.policy_id == Policy.id,
+                PolicyAudienceRole.role_id == universal_role_id,
+            )
+            .correlate(Policy)
+            .scalar_subquery()
+        )
+
     if role_ids:
         matches_role = (
             select(func.count())
@@ -264,7 +288,13 @@ async def published_documents(
             .correlate(Policy)
             .scalar_subquery()
         )
-        stmt = stmt.where((has_audience == 0) | (matches_role > 0))
+        visible = (has_audience == 0) | (matches_role > 0)
+        if matches_universal is not None:
+            visible = visible | (matches_universal > 0)
+        stmt = stmt.where(visible)
+    elif matches_universal is not None:
+        # Anonymous: public set + everything naming the universal role.
+        stmt = stmt.where((has_audience == 0) | (matches_universal > 0))
     else:
         stmt = stmt.where(has_audience == 0)
 
