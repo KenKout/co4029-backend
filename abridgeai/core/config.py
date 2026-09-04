@@ -424,6 +424,17 @@ class Settings(BaseSettings):
     # Platform-level backstop for teacher policies that request termination.
     # False means repeated attempts are flagged/warned but the session continues.
     interview_security_allow_session_termination: bool = False
+    # Phase 3.1 semantic output guard: detects protected content the interviewer
+    # reworded instead of quoting, which no string comparison can see.
+    #
+    # OFF by default, on purpose. The stage only RECORDS — measurement showed
+    # paraphrased leaks and legitimate interviewer turns overlap on cosine
+    # similarity, so blocking would sometimes refuse a genuine question (see
+    # tests/unit/interviews/security/SECURITY_BASELINE.md). Paying for an embedding
+    # call on ~12% of turns to populate an audit signal is a deployment decision,
+    # not a default, and leaving it off keeps embeddings out of the request path for
+    # anyone who has not opted in. Enable it where the audit trail is wanted.
+    interview_security_semantic_guard_enabled: bool = False
 
     # Split answer analysis into a quarantined extractor (sees the raw answer,
     # holds no rubric) and a matcher (holds the rubric, sees only bounded,

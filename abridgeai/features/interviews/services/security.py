@@ -34,6 +34,10 @@ from abridgeai.features.interviews.orchestrator.security import (
     confidence_band,
 )
 from abridgeai.features.interviews.orchestrator.security_logic import assess_output_leakage
+from abridgeai.features.interviews.orchestrator.semantic_leak import (
+    assess_semantic_leakage,
+    grey_zone_leak_candidates,
+)
 from abridgeai.features.interviews.realtime import observability as obs
 
 if TYPE_CHECKING:
@@ -313,7 +317,49 @@ async def guard_student_output(
     )
     leakage = assess_output_leakage(proposed_text, protected)
     if not leakage.blocked:
-        return GuardedOutput(proposed_text, False, False, None)
+        # Phase 3.1 — the lexical guard compares strings, so protected content
+        # the AI reworded rather than quoted passes it. Only phrases already in
+        # the lexical grey zone are worth an embedding call, so an ordinary turn
+        # costs nothing extra here.
+        if not get_settings().interview_security_semantic_guard_enabled:
+            return GuardedOutput(proposed_text, False, False, None)
+        candidates = grey_zone_leak_candidates(proposed_text, protected)
+        if not candidates:
+            return GuardedOutput(proposed_text, False, False, None)
+        semantic = await assess_semantic_leakage(
+            db,
+            proposed=proposed_text,
+            candidates=candidates,
+        )
+        if not semantic.blocked:
+            return GuardedOutput(proposed_text, False, False, None)
+        # RECORD-ONLY, deliberately, and independent of guard_mode. Measured on
+        # the live embedding model, paraphrased leaks and legitimate interviewer
+        # turns on the same topic OVERLAP: benign peaks at 0.588 ("let me repeat
+        # the question: how does a transaction stay atomic across a crash?") while
+        # the weakest real leak sits at 0.496. No cosine threshold separates them,
+        # so enforcing here would sometimes replace a genuine interview question
+        # with a fallback and cost a student their turn. The event is persisted so
+        # the decision can be revisited with production evidence instead of a
+        # guess; blocking stays with the lexical checks, which are exact.
+        await record_security_event(
+            db,
+            session_id=session_id,
+            turn_key=turn_key,
+            event_type=obs.EV_SECURITY_OUTPUT_LEAKAGE_BLOCKED,
+            assessment=assessment,
+            action=SecurityAction.ALLOW,
+            attempt_count=attempt_count,
+            fallback_status=False,
+            turn_id=f"semantic:{turn_id or turn_key}",
+            protected_content_category=semantic.protected_content_category,
+        )
+        return GuardedOutput(
+            proposed_text,
+            output_leakage_blocked=False,
+            output_fallback_used=False,
+            protected_content_category=semantic.protected_content_category,
+        )
 
     enforcing = mode == "enforce" and not force_record_only
     await record_security_event(
