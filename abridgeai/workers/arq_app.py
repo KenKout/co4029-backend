@@ -34,6 +34,7 @@ from abridgeai.features.quizzes.workers import JOBS as QUIZ_JOBS
 from abridgeai.features.quizzes.workers.timing import sweep_overdue_attempts_task
 from abridgeai.features.spaced_repetition.workers import JOBS as SR_JOBS
 from abridgeai.features.spaced_repetition.workers import scan_due_cards_task
+from abridgeai.workers.audit_retention import prune_audit_logs_task
 
 
 class WorkerSettings:
@@ -85,6 +86,12 @@ class WorkerSettings:
         # Phase 6 — finalize/expire overdue in-progress quiz attempts every minute
         # so a timed quiz closes even if the student never hits submit.
         cron(sweep_overdue_attempts_task, minute=set(range(0, 60))),
+        # Prune the append-only audit stores. The HTTP middleware writes a row
+        # per request and nothing deleted one before this job, so the table grew
+        # for the deployment's whole life. Runs at 04:00, after the 02:00/02:30
+        # reporting sweeps and the 03:00 upload cleanup, so a long first prune
+        # cannot delay them. Windows are per-table runtime settings; 0 disables.
+        cron(prune_audit_logs_task, hour={4}, minute=0),
     ]
 
 

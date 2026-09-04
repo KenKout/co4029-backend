@@ -50,6 +50,7 @@ SettingGroup = Literal[
     "careerpath",
     "courses",
     "progress",
+    "audit",
 ]
 
 
@@ -580,6 +581,51 @@ _SPECS: tuple[SettingSpec, ...] = (
             "Existing courses over the cap are grandfathered (no one is "
             "force-removed); they simply cannot grow further. Must be >= the "
             "min teachers setting."
+        ),
+    ),
+    SettingSpec(
+        key="audit.http_log_retention_days",
+        group="audit",
+        type="int",
+        default=90,
+        minimum=0,
+        maximum=3650,
+        label="HTTP audit log retention (days)",
+        description=(
+            "How long request audit rows are kept before the nightly retention "
+            "sweep deletes them. The middleware writes one row per non-skipped "
+            "request, so this table is the fastest-growing one in the database "
+            "and nothing pruned it before. 0 disables pruning and keeps every "
+            "row forever."
+        ),
+    ),
+    SettingSpec(
+        key="audit.integrity_event_retention_days",
+        group="audit",
+        type="int",
+        default=90,
+        minimum=0,
+        maximum=3650,
+        label="Assessment integrity event retention (days)",
+        description=(
+            "How long quiz and interview proctoring signals (tab switches, "
+            "focus loss, disconnects) are kept. These back a post-session "
+            "integrity review, so the window should outlast any appeal period. "
+            "0 disables pruning."
+        ),
+    ),
+    SettingSpec(
+        key="audit.quiz_event_retention_days",
+        group="audit",
+        type="int",
+        default=90,
+        minimum=0,
+        maximum=3650,
+        label="Quiz audit event retention (days)",
+        description=(
+            "How long the teacher-facing quiz action trail (attempt started / "
+            "submitted / regraded / manually graded, override created) is kept. "
+            "0 disables pruning."
         ),
     ),
 )
