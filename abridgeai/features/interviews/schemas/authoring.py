@@ -73,10 +73,26 @@ GenerationRunStatusLiteral = Literal[
     "failed",
     "cancelled",
 ]
+# READ side: every value the DB CHECK still permits, so a config authored before
+# ``end_and_flag`` was withdrawn keeps serialising instead of 500-ing.
 SecurityResponsePolicyLiteral = Literal[
     "continue_and_log",
     "warn_and_continue",
     "end_and_flag",
+]
+# WRITE side: ``end_and_flag`` is NOT accepted on create/update. The runtime
+# downgrades it to warn-and-redirect whenever
+# ``interview_security_allow_session_termination`` is false (the default), and
+# even with that flag on the action only returns ``is_finished`` to the client —
+# nothing stamps ``session.status``/``ended_at``, so a learner who ignores the
+# signal simply keeps answering. A policy the platform does not enforce lets two
+# candidates in the same cohort be graded under different rules, so the API
+# refuses it at the boundary rather than accepting a promise it cannot keep.
+# Existing rows are left untouched; re-enable by restoring the value here AND
+# making END_AND_FLAG terminalise the session server-side.
+SecurityResponsePolicyWriteLiteral = Literal[
+    "continue_and_log",
+    "warn_and_continue",
 ]
 # Deepgram Aura-2 English voices offered in the teacher UI. MUST stay in sync
 # with ``services.narration.ALLOWED_TTS_VOICES`` (the runtime allow-list) and
@@ -186,7 +202,7 @@ class InterviewConfigCreate(BaseModel):
     max_follow_ups_per_question: int = Field(default=2, ge=0, le=50)
     max_hints_per_question: int = Field(default=3, ge=0, le=10)
     supplementary_instructions: str | None = None
-    security_response_policy: SecurityResponsePolicyLiteral = "warn_and_continue"
+    security_response_policy: SecurityResponsePolicyWriteLiteral = "warn_and_continue"
     security_max_consecutive_attempts: int = Field(default=3, ge=2, le=20)
     security_custom_refusal_en: str | None = Field(default=None, max_length=500)
     security_custom_refusal_vi: str | None = Field(default=None, max_length=500)
@@ -218,7 +234,7 @@ class InterviewConfigUpdate(BaseModel):
     max_follow_ups_per_question: int | None = Field(default=None, ge=0, le=50)
     max_hints_per_question: int | None = Field(default=None, ge=0, le=10)
     supplementary_instructions: str | None = None
-    security_response_policy: SecurityResponsePolicyLiteral | None = None
+    security_response_policy: SecurityResponsePolicyWriteLiteral | None = None
     security_max_consecutive_attempts: int | None = Field(default=None, ge=2, le=20)
     security_custom_refusal_en: str | None = Field(default=None, max_length=500)
     security_custom_refusal_vi: str | None = Field(default=None, max_length=500)
@@ -714,5 +730,6 @@ __all__ = [
     "InterviewTranscriptTurn",
     "ReviewStatusLiteral",
     "SecurityResponsePolicyLiteral",
+    "SecurityResponsePolicyWriteLiteral",
     "SecuritySessionSummary",
 ]
