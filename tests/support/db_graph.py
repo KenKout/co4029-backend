@@ -70,19 +70,25 @@ async def _append_only_tables(session: Any) -> set[str]:
 
     The trigger refuses UPDATE unconditionally and DELETE unless
     ``app.audit_maintenance = 'on'``. Both matter here, because an audit row
-    written by one test blocks the NEXT test's purge:
+    written by one test blocks the NEXT test's purge, and the four guarded
+    tables reach live rows through every FK flavour:
 
-    * ``system_setting_changes.actor_id`` and ``http_audit_log.user_id`` are
-      nullable FKs to ``users.id``, so the closure walk drags these tables in
-      and the explicit DELETE trips the maintenance guard.
-    * Both FKs are ``ON DELETE SET NULL``, so even skipping them is not enough —
-      deleting the parent ``users`` row makes Postgres issue the UPDATE itself,
-      which the trigger rejects outright.
+    * ``SET NULL`` (``system_setting_changes.actor_id``,
+      ``http_audit_log.user_id``, ``quiz_audit_events.actor_user_id``) — even
+      SKIPPING the table is not enough, because deleting the parent makes
+      Postgres issue the severing UPDATE itself, which the trigger rejects
+      outright.
+    * ``CASCADE`` (``assessment_integrity_events.student_id``, NOT NULL) —
+      Postgres would issue the DELETE itself, which needs the scope.
+    * ``NO ACTION`` (``quiz_audit_events.quiz_id``, NOT NULL) — the audit row
+      BLOCKS the parent delete outright until it is removed first.
 
-    So the purge both skips them (below) and runs inside the maintenance scope
-    (see ``hard_delete_graph``), which is exactly the scope's purpose: retention
-    cleanup. Discovered from the live catalog for the same reason the FK graph
-    is — a new append-only table is handled the day its migration lands.
+    So the purge skips these tables in the closure walk (phase 1) and then
+    deletes their referencing rows explicitly in phase 2b, all inside the
+    maintenance scope — which is exactly the scope's purpose: retention cleanup.
+    Discovered from the live catalog for the same reason the FK graph is: a new
+    append-only table is handled the day its migration lands (migration 0106
+    added two without touching this file).
     """
     rows = (
         await session.execute(
