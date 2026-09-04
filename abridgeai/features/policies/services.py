@@ -150,6 +150,7 @@ async def open_new_draft(
         changelog=payload.changelog,
         actor_id=actor_id,
     )
+    await db.refresh(version, attribute_names=["updated_at"])
     return PolicyVersionSummary.model_validate(version)
 
 

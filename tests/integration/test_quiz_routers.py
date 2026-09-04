@@ -46,6 +46,7 @@ from abridgeai.core.db import Base, get_db
 from abridgeai.core.security import create_access_token, generate_token, hash_secret
 from abridgeai.features.quizzes.routers import authoring_router, learner_router
 from abridgeai.features.quizzes.routers.authoring import get_arq_pool
+from tests.support.db_graph import hard_delete_graph
 
 for _stub_name in ("interview_configs", "learning_materials", "learning_material_versions"):
     if _stub_name not in Base.metadata.tables:
@@ -174,72 +175,14 @@ async def scenario(
     yield {"course_id": seeded_users.course_id, "module_id": module_id}
 
     async with engine.begin() as conn:
+        await hard_delete_graph(conn, "modules", [str(module_id)])
         await conn.execute(
             text(
-                "DELETE FROM quiz_attempt_answers WHERE attempt_id IN ("
-                "  SELECT id FROM quiz_attempts WHERE quiz_id IN ("
-                "    SELECT id FROM quizzes WHERE module_id = :m"
-                "  )"
-                ")"
+                "DELETE FROM course_enrollments "
+                "WHERE course_id = :c AND student_id = :s"
             ),
-            {"m": module_id},
+            {"c": seeded_users.course_id, "s": seeded_users.student_id},
         )
-        await conn.execute(
-            text(
-                "DELETE FROM quiz_attempts WHERE quiz_id IN ("
-                "  SELECT id FROM quizzes WHERE module_id = :m"
-                ")"
-            ),
-            {"m": module_id},
-        )
-        await conn.execute(
-            text(
-                "DELETE FROM quiz_question_revisions WHERE question_id IN ("
-                "  SELECT id FROM quiz_questions WHERE quiz_id IN ("
-                "    SELECT id FROM quizzes WHERE module_id = :m"
-                "  )"
-                ")"
-            ),
-            {"m": module_id},
-        )
-        await conn.execute(
-            text(
-                "DELETE FROM quiz_question_options WHERE question_id IN ("
-                "  SELECT id FROM quiz_questions WHERE quiz_id IN ("
-                "    SELECT id FROM quizzes WHERE module_id = :m"
-                "  )"
-                ")"
-            ),
-            {"m": module_id},
-        )
-        await conn.execute(
-            text(
-                "DELETE FROM quiz_questions WHERE quiz_id IN ("
-                "  SELECT id FROM quizzes WHERE module_id = :m"
-                ")"
-            ),
-            {"m": module_id},
-        )
-        await conn.execute(
-            text("DELETE FROM module_items WHERE module_id = :m"),
-            {"m": module_id},
-        )
-        await conn.execute(
-            text("DELETE FROM generation_runs WHERE module_id = :m"),
-            {"m": module_id},
-        )
-        await conn.execute(
-            text(
-                "DELETE FROM quiz_source_lessons WHERE quiz_id IN "
-                "(SELECT id FROM quizzes WHERE module_id = :m)"
-            ),
-            {"m": module_id},
-        )
-        await conn.execute(
-            text("DELETE FROM quizzes WHERE module_id = :m"),
-            {"m": module_id},
-        )
-        await conn.execute(text("DELETE FROM modules WHERE id = :m"), {"m": module_id})
 
 
 def _auth(token: str) -> dict[str, str]:
