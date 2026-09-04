@@ -45,6 +45,7 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
+from abridgeai.core.audit.maintenance import audit_maintenance
 from abridgeai.core.config import get_settings
 from abridgeai.core.db import get_db
 from abridgeai.core.exceptions import NotFoundError
@@ -181,6 +182,11 @@ async def _clean_settings(engine: AsyncEngine) -> AsyncIterator[None]:
 
     async def _purge() -> None:
         async with engine.begin() as conn:
+            # system_setting_changes is append-only (migration 0105 trigger):
+            # DELETE is refused unless the transaction opts into the audit
+            # maintenance scope first. A test fixture pruning its own probe rows
+            # is exactly the retention-style caller that scope exists for.
+            await audit_maintenance(conn)
             await conn.execute(
                 text("DELETE FROM system_setting_changes WHERE setting_key = ANY(:k)"),
                 {"k": keys},
@@ -210,6 +216,8 @@ async def other_org(engine: AsyncEngine) -> AsyncIterator[uuid.UUID]:
         )
     yield org_id
     async with engine.begin() as conn:
+        # Append-only audit store — same opt-in as the key purge above.
+        await audit_maintenance(conn)
         await conn.execute(
             text("DELETE FROM system_setting_changes WHERE organization_id = :id"),
             {"id": org_id},

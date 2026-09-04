@@ -159,8 +159,8 @@ async def test_system_setting_changes_update_is_rejected(
         await conn.execute(
             text(
                 "INSERT INTO system_setting_changes "
-                "(id, setting_key, scope, after_value_json, reason, changed_by) "
-                "VALUES (:id, 'immutability.probe', 'global', "
+                "(id, setting_key, scope, action, after_value_json, reason, actor_id) "
+                "VALUES (:id, 'immutability.probe', 'global', 'set', "
                 "CAST('1' AS jsonb), 'initial reason', :actor)"
             ),
             {"id": row_id, "actor": seeded_users.admin_id},
