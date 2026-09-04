@@ -18,6 +18,8 @@ from typing import Any
 
 from sqlalchemy import text
 
+from abridgeai.core.audit.maintenance import audit_maintenance
+
 
 async def _load_fk_graph(session: Any) -> dict[str, list[tuple[str, str]]]:
     """``parent_table -> [(child_table, child_fk_column), ...]`` for public FKs.
@@ -63,6 +65,41 @@ async def _tables_with_id_pk(session: Any) -> set[str]:
     return set(rows)
 
 
+async def _append_only_tables(session: Any) -> set[str]:
+    """Tables guarded by the ``audit_log_immutable`` trigger.
+
+    The trigger refuses UPDATE unconditionally and DELETE unless
+    ``app.audit_maintenance = 'on'``. Both matter here, because an audit row
+    written by one test blocks the NEXT test's purge:
+
+    * ``system_setting_changes.actor_id`` and ``http_audit_log.user_id`` are
+      nullable FKs to ``users.id``, so the closure walk drags these tables in
+      and the explicit DELETE trips the maintenance guard.
+    * Both FKs are ``ON DELETE SET NULL``, so even skipping them is not enough —
+      deleting the parent ``users`` row makes Postgres issue the UPDATE itself,
+      which the trigger rejects outright.
+
+    So the purge both skips them (below) and runs inside the maintenance scope
+    (see ``hard_delete_graph``), which is exactly the scope's purpose: retention
+    cleanup. Discovered from the live catalog for the same reason the FK graph
+    is — a new append-only table is handled the day its migration lands.
+    """
+    rows = (
+        await session.execute(
+            text(
+                """
+                SELECT DISTINCT tg.tgrelid::regclass::text AS table_name
+                FROM pg_trigger tg
+                JOIN pg_proc p ON p.oid = tg.tgfoid
+                WHERE NOT tg.tgisinternal
+                  AND p.proname = 'audit_log_immutable'
+                """
+            )
+        )
+    ).scalars()
+    return set(rows)
+
+
 async def _nullable_columns(session: Any) -> set[tuple[str, str]]:
     rows = (
         await session.execute(
@@ -102,6 +139,15 @@ async def hard_delete_graph(  # noqa: C901 -- three-phase FK-cycle walk reads be
     graph = await _load_fk_graph(session)
     has_id_pk = await _tables_with_id_pk(session)
     nullable = await _nullable_columns(session)
+    append_only = await _append_only_tables(session)
+    if append_only:
+        # Enter the retention-maintenance scope for this transaction (the same
+        # opt-in production retention jobs use). Deleting a seeded user drags an
+        # ``ON DELETE SET NULL`` into the append-only audit tables, and their
+        # trigger rejects that UPDATE outright — so the purge cannot complete
+        # outside this scope once any test has written an audit row. SET LOCAL
+        # means the permission dies with the transaction.
+        await audit_maintenance(session)
 
     # --- Phase 1: collect the doomed closure -----------------------------
     closure: dict[str, set[str]] = {root_table: set(root_ids)}
@@ -111,6 +157,11 @@ async def hard_delete_graph(  # noqa: C901 -- three-phase FK-cycle walk reads be
         for child, col in graph.get(table, ()):
             if child not in has_id_pk:
                 continue  # link table: no PK, nothing can reference it
+            if child in append_only:
+                # Immutable audit trail: cannot be UPDATEd or DELETEd here. Its
+                # FK into the doomed parent is ON DELETE SET NULL, so Postgres
+                # severs the link itself when the parent goes.
+                continue
             child_ids = {
                 str(v)
                 for v in (
@@ -176,6 +227,26 @@ async def hard_delete_graph(  # noqa: C901 -- three-phase FK-cycle walk reads be
             if child in closure and child != parent and (parent, child, col) not in severed:
                 blocked[parent].add(child)
 
+    # --- Phase 2b: delete append-only rows pointing at doomed parents -----
+    # These tables are skipped by the closure walk (their trigger forbids the
+    # UPDATE that phase 2 would use to sever), but their ``ON DELETE SET NULL``
+    # FKs would still make Postgres attempt that same forbidden UPDATE when the
+    # parent row goes. Deleting the referencing rows first — legal inside the
+    # maintenance scope set above — removes the edge entirely.
+    for parent, edges in graph.items():
+        if parent not in closure:
+            continue
+        for child, col in edges:
+            if child not in append_only:
+                continue
+            await session.execute(
+                text(
+                    f"DELETE FROM {child} "  # noqa: S608 -- identifiers come from information_schema
+                    f"WHERE {col} = ANY(CAST(:ids AS uuid[]))"
+                ),
+                {"ids": list(closure[parent])},
+            )
+
     remaining = set(closure)
     while remaining:
         ready = [t for t in remaining if not (blocked[t] & remaining)]
@@ -185,6 +256,8 @@ async def hard_delete_graph(  # noqa: C901 -- three-phase FK-cycle walk reads be
             # Link tables referencing this one go first (they carry no PK and
             # are not part of the closure).
             for child, col in graph.get(table, ()):
+                if child in append_only:
+                    continue  # immutable audit trail — see _append_only_tables
                 if child not in has_id_pk:
                     await session.execute(
                         text(

@@ -73,6 +73,7 @@ import abridgeai.features.materials.models  # noqa: F401  -- register learning_*
 import abridgeai.features.quizzes.models  # noqa: F401  -- register quiz_attempts
 from abridgeai.ai.llm import LLMGateway, LLMRole
 from abridgeai.ai.llm.audit import write_ai_model_call
+from abridgeai.ai.llm.gateway import LLMResult
 from abridgeai.core.config import get_settings
 from abridgeai.core.db import Base, get_db
 from abridgeai.core.security import create_access_token, generate_token, hash_secret
@@ -883,18 +884,49 @@ def llm_mocks(scenario: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> dict
     )
 
     # Spy on the gateway: the test must prove no STT call ever happens.
-    real_generate = LLMGateway.generate_json
-
-    async def _spy_generate_json(
+    #
+    # This records the role and returns a deterministic payload WITHOUT calling
+    # the real gateway. It used to delegate to ``LLMGateway.generate_json``,
+    # which issued a live HTTP request to ``LLM_BASE_URL`` — an unreachable LAN
+    # endpoint in CI. Stages that swallow LLM failures (``classify_intent`` and
+    # ``assess_security`` are best-effort by design) then sat on the 240s
+    # interactive timeout instead of failing, so these two tests took ~210s each
+    # and looked like a hang. The assertions only ever inspect WHICH roles were
+    # invoked, never the response, so a local fake is equivalent and offline.
+    async def _fake_generate_json(
         self: LLMGateway,
         *,
         role: LLMRole,
+        stage_name: str | None = None,
+        pipeline_run_id: UUID | None = None,
         **kwargs: Any,
     ) -> Any:
+        del self, kwargs
         captured["gateway_roles"].append(role)
-        return await real_generate(self, role=role, **kwargs)
+        return LLMResult(
+            role=role,
+            tier=None,
+            model_name="fake-model",
+            base_url="https://fake.test/v1",
+            stage_name=stage_name,
+            pipeline_run_id=pipeline_run_id,
+            request_payload={"role": role.value},
+            response_payload={"role": role.value},
+            # Empty dict: every caller of this fake parses defensively and falls
+            # back to its deterministic verdict, which is the behaviour these
+            # tests exercise. Returning a canned intent/security verdict instead
+            # would silently assert the model's opinion rather than the
+            # fallback path.
+            content_json={},
+            input_tokens=10,
+            output_tokens=20,
+            total_tokens=30,
+            cached_input_tokens=None,
+            latency_ms=1,
+            estimated_cost_usd=Decimal("0"),
+        )
 
-    monkeypatch.setattr(LLMGateway, "generate_json", _spy_generate_json)
+    monkeypatch.setattr(LLMGateway, "generate_json", _fake_generate_json)
 
     return captured
 
