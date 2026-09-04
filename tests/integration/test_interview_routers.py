@@ -17,11 +17,13 @@ Smoke coverage of the seven learner + fourteen authoring endpoints:
 
 from __future__ import annotations
 
+import itertools
 import json
 import re
 import uuid
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -60,6 +62,7 @@ from abridgeai.features.interviews.routers.authoring import (
     get_arq_pool as get_authoring_arq_pool,
 )
 from abridgeai.features.interviews.routers.learner import get_arq_pool as get_learner_arq_pool
+from tests.support.db_graph import hard_delete_graph
 
 for _stub_name in ("learning_materials", "learning_material_versions"):
     if _stub_name not in Base.metadata.tables:
@@ -194,9 +197,13 @@ async def scenario(
         await conn.execute(
             text(
                 "INSERT INTO modules (id, course_id, title, position, status) "
-                "VALUES (:m, :c, 'Interview Test Module', 1, 'draft')"
+                "VALUES (:m, :c, 'Interview Test Module', :pos, 'draft')"
             ),
-            {"m": module_id, "c": seeded_users.course_id},
+            {
+                "m": module_id,
+                "c": seeded_users.course_id,
+                "pos": next(_MODULE_POSITIONS),
+            },
         )
         # BR gate: interview taking is a course-item flow — the student must
         # be enrolled for the learner reads to resolve.
@@ -212,87 +219,85 @@ async def scenario(
     yield {"course_id": seeded_users.course_id, "module_id": module_id}
 
     async with engine.begin() as conn:
-        await conn.execute(
-            text(
-                "DELETE FROM interview_session_messages WHERE session_id IN ("
-                "  SELECT id FROM interview_sessions WHERE interview_config_id IN ("
-                "    SELECT id FROM interview_configs WHERE module_id = :m"
-                "  )"
-                ")"
-            ),
-            {"m": module_id},
-        )
-        await conn.execute(
-            text(
-                "DELETE FROM interview_session_questions WHERE session_id IN ("
-                "  SELECT id FROM interview_sessions WHERE interview_config_id IN ("
-                "    SELECT id FROM interview_configs WHERE module_id = :m"
-                "  )"
-                ")"
-            ),
-            {"m": module_id},
-        )
-        await conn.execute(
-            text(
-                "DELETE FROM interview_outcome_evaluations WHERE session_id IN ("
-                "  SELECT id FROM interview_sessions WHERE interview_config_id IN ("
-                "    SELECT id FROM interview_configs WHERE module_id = :m"
-                "  )"
-                ")"
-            ),
-            {"m": module_id},
-        )
-        await conn.execute(
-            text(
-                "DELETE FROM gap_reports WHERE source_interview_session_id IN ("
-                "  SELECT id FROM interview_sessions WHERE interview_config_id IN ("
-                "    SELECT id FROM interview_configs WHERE module_id = :m"
-                "  )"
-                ")"
-            ),
-            {"m": module_id},
-        )
-        await conn.execute(
-            text(
-                "DELETE FROM interview_sessions WHERE interview_config_id IN ("
-                "  SELECT id FROM interview_configs WHERE module_id = :m"
-                ")"
-            ),
-            {"m": module_id},
-        )
-        await conn.execute(
-            text(
-                "DELETE FROM interview_questions WHERE interview_config_id IN ("
-                "  SELECT id FROM interview_configs WHERE module_id = :m"
-                ")"
-            ),
-            {"m": module_id},
-        )
-        await conn.execute(
-            text(
-                "DELETE FROM interview_outcomes WHERE interview_config_id IN ("
-                "  SELECT id FROM interview_configs WHERE module_id = :m"
-                ")"
-            ),
-            {"m": module_id},
-        )
-        await conn.execute(
-            text("DELETE FROM module_items WHERE module_id = :m"),
-            {"m": module_id},
-        )
-        await conn.execute(
-            text("DELETE FROM generation_runs WHERE module_id = :m"),
-            {"m": module_id},
-        )
-        await conn.execute(
-            text("DELETE FROM interview_configs WHERE module_id = :m"),
-            {"m": module_id},
-        )
-        await conn.execute(text("DELETE FROM modules WHERE id = :m"), {"m": module_id})
+        # Walk the live FK graph from the module instead of hand-rolling the
+        # delete chain. The hand-rolled version listed eight tables in a fixed
+        # order and broke the moment migration 0106 made
+        # ``assessment_integrity_events`` append-only: deleting the parent
+        # interview_sessions fired that table's ON DELETE CASCADE, the
+        # audit_log_immutable trigger refused it, and the whole teardown
+        # transaction aborted. The module row then survived, so every later test
+        # in the run collided on modules_course_id_position_key at
+        # (course_id, position) = (seeded course, 1) — 15 UniqueViolation errors
+        # from ONE aborted teardown. hard_delete_graph enters the retention
+        # maintenance scope and skips append-only tables, and it picks up new
+        # dependent tables the day their migration lands.
+        await hard_delete_graph(conn, "modules", [str(module_id)])
 
 
 def _auth(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
+
+
+# Every test in this file hangs its module off the SHARED seeded course, and
+# ``modules`` has a live unique index on (course_id, position). A hardcoded
+# position 1 therefore made all 35 tests contend for one slot: a single leaked
+# module row (or an overlapping transaction) turned into a UniqueViolation at the
+# NEXT test's setup, and two connections taking FK KEY SHARE locks on that one
+# row deadlocked outright ("while locking tuple in relation modules"). Handing
+# each test its own position removes the contention and makes a leak harmless
+# instead of cascading. Offset high enough to clear any module the seed or a
+# sibling suite creates on the same course.
+_MODULE_POSITIONS = itertools.count(9000)
+
+
+@pytest.fixture(autouse=True)
+def _offline_llm_gateway(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Never let this file reach a real LLM endpoint.
+
+    20 of the 35 tests POST to ``/respond``, which runs the security classifier
+    and the intent stage. Both are best-effort by design — they swallow LLM
+    failures and fall back to deterministic rules — so against an unreachable
+    LLM_BASE_URL they did not fail, they sat on the 240s interactive timeout.
+    One such test then aborted mid-transaction with "Event loop is closed" (httpx
+    pool torn down under it), its fixture teardown never ran, the module row
+    survived, and every later test collided on modules_course_id_position_key.
+    Same root cause as tests/integration/test_interviews_e2e.py (commit f98442a).
+
+    Returning an empty ``content_json`` is deliberate: every caller parses
+    defensively and takes its rule-based fallback, which is the behaviour these
+    router tests assert. Tests that need a specific gateway behaviour (e.g. the
+    followup-stage failure case) patch ``generate_json`` again inside the test
+    and win, because their patch is applied after this fixture's.
+    """
+    from abridgeai.ai.llm import gateway as gateway_module  # noqa: PLC0415
+
+    async def _fake_generate_json(
+        _self: object,
+        *,
+        role: object,
+        stage_name: str | None = None,
+        pipeline_run_id: object = None,
+        **_kwargs: object,
+    ) -> object:
+        return gateway_module.LLMResult(
+            role=role,  # type: ignore[arg-type]
+            tier=None,
+            model_name="fake-model",
+            base_url="https://fake.test/v1",
+            stage_name=stage_name,
+            pipeline_run_id=pipeline_run_id,  # type: ignore[arg-type]
+            request_payload={},
+            response_payload={},
+            content_json={},
+            input_tokens=1,
+            output_tokens=1,
+            total_tokens=2,
+            cached_input_tokens=None,
+            latency_ms=1,
+            estimated_cost_usd=Decimal("0"),
+        )
+
+    monkeypatch.setattr(gateway_module.LLMGateway, "generate_json", _fake_generate_json)
 
 
 # ---------------------------------------------------------------------------
