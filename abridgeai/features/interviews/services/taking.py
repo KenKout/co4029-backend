@@ -53,6 +53,10 @@ from abridgeai.features.interviews.orchestrator.interviewer_identity import (
     identity_from_config,
 )
 from abridgeai.features.interviews.orchestrator.security import (
+    OUTPUT_GUARD_VERSION,
+    SECURITY_POLICY_VERSION,
+    SECURITY_PROMPT_VERSION,
+    SECURITY_RULES_VERSION,
     SecurityAction,
     SecurityAssessment,
     SecurityCategory,
@@ -261,6 +265,16 @@ async def start_session(
         input_mode="hybrid",
         onboarding_stage="identity_check",
         interview_language=normalize_language(language),
+        # Stamp the security provenance from the CODE constants at attempt time.
+        # These four columns only had a migration ``server_default``, so every
+        # session claimed the baseline versions no matter which rules actually
+        # ran — while ``interview_security_events`` recorded the real ones from
+        # the same constants. An attempt is graded under the policy live when it
+        # started, so the verdict is only defensible if the row says which.
+        security_policy_version=SECURITY_POLICY_VERSION,
+        security_rules_version=SECURITY_RULES_VERSION,
+        security_prompt_version=SECURITY_PROMPT_VERSION,
+        output_guard_version=OUTPUT_GUARD_VERSION,
     )
     db.add(session)
     await flush_or_conflict(db)
@@ -1782,6 +1796,14 @@ async def _legacy_advance(
             session_id=session.id,
             config_id=session.interview_config_id,
             turn_key=effective_turn_key,
+            # One turn can guard BOTH the follow-up and the next question, and
+            # ``record_security_event`` dedupes on
+            # ``(session_id, turn_id, event_type)`` with ``turn_id`` defaulting
+            # to ``turn_key``. Without a distinct turn_id the second leakage in
+            # the same turn is silently dropped from the audit log (the text is
+            # still guarded, only the evidence disappears). Mirrors the existing
+            # ``transition:``/``transition-final:`` key namespacing.
+            turn_id=f"followup:{effective_turn_key}",
             proposed_text=followup_text,
             fallback_text=fallback_followup,
             allowed_question_ids=([current_question.id] if current_question else []),
@@ -1873,6 +1895,9 @@ async def _legacy_advance(
         session_id=session.id,
         config_id=session.interview_config_id,
         turn_key=effective_turn_key,
+        # Distinct from the ``followup:`` guard above so both leakage events in
+        # one turn survive the (session_id, turn_id, event_type) dedupe.
+        turn_id=f"next-question:{effective_turn_key}",
         proposed_text=next_question.prompt_text,
         fallback_text=(
             "Tôi có thể nhắc lại hoặc giải thích câu hỏi hiện tại."

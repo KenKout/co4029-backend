@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 from uuid import UUID
 
-from sqlalchemy import case, func, select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
 from abridgeai.core.config import get_settings
@@ -365,7 +365,16 @@ async def get_security_session_metrics(
         (InterviewSecurityEvent.event_type == obs.EV_SECURITY_OUTPUT_LEAKAGE_BLOCKED)
         & InterviewSecurityEvent.fallback_status.is_(True)
     )
-    fallbacks = func.sum(case((InterviewSecurityEvent.fallback_status.is_(True), 1), else_=0))
+    # ``security_fallback_rate`` is the share of CLASSIFIER assessments that
+    # fell back to the deterministic verdict, so both sides of the ratio must
+    # come from the same event stream. Counting ``fallback_status`` across ALL
+    # event types mixed in ``output_leakage_blocked`` rows (which set the flag
+    # when the guard substitutes safe text) and produced rates above 1.0, or a
+    # non-zero rate on a session whose classifier never failed once.
+    fallbacks = func.count().filter(
+        (InterviewSecurityEvent.event_type == obs.EV_SECURITY_ASSESSED)
+        & InterviewSecurityEvent.fallback_status.is_(True)
+    )
     row = (
         await db.execute(
             select(

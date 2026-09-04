@@ -16,6 +16,27 @@ class _ORMModel(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+# ── Author identity (shared by topics + comments) ─────────────────────────
+
+
+class DiscussionCommentAuthor(BaseModel):
+    """Minimal author identity shown beside a topic or a comment.
+
+    Declared above the topic shapes because ``DiscussionTopicRead`` embeds it;
+    the name keeps its original ``Comment`` spelling so existing importers and
+    the generated client types do not churn.
+
+    ``avatar_url`` is a short-lived presigned GET URL minted per request by
+    :mod:`abridgeai.features.discussions.authors` — never a raw bucket/key.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    display_name: str | None = None
+    avatar_url: str | None = None
+
+
 # ── Topics ────────────────────────────────────────────────────────────────
 
 
@@ -44,6 +65,10 @@ class DiscussionTopicRead(_ORMModel):
     ``comment_count`` is filled by the query layer (batched), not stored.
     ``can_manage`` is set per-request by the router so the client knows
     whether to show edit/close/delete controls — never persisted.
+
+    ``author`` is the resolved identity behind ``created_by`` (display name +
+    presigned avatar), so the client can attribute a topic without a second
+    round-trip per row. ``None`` when ``created_by`` is NULL.
     """
 
     id: UUID
@@ -56,6 +81,7 @@ class DiscussionTopicRead(_ORMModel):
     updated_at: datetime
     comment_count: int = 0
     can_manage: bool = False
+    author: DiscussionCommentAuthor | None = None
 
 
 class DiscussionTopicList(BaseModel):
@@ -87,16 +113,6 @@ class DiscussionCommentUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     body: str = Field(min_length=1, max_length=5_000)
-
-
-class DiscussionCommentAuthor(BaseModel):
-    """Minimal author identity shown beside a comment."""
-
-    model_config = ConfigDict(from_attributes=True)
-
-    id: UUID
-    display_name: str | None = None
-    avatar_url: str | None = None
 
 
 class DiscussionCommentRead(_ORMModel):
