@@ -95,6 +95,22 @@ async def test_time_limit_breached_without_transcript_is_abandoned():
     arq.enqueue_job.assert_not_awaited()
 
 
+def _patch_recovery_counter(*, attempt: int | None):
+    """Stub the SQL attempt counter, returning ``attempt`` as the new count.
+
+    The counter is a conditional ``jsonb_set`` UPDATE (see
+    ``queries.sessions.stamp_evaluation_recovery_attempt``) so it cannot clobber a
+    verdict committed concurrently; its SQL is pinned in
+    ``tests/integration/test_interview_recovery_metadata_isolation.py``. Here we
+    only care what the service does with the count it gets back.
+    """
+    return patch.object(
+        lifecycle_service.sessions_queries,
+        "stamp_evaluation_recovery_attempt",
+        AsyncMock(return_value=attempt),
+    )
+
+
 @pytest.mark.asyncio
 async def test_recover_stalled_evaluation_uses_per_attempt_job_id():
     """Recovery must NOT reuse the session-scoped job ID.
@@ -112,6 +128,7 @@ async def test_recover_stalled_evaluation_uses_per_attempt_job_id():
     arq.enqueue_job.return_value = object()
     with (
         patch(f"{_LIFECYCLE}.utcnow", return_value=_NOW),
+        _patch_recovery_counter(attempt=1),
         patch.object(
             lifecycle_service.sessions_queries,
             "list_pending_evaluation_sessions",
@@ -146,6 +163,7 @@ async def test_recovery_counts_its_attempt_before_enqueueing():
     arq.enqueue_job.return_value = object()
     with (
         patch(f"{_LIFECYCLE}.utcnow", return_value=_NOW),
+        _patch_recovery_counter(attempt=1) as stamp,
         patch.object(
             lifecycle_service.sessions_queries,
             "list_pending_evaluation_sessions",
@@ -154,12 +172,41 @@ async def test_recovery_counts_its_attempt_before_enqueueing():
     ):
         await lifecycle_service.recover_stalled_evaluations(db, arq_pool=arq)
 
-    recovery = session.internal_summary_json["evaluation_recovery"]
-    assert recovery["attempts"] == 1
-    assert recovery["last_attempt_at"] == _NOW.isoformat()
-    # The existing failure note is left intact until a verdict actually lands.
+    stamp.assert_awaited_once_with(db, session.id, now=_NOW)
+    # Charged BEFORE the handoff: the enqueue can only have run after the count.
+    assert stamp.await_args is not None
+    arq.enqueue_job.assert_awaited_once()
+    # The existing failure note is left intact until a verdict actually lands —
+    # the counter writes only its own sub-key, so nothing else is touched.
     assert session.internal_summary_json["evaluation_failure"]["message"] == "boom"
-    db.commit.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_session_graded_before_the_charge_is_not_redriven():
+    """The counter refuses (``None``) once a verdict exists, so we stop there.
+
+    The candidate query runs a grace window earlier, so the evaluation this sweep
+    means to repair may have finished in the meantime. Enqueueing anyway starts a
+    second grader against a published verdict.
+    """
+    session = _make_session(started_at=_NOW - timedelta(hours=1))
+    session.status = "failed"
+    session.ended_at = _NOW - timedelta(minutes=30)
+    session.internal_summary_json = {}
+    db, arq = AsyncMock(), AsyncMock()
+    with (
+        patch(f"{_LIFECYCLE}.utcnow", return_value=_NOW),
+        _patch_recovery_counter(attempt=None),
+        patch.object(
+            lifecycle_service.sessions_queries,
+            "list_pending_evaluation_sessions",
+            AsyncMock(return_value=[session]),
+        ),
+    ):
+        count = await lifecycle_service.recover_stalled_evaluations(db, arq_pool=arq)
+
+    assert count == 0
+    arq.enqueue_job.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -183,7 +230,12 @@ async def test_recovery_attempt_ceiling_is_passed_to_the_query():
 
 @pytest.mark.asyncio
 async def test_second_recovery_gets_a_distinct_job_id():
-    """An already-recovered session increments rather than colliding."""
+    """The job ID uses the count the counter returned, not a stale local read.
+
+    The candidate row's ``internal_summary_json`` is a snapshot that may already
+    be stale, so the ID has to come from the value the UPDATE actually wrote —
+    reusing a colliding ID makes the enqueue a silent no-op for an hour.
+    """
     session = _make_session(started_at=_NOW - timedelta(hours=1))
     session.status = "failed"
     session.ended_at = _NOW - timedelta(minutes=30)
@@ -192,6 +244,7 @@ async def test_second_recovery_gets_a_distinct_job_id():
     arq.enqueue_job.return_value = object()
     with (
         patch(f"{_LIFECYCLE}.utcnow", return_value=_NOW),
+        _patch_recovery_counter(attempt=2),
         patch.object(
             lifecycle_service.sessions_queries,
             "list_pending_evaluation_sessions",
@@ -200,7 +253,6 @@ async def test_second_recovery_gets_a_distinct_job_id():
     ):
         await lifecycle_service.recover_stalled_evaluations(db, arq_pool=arq)
 
-    assert session.internal_summary_json["evaluation_recovery"]["attempts"] == 2
     assert (
         arq.enqueue_job.await_args.kwargs["_job_id"]
         == f"interview-evaluation:{session.id}:recover-2"

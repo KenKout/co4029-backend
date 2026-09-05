@@ -351,14 +351,6 @@ async def evaluate_and_generate_report(
             draft=report_draft,
         )
 
-        # An interview is a gradeable course unit, completed by a passing
-        # verdict. `_stamp_session_summary` above just wrote `pass_verdict`, so
-        # this is the moment the unit can change state — fire the D2
-        # course-completion writer before the commit below so the student's last
-        # interview unlocks the next career-path stage now instead of at the
-        # nightly drift sweep.
-        await _sync_course_completion(db, student_id=session.student_id, course_id=course_id)
-
         # The claim has done its job — the verdict below is what refuses any
         # further grading from now on. Cleared in the SAME transaction as the
         # verdict so the row can never be left holding a lease for work that
@@ -383,6 +375,23 @@ async def evaluate_and_generate_report(
             is_final_attempt=is_final_attempt,
         )
         raise
+
+    # An interview is a gradeable course unit, completed by a passing verdict, so
+    # this is the moment the unit can change state — fire the D2 course-completion
+    # writer so the student's last interview unlocks the next career-path stage now
+    # instead of at the nightly drift sweep.
+    #
+    # AFTER the commit, deliberately. It used to run inside the transaction above,
+    # which made a side effect able to destroy the verdict it was reacting to:
+    # ``sync_course_completion`` flushes through ``flush_or_conflict``, which
+    # ROLLS BACK on IntegrityError before raising. That rollback discarded the
+    # uncommitted verdict, gap report and outcome rows; the swallow in
+    # ``_sync_course_completion`` then let execution continue to ``db.commit()``,
+    # which committed an empty transaction. The job logged success and the
+    # student's graded interview silently went back to ungraded — and because the
+    # claim was cleared in the same discarded transaction, the row still held a
+    # 30-minute lease that blocked the recovery sweep from re-driving it.
+    await _sync_course_completion(db, student_id=session.student_id, course_id=course_id)
 
 
 async def _record_evaluation_failure(
@@ -737,19 +746,24 @@ async def _sync_course_completion(db: AsyncSession, *, student_id: UUID, course_
     passing the last interview leaves the next stage locked until the nightly
     drift sweep.
 
-    Runs inside the caller's transaction — the commit that follows persists
-    both the verdict and the status change together.
+    Runs in its OWN transaction, after the verdict has been committed, and owns
+    the commit. Sharing the verdict's transaction let this side effect destroy the
+    verdict: ``sync_course_completion`` flushes via ``flush_or_conflict``, which
+    rolls back before raising, so a conflict here discarded the grading work that
+    had not been committed yet — and the swallow below hid it.
 
-    Never raises into the caller: an evaluation that produced a real verdict
-    must not be rolled back because a completion side-effect failed. The
-    nightly sweeper (``enrollments...resync_stale_course_completions``) repairs
-    any miss — the same contract ``progress.services.tracking`` uses.
+    Never raises into the caller: an evaluation that produced a real verdict must
+    not be reported as failed because a completion side-effect was. The nightly
+    sweeper (``enrollments...resync_stale_course_completions``) repairs any miss —
+    the same contract ``progress.services.tracking`` uses.
     """
     from abridgeai.features.enrollments.api import public as enrollments_api  # noqa: PLC0415
 
     try:
         await enrollments_api.sync_course_completion(db, course_id=course_id, student_id=student_id)
+        await db.commit()
     except Exception:  # noqa: BLE001 -- side-effect; nightly sweeper repairs drift
+        await db.rollback()
         _logger.warning(
             "interview.course_completion_sync_failed",
             exc_info=True,

@@ -422,6 +422,14 @@ class InterviewSessionFinishResponse(BaseModel):
     # Deprecated for students (always []) — see §4.3. Kept for API stability.
     rubric_scores: list[InterviewRubricScore] = []
     pass_verdict: bool | None = None
+    # Same derived label as :class:`InterviewSessionPublic` — see
+    # ``services.evaluation_state.derive_evaluation_state``. Present HERE too
+    # because ``/finish`` is what the results screen reads first, and it is the
+    # only shape it has until the verdict poll returns. Reading ``status`` alone
+    # made the screen freeze a recoverable grader failure as terminal: ARQ can
+    # stamp ``status='failed'`` before this response is built, and the recovery
+    # sweep re-drives exactly those rows.
+    evaluation_state: EvaluationStateLiteral = "not_required"
     ended_at: datetime | None = None
     # ── Proactive retake context (#7) ────────────────────────────────────────
     # Surfaced so the results screen can show "N attempts left" and a cooldown

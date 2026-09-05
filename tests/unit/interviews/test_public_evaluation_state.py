@@ -16,6 +16,7 @@ teacher-only; only the derived label crosses the wire.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 
@@ -24,6 +25,8 @@ from abridgeai.features.interviews.services.evaluation_state import (
     derive_evaluation_state,
 )
 
+_LONG_AGO = "2020-01-01T00:00:00+00:00"
+
 
 def _session(
     *,
@@ -31,15 +34,24 @@ def _session(
     pass_verdict: bool | None = None,
     attempts: int | None = None,
     assessment_started_at: Any = "2026-09-05T00:00:00+00:00",
+    last_attempt_at: Any = _LONG_AGO,
+    claim_expires_at: Any = None,
 ) -> Any:
+    """A session row stand-in.
+
+    ``last_attempt_at`` defaults to long ago so a test that only sets ``attempts``
+    describes a SETTLED final attempt — the interesting "at the ceiling" case
+    where no job is running any more.
+    """
     summary: dict[str, Any] = {}
     if attempts is not None:
-        summary["evaluation_recovery"] = {"attempts": attempts}
+        summary["evaluation_recovery"] = {"attempts": attempts, "last_attempt_at": last_attempt_at}
     return SimpleNamespace(
         status=status,
         pass_verdict=pass_verdict,
         assessment_started_at=assessment_started_at,
         internal_summary_json=summary,
+        evaluation_claim_expires_at=claim_expires_at,
     )
 
 
@@ -68,8 +80,63 @@ def test_a_grader_failure_with_budget_left_is_still_pending() -> None:
     )
 
 
+def test_the_last_attempt_is_still_pending_while_its_job_can_be_running() -> None:
+    """Reaching the ceiling means the last job was DISPATCHED, not that it ended.
+
+    The counter is charged before the enqueue (so a hard-killed task still spends
+    its budget), so a session hits ``attempts == MAX`` the instant the final job
+    is queued. Calling that ``exhausted`` told the student no verdict was coming
+    while their last grading run was queued or mid-flight: the UI stopped polling
+    and never showed the result that landed a minute later.
+    """
+    just_dispatched = _session(
+        status="failed",
+        attempts=MAX_EVALUATION_RECOVERY_ATTEMPTS,
+        last_attempt_at=datetime.now(UTC).isoformat(),
+    )
+    assert derive_evaluation_state(just_dispatched) == "pending"
+
+
+def test_a_live_claim_keeps_the_last_attempt_pending() -> None:
+    """A held lease is direct evidence a grader owns the session right now."""
+    working = _session(
+        status="failed",
+        attempts=MAX_EVALUATION_RECOVERY_ATTEMPTS,
+        last_attempt_at=_LONG_AGO,  # dispatch timestamp is stale...
+        claim_expires_at=datetime.now(UTC) + timedelta(minutes=5),  # ...but a job holds it
+    )
+    assert derive_evaluation_state(working) == "pending"
+
+
+def test_an_expired_claim_does_not_keep_a_dead_session_pending() -> None:
+    """A lapsed lease means the owner is dead (ARQ kills at job_timeout)."""
+    dead = _session(
+        status="failed",
+        attempts=MAX_EVALUATION_RECOVERY_ATTEMPTS,
+        claim_expires_at=datetime.now(UTC) - timedelta(minutes=5),
+    )
+    assert derive_evaluation_state(dead) == "exhausted"
+
+
+def test_the_settle_window_outlasts_a_live_evaluation_job() -> None:
+    """A slow-but-healthy job must never be declared dead while it works.
+
+    ARQ kills a task at ``job_timeout``, so any window at least as long as the
+    claim lease covers the worst case. A shorter one would flip a running
+    evaluation to ``exhausted`` and stop the student's UI mid-grade.
+    """
+    from abridgeai.features.interviews.services.evaluation_claim import EVALUATION_LEASE_SECONDS
+    from abridgeai.features.interviews.services.evaluation_state import (
+        FINAL_ATTEMPT_SETTLE_SECONDS,
+    )
+    from abridgeai.workers.arq_app import WorkerSettings
+
+    assert FINAL_ATTEMPT_SETTLE_SECONDS >= EVALUATION_LEASE_SECONDS
+    assert WorkerSettings.job_timeout < FINAL_ATTEMPT_SETTLE_SECONDS
+
+
 def test_an_exhausted_recovery_budget_is_terminal() -> None:
-    """At the ceiling the sweep drops the row, so the UI must stop waiting."""
+    """At the ceiling with the last job settled, the UI must stop waiting."""
     assert (
         derive_evaluation_state(
             _session(status="failed", attempts=MAX_EVALUATION_RECOVERY_ATTEMPTS)

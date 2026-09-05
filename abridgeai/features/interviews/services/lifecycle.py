@@ -137,6 +137,16 @@ async def recover_stalled_evaluations(
     the enqueue raises OR returns ``None`` (ARQ refused the ID — nothing was
     queued). Everything after a successful handoff still costs an attempt.
 
+    Both the charge and the refund are SQL-side, sub-key writes (see
+    ``queries.sessions.stamp_evaluation_recovery_attempt`` /
+    ``refund_evaluation_recovery_attempt``). They have to be: an evaluator can
+    publish a verdict while this sweep is between its candidate query and its
+    enqueue, and writing back a whole ``internal_summary_json`` dict from the
+    stale ORM snapshot deleted the rubric totals / ``evaluated_at`` that verdict
+    had just committed — and resurrected the ``evaluation_failure`` note it had
+    cleared. Charging is also conditional on ``pass_verdict IS NULL``, so a
+    session graded in that window is skipped instead of re-queued.
+
     Each candidate's enqueue is isolated: a transport error on one row used to
     propagate out of the loop and skip every candidate behind it in that sweep.
 
@@ -154,47 +164,77 @@ async def recover_stalled_evaluations(
     )
     enqueued = 0
     for session in candidates:
-        previous_summary = dict(session.internal_summary_json or {})
-        summary = dict(previous_summary)
-        recovery = dict(summary.get("evaluation_recovery") or {})
-        attempt = int(recovery.get("attempts") or 0) + 1
-        recovery["attempts"] = attempt
-        recovery["last_attempt_at"] = utcnow().isoformat()
-        summary["evaluation_recovery"] = recovery
-        session.internal_summary_json = summary
-        await db.commit()
-
-        job: object | None = None
-        dispatch_error: Exception | None = None
-        try:
-            job = await arq_pool.enqueue_job(  # type: ignore[attr-defined]
-                _EVALUATE_INTERVIEW_SESSION_TASK,
-                session.student_id,
-                session.id,
-                _job_id=_evaluation_job_id(session.id, attempt=attempt),
-            )
-        except Exception as exc:  # noqa: BLE001 -- transport failure, refunded below
-            dispatch_error = exc
-
-        if job is not None:
+        if await _redrive_one_evaluation(db, session, arq_pool=arq_pool):
             enqueued += 1
-            continue
-
-        # Nothing was queued. Refund the attempt so a dispatch outage cannot
-        # consume the student's grading opportunities. Metadata only — never
-        # the transcript.
-        session.internal_summary_json = previous_summary
-        await db.commit()
-        logger.warning(
-            "interview evaluation recovery dispatch failed; attempt refunded",
-            extra={
-                "session_id": str(session.id),
-                "attempt": attempt,
-                "job_id": _evaluation_job_id(session.id, attempt=attempt),
-                "error": str(dispatch_error) if dispatch_error is not None else "enqueue_refused",
-            },
-        )
     return enqueued
+
+
+async def _redrive_one_evaluation(
+    db: AsyncSession,
+    session: object,
+    *,
+    arq_pool: object,
+) -> bool:
+    """Charge an attempt and enqueue one session's evaluation. True if queued.
+
+    Isolated per candidate so a transport error cannot skip the rest of the sweep,
+    and refunds the attempt whenever no job actually reached Redis.
+    """
+    session_id = session.id  # type: ignore[attr-defined]
+    # Snapshot the recovery sub-object ONLY — never the whole summary. See the
+    # refund helper: restoring a whole snapshot destroyed concurrent results.
+    previous_recovery = (getattr(session, "internal_summary_json", None) or {}).get(
+        "evaluation_recovery"
+    )
+    previous_recovery = dict(previous_recovery) if isinstance(previous_recovery, dict) else None
+
+    attempt = await sessions_queries.stamp_evaluation_recovery_attempt(
+        db, session_id, now=utcnow()
+    )
+    if attempt is None:
+        # A verdict landed between the candidate query and now. Nothing to
+        # repair, and no attempt was charged.
+        logger.info(
+            "interview evaluation recovery skipped; verdict already published",
+            extra={"session_id": str(session_id)},
+        )
+        return False
+
+    job: object | None = None
+    dispatch_error: Exception | None = None
+    try:
+        job = await arq_pool.enqueue_job(  # type: ignore[attr-defined]
+            _EVALUATE_INTERVIEW_SESSION_TASK,
+            session.student_id,  # type: ignore[attr-defined]
+            session_id,
+            _job_id=_evaluation_job_id(session_id, attempt=attempt),
+        )
+    except Exception as exc:  # noqa: BLE001 -- transport failure, refunded below
+        dispatch_error = exc
+
+    if job is not None:
+        return True
+
+    # Nothing was queued. Refund the attempt so a dispatch outage cannot consume
+    # the student's grading opportunities. Metadata only — never the transcript,
+    # and never anything the evaluator owns.
+    refunded = await sessions_queries.refund_evaluation_recovery_attempt(
+        db,
+        session_id,
+        attempt=attempt,
+        previous_recovery=previous_recovery,
+    )
+    logger.warning(
+        "interview evaluation recovery dispatch failed; attempt refunded",
+        extra={
+            "session_id": str(session_id),
+            "attempt": attempt,
+            "refunded": refunded,
+            "job_id": _evaluation_job_id(session_id, attempt=attempt),
+            "error": str(dispatch_error) if dispatch_error is not None else "enqueue_refused",
+        },
+    )
+    return False
 
 
 __all__ = [

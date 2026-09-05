@@ -747,6 +747,7 @@ async def finish_session(
         total_score=None,
         rubric_scores=[],
         pass_verdict=session.pass_verdict,
+        evaluation_state=derive_evaluation_state(session),
         ended_at=session.ended_at,
         remaining_attempts=retake.remaining_attempts,
         retake_available_at=retake.retake_available_at,

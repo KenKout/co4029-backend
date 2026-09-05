@@ -366,6 +366,122 @@ async def list_pending_evaluation_sessions(
     return list((await db.execute(stmt)).scalars().all())
 
 
+_RECOVERY_ATTEMPTS_PATH = "'{evaluation_recovery,attempts}'"
+# A legacy / hand-edited row could hold a non-numeric there. Mirror the Python
+# reader's tolerance (``services.evaluation_state.recovery_attempts``) instead of
+# letting one malformed row raise out of the sweep.
+_RECOVERY_ATTEMPTS_INT = (
+    f"CASE WHEN jsonb_typeof(internal_summary_json #> {_RECOVERY_ATTEMPTS_PATH}) = 'number' "
+    f"     THEN (internal_summary_json #>> {_RECOVERY_ATTEMPTS_PATH})::int "
+    "     ELSE 0 END"
+)
+
+
+async def stamp_evaluation_recovery_attempt(
+    db: AsyncSession,
+    session_id: UUID,
+    *,
+    now: datetime,
+) -> int | None:
+    """Charge one recovery attempt to this session. Returns the NEW attempt count.
+
+    ``None`` means nothing was charged because the session is no longer a
+    recovery candidate — a verdict was published between the candidate query and
+    this call, so the caller must not enqueue anything.
+
+    Why this is SQL and not a Python read-modify-write on the ORM row: the sweep
+    loads its candidates in one transaction and then works through them, so its
+    ``internal_summary_json`` snapshot goes stale the moment the evaluator it is
+    trying to repair publishes. Assigning a whole dict back would blind-overwrite
+    the column and wipe the ``total_score`` / ``rubric_aggregated`` /
+    ``evaluated_at`` the evaluator just wrote (and resurrect the stale
+    ``evaluation_failure`` note it had cleared). ``jsonb_set`` touches ONLY the
+    ``evaluation_recovery`` key, so bookkeeping and results never collide.
+    """
+    from sqlalchemy import text  # noqa: PLC0415
+
+    # The only interpolation is _RECOVERY_ATTEMPTS_INT, a module-level SQL
+    # constant. Every value (session id, timestamp) is a bound parameter.
+    sql = text(
+        "UPDATE interview_sessions "  # noqa: S608 -- only _RECOVERY_ATTEMPTS_INT (a SQL constant) is interpolated
+        "   SET internal_summary_json = jsonb_set("
+        "         COALESCE(internal_summary_json, '{}'::jsonb), "
+        "         '{evaluation_recovery}', "
+        "         COALESCE(internal_summary_json -> 'evaluation_recovery', '{}'::jsonb) "
+        "           || jsonb_build_object("
+        f"                'attempts', {_RECOVERY_ATTEMPTS_INT} + 1, "
+        # CAST is required: inside jsonb_build_object Postgres has no context to
+        # infer a bare parameter's type and rejects the statement outright.
+        "                'last_attempt_at', CAST(:now AS text)), "
+        "         true) "
+        " WHERE id = :session_id "
+        "   AND pass_verdict IS NULL "
+        f"RETURNING {_RECOVERY_ATTEMPTS_INT} AS attempts"
+    )
+    attempts = (
+        await db.execute(sql, {"session_id": session_id, "now": now.isoformat()})
+    ).scalar_one_or_none()
+    await db.commit()
+    return int(attempts) if attempts is not None else None
+
+
+async def refund_evaluation_recovery_attempt(
+    db: AsyncSession,
+    session_id: UUID,
+    *,
+    attempt: int,
+    previous_recovery: dict[str, Any] | None,
+) -> bool:
+    """Give back the attempt charged by ``stamp_evaluation_recovery_attempt``.
+
+    Used when the dispatch produced no job at all (Redis down, or ARQ refused the
+    ID), where charging the budget would strand the session unevaluated.
+
+    Restores ONLY the ``evaluation_recovery`` sub-object, and only while the count
+    we wrote is still the current one. Both bounds matter:
+
+    * the sub-object scope means a verdict published while the enqueue was in
+      flight survives the refund — writing back a whole pre-enqueue snapshot of
+      ``internal_summary_json`` deleted the results the evaluator had just
+      committed;
+    * the count guard means a later sweep that has already charged its own
+      attempt is not silently un-charged. We then leave our attempt spent, which
+      is the safe direction (bounded retries, not an infinite loop).
+    """
+    import json  # noqa: PLC0415
+
+    from sqlalchemy import text  # noqa: PLC0415
+
+    # Same shape as stamp_evaluation_recovery_attempt: the interpolation is a
+    # module-level SQL constant, not input.
+    sql = text(
+        "UPDATE interview_sessions "  # noqa: S608 -- SQL constant interpolation only, see stamp helper
+        "   SET internal_summary_json = CASE "
+        "         WHEN CAST(:previous_recovery AS jsonb) IS NULL "
+        "           THEN internal_summary_json - 'evaluation_recovery' "
+        "         ELSE jsonb_set(internal_summary_json, '{evaluation_recovery}', "
+        "                        CAST(:previous_recovery AS jsonb), true) "
+        "       END "
+        " WHERE id = :session_id "
+        f"   AND {_RECOVERY_ATTEMPTS_INT} = :attempt "
+        "RETURNING id"
+    )
+    refunded = (
+        await db.execute(
+            sql,
+            {
+                "session_id": session_id,
+                "attempt": attempt,
+                "previous_recovery": (
+                    json.dumps(previous_recovery) if previous_recovery is not None else None
+                ),
+            },
+        )
+    ).scalar_one_or_none() is not None
+    await db.commit()
+    return refunded
+
+
 async def claim_session_evaluation(
     db: AsyncSession,
     session_id: UUID,
@@ -594,4 +710,6 @@ __all__ = [
     "list_pending_evaluation_sessions",
     "list_session_messages",
     "list_sessions_for_config",
+    "refund_evaluation_recovery_attempt",
+    "stamp_evaluation_recovery_attempt",
 ]
