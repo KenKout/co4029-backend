@@ -41,12 +41,36 @@ def _db(*, user_message_count: int) -> SimpleNamespace:
     )
 
 
-async def _submit(session, db, arq, *, reason: str):
+async def _submit(session, db, arq, *, reason: str, terminalized: bool = True):
+    """Run ``submit_session`` against the fake DB.
+
+    Terminalization is an atomic conditional UPDATE (so two concurrent finishers
+    cannot both relabel the row — see
+    ``tests/integration/test_interview_finish_race.py``), which means the ORM
+    instance is no longer what carries the new status; production re-reads it via
+    ``db.refresh``. This stub applies the decided status to the in-memory session
+    so these tests keep asserting the DECISION, which is what they are about.
+
+    ``terminalized=False`` simulates losing that race: another caller already
+    terminalized the session.
+    """
     actor = SimpleNamespace(user_id=session.student_id)
+
+    async def _terminalize(_db, _sid, *, status: str, ended_at):
+        if terminalized:
+            session.status = status
+            session.ended_at = ended_at
+        return terminalized
+
     with (
         patch.object(taking_service, "_require_session", AsyncMock(return_value=session)),
         patch.object(taking_service, "_assert_owns_session"),
         patch.object(taking_service, "ensure_ceremony_message", AsyncMock()),
+        patch.object(
+            taking_service.sessions_queries,
+            "terminalize_in_progress_session",
+            AsyncMock(side_effect=_terminalize),
+        ),
     ):
         return await taking_service.submit_session(
             db,
@@ -148,3 +172,20 @@ async def test_timed_out_with_answers_is_timed_out_and_graded() -> None:
 
     assert result.status == "timed_out"
     arq.enqueue_job.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_losing_the_terminalize_race_does_not_enqueue() -> None:
+    """Another caller already ended this session, so it owns the enqueue.
+
+    Without this, both the student's finish and the agent's hard-stop timer
+    enqueued, and only ARQ's session-scoped job ID stopped a double grade — a
+    property of the job-ID choice rather than of this function.
+    """
+    session = _session(assessment_started_at=datetime(2026, 7, 24, 10, 0, tzinfo=UTC))
+    db = _db(user_message_count=2)
+    arq = SimpleNamespace(enqueue_job=AsyncMock(return_value=object()))
+
+    await _submit(session, db, arq, reason="natural", terminalized=False)
+
+    arq.enqueue_job.assert_not_awaited()

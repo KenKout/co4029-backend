@@ -323,6 +323,9 @@ ignore_imports = [
     "abridgeai.features.interviews.services.authoring -> sqlalchemy",
     "abridgeai.features.interviews.services.taking -> sqlalchemy",
     "abridgeai.features.interviews.services.evaluation -> sqlalchemy",
+    # Split out of services.evaluation (LOC gate). Same shape as its parent: one
+    # inline `select` for the asked-question ids, then writes via ORM objects.
+    "abridgeai.features.interviews.services.gap_report_writer -> sqlalchemy",
     "abridgeai.features.interviews.services.generation -> sqlalchemy",
     "abridgeai.features.interviews.services.outcomes -> sqlalchemy",
     "abridgeai.features.interviews.services.generation_runs -> sqlalchemy",

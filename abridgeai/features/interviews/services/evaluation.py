@@ -27,7 +27,7 @@ from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from abridgeai.ai.models import GenerationRun
-from abridgeai.core.db.conflict_mapper import flush_or_conflict
+from abridgeai.core.db.conflict_mapper import register_conflict_mappings
 from abridgeai.core.exceptions import NotFoundError
 from abridgeai.core.observability import get_logger
 from abridgeai.core.security import utcnow
@@ -42,7 +42,6 @@ from abridgeai.features.interviews.ai.stages.evaluation.rubric import (
     resolve_rubric_definition,
 )
 from abridgeai.features.interviews.ai.stages.gap_report import (
-    GapReportDraft,
     generate_gap_report,
 )
 from abridgeai.features.interviews.ai.stages.persona_adherence import (
@@ -52,7 +51,6 @@ from abridgeai.features.interviews.ai.stages.persona_adherence.parsers import (
     PersonaAdherence,
 )
 from abridgeai.features.interviews.models import (
-    GapReport,
     InterviewOutcomeEvaluation,
     InterviewQuestion,
     InterviewSession,
@@ -63,20 +61,35 @@ from abridgeai.features.interviews.orchestrator.interviewer_identity import (
     identity_from_config,
 )
 from abridgeai.features.interviews.orchestrator.persona import profile_from_config
-from abridgeai.features.interviews.orchestrator.security import (
-    SecurityAction,
-    SecurityAssessment,
-    SecurityCategory,
-)
 from abridgeai.features.interviews.queries import authoring as authoring_queries
 from abridgeai.features.interviews.queries import sessions as sessions_queries
-from abridgeai.features.interviews.services import security as security_service
+from abridgeai.features.interviews.services.evaluation_claim import (
+    lease_expiry_for,
+    new_claim_token,
+)
+from abridgeai.features.interviews.services.gap_report_writer import persist_gap_report
 from abridgeai.features.quizzes.api import public as quizzes_public
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
 _logger = get_logger(__name__)
+
+# The gap-report writer is read-then-insert on a re-runnable path, and migration
+# 0107 made ``source_interview_session_id`` unique where NOT NULL. Register the
+# constraint so a losing racer surfaces as a ConflictError instead of a raw
+# IntegrityError/HTTP 500. Both spellings are registered because PostgreSQL may
+# report either the declarative name or the index name.
+register_conflict_mappings(
+    {
+        "uq_gap_reports_source_interview_session": (
+            "interview_gap_report_exists: this interview session already has a gap report"
+        ),
+        "gap_reports_source_interview_session_id_key": (
+            "interview_gap_report_exists: this interview session already has a gap report"
+        ),
+    }
+)
 
 
 def _ungradeable_reason(session: object) -> str | None:
@@ -133,19 +146,6 @@ async def evaluate_and_generate_report(
     if session is None:
         raise NotFoundError(f"Interview session {session_id} not found")
 
-    if session.pass_verdict is not None:
-        # Already graded — by an earlier attempt of this job, or by a sibling
-        # job the recovery sweep enqueued while the original was still running
-        # (job_timeout 20min vs. a 15min recovery grace: the windows overlap).
-        # Re-running the judge would spend LLM budget, write a second gap
-        # report, and could flip a verdict the student has already been shown.
-        # ``pass_verdict=False`` counts as graded: it is a real judgement.
-        _logger.info(
-            "interview.evaluation.already_published",
-            extra={"session_id": str(session_id), "pass_verdict": session.pass_verdict},
-        )
-        return
-
     ungradeable = _ungradeable_reason(session)
     if ungradeable is not None:
         # See _ungradeable_reason: practice rehearsals and runs that never
@@ -155,6 +155,36 @@ async def evaluate_and_generate_report(
             extra={"session_id": str(session_id), "reason": ungradeable},
         )
         return
+
+    # Exclusive claim BEFORE any judging. A published verdict or a live claim
+    # held by another job both refuse here, in ONE atomic conditional UPDATE —
+    # reading ``pass_verdict`` and deciding in Python would leave the whole
+    # grading pass (1-2 min of LLM calls) as a TOCTOU window, which is how two
+    # jobs used to run concurrently and race to publish. The recovery sweep makes
+    # that reachable by design: it enqueues under a per-attempt job ID (ARQ
+    # cannot dedupe it) while the original job may still be running.
+    claim_token = new_claim_token()
+    claimed_at = utcnow()
+    if not await sessions_queries.claim_session_evaluation(
+        db,
+        session_id,
+        token=claim_token,
+        now=claimed_at,
+        lease_expires_at=lease_expiry_for(claimed_at),
+    ):
+        _logger.info(
+            "interview.evaluation.not_claimed",
+            extra={"session_id": str(session_id), "pass_verdict": session.pass_verdict},
+        )
+        return
+
+    # The claim was a core UPDATE, so the ORM row we loaded above still shows the
+    # pre-claim values (the sessionmaker uses expire_on_commit=False). Sync them
+    # by hand: without this, clearing the claim at publish time would be a
+    # None -> None no-op, the ORM would emit no UPDATE for those columns, and the
+    # row would keep a lease for work that had already finished.
+    session.evaluation_claim_token = claim_token
+    session.evaluation_claim_expires_at = lease_expiry_for(claimed_at)
 
     # Parent generation_run for this evaluation so it surfaces on the admin
     # processing dashboard and its LLM calls attribute to a pipeline run.
@@ -289,6 +319,20 @@ async def evaluate_and_generate_report(
             pipeline_run_id=eval_run_id,
         )
 
+        # Judging is done; publishing starts here. Re-check ownership first: if
+        # our lease lapsed mid-run another job may legitimately have taken over,
+        # and a stale owner must not publish over it. ``FOR UPDATE`` holds the
+        # row until the commit below, so the check cannot be overtaken.
+        if not await sessions_queries.holds_session_evaluation_claim(
+            db, session_id, token=claim_token, now=utcnow()
+        ):
+            _logger.warning(
+                "interview.evaluation.publish_skipped_lease_lost",
+                extra={"session_id": str(session_id)},
+            )
+            await db.rollback()
+            return
+
         await _persist_outcome_evaluations(db, session_id=session_id, verdicts=outcome_verdicts)
         _stamp_session_summary(
             session,
@@ -299,7 +343,7 @@ async def evaluate_and_generate_report(
             answered_question_count=len(answered_question_ids),
             persona_adherence=persona_adherence,
         )
-        await _persist_gap_report(
+        await persist_gap_report(
             db,
             session=session,
             course_id=course_id,
@@ -315,18 +359,26 @@ async def evaluate_and_generate_report(
         # nightly drift sweep.
         await _sync_course_completion(db, student_id=session.student_id, course_id=course_id)
 
+        # The claim has done its job — the verdict below is what refuses any
+        # further grading from now on. Cleared in the SAME transaction as the
+        # verdict so the row can never be left holding a lease for work that
+        # already finished.
+        session.evaluation_claim_token = None
+        session.evaluation_claim_expires_at = None
+
         # Mark the evaluation run completed now that all work has committed.
         run_row = await db.get(GenerationRun, eval_run_id)
         if run_row is not None:
             run_row.status = "completed"
             run_row.finished_at = utcnow()
-            await db.commit()
+        await db.commit()
     except Exception as exc:
         await db.rollback()
         await _record_evaluation_failure(
             db,
             session_id=session_id,
             eval_run_id=eval_run_id,
+            claim_token=claim_token,
             exc=exc,
             is_final_attempt=is_final_attempt,
         )
@@ -338,6 +390,7 @@ async def _record_evaluation_failure(
     *,
     session_id: UUID,
     eval_run_id: UUID | None,
+    claim_token: UUID,
     exc: Exception,
     is_final_attempt: bool,
 ) -> None:
@@ -345,6 +398,13 @@ async def _record_evaluation_failure(
 
     Runs AFTER the caller's rollback, on its own commits, and never masks the
     original exception.
+
+    Writes the session-level trail ONLY while we still own the claim. A job whose
+    lease lapsed has been superseded — stamping ``status='failed'`` from it would
+    relabel work another job is doing (or has already published), and since the
+    recovery query filters on ``pass_verdict IS NULL`` nothing would repair it.
+    The ``generation_run`` row is stamped either way: it records THIS run's
+    outcome and is not shared.
     """
     # Stamp the evaluation run as failed so the dashboard shows the terminal
     # state even though the evaluation work itself rolled back.
@@ -358,26 +418,22 @@ async def _record_evaluation_failure(
             }
             await db.commit()
 
-    fresh = await db.get(InterviewSession, session_id)
-    if fresh is None:
+    if not await sessions_queries.holds_session_evaluation_claim(
+        db, session_id, token=claim_token, now=utcnow()
+    ):
+        # Superseded: our lease lapsed and/or another job owns this session now
+        # (possibly having already published a verdict). Writing the failure
+        # trail from here would relabel someone else's work.
+        _logger.warning(
+            "interview.evaluation.failure_discarded_not_owner",
+            extra={"session_id": str(session_id), "error": str(exc)},
+        )
+        await db.rollback()
         return
 
-    if fresh.pass_verdict is not None:
-        # A concurrent job published a verdict while this one was running
-        # (recovery enqueues under a per-attempt job ID, so ARQ cannot dedupe
-        # it, and the 20min job timeout overlaps the 15min recovery grace). An
-        # INFRASTRUCTURE failure must never overwrite a published result:
-        # stamping 'failed' here relabelled a graded interview as broken, and
-        # since the recovery query filters on ``pass_verdict IS NULL`` nothing
-        # would ever repair it.
-        _logger.warning(
-            "interview.evaluation.failure_discarded_verdict_published",
-            extra={
-                "session_id": str(session_id),
-                "pass_verdict": fresh.pass_verdict,
-                "error": str(exc),
-            },
-        )
+    fresh = await db.get(InterviewSession, session_id)
+    if fresh is None:
+        await db.rollback()
         return
 
     fresh.internal_summary_json = dict(fresh.internal_summary_json or {}) | {
@@ -395,6 +451,11 @@ async def _record_evaluation_failure(
     # student waits indefinitely.
     if is_final_attempt:
         fresh.status = "failed"
+    # Release our claim in the same transaction. The grading pass failed, so the
+    # next ARQ retry or recovery sweep must be able to claim immediately instead
+    # of waiting out a 30-minute lease held by a job that is already dead.
+    fresh.evaluation_claim_token = None
+    fresh.evaluation_claim_expires_at = None
     await db.commit()
 
 
@@ -694,101 +755,6 @@ async def _sync_course_completion(db: AsyncSession, *, student_id: UUID, course_
             exc_info=True,
             extra={"course_id": str(course_id), "student_id": str(student_id)},
         )
-
-
-async def _persist_gap_report(
-    db: AsyncSession,
-    *,
-    session: InterviewSession,
-    course_id: UUID,
-    module_id: UUID | None,
-    draft: GapReportDraft,
-) -> None:
-    # Gap-report prose is also learner-facing AI output. Guard the complete
-    # learner projection (summary + generated study-plan text) before it can be
-    # serialized by REST. Numeric rubric details remain teacher-only.
-    from sqlalchemy import select  # noqa: PLC0415
-
-    asked_question_ids = list(
-        (
-            await db.execute(
-                select(InterviewSessionQuestion.interview_question_id).where(
-                    InterviewSessionQuestion.session_id == session.id,
-                    InterviewSessionQuestion.interview_question_id.is_not(None),
-                )
-            )
-        )
-        .scalars()
-        .all()
-    )
-    learner_parts = [draft.student_summary]
-    for item in draft.study_plan:
-        learner_parts.extend((item.topic, item.weakness_summary))
-    assessment = SecurityAssessment(
-        category=SecurityCategory.BENIGN,
-        detected=False,
-        confidence=1.0,
-        should_block=False,
-        should_record_academic_evidence=False,
-        response_key=None,
-        normalized_fingerprint=None,
-        source="gap_report_boundary",
-    )
-    guarded = await security_service.guard_student_output(
-        db,
-        session_id=session.id,
-        config_id=session.interview_config_id,
-        turn_key=f"gap-report:{session.id}",
-        proposed_text="\n".join(part for part in learner_parts if part),
-        fallback_text=(
-            "Your interview feedback could not be displayed safely. "
-            "Please ask your instructor for learning guidance."
-        ),
-        allowed_question_ids=[qid for qid in asked_question_ids if qid is not None],
-        assessment=assessment,
-        action=SecurityAction.ALLOW,
-        attempt_count=0,
-        # Product decision: the learner-facing AI feedback is ALWAYS shown to
-        # the student, so the gap-report boundary is record-only — leakage is
-        # still persisted/audited as a security event, but the feedback itself
-        # is never substituted with the fallback text.
-        force_record_only=True,
-    )
-    report_json = dict(draft.report_json)
-    student_summary = draft.student_summary
-    if guarded.output_fallback_used and guarded.output_leakage_blocked:
-        # Unreachable today (force_record_only above) — kept as a defensive
-        # backstop in case the boundary is ever switched back to enforcing.
-        student_summary = guarded.text
-        report_json["study_plan"] = []
-        report_json["strengths"] = []
-        report_json["weaknesses"] = []
-    # Update in place when a report already exists for this session. The schema
-    # has NO unique constraint on ``source_interview_session_id`` (readers take
-    # the latest row and the ORM maps it as singular), so a blind insert on this
-    # re-runnable path would leave two reports for one interview and let a
-    # teacher open the stale one. There is at most one today.
-    existing = await sessions_queries.get_gap_report_for_session(db, session.id)
-    if existing is not None:
-        existing.course_id = course_id
-        existing.module_id = module_id
-        existing.student_summary = student_summary
-        existing.teacher_summary = draft.teacher_summary
-        existing.report_json = report_json
-    else:
-        db.add(
-            GapReport(
-                student_id=session.student_id,
-                course_id=course_id,
-                module_id=module_id,
-                source_quiz_attempt_id=None,
-                source_interview_session_id=session.id,
-                student_summary=student_summary,
-                teacher_summary=draft.teacher_summary,
-                report_json=report_json,
-            )
-        )
-    await flush_or_conflict(db)
 
 
 __all__ = ["evaluate_and_generate_report"]

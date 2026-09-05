@@ -1,30 +1,38 @@
-"""A published verdict is final: no later job may overwrite or re-grade it.
+"""A published verdict is final, and only the claim owner may write an outcome.
 
 Two evaluation jobs can be in flight for the same session. The recovery sweep
 enqueues under a per-attempt job ID (so ARQ cannot dedupe it) while the original
 job may still be running: ``WorkerSettings.job_timeout`` is 20 minutes and the
 sweep's grace is 15, so the windows overlap by design.
 
-When that happens the two jobs race, and the loser used to win. The failure
-branch of ``evaluate_and_generate_report`` re-read the row and stamped
+When that happened the loser used to win. The failure branch of
+``evaluate_and_generate_report`` re-read the row and stamped
 ``evaluation_failure`` (plus ``status='failed'`` on the final ARQ attempt)
-without looking at ``pass_verdict``. A session that had *already been graded*
-by the sibling job was therefore relabelled as a grader failure — and because
-the recovery query filters on ``pass_verdict IS NULL``, nothing ever repaired
-it. The student's history showed a permanent error for a graded interview.
+without asking whether it was still the session's owner. A session that had
+*already been graded* by the sibling job was therefore relabelled as a grader
+failure — and because the recovery query filters on ``pass_verdict IS NULL``,
+nothing ever repaired it. The student's history showed a permanent error for a
+graded interview.
 
-Two invariants pinned here:
+The guard is now ownership, not a ``pass_verdict`` read: the job claims the
+session before judging and re-checks that its lease is still its own before
+publishing OR stamping a failure. That closes the window a value check leaves
+open — a full grading pass sits between reading ``pass_verdict`` and writing.
 
-* an infrastructure failure never overwrites a published verdict
-  (``pass_verdict=False`` is published too — it is a real judgement);
-* a session that already carries a verdict is not graded a second time.
+Invariants pinned here:
+
+* an unclaimable session (already graded, or claimed by a live job) is never
+  judged — the stages do not even run;
+* a job that lost its lease writes neither a verdict nor a failure;
+* the ordinary failure path still records the trail for the rightful owner, and
+  releases the claim so the next retry can start immediately.
 """
 
 from __future__ import annotations
 
 from types import SimpleNamespace
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -50,7 +58,7 @@ class _FakeDB:
         self.rollbacks += 1
 
 
-def _session(*, pass_verdict: bool | None, status: str = "completed") -> Any:
+def _session(*, pass_verdict: bool | None = None, status: str = "completed") -> Any:
     return SimpleNamespace(
         id=uuid4(),
         student_id=uuid4(),
@@ -59,125 +67,143 @@ def _session(*, pass_verdict: bool | None, status: str = "completed") -> Any:
         status=status,
         pass_verdict=pass_verdict,
         internal_summary_json={"total_score": 80.0},
+        evaluation_claim_token=None,
+        evaluation_claim_expires_at=None,
     )
 
 
-@pytest.mark.asyncio
-async def test_a_stale_failure_never_overwrites_a_published_verdict(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The sibling job graded it. This job's crash must not relabel it failed."""
-    graded = _session(pass_verdict=True)
-    db = _FakeDB({InterviewSession: graded})
-
+def _patch_session_read(monkeypatch: pytest.MonkeyPatch, row: Any) -> None:
     async def _get_session(_db: Any, _session_id: Any) -> Any:
-        # What THIS job read when it started: not yet graded.
-        return _session(pass_verdict=None)
-
-    async def _boom(*_args: Any, **_kwargs: Any) -> Any:
-        raise RuntimeError("LLM provider 503")
+        return row
 
     monkeypatch.setattr(evaluation_service.sessions_queries, "get_session", _get_session)
-    monkeypatch.setattr(evaluation_service.authoring_queries, "list_outcomes_for_config", _boom)
 
-    with pytest.raises(RuntimeError):
-        await evaluation_service.evaluate_and_generate_report(
-            db,  # type: ignore[arg-type]
-            graded.id,
-            is_final_attempt=True,
-        )
 
-    assert graded.status == "completed", (
-        "a graded session must not be relabelled as a grader failure by a stale job"
+def _patch_claim(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    claimed: bool,
+    still_owner: bool = True,
+) -> dict[str, Any]:
+    """Stub the claim helpers; records what the service asked for."""
+    calls: dict[str, Any] = {"claim": 0, "owns": 0, "token": None}
+
+    async def _claim(_db: Any, _sid: Any, *, token: UUID, now: Any, lease_expires_at: Any) -> bool:
+        calls["claim"] += 1
+        calls["token"] = token
+        return claimed
+
+    async def _owns(_db: Any, _sid: Any, *, token: UUID, now: Any) -> bool:
+        calls["owns"] += 1
+        assert token == calls["token"], "ownership must be checked with the token we claimed"
+        return still_owner
+
+    monkeypatch.setattr(
+        evaluation_service.sessions_queries, "claim_session_evaluation", _claim
     )
-    assert "evaluation_failure" not in graded.internal_summary_json, (
-        "the failure note would make a graded interview read as broken"
+    monkeypatch.setattr(
+        evaluation_service.sessions_queries, "holds_session_evaluation_claim", _owns
     )
+    return calls
 
 
 @pytest.mark.asyncio
-async def test_a_published_failing_verdict_is_also_protected(
+async def test_an_unclaimable_session_is_never_judged(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """``pass_verdict=False`` is a real judgement, not an absence of one."""
-    graded = _session(pass_verdict=False)
-    db = _FakeDB({InterviewSession: graded})
-
-    async def _get_session(_db: Any, _session_id: Any) -> Any:
-        return _session(pass_verdict=None)
-
-    async def _boom(*_args: Any, **_kwargs: Any) -> Any:
-        raise RuntimeError("connection reset")
-
-    monkeypatch.setattr(evaluation_service.sessions_queries, "get_session", _get_session)
-    monkeypatch.setattr(evaluation_service.authoring_queries, "list_outcomes_for_config", _boom)
-
-    with pytest.raises(RuntimeError):
-        await evaluation_service.evaluate_and_generate_report(
-            db,  # type: ignore[arg-type]
-            graded.id,
-            is_final_attempt=True,
-        )
-
-    assert graded.status == "completed"
-    assert "evaluation_failure" not in graded.internal_summary_json
-
-
-@pytest.mark.asyncio
-async def test_a_still_failing_ungraded_session_is_stamped_as_before(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The guard must not disarm the real failure path for ungraded rows."""
-    ungraded = _session(pass_verdict=None)
-    db = _FakeDB({InterviewSession: ungraded})
-
-    async def _get_session(_db: Any, _session_id: Any) -> Any:
-        return ungraded
-
-    async def _boom(*_args: Any, **_kwargs: Any) -> Any:
-        raise RuntimeError("still broken")
-
-    monkeypatch.setattr(evaluation_service.sessions_queries, "get_session", _get_session)
-    monkeypatch.setattr(evaluation_service.authoring_queries, "list_outcomes_for_config", _boom)
-
-    with pytest.raises(RuntimeError):
-        await evaluation_service.evaluate_and_generate_report(
-            db,  # type: ignore[arg-type]
-            ungraded.id,
-            is_final_attempt=True,
-        )
-
-    assert ungraded.status == "failed"
-    assert ungraded.internal_summary_json["evaluation_failure"]["message"] == "still broken"
-
-
-@pytest.mark.asyncio
-async def test_an_already_graded_session_is_not_graded_twice(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A duplicate job returns early instead of re-running the judge.
-
-    Re-grading would spend LLM budget, write a second gap report, and could
-    flip a verdict the student has already been shown.
-    """
+    """Already graded, or owned by a live job: the stages must not run at all."""
     graded = _session(pass_verdict=True)
     db = _FakeDB({InterviewSession: graded})
     stage_calls: list[str] = []
-
-    async def _get_session(_db: Any, _session_id: Any) -> Any:
-        return graded
 
     async def _outcomes(*_args: Any, **_kwargs: Any) -> Any:
         stage_calls.append("list_outcomes_for_config")
         return []
 
-    monkeypatch.setattr(evaluation_service.sessions_queries, "get_session", _get_session)
+    _patch_session_read(monkeypatch, graded)
+    calls = _patch_claim(monkeypatch, claimed=False)
     monkeypatch.setattr(evaluation_service.authoring_queries, "list_outcomes_for_config", _outcomes)
 
-    await evaluation_service.evaluate_and_generate_report(
-        db,  # type: ignore[arg-type]
-        graded.id,
-    )
+    await evaluation_service.evaluate_and_generate_report(db, graded.id)  # type: ignore[arg-type]
 
-    assert stage_calls == [], "the judge must not run again for a published verdict"
+    assert calls["claim"] == 1
+    assert stage_calls == [], "the judge must not run without the claim"
     assert graded.pass_verdict is True
+    assert graded.status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_a_stale_owner_does_not_stamp_a_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Lease lost mid-run: the crash trail belongs to whoever owns it now."""
+    row = _session(pass_verdict=None)
+    db = _FakeDB({InterviewSession: row})
+
+    async def _boom(*_args: Any, **_kwargs: Any) -> Any:
+        raise RuntimeError("LLM provider 503")
+
+    _patch_session_read(monkeypatch, row)
+    _patch_claim(monkeypatch, claimed=True, still_owner=False)
+    monkeypatch.setattr(evaluation_service.authoring_queries, "list_outcomes_for_config", _boom)
+
+    with pytest.raises(RuntimeError):
+        await evaluation_service.evaluate_and_generate_report(
+            db,  # type: ignore[arg-type]
+            row.id,
+            is_final_attempt=True,
+        )
+
+    assert row.status == "completed", (
+        "a superseded job must not relabel a session it no longer owns"
+    )
+    assert "evaluation_failure" not in row.internal_summary_json
+
+
+@pytest.mark.asyncio
+async def test_the_rightful_owner_still_records_the_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The guard must not disarm the real failure path."""
+    row = _session(pass_verdict=None)
+    row.evaluation_claim_token = uuid4()
+    row.evaluation_claim_expires_at = "2026-09-05T01:00:00+00:00"
+    db = _FakeDB({InterviewSession: row})
+
+    async def _boom(*_args: Any, **_kwargs: Any) -> Any:
+        raise RuntimeError("still broken")
+
+    _patch_session_read(monkeypatch, row)
+    _patch_claim(monkeypatch, claimed=True, still_owner=True)
+    monkeypatch.setattr(evaluation_service.authoring_queries, "list_outcomes_for_config", _boom)
+
+    with pytest.raises(RuntimeError):
+        await evaluation_service.evaluate_and_generate_report(
+            db,  # type: ignore[arg-type]
+            row.id,
+            is_final_attempt=True,
+        )
+
+    assert row.status == "failed"
+    assert row.internal_summary_json["evaluation_failure"]["message"] == "still broken"
+    assert row.evaluation_claim_token is None, (
+        "a failed pass must release its lease so the next retry can claim at once"
+    )
+    assert row.evaluation_claim_expires_at is None
+
+
+@pytest.mark.asyncio
+async def test_a_session_that_never_reached_the_assessment_is_not_claimed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The ungradeable refusal stays AHEAD of the claim — don't burn a lease."""
+    row = _session(pass_verdict=None)
+    row.assessment_started_at = None
+    db = _FakeDB({InterviewSession: row})
+
+    _patch_session_read(monkeypatch, row)
+    calls = _patch_claim(monkeypatch, claimed=True)
+
+    await evaluation_service.evaluate_and_generate_report(db, row.id)  # type: ignore[arg-type]
+
+    assert calls["claim"] == 0, "an ungradeable session must not be claimed at all"

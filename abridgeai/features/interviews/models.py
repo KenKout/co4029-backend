@@ -494,6 +494,11 @@ class InterviewSession(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         ForeignKey("storage_objects.id", ondelete="SET NULL"),
     )
     pass_verdict: Mapped[bool | None] = mapped_column(Boolean)
+    # Exclusive-owner claim for the async evaluation (migration 0107). Written
+    # only by the atomic claim/release helpers in ``queries.sessions``; see
+    # ``services.evaluation_claim`` for the lease rationale.
+    evaluation_claim_token: Mapped[uuid.UUID | None] = mapped_column(PGUUID(as_uuid=True))
+    evaluation_claim_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     internal_summary_json: Mapped[dict[str, Any]] = mapped_column(
         JSONB, nullable=False, server_default=text("'{}'::jsonb")
     )
@@ -649,6 +654,10 @@ class GapReport(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     source_interview_session_id: Mapped[uuid.UUID | None] = mapped_column(
         PGUUID(as_uuid=True),
         ForeignKey("interview_sessions.id", ondelete="SET NULL"),
+        # UNIQUE where NOT NULL (partial index, migration 0107): the writer is
+        # re-runnable and was read-then-insert, so two concurrent evaluations
+        # could both insert. Quiz-sourced reports leave this NULL.
+        unique=True,
     )
     student_summary: Mapped[str | None] = mapped_column(Text)
     teacher_summary: Mapped[str | None] = mapped_column(Text)

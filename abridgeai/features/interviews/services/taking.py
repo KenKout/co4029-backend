@@ -2056,14 +2056,29 @@ async def submit_session(
     # onboarding quit + submit was marked ``completed`` and graded: 14 production
     # sessions carry verdicts derived from onboarding chatter alone).
     never_reached_assessment = session.assessment_started_at is None
-    session.status = (
+    terminal_status = (
         "abandoned"
         if never_reached_assessment or (user_message_count == 0 and reason == "timed_out")
         else "timed_out"
         if reason == "timed_out"
         else "completed"
     )
-    session.ended_at = ended_at
+    # Terminalize through a conditional UPDATE, not by assigning to the ORM
+    # instance. The `status != 'in_progress'` check above is a Python read, so two
+    # callers that both read a live session both passed it and the later commit
+    # decided the record: a student's `completed` finish could be relabelled
+    # `timed_out` by the agent's hard-stop timer, moving `ended_at` with it (which
+    # anchors the recovery sweep's grace window). Both callers are real and can
+    # fire together — the finish endpoint and `realtime.orchestration_bridge
+    # .finalize_session`. Losing the race means someone else already terminalized:
+    # return their state and do NOT enqueue, so exactly one caller owns the
+    # transition.
+    if not await sessions_queries.terminalize_in_progress_session(
+        db, session.id, status=terminal_status, ended_at=ended_at
+    ):
+        await db.commit()  # the ceremony message above is still ours to keep
+        await db.refresh(session)
+        return session
     await db.commit()
     await db.refresh(session)
 

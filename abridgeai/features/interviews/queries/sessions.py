@@ -366,6 +366,110 @@ async def list_pending_evaluation_sessions(
     return list((await db.execute(stmt)).scalars().all())
 
 
+async def claim_session_evaluation(
+    db: AsyncSession,
+    session_id: UUID,
+    *,
+    token: UUID,
+    now: datetime,
+    lease_expires_at: datetime,
+) -> bool:
+    """Atomically take exclusive ownership of one session's evaluation.
+
+    Returns ``True`` only when THIS caller won the claim. One conditional UPDATE
+    does the whole decision, so two workers racing on the same session cannot
+    both succeed: the loser's WHERE clause no longer matches after the winner's
+    row lock is released.
+
+    Refuses when:
+
+    * a verdict is already published (``pass_verdict IS NOT NULL``) — including
+      ``FALSE``, which is a real judgement, not an absence of one;
+    * an unexpired claim is held by someone else.
+
+    An EXPIRED claim is reclaimable: ARQ kills a task at ``job_timeout``, which
+    is shorter than the lease, so a lapsed lease means the owner is dead rather
+    than slow.
+    """
+    from sqlalchemy import or_, update  # noqa: PLC0415
+
+    result = await db.execute(
+        update(InterviewSession)
+        .where(
+            InterviewSession.id == session_id,
+            InterviewSession.pass_verdict.is_(None),
+            or_(
+                InterviewSession.evaluation_claim_token.is_(None),
+                InterviewSession.evaluation_claim_expires_at.is_(None),
+                InterviewSession.evaluation_claim_expires_at <= now,
+            ),
+        )
+        .values(
+            evaluation_claim_token=token,
+            evaluation_claim_expires_at=lease_expires_at,
+        )
+        .returning(InterviewSession.id)
+    )
+    claimed = result.scalar_one_or_none() is not None
+    await db.commit()
+    return claimed
+
+
+async def holds_session_evaluation_claim(
+    db: AsyncSession,
+    session_id: UUID,
+    *,
+    token: UUID,
+    now: datetime,
+) -> bool:
+    """Whether ``token`` still owns this session's evaluation right now.
+
+    Checked before any publish or failure write. A stale owner (lease lapsed
+    while it ran, so another job may already have taken over) must not write
+    either outcome — that is exactly how a superseded job used to relabel a
+    graded interview as failed.
+
+    Reads with ``FOR UPDATE`` so the check and the caller's subsequent write are
+    serialized against a concurrent reclaim attempt.
+    """
+    stmt = (
+        select(InterviewSession.evaluation_claim_token)
+        .where(
+            InterviewSession.id == session_id,
+            InterviewSession.evaluation_claim_token == token,
+            InterviewSession.evaluation_claim_expires_at.is_not(None),
+            InterviewSession.evaluation_claim_expires_at > now,
+        )
+        .with_for_update()
+    )
+    return (await db.execute(stmt)).scalar_one_or_none() is not None
+
+
+async def release_session_evaluation_claim(
+    db: AsyncSession,
+    session_id: UUID,
+    *,
+    token: UUID,
+) -> None:
+    """Drop our own claim so a later recovery can re-drive the session.
+
+    Scoped to the token: a job whose lease already lapsed must not clear the
+    claim of whoever legitimately took over. Releasing on the failure path is
+    what lets the next sweep retry immediately instead of waiting out the lease.
+    """
+    from sqlalchemy import update  # noqa: PLC0415
+
+    await db.execute(
+        update(InterviewSession)
+        .where(
+            InterviewSession.id == session_id,
+            InterviewSession.evaluation_claim_token == token,
+        )
+        .values(evaluation_claim_token=None, evaluation_claim_expires_at=None)
+    )
+    await db.commit()
+
+
 async def count_user_messages(db: AsyncSession, session_id: UUID) -> int:
     """Number of graded student answer turns recorded for a session.
 
@@ -378,6 +482,39 @@ async def count_user_messages(db: AsyncSession, session_id: UUID) -> int:
         InterviewSessionMessage.session_question_id.is_not(None),
     )
     return int((await db.execute(stmt)).scalar_one())
+
+
+async def terminalize_in_progress_session(
+    db: AsyncSession,
+    session_id: UUID,
+    *,
+    status: str,
+    ended_at: datetime,
+) -> bool:
+    """Atomically move a live session to ``status``; True only if WE moved it.
+
+    The status predicate lives in the UPDATE's own WHERE clause, so a second
+    caller that read ``in_progress`` before the first committed still matches zero
+    rows. Doing the check in Python instead (read, compare, write) let two
+    finishers through: the student's own ``completed`` finish could be relabelled
+    ``timed_out`` by the agent's hard-stop timer, and ``ended_at`` — which anchors
+    the recovery sweep's grace window — moved with it.
+
+    Mirrors ``finalize_expired_in_progress_session``, which the deadline sweep
+    already used; this is the same guarantee for the submit path.
+    """
+    from sqlalchemy import update  # noqa: PLC0415
+
+    result = await db.execute(
+        update(InterviewSession)
+        .where(
+            InterviewSession.id == session_id,
+            InterviewSession.status == "in_progress",
+        )
+        .values(status=status, ended_at=ended_at)
+        .returning(InterviewSession.id)
+    )
+    return result.scalar_one_or_none() is not None
 
 
 async def finalize_expired_in_progress_session(
