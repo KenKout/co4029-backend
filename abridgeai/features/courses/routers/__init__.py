@@ -19,11 +19,13 @@ from .assignment import router as assignment_router
 from .authoring import router as authoring_router
 from .learner import me_courses_router
 from .learner import router as learner_router
+from .management_dashboard import router as management_dashboard_router
 
 __all__ = [
     "administration_router",
     "assignment_router",
     "authoring_router",
+    "management_dashboard_router",
     "learner_router",
     "me_courses_router",
 ]

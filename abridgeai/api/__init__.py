@@ -94,6 +94,9 @@ from abridgeai.features.courses.routers import (
     learner_router as courses_learner_router,
 )
 from abridgeai.features.courses.routers import (
+    management_dashboard_router as courses_management_dashboard_router,
+)
+from abridgeai.features.courses.routers import (
     me_courses_router,
 )
 from abridgeai.features.courses.routers.assignment import (
@@ -308,6 +311,10 @@ def create_app() -> FastAPI:
     app.include_router(courses_authoring_router, prefix=API_V1_PREFIX)
     app.include_router(courses_assignment_router, prefix=API_V1_PREFIX)
     app.include_router(courses_administration_router, prefix=API_V1_PREFIX)
+    # Manager / faculty-dean decision queue. Scoped from role assignments, NOT
+    # from authored courses — see the service docstring for why that distinction
+    # is the whole point of the endpoint.
+    app.include_router(courses_management_dashboard_router, prefix=API_V1_PREFIX)
 
     # Phase 4 -- materials
     app.include_router(materials_learner_router, prefix=API_V1_PREFIX)

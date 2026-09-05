@@ -1571,3 +1571,195 @@ async def course_health_metrics_for_courses(
         )
         for row in rows.all()
     }
+
+
+_GRADEABLE_UNIT_COUNT_BY_COURSE_SQL = text(
+    """
+SELECT course_id, SUM(n)::bigint AS units
+FROM (
+    SELECT m.course_id AS course_id, COUNT(*) AS n
+      FROM modules m
+      JOIN lessons l ON l.module_id = m.id
+          AND l.deleted_at IS NULL AND l.status = 'published'
+     WHERE m.course_id = ANY(:course_ids) AND m.deleted_at IS NULL
+     GROUP BY m.course_id
+    UNION ALL
+    SELECT m.course_id AS course_id, COUNT(*) AS n
+      FROM module_items mi
+      JOIN modules m ON m.id = mi.module_id AND m.deleted_at IS NULL
+      JOIN quizzes q ON q.id = mi.quiz_id
+          AND q.deleted_at IS NULL AND q.status = 'published'
+     WHERE m.course_id = ANY(:course_ids)
+       AND mi.item_type = 'quiz' AND mi.deleted_at IS NULL
+     GROUP BY m.course_id
+    UNION ALL
+    SELECT m.course_id AS course_id, COUNT(*) AS n
+      FROM module_items mi
+      JOIN modules m ON m.id = mi.module_id AND m.deleted_at IS NULL
+      JOIN interview_configs ic ON ic.id = mi.interview_config_id
+          AND ic.deleted_at IS NULL AND ic.status = 'published'
+     WHERE m.course_id = ANY(:course_ids)
+       AND mi.item_type = 'interview' AND mi.deleted_at IS NULL
+     GROUP BY m.course_id
+) parts
+GROUP BY course_id
+"""
+)
+"""Batched twin of ``enrollments.queries.completion_units._COURSE_UNIT_COUNT_SQL``.
+
+Same three sources, same visibility rules, one round-trip for N courses:
+published lessons reached through ``modules`` (NOT ``module_items`` — a lesson
+is gradeable by being a live member of a live module), plus published quizzes
+and published interview_configs reached through ``module_items``. Keeping the
+join/visibility rules identical is the point: the manager decision queue and
+the publish gate must count the same units or the queue accuses a publishable
+course of having no content.
+"""
+
+
+async def gradeable_unit_count_for_courses(
+    db: AsyncSession, course_ids: Sequence[UUID]
+) -> dict[UUID, int]:
+    """``{course_id: gradeable_unit_count}`` for every id in ``course_ids``.
+
+    Batched equivalent of ``enrollments.api.public.count_course_gradeable_units``
+    (which is per-course and issues three subqueries per call). The manager
+    dashboard fans the readiness check over a whole organization, so the
+    per-course version would be an N+1 on the critical path.
+
+    Courses with no gradeable unit are present in the result with ``0`` rather
+    than absent — a missing key and a zero mean the same thing here and the
+    caller's conjunction reads better without a ``.get`` default.
+    """
+    ids = list(course_ids)
+    result: dict[UUID, int] = dict.fromkeys(ids, 0)
+    if not ids:
+        return result
+    rows = await db.execute(_GRADEABLE_UNIT_COUNT_BY_COURSE_SQL, {"course_ids": ids})
+    for row in rows.all():
+        result[row.course_id] = int(row.units)
+    return result
+
+
+async def teacher_count_for_courses(
+    db: AsyncSession, course_ids: Sequence[UUID]
+) -> dict[UUID, int]:
+    """``{course_id: active_teacher_count}`` for every id in ``course_ids``.
+
+    Batched twin of ``assignment_queries.list_teachers_for_course``, carrying
+    the same active predicate verbatim (``scope_kind='course'``, role
+    ``teacher``, not soft-deleted, ``active_until`` NULL or in the future) so
+    the staffing number on the decision queue matches the staffing number on
+    the course's own staffing tab. A revoked teacher (``active_until`` in the
+    past) must not keep a course looking staffed.
+
+    One GROUP BY for N courses. Courses with no active teacher are present
+    with ``0``.
+    """
+    ids = list(course_ids)
+    result: dict[UUID, int] = dict.fromkeys(ids, 0)
+    if not ids:
+        return result
+    stmt = (
+        select(UserRoleAssignment.course_id, func.count().label("n"))
+        .join(Role, Role.id == UserRoleAssignment.role_id)
+        .where(
+            UserRoleAssignment.course_id.in_(ids),
+            UserRoleAssignment.scope_kind == "course",
+            Role.code == "teacher",
+            UserRoleAssignment.deleted_at.is_(None),
+            (UserRoleAssignment.active_until.is_(None))
+            | (UserRoleAssignment.active_until > func.now()),
+        )
+        .group_by(UserRoleAssignment.course_id)
+    )
+    for course_id, n in (await db.execute(stmt)).all():
+        result[UUID(str(course_id))] = int(n)
+    return result
+
+
+async def outcome_count_for_courses(
+    db: AsyncSession, course_ids: Sequence[UUID]
+) -> dict[UUID, int]:
+    """``{course_id: live_learning_outcome_count}`` for every id in ``course_ids``.
+
+    Batched twin of :func:`count_course_outcomes`, carrying the same predicate
+    verbatim (``deleted_at IS NULL``, outcomes at ANY depth) so the manager
+    decision queue's outcome verdict matches the publish gate's. The per-course
+    version is one COUNT per course, which is an N+1 once the readiness check
+    fans out over a whole organization.
+
+    This exists because ``CourseAuthoring.outcomes`` CANNOT be used for the
+    count: ``Course`` has no ``outcomes`` relationship, so the DTO field is
+    populated only by the single-course content-tree reads and is ``[]`` on
+    every row the list endpoints return -- including courses that really do
+    have 19 outcomes. Deriving ``outcome_count`` from ``len(dto.outcomes)``
+    would report every course in the org as missing its outcomes, which is
+    precisely the false accusation the parity-with-the-publish-gate rule
+    exists to prevent.
+
+    Courses with no live outcome are present with ``0`` rather than absent, so
+    the caller's conjunction reads without a ``.get`` default.
+    """
+    ids = list(course_ids)
+    result: dict[UUID, int] = dict.fromkeys(ids, 0)
+    if not ids:
+        return result
+    stmt = (
+        select(CourseLearningOutcome.course_id, func.count().label("n"))
+        .where(
+            CourseLearningOutcome.course_id.in_(ids),
+            CourseLearningOutcome.deleted_at.is_(None),
+        )
+        .group_by(CourseLearningOutcome.course_id)
+    )
+    for course_id, n in (await db.execute(stmt)).all():
+        result[UUID(str(course_id))] = int(n)
+    return result
+
+
+_REQUIRED_PATH_COURSE_IDS_SQL = text(
+    """
+SELECT DISTINCT cci.course_id AS course_id
+  FROM career_course_items cci
+  JOIN career_path_versions cpv ON cpv.id = cci.version_id
+      AND cpv.deleted_at IS NULL
+  JOIN career_path_stages cps ON cps.id = cci.stage_id
+      AND cps.deleted_at IS NULL
+  JOIN career_paths cp ON cp.id = cpv.career_path_id
+      AND cp.deleted_at IS NULL
+ WHERE cci.course_id = ANY(:course_ids)
+   AND cci.is_required IS TRUE
+"""
+)
+"""Batched membership test behind ``blocks_required_stage``.
+
+Set-shaped twin of ``assignment_queries.list_career_paths_containing_course``,
+carrying its four soft-delete predicates verbatim (path, version, stage; the
+join table itself has no ``deleted_at`` column). That function projects one row
+per placement because the course-detail Career Paths tab renders them; the
+decision queue only ever asks the boolean "is this course REQUIRED anywhere",
+so this returns the id set instead of N rows per course and answers for the
+whole organization in one round-trip rather than one query per course.
+
+Deliberately NOT filtered on ``career_paths.status``: a draft or archived path
+still pins the course as required, and the severity rule is about the course's
+own missing content, not the path's publication state -- matching the per-course
+function, which also returns placements at every status.
+"""
+
+
+async def required_path_course_ids(db: AsyncSession, course_ids: Sequence[UUID]) -> set[UUID]:
+    """Subset of ``course_ids`` sitting on >= 1 career path as a REQUIRED course.
+
+    A required course with no gradeable unit does not merely fail to complete:
+    it locks its stage and every stage behind it, for every student on that
+    path. That is why this is the decision queue's highest severity signal and
+    why it is worth its own query rather than being folded into the readiness
+    conjunction.
+    """
+    ids = list(course_ids)
+    if not ids:
+        return set()
+    rows = await db.execute(_REQUIRED_PATH_COURSE_IDS_SQL, {"course_ids": ids})
+    return {UUID(str(row.course_id)) for row in rows.all()}

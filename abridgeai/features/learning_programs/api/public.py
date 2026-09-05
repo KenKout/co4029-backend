@@ -23,6 +23,57 @@ register_conflict_mappings(
 )
 
 
+async def list_program_governance_rows(
+    db: AsyncSession, *, organization_id: UUID, actor: object
+) -> list[dict[str, object]]:
+    """Programs in an organization with their governance counters, for a dashboard.
+
+    Backs the manager / faculty-dean decision queue in
+    ``courses.services.management_dashboard``. Cross-feature callers cannot
+    reach ``learning_programs.services``, so this is the blessed surface.
+
+    Delegates to the SAME service the management list page uses, so a program
+    hidden from a dean there is hidden here too: ``list_programs`` filters
+    per-program by ``_actor_can_operate``, which is what restricts a faculty
+    dean to the programs they own. Re-implementing the filter would be a second
+    definition of "my programs" and the two would drift.
+
+    Returns plain dicts rather than ``ProgramRead`` so the schema stays inside
+    this feature -- the same contract
+    :func:`list_student_program_enrollments` follows.
+
+    ``path_change_request_count`` counts OPEN statuses only (``pending`` +
+    ``in_progress``), matching the management list card. The per-program
+    drill-down returns every status and will legitimately show more rows.
+    """
+    from abridgeai.features.learning_programs import services  # noqa: PLC0415
+
+    # ``actor`` is the caller's real ``CurrentUser``, passed straight through
+    # rather than reconstructed: ``list_programs`` reads only ``user_id`` today,
+    # but fabricating a principal here would silently diverge the moment it
+    # starts consulting permissions or the session. Typed ``object`` so this
+    # module needs no import from ``core.security``.
+    programs = await services.list_programs(
+        db,
+        organization_id=organization_id,
+        actor=actor,  # type: ignore[arg-type]
+    )
+    return [
+        {
+            "id": program.id,
+            "name": program.name,
+            "slug": program.slug,
+            "status": program.status,
+            "organization_id": program.organization_id,
+            "faculty_id": program.faculty_id,
+            "student_count": program.student_count,
+            "path_change_request_count": program.path_change_request_count,
+            "has_draft_version": program.has_draft_version,
+        }
+        for program in programs
+    ]
+
+
 async def list_student_program_enrollments(
     db: AsyncSession, *, student_id: UUID
 ) -> list[dict[str, object]]:
@@ -184,6 +235,7 @@ async def grant_active_path_entitlement(
 
 __all__ = [
     "complete_program_attempts",
+    "list_program_governance_rows",
     "list_student_program_enrollments",
     "ensure_completion_award",
     "grant_active_path_entitlement",
