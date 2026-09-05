@@ -150,21 +150,57 @@ async def save(
 
     Whole-dict reassignment of ``state_json`` is intentional: the ORM only
     reliably flags a JSONB column dirty on reassignment, not in-place mutation.
-    """
-    row = await _get_row(db, session_id)
-    if row is None:
-        # Caller must load_or_init first; treat a missing row as a lost race.
-        raise StaleStateError(session_id, expected_version, -1)
-    if row.state_version != expected_version:
-        raise StaleStateError(session_id, expected_version, row.state_version)
 
-    row.state_json = data.to_dict()
-    row.phase = data.phase.value
-    row.state_version = expected_version + 1
+    The version check lives INSIDE the UPDATE's WHERE clause, not in a preceding
+    SELECT. A read-then-write pair is not atomic under READ COMMITTED: while one
+    transaction holds the row lock with an uncommitted UPDATE, a second one still
+    SELECTs the OLD version, so its guard passes; its UPDATE then blocks on the
+    lock and lands anyway once the first commits. That silently discarded a turn
+    — reproduced against this database as ``state_version`` stuck at 1 after two
+    turns, with the second turn's ``last_turn_idempotency_key`` overwriting the
+    first and its state (hint counters, security attempt counts) lost.
+
+    Postgres re-evaluates the WHERE of a blocked UPDATE against the *committed*
+    row once the lock is released, so ``state_version = :expected`` fails there
+    and the write matches zero rows — which is how the race is now detected.
+    """
+    from sqlalchemy import update  # noqa: PLC0415
+
+    # A bulk UPDATE bypasses the ORM's identity map. Expire any instance this
+    # session already loaded BEFORE issuing it, so a later read in the same
+    # transaction refetches instead of serving pre-save column values.
+    stale_instance = await _get_row(db, session_id)
+    if stale_instance is not None:
+        db.expire(stale_instance)
+
+    values: dict[str, object] = {
+        "state_json": data.to_dict(),
+        "phase": data.phase.value,
+        "state_version": expected_version + 1,
+    }
     if turn_idempotency_key is not None:
-        row.last_turn_idempotency_key = turn_idempotency_key
-    await db.flush()
-    return row.state_version
+        values["last_turn_idempotency_key"] = turn_idempotency_key
+
+    result = await db.execute(
+        update(InterviewRuntimeState)
+        .where(
+            InterviewRuntimeState.session_id == session_id,
+            InterviewRuntimeState.state_version == expected_version,
+        )
+        .values(**values)
+        .returning(InterviewRuntimeState.state_version)
+    )
+    new_version = result.scalar_one_or_none()
+    if new_version is None:
+        # Zero rows matched: either no row exists (caller skipped load_or_init)
+        # or the version moved on. Re-read to report which, and to give the
+        # caller the actual version for its duplicate-replay decision.
+        row = await _get_row(db, session_id)
+        raise StaleStateError(
+            session_id, expected_version, row.state_version if row is not None else -1
+        )
+
+    return int(new_version)
 
 
 def is_duplicate_turn(loaded: LoadedRuntimeState, turn_idempotency_key: str | None) -> bool:
