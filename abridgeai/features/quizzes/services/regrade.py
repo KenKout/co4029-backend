@@ -20,6 +20,7 @@ Layering: this service owns its own DB reads/writes (same precedent as
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
@@ -38,7 +39,11 @@ from abridgeai.features.quizzes.models import (
     QuizRegradeItem,
     QuizRegradeRun,
 )
-from abridgeai.features.quizzes.services.grader import grade_answer_against_revision
+from abridgeai.features.quizzes.services.grader import (
+    GradeResult,
+    grade_answer_against_revision,
+    needs_manual_grade,
+)
 from abridgeai.features.quizzes.services.taking import _recompute_attempt_score
 
 if TYPE_CHECKING:
@@ -60,11 +65,13 @@ async def _snapshot_live_question(
     db: AsyncSession, question: QuizQuestion
 ) -> dict[str, Any]:
     """Serialize the CURRENT question definition into the dict shape that
-    :func:`grade_answer_against_revision` expects (``question_type`` + either
-    ``options`` w/ ``option_key``+``is_correct`` for MCQ/TF, or ``correct_answer``
-    for short_answer/fill_blank from ``original_generated_payload``).
+    :func:`grade_answer_against_revision` expects. Every auto-graded question
+    type carries the same answer-bearing fields used by the live grader.
     """
-    payload: dict[str, Any] = {"question_type": question.question_type}
+    payload: dict[str, Any] = {
+        "question_type": question.question_type,
+        "single_answer": question.single_answer,
+    }
     if question.question_type in {"multiple_choice", "true_false"}:
         options = (
             (
@@ -80,10 +87,37 @@ async def _snapshot_live_question(
         payload["options"] = [
             {"option_key": o.option_key, "is_correct": o.is_correct} for o in options
         ]
-    else:
+    elif question.question_type in {"short_answer", "fill_blank"}:
         gen = question.original_generated_payload or {}
         payload["correct_answer"] = gen.get("correct_answer")
+    elif question.question_type == "numerical":
+        payload["numeric_answer"] = question.numeric_answer
+        payload["numeric_tolerance"] = question.numeric_tolerance
+    elif question.question_type == "matching":
+        payload["match_pairs"] = question.match_pairs
+    elif question.question_type == "ordering":
+        payload["ordering_sequence"] = question.ordering_sequence
     return payload
+
+
+def _selected_option_ids(answer: QuizAttemptAnswer) -> list[UUID]:
+    """Return single/multi-select option ids stored by either answer contract."""
+    raw: object = answer.selected_option_ids
+    if not isinstance(raw, list) and answer.answer_text:
+        try:
+            raw = json.loads(answer.answer_text)
+        except (TypeError, ValueError):
+            raw = []
+    values = raw if isinstance(raw, list) else []
+    if answer.selected_option_id is not None:
+        values = [answer.selected_option_id, *values]
+    parsed: list[UUID] = []
+    for value in values:
+        try:
+            parsed.append(UUID(str(value)))
+        except (TypeError, ValueError, AttributeError):
+            continue
+    return parsed
 
 
 async def _current_revision_id(db: AsyncSession, question_id: UUID) -> UUID | None:
@@ -171,7 +205,9 @@ async def compute_regrade(
     )
 
     # Batch-resolve selected option keys (avoid N+1).
-    option_ids = [a.selected_option_id for a in answers if a.selected_option_id]
+    option_ids = {
+        option_id for answer in answers for option_id in _selected_option_ids(answer)
+    }
     option_key_by_id: dict[UUID, str] = {}
     if option_ids:
         for oid, okey in (
@@ -186,6 +222,10 @@ async def compute_regrade(
     changed_attempts: set[UUID] = set()
     items_created = 0
     for ans in answers:
+        # A teacher's explicit grade is authoritative. Pending manual answers
+        # also remain in the queue instead of being silently converted to zero.
+        if ans.manual_score is not None or ans.needs_manual_grade:
+            continue
         snapshot = snapshots.get(ans.question_id)
         if snapshot is None:
             continue
@@ -194,10 +234,16 @@ async def compute_regrade(
             if ans.selected_option_id
             else None
         )
+        selected_keys = [
+            option_key_by_id[option_id]
+            for option_id in _selected_option_ids(ans)
+            if option_id in option_key_by_id
+        ]
         new = grade_answer_against_revision(
             snapshot,
             selected_option_key=selected_key,
             answer_text=ans.answer_text,
+            selected_option_keys=selected_keys,
         )
         if (
             new.is_correct != ans.is_correct
@@ -289,15 +335,40 @@ async def commit_regrade(
         .scalars()
         .all()
     }
+    question_types = dict(
+        (
+            await db.execute(
+                select(QuizQuestion.id, QuizQuestion.question_type).where(
+                    QuizQuestion.id.in_({item.question_id for item in items})
+                )
+            )
+        ).all()
+    )
     affected_attempt_ids: set[UUID] = set()
+    applied_items = 0
     for it in items:
         ans = answers_by_id.get(it.answer_id)
         if ans is None:
             continue
+        if ans.manual_score is not None or ans.needs_manual_grade:
+            continue
         ans.is_correct = it.new_is_correct
         ans.points_awarded = it.new_points
+        question_type = question_types.get(it.question_id)
+        if question_type is not None:
+            ans.needs_manual_grade = needs_manual_grade(
+                question_type,
+                GradeResult(
+                    is_correct=it.new_is_correct,
+                    points_awarded=it.new_points,
+                ),
+            )
         ans.graded_revision_id = await _current_revision_id(db, it.question_id)
         affected_attempt_ids.add(it.attempt_id)
+        applied_items += 1
+
+    run.answers_changed = applied_items
+    run.attempts_affected = len(affected_attempt_ids)
 
     await flush_or_conflict(db)
 
@@ -311,13 +382,32 @@ async def commit_regrade(
         .scalars()
         .all()
     )
+    pending_attempt_ids = set(
+        (
+            await db.execute(
+                select(QuizAttemptAnswer.attempt_id)
+                .where(
+                    QuizAttemptAnswer.attempt_id.in_(affected_attempt_ids),
+                    QuizAttemptAnswer.needs_manual_grade.is_(True),
+                )
+                .distinct()
+            )
+        ).scalars()
+    )
     for attempt in attempts:
+        if attempt.id in pending_attempt_ids:
+            attempt.score_points = None
+            attempt.score_percent = None
+            attempt.passed = None
+            continue
         score_points, score_percent, _correct, _count = await _recompute_attempt_score(
             db, attempt, quiz
         )
         attempt.score_points = score_points
         attempt.score_percent = score_percent
         attempt.passed = score_percent >= quiz.passing_score_percent
+
+    await flush_or_conflict(db)
 
     # Phase 9: refresh the materialised grade-of-record for each affected student
     # (dedup — grade is per student, not per attempt).

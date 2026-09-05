@@ -175,9 +175,8 @@ def test_matching_no_distractors_is_classic_one_to_one():
     assert sorted(pub.match_choices) == ["1", "2"]
 
 
-def test_fill_blank_derives_shuffled_bank_from_correct_answer_no_leak():
-    """Teacher-created fill_blank (no option rows) exposes the answer words as
-    a shuffled word bank; the raw ``correct_answer`` never serializes."""
+def test_fill_blank_without_distractors_does_not_expose_answer_bank():
+    """An answer-only bank is withheld so the client uses free-text blanks."""
     pub = QuizQuestionPublic.model_validate(
         _base(
             question_type="fill_blank",
@@ -187,10 +186,11 @@ def test_fill_blank_derives_shuffled_bank_from_correct_answer_no_leak():
     )
     dumped = pub.model_dump()
 
-    # The answer key must NOT serialize — only the shuffled word bank may.
+    # Neither the raw key nor a derived answer-only bank may serialize.
     assert "original_generated_payload" not in dumped
     assert "correct_answer" not in dumped
-    assert sorted(pub.fill_blank_choices) == ["123", "456"]
+    assert pub.options == []
+    assert pub.fill_blank_choices == []
 
 
 def test_fill_blank_uses_option_bank_with_distractors_when_present():
@@ -198,9 +198,27 @@ def test_fill_blank_uses_option_bank_with_distractors_when_present():
     projection surfaces every option text (correct + distractors), still with
     no is_correct leak."""
     options = [
-        SimpleNamespace(id=uuid.uuid4(), option_key="O01", option_text="alpha", position=1),
-        SimpleNamespace(id=uuid.uuid4(), option_key="O02", option_text="beta", position=2),
-        SimpleNamespace(id=uuid.uuid4(), option_key="O03", option_text="gamma", position=3),
+        SimpleNamespace(
+            id=uuid.uuid4(),
+            option_key="O01",
+            option_text="alpha",
+            position=1,
+            is_correct=True,
+        ),
+        SimpleNamespace(
+            id=uuid.uuid4(),
+            option_key="O02",
+            option_text="beta",
+            position=2,
+            is_correct=True,
+        ),
+        SimpleNamespace(
+            id=uuid.uuid4(),
+            option_key="O03",
+            option_text="gamma",
+            position=3,
+            is_correct=False,
+        ),
     ]
     pub = QuizQuestionPublic.model_validate(
         _base(
@@ -219,11 +237,30 @@ def test_fill_blank_shuffle_is_stable_and_not_in_answer_order():
     order is not implied by position."""
     qid = uuid.uuid4()
     answers = ["w1", "w2", "w3", "w4", "w5"]
+    options = [
+        SimpleNamespace(
+            id=uuid.uuid4(),
+            option_key=f"O{index:02d}",
+            option_text=answer,
+            position=index,
+            is_correct=True,
+        )
+        for index, answer in enumerate(answers, start=1)
+    ]
+    options.append(
+        SimpleNamespace(
+            id=uuid.uuid4(),
+            option_key="O06",
+            option_text="distractor",
+            position=6,
+            is_correct=False,
+        )
+    )
     a = QuizQuestionPublic.model_validate(
         _base(
             id=qid,
             question_type="fill_blank",
-            options=[],
+            options=options,
             original_generated_payload={"correct_answer": answers},
         )
     )
@@ -231,10 +268,11 @@ def test_fill_blank_shuffle_is_stable_and_not_in_answer_order():
         _base(
             id=qid,
             question_type="fill_blank",
-            options=[],
+            options=options,
             original_generated_payload={"correct_answer": answers},
         )
     )
     assert a.fill_blank_choices == b.fill_blank_choices
-    assert sorted(a.fill_blank_choices) == sorted(answers)
-    assert a.fill_blank_choices != answers
+    expected = [*answers, "distractor"]
+    assert sorted(a.fill_blank_choices) == sorted(expected)
+    assert a.fill_blank_choices != expected

@@ -79,3 +79,14 @@ def test_true_false_stays_strict() -> None:
     both = [_opt("T", correct=True), _opt("F", correct=True)]
     with pytest.raises(AppError, match="exactly one correct"):
         _validate_question_options("true_false", both, single_answer=False)
+
+
+def test_fill_blank_requires_a_distractor_for_word_bank_mode() -> None:
+    answer_only = [_opt("O01", correct=True)]
+    with pytest.raises(AppError, match="at least one distractor"):
+        _validate_question_options("fill_blank", answer_only)
+
+
+def test_fill_blank_accepts_correct_answers_plus_distractor() -> None:
+    bank = [_opt("O01", correct=True), _opt("O02", correct=False)]
+    _validate_question_options("fill_blank", bank)

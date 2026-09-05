@@ -17,7 +17,7 @@ service is the only consumer of the authoring projection.
 from __future__ import annotations
 
 from datetime import datetime
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from typing import TYPE_CHECKING
 from uuid import UUID
 
@@ -71,6 +71,14 @@ if TYPE_CHECKING:
 _logger = get_logger(__name__)
 
 _DEFAULT_FAILURE_COOLDOWN_SECONDS = 86400
+_TWO_DECIMAL_PLACES = Decimal("0.01")
+
+
+def _calculate_score_percent(score_points: Decimal, question_count: int) -> Decimal:
+    """Return the canonical persisted/displayed percentage."""
+    return (
+        (score_points / Decimal(question_count)) * Decimal("100")
+    ).quantize(_TWO_DECIMAL_PLACES, rounding=ROUND_HALF_UP)
 
 
 class AllCardsInCooldownError(AppError):
@@ -695,7 +703,7 @@ async def _recompute_attempt_score(
         )
         question_count = int(question_count_row.scalar_one()) or len(answers) or 1
     score_points = sum((answer.points_awarded for answer in answers), Decimal("0"))
-    score_percent = (score_points / Decimal(question_count)) * Decimal("100")
+    score_percent = _calculate_score_percent(score_points, question_count)
     correct_count = sum(1 for answer in answers if answer.is_correct)
     return score_points, score_percent, correct_count, question_count
 

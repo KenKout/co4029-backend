@@ -90,3 +90,67 @@ def test_code_and_unknown_always_zero() -> None:
         assert not grade_answer_against_revision(
             snap, selected_option_key=None, answer_text="anything"
         ).is_correct
+
+
+def test_numerical_regrade_uses_tolerance() -> None:
+    snap = {
+        "question_type": "numerical",
+        "numeric_answer": Decimal("10"),
+        "numeric_tolerance": Decimal("0.25"),
+    }
+    assert grade_answer_against_revision(
+        snap, selected_option_key=None, answer_text="10.2"
+    ).is_correct
+    assert not grade_answer_against_revision(
+        snap, selected_option_key=None, answer_text="10.3"
+    ).is_correct
+
+
+def test_matching_regrade_uses_current_pairs() -> None:
+    snap = {
+        "question_type": "matching",
+        "match_pairs": [
+            {"left": "France", "right": "Paris"},
+            {"left": "Japan", "right": "Tokyo"},
+        ],
+    }
+    assert grade_answer_against_revision(
+        snap,
+        selected_option_key=None,
+        answer_text='{"France":"Paris","Japan":"Tokyo"}',
+    ).is_correct
+
+
+def test_ordering_regrade_uses_current_sequence() -> None:
+    snap = {
+        "question_type": "ordering",
+        "ordering_sequence": ["first", "second", "third"],
+    }
+    assert grade_answer_against_revision(
+        snap,
+        selected_option_key=None,
+        answer_text='["first","second","third"]',
+    ).is_correct
+    assert not grade_answer_against_revision(
+        snap,
+        selected_option_key=None,
+        answer_text='["second","first","third"]',
+    ).is_correct
+
+
+def test_multi_select_regrade_compares_stable_option_keys() -> None:
+    snap = {
+        "question_type": "multiple_choice",
+        "single_answer": False,
+        "options": [
+            {"option_key": "A", "is_correct": True},
+            {"option_key": "B", "is_correct": False},
+            {"option_key": "C", "is_correct": True},
+        ],
+    }
+    assert grade_answer_against_revision(
+        snap,
+        selected_option_key=None,
+        selected_option_keys=["A", "C"],
+        answer_text=None,
+    ).is_correct

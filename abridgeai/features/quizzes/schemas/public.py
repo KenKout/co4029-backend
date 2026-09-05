@@ -106,10 +106,15 @@ class QuizQuestionOptionPublic(_ORMModel):
     option_format: str = "plain"
 
 
-def _extract_fill_blank_bank(options: object, payload: object) -> list[str]:
-    """Return the fill_blank word bank: option texts when present, else the
-    answer words from ``original_generated_payload.correct_answer``."""
+def _extract_fill_blank_bank(options: object, _payload: object) -> list[str]:
+    """Return a word bank only when it contains at least one distractor.
+
+    Falling back to ``correct_answer`` exposes the full answer set and makes a
+    one-blank question trivial. Existing unsafe questions therefore render as
+    free-text blanks instead of receiving an answer-bearing bank.
+    """
     bank: list[str] = []
+    has_distractor = False
     if isinstance(options, list):
         for opt in options:
             text = (
@@ -119,11 +124,13 @@ def _extract_fill_blank_bank(options: object, payload: object) -> list[str]:
             )
             if isinstance(text, str) and text.strip():
                 bank.append(text.strip())
-    if not bank:
-        correct = payload.get("correct_answer") if isinstance(payload, dict) else None
-        if isinstance(correct, list):
-            bank = [b.strip() for b in correct if isinstance(b, str) and b.strip()]
-    return bank
+                is_correct = (
+                    opt.get("is_correct")
+                    if isinstance(opt, dict)
+                    else getattr(opt, "is_correct", None)
+                )
+                has_distractor = has_distractor or is_correct is False
+    return bank if has_distractor else []
 
 
 class QuizQuestionPublic(_ORMModel):
@@ -193,9 +200,8 @@ class QuizQuestionPublic(_ORMModel):
     match_prompts: list[str] = []
     match_choices: list[str] = []
     ordering_items: list[str] = []
-    # fill_blank word bank: the answer words (or the AI-generated option bank
-    # with distractors) served SHUFFLED so the positional answer key never
-    # leaks to a learner. Derived in ``_derive_no_leak_type_fields``.
+    # fill_blank word bank: served only when the author supplied at least one
+    # distractor, then shuffled so position never implies the answer key.
     fill_blank_choices: list[str] = []
 
     @model_validator(mode="before")
@@ -281,6 +287,11 @@ class QuizQuestionPublic(_ORMModel):
                     if len(shuffled) <= 1 or shuffled != bank:
                         break
                 derived["fill_blank_choices"] = shuffled
+            else:
+                # An answer-only option list is itself a leak even if the UI
+                # ignores fill_blank_choices, so strip it from the wire too.
+                derived["options"] = []
+                derived["fill_blank_choices"] = []
 
         if not derived:
             return data
