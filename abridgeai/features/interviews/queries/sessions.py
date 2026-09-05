@@ -333,18 +333,35 @@ async def list_pending_evaluation_sessions(
     db: AsyncSession,
     *,
     ended_before: datetime,
+    max_recovery_attempts: int = 3,
 ) -> list[InterviewSession]:
     """Terminal sessions whose async evaluation appears to be stranded.
 
     The grace cutoff keeps an actively running evaluation job out of the
-    recovery scan. ``failed`` and ``abandoned`` rows are intentionally
-    excluded because they are already terminal from the grader's perspective.
+    recovery scan.
+
+    ``status='failed'`` IS included. That status only means "ARQ exhausted its
+    retry budget", which is an infrastructure outcome, not a judgement about the
+    student: the session still holds real answers and ``_ungradeable_reason``
+    still permits grading it. Excluding it stranded 14 sessions that a student
+    had actually sat, with no re-drive path anywhere in the codebase. It is
+    bounded by ``max_recovery_attempts`` so a genuinely unprocessable session
+    cannot be retried forever.
+
+    ``abandoned`` stays excluded on the merits: that status is only reached when
+    the session has no gradeable answer at all.
     """
+    recovery_attempts = InterviewSession.internal_summary_json[
+        "evaluation_recovery"
+    ]["attempts"].as_integer()
     stmt = select(InterviewSession).where(
-        InterviewSession.status.in_(("completed", "timed_out")),
+        InterviewSession.status.in_(("completed", "timed_out", "failed")),
         InterviewSession.pass_verdict.is_(None),
         InterviewSession.ended_at.is_not(None),
         InterviewSession.ended_at <= ended_before,
+        # NULL (never recovered) or under the ceiling. func.coalesce keeps the
+        # comparison SQL-side so a missing key is not silently false.
+        func.coalesce(recovery_attempts, 0) < max_recovery_attempts,
     )
     return list((await db.execute(stmt)).scalars().all())
 

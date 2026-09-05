@@ -38,7 +38,20 @@ logger = logging.getLogger(__name__)
 _EVALUATE_INTERVIEW_SESSION_TASK = "evaluate_interview_session_task"
 
 
-def _evaluation_job_id(session_id: UUID) -> str:
+def _evaluation_job_id(session_id: UUID, *, attempt: int = 0) -> str:
+    """Deterministic ARQ job ID for one session's evaluation.
+
+    ``attempt=0`` (the default) keeps the original session-scoped ID used by the
+    natural submit and sweep paths, where deduplication is exactly what we want:
+    two enqueues for the same finish must not grade twice.
+
+    Recovery passes its attempt number so each re-drive gets a distinct ID. ARQ
+    refuses a duplicate ID while the previous result is still in Redis
+    (``keep_result_seconds = 3600``), so a session-scoped ID would make every
+    recovery within the hour a silent no-op.
+    """
+    if attempt > 0:
+        return f"interview-evaluation:{session_id}:recover-{attempt}"
     return f"interview-evaluation:{session_id}"
 
 
@@ -93,27 +106,54 @@ async def recover_stalled_evaluations(
     arq_pool: object | None = None,
     *,
     grace_minutes: int = 15,
+    max_recovery_attempts: int = 3,
 ) -> int:
     """Re-enqueue terminal sessions left without an evaluation verdict.
 
-    This repairs rows stranded by worker crashes or by the former retry bug
-    where ARQ exhausted its budget before the application could stamp
-    ``status='failed'``. A deterministic job ID prevents duplicate work when
-    consecutive sweeps overlap an evaluation already in progress.
+    Repairs rows stranded by worker crashes, and rows where ARQ exhausted its
+    own retry budget and stamped ``status='failed'``. That status is an
+    infrastructure outcome rather than a judgement about the student — the
+    answers are still there and still gradeable — so leaving those rows alone
+    permanently discarded work a student had actually done.
+
+    Two bounds keep this from becoming an infinite retry loop:
+
+    * ``max_recovery_attempts`` — counted in
+      ``internal_summary_json['evaluation_recovery']['attempts']`` and enforced
+      SQL-side by the query, so a session that cannot be processed is abandoned
+      after a few sweeps instead of being re-queued every five minutes forever.
+    * the attempt counter is stamped BEFORE the job is enqueued, so a task that
+      dies hard (OOM, worker kill) still consumes its budget. Under-counting
+      would be safe for the student but would reintroduce the loop.
+
+    The job ID is per-attempt rather than per-session: ARQ refuses a duplicate
+    job ID while the previous result is still in Redis (``keep_result_seconds``
+    is 3600), so reusing the session-scoped ID would make every recovery inside
+    that hour a silent no-op — the enqueue returns ``None`` and nothing happens.
     """
     if arq_pool is None:
         return 0
     candidates = await sessions_queries.list_pending_evaluation_sessions(
         db,
         ended_before=utcnow() - timedelta(minutes=max(1, grace_minutes)),
+        max_recovery_attempts=max_recovery_attempts,
     )
     enqueued = 0
     for session in candidates:
+        summary = dict(session.internal_summary_json or {})
+        recovery = dict(summary.get("evaluation_recovery") or {})
+        attempt = int(recovery.get("attempts") or 0) + 1
+        recovery["attempts"] = attempt
+        recovery["last_attempt_at"] = utcnow().isoformat()
+        summary["evaluation_recovery"] = recovery
+        session.internal_summary_json = summary
+        await db.commit()
+
         job = await arq_pool.enqueue_job(  # type: ignore[attr-defined]
             _EVALUATE_INTERVIEW_SESSION_TASK,
             session.student_id,
             session.id,
-            _job_id=_evaluation_job_id(session.id),
+            _job_id=_evaluation_job_id(session.id, attempt=attempt),
         )
         if job is not None:
             enqueued += 1

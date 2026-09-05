@@ -96,10 +96,17 @@ async def test_time_limit_breached_without_transcript_is_abandoned():
 
 
 @pytest.mark.asyncio
-async def test_recover_stalled_evaluation_uses_deduplicated_job_id():
+async def test_recover_stalled_evaluation_uses_per_attempt_job_id():
+    """Recovery must NOT reuse the session-scoped job ID.
+
+    ARQ refuses a duplicate job ID while the previous result is still in Redis
+    (``keep_result_seconds = 3600``), so a session-scoped ID would make every
+    recovery inside that hour a silent no-op.
+    """
     session = _make_session(started_at=_NOW - timedelta(hours=1))
     session.status = "completed"
     session.ended_at = _NOW - timedelta(minutes=30)
+    session.internal_summary_json = {}
     db = AsyncMock()
     arq = AsyncMock()
     arq.enqueue_job.return_value = object()
@@ -119,7 +126,93 @@ async def test_recover_stalled_evaluation_uses_deduplicated_job_id():
         "evaluate_interview_session_task",
         session.student_id,
         session.id,
-        _job_id=f"interview-evaluation:{session.id}",
+        _job_id=f"interview-evaluation:{session.id}:recover-1",
+    )
+
+
+@pytest.mark.asyncio
+async def test_recovery_counts_its_attempt_before_enqueueing():
+    """The budget is spent up front so a hard-killed task still consumes it.
+
+    Counting after a successful enqueue would let a worker that dies mid-task be
+    re-queued every five minutes forever.
+    """
+    session = _make_session(started_at=_NOW - timedelta(hours=1))
+    session.status = "failed"
+    session.ended_at = _NOW - timedelta(minutes=30)
+    session.internal_summary_json = {"evaluation_failure": {"message": "boom"}}
+    db = AsyncMock()
+    arq = AsyncMock()
+    arq.enqueue_job.return_value = object()
+    with (
+        patch(f"{_LIFECYCLE}.utcnow", return_value=_NOW),
+        patch.object(
+            lifecycle_service.sessions_queries,
+            "list_pending_evaluation_sessions",
+            AsyncMock(return_value=[session]),
+        ),
+    ):
+        await lifecycle_service.recover_stalled_evaluations(db, arq_pool=arq)
+
+    recovery = session.internal_summary_json["evaluation_recovery"]
+    assert recovery["attempts"] == 1
+    assert recovery["last_attempt_at"] == _NOW.isoformat()
+    # The existing failure note is left intact until a verdict actually lands.
+    assert session.internal_summary_json["evaluation_failure"]["message"] == "boom"
+    db.commit.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_recovery_attempt_ceiling_is_passed_to_the_query():
+    """The ceiling is enforced SQL-side, so the service must forward it."""
+    db, arq = AsyncMock(), AsyncMock()
+    with (
+        patch(f"{_LIFECYCLE}.utcnow", return_value=_NOW),
+        patch.object(
+            lifecycle_service.sessions_queries,
+            "list_pending_evaluation_sessions",
+            AsyncMock(return_value=[]),
+        ) as pending_query,
+    ):
+        await lifecycle_service.recover_stalled_evaluations(
+            db, arq_pool=arq, max_recovery_attempts=5
+        )
+
+    assert pending_query.await_args.kwargs["max_recovery_attempts"] == 5
+
+
+@pytest.mark.asyncio
+async def test_second_recovery_gets_a_distinct_job_id():
+    """An already-recovered session increments rather than colliding."""
+    session = _make_session(started_at=_NOW - timedelta(hours=1))
+    session.status = "failed"
+    session.ended_at = _NOW - timedelta(minutes=30)
+    session.internal_summary_json = {"evaluation_recovery": {"attempts": 1}}
+    db, arq = AsyncMock(), AsyncMock()
+    arq.enqueue_job.return_value = object()
+    with (
+        patch(f"{_LIFECYCLE}.utcnow", return_value=_NOW),
+        patch.object(
+            lifecycle_service.sessions_queries,
+            "list_pending_evaluation_sessions",
+            AsyncMock(return_value=[session]),
+        ),
+    ):
+        await lifecycle_service.recover_stalled_evaluations(db, arq_pool=arq)
+
+    assert session.internal_summary_json["evaluation_recovery"]["attempts"] == 2
+    assert (
+        arq.enqueue_job.await_args.kwargs["_job_id"]
+        == f"interview-evaluation:{session.id}:recover-2"
+    )
+
+
+def test_natural_submit_keeps_the_deduplicated_job_id():
+    """The submit/sweep paths must still dedupe: two finishes cannot grade twice."""
+    session_id = _make_session(started_at=_NOW).id
+    assert (
+        lifecycle_service._evaluation_job_id(session_id)
+        == f"interview-evaluation:{session_id}"
     )
 
 

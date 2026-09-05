@@ -519,18 +519,40 @@ async def _persist_outcome_evaluations(
     Each row carries that outcome's OWN met/not-met verdict, hidden reasoning,
     and evidence excerpt — the genuine per-outcome judgement from the §4.3
     verdict stage (not a copied session-total).
+
+    Written as an idempotent upsert because this is now a RE-RUNNABLE path. The
+    table has a unique ``(session_id, outcome_id)``, and an evaluation can fail
+    *after* these rows commit (the gap-report stage is downstream). A plain
+    INSERT would then make every recovery attempt die on that constraint, so the
+    session could never be graded — the failure would be permanent and silent.
+    ON CONFLICT DO UPDATE lets the newest verdict win instead.
     """
-    for verdict in verdicts.verdicts:
-        db.add(
-            InterviewOutcomeEvaluation(
-                session_id=session_id,
-                outcome_id=verdict.outcome_id,
-                verdict_met=verdict.met,
-                hidden_reasoning=verdict.reasoning,
-                evidence_excerpt=verdict.evidence,
-            )
+    if not verdicts.verdicts:
+        return
+    from sqlalchemy.dialects.postgresql import insert as pg_insert  # noqa: PLC0415
+
+    stmt = pg_insert(InterviewOutcomeEvaluation).values(
+        [
+            {
+                "session_id": session_id,
+                "outcome_id": verdict.outcome_id,
+                "verdict_met": verdict.met,
+                "hidden_reasoning": verdict.reasoning,
+                "evidence_excerpt": verdict.evidence,
+            }
+            for verdict in verdicts.verdicts
+        ]
+    )
+    await db.execute(
+        stmt.on_conflict_do_update(
+            index_elements=["session_id", "outcome_id"],
+            set_={
+                "verdict_met": stmt.excluded.verdict_met,
+                "hidden_reasoning": stmt.excluded.hidden_reasoning,
+                "evidence_excerpt": stmt.excluded.evidence_excerpt,
+            },
         )
-    await flush_or_conflict(db)
+    )
 
 
 def _derive_pass_verdict(verdicts: OutcomeVerdicts, min_outcomes_to_pass: int | None) -> bool:
@@ -575,6 +597,19 @@ def _stamp_session_summary(
         summary["persona_adherence"] = persona_adherence.to_json()
     session.internal_summary_json = summary
     session.pass_verdict = _derive_pass_verdict(verdicts, min_outcomes_to_pass)
+    # A recovered run must leave the failure state behind. ``status='failed'``
+    # says only "the grader never finished" — it is stamped by the ARQ wrapper
+    # when the retry budget runs out, so the student-facing poll can stop
+    # waiting. Now that the recovery sweep re-drives those rows, keeping the
+    # status after a verdict has been written would show an error for an
+    # interview that is in fact graded, and would hide the row from every reader
+    # that filters on a terminal status. ``completed`` is the honest label: the
+    # session ran through to a verdict. ``timed_out`` is deliberately NOT
+    # rewritten — that one is a real assessment outcome, not a grader fault.
+    # (The stale ``evaluation_failure`` note is already dropped at the top of
+    # this function, so only the status needs correcting here.)
+    if session.status == "failed":
+        session.status = "completed"
 
 
 async def _sync_course_completion(db: AsyncSession, *, student_id: UUID, course_id: UUID) -> None:
@@ -674,18 +709,31 @@ async def _persist_gap_report(
         report_json["study_plan"] = []
         report_json["strengths"] = []
         report_json["weaknesses"] = []
-    db.add(
-        GapReport(
-            student_id=session.student_id,
-            course_id=course_id,
-            module_id=module_id,
-            source_quiz_attempt_id=None,
-            source_interview_session_id=session.id,
-            student_summary=student_summary,
-            teacher_summary=draft.teacher_summary,
-            report_json=report_json,
+    # Update in place when a report already exists for this session. The schema
+    # has NO unique constraint on ``source_interview_session_id`` (readers take
+    # the latest row and the ORM maps it as singular), so a blind insert on this
+    # re-runnable path would leave two reports for one interview and let a
+    # teacher open the stale one. There is at most one today.
+    existing = await sessions_queries.get_gap_report_for_session(db, session.id)
+    if existing is not None:
+        existing.course_id = course_id
+        existing.module_id = module_id
+        existing.student_summary = student_summary
+        existing.teacher_summary = draft.teacher_summary
+        existing.report_json = report_json
+    else:
+        db.add(
+            GapReport(
+                student_id=session.student_id,
+                course_id=course_id,
+                module_id=module_id,
+                source_quiz_attempt_id=None,
+                source_interview_session_id=session.id,
+                student_summary=student_summary,
+                teacher_summary=draft.teacher_summary,
+                report_json=report_json,
+            )
         )
-    )
     await flush_or_conflict(db)
 
 
