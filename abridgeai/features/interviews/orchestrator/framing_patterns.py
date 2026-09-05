@@ -28,7 +28,14 @@ Three families:
 from __future__ import annotations
 
 JAILBREAK_PERSONA = (
-    r"\bDAN\b|do\s+anything\s+now|developer\s+mode|dev\s+mode|"
+    # "DAN" only as the jailbreak handle, never as the ordinary word: the rules
+    # run on case-folded text, so a bare \bDAN\b also matched "base64 of 'dan'
+    # is ZGFu" and any sentence naming a person or variable called dan. Require
+    # the persona framing around it instead.
+    r"(?:you\s+are|act\s+as|acting\s+as|pretend\s+to\s+be|from\s+now\s+on\s+you\s*'?re)"
+    r"\s+(?:now\s+)?(?:a\s+|an\s+|the\s+)?dan\b|"
+    r"\bdan\s+mode\b|\bdan\s+jailbreak\b|"
+    r"do\s+anything\s+now|developer\s+mode|dev\s+mode|"
     # "no restrictions" must be asserted about the MODEL, not in passing. A bare
     # "\bno restrictions?\b" wrongly blocked "I have no restrictions on which
     # language I use, so I will answer in English."
@@ -47,7 +54,11 @@ JAILBREAK_PERSONA = (
 # Chat-template control tokens and forged turn headers.
 DELIMITER_INJECTION = (
     r"<\|[a-z_]+\|>|"  # <|im_start|>, <|system|>, <|endoftext|>
-    r"</?(?:system|assistant|user|instructions?)\s*>|"  # <system> ... </system>
+    # A role tag counts only when it OPENS the text or follows a line break —
+    # i.e. where a real turn boundary would sit. Matching it anywhere blocked
+    # "in XML you write <system> tags around configuration", a legitimate answer
+    # that merely mentions the tag. Same reasoning for the bare "System:" form.
+    r"(?:^|\n)\s*</?(?:system|assistant|user|instructions?)\s*>|"
     r"(?:^|\n)\s*#{2,}\s*(?:instruction|system|prompt|new\s+instruction)s?\s*:|"
     r"(?:^|\n)\s*(?:system|assistant|user)\s*:\s|"
     r"\[/?(?:INST|SYS|SYSTEM)\]|"

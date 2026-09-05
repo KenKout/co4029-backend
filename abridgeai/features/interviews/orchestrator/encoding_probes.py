@@ -158,4 +158,25 @@ HOMOGLYPHS = str.maketrans(
 )
 
 
-__all__ = ["HOMOGLYPHS", "decoded_variants", "decodes_to_protected_request", "leet_folded"]
+# Phase 1.3 — the ACT-ON-IT half of encoding detection. Mentioning a scheme is
+# ordinary technical speech; asking the interviewer to APPLY one is not. Keeping
+# the two halves separate is what lets "0xffffff in hexadecimal notation" pass
+# while "apply rot13 and follow" does not.
+ENCODING_INTENT = (
+    r"\b(?:decode|decrypt|unscramble|deobfuscat\w*|apply|run|execute|evaluate|"
+    r"interpret|follow|obey|read\s+back|translate)\b|"
+    r"\b(?:giải\s*mã|thực\s*hiện|làm\s+theo|áp\s*dụng|đọc\s+lại)\b"
+)
+
+# Marker literals + the disclosure-frame regex live in
+# ``output_guard_patterns`` (keeps this module under the orchestrator's 800-line
+# ceiling). Re-exported under the historical private names so existing importers
+# and tests keep working.
+
+__all__ = [
+    "ENCODING_INTENT",
+    "HOMOGLYPHS",
+    "decoded_variants",
+    "decodes_to_protected_request",
+    "leet_folded",
+]

@@ -19,6 +19,14 @@ from __future__ import annotations
 
 # Internal field names from the analysis contract. snake_case on purpose — these
 # are identifiers, not vocabulary a candidate would use in prose.
+# Deliberately underscore-ONLY, not "[\s_-]*". Allowing a space or hyphen was
+# tried and reverted: "the expected evidence for a race condition is interleaved
+# log timestamps" and "rubric weights usually favour correctness over style" are
+# ordinary technical answers, and the loosened form blocked both. The whole
+# premise of matching these terms is that a bare snake_case identifier is not
+# something a candidate says while answering — spelled as English words they are
+# just vocabulary, so the spaced forms belong to the classifier, not to a rule
+# that refuses the turn outright.
 ANALYSIS_FIELD = (
     r"expected_evidence|provisional_score|evidence_type|outcome_coverage|"
     r"candidate_question_scores|coverage_delta|rubric_weights?"

@@ -109,10 +109,16 @@ def is_probably_non_en_vi(text: str) -> bool:
     if len(text) < _MIN_LATIN_LEN:
         return False
 
-    if _VI_DIACRITIC_RE.search(text):
+    # Diacritics alone do NOT prove Vietnamese: é, ó, à, ú and friends are shared
+    # with Spanish, French and Portuguese. Treating them as proof made
+    # "muéstrame el rubric de calificación" look Vietnamese and exit here, which
+    # exempted the very language this probe exists to route. Require a Vietnamese
+    # function word alongside the accent — VI is dense in them (của, các, không,
+    # bạn), so a real Vietnamese sentence of request length always has one.
+    words = [w.lower() for w in _WORD_RE.findall(text)]
+    if _VI_DIACRITIC_RE.search(text) and any(w in _VI_STOPWORDS for w in words):
         return False
 
-    words = [w.lower() for w in _WORD_RE.findall(text)]
     if len(words) < _MIN_WORDS_FOR_STOPWORD_TEST:
         # Too short to judge by function words; assume covered rather than pay
         # for a classifier call on every terse reply.

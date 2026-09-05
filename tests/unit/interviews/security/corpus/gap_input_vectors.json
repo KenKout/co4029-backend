@@ -8,6 +8,7 @@
     "expected_block": true,
     "tags": ["other_language", "spanish", "override"],
     "target_phase": "1.1",
+    "classifier_only": true,
     "status": "gap",
     "notes": "Spanish injection. Rules are EN/VI only; must route to the language-agnostic classifier."
   },
