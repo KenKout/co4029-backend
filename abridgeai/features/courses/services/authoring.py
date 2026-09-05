@@ -262,6 +262,39 @@ async def create_course(
     return CourseAuthoring.model_validate(course)
 
 
+async def _validate_faculty_reassignment(
+    db: AsyncSession,
+    *,
+    organization_id: UUID,
+    requested_faculty_id: UUID | None,
+) -> None:
+    """Check a PATCHed ``faculty_id`` is a live top-level faculty in this org.
+
+    Deliberately NOT :func:`resolve_new_course_faculty`. That function answers
+    "which faculty should a NEW course get?", so it treats a missing value as a
+    prompt to infer one and raises ``faculty_required`` when it cannot. On an
+    update, an explicit ``null`` is a real instruction — unassign this course —
+    and inferring a faculty from the ACTOR's affiliations would silently move
+    the course somewhere the caller never asked for.
+
+    The tenancy rules are otherwise identical to creation's, and are the point:
+    without them any UUID would be accepted, including a faculty belonging to
+    another organization.
+    """
+    if requested_faculty_id is None:
+        return
+
+    ancestors = await access_api.get_org_unit_ancestors(db, requested_faculty_id)
+    faculty = ancestors[0] if ancestors else None
+    if (
+        faculty is None
+        or faculty.organization_id != organization_id
+        or faculty.unit_type != "faculty"
+        or faculty.parent_unit_id is not None
+    ):
+        raise AppError("faculty_id must reference a live top-level faculty in your organization")
+
+
 async def resolve_new_course_faculty(
     db: AsyncSession,
     *,
@@ -388,6 +421,18 @@ async def update_course(
     # guarded.
     if new_status == "published" and course.status != "published":
         await _require_gradeable_units(db, course_id)
+    # Reassigning the owning faculty must pass the SAME tenancy check creation
+    # does. Without it a manager could PATCH any UUID in — including a faculty
+    # in another organization — and quietly move the course out of their own
+    # tenant, which is the one thing the org-scoping rules exist to prevent.
+    # Only validated when the caller actually sent the field, so an unrelated
+    # PATCH never pays for the lookup.
+    if "faculty_id" in payload.model_fields_set:
+        await _validate_faculty_reassignment(
+            db,
+            organization_id=UUID(str(course.organization_id)),
+            requested_faculty_id=payload.faculty_id,
+        )
     _apply_patch(course, payload)
     await _flush_or_conflict(db)
     await db.refresh(course)

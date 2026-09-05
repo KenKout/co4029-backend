@@ -156,6 +156,13 @@ class CourseAuthoring(CoursePublic):
 
     status: Literal["draft", "published", "archived"]  # type: ignore[assignment]
     faculty_id: UUID | None = None
+    # Display name for ``faculty_id``, attached by the service layer in one
+    # batched lookup. Not persisted — a projection, like ``instructor``.
+    # Without it the SPA could only render the raw UUID or issue one request
+    # per row. None both when the course has no faculty AND when its faculty
+    # was retired, so a stale pointer reads as "unassigned" rather than naming
+    # a faculty that no longer exists.
+    faculty_name: str | None = None
     owner_user_id: UUID
     thumbnail_object_id: UUID | None = None
     # Short-TTL presigned GET URL for the course thumbnail, minted by the

@@ -228,6 +228,30 @@ async def get_org_unit_ancestors(db: AsyncSession, org_unit_id: UUID) -> list[Or
     return [OrgUnitDTO.model_validate(dict(row)) for row in rows]
 
 
+async def get_org_unit_names(
+    db: AsyncSession, org_unit_ids: Sequence[UUID]
+) -> dict[UUID, str]:
+    """Map org-unit ids to their display names, in ONE query.
+
+    Exists so a list endpoint can LABEL a faculty it already holds the id for.
+    Course rows carry ``faculty_id`` but no name, which left the SPA a choice
+    between rendering a raw UUID or one lookup per row; both are wrong, and the
+    second is an N+1 on the manager worklist.
+
+    Soft-deleted units are omitted rather than returned with their name: a course
+    still pointing at a retired faculty should read as unassigned, not as a
+    faculty that no longer exists. Callers therefore treat a missing key as
+    "no faculty".
+    """
+    if not org_unit_ids:
+        return {}
+    stmt = select(OrgUnit.id, OrgUnit.name).where(
+        OrgUnit.id.in_(list({*org_unit_ids})),
+        OrgUnit.deleted_at.is_(None),
+    )
+    return {row.id: row.name for row in (await db.execute(stmt)).all()}
+
+
 async def get_org_unit_subtree_ids(db: AsyncSession, org_unit_id: UUID) -> list[UUID]:
     """``org_unit_id`` plus every live unit BELOW it.
 
@@ -653,6 +677,7 @@ __all__ = [
     "get_active_permissions",
     "get_user_faculty_access",
     "get_org_unit_ancestors",
+    "get_org_unit_names",
     "get_role_assignments_for_user",
     "get_role_codes_for_users",
     "get_primary_orgs_for_users",

@@ -74,6 +74,13 @@ class CourseCreate(_StrictRequest):
 class CourseUpdate(_StrictRequest):
     """Partial update for a course. State transitions checked in service."""
 
+    # Reassignable AFTER creation (user request 2026-09-05). Creation already
+    # resolved a faculty, but nothing could change it, so every course predating
+    # the faculty feature was stuck at NULL with no route to fix it — a filter
+    # by faculty could never match them. Manager-only: `faculty_id` is outside
+    # _TEACHER_PATCHABLE_COURSE_FIELDS, so the router's derived allow-list gates
+    # it on `course.delete` automatically.
+    faculty_id: UUID | None = None
     slug: str | None = Field(default=None, max_length=100)
     title: str | None = Field(default=None, max_length=255)
     description: str | None = None

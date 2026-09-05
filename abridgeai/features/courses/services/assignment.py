@@ -544,8 +544,23 @@ async def _attach_health_projections(
     )
     instructors = await authoring_queries.list_instructors_for_courses(db, [c.id for c in courses])
     syllabus_ids = await authoring_queries.course_ids_with_syllabus(db, [c.id for c in courses])
+    # One query for every distinct faculty on the page, so the worklist can show
+    # a faculty NAME instead of a UUID without an N+1. Skipped entirely when no
+    # course in the batch has a faculty — the common case until faculties are
+    # actually assigned.
+    #
+    # Lazy import for the same reason as every other access_control call in this
+    # module: a module-level edge would close an import cycle.
+    from abridgeai.features.access_control.api import public as access_api  # noqa: PLC0415
+
+    faculty_names = await access_api.get_org_unit_names(
+        db, [c.faculty_id for c in courses if c.faculty_id is not None]
+    )
     for dto, orm in zip(dtos, courses, strict=True):
         dto.has_syllabus = orm.id in syllabus_ids
+        dto.faculty_name = (
+            faculty_names.get(UUID(str(orm.faculty_id))) if orm.faculty_id else None
+        )
         students, modules = counts.get(orm.id, (0, 0))
         dto.student_count = students
         dto.module_count = modules

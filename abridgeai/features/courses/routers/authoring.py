@@ -590,8 +590,15 @@ async def update_course(
         course = await authoring_service.update_course(db, course_id, payload, current_user)
     except NotFoundError as exc:
         raise _not_found(str(exc)) from exc
+    # ConflictError subclasses AppError, so it MUST stay above the AppError arm
+    # or every 409 collapses into a 400.
     except ConflictError as exc:
         raise _conflict(str(exc)) from exc
+    # Needed since `faculty_id` became patchable: its tenancy check raises
+    # AppError, and without this arm a bad faculty_id surfaced as a 500 instead
+    # of a 400. Mirrors the create route.
+    except AppError as exc:
+        raise _bad_request(str(exc)) from exc
     await db.commit()
     return course
 
