@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from typing import TYPE_CHECKING
 
 from sqlalchemy import delete, select
@@ -67,8 +67,8 @@ def _compute_final_grade(attempts: list[AttemptScore], method: str) -> FinalGrad
         avg_pct = sum((a.score_percent for a in attempts), Decimal(0)) / n
         avg_pts = sum((a.score_points for a in attempts), Decimal(0)) / n
         return FinalGrade(
-            avg_pct.quantize(Decimal("0.01")),
-            avg_pts.quantize(Decimal("0.01")),
+            avg_pct.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP),
+            avg_pts.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP),
             None,
             n,
         )
@@ -91,6 +91,8 @@ async def recompute_final_grade(
                     QuizAttempt.quiz_id == quiz.id,
                     QuizAttempt.student_id == student_id,
                     QuizAttempt.status.in_(["submitted", "graded"]),
+                    QuizAttempt.score_percent.is_not(None),
+                    QuizAttempt.score_points.is_not(None),
                 )
                 .order_by(QuizAttempt.attempt_number)
             )

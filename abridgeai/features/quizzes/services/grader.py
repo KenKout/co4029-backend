@@ -25,7 +25,8 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import TYPE_CHECKING
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, cast
 
 from abridgeai.features.quizzes.models import QuizQuestion, QuizQuestionOption
 
@@ -106,10 +107,11 @@ def _grade_numerical(question: QuizQuestion, answer_text: str | None) -> GradeRe
         return _ZERO
     try:
         submitted = Decimal(str(answer_text).strip())
+        expected_value = Decimal(str(expected))
+        tolerance = Decimal(str(getattr(question, "numeric_tolerance", None) or 0))
     except (TypeError, ValueError, ArithmeticError):
         return _ZERO
-    tol = getattr(question, "numeric_tolerance", None) or Decimal("0")
-    return _ONE if abs(submitted - expected) <= tol else _ZERO
+    return _ONE if abs(submitted - expected_value) <= tolerance else _ZERO
 
 
 def _grade_matching(question: QuizQuestion, answer_text: str | None) -> GradeResult:
@@ -244,6 +246,7 @@ def grade_answer_against_revision(
     *,
     selected_option_key: str | None,
     answer_text: str | None,
+    selected_option_keys: list[str] | None = None,
 ) -> GradeResult:
     """Grade an answer against a question-definition *snapshot* dict.
 
@@ -255,9 +258,18 @@ def grade_answer_against_revision(
     """
     qtype = revision_payload.get("question_type")
     if qtype in {"multiple_choice", "true_false"}:
+        options = revision_payload.get("options", [])
+        if not revision_payload.get("single_answer", True):
+            correct_keys = {
+                str(opt.get("option_key"))
+                for opt in options
+                if isinstance(opt, dict) and opt.get("is_correct")
+            }
+            chosen_keys = {str(key) for key in selected_option_keys or []}
+            return _ONE if chosen_keys and chosen_keys == correct_keys else _ZERO
         if selected_option_key is None:
             return _ZERO
-        for opt in revision_payload.get("options", []):
+        for opt in options:
             if opt.get("option_key") == selected_option_key:
                 return _ONE if opt.get("is_correct") else _ZERO
         return _ZERO
@@ -283,7 +295,22 @@ def grade_answer_against_revision(
             )
             else _ZERO
         )
-    return _ZERO  # code + unknown → 0 (unchanged policy)
+    snapshot_question = cast(
+        QuizQuestion,
+        SimpleNamespace(
+            numeric_answer=revision_payload.get("numeric_answer"),
+            numeric_tolerance=revision_payload.get("numeric_tolerance"),
+            match_pairs=revision_payload.get("match_pairs"),
+            ordering_sequence=revision_payload.get("ordering_sequence"),
+        ),
+    )
+    if qtype == "numerical":
+        return _grade_numerical(snapshot_question, answer_text)
+    if qtype == "matching":
+        return _grade_matching(snapshot_question, answer_text)
+    if qtype == "ordering":
+        return _grade_ordering(snapshot_question, answer_text)
+    return _ZERO  # code + unknown remain manual-only
 
 
 _OPEN_RESPONSE_ON_MISS = {"short_answer", "fill_blank"}

@@ -53,6 +53,14 @@ _ATTEMPT_COUNTS_SQL = """
 SELECT quiz_id,
        COUNT(*) AS used,
        COUNT(*) FILTER (WHERE status = 'in_progress') AS in_flight,
+       COUNT(*) FILTER (
+           WHERE EXISTS (
+               SELECT 1
+               FROM quiz_attempt_answers qaa
+               WHERE qaa.attempt_id = quiz_attempts.id
+                 AND qaa.needs_manual_grade = TRUE
+           )
+       ) AS pending_grading,
        MAX(submitted_at) AS latest_submitted_at
 FROM quiz_attempts
 WHERE student_id = :user_id
@@ -125,6 +133,7 @@ async def list_my_quiz_progress(
         used_row = counts.get(quiz.id)
         used = int(used_row["used"]) if used_row else 0
         in_flight = int(used_row["in_flight"]) if used_row else 0
+        pending_grading = int(used_row["pending_grading"]) if used_row else 0
 
         grade_row = grades.get(quiz.id)
         passed = bool(grade_row["passed"]) if grade_row else None
@@ -135,14 +144,17 @@ async def list_my_quiz_progress(
         # allow_retakes=FALSE clamps to 1 regardless of max_attempts.
         eff_max: int | None = 1 if not policy.allow_retakes else policy.max_attempts
         exhausted = eff_max is not None and used >= eff_max
-        completed = bool(passed) or (exhausted and in_flight == 0)
+        completed = pending_grading == 0 and (
+            bool(passed) or (exhausted and in_flight == 0)
+        )
         visibility = resolve_review_visibility(
             quiz,
             SimpleNamespace(submitted_at=latest_submitted_at),
             datetime.now(UTC),
         )
-        public_passed = passed if visibility.show_score else None
-        public_grade_percent = grade_percent if visibility.show_score else None
+        score_available = visibility.show_score and pending_grading == 0
+        public_passed = passed if score_available else None
+        public_grade_percent = grade_percent if score_available else None
 
         payload.append(
             {

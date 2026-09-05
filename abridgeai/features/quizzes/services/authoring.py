@@ -316,11 +316,15 @@ def _normalize_question_type(raw: Any) -> str:  # noqa: ANN401 -- arbitrary DTO 
 
 
 def _validate_fill_blank_options(options: list[Any]) -> None:
-    """fill_blank word bank: every entry needs text. The correct/distractor
-    split is the caller's job (the AI path validates it more strictly in
-    ``shape_validators.validate_fill_blank``)."""
+    """Require a usable fill-blank bank with correct and distractor entries."""
+    if not options:
+        raise AppError("fill_blank questions need a non-empty word bank")
     if any(not str(option.option_text).strip() for option in options):
         raise AppError("Question option text is required")
+    if not any(option.is_correct for option in options):
+        raise AppError("fill_blank word bank must contain a correct answer")
+    if not any(not option.is_correct for option in options):
+        raise AppError("fill_blank word bank must include at least one distractor")
 
 
 def _validate_question_options(
@@ -734,7 +738,13 @@ async def update_question(
 
     options_payload = getattr(payload, "options", None)
     if options_payload is not None:
-        await _update_question_options(db, question, list(options_payload))
+        normalized_options = list(options_payload)
+        _validate_question_options(
+            question.question_type,
+            normalized_options,
+            single_answer=bool(question.single_answer),
+        )
+        await _update_question_options(db, question, normalized_options)
 
     question.reviewed_by = actor.user_id
     question.reviewed_at = utcnow()
