@@ -329,29 +329,24 @@ async def list_documents(
 ) -> list[PolicySummary]:
     """The index, scoped to the reader's roles.
 
-    ``role_codes=None`` (signed out) is the anonymous reader: treated as a
-    STUDENT — the universal role. A policy is visible when it has no
-    audience, names one of the reader's roles, or names the student role
-    (everyone is a party to the student policies; a prospective student is
-    exactly who reads the terms). An unrecognised code simply matches
-    nothing rather than erroring: this is a courtesy filter over public
-    documents, not a gate.
+    The audience is LITERAL. ``role_codes=None`` (signed out) sees only the
+    public set — policies with no audience. A signed-in reader additionally
+    sees every policy naming one of their roles, and ONLY those: naming
+    ``student`` means students, not everyone (the old universal-role reading
+    was removed — a teacher picking through their index should not be shown
+    documents that govern students specifically, and an admin choosing
+    ``student`` in the picker means exactly students).
+
+    An unrecognised code simply matches nothing rather than erroring: this
+    is a courtesy filter over public documents, not a gate.
     """
     role_ids: list[UUID] | None = None
     if role_codes:
         roles = await access_api.get_roles_by_codes(db, role_codes)
         role_ids = [r.id for r in roles.values()]
 
-    # The universal role: resolve once, every reader benefits. A role code
-    # that does not exist in the catalogue (fresh deploy before seeding)
-    # degrades to the plain public set rather than erroring.
-    student_roles = await access_api.get_roles_by_codes(
-        db, [policy_queries.STUDENT_ROLE_CODE]
-    )
-    student_role_id = next(iter(student_roles.values())).id if student_roles else None
-
     rows = await policy_queries.published_documents(
-        db, language=language, role_ids=role_ids, universal_role_id=student_role_id
+        db, language=language, role_ids=role_ids
     )
     out: list[PolicySummary] = []
     for policy, version in rows:

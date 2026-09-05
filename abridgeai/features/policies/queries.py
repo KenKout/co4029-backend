@@ -17,10 +17,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from abridgeai.features.policies.models import Policy, PolicyAudienceRole, PolicyVersion
 
-#: The universal audience. Every role is a party to the student policies —
-#: teachers and admins are people too — and an anonymous reader is treated
-#: as a student (a prospective student is exactly who reads the terms).
-STUDENT_ROLE_CODE = "student"
+#: Kept as documentation of history: between 0102 and 0108 the ``student``
+#: audience acted as a UNIVERSAL role — every reader saw policies named
+#: ``student`` and an anonymous reader was treated as a student. The audience
+#: is now literal (a role sees a policy exactly when a row names it, and
+#: everyone only when no row exists); see migration 0108, which converted the
+#: seeded legal documents to empty audiences so they stay public.
 
 
 async def get_policy(db: AsyncSession, policy_id: UUID) -> Policy | None:
@@ -234,15 +236,14 @@ async def published_documents(
     *,
     language: str,
     role_ids: Sequence[UUID] | None,
-    universal_role_id: UUID | None = None,
 ) -> list[tuple[Policy, PolicyVersion]]:
     """Every policy with a published version, scoped to ``role_ids``.
 
-    ``role_ids=None`` is the anonymous reader. A policy is visible when it
-    has NO audience rows, names one of the reader's roles, or names the
-    UNIVERSAL role (student) — student policies bind every reader, signed in
-    or not. A non-empty ``role_ids`` list adds those roles to the same
-    predicate.
+    The audience is LITERAL: a policy is visible when it has NO audience
+    rows (public — everyone, including signed-out visitors) or names one of
+    the reader's roles. Naming ``student`` means students and no one else,
+    which is the whole point of the picker. ``role_ids=None`` is the
+    anonymous reader and therefore sees only the public set.
 
     Takes role IDS rather than codes because resolving a code to a role is the
     roles catalogue's job, and that lives behind another feature's public API.
@@ -264,19 +265,6 @@ async def published_documents(
         )
     )
 
-    matches_universal = None
-    if universal_role_id is not None:
-        matches_universal = (
-            select(func.count())
-            .select_from(PolicyAudienceRole)
-            .where(
-                PolicyAudienceRole.policy_id == Policy.id,
-                PolicyAudienceRole.role_id == universal_role_id,
-            )
-            .correlate(Policy)
-            .scalar_subquery()
-        )
-
     if role_ids:
         matches_role = (
             select(func.count())
@@ -288,14 +276,10 @@ async def published_documents(
             .correlate(Policy)
             .scalar_subquery()
         )
-        visible = (has_audience == 0) | (matches_role > 0)
-        if matches_universal is not None:
-            visible = visible | (matches_universal > 0)
-        stmt = stmt.where(visible)
-    elif matches_universal is not None:
-        # Anonymous: public set + everything naming the universal role.
-        stmt = stmt.where((has_audience == 0) | (matches_universal > 0))
+        stmt = stmt.where((has_audience == 0) | (matches_role > 0))
     else:
+        # Anonymous: the public set only. A policy narrowed to roles is not
+        # for people who have not signed in.
         stmt = stmt.where(has_audience == 0)
 
     stmt = stmt.order_by(Policy.category, Policy.slug)

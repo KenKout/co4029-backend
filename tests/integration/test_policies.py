@@ -408,6 +408,49 @@ async def test_index_hides_policies_the_reader_is_not_party_to(db: AsyncSession)
 
 
 @pytest.mark.asyncio
+async def test_student_audience_means_students_only(db: AsyncSession) -> None:
+    """The audience is LITERAL: naming ``student`` excludes every other role.
+
+    There is no universal role any more. A teacher or an admin reading their
+    index is not shown a policy governed by students specifically, and an
+    anonymous visitor sees only the public set.
+    """
+    student_slug = _slug("students-only")
+    await _published_policy(db, slug=student_slug, audience=["student"])
+
+    students = {p.slug for p in await policy_service.list_documents(db, role_codes=["student"])}
+    assert student_slug in students
+
+    for roles in (None, ["teacher"], ["hod"], ["admin"], ["teacher", "hod"]):
+        reader = {p.slug for p in await policy_service.list_documents(db, role_codes=roles)}
+        assert student_slug not in reader, f"leaked to {roles}"
+
+
+@pytest.mark.asyncio
+async def test_multi_role_reader_sees_each_role_s_audience(db: AsyncSession) -> None:
+    """A reader holding several roles unions those audiences."""
+    for_slug = _slug("for-students")
+    teach_slug = _slug("for-teachers")
+    await _published_policy(db, slug=for_slug, audience=["student"])
+    await _published_policy(db, slug=teach_slug, audience=["teacher"])
+
+    both = {p.slug for p in await policy_service.list_documents(db, role_codes=["student", "teacher"])}
+    assert for_slug in both
+    assert teach_slug in both
+
+
+@pytest.mark.asyncio
+async def test_empty_audience_is_the_only_everyone(db: AsyncSession) -> None:
+    """Everyone = no audience rows. Any named role narrows to that role."""
+    public_slug = _slug("truly-public")
+    await _published_policy(db, slug=public_slug)
+
+    for roles in (None, ["student"], ["teacher"], ["student", "teacher"]):
+        reader = {p.slug for p in await policy_service.list_documents(db, role_codes=roles)}
+        assert public_slug in reader, f"public policy hidden from {roles}"
+
+
+@pytest.mark.asyncio
 async def test_a_scoped_policy_still_opens_by_its_own_url(db: AsyncSession) -> None:
     """The audience scopes the INDEX. A shared or bookmarked link must open.
 
