@@ -186,6 +186,14 @@ class InterviewToolsMixin:
         if data.current_question_follow_up_count > 0 and data.current_question_hint_refunds < 1:
             data.current_question_follow_up_count -= 1
             data.current_question_hint_refunds += 1
+        # Persist the ladder BEFORE announcing the hint. `resolve_hint_request`
+        # above advanced `hint_level` in memory only, and this tool is not on the
+        # graded path — nothing else on a hint turn writes runtime state. A worker
+        # restart therefore resumed on the previous rung and the candidate could
+        # draw the same hint again, past the ladder's ceiling. Saved rather than
+        # published: the client's snapshot carries no hint state, so a hint changes
+        # nothing it renders.
+        await _save_state(ctx)
         # The next thing the model says IS the hint: mark it for the transcript
         # recorder (so a reload renders kind="hint", not FOLLOW-UP) and tell the
         # client (so the live utterance gets the HINT badge). A refused hint
@@ -319,6 +327,22 @@ async def _finalize_session(ctx: RunContext[object]) -> None:
 async def _publish_state(ctx: RunContext[object]) -> None:
     publish = ctx.userdata.publish_state  # type: ignore[attr-defined]
     await publish()
+
+
+async def _save_state(ctx: RunContext[object]) -> None:
+    """Persist runtime state without a snapshot. Never raises.
+
+    For the state the client cannot see — the hint ladder, the follow-up budgets.
+    A tool that mutates one of those and does not save it loses it on a restart,
+    which gives the candidate back a rung or a probe they had already spent.
+    """
+    save = getattr(ctx.userdata, "save_state", None)
+    if save is None:
+        return
+    try:
+        await save()
+    except Exception:  # noqa: BLE001 -- the mutation is already applied in memory
+        logger.exception("persisting runtime state from a tool failed")
 
 
 async def _inject_todo_note(ctx: RunContext[object]) -> None:

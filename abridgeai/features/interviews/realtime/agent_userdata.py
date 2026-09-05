@@ -130,6 +130,13 @@ class InterviewUserdata:
     # exist before that. A no-op default keeps the tools usable in tests and in
     # a partially-wired diagnostic harness.
     publish_state: Callable[[], Awaitable[None]] = _no_publish
+    # Persist runtime state WITHOUT publishing a snapshot. For the mutations the
+    # client cannot see: the hint ladder and the follow-up budgets. Those live only
+    # in runtime state, and a tool that changed one and did not save it lost it on
+    # a restart — handing the candidate back a rung or a probe they had spent.
+    # `publish_state` would work but tells the client nothing changed, on every
+    # probe of every question.
+    save_state: Callable[[], Awaitable[None]] = _no_publish
     # Tell the client the agent's next utterance is assistance of this kind, so
     # the live transcript can badge it. Same injection/no-op pattern as
     # `publish_state`.

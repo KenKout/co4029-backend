@@ -252,11 +252,41 @@ class NativeInterviewAgent(InterviewToolsMixin, Agent):
             await self._inject_advance_directive()
         else:
             count_follow_up(userdata)
+            # Persist the charge. `grade_turn` already saved — but it saved BEFORE
+            # this increment, and the advance branch is the only one that writes
+            # again (via `publish_state` inside `advance_if_resolved`). So a
+            # non-advancing turn's follow-up was held in memory only: a worker
+            # restart resumed on the previous count and handed the candidate's
+            # spent probe back, which is what let a question be probed past its
+            # budget and never auto-advance.
+            await self._persist_turn_counters()
         # Publish after the fold so the answer's transcript row can be attributed
         # to the question it actually answered.
         userdata.answered_question_id = answered_question_id
         self._record_shadow(userdata, advanced=outcome.advanced)
         await self.refresh_state_note()
+
+    async def _persist_turn_counters(self) -> None:
+        """Write the counters this turn charged, without publishing a snapshot.
+
+        A plain save rather than ``publish_state``: nothing the client renders
+        changed on a non-advancing turn (same question, same "n of m"), and
+        re-publishing an identical snapshot on every probe is noise the client has
+        to diff. The BUDGETS did change, and those live only in runtime state.
+
+        Never raises: the charge is already applied in memory, and losing the write
+        costs a re-drive's accuracy, not the candidate's reply.
+        """
+        save = self._setup.save_state
+        if save is None:
+            return
+        try:
+            await save()
+        except Exception:  # noqa: BLE001 -- a failed save must not cost the reply
+            logger.exception(
+                "persisting the turn counters failed (session=%s)",
+                self._setup.userdata.interview_session_id,
+            )
 
     async def _inject_advance_directive(self) -> None:
         """Pin "ask the NEW question now" into the chat context on an advance.
@@ -387,6 +417,11 @@ async def run_native_interview(
     # Safe because the publisher resolves the room lazily on each publish.
     publisher = ControlPublisher(session, interview_session_id=userdata.interview_session_id)
     userdata.publish_state = _make_state_publisher(userdata, publisher, save=setup.save_state)
+    # The tools reach persistence through this for the state a snapshot does not
+    # carry (the hint ladder, the follow-up budgets). Without it a hint turn — which
+    # is not on the graded path — mutated the ladder in memory only.
+    if setup.save_state is not None:
+        userdata.save_state = setup.save_state
     userdata.publish_agent_action = partial(publisher.agent_action)
     hard_stop.on_finalized = _make_finish_marker(userdata)
 
