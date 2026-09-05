@@ -133,6 +133,19 @@ async def evaluate_and_generate_report(
     if session is None:
         raise NotFoundError(f"Interview session {session_id} not found")
 
+    if session.pass_verdict is not None:
+        # Already graded — by an earlier attempt of this job, or by a sibling
+        # job the recovery sweep enqueued while the original was still running
+        # (job_timeout 20min vs. a 15min recovery grace: the windows overlap).
+        # Re-running the judge would spend LLM budget, write a second gap
+        # report, and could flip a verdict the student has already been shown.
+        # ``pass_verdict=False`` counts as graded: it is a real judgement.
+        _logger.info(
+            "interview.evaluation.already_published",
+            extra={"session_id": str(session_id), "pass_verdict": session.pass_verdict},
+        )
+        return
+
     ungradeable = _ungradeable_reason(session)
     if ungradeable is not None:
         # See _ungradeable_reason: practice rehearsals and runs that never
@@ -310,38 +323,79 @@ async def evaluate_and_generate_report(
             await db.commit()
     except Exception as exc:
         await db.rollback()
-        # Stamp the evaluation run as failed so the dashboard shows the
-        # terminal state. This rides its own commit after the rollback above
-        # and never masks the original exception.
-        if eval_run_id is not None:
-            failed_run = await db.get(GenerationRun, eval_run_id)
-            if failed_run is not None:
-                failed_run.status = "failed"
-                failed_run.finished_at = utcnow()
-                failed_run.config_json = dict(failed_run.config_json or {}) | {
-                    "failure": {"message": str(exc)}
-                }
-                await db.commit()
-        fresh = await db.get(InterviewSession, session_id)
-        if fresh is not None:
-            fresh.internal_summary_json = dict(fresh.internal_summary_json or {}) | {
-                "evaluation_failure": {
-                    "message": str(exc),
-                    "failed_at": utcnow().isoformat(),
-                    "final_attempt": is_final_attempt,
-                }
-            }
-            # Only stamp the terminal 'failed' status once ARQ has exhausted
-            # its retry budget. Marking it failed on attempt 1/3 would tell
-            # the student the interview is dead while a retry is still
-            # queued — but NOT stamping it on the LAST attempt leaves the
-            # session stuck at 'completed' with pass_verdict forever null,
-            # so the frontend poll in course-interview.tsx never resolves
-            # and the student waits indefinitely (the bug we're fixing).
-            if is_final_attempt:
-                fresh.status = "failed"
-            await db.commit()
+        await _record_evaluation_failure(
+            db,
+            session_id=session_id,
+            eval_run_id=eval_run_id,
+            exc=exc,
+            is_final_attempt=is_final_attempt,
+        )
         raise
+
+
+async def _record_evaluation_failure(
+    db: AsyncSession,
+    *,
+    session_id: UUID,
+    eval_run_id: UUID | None,
+    exc: Exception,
+    is_final_attempt: bool,
+) -> None:
+    """Persist the failure trail for a crashed evaluation, then let it re-raise.
+
+    Runs AFTER the caller's rollback, on its own commits, and never masks the
+    original exception.
+    """
+    # Stamp the evaluation run as failed so the dashboard shows the terminal
+    # state even though the evaluation work itself rolled back.
+    if eval_run_id is not None:
+        failed_run = await db.get(GenerationRun, eval_run_id)
+        if failed_run is not None:
+            failed_run.status = "failed"
+            failed_run.finished_at = utcnow()
+            failed_run.config_json = dict(failed_run.config_json or {}) | {
+                "failure": {"message": str(exc)}
+            }
+            await db.commit()
+
+    fresh = await db.get(InterviewSession, session_id)
+    if fresh is None:
+        return
+
+    if fresh.pass_verdict is not None:
+        # A concurrent job published a verdict while this one was running
+        # (recovery enqueues under a per-attempt job ID, so ARQ cannot dedupe
+        # it, and the 20min job timeout overlaps the 15min recovery grace). An
+        # INFRASTRUCTURE failure must never overwrite a published result:
+        # stamping 'failed' here relabelled a graded interview as broken, and
+        # since the recovery query filters on ``pass_verdict IS NULL`` nothing
+        # would ever repair it.
+        _logger.warning(
+            "interview.evaluation.failure_discarded_verdict_published",
+            extra={
+                "session_id": str(session_id),
+                "pass_verdict": fresh.pass_verdict,
+                "error": str(exc),
+            },
+        )
+        return
+
+    fresh.internal_summary_json = dict(fresh.internal_summary_json or {}) | {
+        "evaluation_failure": {
+            "message": str(exc),
+            "failed_at": utcnow().isoformat(),
+            "final_attempt": is_final_attempt,
+        }
+    }
+    # Only stamp the terminal 'failed' status once ARQ has exhausted its retry
+    # budget. Marking it failed on attempt 1/3 would tell the student the
+    # interview is dead while a retry is still queued — but NOT stamping it on
+    # the LAST attempt leaves the session stuck at 'completed' with
+    # pass_verdict forever null, so the frontend poll never resolves and the
+    # student waits indefinitely.
+    if is_final_attempt:
+        fresh.status = "failed"
+    await db.commit()
 
 
 async def _list_candidate_answers(

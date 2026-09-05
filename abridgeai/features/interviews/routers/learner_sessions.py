@@ -61,6 +61,7 @@ from abridgeai.features.interviews.services.ceremony import (
     ensure_ceremony_message,
     onboarding_ceremony_kind,
 )
+from abridgeai.features.interviews.services.evaluation_state import derive_evaluation_state
 
 router = APIRouter(tags=["interviews-learner-sessions"])
 
@@ -585,6 +586,7 @@ async def get_session(
         current_question_index=None,
         time_remaining_seconds=await taking_service.session_time_remaining_seconds(db, session),
         pass_verdict=session.pass_verdict,
+        evaluation_state=derive_evaluation_state(session),
         remaining_attempts=retake.remaining_attempts,
         retake_available_at=retake.retake_available_at,
         can_retake=retake.can_retake,

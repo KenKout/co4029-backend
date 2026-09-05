@@ -29,6 +29,9 @@ from uuid import UUID
 
 from abridgeai.core.security import utcnow
 from abridgeai.features.interviews.queries import sessions as sessions_queries
+from abridgeai.features.interviews.services.evaluation_state import (
+    MAX_EVALUATION_RECOVERY_ATTEMPTS,
+)
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -106,7 +109,7 @@ async def recover_stalled_evaluations(
     arq_pool: object | None = None,
     *,
     grace_minutes: int = 15,
-    max_recovery_attempts: int = 3,
+    max_recovery_attempts: int = MAX_EVALUATION_RECOVERY_ATTEMPTS,
 ) -> int:
     """Re-enqueue terminal sessions left without an evaluation verdict.
 
@@ -126,6 +129,17 @@ async def recover_stalled_evaluations(
       dies hard (OOM, worker kill) still consumes its budget. Under-counting
       would be safe for the student but would reintroduce the loop.
 
+    The stamp-before-enqueue order only holds when a job actually reached
+    Redis. A *dispatch* failure creates no job at all, so charging it against
+    the budget would strand the session: three sweeps during a Redis outage
+    exhaust the ceiling, the SQL-side filter drops the row, and the answers are
+    never graded even after Redis recovers. So the counter is rolled back when
+    the enqueue raises OR returns ``None`` (ARQ refused the ID — nothing was
+    queued). Everything after a successful handoff still costs an attempt.
+
+    Each candidate's enqueue is isolated: a transport error on one row used to
+    propagate out of the loop and skip every candidate behind it in that sweep.
+
     The job ID is per-attempt rather than per-session: ARQ refuses a duplicate
     job ID while the previous result is still in Redis (``keep_result_seconds``
     is 3600), so reusing the session-scoped ID would make every recovery inside
@@ -140,7 +154,8 @@ async def recover_stalled_evaluations(
     )
     enqueued = 0
     for session in candidates:
-        summary = dict(session.internal_summary_json or {})
+        previous_summary = dict(session.internal_summary_json or {})
+        summary = dict(previous_summary)
         recovery = dict(summary.get("evaluation_recovery") or {})
         attempt = int(recovery.get("attempts") or 0) + 1
         recovery["attempts"] = attempt
@@ -149,14 +164,36 @@ async def recover_stalled_evaluations(
         session.internal_summary_json = summary
         await db.commit()
 
-        job = await arq_pool.enqueue_job(  # type: ignore[attr-defined]
-            _EVALUATE_INTERVIEW_SESSION_TASK,
-            session.student_id,
-            session.id,
-            _job_id=_evaluation_job_id(session.id, attempt=attempt),
-        )
+        job: object | None = None
+        dispatch_error: Exception | None = None
+        try:
+            job = await arq_pool.enqueue_job(  # type: ignore[attr-defined]
+                _EVALUATE_INTERVIEW_SESSION_TASK,
+                session.student_id,
+                session.id,
+                _job_id=_evaluation_job_id(session.id, attempt=attempt),
+            )
+        except Exception as exc:  # noqa: BLE001 -- transport failure, refunded below
+            dispatch_error = exc
+
         if job is not None:
             enqueued += 1
+            continue
+
+        # Nothing was queued. Refund the attempt so a dispatch outage cannot
+        # consume the student's grading opportunities. Metadata only — never
+        # the transcript.
+        session.internal_summary_json = previous_summary
+        await db.commit()
+        logger.warning(
+            "interview evaluation recovery dispatch failed; attempt refunded",
+            extra={
+                "session_id": str(session.id),
+                "attempt": attempt,
+                "job_id": _evaluation_job_id(session.id, attempt=attempt),
+                "error": str(dispatch_error) if dispatch_error is not None else "enqueue_refused",
+            },
+        )
     return enqueued
 
 

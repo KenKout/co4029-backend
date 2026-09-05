@@ -56,6 +56,14 @@ SessionStatusLiteral = Literal[
     "abandoned",
     "failed",
 ]
+# Mirrors ``services.evaluation_state.EvaluationState``. Kept as a local literal
+# so the schema layer does not import a service (import-linter contract).
+EvaluationStateLiteral = Literal[
+    "not_required",
+    "pending",
+    "succeeded",
+    "exhausted",
+]
 InterviewFinishReasonLiteral = Literal["natural", "ended_early", "timed_out"]
 InterviewLanguageLiteral = Literal["en", "vi"]
 InterviewTurnActionLiteral = Literal[
@@ -185,6 +193,13 @@ class InterviewSessionPublic(BaseModel):
     current_question_index: int | None = None
     time_remaining_seconds: int | None = None
     pass_verdict: bool | None = None
+    # Is a verdict still coming? Derived server-side from the terminal status,
+    # the verdict, and the recovery budget (see
+    # ``services.evaluation_state.derive_evaluation_state``) — the frontend must
+    # not re-derive it, because ``status='failed'`` is NOT terminal while the
+    # recovery sweep can still re-drive the row. ``pending`` means keep polling;
+    # ``succeeded`` / ``exhausted`` / ``not_required`` mean stop.
+    evaluation_state: EvaluationStateLiteral = "not_required"
     # Proactive retake context (#7) — see InterviewSessionFinishResponse. Present
     # here too so the results screen survives a reload (the FE re-fetches the
     # session and must still know remaining attempts / cooldown).
