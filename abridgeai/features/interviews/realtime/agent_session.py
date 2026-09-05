@@ -62,7 +62,11 @@ def build_state_reminder(data: InterviewUserdata, *, opening: bool = False) -> s
         max_hints=data.max_hints_per_question,
         below_closing_threshold=data.below_closing_threshold,
         outcome_titles=data.outcome_titles,
-        time_remaining_seconds=data.time_remaining_seconds,
+        # Derived NOW, not the stored snapshot: the note is rebuilt every turn and
+        # the stored value is the reading taken at setup, so the model was told
+        # "about 30 minutes remain" for the whole of a 30-minute interview — and the
+        # closing nudge that rides on this number never became urgent.
+        time_remaining_seconds=data.remaining_seconds_now(),
         current_question_text=data.current_question_text,
         server_advanced=data.pending_new_question,
         opening=opening,

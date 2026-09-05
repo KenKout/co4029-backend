@@ -74,6 +74,18 @@ EV_TURN_ERROR = "voice.turn_error"
 # Distinct from EV_TURN_ERROR, which means the brain itself raised.
 EV_TEXT_TURN_REJECTED = "voice.text_turn_rejected"
 
+# A typed turn arrived with a `turn_key` this session has already accepted, so it
+# was re-acked instead of re-graded. Normal after a reconnect — the client lost
+# the ack and retried, exactly as the protocol invites it to. Worth an event
+# because a RISING rate means clients are losing acks, and because the alternative
+# (silently grading it twice) is a scoring bug with no signal at all.
+EV_TEXT_TURN_DUPLICATE = "voice.text_turn_duplicate"
+
+# A finish (the model ending, or the hard stop) had to wait for typed turns that
+# were still being graded, and the wait timed out. Every one of these is an answer
+# that may be missing from the transcript the evaluator grades.
+EV_TURN_DRAIN_TIMEOUT = "voice.turn_drain_timeout"
+
 # A server-authoritative tool refused the model (advance-while-uncovered, or
 # end-while-required-outcomes-remain). The native path produces no ReasonCode, so
 # this is the only record of WHY an interview stayed where it was — without it a
@@ -122,6 +134,8 @@ ALL_EVENTS = frozenset(
         EV_EVALUATION_ENQUEUED,
         EV_TURN_ERROR,
         EV_TEXT_TURN_REJECTED,
+        EV_TEXT_TURN_DUPLICATE,
+        EV_TURN_DRAIN_TIMEOUT,
         EV_SERVER_ADVANCED,
         EV_TOOL_REFUSED,
         EV_TRANSCRIPT_WRITE_FAILED,
@@ -193,6 +207,8 @@ __all__ = [
     "EV_TURN_ERROR",
     "EV_TURN_STARTED",
     "EV_TEXT_TURN_REJECTED",
+    "EV_TEXT_TURN_DUPLICATE",
+    "EV_TURN_DRAIN_TIMEOUT",
     "EV_SERVER_ADVANCED",
     "EV_TOOL_REFUSED",
     "EV_TRANSCRIPT_WRITE_FAILED",

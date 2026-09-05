@@ -28,16 +28,15 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable, Coroutine
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable
 from functools import partial
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
 from livekit import (
     rtc,  # rtc is a lazy submodule; livekit ships no stubs
 )
-from livekit.agents import Agent, AgentSession, ChatContext, ChatMessage, get_job_context
+from livekit.agents import Agent, AgentSession, ChatContext, ChatMessage
 
 from abridgeai.features.interviews.orchestrator.intent import (
     IntentClassification,
@@ -61,12 +60,23 @@ from abridgeai.features.interviews.realtime.native_advance import (
     count_follow_up,
 )
 from abridgeai.features.interviews.realtime.native_control import ControlPublisher, build_snapshot
+
+# Re-exported below: the finish machinery moved to its own module for the LOC gate,
+# but it is part of THIS module's published surface and its callers (and tests)
+# reach it as `native_runtime.HardStopTimer`.
+from abridgeai.features.interviews.realtime.native_hard_stop import (
+    HardStopPlan,
+    HardStopTimer,
+    TranscriptWriteBarrier,
+    hard_stop_deadline_seconds,
+)
 from abridgeai.features.interviews.realtime.native_rejoin import (
     _re_read_question,  # noqa: F401  -- re-exported: room-rejoin path calls it here
     _rejoin_question_text,  # noqa: F401  -- re-exported: room-rejoin path calls it here
 )
 from abridgeai.features.interviews.realtime.native_text_input import make_text_input_cb
 from abridgeai.features.interviews.realtime.native_transcript import record_turn
+from abridgeai.features.interviews.realtime.native_turn_intake import TurnIntake
 
 if TYPE_CHECKING:
     from livekit.agents import JobContext
@@ -76,216 +86,6 @@ if TYPE_CHECKING:
     from abridgeai.features.interviews.realtime.native_bridge import NativeSetup
 
 logger = logging.getLogger(__name__)
-
-# Wall-clock budget the hard stop allows per remaining question when the config
-# sets no time limit. Generous on purpose: this is a backstop against a model
-# that never ends, not a pacing mechanism, and cutting a productive interview
-# short is a worse failure than running a few minutes long.
-_SECONDS_PER_REMAINING_QUESTION = 240.0
-# Never arm the stop closer than this, even with no questions left: a session
-# joined at the very end of its window still deserves a closing exchange rather
-# than an immediate teardown.
-_MIN_HARD_STOP_SECONDS = 120.0
-# Fired past the deadline, not at it: `submit_session` refuses a `timed_out`
-# reason until the limit has actually elapsed (with a 2s scheduling-tolerance
-# buffer of its own), and a hard stop that fires early therefore cannot submit.
-_DEADLINE_GRACE_SECONDS = 5.0
-# Used only when neither a time limit nor a question budget is known. Long
-# enough that no real interview trips it, short enough that an abandoned room
-# still closes.
-_DEFAULT_HARD_STOP_SECONDS = 45.0 * 60.0
-# Bound on waiting for the closing to finish playing out before teardown, so a
-# stuck SpeechHandle cannot hang the job. Mirrors ``session_runtime``.
-_CLOSING_PLAYOUT_TIMEOUT_S = 30.0
-_TRANSCRIPT_FLUSH_TIMEOUT_S = 3.0
-
-
-def hard_stop_deadline_seconds(
-    *, time_remaining_seconds: int | None, questions_remaining: int
-) -> float:
-    """Seconds until the server-side hard stop fires.
-
-    The config's time limit is the authoritative deadline when one exists; the
-    question budget only applies to an UNTIMED session. Using ``min`` of the two
-    let a small question pool end a 30-minute interview after 8 — the reported
-    session was killed mid-conversation, and the timed-out submission was then
-    REJECTED because the real limit had not elapsed. Pure so the arithmetic is
-    testable without a room.
-    """
-    if time_remaining_seconds is not None:
-        return max(_MIN_HARD_STOP_SECONDS, float(time_remaining_seconds) + _DEADLINE_GRACE_SECONDS)
-    budget = max(0.0, questions_remaining) * _SECONDS_PER_REMAINING_QUESTION
-    if budget <= 0.0:
-        return _DEFAULT_HARD_STOP_SECONDS
-    return max(_MIN_HARD_STOP_SECONDS, budget)
-
-
-async def _no_flush() -> None:
-    return None
-
-
-class TranscriptWriteBarrier:
-    """Track native transcript writes until session finalization.
-
-    Conversation callbacks cannot await ``record_turn`` directly. Before either
-    native finalization path submits and enqueues evaluation, this barrier waits
-    for every write task already scheduled, so the evaluator sees the final
-    candidate answer.
-    """
-
-    def __init__(self) -> None:
-        self._pending: set[asyncio.Task[None]] = set()
-
-    def create(self, coro: Coroutine[Any, Any, None]) -> None:
-        task = asyncio.create_task(coro)
-        self._pending.add(task)
-        task.add_done_callback(self._pending.discard)
-
-    async def flush(self) -> None:
-        """Wait briefly for writes in flight without cancelling them.
-
-        Loop with a single deadline so a write task created WHILE the flush is
-        already running (an SDK callback landing exactly as finalization
-        begins) is also drained before submit. Writers still pending at the
-        deadline are left to finish on their own — never cancelled — so a
-        wedged DB session cannot hang the finalizer, and a merely slow write
-        is not lost, only unawaited.
-        """
-        deadline = asyncio.get_running_loop().time() + _TRANSCRIPT_FLUSH_TIMEOUT_S
-        while self._pending:
-            remaining = deadline - asyncio.get_running_loop().time()
-            if remaining <= 0:
-                logger.error(
-                    "transcript flush timed out (pending=%d, timeout_seconds=%s)",
-                    len(self._pending),
-                    _TRANSCRIPT_FLUSH_TIMEOUT_S,
-                )
-                return
-            done, _still = await asyncio.wait(
-                tuple(self._pending),
-                timeout=remaining,
-            )
-            for task in done:
-                try:
-                    task.result()
-                except Exception:  # noqa: BLE001 -- record_turn normally swallows failures
-                    logger.exception("unexpected transcript task failure")
-
-
-@dataclass
-class HardStopPlan:
-    """What the hard stop needs to close a session the model never ends.
-
-    ``close`` submits the session and returns the canonical ceremony closing to
-    speak — the same ``orchestration_bridge.finalize_session`` the
-    ``interview_end_interview`` tool reaches, so both routes submit once, the
-    same way.
-    """
-
-    deadline_seconds: float
-    close: Callable[[], Awaitable[str | None]]
-    interview_session_id: UUID
-    flush_transcript: Callable[[], Awaitable[None]] = _no_flush
-
-
-class HardStopTimer:
-    """The third anti-deadlock layer: a wall clock the model cannot argue with.
-
-    The other two are the bounded refusal counters in ``orchestrator/tools.py``
-    (``MAX_END_REFUSALS`` / ``MAX_ADVANCE_REFUSALS``), and both only help a model
-    that TRIES to advance or end. A model that simply keeps talking defeats them,
-    which is why this layer exists outside the model's reach entirely.
-
-    :meth:`finalize_once` is the shared entry for both routes, so a session
-    cannot be submitted twice when the model ends just as the timer fires.
-    """
-
-    def __init__(self, plan: HardStopPlan, *, session: AgentSession) -> None:
-        self._plan = plan
-        self._session = session
-        self._task: asyncio.Task[None] | None = None
-        self._finalized = False
-        # Set by the runtime once the publisher exists. Runs after EITHER route
-        # submits, so "the interview is over" reaches the client whether the model
-        # ended it or the wall clock did.
-        self.on_finalized: Callable[[], Awaitable[None]] | None = None
-
-    @property
-    def fired(self) -> bool:
-        return self._finalized
-
-    def start(self) -> None:
-        self._task = asyncio.create_task(self._run())
-
-    def cancel(self) -> None:
-        if self._task is not None:
-            self._task.cancel()
-            self._task = None
-
-    async def finalize_once(self, inner: Callable[[], Awaitable[None]]) -> None:
-        """Run ``inner`` at most once per session, and disarm the timer.
-
-        Wrapping the tool's finalizer rather than guarding inside it keeps
-        ``agent_tools`` unaware that a timer exists.
-        """
-        if self._finalized:
-            return
-        self._finalized = True
-        self.cancel()
-        await self._plan.flush_transcript()
-        await inner()
-        await self._announce_finished()
-
-    async def _announce_finished(self) -> None:
-        """Tell the client the interview is over. Never raises."""
-        if self.on_finalized is None:
-            return
-        try:
-            await self.on_finalized()
-        except Exception:  # noqa: BLE001 -- a submitted session must not fail on a notification
-            logger.exception(
-                "failed to announce finish (session=%s)", self._plan.interview_session_id
-            )
-
-    async def _run(self) -> None:
-        try:
-            await asyncio.sleep(self._plan.deadline_seconds)
-        except asyncio.CancelledError:
-            return
-        await self._stop()
-
-    async def _stop(self) -> None:
-        if self._finalized:
-            return
-        self._finalized = True
-        # Submit BEFORE speaking. The candidate's answers are already graded
-        # evidence at this point, and a transport failure during the goodbye must
-        # not be the reason a completed interview was never submitted.
-        closing: str | None = None
-        try:
-            await self._plan.flush_transcript()
-            closing = await self._plan.close()
-        except Exception:
-            logger.exception(
-                "hard stop failed to finalize (session=%s)",
-                self._plan.interview_session_id,
-            )
-        obs.emit(
-            obs.EV_CLOSING_EMITTED,
-            session_id=self._plan.interview_session_id,
-            reason="hard_stop_deadline",
-            closing_chars=len(closing or ""),
-        )
-        await self._announce_finished()
-        handle = None
-        if closing:
-            handle = self._session.say(closing, allow_interruptions=False)
-            await handle
-        await _await_playout(handle)
-        job = get_job_context(required=False)
-        if job is not None:
-            job.shutdown(reason="interview_hard_stop")
-
 
 # Markers identifying the server's injected control notes in the chat context.
 # Everything the server pins mid-conversation (the advance directive, the
@@ -316,22 +116,6 @@ def _control_notes_removed(chat_ctx: ChatContext) -> list[ChatMessage]:
             continue
         kept.append(item)
     return kept
-
-
-async def _await_playout(handle: object) -> None:
-    """Wait for a closing utterance to reach the candidate, bounded.
-
-    Awaiting ``say()`` only means the speech was scheduled and generated, not
-    that the audio arrived — tearing the room down here would cut the closing.
-    Never raises: a stuck handle must not block shutdown.
-    """
-    waiter = getattr(handle, "wait_for_playout", None)
-    if waiter is None:
-        return
-    try:
-        await asyncio.wait_for(waiter(), timeout=_CLOSING_PLAYOUT_TIMEOUT_S)
-    except Exception:  # noqa: BLE001 - playout is best-effort; shutdown proceeds
-        logger.warning("closing playout wait failed; shutting down anyway")
 
 
 class NativeInterviewAgent(InterviewToolsMixin, Agent):
@@ -414,12 +198,18 @@ class NativeInterviewAgent(InterviewToolsMixin, Agent):
         """
         await self.fold_turn(answer_text=(new_message.text_content or ""))
 
-    async def fold_turn(self, *, answer_text: str) -> None:
+    async def fold_turn(self, *, answer_text: str, turn_key: str | None = None) -> None:
         """Grade one candidate answer, then refresh the state note.
 
         The single graded path, shared by the spoken and typed doors. Takes no
         chat context: the note lives in the SYSTEM instructions now, so neither
         door has to mutate a per-turn copy and write it back.
+
+        ``turn_key`` is the TYPED door's client idempotency key, persisted with the
+        runtime state as ``last_turn_idempotency_key``. It is what lets a resend
+        that lands on a DIFFERENT agent process — the in-memory ledger is empty
+        there — still be recognised as the same turn. A spoken turn has no key: the
+        SDK's end-of-turn commits are not client retries.
         """
         userdata = self._setup.userdata
         # Belongs to the PREVIOUS turn: the model has had its chance to ask the
@@ -444,6 +234,7 @@ class NativeInterviewAgent(InterviewToolsMixin, Agent):
                     answer_text=answer_text,
                     question_text=(userdata.current_question_text or ""),
                     turn_id=str(uuid4()),
+                    turn_key=turn_key,
                 )
             except Exception:  # noqa: BLE001 -- grading must never cost the reply
                 logger.exception(
@@ -573,6 +364,11 @@ async def run_native_interview(
         settings, userdata, language=setup.language, voice=setup.tts_voice
     )
     transcript_writes = TranscriptWriteBarrier()
+    # One per session: the turn_key ledger that makes a resend idempotent, and the
+    # in-flight count a finish waits on. Seeded from the key persisted by any
+    # earlier run of this session, so a restart does not forget what it graded.
+    turn_intake = TurnIntake()
+    turn_intake.seed(setup.last_turn_key)
     hard_stop = HardStopTimer(
         HardStopPlan(
             deadline_seconds=hard_stop_deadline_seconds(
@@ -582,6 +378,8 @@ async def run_native_interview(
             close=setup.close_session,
             interview_session_id=userdata.interview_session_id,
             flush_transcript=transcript_writes.flush,
+            drain_turns=turn_intake.drain,
+            close_fallback=setup.close_session_fallback,
         ),
         session=session,
     )
@@ -598,7 +396,8 @@ async def run_native_interview(
     userdata.finalize_session = lambda: hard_stop.finalize_once(tool_finalize)
 
     room_input, room_output = room_options_for_mode(
-        setup.input_mode, text_input_cb=make_text_input_cb(publisher)
+        setup.input_mode,
+        text_input_cb=make_text_input_cb(publisher, intake=turn_intake),
     )
     await session.start(
         agent,

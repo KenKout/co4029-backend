@@ -48,6 +48,14 @@ def build_snapshot(userdata: InterviewUserdata) -> tp.StateSnapshot:
     ``interview_get_progress`` can never disagree about what is ticked.
     """
     state = userdata.state
+    # The countdown must be computed at SNAPSHOT time, not read as stored.
+    # `time_remaining_seconds` is the value captured once at setup and nothing
+    # refreshes it, so every snapshot re-sent the clock the session had at join:
+    # ten minutes into a thirty-minute interview, a client that reloaded was handed
+    # nearly thirty minutes again, while the backend still ended it on the real
+    # deadline. `has_time_limit` still keys off the stored field — whether a limit
+    # EXISTS is a property of the config, not of how much is left.
+    remaining_now = userdata.remaining_seconds_now()
     if state is None:
         return tp.StateSnapshot(
             current_question_id=None,
@@ -59,7 +67,7 @@ def build_snapshot(userdata: InterviewUserdata) -> tp.StateSnapshot:
             outcomes_required=len(userdata.required_outcome_ids),
             is_finished=False,
             has_time_limit=userdata.time_remaining_seconds is not None,
-            time_remaining_seconds=userdata.time_remaining_seconds,
+            time_remaining_seconds=remaining_now,
         )
     report = build_progress_report(
         state,
@@ -82,7 +90,7 @@ def build_snapshot(userdata: InterviewUserdata) -> tp.StateSnapshot:
         outcomes_required=required,
         is_finished=userdata.finished,
         has_time_limit=userdata.time_remaining_seconds is not None,
-        time_remaining_seconds=userdata.time_remaining_seconds,
+        time_remaining_seconds=remaining_now,
     )
 
 

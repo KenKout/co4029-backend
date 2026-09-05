@@ -84,10 +84,15 @@ class _Agent:
     def __init__(self) -> None:
         self.chat_ctx = _Ctx()
         self.folded: list[str] = []
+        # The typed door forwards the client's idempotency key so the fold can
+        # persist it as `last_turn_idempotency_key` — that is what makes a resend
+        # recognisable after an agent restart, when the in-memory ledger is gone.
+        self.folded_keys: list[str | None] = []
         self.on_fold: Callable[[str], Awaitable[None]] | None = None
 
-    async def fold_turn(self, *, answer_text: str) -> None:
+    async def fold_turn(self, *, answer_text: str, turn_key: str | None = None) -> None:
         self.folded.append(answer_text)
+        self.folded_keys.append(turn_key)
         if self.on_fold is not None:
             await self.on_fold(answer_text)
 

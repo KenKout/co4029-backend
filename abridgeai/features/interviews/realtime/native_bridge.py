@@ -21,6 +21,7 @@ created here and never updated reads as a session that made no progress.
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass, field
 from functools import partial
 from typing import TYPE_CHECKING, Any
@@ -134,6 +135,17 @@ class BankSelector:
             and candidate.question_id not in ctx.skipped_question_ids
         )
 
+    def prompt_for(self, question_id: object) -> str | None:
+        """The bank prompt for one question id, or None when it is not in the pool.
+
+        Lets a resume read the text for the question RUNTIME STATE is on, rather
+        than the one the transcript last recorded — those diverge for the window
+        between selecting a question and speaking it.
+        """
+        if not question_id:
+            return None
+        return self.prompts.get(str(question_id)) or None
+
     def last_picked_id(self) -> UUID | None:
         """The question the interview is currently on, for the deferred analysis.
 
@@ -187,6 +199,15 @@ class NativeSetup:
     input_mode: str
     close_session: Callable[[], Awaitable[str | None]]
     selector: BankSelector
+    # The client idempotency key of the last typed turn this session processed, read
+    # back from runtime state. Seeds the in-process ledger so a resend that lands on
+    # a FRESH agent process (after a crash/redeploy) is still a duplicate.
+    last_turn_key: str | None = None
+    # Used only when ``close_session`` is REFUSED. ``submit_session`` validates the
+    # reason against the config, so a hard stop that fires early (or on an untimed
+    # session) has its primary submit rejected; this one always satisfies the
+    # validator, so the row cannot be stranded ``in_progress``.
+    close_session_fallback: Callable[[], Awaitable[str | None]] | None = None
     tts_voice: str | None = None
     interviewer_name: str | None = None
     onboarding_turns: list[tuple[str, str]] = field(default_factory=list)
@@ -230,7 +251,14 @@ class StateWriter:
     def adopt_version(self, version: int) -> None:
         self._version = version
 
-    async def save(self) -> None:
+    async def save(self, *, turn_key: str | None = None) -> None:
+        """Persist the in-room state, optionally stamping the turn that produced it.
+
+        ``turn_key`` is the typed door's client idempotency key. Recording it makes
+        the duplicate check survive an agent restart: the in-process ledger is gone
+        after a crash, but ``last_turn_idempotency_key`` is loaded back at setup, so
+        a client that reconnects to a fresh process and retries is still recognised.
+        """
         async with get_sessionmaker()() as db:
             loaded = await state_repo.load_or_init(db, self._session_id)
             expected = self._version if self._version is not None else loaded.version
@@ -245,7 +273,11 @@ class StateWriter:
                 expected = loaded.version
             try:
                 self._version = await state_repo.save(
-                    db, self._session_id, self._state, expected_version=expected
+                    db,
+                    self._session_id,
+                    self._state,
+                    expected_version=expected,
+                    turn_idempotency_key=turn_key,
                 )
             except state_repo.StaleStateError:
                 logger.warning(
@@ -291,6 +323,7 @@ def _make_turn_grader(
         answer_text: str,
         question_text: str,
         turn_id: str,
+        turn_key: str | None = None,
     ) -> None:
         from abridgeai.core.db import get_sessionmaker  # noqa: PLC0415
         from abridgeai.features.interviews.orchestrator.sufficiency_logic import (  # noqa: PLC0415
@@ -343,7 +376,10 @@ def _make_turn_grader(
                 turn_id=turn_id,
                 probe=_probe,
                 enqueue_reconcile=_enqueue,
-                save_state=writer.save,
+                # Stamps this turn's client key as the last one processed, in the
+                # SAME write that persists the coverage it produced — so the key
+                # can never be recorded for a fold that did not land.
+                save_state=partial(writer.save, turn_key=turn_key),
             )
 
     return _grade
@@ -369,6 +405,7 @@ async def load_native_setup(
         loaded = await state_repo.load_readonly(db, session_id)
         state = loaded.data if loaded is not None else InterviewRuntimeStateData()
         loaded_version = loaded.version if loaded is not None else None
+        last_turn_key = loaded.last_turn_idempotency_key if loaded is not None else None
 
         candidates, orm_by_id = await turn_perception.load_candidates(db, config.id)
         identity = identity_from_config(getattr(config, "persona_profile_json", None))
@@ -385,11 +422,33 @@ async def load_native_setup(
         asked_ids = await turn_perception.persisted_question_ids(db, session_id)
         # Merges the REST transcript into state that the agent path never wrote,
         # so the scorer cannot re-offer a question the candidate already saw.
-        sync_question_history(
-            state,
-            asked_ids,
-            current_question=orm_by_id.get(str(asked_ids[-1])) if asked_ids else None,
-        )
+        #
+        # The transcript must NOT be allowed to move the current question BACKWARDS.
+        # A transcript row is written when a question is spoken, while runtime state
+        # is written when the server selects one, so the two are legitimately out of
+        # step: after an advance to Q2 whose reading has not been recorded yet, the
+        # transcript's last row is still Q1. Passing that as ``current_question``
+        # rewound the interview — a worker restart in that window resumed on Q1
+        # while Q2 stayed in ``asked_question_ids``, so the scorer would never offer
+        # it again and Q2 was skipped outright.
+        #
+        # So the current question is only taken from the transcript when runtime
+        # state does not already name one. The ids are still merged either way: that
+        # direction only ever ADDS to the asked set, which cannot lose a question.
+        current_question = None
+        if not state.current_question_id and asked_ids:
+            current_question = orm_by_id.get(str(asked_ids[-1]))
+        elif state.current_question_id and asked_ids:
+            newest_recorded = str(asked_ids[-1])
+            if newest_recorded != str(state.current_question_id):
+                logger.info(
+                    "runtime state is ahead of the transcript; keeping state's question "
+                    "(session=%s, state=%s, transcript=%s)",
+                    session_id,
+                    state.current_question_id,
+                    newest_recorded,
+                )
+        sync_question_history(state, asked_ids, current_question=current_question)
 
         outcomes = await turn_perception.list_outcomes(db, config.id)
         time_fraction = turn_perception.time_fraction_remaining(session, config)
@@ -397,6 +456,7 @@ async def load_native_setup(
         session_language = getattr(session, "interview_language", language) or language
         input_mode = session.input_mode
         tts_voice = getattr(config, "tts_voice", None)
+        has_time_limit = bool(getattr(config, "time_limit_minutes", None))
 
     # Every config outcome is required — ``InterviewOutcome`` carries no
     # required flag, and ``adaptive.run_adaptive_turn`` reads them the same way.
@@ -434,14 +494,24 @@ async def load_native_setup(
         below_closing_threshold=(
             time_fraction is not None and time_fraction <= _CLOSING_TIME_FRACTION
         ),
-        current_question_text=await bridge.get_current_question_text(
-            session_id, language=session_language
-        ),
+        # Prefer the prompt for the question runtime state says we are on. The
+        # bridge helper reads the highest-sequence TRANSCRIPT row, which lags the
+        # same way the id does (state advances at selection, the row appears at
+        # speaking) — so on a restart inside that window it handed back the
+        # previous question's text while the state, the counter and the client
+        # snapshot all said the new one, and the agent re-read a question the
+        # candidate had already been moved past.
+        current_question_text=selector.prompt_for(state.current_question_id)
+        or await bridge.get_current_question_text(session_id, language=session_language),
         select_next=selector,
         finalize_session=partial(
             _submit_and_discard_closing, session_id, student_id, language=session_language
         ),
         time_remaining_seconds=remaining_seconds,
+        # Anchors the countdown so every later snapshot can derive the clock as of
+        # NOW rather than re-sending this reading. Stamped here, next to the read it
+        # describes — deriving it anywhere else would measure from the wrong moment.
+        clock_read_monotonic=time.monotonic(),
     )
     writer = StateWriter(session_id, state)
     if loaded_version is not None:
@@ -450,14 +520,34 @@ async def load_native_setup(
         userdata=userdata,
         language=session_language,
         input_mode=input_mode,
+        # The hard stop's finish reason must match what the session can actually
+        # be finished as. ``submit_session`` REJECTS ``reason="timed_out"`` when the
+        # config has no ``time_limit_minutes`` ("Cannot time out an interview
+        # without a time limit"), so on an untimed session the hard stop's submit
+        # raised, was swallowed, and the runtime went on to announce the finish and
+        # shut the job down — leaving the row ``in_progress`` with nothing left
+        # running to finish it. ``ended_early`` is the honest label there: the
+        # server stopped the interview, and no configured deadline elapsed.
         close_session=partial(
             bridge.finalize_session,
             session_id,
             student_id,
             language=session_language,
-            reason="timed_out",
+            reason="timed_out" if has_time_limit else "ended_early",
+        ),
+        # ``ended_early`` passes ``submit_session``'s validator unconditionally: it
+        # is the "the interview was stopped before its natural end" reason, with no
+        # config or deadline precondition. So whatever the primary reason was refused
+        # for, this one lands and the session is never left ``in_progress``.
+        close_session_fallback=partial(
+            bridge.finalize_session,
+            session_id,
+            student_id,
+            language=session_language,
+            reason="ended_early",
         ),
         selector=selector,
+        last_turn_key=last_turn_key,
         tts_voice=tts_voice,
         interviewer_name=identity.name,
         onboarding_turns=await bridge.get_onboarding_turns(session_id),

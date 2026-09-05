@@ -1010,10 +1010,16 @@ async def test_transcript_barrier_timeout_does_not_block_finalization(
         started.set()
         await release.wait()
 
+    from abridgeai.features.interviews.realtime import native_hard_stop
+
     barrier = native_runtime.TranscriptWriteBarrier()
     barrier.create(_blocked_write())
     await started.wait()
-    monkeypatch.setattr(native_runtime, "_TRANSCRIPT_FLUSH_TIMEOUT_S", 0.01)
+    # The finish machinery lives in `native_hard_stop` now (native_runtime crossed
+    # the feature's LOC gate and re-exports it). The public names still resolve
+    # through native_runtime; a module-private constant has to be patched where it
+    # is defined.
+    monkeypatch.setattr(native_hard_stop, "_TRANSCRIPT_FLUSH_TIMEOUT_S", 0.01)
     close = AsyncMock(return_value=None)
     timer = native_runtime.HardStopTimer(
         native_runtime.HardStopPlan(

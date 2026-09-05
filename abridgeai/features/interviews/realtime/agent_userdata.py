@@ -15,6 +15,7 @@ objects.
 
 from __future__ import annotations
 
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol
@@ -69,11 +70,20 @@ class InterviewUserdata:
     max_hints_per_question: int = 3
     below_closing_threshold: bool = False
     current_question_text: str | None = None
-    # Seconds left on the session clock, refreshed each turn. None means the
-    # session is UNTIMED — distinct from 0, and the reminder must not report it
+    # Seconds left on the session clock AS OF ``clock_read_monotonic``. None means
+    # the session is UNTIMED — distinct from 0, and the reminder must not report it
     # as a deadline or the agent rushes a session that has no limit.
+    #
+    # Read this through :meth:`remaining_seconds_now`, never directly, unless you
+    # genuinely want the value at read time. It is a SNAPSHOT: nothing refreshes it
+    # per turn, so every client snapshot re-sent the countdown the session had at
+    # join. Ten minutes into a thirty-minute interview a rejoining candidate saw
+    # nearly thirty minutes again while the backend still finished on the real
+    # deadline — a timer that lies in the candidate's favour, then stops them.
     time_remaining_seconds: int | None = None
-
+    # ``time.monotonic()`` when ``time_remaining_seconds`` was read. Monotonic, not
+    # wall clock: a container NTP step must not move a candidate's deadline.
+    clock_read_monotonic: float | None = None
     # True from the moment the SERVER advanced the question until the model has had
     # its turn to ask it. Two readers: the state note flips from "call the tool to
     # move on" to "you have already been moved", and `interview_next_question`
@@ -124,6 +134,20 @@ class InterviewUserdata:
     # the live transcript can badge it. Same injection/no-op pattern as
     # `publish_state`.
     publish_agent_action: Callable[[str], Awaitable[None]] = lambda kind: _no_publish()
+
+    def remaining_seconds_now(self) -> int | None:
+        """The countdown as of NOW, derived from the snapshot and elapsed time.
+
+        None for an untimed session (nothing to count down), and never negative:
+        past the deadline the honest answer is 0 — the hard stop owns what happens
+        next, and a negative number renders as a nonsense timer.
+        """
+        if self.time_remaining_seconds is None:
+            return None
+        if self.clock_read_monotonic is None:
+            return self.time_remaining_seconds
+        elapsed = time.monotonic() - self.clock_read_monotonic
+        return max(0, int(self.time_remaining_seconds - elapsed))
 
 
 __all__ = ["InterviewUserdata", "SelectedQuestion"]

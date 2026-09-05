@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING, Any
 
 from abridgeai.features.interviews.realtime import observability as obs
 from abridgeai.features.interviews.realtime import text_protocol as tp
+from abridgeai.features.interviews.realtime.native_turn_intake import TurnIntake
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -65,6 +66,8 @@ _ACTION_INSTRUCTIONS: dict[str, str] = {
 
 def make_text_input_cb(
     publisher: ControlPublisher,
+    *,
+    intake: TurnIntake | None = None,
 ) -> Callable[[Any, Any], Awaitable[None]]:
     """Build the ``text_input_cb`` for a native session.
 
@@ -72,7 +75,13 @@ def make_text_input_cb(
     callback can be wired into ``RoomInputOptions`` BEFORE ``session.start`` —
     which it must be, since the options are an argument to it. The publisher
     resolves the room lazily on each publish, so it tolerates being built early.
+
+    ``intake`` carries the session's ``turn_key`` ledger and its in-flight count.
+    It is optional only so a diagnostic harness can build a callback without one;
+    a real session always passes it, because without it a resent turn is graded
+    twice and a finish can submit while an answer is still being graded.
     """
+    turn_intake = intake if intake is not None else TurnIntake()
 
     async def _on_text_input(sess: Any, ev: Any) -> None:  # noqa: ANN401 - SDK passes AgentSession/TextInputEvent; typing them here would import the SDK at module scope
         try:
@@ -90,25 +99,56 @@ def make_text_input_cb(
             )
             return
 
+        # A resend of a key we have already taken is the SAME turn arriving twice
+        # — the client lost the ack (a reconnect mid-turn is the normal cause) and
+        # retried with its idempotency key, exactly as the protocol invites it to.
+        # Re-acking is the whole response: the client needs the settle signal it
+        # missed, and re-grading would apply this answer's coverage points a
+        # second time, charge another follow-up, and — because the server may have
+        # advanced in between — fold an answer to the previous question against
+        # the current one.
+        if not turn_intake.claim(turn.turn_key):
+            obs.emit(
+                obs.EV_TEXT_TURN_DUPLICATE,
+                session_id=_session_id(sess),
+                turn_action=turn.turn_action,
+            )
+            logger.info("duplicate typed turn re-acked, not re-graded (key=%s)", turn.turn_key)
+            await publisher.ack(turn_key=turn.turn_key, turn_action=turn.turn_action)
+            return
+
         # Ack BEFORE the fold. Grading calls an LLM and can take seconds; the
         # composer must not sit spinning behind it, and an ack means "received",
         # not "graded".
         await publisher.ack(turn_key=turn.turn_key, turn_action=turn.turn_action)
 
-        if turn.turn_action == tp.DEFAULT_TURN_ACTION:
-            await _fold_typed_answer(sess, turn.text)
+        # Held across the fold AND the reply handoff, so a finish that starts now
+        # waits for this answer instead of submitting a transcript without it.
+        async with turn_intake.processing():
+            if turn.turn_action == tp.DEFAULT_TURN_ACTION:
+                await _fold_typed_answer(sess, turn.text, turn_key=turn.turn_key)
 
-        await _reply(sess, turn, publisher)
+            await _reply(sess, turn, publisher)
 
     return _on_text_input
 
 
-async def _fold_typed_answer(sess: Any, text: str) -> None:  # noqa: ANN401 - see _on_text_input
+async def _fold_typed_answer(
+    sess: Any,  # noqa: ANN401 - see _on_text_input
+    text: str,
+    *,
+    turn_key: str | None,
+) -> None:
     """Run the graded fold a spoken turn gets from ``on_user_turn_completed``.
 
     No chat-context handling: the state note lives in the agent's SYSTEM
     instructions, so ``fold_turn`` refreshes it directly and there is no per-turn
     copy to mutate and write back.
+
+    ``turn_key`` is forwarded so the fold can persist it as the session's last
+    processed turn. Without that, the only duplicate protection is this process's
+    in-memory ledger, which an agent restart empties — and a client that reconnects
+    to a NEW agent process and retries would be graded again.
 
     Never raises: a failure here must cost the grade, not the candidate's reply.
     """
@@ -118,7 +158,7 @@ async def _fold_typed_answer(sess: Any, text: str) -> None:  # noqa: ANN401 - se
         logger.warning("typed turn on an agent with no fold_turn; answer not graded")
         return
     try:
-        await fold(answer_text=text)
+        await fold(answer_text=text, turn_key=turn_key)
     except Exception:  # noqa: BLE001 -- grading must never cost the reply
         logger.exception("typed turn fold failed")
 
