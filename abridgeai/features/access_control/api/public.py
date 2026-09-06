@@ -55,6 +55,34 @@ class FacultyAccessDTO:
     has_organization_scope: bool
 
 
+@dataclass(frozen=True)
+class MembershipCodesDTO:
+    student_code: str | None
+    employee_code: str | None
+
+
+async def get_user_membership_codes(
+    db: AsyncSession, user_id: UUID
+) -> MembershipCodesDTO | None:
+    """Return role-specific organization identifiers for a current member."""
+    stmt = (
+        select(
+            OrganizationMembership.student_code,
+            OrganizationMembership.employee_code,
+        )
+        .where(
+            OrganizationMembership.user_id == user_id,
+            OrganizationMembership.deleted_at.is_(None),
+            OrganizationMembership.status != "left",
+        )
+        .limit(1)
+    )
+    row = (await db.execute(stmt)).one_or_none()
+    if row is None:
+        return None
+    return MembershipCodesDTO(student_code=row.student_code, employee_code=row.employee_code)
+
+
 async def get_user_faculty_access(
     db: AsyncSession,
     *,
@@ -272,8 +300,8 @@ async def get_user_primary_org(db: AsyncSession, user_id: UUID) -> OrgDTO | None
     """Resolve the user's primary organization via membership.
 
     Sole source of truth: ``organization_memberships``. ``status='active'``
-    only; soft-deleted rows excluded. When a user has multiple memberships
-    the most recent (``created_at DESC``) wins.
+    only; soft-deleted rows excluded. The database permits at most one current
+    non-left membership per user; ordering remains defensive for legacy data.
 
     Role assignments are NOT consulted -- belonging-to-org and
     permissions-in-org are independent concepts. ``scope_kind='global'``
@@ -376,6 +404,8 @@ async def grant_org_role_access(
     organization_id: UUID,
     role_code: str,
     granted_by: UUID | None = None,
+    student_code: str | None = None,
+    employee_code: str | None = None,
 ) -> None:
     """Attach an existing user to an org with a chosen role (admin invite).
 
@@ -395,6 +425,8 @@ async def grant_org_role_access(
             user_id=user_id,
             organization_id=organization_id,
             status="active",
+            student_code=student_code,
+            employee_code=employee_code,
         )
     )
     db.add(
@@ -499,10 +531,10 @@ async def list_user_ids_with_role(
 async def get_primary_orgs_for_users(
     db: AsyncSession, user_ids: Sequence[UUID]
 ) -> dict[UUID, OrgDTO]:
-    """Batch-resolve each user's primary organization (one query for the page).
+    """Batch-resolve each user's organization (one query for the page).
 
-    Backs the admin user-list "Organization" column. Primary = the most recent
-    active, non-deleted membership (matches :func:`get_user_primary_org`).
+    Backs the admin user-list "Organization" column. Current = the active,
+    non-deleted membership (matches :func:`get_user_primary_org`).
     Users with no active membership are absent from the dict.
     """
     if not user_ids:
@@ -664,6 +696,7 @@ __all__ = [
     "get_roles_by_codes",
     "list_roles",
     "FacultyAccessDTO",
+    "MembershipCodesDTO",
     "InactiveOrgDTO",
     "list_inactive_organizations",
     "get_org_unit_subtree_ids",
@@ -676,6 +709,7 @@ __all__ = [
     "find_auto_provision_org_id",
     "get_active_permissions",
     "get_user_faculty_access",
+    "get_user_membership_codes",
     "get_org_unit_ancestors",
     "get_org_unit_names",
     "get_role_assignments_for_user",

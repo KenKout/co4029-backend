@@ -18,7 +18,7 @@ Covers:
 from __future__ import annotations
 
 import pytest
-from sqlalchemy import CheckConstraint
+from sqlalchemy import CheckConstraint, Index
 
 from abridgeai.features.access_control.models import (
     CareerPath,
@@ -131,3 +131,17 @@ def test_user_role_assignment_course_id_targets_courses_id() -> None:
 def test_role_permission_composite_primary_key() -> None:
     pk_cols = {c.name for c in RolePermission.__table__.primary_key.columns}
     assert pk_cols == {"role_id", "permission_id"}
+
+
+def test_membership_allows_only_one_non_left_organization_per_user() -> None:
+    indexes = {
+        index.name: index
+        for index in OrganizationMembership.__table__.indexes
+        if isinstance(index, Index)
+    }
+    index = indexes["uq_organization_memberships_one_live_org_per_user"]
+    assert index.unique is True
+    assert [column.name for column in index.columns] == ["user_id"]
+    predicate = str(index.dialect_options["postgresql"]["where"])
+    assert "deleted_at IS NULL" in predicate
+    assert "status <> 'left'" in predicate

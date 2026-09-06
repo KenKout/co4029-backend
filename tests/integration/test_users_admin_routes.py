@@ -427,6 +427,7 @@ async def test_search_users_role_and_org_filter_intersect(
 
 async def test_create_user_as_admin_201(
     client: httpx.AsyncClient,
+    test_engine_local: AsyncEngine,
     admin_auth: tuple[uuid.UUID, str],
     seeded_users: SeededUsers,
 ) -> None:
@@ -443,6 +444,7 @@ async def test_create_user_as_admin_201(
             "display_name": "Invited User",
             "organization_id": str(seeded_users.organization_id),
             "role_code": "student",
+            "student_code": "SV-INVITE-001",
         },
     )
     assert response.status_code == 201, response.text
@@ -461,6 +463,18 @@ async def test_create_user_as_admin_201(
     assert len(items) == 1
     assert "student" in items[0]["roles"]
     assert items[0]["organization_id"] == str(seeded_users.organization_id)
+
+    async with test_engine_local.connect() as conn:
+        student_code = (
+            await conn.execute(
+                text(
+                    "SELECT student_code FROM organization_memberships "
+                    "WHERE user_id = :user_id AND deleted_at IS NULL"
+                ),
+                {"user_id": uuid.UUID(body["id"])},
+            )
+        ).scalar_one()
+    assert student_code == "SV-INVITE-001"
 
 
 async def test_create_user_with_manager_role_201(

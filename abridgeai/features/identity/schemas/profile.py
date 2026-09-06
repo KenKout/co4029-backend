@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal
+from typing import Literal, Self
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 # Mirrors the ``ck_user_profile_links_link_type`` CHECK constraint in the
 # baseline schema. Declared as a Literal so an unknown type is a 422 from the
@@ -116,6 +116,11 @@ class UserRead(_ORMModel):
     # (e.g. platform admins). Populated by the search service only.
     organization_id: UUID | None = None
     organization_name: str | None = None
+    # Organization identifiers are populated only on the scoped user-detail
+    # response.  They are authored during invite/profile management, not from
+    # the organization membership roster.
+    student_code: str | None = None
+    employee_code: str | None = None
 
 
 class UserProfileUpdate(BaseModel):
@@ -152,6 +157,14 @@ class UserCreate(BaseModel):
     role_code: str = Field(default="student", min_length=1, max_length=50)
     student_code: str | None = Field(default=None, max_length=50)
     employee_code: str | None = Field(default=None, max_length=50)
+
+    @model_validator(mode="after")
+    def validate_role_identifier(self) -> Self:
+        if self.role_code == "student" and self.employee_code is not None:
+            raise ValueError("employee_code is not valid for a student account")
+        if self.role_code != "student" and self.student_code is not None:
+            raise ValueError("student_code is only valid for a student account")
+        return self
 
 
 class AuthSessionRead(_ORMModel):

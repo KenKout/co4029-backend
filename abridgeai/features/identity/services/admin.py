@@ -244,6 +244,14 @@ async def get_user_overview(db: AsyncSession, *, user_id: UUID) -> UserOverviewR
     org_map = await access_control_api.get_primary_orgs_for_users(db, [user_id])
     org = org_map.get(user_id)
     user_read = await _serialize_search_row(user, profile, {}, role_map, org)
+    membership_codes = await access_control_api.get_user_membership_codes(db, user_id)
+    if membership_codes is not None:
+        user_read = user_read.model_copy(
+            update={
+                "student_code": membership_codes.student_code,
+                "employee_code": membership_codes.employee_code,
+            }
+        )
 
     role_codes = role_map.get(user_id, [])
     overview = UserOverviewRead(user=user_read)
@@ -404,6 +412,8 @@ async def create_user_account(
         organization_id=payload.organization_id,
         role_code=payload.role_code,
         granted_by=actor_id,
+        student_code=payload.student_code,
+        employee_code=payload.employee_code,
     )
 
     return serialize_user(user, profile)

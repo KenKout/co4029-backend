@@ -21,6 +21,7 @@ from abridgeai.core.pagination import (
     decode_composite_cursor,
     encode_composite_cursor,
 )
+from abridgeai.features.access_control.api import public as access_control_api
 from abridgeai.features.admin.queries import users as user_queries
 
 if TYPE_CHECKING:
@@ -139,6 +140,13 @@ async def user_detail(db: AsyncSession, *, user_id: UUID) -> dict[str, Any]:
     profile = {k: base_dict.pop(k) for k in profile_keys}
     user_payload = dict(base_dict)
     user_payload["profile"] = profile if profile.get("display_name") is not None else None
+    membership_codes = await access_control_api.get_user_membership_codes(db, user_id)
+    user_payload["student_code"] = (
+        membership_codes.student_code if membership_codes is not None else None
+    )
+    user_payload["employee_code"] = (
+        membership_codes.employee_code if membership_codes is not None else None
+    )
     return {
         "user": user_payload,
         "role_assignments": role_assignments,

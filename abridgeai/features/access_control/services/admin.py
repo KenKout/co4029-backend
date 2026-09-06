@@ -17,7 +17,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from uuid import UUID
 
-from abridgeai.core.exceptions import ForbiddenError, NotFoundError
+from abridgeai.core.exceptions import ConflictError, ForbiddenError, NotFoundError
 from abridgeai.features.access_control.models import (
     OrganizationMembership,
     UserPermissionGrant,
@@ -530,6 +530,14 @@ async def add_organization_membership(
     organization_id: UUID,
     payload: MembershipCreate,
 ) -> OrganizationMembership:
+    if await admin_queries.is_platform_admin(db, payload.user_id):
+        raise ForbiddenError("platform_admin_cannot_join_an_organization")
+    reserved = await admin_queries.get_reserved_membership_for_user(db, payload.user_id)
+    if reserved is not None:
+        # Do not reveal which tenant owns the account to a caller from another
+        # organization.  The same stable error covers duplicate same-org adds
+        # and attempts to attach an existing account across tenants.
+        raise ConflictError("user_already_belongs_to_an_organization")
     return await admin_queries.insert_membership(
         db,
         user_id=payload.user_id,

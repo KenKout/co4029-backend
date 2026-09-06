@@ -23,10 +23,12 @@ from __future__ import annotations
 from datetime import datetime
 from uuid import UUID, uuid4
 
-from sqlalchemy import insert, select
+from sqlalchemy import func, insert, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from abridgeai.core.db.recursive_delete import soft_delete_cascade
+from abridgeai.core.exceptions import ConflictError
 from abridgeai.features.access_control.models import (
     OrganizationMembership,
     Permission,
@@ -302,6 +304,48 @@ async def list_memberships_for_organization(
     return list(result.scalars().all())
 
 
+async def get_reserved_membership_for_user(
+    db: AsyncSession, user_id: UUID
+) -> OrganizationMembership | None:
+    """Return the membership currently reserving a user's organization.
+
+    Every non-``left`` state reserves the tenant boundary.  In particular,
+    suspending or deactivating an account must not make it attachable to a
+    second organization.  Soft-deleted and historical ``left`` rows do not
+    reserve the user.
+    """
+    result = await db.execute(
+        select(OrganizationMembership)
+        .where(
+            OrganizationMembership.user_id == user_id,
+            OrganizationMembership.deleted_at.is_(None),
+            OrganizationMembership.status != "left",
+        )
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
+async def is_platform_admin(db: AsyncSession, user_id: UUID) -> bool:
+    """Whether the user currently holds the global platform-admin role."""
+    result = await db.execute(
+        select(UserRoleAssignment.id)
+        .join(Role, Role.id == UserRoleAssignment.role_id)
+        .where(
+            UserRoleAssignment.user_id == user_id,
+            UserRoleAssignment.scope_kind == "global",
+            UserRoleAssignment.deleted_at.is_(None),
+            UserRoleAssignment.active_from <= func.now(),
+            (UserRoleAssignment.active_until.is_(None))
+            | (UserRoleAssignment.active_until > func.now()),
+            Role.code == "admin",
+            Role.deleted_at.is_(None),
+        )
+        .limit(1)
+    )
+    return result.scalar_one_or_none() is not None
+
+
 async def insert_membership(
     db: AsyncSession,
     *,
@@ -313,18 +357,24 @@ async def insert_membership(
     employee_code: str | None,
 ) -> OrganizationMembership:
     new_id = uuid4()
-    await db.execute(
-        insert(OrganizationMembership).values(
-            id=new_id,
-            user_id=user_id,
-            organization_id=organization_id,
-            org_unit_id=org_unit_id,
-            status=status,
-            student_code=student_code,
-            employee_code=employee_code,
+    try:
+        await db.execute(
+            insert(OrganizationMembership).values(
+                id=new_id,
+                user_id=user_id,
+                organization_id=organization_id,
+                org_unit_id=org_unit_id,
+                status=status,
+                student_code=student_code,
+                employee_code=employee_code,
+            )
         )
-    )
-    await db.flush()
+        await db.flush()
+    except IntegrityError as exc:
+        if "uq_organization_memberships_one_live_org_per_user" not in str(exc.orig):
+            raise
+        await db.rollback()
+        raise ConflictError("user_already_belongs_to_an_organization") from exc
     fetched = await db.execute(
         select(OrganizationMembership).where(OrganizationMembership.id == new_id)
     )
@@ -342,6 +392,7 @@ async def get_role_by_id(db: AsyncSession, role_id: UUID) -> Role | None:
 __all__ = [
     "delete_grant",
     "get_grant",
+    "get_reserved_membership_for_user",
     "get_permission_by_id",
     "get_role_by_code",
     "get_role_by_id",
@@ -349,6 +400,7 @@ __all__ = [
     "insert_assignment",
     "insert_grant",
     "insert_membership",
+    "is_platform_admin",
     "list_assignments_for_user",
     "list_grants_for_user",
     "list_memberships_for_organization",

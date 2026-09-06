@@ -744,6 +744,27 @@ async def test_admin_router_membership_endpoints(
         assert added.status_code == 201, added.text
         assert added.json()["user_id"] == str(member_user_id)
 
+        duplicate = await client.post(
+            f"/api/v1/admin/organizations/{scenario.organization_id}/memberships",
+            headers={"Authorization": f"Bearer {admin_token}"},
+            json={"user_id": str(member_user_id), "status": "inactive"},
+        )
+        assert duplicate.status_code == 409, duplicate.text
+        assert duplicate.json()["detail"] == {
+            "error": "conflict",
+            "message": "user_already_belongs_to_an_organization",
+        }
+
+        platform_admin = await client.post(
+            f"/api/v1/admin/organizations/{scenario.organization_id}/memberships",
+            headers={"Authorization": f"Bearer {admin_token}"},
+            json={"user_id": str(scenario.admin_id), "status": "active"},
+        )
+        assert platform_admin.status_code == 403, platform_admin.text
+        assert platform_admin.json()["detail"]["message"] == (
+            "platform_admin_cannot_join_an_organization"
+        )
+
         listing = await client.get(
             f"/api/v1/admin/organizations/{scenario.organization_id}/memberships",
             headers={"Authorization": f"Bearer {admin_token}"},

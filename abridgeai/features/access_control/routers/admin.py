@@ -32,7 +32,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from abridgeai.core.db import get_db
-from abridgeai.core.exceptions import ForbiddenError, NotFoundError
+from abridgeai.core.exceptions import ConflictError, ForbiddenError, NotFoundError
 from abridgeai.core.security import CurrentUser
 from abridgeai.features.access_control.policies import (
     require_any_permission,
@@ -79,6 +79,13 @@ def _bad_request(detail: str) -> HTTPException:
     return HTTPException(
         status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
         detail={"error": "scope_invalid", "message": detail},
+    )
+
+
+def _conflict(detail: str) -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail={"error": "conflict", "message": detail},
     )
 
 
@@ -290,9 +297,14 @@ async def add_org_membership(
         resource_id=org_id,
         permissions=_ORG_MEMBERSHIP_CODES,
     )
-    membership = await admin_service.add_organization_membership(
-        db, organization_id=org_id, payload=payload
-    )
+    try:
+        membership = await admin_service.add_organization_membership(
+            db, organization_id=org_id, payload=payload
+        )
+    except ForbiddenError as exc:
+        raise _forbidden(str(exc)) from exc
+    except ConflictError as exc:
+        raise _conflict(str(exc)) from exc
     await db.commit()
     return MembershipRead.model_validate(membership)
 

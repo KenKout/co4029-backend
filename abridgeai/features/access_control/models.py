@@ -181,6 +181,12 @@ class OrganizationMembership(
             "status IN ('active', 'invited', 'inactive', 'suspended', 'left')",
             name="ck_organization_memberships_status",
         ),
+        Index(
+            "uq_organization_memberships_one_live_org_per_user",
+            "user_id",
+            unique=True,
+            postgresql_where=text("deleted_at IS NULL AND status <> 'left'"),
+        ),
     )
 
     user_id: Mapped[uuid.UUID] = mapped_column(
