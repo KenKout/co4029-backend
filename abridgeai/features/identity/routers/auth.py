@@ -21,10 +21,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from abridgeai.core.db import get_db
 from abridgeai.core.exceptions import AppError, ForbiddenError, UnauthorizedError
-from abridgeai.core.security import CurrentUser, get_current_user_pre_mfa
+from abridgeai.core.security import (
+    CurrentUser,
+    get_optional_current_user_pre_mfa,
+)
 from abridgeai.features.access_control.api import public as access_control_api
 from abridgeai.features.identity.schemas import (
     GoogleLoginResponse,
+    LogoutRequest,
     RefreshTokenRequest,
     TokenResponse,
 )
@@ -119,17 +123,32 @@ async def refresh(
 
 @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
 async def logout(
-    current_user: Annotated[CurrentUser, Depends(get_current_user_pre_mfa)],
-    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[
+        CurrentUser | None, Depends(get_optional_current_user_pre_mfa)
+    ],
+    payload: LogoutRequest | None = None,
+    db: Annotated[AsyncSession, Depends(get_db)] = None,  # type: ignore[assignment]
 ) -> Response:
-    """Revoke the bearer-token session. Idempotent.
+    """Revoke the caller's session. Idempotent — never a client-visible failure.
 
-    Uses ``get_current_user_pre_mfa`` so a user who is mid-MFA (fresh
-    post-login session, ``mfa_verified_at IS NULL``) can still log out
-    without first completing MFA — abandoning the login flow is the
-    whole point.
+    Two resolution paths, tried in order:
+
+    1. Bearer token (when it still validates — includes users mid-MFA, so
+       abandoning the login flow works: that is the whole point of
+       ``get_optional_current_user_pre_mfa``).
+    2. The body's ``refresh_token``: the client sends the token it holds, so
+       sign-out still revokes the session when the ACCESS token has expired
+       (the exact case where the old route 401'd and the frontend's
+       refresh-then-logout dance could hang the UI on a dead socket).
+
+    Both fail (unknown token, already revoked) → still 204: the client's goal
+    — "this session must die" — is already true or unachievable, and either
+    way the sign-out UX must not error.
     """
-    await session_service.logout(db, session_id=current_user.session_id)
+    if current_user is not None:
+        await session_service.logout(db, session_id=current_user.session_id)
+    elif payload is not None and payload.refresh_token:
+        await session_service.logout(db, refresh_token=payload.refresh_token)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 

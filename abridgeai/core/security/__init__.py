@@ -289,6 +289,27 @@ async def get_current_user_pre_mfa(
     return current
 
 
+async def get_optional_current_user_pre_mfa(
+    request: Request,
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer_scheme)] = None,
+    db: Annotated[AsyncSession, Depends(get_db)] = None,  # type: ignore[assignment]
+) -> CurrentUser | None:
+    """Resolve the bearer principal if possible, else ``None`` — never raise.
+
+    For endpoints that must SUCCEED on degraded credentials. The one user is
+    ``POST /auth/logout``: an expired access token must not turn "sign out"
+    into a client-visible failure — the request then falls back to revoking
+    by the refresh token from the body.
+    """
+    try:
+        current, _mfa_pending, _has_verified_mfa = await _resolve_principal(
+            request, credentials, db
+        )
+    except HTTPException:
+        return None
+    return current
+
+
 __all__ = [
     "ALGORITHM",
     "CurrentUser",
@@ -300,6 +321,7 @@ __all__ = [
     "generate_token",
     "get_current_user",
     "get_current_user_pre_mfa",
+    "get_optional_current_user_pre_mfa",
     "hash_secret",
     "utcnow",
     "verify_secret",

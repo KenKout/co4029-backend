@@ -33,8 +33,6 @@ import pytest_asyncio
 import respx
 from fastapi import FastAPI
 from sqlalchemy import text
-
-from tests.support.db_graph import purge_auth_events_for_users
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -57,6 +55,7 @@ from abridgeai.features.identity.routers import (
     mfa_router,
     users_router,
 )
+from tests.support.db_graph import purge_auth_events_for_users
 
 AUTH_ROUTER_PATH = (
     Path(__file__).resolve().parent.parent.parent
@@ -517,6 +516,68 @@ async def test_full_login_then_me_then_logout(
         assert post_logout.status_code == 401, post_logout.text
     finally:
         await _purge_user(engine, email=email, subject=subject)
+
+
+async def test_logout_with_expired_access_token_still_revokes_via_refresh_token(
+    client: httpx.AsyncClient,
+    engine: AsyncEngine,
+    google_oauth_settings: None,
+) -> None:
+    """Sign-out must not 401 when the access token has expired.
+
+    Regression: the old route required a VALID bearer, so the frontend had to
+    refresh first — on a dead socket that refresh hung and sign-out appeared
+    to time out while the session stayed alive server-side. Now the route
+    accepts an expired access token and falls back to the body's refresh
+    token, so one request both signs the UI out and revokes the session.
+    """
+    email = f"logout-fallback-{uuid.uuid4().hex[:8]}@abridgeai.local"
+    subject = f"google-uid-{uuid.uuid4().hex[:12]}"
+    pre_user_id = uuid.uuid4()
+
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("INSERT INTO users (id, primary_email, status) VALUES (:id, :em, 'active')"),
+            {"id": pre_user_id, "em": email},
+        )
+
+    try:
+        with _mock_google(email, subject):
+            login = await client.get(
+                "/api/v1/auth/google/callback",
+                params={"code": "fakeCode"},
+            )
+        assert login.status_code == 200, login.text
+        access_token = login.json()["access_token"]
+        refresh_token = login.json()["refresh_token"]
+
+        # Garbage-but-well-formed bearer: decodes as invalid → optional
+        # principal resolves to None → the refresh-token fallback must fire.
+        logout_response = await client.post(
+            "/api/v1/auth/logout",
+            headers={"Authorization": "Bearer not-a-jwt"},
+            json={"refresh_token": refresh_token},
+        )
+        assert logout_response.status_code == 204, logout_response.text
+
+        post_logout = await client.get(
+            "/api/v1/users/me",
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+        assert post_logout.status_code == 401, (
+            "The refresh-token fallback must revoke the session"
+        )
+    finally:
+        await _purge_user(engine, email=email, subject=subject)
+
+
+async def test_logout_idempotent_on_garbage_tokens(client: httpx.AsyncClient) -> None:
+    """No bearer + unknown refresh token → still 204, never an error surface."""
+    response = await client.post(
+        "/api/v1/auth/logout",
+        json={"refresh_token": f"no-such-token-{uuid.uuid4().hex}"},
+    )
+    assert response.status_code == 204, response.text
 
 
 async def test_refresh_token_rotation(
