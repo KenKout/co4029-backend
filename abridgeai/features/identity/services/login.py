@@ -27,6 +27,7 @@ from abridgeai.features.identity.queries import users as user_queries
 from abridgeai.features.identity.schemas import TokenResponse
 from abridgeai.infrastructure.google_oauth import fetch_google_profile
 
+from .auth_events import record_auth_event, record_auth_event_standalone
 from .profile import serialize_user
 
 logger = get_logger(__name__)
@@ -89,11 +90,23 @@ async def handle_google_callback(
                 grant_default_access=grant_default_access,
             )
         if user is None:
+            await record_auth_event_standalone(
+                "login_failed",
+                detail={
+                    "reason": "email_not_registered",
+                    "email_domain": profile.email.split("@")[-1],
+                },
+            )
             raise ForbiddenError(
                 "This email is not registered. Ask an administrator to add "
                 "your account before signing in."
             )
         if user.status != "active":
+            await record_auth_event_standalone(
+                "login_failed",
+                user_id=user.id,
+                detail={"reason": f"account_{user.status}"},
+            )
             raise ForbiddenError(
                 f"Account is {user.status}; sign-in is disabled. Contact an administrator."
             )
@@ -120,11 +133,22 @@ async def handle_google_callback(
         if user is None:
             raise NotFoundError("OAuth user not found")
         if user.status != "active":
+            await record_auth_event_standalone(
+                "login_failed",
+                user_id=user.id,
+                detail={"reason": f"account_{user.status}"},
+            )
             raise ForbiddenError(
                 f"Account is {user.status}; sign-in is disabled. Contact an administrator."
             )
         user.last_login_at = utcnow()
 
+    await record_auth_event(
+        db,
+        event_type="login_succeeded",
+        user_id=user.id,
+        detail={"provider": "google", "auto_provisioned": identity is None},
+    )
     return await _issue_tokens(db, user=user, ip_address=ip_address, user_agent=user_agent)
 
 

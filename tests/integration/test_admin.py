@@ -29,6 +29,7 @@ import abridgeai.features.interviews.models  # noqa: F401
 import abridgeai.features.materials.models  # noqa: F401
 import abridgeai.features.quizzes.models  # noqa: F401
 from abridgeai.core.audit import audit_maintenance
+from tests.support.db_graph import purge_auth_events_for_users
 from abridgeai.core.config import get_settings
 from abridgeai.core.db import get_db
 from abridgeai.core.security import create_access_token, generate_token, hash_secret
@@ -204,6 +205,7 @@ async def extra_org(engine: AsyncEngine) -> AsyncIterator[dict[str, uuid.UUID]]:
             text("DELETE FROM organization_memberships WHERE user_id = :u"),
             {"u": other_user},
         )
+        await purge_auth_events_for_users(conn, [str(other_user)])
         await conn.execute(text("DELETE FROM users WHERE id = :u"), {"u": other_user})
         await conn.execute(text("DELETE FROM org_units WHERE id = :id"), {"id": other_unit})
         await conn.execute(text("DELETE FROM organizations WHERE id = :id"), {"id": other_org})
@@ -793,6 +795,7 @@ async def test_disable_revokes_sessions(
         assert row[1] is not None
     finally:
         async with engine.begin() as conn:
+            await purge_auth_events_for_users(conn, [str(target)])
             await conn.execute(
                 text("DELETE FROM auth_sessions WHERE user_id = :u"),
                 {"u": target},
@@ -842,6 +845,7 @@ async def test_enable_restores_status(
         assert row[1] is not None
     finally:
         async with engine.begin() as conn:
+            await purge_auth_events_for_users(conn, [str(target)])
             await conn.execute(
                 text("DELETE FROM auth_sessions WHERE user_id = :u"),
                 {"u": target},

@@ -35,6 +35,8 @@ from alembic.config import Config
 from conftest import SeededUsers
 from fastapi import FastAPI
 from sqlalchemy import text
+
+from tests.support.db_graph import purge_auth_events_for_users
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -194,6 +196,7 @@ async def cohort(engine: AsyncEngine) -> AsyncIterator[Cohort]:
         await conn.execute(
             text("DELETE FROM user_profiles WHERE user_id = ANY(:ids)"), {"ids": c.user_ids}
         )
+        await purge_auth_events_for_users(conn, [str(u) for u in c.user_ids])
         await conn.execute(text("DELETE FROM users WHERE id = ANY(:ids)"), {"ids": c.user_ids})
         await conn.execute(text("DELETE FROM organizations WHERE id = :id"), {"id": c.org_id})
 

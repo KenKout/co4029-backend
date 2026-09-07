@@ -33,6 +33,7 @@ from abridgeai.features.access_control.schemas.admin import (
     MembershipCreate,
     RoleAssignmentCreate,
 )
+from abridgeai.features.identity.services.auth_events import record_auth_event
 
 if TYPE_CHECKING:
     from abridgeai.core.db import AsyncSession  # type: ignore[attr-defined]
@@ -402,6 +403,21 @@ async def create_role_assignment(
     )
     # The new assignment must take effect immediately, not one TTL later.
     invalidate_user_permissions(user_id)
+    # FR-1.6: access-control changes are typed events, same transaction as
+    # the grant. actor_user_id is the admin performing it; user_id the
+    # subject gaining the role.
+    await record_auth_event(
+        db,
+        event_type="role_assigned",
+        user_id=user_id,
+        actor_user_id=actor_id,
+        organization_id=payload.organization_id,
+        detail={
+            "role_code": payload.role_code,
+            "scope_kind": payload.scope_kind,
+            "assignment_id": str(created.id),
+        },
+    )
     return created
 
 
@@ -432,6 +448,18 @@ async def revoke_role_assignment(
     if system_admin and not delegated_academic_role:
         await admin_queries.soft_delete_assignment(db, assignment_id, actor_id=actor_id)
         invalidate_user_permissions(assignment.user_id)
+        await record_auth_event(
+            db,
+            event_type="role_revoked",
+            user_id=assignment.user_id,
+            actor_user_id=actor_id,
+            organization_id=assignment.organization_id,
+            detail={
+                "role_code": role_code,
+                "scope_kind": assignment.scope_kind,
+                "assignment_id": str(assignment_id),
+            },
+        )
         return
 
     if actor_id is None:
@@ -465,6 +493,18 @@ async def revoke_role_assignment(
 
     await admin_queries.soft_delete_assignment(db, assignment_id, actor_id=actor_id)
     invalidate_user_permissions(assignment.user_id)
+    await record_auth_event(
+        db,
+        event_type="role_revoked",
+        user_id=assignment.user_id,
+        actor_user_id=actor_id,
+        organization_id=assignment.organization_id,
+        detail={
+            "role_code": role_code,
+            "scope_kind": assignment.scope_kind,
+            "assignment_id": str(assignment_id),
+        },
+    )
 
 
 async def list_user_grants(db: AsyncSession, user_id: UUID) -> list[UserPermissionGrant]:

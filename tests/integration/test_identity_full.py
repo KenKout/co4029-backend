@@ -33,6 +33,8 @@ import pytest_asyncio
 import respx
 from fastapi import FastAPI
 from sqlalchemy import text
+
+from tests.support.db_graph import purge_auth_events_for_users
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -189,6 +191,9 @@ async def scenario(engine: AsyncEngine) -> AsyncIterator[_Scenario]:
     )
 
     async with engine.begin() as conn:
+        await purge_auth_events_for_users(
+            conn, [str(student_id), str(teacher_id), str(admin_id)]
+        )
         await conn.execute(
             text("DELETE FROM user_role_assignments WHERE user_id = ANY(:ids)"),
             {"ids": [student_id, teacher_id, admin_id]},
@@ -295,6 +300,12 @@ async def _purge_user(engine: AsyncEngine, *, email: str, subject: str | None = 
             ),
             {"email": email},
         )
+        user_ids = (
+            await conn.execute(
+                text("SELECT id FROM users WHERE primary_email = :email"), {"email": email}
+            )
+        ).scalars().all()
+        await purge_auth_events_for_users(conn, [str(u) for u in user_ids])
         await conn.execute(
             text("DELETE FROM users WHERE primary_email = :email"),
             {"email": email},

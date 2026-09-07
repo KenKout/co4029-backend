@@ -27,6 +27,8 @@ import httpx
 import pytest_asyncio
 from fastapi import FastAPI
 from sqlalchemy import text
+
+from tests.support.db_graph import purge_auth_events_for_users
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -203,6 +205,9 @@ async def scenario(engine: AsyncEngine) -> AsyncIterator[_Scenario]:
     )
 
     async with engine.begin() as conn:
+        await purge_auth_events_for_users(
+            conn, [str(u) for u in user_ids.values()]
+        )
         await conn.execute(
             text("DELETE FROM user_role_assignments WHERE user_id = ANY(:ids)"),
             {"ids": list(user_ids.values())},
@@ -491,6 +496,7 @@ async def test_role_assignment_via_admin_router_grants_perms(
     finally:
         await _close_session(engine, admin_session_id)
         async with engine.begin() as conn:
+            await purge_auth_events_for_users(conn, [str(target_user_id)])
             await conn.execute(
                 text("DELETE FROM user_role_assignments WHERE user_id = :uid"),
                 {"uid": target_user_id},
@@ -550,6 +556,7 @@ async def test_role_revocation_removes_perms(
     finally:
         await _close_session(engine, admin_session_id)
         async with engine.begin() as conn:
+            await purge_auth_events_for_users(conn, [str(target_user_id)])
             await conn.execute(
                 text("DELETE FROM user_role_assignments WHERE user_id = :uid"),
                 {"uid": target_user_id},
@@ -608,6 +615,7 @@ async def test_active_window_filter_excludes_expired(
                 text("DELETE FROM user_role_assignments WHERE user_id = :uid"),
                 {"uid": expired_user_id},
             )
+            await purge_auth_events_for_users(conn, [str(expired_user_id)])
             await conn.execute(
                 text("DELETE FROM users WHERE id = :id"),
                 {"id": expired_user_id},
@@ -700,6 +708,7 @@ async def test_admin_router_grant_lifecycle(
     finally:
         await _close_session(engine, admin_session_id)
         async with engine.begin() as conn:
+            await purge_auth_events_for_users(conn, [str(target_user_id)])
             await conn.execute(
                 text("DELETE FROM user_permission_grants WHERE user_id = :uid"),
                 {"uid": target_user_id},
@@ -778,6 +787,7 @@ async def test_admin_router_membership_endpoints(
                 text("DELETE FROM organization_memberships WHERE user_id = :uid"),
                 {"uid": member_user_id},
             )
+            await purge_auth_events_for_users(conn, [str(member_user_id)])
             await conn.execute(
                 text("DELETE FROM users WHERE id = :id"),
                 {"id": member_user_id},
@@ -841,6 +851,7 @@ async def test_revoke_role_assignment_soft_deletes_not_hard(
     finally:
         await _close_session(engine, admin_session_id)
         async with engine.begin() as conn:
+            await purge_auth_events_for_users(conn, [str(target_user_id)])
             await conn.execute(
                 text("DELETE FROM user_role_assignments WHERE user_id = :uid"),
                 {"uid": target_user_id},
@@ -913,6 +924,7 @@ async def test_revoke_permission_grant_soft_deletes_not_hard(
     finally:
         await _close_session(engine, admin_session_id)
         async with engine.begin() as conn:
+            await purge_auth_events_for_users(conn, [str(target_user_id)])
             await conn.execute(
                 text("DELETE FROM user_permission_grants WHERE user_id = :uid"),
                 {"uid": target_user_id},

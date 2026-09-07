@@ -88,6 +88,32 @@ async def http_audit_search(
     return rows if reveal else [_mask_row(row) for row in rows]
 
 
+async def auth_event_search(
+    db: AsyncSession,
+    *,
+    since: datetime,
+    until: datetime | None = None,
+    user_id: UUID | None = None,
+    actor_user_id: UUID | None = None,
+    event_type: str | None = None,
+    organization_id: UUID | None = None,
+    limit: int,
+) -> list[dict[str, Any]]:
+    """Typed auth-event search (FR-1.6). No masking: the store carries no
+    secrets — codes and tokens never reach ``detail`` (enforced at the
+    recorder), so there is nothing to reveal."""
+    return await audit_queries.auth_event_search(
+        db,
+        since=since,
+        until=until,
+        user_id=user_id,
+        actor_user_id=actor_user_id,
+        event_type=event_type,
+        organization_id=organization_id,
+        limit=limit,
+    )
+
+
 SUPPORTED_DATA_CHANGE_TABLES = audit_queries.SUPPORTED_DATA_CHANGE_TABLES
 
 

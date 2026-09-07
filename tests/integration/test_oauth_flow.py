@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
+from abridgeai.core.audit.maintenance import audit_maintenance
 from abridgeai.core.config import get_settings
 from abridgeai.core.db import get_db
 from abridgeai.core.security import generate_token, hash_secret
@@ -196,6 +197,14 @@ async def test_oauth_callback_links_identity_for_preprovisioned_user(
         assert body["user"]["primary_email"] == fresh_email
     finally:
         async with test_engine_local.begin() as conn:
+            # auth_events first: its user_id FK is SET NULL and the table is
+            # append-only, so the user DELETE below would otherwise fire a
+            # forbidden UPDATE, and the row DELETE itself needs the retention
+            # scope. Same shape as the cleanup in tests/support/db_graph.py.
+            await audit_maintenance(conn)
+            await conn.execute(
+                text("DELETE FROM auth_events WHERE user_id = :uid"), {"uid": user_id}
+            )
             await conn.execute(
                 text("DELETE FROM auth_sessions WHERE user_id = :uid"), {"uid": user_id}
             )

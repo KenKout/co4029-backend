@@ -11,6 +11,8 @@ from fastapi import APIRouter, FastAPI
 from fastapi.routing import APIRoute
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import text
+
+from tests.support.db_graph import purge_auth_events_for_users
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -245,6 +247,7 @@ async def scenario(engine: AsyncEngine) -> AsyncIterator[_AdminScenario]:
             text("DELETE FROM org_units WHERE id = :id"),
             {"id": org_unit_id},
         )
+        await purge_auth_events_for_users(conn, [str(u) for u in user_ids.values()])
         await conn.execute(
             text("DELETE FROM users WHERE id = ANY(:ids)"),
             {"ids": list(user_ids.values())},

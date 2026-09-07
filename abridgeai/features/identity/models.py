@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
+from typing import Any
 
 from sqlalchemy import (
     BigInteger,
@@ -33,8 +34,9 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    text,
 )
-from sqlalchemy.dialects.postgresql import CITEXT, INET
+from sqlalchemy.dialects.postgresql import CITEXT, INET, JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from abridgeai.core.db import Base
@@ -235,7 +237,74 @@ class MfaChallenge(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
     consumed_at: Mapped[datetime | None] = mapped_column(nullable=True)
 
 
+class AuthEvent(UUIDPrimaryKeyMixin, Base):
+    """One semantic authentication / access-control event (FR-1.6).
+
+    The typed counterpart of the ``http_audit_log`` request row: where the
+    HTTP trail says "POST /auth/mfa/verify -> 204", this table says
+    ``mfa_verified``. Written in the same transaction as the action it
+    describes (or self-committed on failure paths that roll the request
+    transaction back), never updated, never deleted outside the maintenance
+    scope (``audit_log_immutable_auth_events`` trigger, migration 0110).
+
+    Column policy mirrors ``http_audit_log``:
+
+    * ``user_id``/``actor_user_id``/``organization_id`` are SET NULL so the
+      trail survives deletion of its subject — an audit log that vanishes
+      with the account it describes can be erased by deleting the account.
+    * ``session_id`` is a bare uuid (no FK): ``auth_sessions`` is hard-delete
+      and the event must outlive the session.
+    * ``detail`` is redacted context (reason codes, provider, scope kinds) —
+      never codes, tokens or secrets.
+
+    Event names are validated against :data:`AUTH_EVENT_TYPES` in
+    ``services/auth_events.py``; the CHECK constraint is the database-side
+    backstop for writers that bypass the ORM.
+    """
+
+    __tablename__ = "auth_events"
+    __table_args__ = (
+        CheckConstraint(
+            "event_type IN ("
+            "'login_succeeded', 'login_failed', 'logout', "
+            "'mfa_enrolled', 'mfa_enrollment_verified', 'mfa_challenge_created', "
+            "'mfa_verified', 'mfa_verification_failed', 'mfa_disabled', "
+            "'recovery_codes_regenerated', "
+            "'account_status_changed', 'role_assigned', 'role_revoked')",
+            name="ck_auth_events_event_type",
+        ),
+        Index("ix_auth_events_occurred_at", "occurred_at"),
+        Index("ix_auth_events_user_id", "user_id"),
+        Index("ix_auth_events_event_type", "event_type"),
+    )
+
+    occurred_at: Mapped[datetime] = mapped_column(
+        nullable=False, server_default=text("now()")
+    )
+    event_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    user_id: Mapped[uuid.UUID | None] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    actor_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    organization_id: Mapped[uuid.UUID | None] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("organizations.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    session_id: Mapped[uuid.UUID | None] = mapped_column(PGUUID(as_uuid=True), nullable=True)
+    detail: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+
+
 __all__ = [
+    "AuthEvent",
     "AuthIdentity",
     "AuthSession",
     "MfaChallenge",

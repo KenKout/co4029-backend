@@ -628,6 +628,21 @@ _SPECS: tuple[SettingSpec, ...] = (
             "0 disables pruning."
         ),
     ),
+    SettingSpec(
+        key="audit.auth_event_retention_days",
+        group="audit",
+        type="int",
+        default=90,
+        minimum=0,
+        maximum=3650,
+        label="Auth event retention (days)",
+        description=(
+            "How long semantic authentication events (logins, MFA "
+            "verifications, role and account-status changes) are kept. These "
+            "are the typed FR-1.6 audit trail; keep them at least as long as "
+            "any incident-investigation window. 0 disables pruning."
+        ),
+    ),
 )
 
 

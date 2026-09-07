@@ -25,6 +25,7 @@ def _load(name: str) -> TextClause:
 _ROLE_CHANGES_SQL = _load("audit/role_changes.sql")
 _HTTP_AUDIT_SQL = _load("audit/http_audit.sql")
 _HTTP_AUDIT_PROBE_SQL = _load("audit/http_audit_table_exists.sql")
+_AUTH_EVENTS_SQL = _load("audit/auth_events.sql")
 
 # Data-change lookups, keyed by the ``table`` query param. Every statement
 # projects the same uniform shape (entity_id / title / status / created_by /
@@ -101,6 +102,35 @@ async def http_audit_search(
                 "path_pattern": path_pattern,
                 "event_kind": event_kind,
                 "request_id": request_id,
+                "limit": limit,
+            },
+        )
+    ).mappings()
+    return [dict(r) for r in rows]
+
+
+async def auth_event_search(
+    db: AsyncSession,
+    *,
+    since: datetime,
+    until: datetime | None,
+    user_id: UUID | None,
+    actor_user_id: UUID | None,
+    event_type: str | None,
+    organization_id: UUID | None,
+    limit: int,
+) -> list[dict[str, Any]]:
+    """Semantic auth-event search (FR-1.6). Newest first, bounded by :limit."""
+    rows = (
+        await db.execute(
+            _AUTH_EVENTS_SQL,
+            {
+                "since": since,
+                "until": until,
+                "user_id": user_id,
+                "actor_user_id": actor_user_id,
+                "event_type": event_type,
+                "organization_id": organization_id,
                 "limit": limit,
             },
         )

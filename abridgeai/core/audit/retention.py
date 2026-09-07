@@ -87,6 +87,11 @@ RETAINED_TABLES: tuple[RetainedTable, ...] = (
         timestamp_column="created_at",
         setting_key="audit.quiz_event_retention_days",
     ),
+    RetainedTable(
+        table="auth_events",
+        timestamp_column="occurred_at",
+        setting_key="audit.auth_event_retention_days",
+    ),
 )
 
 

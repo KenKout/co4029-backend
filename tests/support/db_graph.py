@@ -279,4 +279,27 @@ async def hard_delete_graph(  # noqa: C901 -- three-phase FK-cycle walk reads be
             remaining.discard(table)
 
 
-__all__ = ["hard_delete_graph"]
+async def purge_auth_events_for_users(session, user_ids: list[str]) -> None:
+    """Delete ``auth_events`` rows for the given users inside the maintenance scope.
+
+    For per-test cleanups that ``DELETE FROM users`` with raw SQL: the
+    ``auth_events.user_id`` FK is ON DELETE SET NULL and the table is
+    append-only, so the parent delete would otherwise fire a forbidden
+    UPDATE. Deleting the referencing rows first (legal only inside
+    ``app.audit_maintenance``) removes the edge entirely — the same
+    treatment phase 2b gives every append-only table during graph teardown.
+    """
+    if not user_ids:
+        return
+    await audit_maintenance(session)
+    await session.execute(
+        text(
+            "DELETE FROM auth_events "  # noqa: S608 -- constant table name
+            "WHERE user_id = ANY(CAST(:ids AS uuid[])) "
+            "OR actor_user_id = ANY(CAST(:ids AS uuid[]))"
+        ),
+        {"ids": list(user_ids)},
+    )
+
+
+__all__ = ["hard_delete_graph", "purge_auth_events_for_users"]

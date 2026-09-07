@@ -23,6 +23,7 @@ from abridgeai.core.pagination import (
 )
 from abridgeai.features.access_control.api import public as access_control_api
 from abridgeai.features.admin.queries import users as user_queries
+from abridgeai.features.identity.services.auth_events import record_auth_event
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -193,6 +194,12 @@ async def disable_user(db: AsyncSession, *, user_id: UUID) -> dict[str, Any]:
         }
 
     revoked_now = (await db.execute(_REVOKE_SESSIONS_SQL, {"user_id": user_id})).mappings().all()
+    await record_auth_event(
+        db,
+        event_type="account_status_changed",
+        user_id=user_id,
+        detail={"from": user_row["status"], "to": "inactive", "action": "disable"},
+    )
     await db.commit()
     return {
         "user_id": user_id,
@@ -206,6 +213,12 @@ async def enable_user(db: AsyncSession, *, user_id: UUID) -> dict[str, Any]:
     row = (await db.execute(_ENABLE_USER_SQL, {"user_id": user_id})).mappings().one_or_none()
     if row is None:
         raise NotFoundError(f"user {user_id} not found")
+    await record_auth_event(
+        db,
+        event_type="account_status_changed",
+        user_id=user_id,
+        detail={"from": "inactive", "to": "active", "action": "enable"},
+    )
     await db.commit()
     return {"user_id": user_id, "status": row["status"]}
 

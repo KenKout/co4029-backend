@@ -17,6 +17,7 @@ from abridgeai.features.identity.queries import sessions as session_queries
 from abridgeai.features.identity.queries import users as user_queries
 from abridgeai.features.identity.schemas import TokenResponse
 
+from .auth_events import record_auth_event
 from .profile import serialize_user
 
 if TYPE_CHECKING:
@@ -68,6 +69,15 @@ async def logout(
 
     if target is not None and target.revoked_at is None:
         target.revoked_at = utcnow()
+        # Same transaction as the revocation: a committed logout always has
+        # its event (FR-1.6). Refresh is deliberately NOT an event — session
+        # maintenance, per the security-rollup definitions in summary.sql.
+        await record_auth_event(
+            db,
+            event_type="logout",
+            user_id=target.user_id,
+            session_id=target.id,
+        )
         await db.commit()
 
 

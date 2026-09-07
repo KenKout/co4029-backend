@@ -269,4 +269,66 @@ async def search_http_audit(
     return [HttpAuditRow.model_validate(r) for r in rows]
 
 
+class AuthEventRow(BaseModel):
+    """One semantic auth event (FR-1.6). ``detail`` is redacted by the
+    recorder — codes and tokens never reach the store."""
+
+    id: UUID
+    event_type: str
+    user_id: UUID | None = None
+    actor_user_id: UUID | None = None
+    organization_id: UUID | None = None
+    session_id: UUID | None = None
+    detail: dict[str, object]
+    occurred_at: datetime
+
+
+@router.get("/auth-events", response_model=list[AuthEventRow])
+async def search_auth_events(
+    _user: Annotated[CurrentUser, Depends(_REQUIRE_AUDIT)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    since: Annotated[datetime, Query(description="Lower bound on occurred_at (required).")],
+    until: Annotated[
+        datetime | None,
+        Query(description="Exclusive upper bound on occurred_at (optional)."),
+    ] = None,
+    user_id: Annotated[UUID | None, Query(description="Subject of the event.")] = None,
+    actor_user_id: Annotated[
+        UUID | None,
+        Query(description="Performer of an access-control change (role/status)."),
+    ] = None,
+    event_type: Annotated[
+        str | None,
+        Query(
+            description=(
+                "Exact event name, e.g. mfa_verified, login_failed, "
+                "role_assigned. See ck_auth_events_event_type."
+            )
+        ),
+    ] = None,
+    organization_id: Annotated[
+        UUID | None,
+        Query(description="Org edge on role/status events; login/MFA rows are NULL."),
+    ] = None,
+    limit: Annotated[int, Query(ge=1, le=500)] = 100,
+) -> list[AuthEventRow]:
+    """Typed authentication/access-control event search (FR-1.6).
+
+    The semantic counterpart of ``/http``: where a request row says
+    "POST /auth/mfa/verify -> 204", an ``mfa_verified`` row lives here,
+    written by the MFA service in the same transaction as the verification.
+    """
+    rows = await audit_service.auth_event_search(
+        db,
+        since=since,
+        until=until,
+        user_id=user_id,
+        actor_user_id=actor_user_id,
+        event_type=event_type,
+        organization_id=organization_id,
+        limit=limit,
+    )
+    return [AuthEventRow.model_validate(r) for r in rows]
+
+
 __all__ = ["router"]

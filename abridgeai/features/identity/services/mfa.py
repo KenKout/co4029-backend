@@ -36,6 +36,10 @@ from abridgeai.features.identity.schemas import (
     MfaTotpVerifyRequest,
     MfaVerifyRequest,
 )
+from abridgeai.features.identity.services.auth_events import (
+    record_auth_event,
+    record_auth_event_standalone,
+)
 
 register_conflict_mappings(
     {
@@ -59,6 +63,10 @@ async def enroll_totp(db: AsyncSession, user: User) -> MfaEnrollResponse:
         secret_encrypted=encrypt_secret(secret),
     )
     db.add(factor)
+    # FR-1.6: MFA enrollment STARTS an account-security change. Recorded even
+    # though the enrollment is not yet verified — an enrollment attempt that
+    # is never completed is itself worth seeing in the trail.
+    await record_auth_event(db, event_type="mfa_enrolled", user_id=user.id)
     await db.commit()
     await db.refresh(factor)
 
@@ -83,6 +91,12 @@ async def verify_totp_enrollment(
     factor.verified_at = utcnow()
     session.mfa_verified_at = utcnow()
     recovery_codes = await _replace_recovery_codes(db, factor.id)
+    await record_auth_event(
+        db,
+        event_type="mfa_enrollment_verified",
+        user_id=user.id,
+        session_id=session.id,
+    )
     await db.commit()
     return MfaRecoveryCodesResponse(recovery_codes=recovery_codes)
 
@@ -100,6 +114,12 @@ async def create_mfa_challenge(
         expires_at=utcnow() + timedelta(minutes=5),
     )
     db.add(challenge)
+    await record_auth_event(
+        db,
+        event_type="mfa_challenge_created",
+        user_id=user.id,
+        session_id=session.id,
+    )
     await db.commit()
     await db.refresh(challenge)
     return MfaChallengeResponse(challenge_id=challenge.id, expires_at=challenge.expires_at)
@@ -125,15 +145,32 @@ async def verify_mfa_challenge(
         raise UnauthorizedError("Invalid MFA factor")
 
     verified = False
+    used_recovery_code = False
     if payload.code:
         verified = _verify_totp(factor, payload.code)
     if not verified and payload.recovery_code:
         verified = await _consume_recovery_code(db, factor.id, payload.recovery_code)
+        used_recovery_code = verified
     if not verified:
+        # Failure: the request transaction rolls back (get_db never commits),
+        # so the event commits itself and must not mask the 401.
+        await record_auth_event_standalone(
+            "mfa_verification_failed",
+            user_id=user.id,
+            session_id=session.id,
+            detail={"method": "recovery_code" if payload.recovery_code else "totp"},
+        )
         raise UnauthorizedError("Invalid MFA verification code")
 
     challenge.consumed_at = utcnow()
     session.mfa_verified_at = utcnow()
+    await record_auth_event(
+        db,
+        event_type="mfa_verified",
+        user_id=user.id,
+        session_id=session.id,
+        detail={"method": "recovery_code" if used_recovery_code else "totp"},
+    )
     await db.commit()
 
 
@@ -142,6 +179,7 @@ async def regenerate_recovery_codes(db: AsyncSession, user: User) -> MfaRecovery
     if factor is None:
         raise NotFoundError("Verified MFA factor not found")
     recovery_codes = await _replace_recovery_codes(db, factor.id)
+    await record_auth_event(db, event_type="recovery_codes_regenerated", user_id=user.id)
     await db.commit()
     return MfaRecoveryCodesResponse(recovery_codes=recovery_codes)
 
@@ -171,6 +209,14 @@ async def disable_mfa(
     if not verified and payload.recovery_code:
         verified = await _consume_recovery_code(db, factor.id, payload.recovery_code)
     if not verified:
+        await record_auth_event_standalone(
+            "mfa_verification_failed",
+            user_id=user.id,
+            detail={
+                "action": "disable",
+                "method": "recovery_code" if payload.recovery_code else "totp",
+            },
+        )
         raise UnauthorizedError("Invalid MFA verification code")
 
     now = utcnow()
@@ -178,6 +224,7 @@ async def disable_mfa(
     for active in active_factors:
         active.disabled_at = now
     await mfa_queries.delete_recovery_codes_for_factor(db, factor.id)
+    await record_auth_event(db, event_type="mfa_disabled", user_id=user.id)
     await db.commit()
 
 
