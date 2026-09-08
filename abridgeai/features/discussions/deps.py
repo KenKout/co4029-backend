@@ -61,6 +61,23 @@ async def resolve_lesson_course(db: AsyncSession, lesson_id: UUID) -> UUID | Non
     return module.course_id
 
 
+async def resolve_topic_course(
+    db: AsyncSession, topic: LessonDiscussionTopic
+) -> UUID | None:
+    """The course a topic belongs to, whichever way it is scoped.
+
+    A course-scoped topic already carries the answer; a lesson-scoped one is
+    walked up as before. Every permission check in this feature is expressed
+    against a course, so this is the single point where the two scopes stop
+    being different.
+    """
+    if topic.course_id is not None:
+        return topic.course_id
+    if topic.lesson_id is None:  # pragma: no cover - CHECK forbids it
+        return None
+    return await resolve_lesson_course(db, topic.lesson_id)
+
+
 async def can_manage(db: AsyncSession, user: CurrentUser, course_id: UUID) -> bool:
     """True iff the user owns or has ``course.update`` on the course."""
     return await can_manage_course(db, user.user_id, course_id, manage_perm=_MANAGE_PERM)
@@ -106,4 +123,5 @@ __all__ = [
     "get_topic_or_404",
     "not_found",
     "resolve_lesson_course",
+    "resolve_topic_course",
 ]

@@ -35,6 +35,23 @@ async def list_topics_for_lesson(
     return list((await db.execute(stmt)).scalars().all())
 
 
+async def list_topics_for_course(
+    db: AsyncSession, course_id: UUID
+) -> list[LessonDiscussionTopic]:
+    """Course-wide topics, newest first.
+
+    Only topics attached to the COURSE — a course-level board that also swept
+    in every lesson's topics would bury the course-wide announcements it exists
+    to hold, and each lesson already shows its own.
+    """
+    stmt = (
+        select(LessonDiscussionTopic)
+        .where(LessonDiscussionTopic.course_id == course_id)
+        .order_by(LessonDiscussionTopic.created_at.desc())
+    )
+    return list((await db.execute(stmt)).scalars().all())
+
+
 async def comment_counts_for_topics(
     db: AsyncSession, topic_ids: list[UUID]
 ) -> dict[UUID, int]:
@@ -47,6 +64,41 @@ async def comment_counts_for_topics(
             func.count(LessonDiscussionComment.id),
         )
         .where(LessonDiscussionComment.topic_id.in_(topic_ids))
+        .group_by(LessonDiscussionComment.topic_id)
+    )
+    rows = (await db.execute(stmt)).all()
+    return {row[0]: int(row[1]) for row in rows}
+
+
+async def mention_counts_for_topics(
+    db: AsyncSession, topic_ids: list[UUID], *, viewer_id: UUID
+) -> dict[UUID, int]:
+    """Batched ``{topic_id: replies-to-me}`` for one viewer.
+
+    A mention is a reply, so "how many times was I named in this topic" is
+    "how many comments answer one of mine". Replies the viewer wrote to their
+    own comment do not count — self-replying is a normal way to add a thought
+    and badging yourself for it would make the marker meaningless.
+
+    Batched for the same reason the comment counts are: a topic list otherwise
+    costs one query per row.
+    """
+    if not topic_ids:
+        return {}
+    mine = select(LessonDiscussionComment.id).where(
+        LessonDiscussionComment.topic_id.in_(topic_ids),
+        LessonDiscussionComment.author_id == viewer_id,
+    )
+    stmt = (
+        select(
+            LessonDiscussionComment.topic_id,
+            func.count(LessonDiscussionComment.id),
+        )
+        .where(
+            LessonDiscussionComment.topic_id.in_(topic_ids),
+            LessonDiscussionComment.parent_comment_id.in_(mine),
+            LessonDiscussionComment.author_id != viewer_id,
+        )
         .group_by(LessonDiscussionComment.topic_id)
     )
     rows = (await db.execute(stmt)).all()
@@ -84,5 +136,7 @@ __all__ = [
     "get_comment",
     "get_topic",
     "list_comments_for_topic",
+    "mention_counts_for_topics",
+    "list_topics_for_course",
     "list_topics_for_lesson",
 ]

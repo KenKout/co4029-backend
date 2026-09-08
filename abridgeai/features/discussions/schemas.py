@@ -41,7 +41,12 @@ class DiscussionCommentAuthor(BaseModel):
 
 
 class DiscussionTopicCreate(BaseModel):
-    """Teacher payload to open a new topic on a lesson."""
+    """Teacher payload to open a new topic.
+
+    Scope is not in the body — it comes from the route the payload is posted
+    to (``/lessons/{id}/...`` or ``/courses/{id}/...``), so a client cannot
+    claim one scope in the URL and another in the JSON.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -72,7 +77,10 @@ class DiscussionTopicRead(_ORMModel):
     """
 
     id: UUID
-    lesson_id: UUID
+    #: Exactly one of these is set — the topic's scope. A course-scoped topic
+    #: has ``lesson_id`` NULL and vice versa (CHECK-enforced).
+    lesson_id: UUID | None = None
+    course_id: UUID | None = None
     title: str
     body_markdown: str | None = None
     status: str
@@ -80,12 +88,16 @@ class DiscussionTopicRead(_ORMModel):
     created_at: datetime
     updated_at: datetime
     comment_count: int = 0
+    #: Replies addressed to the VIEWER in this topic — what the red badge
+    #: counts. Per-request, never persisted, and 0 for a viewer who has not
+    #: commented (nobody can have replied to them).
+    mention_count: int = 0
     can_manage: bool = False
     author: DiscussionCommentAuthor | None = None
 
 
 class DiscussionTopicList(BaseModel):
-    """Envelope for the lesson topic list.
+    """Envelope for a topic list (lesson-scoped or course-scoped).
 
     ``can_manage`` rides at the top level so the client knows whether to
     show the teacher's "post a topic" affordance even when ``topics`` is
@@ -100,11 +112,21 @@ class DiscussionTopicList(BaseModel):
 
 
 class DiscussionCommentCreate(BaseModel):
-    """Student/teacher payload to post a comment on a topic."""
+    """Student/teacher payload to post a comment on a topic.
+
+    ``parent_comment_id`` makes the comment a REPLY, and a reply is the only
+    way to name someone: the client prefixes the body with the parent author's
+    handle, and the notification goes to that author. There is deliberately no
+    free-form mention field — see migration 0111's docstring.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     body: str = Field(min_length=1, max_length=5_000)
+    #: The comment being replied to. Must belong to the same topic; a reply to
+    #: a reply is flattened onto the top-level parent by the router, so threads
+    #: stay one level deep.
+    parent_comment_id: UUID | None = None
 
 
 class DiscussionCommentUpdate(BaseModel):

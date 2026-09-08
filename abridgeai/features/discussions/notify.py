@@ -1,6 +1,7 @@
-"""Lesson-discussion comment notifications (cross-feature).
+"""Discussion comment notifications (cross-feature).
 
-A new comment on a discussion topic is a push moment for two audiences:
+A new comment on a discussion topic — lesson-scoped or course-scoped — is a
+push moment for two audiences:
 
 * **thread participants** — everyone who commented before (any role) is
   following the exchange and should see the new reply;
@@ -9,7 +10,9 @@ A new comment on a discussion topic is a push moment for two audiences:
   something, without having to poll the lesson page.
 
 Sent under the ``course_discussion`` category so users get ONE preference
-toggle for lesson-discussion activity, distinct from course announcements.
+toggle for discussion activity, distinct from course announcements. A reply
+reaches the person it answers through this same fan-out: they commented
+before, so they are already a thread participant.
 
 Dispatch goes through the blessed cross-feature surfaces
 (:mod:`notifications.api.public`, :mod:`courses.api.public`,
@@ -53,7 +56,55 @@ _CATEGORY = "course_discussion"
 # tab, so this link degrades safely if the tab set is ever renamed.
 _ACTION_URL = "/courses/{course_slug}/learn?item={lesson_slug}&tab=discussion"
 
+# Course-wide topics have no lesson to open, so the link goes to the course
+# page, where the board sits below the curriculum. Slug-addressed like the
+# lesson link above, and reachable by both audiences: the section is behind
+# the same enrollment gate a student already passed to be notified, and a
+# teacher managing the course passes it too.
+_COURSE_ACTION_URL = "/courses/{course_slug}#discussion"
+
 _SNIPPET_LEN = 120
+
+
+async def _resolve_context(
+    db: AsyncSession, topic: LessonDiscussionTopic
+) -> tuple[courses_api.CourseDTO, UUID, str] | None:
+    """``(course, course_id, action_url)`` for either topic scope.
+
+    A course-wide topic has no lesson to walk up from and no lesson page to
+    open, so both the course lookup and the deep link fork here rather than in
+    the caller.
+
+    The course link lands on the course page, whose discussion section sits
+    below the curriculum behind the same enrollment gate the recipient already
+    passed to be notified at all.
+    """
+    if topic.course_id is not None:
+        course = await courses_api.get_course_by_id(db, topic.course_id)
+        if course is None:
+            return None
+        return (
+            course,
+            topic.course_id,
+            _COURSE_ACTION_URL.format(course_slug=course.slug),
+        )
+
+    if topic.lesson_id is None:  # pragma: no cover - CHECK forbids it
+        return None
+    lesson = await courses_api.get_lesson_by_id(db, topic.lesson_id)
+    if lesson is None:
+        return None
+    module = await courses_api.get_module_by_id(db, lesson.module_id)
+    if module is None:
+        return None
+    course = await courses_api.get_course_by_id(db, module.course_id)
+    if course is None:
+        return None
+    return (
+        course,
+        module.course_id,
+        _ACTION_URL.format(course_slug=course.slug, lesson_slug=lesson.slug),
+    )
 
 
 async def notify_comment_participants(
@@ -67,15 +118,10 @@ async def notify_comment_participants(
 ) -> None:
     """Fan out the "new comment" notification to thread + teachers."""
     try:
-        lesson = await courses_api.get_lesson_by_id(db, topic.lesson_id)
-        if lesson is None:
+        resolved = await _resolve_context(db, topic)
+        if resolved is None:
             return
-        module = await courses_api.get_module_by_id(db, lesson.module_id)
-        if module is None:
-            return
-        course = await courses_api.get_course_by_id(db, module.course_id)
-        if course is None:
-            return
+        course, course_id, action_url = resolved
 
         commenter = await identity_api.get_user_by_id(db, actor_id)
         if commenter is not None:
@@ -98,11 +144,10 @@ async def notify_comment_participants(
         if not actor_can_manage:
             recipients.update(
                 uid
-                for uid in await courses_api.list_course_manager_ids(db, module.course_id)
+                for uid in await courses_api.list_course_manager_ids(db, course_id)
                 if uid != actor_id
             )
 
-        action_url = _ACTION_URL.format(course_slug=course.slug, lesson_slug=lesson.slug)
         for recipient_id in recipients:
             try:
                 locale = await identity_api.get_user_locale(db, recipient_id)

@@ -83,10 +83,46 @@ async def _require_lesson_manage(
 async def _topic_course_or_404(
     db: AsyncSession, topic: LessonDiscussionTopic
 ) -> UUID:
-    course_id = await deps.resolve_lesson_course(db, topic.lesson_id)
+    course_id = await deps.resolve_topic_course(db, topic)
     if course_id is None:
         raise deps.not_found("discussion_topic", topic.id)
     return course_id
+
+
+async def _require_course_view(
+    db: AsyncSession, course_id: UUID, user: CurrentUser
+) -> None:
+    """Assert the viewer may read this course's discussion board."""
+    if not await deps.can_view_discussion(db, user, course_id):
+        raise deps.not_found("course", course_id)
+
+
+async def _require_course_manage(
+    db: AsyncSession, course_id: UUID, user: CurrentUser
+) -> None:
+    if not await deps.can_manage(db, user, course_id):
+        raise deps.not_found("course", course_id)
+
+
+async def _resolve_reply_parent(
+    db: AsyncSession, topic_id: UUID, parent_comment_id: UUID | None
+) -> UUID | None:
+    """Validate a reply target and flatten it to one level.
+
+    Two rules, both about keeping a thread readable rather than about safety:
+
+    * the parent must live on the SAME topic — a reply pointing at another
+      topic's comment would render under a parent the reader cannot see;
+    * a reply to a reply is re-parented onto the top-level comment, so a thread
+      is always parent + children. Arbitrary nesting is unreadable on a phone
+      and there is no UI that could render it.
+    """
+    if parent_comment_id is None:
+        return None
+    parent = await queries.get_comment(db, parent_comment_id)
+    if parent is None or parent.topic_id != topic_id:
+        raise deps.not_found("discussion_comment", parent_comment_id)
+    return parent.parent_comment_id or parent.id
 
 
 def _topic_read(
@@ -94,11 +130,13 @@ def _topic_read(
     *,
     comment_count: int,
     can_manage: bool,
+    mention_count: int = 0,
     author: DiscussionCommentAuthor | None = None,
 ) -> DiscussionTopicRead:
     return DiscussionTopicRead(
         id=topic.id,
         lesson_id=topic.lesson_id,
+        course_id=topic.course_id,
         title=topic.title,
         body_markdown=topic.body_markdown,
         status=topic.status,
@@ -106,6 +144,7 @@ def _topic_read(
         created_at=topic.created_at,
         updated_at=topic.updated_at,
         comment_count=comment_count,
+        mention_count=mention_count,
         can_manage=can_manage,
         author=author,
     )
@@ -153,7 +192,11 @@ async def list_lesson_topics(
     course_id = await _require_lesson_view(db, lesson_id, current_user)
     viewer_can_manage = await deps.can_manage(db, current_user, course_id)
     topics = await queries.list_topics_for_lesson(db, lesson_id)
-    counts = await queries.comment_counts_for_topics(db, [t.id for t in topics])
+    topic_ids = [t.id for t in topics]
+    counts = await queries.comment_counts_for_topics(db, topic_ids)
+    mentions = await queries.mention_counts_for_topics(
+        db, topic_ids, viewer_id=current_user.user_id
+    )
     # One batched identity+avatar resolve for every distinct topic author, so
     # the client can render "opened by X" without a request per row.
     resolved = await author_resolver.resolve_authors(
@@ -165,6 +208,7 @@ async def list_lesson_topics(
             _topic_read(
                 t,
                 comment_count=counts.get(t.id, 0),
+                mention_count=mentions.get(t.id, 0),
                 can_manage=viewer_can_manage,
                 author=author_resolver.author_or_bare(resolved, t.created_by),
             )
@@ -188,6 +232,80 @@ async def create_lesson_topic(
     await _require_lesson_manage(db, lesson_id, current_user)
     topic = LessonDiscussionTopic(
         lesson_id=lesson_id,
+        title=payload.title,
+        body_markdown=payload.body_markdown,
+        status="open",
+        created_by=current_user.user_id,
+    )
+    db.add(topic)
+    await db.flush()
+    await db.commit()
+    await db.refresh(topic)
+    resolved = await author_resolver.resolve_authors(db, [current_user.user_id])
+    return _topic_read(
+        topic,
+        comment_count=0,
+        can_manage=True,
+        author=author_resolver.author_or_bare(resolved, topic.created_by),
+    )
+
+
+@router.get(
+    "/courses/{course_id}/discussion/topics",
+    response_model=DiscussionTopicList,
+)
+async def list_course_topics(
+    course_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> DiscussionTopicList:
+    """Course-wide topics (enrolled students + course managers).
+
+    The course board holds topics attached to the COURSE only. Rolling every
+    lesson's topics in here as well would bury the course-wide ones this board
+    exists for, and each lesson already shows its own.
+    """
+    await _require_course_view(db, course_id, current_user)
+    viewer_can_manage = await deps.can_manage(db, current_user, course_id)
+    topics = await queries.list_topics_for_course(db, course_id)
+    topic_ids = [t.id for t in topics]
+    counts = await queries.comment_counts_for_topics(db, topic_ids)
+    mentions = await queries.mention_counts_for_topics(
+        db, topic_ids, viewer_id=current_user.user_id
+    )
+    resolved = await author_resolver.resolve_authors(
+        db, [t.created_by for t in topics if t.created_by is not None]
+    )
+    return DiscussionTopicList(
+        can_manage=viewer_can_manage,
+        topics=[
+            _topic_read(
+                t,
+                comment_count=counts.get(t.id, 0),
+                mention_count=mentions.get(t.id, 0),
+                can_manage=viewer_can_manage,
+                author=author_resolver.author_or_bare(resolved, t.created_by),
+            )
+            for t in topics
+        ],
+    )
+
+
+@router.post(
+    "/courses/{course_id}/discussion/topics",
+    response_model=DiscussionTopicRead,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_course_topic(
+    course_id: UUID,
+    payload: DiscussionTopicCreate,
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> DiscussionTopicRead:
+    """Open a course-wide topic (course managers only)."""
+    await _require_course_manage(db, course_id, current_user)
+    topic = LessonDiscussionTopic(
+        course_id=course_id,
         title=payload.title,
         body_markdown=payload.body_markdown,
         status="open",
@@ -316,6 +434,10 @@ async def create_comment(
     Rejects with 404 when the topic is closed for viewers who cannot
     manage the course — a closed topic accepts no new student comments.
 
+    ``parent_comment_id`` makes it a reply. Replying is also how one names
+    someone: the client prefixes the body with the parent author's handle, and
+    that author is notified as a thread participant.
+
     Notifies thread participants (and course teachers when the author is a
     student) — see :mod:`abridgeai.features.discussions.notify`. The
     notification rows join this transaction; failures are swallowed.
@@ -327,10 +449,12 @@ async def create_comment(
     viewer_can_manage = await deps.can_manage(db, current_user, course_id)
     if topic.status == "closed" and not viewer_can_manage:
         raise deps.not_found("discussion_topic", topic_id)
+    parent_id = await _resolve_reply_parent(db, topic_id, payload.parent_comment_id)
     comment = LessonDiscussionComment(
         topic_id=topic_id,
         author_id=current_user.user_id,
         body=payload.body,
+        parent_comment_id=parent_id,
     )
     db.add(comment)
     await db.flush()
