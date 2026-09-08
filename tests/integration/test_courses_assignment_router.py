@@ -590,10 +590,29 @@ async def test_admin_can_assign_a_teacher_of_that_org(
     admin_bearer: str,
     scenario: dict[str, uuid.UUID],
     engine: AsyncEngine,
+    seeded_users: SeededUsers,
 ) -> None:
     """The reach itself is intact: give the assignee membership in the other
-    org and the same admin assignment goes through."""
+    org and the same admin assignment goes through.
+
+    0109 enforces ONE live membership per user (status <> 'left' and not
+    soft-deleted), so moving Bob to the other organization means retiring his
+    origin-org membership first — status='left', the audit-friendly form the
+    migration itself names — and restoring it in the teardown.
+    """
     async with engine.begin() as conn:
+        # Retire the origin-org membership...
+        await conn.execute(
+            text(
+                "UPDATE organization_memberships SET status = 'left' "
+                "WHERE user_id = :uid AND organization_id = :org"
+            ),
+            {
+                "uid": scenario["bob_id"],
+                "org": seeded_users.organization_id,
+            },
+        )
+        # ...then the other-org membership no longer collides.
         await conn.execute(
             text(
                 "INSERT INTO organization_memberships (user_id, organization_id, status) "
@@ -616,6 +635,16 @@ async def test_admin_can_assign_a_teacher_of_that_org(
                     "WHERE user_id = :uid AND organization_id = :org"
                 ),
                 {"uid": scenario["bob_id"], "org": scenario["other_org"]},
+            )
+            await conn.execute(
+                text(
+                    "UPDATE organization_memberships SET status = 'active' "
+                    "WHERE user_id = :uid AND organization_id = :org"
+                ),
+                {
+                    "uid": scenario["bob_id"],
+                    "org": seeded_users.organization_id,
+                },
             )
 
 

@@ -285,7 +285,7 @@ class AuthEventRow(BaseModel):
 
 @router.get("/auth-events", response_model=list[AuthEventRow])
 async def search_auth_events(
-    _user: Annotated[CurrentUser, Depends(_REQUIRE_AUDIT)],
+    user: Annotated[CurrentUser, Depends(_REQUIRE_AUDIT)],
     db: Annotated[AsyncSession, Depends(get_db)],
     since: Annotated[datetime, Query(description="Lower bound on occurred_at (required).")],
     until: Annotated[
@@ -308,7 +308,13 @@ async def search_auth_events(
     ] = None,
     organization_id: Annotated[
         UUID | None,
-        Query(description="Org edge on role/status events; login/MFA rows are NULL."),
+        Query(
+            description=(
+                "Narrow to one tenant's role/status events. Honoured only "
+                "for system.administer; every other caller is pinned to "
+                "their own organization and the parameter is ignored."
+            )
+        ),
     ] = None,
     limit: Annotated[int, Query(ge=1, le=500)] = 100,
 ) -> list[AuthEventRow]:
@@ -318,6 +324,14 @@ async def search_auth_events(
     "POST /auth/mfa/verify -> 204", an ``mfa_verified`` row lives here,
     written by the MFA service in the same transaction as the verification.
     """
+    # Narrowing-only organization_id, same contract as get_security_summary:
+    # honoured for system.administer, ignored for everyone else — a caller
+    # holding audit.read via a scoped grant cannot pass another org's id and
+    # read that tenant's access-control history.
+    if user.has_permission("system.administer"):
+        scope = organization_id
+    else:
+        scope = await resolve_admin_scope(db, user)
     rows = await audit_service.auth_event_search(
         db,
         since=since,
@@ -325,7 +339,7 @@ async def search_auth_events(
         user_id=user_id,
         actor_user_id=actor_user_id,
         event_type=event_type,
-        organization_id=organization_id,
+        organization_id=scope,
         limit=limit,
     )
     return [AuthEventRow.model_validate(r) for r in rows]

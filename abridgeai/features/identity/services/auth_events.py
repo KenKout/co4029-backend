@@ -20,13 +20,19 @@ other feature).
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
-
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from abridgeai.core.security import utcnow
 from abridgeai.features.identity.models import AuthEvent
+
+if TYPE_CHECKING:
+    # Indented on purpose: identity services must not import sqlalchemy at
+    # module level (tests/unit/test_identity_services.py enforces it —
+    # services talk to the DB through the injected session, never the ORM
+    # directly). AsyncSession appears only in annotations, and
+    # `from __future__ import annotations` keeps those lazy.
+    from sqlalchemy.ext.asyncio import AsyncSession
 
 #: Frozen v1 event registry — the only names the recorder accepts. Mirrors the
 #: CHECK constraint ``ck_auth_events_event_type``; keep the two in sync.

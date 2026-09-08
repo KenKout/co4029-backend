@@ -127,6 +127,16 @@ _GLOBAL_BY_DESIGN: dict[tuple[str, str], str] = {
         "Same narrowing-only organization_id as get_dashboard: honoured for "
         "system.administer, ignored for everyone else."
     ),
+    (
+        "admin/routers/audit.py",
+        "search_auth_events",
+    ): (
+        "Same narrowing-only organization_id as get_security_summary: "
+        "honoured for system.administer, ignored for everyone else (the "
+        "caller is pinned by resolve_admin_scope instead). The audit router "
+        "family is admin-global — /http returns platform-wide rows to any "
+        "audit.read holder and takes no org parameter at all."
+    ),
 }
 
 
