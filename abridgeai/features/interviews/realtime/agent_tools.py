@@ -247,7 +247,17 @@ class InterviewToolsMixin:
         if not verdict.allowed:
             await _inject_todo_note(ctx)
             raise _refused(ctx, "interview_end_interview", verdict)
-        await _finalize_session(ctx)
+        finalized = await _finalize_session(ctx)
+        if not finalized:
+            # The submission did NOT persist (DB/network/queue). Telling the
+            # model "finalized" would have it close the interview while the
+            # session stays in_progress — raise so the tool call retries
+            # instead, and so no success phrase is spoken.
+            raise ToolError(
+                "The interview could not be submitted right now (a temporary "
+                "system error). You have NOT finished it. Ask the candidate to "
+                "hold on a moment, then try to end the interview again."
+            )
         return "Interview finalized and submitted for evaluation. Deliver the closing message now."
 
 
@@ -319,9 +329,15 @@ def _sync_questions_remaining(ctx: RunContext[object]) -> None:
     ctx.userdata.questions_remaining = selector.remaining()  # type: ignore[attr-defined]
 
 
-async def _finalize_session(ctx: RunContext[object]) -> None:
+async def _finalize_session(ctx: RunContext[object]) -> bool:
+    """True ONLY when the terminal submission persisted.
+
+    A False (or raised) finalization means the session is still live: the model
+    must never be told the interview was submitted, or it delivers a goodbye
+    while the row reads ``in_progress`` with no fallback timer holding it.
+    """
     finalizer = ctx.userdata.finalize_session  # type: ignore[attr-defined]
-    await finalizer()
+    return bool(await finalizer())
 
 
 async def _publish_state(ctx: RunContext[object]) -> None:

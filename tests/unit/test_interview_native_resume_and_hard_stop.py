@@ -40,6 +40,7 @@ from uuid import uuid4
 
 import pytest
 
+from abridgeai.core.exceptions import AppError
 from abridgeai.features.interviews.orchestrator.state import InterviewRuntimeStateData
 from abridgeai.features.interviews.orchestrator.turn_state import sync_question_history
 from abridgeai.features.interviews.realtime.agent_userdata import InterviewUserdata
@@ -167,7 +168,9 @@ async def test_a_refused_submit_falls_back_to_a_reason_that_is_legal() -> None:
 
     async def _refuse() -> str | None:
         attempts.append("timed_out")
-        raise RuntimeError("Cannot time out an interview without a time limit")
+        # The exact production shape: AppError from submit_session's semantic
+        # reason validation.
+        raise AppError("Cannot time out an interview without a time limit")
 
     async def _fallback() -> str | None:
         attempts.append("ended_early")
@@ -202,7 +205,7 @@ async def test_a_finish_that_cannot_be_persisted_is_not_announced() -> None:
     """
 
     async def _refuse() -> str | None:
-        raise RuntimeError("Interview time limit has not elapsed")
+        raise AppError("Interview time limit has not elapsed")
 
     announced: list[bool] = []
 
@@ -554,6 +557,90 @@ async def test_an_announce_failure_after_submit_does_not_resubmit() -> None:
 
     assert len(submits) == 1
     assert timer.fired is True, "the submit landed; the session stays finalized"
+
+
+
+
+# ─────────────── truthfulness: bool outcome + watchdog safety net ───────────────
+
+
+@_asyncio
+async def test_finalize_once_returns_true_only_on_persist() -> None:
+    """The tool needs an honest boolean, not a fire-and-forget."""
+    persisted: list[int] = []
+
+    async def _inner() -> None:
+        persisted.append(1)
+
+    async def _inner_boom() -> None:
+        raise RuntimeError("DB down")
+
+    ok_timer = HardStopTimer(
+        _plan(deadline_seconds=999),
+        session=_FakeSession(),  # type: ignore[arg-type]
+    )
+    assert await ok_timer.finalize_once(_inner) is True
+
+    fail_timer = HardStopTimer(
+        _plan(deadline_seconds=999),
+        session=_FakeSession(),  # type: ignore[arg-type]
+    )
+    assert await fail_timer.finalize_once(_inner_boom) is False
+    assert persisted == [1], "the failed attempt must not have counted as a submit"
+
+
+@_asyncio
+async def test_a_failed_model_finalize_leaves_the_watchdog_alive() -> None:
+    """The deadline must still fire after the model route failed."""
+    submits: list[int] = []
+
+    async def _inner() -> None:
+        submits.append(1)
+        raise RuntimeError("terminal submission failed")
+
+    async def _close() -> str | None:
+        submits.append(1)
+        return None
+
+    timer = HardStopTimer(
+        _plan(deadline_seconds=0.02, close=_close),
+        session=_FakeSession(),  # type: ignore[arg-type]
+    )
+    timer._RETRY_AFTER_FAILED_STOP_S = 0.01  # type: ignore[misc] # noqa: SLF001
+    timer.start()  # the safety net must be RUNNING before the model route fails
+
+    assert await timer.finalize_once(_inner) is False
+
+    # The watchdog is still armed: it will retry (via its own close reason)
+    # and eventually persist.
+    for _ in range(200):
+        if timer.fired:
+            break
+        await asyncio.sleep(0.01)
+    assert timer.fired is True, "the watchdog never fired after the model route failed"
+
+
+@_asyncio
+async def test_an_operational_error_retries_the_original_reason() -> None:
+    """A DB/network failure must NEVER relabel a timed interview ended_early."""
+    reasons: list[str] = []
+
+    async def _refuse_timed_out() -> str | None:
+        reasons.append("timed_out")
+        raise ConnectionError("database unreachable")
+
+    async def _would_relabel() -> str | None:
+        reasons.append("ended_early")
+        raise AssertionError("fallback must not run for an operational error")
+
+    timer = HardStopTimer(
+        _plan(close=_refuse_timed_out, close_fallback=_would_relabel),
+        session=_FakeSession(),  # type: ignore[arg-type]
+    )
+    await timer._stop()  # noqa: SLF001
+
+    assert reasons == ["timed_out"], "an operational error triggered the semantic fallback"
+    assert timer.fired is False
 
 
 # ───────────────────────── the resume's current question ─────────────────────────

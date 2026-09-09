@@ -35,14 +35,15 @@ class SelectedQuestion(Protocol):
     def prompt_text(self) -> str: ...
 
 
-async def _no_finalize() -> None:
+async def _no_finalize() -> bool:
+    return False
     """Default finalizer: do nothing.
 
     A no-op rather than a raise so a partially-wired session (a test, or a
     diagnostic harness) can still exercise the tools without ending a real
     interview by accident.
     """
-    return
+    return None
 
 
 async def _no_publish() -> None:
@@ -124,7 +125,7 @@ class InterviewUserdata:
     # (selection.py) and returns the chosen question, or None when the bank is
     # exhausted — the model never picks.
     select_next: Callable[[], SelectedQuestion | None] = lambda: None
-    finalize_session: Callable[[], Awaitable[None]] = _no_finalize
+    finalize_session: Callable[[], Awaitable[bool]] = _no_finalize
     # Persist runtime state, then publish a snapshot. Injected by the runtime
     # after `session.start`, because the room the snapshot rides on does not
     # exist before that. A no-op default keeps the tools usable in tests and in

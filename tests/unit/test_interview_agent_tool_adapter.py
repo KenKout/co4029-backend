@@ -348,8 +348,9 @@ async def test_end_interview_refuses_and_names_the_missing_outcome(
 async def test_end_interview_allowed_once_covered(tools: InterviewToolsMixin) -> None:
     called: list[bool] = []
 
-    async def _finalize() -> None:
+    async def _finalize() -> bool:
         called.append(True)
+        return True
 
     data = _userdata(points=COVERAGE_SUFFICIENT_POINTS)
     data.finalize_session = _finalize

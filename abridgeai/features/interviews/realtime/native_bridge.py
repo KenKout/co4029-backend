@@ -289,14 +289,21 @@ class StateWriter:
             await db.commit()
 
 
-async def _submit_and_discard_closing(session_id: UUID, student_id: UUID, *, language: str) -> None:
-    """``finalize_session`` adapted to the tool's ``-> None`` contract.
+async def _submit_and_discard_closing(session_id: UUID, student_id: UUID, *, language: str) -> bool:
+    """``finalize_session`` adapted to the tool's ``-> bool`` contract.
 
     The model delivers its own closing in its own words (the instructions tell it
     to), so the canonical ceremony text is written but not spoken here. The hard
     stop is the path that speaks it, because there is no model turn left to.
+    The boolean is the finalizer's honest outcome: True ONLY when the terminal
+    submission persisted.
     """
-    await bridge.finalize_session(session_id, student_id, language=language, reason="natural")
+    await bridge.finalize_session(
+        session_id, student_id, language=language, reason="natural"
+    )
+    # Reaching here means the terminal submission persisted (any failure raises
+    # inside finalize_session); the closing text is optional.
+    return True
 
 
 def _make_turn_grader(

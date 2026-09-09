@@ -85,6 +85,15 @@ EV_TEXT_TURN_DUPLICATE = "voice.text_turn_duplicate"
 # Each of these is a session staying `in_progress` for another 30s window.
 EV_FINALIZE_RETRY = "voice.finalize_retry"
 
+# A finalization attempt RAISED before the terminal submission persisted — the
+# state rolled back to open and the watchdog/intake stay usable. Pair with
+# finalize_persisted: a finalize_failed with NO later finalize_persisted needs
+# eyes.
+EV_FINALIZE_FAILED = "voice.finalize_failed"
+
+# The terminal submission PERSISTED (the only "finished is true" moment).
+EV_FINALIZE_PERSISTED = "voice.finalize_persisted"
+
 # The typed-turn receipt could not be made durable, so the turn was NOT acked
 # and the client is free to retry with the same key. Every one of these is a
 # candidate answer that exists only on their screen — alert on it.
@@ -94,6 +103,10 @@ EV_TYPED_RECEIPT_FAILED = "voice.typed_turn_commit_failed"
 # already applied on a retry (re-acked without re-grading).
 EV_TYPED_TURN_APPLIED = "voice.typed_turn_applied"
 EV_TYPED_TURN_RESUMED = "voice.typed_turn_resumed"
+# The fold for a durable receipt RAISED: the receipt was CASed to failed, a
+# turn-scoped FAILED was published, and the client's draft stays retryable.
+# Alert on it — every one is a candidate whose answer exists but was not graded.
+EV_TYPED_TURN_FOLD_FAILED = "voice.typed_turn_fold_failed"
 
 # A finish (the model ending, or the hard stop) had to wait for typed turns that
 # were still being graded, and the wait timed out. Every one of these is an answer
@@ -152,6 +165,9 @@ ALL_EVENTS = frozenset(
         EV_TYPED_RECEIPT_FAILED,
         EV_TYPED_TURN_APPLIED,
         EV_TYPED_TURN_RESUMED,
+        EV_TYPED_TURN_FOLD_FAILED,
+        EV_FINALIZE_FAILED,
+        EV_FINALIZE_PERSISTED,
         EV_FINALIZE_RETRY,
         EV_TURN_DRAIN_TIMEOUT,
         EV_SERVER_ADVANCED,
@@ -229,6 +245,9 @@ __all__ = [
     "EV_TYPED_RECEIPT_FAILED",
     "EV_TYPED_TURN_APPLIED",
     "EV_TYPED_TURN_RESUMED",
+    "EV_TYPED_TURN_FOLD_FAILED",
+    "EV_FINALIZE_FAILED",
+    "EV_FINALIZE_PERSISTED",
     "EV_FINALIZE_RETRY",
     "EV_TURN_DRAIN_TIMEOUT",
     "EV_SERVER_ADVANCED",

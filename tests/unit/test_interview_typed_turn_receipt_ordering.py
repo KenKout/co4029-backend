@@ -29,6 +29,7 @@ class _Publisher:
     def __init__(self) -> None:
         self.acks: list[str | None] = []
         self.rejections: list[tuple[str | None, str]] = []
+        self.failures: list[tuple[str | None, str]] = []
 
     async def ack(self, *, turn_key: str | None, turn_action: str) -> None:
         del turn_action
@@ -39,6 +40,12 @@ class _Publisher:
     ) -> None:
         del turn_action
         self.rejections.append((turn_key, str(rejection)))
+
+    async def fail(
+        self, *, turn_key: str | None, turn_action: str, error_class: str
+    ) -> None:
+        del turn_action
+        self.failures.append((turn_key, error_class))
 
     async def agent_action(self, *, kind: str, text: str | None = None) -> None:
         del kind, text
@@ -301,6 +308,117 @@ async def test_two_callbacks_with_the_same_key_make_one_row_and_one_fold() -> No
 
     assert len(agent.folded) == 1
     assert len(store.rows) == 1
+
+
+
+
+# ─────────────── fold failure: honest failure, retryable receipt ───────────────
+
+
+class _Boom(_Agent):
+    """A fold whose grading/DB write raises."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.calls = 0
+
+    async def fold_turn(self, *, answer_text: str, turn_key: str | None = None) -> None:
+        self.calls += 1
+        raise RuntimeError("grading probe down")
+
+
+@_asyncio
+async def test_a_failing_fold_is_never_applied_or_confirmed() -> None:
+    """THE BUG: fold raised, receipt was still applied + confirmed, draft lost."""
+    store = ntt.InMemoryTypedTurnStore()
+    publisher = _Publisher()
+    agent = _Boom()
+    on_text = make_text_input_cb(
+        publisher, intake=TurnIntake(), receipts=store  # type: ignore[arg-type]
+    )
+
+    await on_text(_Session(agent), _Event("answer", turn_key="tk-foldfail1"))
+
+    assert store.rows["tk-foldfail1"]["turn_state"] == "failed", (
+        "a fold that raised was recorded as applied"
+    )
+    assert store.rows["tk-foldfail1"]["last_error_class"] == "RuntimeError"
+    assert publisher.failures and publisher.failures[0][0] == "tk-foldfail1", (
+        "the client was never told the fold failed"
+    )
+    assert publisher.failures[0][1] == "RuntimeError"
+
+
+@_asyncio
+async def test_a_failing_fold_gets_no_ai_reply_and_no_confirmation() -> None:
+    """No second AI message may ride on a fold that did not land."""
+    store = ntt.InMemoryTypedTurnStore()
+    session = _Session(_Boom())
+    on_text = make_text_input_cb(
+        _Publisher(), intake=TurnIntake(), receipts=store  # type: ignore[arg-type]
+    )
+
+    await on_text(session, _Event("answer", turn_key="tk-foldfail2"))
+
+    assert session.replies == [], "the agent replied on a fold that failed"
+
+
+@_asyncio
+async def test_a_failed_receipt_is_retriable_in_the_same_process() -> None:
+    """Same key resent after a failed fold: fold runs AGAIN, then applies."""
+    store = ntt.InMemoryTypedTurnStore()
+    publisher = _Publisher()
+
+    class _Flaky(_Agent):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls = 0
+
+        async def fold_turn(self, *, answer_text: str, turn_key: str | None = None) -> None:
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("transient DB outage")
+
+    agent = _Flaky()
+    session = _Session(agent)
+    on_text = make_text_input_cb(
+        publisher, intake=TurnIntake(), receipts=store  # type: ignore[arg-type]
+    )
+
+    await on_text(session, _Event("answer", turn_key="tk-retry0001"))
+    assert store.rows["tk-retry0001"]["turn_state"] == "failed"
+    assert agent.calls == 1
+
+    # The client retried with the SAME key after the FAILED event.
+    await on_text(session, _Event("answer", turn_key="tk-retry0001"))
+
+    assert agent.calls == 2, "the retry never re-folded the failed receipt"
+    assert store.rows["tk-retry0001"]["turn_state"] == "applied"
+    assert len(store.rows) == 1, "the retry created a second receipt"
+
+
+@_asyncio
+async def test_a_failing_fold_does_not_cost_the_in_flight_slot() -> None:
+    store = ntt.InMemoryTypedTurnStore()
+    intake = TurnIntake()
+    on_text = make_text_input_cb(
+        _Publisher(), intake=intake, receipts=store  # type: ignore[arg-type]
+    )
+
+    await on_text(_Session(_Boom()), _Event("answer", turn_key="tk-slot00001"))
+
+    assert intake.in_flight == 0
+    assert await intake.drain(timeout_seconds=0.01) is True
+
+
+@_asyncio
+async def test_a_spoken_style_fold_without_store_stays_best_effort() -> None:
+    """No store wired (diagnostic harness): swallow preserved, no crash."""
+    on_text = make_text_input_cb(_Publisher(), intake=TurnIntake())
+
+    await on_text(_Session(_Boom()), _Event("answer", turn_key="tk-diag00001"))
+
+    # The important part: the callback completed without raising.
 
 
 # ─────────────── the acknowledged snapshot (confirmed_turn_key) ───────────────

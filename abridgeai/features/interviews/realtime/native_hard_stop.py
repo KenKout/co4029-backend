@@ -41,6 +41,7 @@ from typing import TYPE_CHECKING, Any
 
 from livekit.agents import get_job_context
 
+from abridgeai.core.exceptions import AppError
 from abridgeai.features.interviews.realtime import observability as obs
 
 if TYPE_CHECKING:
@@ -223,32 +224,35 @@ class HardStopTimer:
             self._task.cancel()
             self._task = None
 
-    async def finalize_once(self, inner: Callable[[], Awaitable[None]]) -> None:
-        """Run ``inner`` at most once per session, and disarm the timer.
+    async def finalize_once(self, inner: Callable[[], Awaitable[bool | None]]) -> bool:
+        """Run ``inner`` at most once per session. True only when it persisted.
 
         Wrapping the tool's finalizer rather than guarding inside it keeps
         ``agent_tools`` unaware that a timer exists. Both this and the timer's
         own ``_stop`` drive ONE state machine and ONE in-flight task: whichever
         route arrives while the other is finalizing awaits the same attempt and
-        returns its outcome, so neither submits twice nor races the drain.
+        receives the SAME outcome, so neither submits twice nor races the drain.
+
+        The watchdog is NOT cancelled here — a failed attempt must leave the
+        deadline alive as the safety net. Disarm happens only after a persisted
+        finalize (inside :meth:`_attempt`).
         """
         async with self._lock:
             if self._state == "finalized":
-                return
+                return True
             if self._finalize_task is not None:
                 # Another route's attempt is live: join it. Same result, one
                 # submit.
                 task = self._finalize_task
             else:
                 self._state = "finalizing"
-                self.cancel()
                 task = self._finalize_task = asyncio.create_task(
                     self._attempt(lambda: self._submit_model_route(inner))
                 )
-        await task
+        return bool(await task)
 
     def _submit_model_route(
-        self, inner: Callable[[], Awaitable[None]]
+        self, inner: Callable[[], Awaitable[bool | None]]
     ) -> Callable[[], Awaitable[None]]:
         """The model route's submit step: ``inner`` (it persists the session)."""
 
@@ -289,9 +293,28 @@ class HardStopTimer:
             raise
         except Exception:
             self._rollback_finalization(closing_generation)
+            obs.emit(
+                obs.EV_FINALIZE_FAILED,
+                session_id=self._plan.interview_session_id,
+            )
             return False
         self._state = "finalized"
         self._finalize_task = None
+        obs.emit(
+            obs.EV_FINALIZE_PERSISTED,
+            session_id=self._plan.interview_session_id,
+        )
+        # Disarm ONLY now: the terminal submission persisted, so the deadline's
+        # retry loop has nothing left to do. A pre-persist failure leaves the
+        # watchdog armed (or its retry loop running) as the safety net.
+        #
+        # Deliberately NOT self.cancel() here: the timer route's attempt runs as
+        # a child of the watchdog task itself, and cancelling that task from
+        # inside the attempt would abort the closing speech mid-way. The _run
+        # loop exits on its own the next time it checks `finalized`; a watchdog
+        # left sleeping after the model ended is a harmless no-op (it can no
+        # longer submit — finalized is terminal), and the runtime tears the job
+        # down right after.
         await self._announce_finished()
         return True
 
@@ -439,7 +462,16 @@ class HardStopTimer:
         async def _submit() -> None:
             try:
                 closing = await self._plan.close()
-            except Exception:
+            except Exception as exc:
+                # The fallback exists ONLY for the two recognized SEMANTIC
+                # finish-reason rejections ("timed_out" on an untimed config /
+                # before the deadline). A DB, network or queue failure says
+                # nothing about which reason is legal — falling back there
+                # would relabel a timed interview "ended_early". Anything not
+                # recognized propagates: the retry loop re-runs the ORIGINAL
+                # reason.
+                if not _is_reason_validation_error(exc):
+                    raise
                 fallback_closing, fallback_ok = await self._close_via_fallback()
                 if not fallback_ok:
                     raise
@@ -447,6 +479,27 @@ class HardStopTimer:
             self._last_closing = closing
 
         return _submit
+
+
+# The two finish-reason rejections submit_session raises for a SEMANTIC
+# mismatch (wrong reason for this config / deadline not reached). Only these
+# authorize the ended_early fallback; operational errors retry as-is.
+_REASON_VALIDATION_MESSAGES = (
+    "Cannot time out an interview without a time limit",
+    "Interview time limit has not elapsed",
+)
+
+
+def _is_reason_validation_error(exc: Exception) -> bool:
+    """Whether this exception is one of the two semantic reason rejections.
+
+    Message-scoped on purpose: the two rejections share ``AppError`` with a
+    dozen unrelated domain errors, and matching the message keeps the fallback
+    from firing on any other AppError that happens to surface mid-submit.
+    """
+    return isinstance(exc, AppError) and any(
+        marker in str(exc) for marker in _REASON_VALIDATION_MESSAGES
+    )
 
 
 async def _await_playout(handle: object) -> None:

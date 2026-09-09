@@ -579,6 +579,46 @@ def _make_receipt_store(
                     db, row, processing_token=token
                 )
 
+        async def mark_failed(
+            self,
+            row: Any,  # noqa: ANN401 - the ORM row produced by persist
+            *,
+            error_class: str,
+        ) -> bool:
+            from abridgeai.core.db import get_sessionmaker  # noqa: PLC0415
+
+            token = getattr(row, "metadata_json", {}).get("processing_token")
+            async with get_sessionmaker()() as db:
+                return await native_typed_turn.mark_receipt_failed(
+                    db, row, processing_token=token, error_class=error_class
+                )
+
+        async def lookup(
+            self,
+            *,
+            session_id: UUID,
+            turn_key: str,
+        ) -> Any | None:  # noqa: ANN401 - the ORM row type is the implementation's own
+            from abridgeai.core.db import get_sessionmaker  # noqa: PLC0415
+
+            async with get_sessionmaker()() as db:
+                return await native_typed_turn.load_receipt_by_key(
+                    db, session_id=session_id, turn_key=turn_key
+                )
+
+        async def reclaim(
+            self,
+            *,
+            session_id: UUID,
+            turn_key: str,
+        ) -> tuple[Any, bool]:
+            from abridgeai.core.db import get_sessionmaker  # noqa: PLC0415
+
+            async with get_sessionmaker()() as db:
+                return await native_typed_turn.reclaim_receipt_failed(
+                    db, session_id=session_id, turn_key=turn_key
+                )
+
     return _PgStore()
 
 

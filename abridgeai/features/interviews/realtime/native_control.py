@@ -127,6 +127,31 @@ class ControlPublisher:
             )
         )
 
+    async def fail(
+        self,
+        *,
+        turn_key: str | None,
+        turn_action: str,
+        error_class: str,
+    ) -> None:
+        """A turn-scoped POST-ACK failure: the fold did not land.
+
+        The receipt IS durable (the ack was truthful), but grading/folding
+        failed before the answer reached the runtime state. The client keeps
+        its parked sent-draft and may retry with the SAME turn_key; the
+        receipt's failed state makes that retry reclaimable. ``error_class``
+        is an allowlisted name only — never a raw exception message.
+        """
+        await self._publish(
+            tp.ControlEvent(
+                status=tp.ControlStatus.FAILED,
+                turn_key=turn_key,
+                seq=0,
+                turn_action=turn_action,
+                error_class=error_class,
+            )
+        )
+
     async def acknowledge(
         self,
         *,

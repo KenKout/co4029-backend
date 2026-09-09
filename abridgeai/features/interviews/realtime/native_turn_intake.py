@@ -90,6 +90,14 @@ class TurnLedger:
         self._remember(turn_key)
         return True
 
+    def forget(self, turn_key: str) -> None:
+        """Remove a key so the same key can be claimed again.
+
+        Only used when a durable receipt overrides the in-memory "seen" — the
+        receipt's failed state is the truth, not the ledger.
+        """
+        self._seen.pop(turn_key, None)
+
     def _remember(self, turn_key: str) -> None:
         self._seen[turn_key] = None
         self._seen.move_to_end(turn_key)
@@ -153,6 +161,16 @@ class TurnIntake:
     @property
     def is_closed(self) -> bool:
         return self._closed
+
+    def release_claim(self, turn_key: str | None) -> None:
+        """Give back a claim taken by :meth:`claim` for a key we will re-process.
+
+        The failed-retry path needs this: the ledger said "seen", but the
+        durable receipt says "failed" — the retry must reach the receipt path,
+        so the key must be forgettable again. A ``None`` key was never claimed.
+        """
+        if turn_key is not None:
+            self._ledger.forget(turn_key)
 
     @property
     def in_flight(self) -> int:

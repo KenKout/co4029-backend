@@ -50,6 +50,7 @@ PROCESSING_LEASE_SECONDS = 300
 
 _RECEIVED = "received"
 _APPLIED = "applied"
+_FAILED = "failed"
 
 
 class TypedTurnReceiptError(RuntimeError):
@@ -245,8 +246,100 @@ async def mark_receipt_applied(
     return bool(rowcount > 0)
 
 
+async def mark_receipt_failed(
+    db: AsyncSession,
+    row: Any,  # noqa: ANN401 - ORM row from persist_receipt
+    *,
+    processing_token: str | None,
+    error_class: str,
+) -> bool:
+    """CAS one receipt received→failed, owner-checked by the processing token.
+
+    A failed receipt is RETRYABLE, not terminal: the client resends with the
+    SAME turn_key and the next callback reclaims the lease and folds again.
+    Returns True when THIS caller won the transition.
+    """
+    from sqlalchemy import update  # noqa: PLC0415
+
+    from abridgeai.features.interviews.models import (  # noqa: PLC0415
+        InterviewSessionMessage,
+    )
+
+    if not processing_token:
+        return False
+    meta = dict(getattr(row, "metadata_json", None) or {})
+    if meta.get("turn_state") != _RECEIVED:
+        return False
+    meta["turn_state"] = _FAILED
+    # Allowlisted error class only, truncated — never a raw exception string
+    # (it can carry prompt or DB detail) and never the answer text itself.
+    meta["last_error_class"] = error_class[:64]
+    meta["failed_at"] = utcnow().isoformat()
+    result = await db.execute(
+        update(InterviewSessionMessage)
+        .where(
+            InterviewSessionMessage.id == row.id,
+            InterviewSessionMessage.metadata_json["turn_state"].as_string() == _RECEIVED,
+            InterviewSessionMessage.metadata_json["processing_token"].as_string()
+            == processing_token,
+        )
+        .values(metadata_json=meta)
+    )
+    await db.commit()
+    rowcount: Any = getattr(result, "rowcount", 0)
+    return bool(rowcount > 0)
+
+
+async def reclaim_receipt_failed(
+    db: AsyncSession,
+    *,
+    session_id: UUID,
+    turn_key: str,
+) -> tuple[Any, bool]:  # noqa: ANN401 - ORM row
+    """CAS a FAILED receipt back to received under a FRESH processing token.
+
+    This is the retry path's ownership handover: the previous fold died, the
+    lease/token is stale, and the new caller takes the row over. Applied rows
+    are immutable; received rows under a live lease stay with their owner.
+    """
+
+    from abridgeai.features.interviews.models import (  # noqa: PLC0415
+        InterviewSessionMessage,
+    )
+
+    row = await load_receipt_by_key(db, session_id=session_id, turn_key=turn_key)
+    if row is None:
+        return None, False
+    meta = dict(getattr(row, "metadata_json", None) or {})
+    if meta.get("turn_state") != _FAILED:
+        return row, False
+    token = uuid_token()
+    meta["turn_state"] = _RECEIVED
+    meta["processing_token"] = str(token)
+    meta["processing_expires_at"] = (
+        utcnow() + timedelta(seconds=PROCESSING_LEASE_SECONDS)
+    ).isoformat()
+    meta["reclaimed_at"] = utcnow().isoformat()
+    meta.pop("last_error_class", None)
+    from sqlalchemy import update  # noqa: PLC0415
+
+    result = await db.execute(
+        update(InterviewSessionMessage)
+        .where(
+            InterviewSessionMessage.id == row.id,
+            InterviewSessionMessage.metadata_json["turn_state"].as_string() == _FAILED,
+        )
+        .values(metadata_json=meta)
+    )
+    await db.commit()
+    rowcount: Any = getattr(result, "rowcount", 0)
+    return row, bool(rowcount > 0)
+
+
 __all__ = [
     "PROCESSING_LEASE_SECONDS",
+    "mark_receipt_failed",
+    "reclaim_receipt_failed",
     "InMemoryTypedTurnStore",
     "TypedTurnStore",
     "TypedTurnReceiptError",
@@ -286,6 +379,33 @@ class TypedTurnStore(Protocol):
         state_extra: dict[str, Any] | None = None
     ) -> bool:
         """CAS the row received→applied under the processing token."""
+        ...
+
+    async def mark_failed(
+        self,
+        row: Any,  # noqa: ANN401 - the row type is the implementation's own
+        *,
+        error_class: str,
+    ) -> bool:
+        """CAS the row received→failed (owner-checked). A retry reclaims it."""
+        ...
+
+    async def lookup(
+        self,
+        *,
+        session_id: UUID,
+        turn_key: str,
+    ) -> Any | None:  # noqa: ANN401 - the row type is the implementation's own
+        """The durable receipt for a turn key, or None. Read-only."""
+        ...
+
+    async def reclaim(
+        self,
+        *,
+        session_id: UUID,
+        turn_key: str,
+    ) -> tuple[Any | None, bool]:  # noqa: ANN401 - the row type is the implementation's own
+        """CAS failed→received under a fresh token. (row, claimed)."""
         ...
 
 
@@ -338,3 +458,48 @@ class InMemoryTypedTurnStore:
         if state_extra:
             row.update(state_extra)
         return True
+
+    async def mark_failed(
+        self,
+        row: Any,  # noqa: ANN401 - in-memory row
+        *,
+        error_class: str,
+    ) -> bool:
+        if row["turn_state"] != _RECEIVED:
+            return False
+        row["turn_state"] = _FAILED
+        # Allowlisted class only, truncated — never a raw exception string.
+        row["last_error_class"] = error_class[:64]
+        return True
+
+    async def lookup(
+        self,
+        *,
+        session_id: UUID,
+        turn_key: str,
+    ) -> dict[str, Any] | None:
+        del session_id
+        return self.rows.get(turn_key[:128])
+
+    async def reclaim(
+        self,
+        *,
+        session_id: UUID,
+        turn_key: str,
+    ) -> tuple[dict[str, Any] | None, bool]:
+        """Failed (or expired-lease) receipt → received under a FRESH token.
+
+        Returns (row, claimed). claimed=False means someone else owns it or the
+        state did not permit reclaiming (applied is immutable).
+        """
+        del session_id
+        row = self.rows.get(turn_key[:128])
+        if row is None or row["turn_state"] != _FAILED:
+            return row, False
+        row["turn_state"] = _RECEIVED
+        row["processing_token"] = str(uuid_token())
+        row["processing_expires_at"] = (
+            utcnow() + timedelta(seconds=PROCESSING_LEASE_SECONDS)
+        ).isoformat()
+        row.pop("last_error_class", None)
+        return row, True
