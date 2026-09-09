@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from abridgeai.features.interviews.orchestrator.tools import build_progress_report
@@ -125,6 +126,30 @@ class ControlPublisher:
                 rejection=rejection,
             )
         )
+
+    async def acknowledge(
+        self,
+        *,
+        turn_key: str,
+        state: tp.StateSnapshot | None = None,
+    ) -> None:
+        """Publish a snapshot that CONFIRMS one typed turn as durable.
+
+        The confirmation rides a full snapshot (not the ack, which was already
+        sent after the receipt COMMITTED, and not a bare event, which a client
+        could apply out of order against a newer absolute snapshot). The
+        snapshot carries ``confirmed_turn_key=K``: that is the client's signal
+        to drop its parked sent-draft for K. Ordering is the lock's: a client
+        cannot receive this BEFORE the newer state it also carries.
+        """
+        base = state if state is not None else build_snapshot(self._userdata_for_snapshot())
+        await self.snapshot(replace(base, confirmed_turn_key=turn_key))
+
+    def _userdata_for_snapshot(self) -> InterviewUserdata:
+        userdata = getattr(self._session, "userdata", None)
+        if userdata is None:
+            raise RuntimeError("acknowledge() needs the agent session's userdata")
+        return userdata  # type: ignore[no-any-return]
 
     async def snapshot(self, state: tp.StateSnapshot) -> None:
         await self._publish(

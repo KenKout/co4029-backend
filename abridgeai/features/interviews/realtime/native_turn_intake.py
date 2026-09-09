@@ -109,12 +109,50 @@ class TurnIntake:
         # Set while nothing is in flight, so `drain` on an idle session is free.
         self._idle = asyncio.Event()
         self._idle.set()
+        # One-shot echo suppression marker (see `arm_echo` / `consume_echo`).
+        self._echo: tuple[str, str] | None = None
+        # Closing gate + generation: a finalizer closes intake and remembers its
+        # generation; a retry/reopen that belongs to a NEW finalizer bumps the
+        # generation, so a stale finalizer cannot reopen the intake.
+        self._closed = False
+        self._generation = 0
 
     def seed(self, turn_key: str | None) -> None:
         self._ledger.seed(turn_key)
 
     def claim(self, turn_key: str | None) -> bool:
+        if self._closed:
+            return False
         return self._ledger.claim(turn_key)
+
+    # ── closing gate ────────────────────────────────────────────────────────
+    def close(self) -> int:
+        """Stop accepting new turns. Returns the generation that closed.
+
+        A turn claimed but not yet finished (in_flight > 0) keeps running: the
+        finalizer drains it. New claims are refused — the callback answers them
+        with ``session_closing``.
+        """
+        self._closed = True
+        return self._generation
+
+    def reopen(self, *, expected_generation: int | None = None) -> bool:
+        """Reopen a closed intake for a NEW finalization attempt.
+
+        ``expected_generation`` is the stale-finalizer guard: only the attempt
+        that closed the intake (or a caller that passes None) may reopen it, so
+        a retry loop whose first attempt timed out cannot be tricked into
+        reopening by a zombie coroutine from that first attempt.
+        """
+        if expected_generation is not None and expected_generation != self._generation:
+            return False
+        self._closed = False
+        self._generation += 1
+        return True
+
+    @property
+    def is_closed(self) -> bool:
+        return self._closed
 
     @property
     def in_flight(self) -> int:
@@ -132,6 +170,49 @@ class TurnIntake:
     def processing(self) -> _ProcessingScope:
         """Mark one turn as being processed for as long as the scope is held."""
         return _ProcessingScope(self)
+
+    def begin(self) -> _ProcessingScope:
+        """Reserve an in-flight slot SYNCHRONOUSLY, before the callback awaits.
+
+        Same bookkeeping :meth:`processing` performs, but it happens before the
+        first await in the callback — the closing gate decision and the
+        in-flight increment are atomic with respect to every other callback and
+        the finalizer, because asyncio only switches at await points. Raises
+        :class:`TypedTurnIntakeError` when the intake is closed: the callback
+        answers with ``session_closing`` and never reaches the fold.
+        """
+        if self._closed:
+            raise TypedTurnIntakeError()
+        return _ProcessingScope(self)
+
+    # ── echo suppression ────────────────────────────────────────────────────
+    def arm_echo(self, *, turn_key: str, text: str) -> None:
+        """Arm a ONE-SHOT marker for the SDK's echo of this typed answer.
+
+        A typed answer is persisted DIRECTLY as its durable receipt, so the
+        ``conversation_item_added`` copy of the same text must not be recorded
+        again — two identical transcript rows for one answer. The marker holds
+        the normalized text so a candidate typing the same sentence twice (two
+        keys, two legitimate answers) is NOT swallowed: only the turn whose key
+        and text both match is suppressed, and only once.
+        """
+        self._echo = (turn_key, " ".join(text.split()))
+
+    def consume_echo(self, *, turn_key: str, text: str) -> bool:
+        """Consume the armed marker when THIS turn's echo arrives.
+
+        True means "this conversation item is the SDK echo of an already
+        persisted typed receipt — do not record it". A voice turn (no key
+        armed, different text) never matches, so hybrid mode is untouched.
+        """
+        marker = self._echo
+        if marker is None:
+            return False
+        expected_key, expected_text = marker
+        if expected_key != turn_key or expected_text != " ".join(text.split()):
+            return False
+        self._echo = None
+        return True
 
     async def drain(self, *, timeout_seconds: float = DRAIN_TIMEOUT_S) -> bool:
         """Wait until no turn is mid-processing. True when the session went idle.
@@ -169,4 +250,11 @@ class _ProcessingScope:
         self._intake._exit()  # noqa: SLF001 -- same-module collaborator
 
 
-__all__ = ["DRAIN_TIMEOUT_S", "TurnIntake", "TurnLedger"]
+__all__ = ["DRAIN_TIMEOUT_S", "TurnIntake", "TurnLedger", "TypedTurnIntakeError"]
+
+
+class TypedTurnIntakeError(RuntimeError):
+    """A typed turn arrived while the intake is closed (session closing)."""
+
+    def __init__(self) -> None:
+        super().__init__("session is closing; new typed turns are refused")

@@ -375,6 +375,187 @@ async def test_a_drain_that_raises_does_not_stop_the_finish() -> None:
     assert submitted == [True]
 
 
+
+
+# ───────────────── the finalization state machine ─────────────────
+
+
+@_asyncio
+async def test_a_failed_first_submit_can_be_retried_to_success() -> None:
+    """finalizing is not a latch: a rolled-back attempt leaves the session live."""
+    attempts: list[int] = []
+
+    async def _close() -> str | None:
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise RuntimeError("database briefly unavailable")
+        return None
+
+    timer = HardStopTimer(
+        _plan(deadline_seconds=0.0, close=_close),
+        session=_FakeSession(),  # type: ignore[arg-type]
+    )
+    timer._RETRY_AFTER_FAILED_STOP_S = 0.01  # type: ignore[misc] # noqa: SLF001
+    timer.start()
+
+    for _ in range(200):
+        if timer.fired:
+            break
+        await asyncio.sleep(0.01)
+
+    timer.cancel()
+    assert timer.fired is True
+    assert len(attempts) == 2
+
+
+@_asyncio
+async def test_two_concurrent_routes_submit_once_and_share_the_result() -> None:
+    """The model ends while the timer is finalizing: one submit, both await it."""
+    submits: list[int] = []
+
+    async def _inner() -> None:
+        submits.append(1)
+        await asyncio.sleep(0.02)  # hold the in-flight task open
+
+    async def _close() -> str | None:
+        submits.append(1)
+        await asyncio.sleep(0.02)
+
+    timer = HardStopTimer(
+        _plan(close=_close, deadline_seconds=999),
+        session=_FakeSession(),  # type: ignore[arg-type]
+    )
+
+    tool = asyncio.create_task(timer.finalize_once(_inner))
+    timer_task = asyncio.create_task(timer._stop())  # noqa: SLF001
+    await asyncio.gather(tool, timer_task)
+
+    assert len(submits) == 1, "two routes raced into two submits"
+
+
+@_asyncio
+async def test_a_turn_sent_after_closing_is_refused_not_graded() -> None:
+    """The intake closes before the drain: late turns cannot extend the finish."""
+    closed_seen: list[bool] = []
+
+    class _SpyIntake:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def close(self) -> int:
+            self.closed = True
+            return 7
+
+        def reopen(self, *, expected_generation: int | None = None) -> bool:
+            del expected_generation
+            self.closed = False
+            return True
+
+    intake = _SpyIntake()
+
+    async def _drain() -> bool:
+        closed_seen.append(intake.closed)
+        return True
+
+    async def _inner() -> None:
+        closed_seen.append(intake.closed)
+
+    timer = HardStopTimer(
+        _plan(drain_turns=_drain, turn_intake=intake),
+        session=_FakeSession(),  # type: ignore[arg-type]
+    )
+    await timer.finalize_once(_inner)
+
+    assert closed_seen == [True, True], "the intake was not closed during the finish"
+
+
+@_asyncio
+async def test_a_failed_attempt_reopens_the_intake() -> None:
+    """A rolled-back finish must leave the session accepting answers again."""
+
+    class _SpyIntake:
+        def __init__(self) -> None:
+            self.closed = False
+            self.reopens = 0
+
+        def close(self) -> int:
+            self.closed = True
+            return 3
+
+        def reopen(self, *, expected_generation: int | None = None) -> bool:
+            del expected_generation
+            self.closed = False
+            self.reopens += 1
+            return True
+
+    intake = _SpyIntake()
+
+    async def _close() -> str | None:
+        raise RuntimeError("still refused")
+
+    timer = HardStopTimer(
+        _plan(close=_close, close_fallback=_close, turn_intake=intake),
+        session=_FakeSession(),  # type: ignore[arg-type]
+    )
+    await timer._stop()  # noqa: SLF001
+
+    assert timer.fired is False
+    assert intake.reopens == 1
+    assert intake.closed is False
+
+
+@_asyncio
+async def test_a_stale_generation_cannot_reopen_the_new_attempt_s_intake() -> None:
+    """A zombie attempt's rollback must not undo the retry that replaced it."""
+    reopened_with: list[int | None] = []
+
+    class _SpyIntake:
+        def __init__(self) -> None:
+            self.generation = 0
+
+        def close(self) -> int:
+            self.generation += 1
+            return self.generation
+
+        def reopen(self, *, expected_generation: int | None = None) -> bool:
+            reopened_with.append(expected_generation)
+            return expected_generation == self.generation
+
+    intake = _SpyIntake()
+    first = intake.close()  # generation 1: the FAILED attempt
+
+    # The retry closes again (generation 2) and succeeds; the zombie's rollback
+    # then tries to reopen under generation 1 and must be refused.
+    second = intake.close()
+    assert second == 2
+    assert intake.reopen(expected_generation=first) is False
+    assert intake.reopen(expected_generation=second) is True
+
+
+@_asyncio
+async def test_an_announce_failure_after_submit_does_not_resubmit() -> None:
+    """The submit persisted; a broken announcement must not reopen the session."""
+    submits: list[int] = []
+
+    async def _close() -> str | None:
+        submits.append(1)
+        return None
+
+    async def _boom() -> None:
+        raise RuntimeError("room already closed")
+
+    timer = HardStopTimer(
+        _plan(close=_close),
+        session=_FakeSession(),  # type: ignore[arg-type]
+    )
+    timer.on_finalized = _boom
+
+    await timer._stop()  # noqa: SLF001
+
+    assert len(submits) == 1
+    assert timer.fired is True, "the submit landed; the session stays finalized"
+
+
 # ───────────────────────── the resume's current question ─────────────────────────
 
 

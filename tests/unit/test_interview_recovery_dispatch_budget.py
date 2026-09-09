@@ -290,3 +290,153 @@ async def test_the_refund_only_restores_the_recovery_bookkeeping():
         "the refund clobbered results written by the evaluator"
     )
     assert session.internal_summary_json["evaluated_at"] == "2026-01-01T12:00:30+00:00"
+
+
+# ─────────────── a live claim must not be shortlisted or charged ───────────────
+#
+# The grace window (ended_at <= now - 15min) decides when the sweep FIRST sees a
+# row. The claim lease decides whether a grader STILL owns it. Those overlap by
+# design: a session whose first evaluation was enqueued at submit and died just
+# after claiming has ended_at 16 minutes old and a live lease — the sweep must
+# skip it, not charge a second grader into a race with the live one.
+
+
+class _ClaimAwareStore(_RecoveryCounterStore):
+    """The SQL stamp's REAL contract once the claim guard lands in it.
+
+    ``stamp_evaluation_recovery_attempt`` must re-check, atomically inside the
+    UPDATE, every condition the candidate query only approximated: the verdict,
+    the claim, the ceiling and (once the durable phase lands) an active job.
+    The fakes here mirror that contract so the service-level rules are pinned
+    before the SQL is written.
+    """
+
+    async def stamp(self, _db: Any, session_id: UUID, *, now: datetime) -> int | None:
+        row = self._rows[session_id]
+        if row.pass_verdict is not None:
+            return None
+        # A live claim means a grader owns the session right now.
+        claim_expires = getattr(row, "evaluation_claim_expires_at", None)
+        if claim_expires is not None and claim_expires > now:
+            return None
+        attempts = int(self._recovery(row).get("attempts") or 0) + 1
+        row.internal_summary_json["evaluation_recovery"] = {
+            **self._recovery(row),
+            "attempts": attempts,
+            "last_attempt_at": now.isoformat(),
+        }
+        return attempts
+
+
+def _claimed_session(*, claim_minutes_left: float) -> Any:
+    session = _pending_session()
+    session.evaluation_claim_expires_at = _NOW + timedelta(minutes=claim_minutes_left)
+    session.evaluation_claim_token = uuid4()
+    return session
+
+
+@contextlib.contextmanager
+def _claim_aware_sweep(*rows: Any):
+    store = _ClaimAwareStore(*rows)
+    with (
+        patch(f"{_LIFECYCLE}.utcnow", return_value=_NOW),
+        patch.object(
+            lifecycle_service.sessions_queries,
+            "list_pending_evaluation_sessions",
+            AsyncMock(return_value=list(rows)),
+        ),
+        patch.object(
+            lifecycle_service.sessions_queries,
+            "stamp_evaluation_recovery_attempt",
+            store.stamp,
+        ),
+        patch.object(
+            lifecycle_service.sessions_queries,
+            "refund_evaluation_recovery_attempt",
+            store.refund,
+        ),
+    ):
+        yield store
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("claim_minutes_left", [5, 10, 15])
+async def test_a_live_claim_is_never_charged_an_attempt(claim_minutes_left: float):
+    """A grader holding the lease owns the session; the sweep must not bill it.
+
+    The candidate list is a stale SNAPSHOT (taken up to a grace window earlier),
+    so the stamp — not the query — is what must refuse: a claim taken AFTER the
+    query ran has to be honoured too.
+    """
+    session = _claimed_session(claim_minutes_left=claim_minutes_left)
+    db = AsyncMock()
+    arq = AsyncMock()
+    arq.enqueue_job.return_value = object()
+
+    with _claim_aware_sweep(session):
+        count = await lifecycle_service.recover_stalled_evaluations(db, arq_pool=arq)
+
+    assert count == 0, "the sweep charged a second grader against a live claim"
+    assert _attempts(session) == 0
+    arq.enqueue_job.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_claim_taken_between_the_query_and_the_stamp_is_respected():
+    """The dangerous interleaving: the candidate list was already stale."""
+    session = _claimed_session(claim_minutes_left=0)
+    # The claim is NOT live when the sweep starts...
+    session.evaluation_claim_expires_at = _NOW - timedelta(minutes=1)
+    db = AsyncMock()
+    arq = AsyncMock()
+    arq.enqueue_job.return_value = object()
+
+    store = _ClaimAwareStore(session)
+    original_stamp = store.stamp
+
+    async def _stamp(db_: Any, session_id: UUID, *, now: datetime) -> int | None:
+        # ...but ANOTHER grader claims while the sweep is between the query and
+        # the stamp. The stamp's atomic guard must see it.
+        session.evaluation_claim_expires_at = _NOW + timedelta(minutes=25)
+        session.evaluation_claim_token = uuid4()
+        return await original_stamp(db_, session_id, now=now)
+
+    with (
+        patch(f"{_LIFECYCLE}.utcnow", return_value=_NOW),
+        patch.object(
+            lifecycle_service.sessions_queries,
+            "list_pending_evaluation_sessions",
+            AsyncMock(return_value=[session]),
+        ),
+        patch.object(
+            lifecycle_service.sessions_queries,
+            "stamp_evaluation_recovery_attempt",
+            _stamp,
+        ),
+        patch.object(
+            lifecycle_service.sessions_queries,
+            "refund_evaluation_recovery_attempt",
+            store.refund,
+        ),
+    ):
+        count = await lifecycle_service.recover_stalled_evaluations(db, arq_pool=arq)
+
+    assert count == 0
+    assert _attempts(session) == 0
+    arq.enqueue_job.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_an_expired_claim_is_rechargeable():
+    """A lapsed lease means the owner is dead — the sweep MUST proceed."""
+    session = _claimed_session(claim_minutes_left=0)
+    session.evaluation_claim_expires_at = _NOW - timedelta(minutes=5)
+    db = AsyncMock()
+    arq = AsyncMock()
+    arq.enqueue_job.return_value = object()
+
+    with _claim_aware_sweep(session):
+        count = await lifecycle_service.recover_stalled_evaluations(db, arq_pool=arq)
+
+    assert count == 1
+    assert _attempts(session) == 1

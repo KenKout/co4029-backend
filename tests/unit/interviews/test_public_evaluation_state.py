@@ -108,14 +108,34 @@ def test_a_live_claim_keeps_the_last_attempt_pending() -> None:
     assert derive_evaluation_state(working) == "pending"
 
 
-def test_an_expired_claim_does_not_keep_a_dead_session_pending() -> None:
-    """A lapsed lease means the owner is dead (ARQ kills at job_timeout)."""
+def test_an_expired_claim_with_a_terminal_phase_is_exhausted() -> None:
+    """Lapsed lease AND terminal phase record: the last job is proven over."""
     dead = _session(
         status="failed",
         attempts=MAX_EVALUATION_RECOVERY_ATTEMPTS,
         claim_expires_at=datetime.now(UTC) - timedelta(minutes=5),
     )
+    dead.internal_summary_json["evaluation_recovery"]["current"] = {
+        "attempt": MAX_EVALUATION_RECOVERY_ATTEMPTS,
+        "job_id": "j-final",
+        "phase": "missing",
+        "dispatched_at": _LONG_AGO,
+    }
     assert derive_evaluation_state(dead) == "exhausted"
+
+
+def test_an_expired_claim_alone_does_not_prove_exhausted() -> None:
+    """A lapsed lease is evidence the OWNER is gone, not that the job is.
+
+    The job may be queued behind a busy worker, never having claimed. Only a
+    terminal phase record (or a lazy reconcile against ARQ) proves that.
+    """
+    dead = _session(
+        status="failed",
+        attempts=MAX_EVALUATION_RECOVERY_ATTEMPTS,
+        claim_expires_at=datetime.now(UTC) - timedelta(minutes=5),
+    )
+    assert derive_evaluation_state(dead) == "pending"
 
 
 def test_the_settle_window_outlasts_a_live_evaluation_job() -> None:
@@ -136,19 +156,18 @@ def test_the_settle_window_outlasts_a_live_evaluation_job() -> None:
 
 
 def test_an_exhausted_recovery_budget_is_terminal() -> None:
-    """At the ceiling with the last job settled, the UI must stop waiting."""
-    assert (
-        derive_evaluation_state(
-            _session(status="failed", attempts=MAX_EVALUATION_RECOVERY_ATTEMPTS)
+    """At the ceiling with the last job PROVEN terminal, the UI stops waiting."""
+    for phase in ("succeeded", "failed", "missing"):
+        session = _session_with_current(
+            "failed",
+            {
+                "attempt": MAX_EVALUATION_RECOVERY_ATTEMPTS,
+                "job_id": "j-final",
+                "phase": phase,
+                "dispatched_at": _LONG_AGO,
+            },
         )
-        == "exhausted"
-    )
-    assert (
-        derive_evaluation_state(
-            _session(status="completed", attempts=MAX_EVALUATION_RECOVERY_ATTEMPTS + 2)
-        )
-        == "exhausted"
-    )
+        assert derive_evaluation_state(session) == "exhausted", phase
 
 
 def test_an_exhausted_session_that_later_grades_reads_as_succeeded() -> None:
@@ -205,3 +224,62 @@ def test_the_recovery_ceiling_matches_the_sweep_default() -> None:
         inspect.signature(recover_stalled_evaluations).parameters["max_recovery_attempts"].default
     )
     assert default == MAX_EVALUATION_RECOVERY_ATTEMPTS
+
+
+# ─────────────── the durable phase decides, not a timestamp heuristic ───────────────
+#
+# The dispatch age (``last_attempt_at``) can only say "a job was sent". It
+# cannot distinguish a job that is queued/running/retrying from one that
+# finished (and its result later dropped out of Redis) — so a queued job >30
+# minutes old was reported ``exhausted`` to the student while the worker was
+# still about to pick it up. The durable ``evaluation_recovery.current.phase``
+# record is the authority: active means pending, terminal means the budget can
+# be called spent, and a verdict outranks everything.
+
+
+def _session_with_current(status: str, current: dict[str, Any] | None) -> Any:
+    summary: dict[str, Any] = {
+        "evaluation_recovery": {
+            "attempts": MAX_EVALUATION_RECOVERY_ATTEMPTS,
+            "last_attempt_at": _LONG_AGO,
+        }
+    }
+    if current is not None:
+        summary["evaluation_recovery"]["current"] = current
+    return SimpleNamespace(
+        status=status,
+        pass_verdict=None,
+        assessment_started_at="2026-09-05T00:00:00+00:00",
+        internal_summary_json=summary,
+        evaluation_claim_expires_at=None,
+    )
+
+
+def test_an_active_durable_phase_is_pending_no_matter_how_old_the_dispatch_is() -> None:
+    """queued/retrying >30min stays pending — the UI must keep polling."""
+    for phase in ("dispatching", "queued", "running", "retrying"):
+        session = _session_with_current(
+            "failed",
+            {"attempt": 3, "job_id": "j-1", "phase": phase, "dispatched_at": _LONG_AGO},
+        )
+        assert derive_evaluation_state(session) == "pending", phase
+
+
+def test_a_terminal_durable_phase_allows_exhausted() -> None:
+    """exhausted needs the last job PROVEN terminal, not merely old."""
+    for phase in ("succeeded", "failed", "missing"):
+        session = _session_with_current(
+            "failed",
+            {"attempt": 3, "job_id": "j-1", "phase": phase, "dispatched_at": _LONG_AGO},
+        )
+        assert derive_evaluation_state(session) == "exhausted", phase
+
+
+def test_a_currentless_ceiling_row_stays_pending_until_reconciled() -> None:
+    """Legacy rows at the ceiling without ``current`` are NOT declared dead.
+
+    The lifecycle lazy-reconciles them against ARQ; until there is terminal
+    evidence, ``pending`` keeps the student's UI honest.
+    """
+    session = _session_with_current("failed", None)
+    assert derive_evaluation_state(session) == "pending"

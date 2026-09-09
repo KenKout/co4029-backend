@@ -30,7 +30,7 @@ import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from functools import partial
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
 
 from livekit import (
@@ -43,6 +43,7 @@ from abridgeai.features.interviews.orchestrator.intent import (
     StudentIntent,
 )
 from abridgeai.features.interviews.orchestrator.shadow import shadow_check_turn
+from abridgeai.features.interviews.realtime import native_typed_turn
 from abridgeai.features.interviews.realtime import observability as obs
 from abridgeai.features.interviews.realtime.agent_context import (
     end_on_user_turn,
@@ -410,6 +411,7 @@ async def run_native_interview(
             flush_transcript=transcript_writes.flush,
             drain_turns=turn_intake.drain,
             close_fallback=setup.close_session_fallback,
+            turn_intake=turn_intake,
         ),
         session=session,
     )
@@ -432,7 +434,14 @@ async def run_native_interview(
 
     room_input, room_output = room_options_for_mode(
         setup.input_mode,
-        text_input_cb=make_text_input_cb(publisher, intake=turn_intake),
+        text_input_cb=make_text_input_cb(
+            publisher,
+            intake=turn_intake,
+            receipts=_make_receipt_store(
+                interview_session_id=userdata.interview_session_id,
+                question_id_getter=_typed_bank_question_id(userdata),
+            ),
+        ),
     )
     await session.start(
         agent,
@@ -440,7 +449,7 @@ async def run_native_interview(
         room_input_options=room_input,
         room_output_options=room_output,
     )
-    _record_conversation(session, userdata, transcript_writes)
+    _record_conversation(session, userdata, transcript_writes, turn_intake=turn_intake)
     hard_stop.start()
     obs.emit(
         obs.EV_AGENT_DISPATCH,
@@ -509,6 +518,70 @@ def _make_finish_marker(userdata: InterviewUserdata) -> Callable[[], Awaitable[N
     return _mark
 
 
+def _typed_bank_question_id(userdata: InterviewUserdata) -> Callable[[], Any]:
+    """The bank question id as of CALL time (the fold may advance it)."""
+
+    def _get() -> Any:  # noqa: ANN401 - the caller treats it as the bank id or None
+        state = userdata.state
+        return state.current_question_id if state is not None else None
+
+    return _get
+
+
+def _make_receipt_store(
+    *,
+    interview_session_id: UUID,
+    question_id_getter: Callable[[], Any],
+) -> native_typed_turn.TypedTurnStore:
+    """The durable typed-turn receipt store wired into the text-input callback.
+
+    Thin adapter over :mod:`native_typed_turn` bound to THIS session, so the
+    callback needs no DB knowledge. The question id is read at persist time —
+    the answer belongs to the question it folds against, and the fold may
+    advance the pointer before the receipt is read again.
+    """
+
+    class _PgStore:
+        async def persist(
+            self,
+            *,
+            session_id: UUID,
+            session_question_id: UUID | None,
+            bank_question_id: UUID | None,
+            text: str,
+            turn_key: str,
+        ) -> tuple[Any, bool]:
+            from abridgeai.core.db import get_sessionmaker  # noqa: PLC0415
+
+            async with get_sessionmaker()() as db:
+                row, created = await native_typed_turn.persist_receipt(
+                    db,
+                    session_id=session_id,
+                    session_question_id=session_question_id,
+                    bank_question_id=bank_question_id,
+                    text=text,
+                    turn_key=turn_key,
+                )
+                return row, created
+
+        async def mark_applied(
+            self,
+            row: Any,  # noqa: ANN401 - the ORM row produced by persist
+            *,
+            state_extra: dict[str, Any] | None = None,
+        ) -> bool:
+            from abridgeai.core.db import get_sessionmaker  # noqa: PLC0415
+
+            del state_extra
+            token = getattr(row, "metadata_json", {}).get("processing_token")
+            async with get_sessionmaker()() as db:
+                return await native_typed_turn.mark_receipt_applied(
+                    db, row, processing_token=token
+                )
+
+    return _PgStore()
+
+
 def _make_state_publisher(
     userdata: InterviewUserdata,
     publisher: ControlPublisher,
@@ -549,6 +622,8 @@ def _record_conversation(
     session: AgentSession,
     userdata: InterviewUserdata,
     transcript_writes: TranscriptWriteBarrier,
+    *,
+    turn_intake: TurnIntake | None = None,
 ) -> None:
     """Persist every committed chat item to ``interview_session_messages``.
 
@@ -603,6 +678,19 @@ def _record_conversation(
             userdata.pending_assistant_kind = None
         else:
             kind = "answer"
+        # A TYPED answer is persisted directly as its durable receipt; the SDK's
+        # conversation_item_added copy of the same text must not be recorded
+        # again (two identical transcript rows for one answer). The intake's
+        # one-shot marker matches on key + normalized text, so a candidate
+        # typing the same sentence TWICE (two keys, two legitimate answers) is
+        # not swallowed, and a voice turn never matches.
+        if (
+            turn_intake is not None
+            and str(role) == "user"
+            and turn_intake.consume_echo(turn_key=userdata.echo_turn_key or "", text=text)
+        ):
+            userdata.echo_turn_key = None
+            return
         transcript_writes.create(
             record_turn(
                 userdata.interview_session_id,

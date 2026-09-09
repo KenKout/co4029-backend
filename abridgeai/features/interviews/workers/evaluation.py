@@ -53,6 +53,8 @@ Behaviour:
 
 from __future__ import annotations
 
+import asyncio
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
@@ -88,6 +90,77 @@ def _retry_defer_seconds(job_try: int) -> float:
     return float(min(_RETRY_MAX_DELAY_S, _RETRY_BASE_DELAY_S * (2**exponent)))
 
 
+async def _stamp_phase(
+    session_id: UUID,
+    job_id: str | None,
+    *,
+    from_phase: str | None,
+    to_phase: str,
+    next_retry_at: str | None = None,
+) -> None:
+    """Move the durable recovery record along THIS job's lifecycle.
+
+    Never raises and never guesses: without a job id (a legacy enqueue path
+    that did not use one) there is no record to address, and the recovery
+    sweep's ARQ reconcile is the safety net. ``from_phase=None`` is the pickup
+    transition and is allowed from any active phase — the queued job that
+    starts running may have been recorded as dispatching or queued.
+
+    Scoped to the job id: a superseded job's transition must not relabel the
+    newer dispatch's record (the CAS refuses when the recorded job differs).
+    """
+    from datetime import UTC, datetime  # noqa: PLC0415
+
+    from abridgeai.features.interviews.queries import (  # noqa: PLC0415
+        sessions as sessions_queries,
+    )
+
+    if job_id is None:
+        return
+    extra = {"started_at": datetime.now(UTC).isoformat()} if to_phase == "running" else None
+    if to_phase == "retrying" and next_retry_at is not None:
+        extra = {"next_retry_at": next_retry_at}
+    try:
+        sessionmaker = get_sessionmaker()
+        async with sessionmaker() as db:
+            if from_phase is None:
+                # Pickup: accept any active phase (dispatching/queued/retrying)
+                # held by THIS job id and move it to running.
+                for phase in ("dispatching", "queued", "retrying", "running"):
+                    if await sessions_queries.transition_evaluation_recovery_phase(
+                        db,
+                        session_id,
+                        job_id=job_id,
+                        from_phase=phase,
+                        to_phase=to_phase,
+                        extra=extra,
+                    ):
+                        return
+                return
+            await sessions_queries.transition_evaluation_recovery_phase(
+                db,
+                session_id,
+                job_id=job_id,
+                from_phase=from_phase,
+                to_phase=to_phase,
+                extra=extra,
+            )
+            _logger.info(
+                "interview.evaluation.phase_transition",
+                session_id=str(session_id),
+                job_id=job_id[:12],
+                from_phase=from_phase,
+                to_phase=to_phase,
+            )
+    except Exception:  # noqa: BLE001 -- bookkeeping must never fail the job
+        _logger.warning(
+            "evaluation recovery phase stamp failed",
+            session_id=str(session_id),
+            job_id=job_id,
+            to_phase=to_phase,
+        )
+
+
 async def evaluate_interview_session_task(
     ctx: dict[str, Any],
     actor_id: UUID,
@@ -119,6 +192,11 @@ async def evaluate_interview_session_task(
     job_try_raw = ctx.get("job_try")
     job_try = job_try_raw if isinstance(job_try_raw, int) else 1
     is_final_attempt = job_try >= EVALUATION_MAX_TRIES
+    # The ARQ job id (when enqueueing used one — every interview evaluation
+    # does). It keys the durable recovery record: phase transitions are scoped
+    # to it, so a superseded job can never relabel a newer dispatch.
+    raw_job_id = ctx.get("job_id")
+    job_id = raw_job_id if isinstance(raw_job_id, str) else None
     set_worker_actor(actor_id)
     bind_request_context(
         session_id=str(session_id),
@@ -126,12 +204,27 @@ async def evaluate_interview_session_task(
     )
     sessionmaker = get_sessionmaker()
     try:
+        await _stamp_phase(session_id, job_id, from_phase=None, to_phase="running")
         async with sessionmaker() as db:
             try:
                 await evaluation_service.evaluate_and_generate_report(
                     db, session_id, is_final_attempt=is_final_attempt
                 )
+                await _stamp_phase(
+                    session_id, job_id, from_phase="running", to_phase="succeeded"
+                )
             except (KeyboardInterrupt, SystemExit):
+                raise
+            except asyncio.CancelledError:
+                # Shutdown cancellation: the worker is going away, not the
+                # evaluation failing. The service rolls back and releases the
+                # claim; here the record goes back to `missing` only when ARQ
+                # re-enqueues decides — actually leave it `running`→`missing`
+                # is WRONG if the job will be retried; ARQ re-runs cancelled
+                # jobs? It does not for CancelledError outside Retry. The
+                # recovery sweep's ARQ reconcile handles it: the job key is
+                # gone, so the record is reconciled to `missing` and the
+                # budget is re-spendable. Nothing to do here but re-raise.
                 raise
             except Retry:
                 # Already a retry signal (shouldn't originate in the service,
@@ -148,12 +241,26 @@ async def evaluate_interview_session_task(
                 if is_final_attempt:
                     # Budget exhausted: the service already stamped
                     # status='failed'. Propagate so arq records the terminal
-                    # job failure — no further retry.
+                    # job failure — no further retry. The durable record is
+                    # stamped failed (scoped to THIS job id) so the public
+                    # state can prove terminality.
+                    await _stamp_phase(
+                        session_id, job_id, from_phase="running", to_phase="failed"
+                    )
                     raise
                 # Budget remaining: translate into arq's Retry so the job is
                 # re-enqueued (bare re-raise would NOT retry — see module
-                # docstring). Backoff grows with each attempt.
+                # docstring). Backoff grows with each attempt. The durable
+                # record moves running→retrying with the resumption time so a
+                # public-state reader sees the job is NOT over.
                 defer = _retry_defer_seconds(job_try)
+                await _stamp_phase(
+                    session_id,
+                    job_id,
+                    from_phase="running",
+                    to_phase="retrying",
+                    next_retry_at=(datetime.now(UTC) + timedelta(seconds=defer)).isoformat(),
+                )
                 _logger.warning(
                     "interview_evaluation_task_retry",
                     session_id=str(session_id),

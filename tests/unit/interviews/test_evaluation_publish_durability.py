@@ -163,7 +163,9 @@ def test_the_completion_sync_is_called_after_the_commit_in_the_source() -> None:
     """
     import inspect
 
-    source = inspect.getsource(evaluation_service.evaluate_and_generate_report)
+    # The verdict's transaction and the sync call both live in the claimed
+    # handler (the wrapper only claims/dispatches to it).
+    source = inspect.getsource(evaluation_service._evaluate_claimed)
     sync_at = source.index("_sync_course_completion(")
     except_at = source.index("    except Exception as exc:")
     assert sync_at > except_at, (

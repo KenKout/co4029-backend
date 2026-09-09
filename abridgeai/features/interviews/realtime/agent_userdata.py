@@ -141,6 +141,11 @@ class InterviewUserdata:
     # the live transcript can badge it. Same injection/no-op pattern as
     # `publish_state`.
     publish_agent_action: Callable[[str], Awaitable[None]] = lambda kind: _no_publish()
+    # The turn_key of the typed answer whose durable receipt was JUST persisted
+    # and whose SDK echo (conversation_item_added) has not arrived yet. The
+    # transcript handler consumes it to suppress that one echo — the receipt
+    # already is the transcript row. See `TurnIntake.arm_echo`.
+    echo_turn_key: str | None = None
 
     def remaining_seconds_now(self) -> int | None:
         """The countdown as of NOW, derived from the snapshot and elapsed time.

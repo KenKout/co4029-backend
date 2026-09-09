@@ -17,14 +17,27 @@ Both facts already exist server-side. This module derives the answer from them
 so there is ONE definition, and exposes it as a small closed vocabulary. The
 underlying ``internal_summary_json`` stays teacher-only: only the label crosses
 the wire.
+
+The DECISION inputs, in order of authority:
+
+1. a published verdict → ``succeeded`` (``pass_verdict=False`` counts);
+2. a durable ACTIVE recovery phase (``evaluation_recovery.current.phase`` in
+   dispatching/queued/running/retrying) → ``pending`` — a timestamp heuristic
+   cannot distinguish "queued for an hour behind a busy worker" from "dead",
+   and guessing dead told the student no verdict was coming while the job sat
+   in the queue;
+3. a live claim → ``pending`` (direct evidence a grader holds the session);
+4. the budget spent with every phase record terminal (succeeded/failed/missing)
+   → ``exhausted``;
+5. a legacy row at the ceiling with NO phase record stays ``pending`` until the
+   lifecycle lazy-reconciles it against ARQ — "unknown" must never be read as
+   "dead".
 """
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
 from typing import Any, Literal
 
-from abridgeai.core.security import utcnow
 from abridgeai.features.interviews.services.evaluation_claim import EVALUATION_LEASE_SECONDS
 
 # Keep in step with ``recover_stalled_evaluations(max_recovery_attempts=...)``
@@ -32,13 +45,15 @@ from abridgeai.features.interviews.services.evaluation_claim import EVALUATION_L
 # attempts the sweep no longer selects the row, so nothing will re-drive it.
 MAX_EVALUATION_RECOVERY_ATTEMPTS = 3
 
-# How long the job that consumed the LAST attempt may still be working before we
-# are willing to call a session dead. The counter is charged BEFORE the enqueue
-# (deliberately: a job killed mid-run must still spend its budget), so hitting
-# the ceiling means "the final job was dispatched", not "the final job finished".
-# The lease ceiling is the right bound: it is already longer than
-# ``WorkerSettings.job_timeout``, so no live job can outlast it.
+# Kept only for backwards compatibility with the ordering test that pins it
+# against the claim lease and ARQ's job timeout. The public-state decision no
+# longer consults a dispatch age: the durable phase is the authority.
 FINAL_ATTEMPT_SETTLE_SECONDS = EVALUATION_LEASE_SECONDS
+
+# The ACTIVE phases of a durable recovery record: the recorded job has been
+# dispatched and has not reached a terminal state yet.
+ACTIVE_PHASES = ("dispatching", "queued", "running", "retrying")
+TERMINAL_PHASES = ("succeeded", "failed", "missing")
 
 EvaluationState = Literal[
     "not_required",
@@ -64,48 +79,13 @@ def recovery_attempts(session: object) -> int:
         return 0
 
 
-def _last_attempt_at(session: object) -> datetime | None:
-    """When the most recent recovery attempt was dispatched, if it is known."""
-    raw = _recovery_metadata(session).get("last_attempt_at")
-    if isinstance(raw, datetime):
-        return raw
-    if not isinstance(raw, str):
+def _current_phase(session: object) -> str | None:
+    """The durable phase of the most recent recovery dispatch, if recorded."""
+    current = _recovery_metadata(session).get("current")
+    if not isinstance(current, dict):
         return None
-    try:
-        return datetime.fromisoformat(raw)
-    except ValueError:
-        return None
-
-
-def _final_attempt_may_still_be_running(session: object) -> bool:
-    """Is the job that consumed the last attempt plausibly still working?
-
-    The attempt counter is charged BEFORE the enqueue, so reaching the ceiling
-    only proves the final job was dispatched. Calling that ``exhausted`` told the
-    student "no verdict is coming" while their last grading job was still queued
-    or mid-run: the UI stopped polling and they never saw the result that landed
-    a minute later.
-
-    A live claim is direct evidence a job holds the session. Otherwise fall back
-    to the dispatch timestamp: within the settle window the job may not have
-    claimed yet (still queued behind other work).
-    """
-    now = utcnow()
-    lease_expires_at = getattr(session, "evaluation_claim_expires_at", None)
-    if isinstance(lease_expires_at, datetime) and lease_expires_at > now:
-        return True
-
-    last_attempt_at = _last_attempt_at(session)
-    if last_attempt_at is None:
-        # No dispatch timestamp (pre-existing row, or hand-edited metadata) —
-        # nothing suggests a live job, so do not hold the UI open indefinitely.
-        return False
-    if last_attempt_at.tzinfo is None:
-        # Everything we write is aware (``utcnow().isoformat()``); a naive value
-        # can only be legacy/hand-edited data. Read it as UTC rather than raising
-        # a TypeError out of a student-facing response serializer.
-        last_attempt_at = last_attempt_at.replace(tzinfo=now.tzinfo)
-    return now - last_attempt_at < timedelta(seconds=FINAL_ATTEMPT_SETTLE_SECONDS)
+    phase = current.get("phase")
+    return phase if isinstance(phase, str) else None
 
 
 def derive_evaluation_state(session: object) -> EvaluationState:
@@ -113,14 +93,12 @@ def derive_evaluation_state(session: object) -> EvaluationState:
 
     * ``succeeded`` — a verdict is published. ``pass_verdict=False`` counts:
       the grader ran to completion and made a judgement.
-    * ``pending`` — terminal + ungraded, and either a job is still working or
-      the recovery sweep can still pick it up. Includes ``status='failed'``, and
-      includes a session at the attempt ceiling whose FINAL job has not settled
-      yet: the counter is charged before the enqueue, so the ceiling alone does
-      not mean the last grading run is over.
-    * ``exhausted`` — terminal + ungraded, the recovery budget is spent AND the
-      job that spent it is no longer running. No sweep will select it again, so
-      a reader must stop waiting.
+    * ``pending`` — terminal + ungraded, and the work is not proven over: a
+      durable ACTIVE recovery phase, a live claim, or budget left for the
+      sweep to pick the session up with.
+    * ``exhausted`` — terminal + ungraded, the budget is spent, AND every
+      phase record is terminal (or the record was reconciled away). No sweep
+      will select it again, so a reader must stop waiting.
     * ``not_required`` — nothing to wait for: still live, ``abandoned`` (no
       gradeable answer), or never reached the assessment (the same refusal
       ``services.evaluation._ungradeable_reason`` applies).
@@ -135,13 +113,48 @@ def derive_evaluation_state(session: object) -> EvaluationState:
         return "not_required"
 
     if recovery_attempts(session) >= MAX_EVALUATION_RECOVERY_ATTEMPTS:
-        return "pending" if _final_attempt_may_still_be_running(session) else "exhausted"
+        return "pending" if _final_job_may_still_be_working(session) else "exhausted"
     return "pending"
+
+
+def _final_job_may_still_be_working(session: object) -> bool:
+    """Is the last dispatched job alive, or at least not proven terminal?
+
+    Reads the DURABLE evidence, never a clock: an active phase record means the
+    job is still working no matter how long it has been; a live claim is direct
+    evidence a grader holds the session. A legacy row with no record (or an
+    unrecognised one) conservatively stays pending until the lifecycle
+    reconciles it against ARQ.
+    """
+    phase = _current_phase(session)
+    if phase in ACTIVE_PHASES:
+        return True
+    if phase in TERMINAL_PHASES:
+        return False
+
+    # No usable phase record. A live claim is still direct evidence a grader
+    # holds the session. Without one the record may be legacy (the lazy
+    # reconcile has not reached it) — "unknown" stays pending rather than
+    # being read as dead.
+    from datetime import datetime  # noqa: PLC0415
+
+    from abridgeai.core.security import utcnow  # noqa: PLC0415
+
+    lease_expires_at = getattr(session, "evaluation_claim_expires_at", None)
+    if isinstance(lease_expires_at, datetime) and lease_expires_at > utcnow():
+        # A live claim: a grader holds the session right now.
+        return True
+    # Nothing proves the job terminal and nothing proves it alive. Until the
+    # lifecycle reconciles this legacy row against ARQ, "unknown" stays
+    # pending — declaring it dead is the exact bug this module exists to stop.
+    return True
 
 
 __all__ = [
     "FINAL_ATTEMPT_SETTLE_SECONDS",
     "MAX_EVALUATION_RECOVERY_ATTEMPTS",
+    "ACTIVE_PHASES",
+    "TERMINAL_PHASES",
     "EvaluationState",
     "derive_evaluation_state",
     "recovery_attempts",

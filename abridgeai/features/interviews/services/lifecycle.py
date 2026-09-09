@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import logging
 from datetime import timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from abridgeai.core.security import utcnow
@@ -164,9 +164,103 @@ async def recover_stalled_evaluations(
     )
     enqueued = 0
     for session in candidates:
+        # Reconcile the durable phase record against ARQ BEFORE deciding to
+        # charge: an active record whose job ARQ no longer holds must be
+        # marked terminal (or left active, when Redis cannot say), never
+        # charged over.
+        try:
+            if await _reconcile_current_phase(db, session, arq_pool=arq_pool):
+                continue
+        except Exception:  # noqa: BLE001 -- one bad row must not skip the sweep
+            logger.exception(
+                "reconciling recovery phase failed (session=%s)",
+                getattr(session, "id", "?"),
+            )
+            continue
         if await _redrive_one_evaluation(db, session, arq_pool=arq_pool):
             enqueued += 1
     return enqueued
+
+
+async def _arq_job_is_live(arq_pool: object, job_id: str) -> bool | None:
+    """Whether ARQ still holds ``job_id``: True live, False gone, None unknown.
+
+    A live ARQ job keeps an ``arq:job:<id>`` key in Redis for its whole
+    lifecycle (queued, in-progress, retry-scheduled) and the key is deleted
+    once the job finishes. A result key existing means the job RAN — terminal
+    either way. Any Redis failure returns None: "unknown" must never be read
+    as "dead", because that is exactly how a queued job was declared exhausted
+    while it waited for a worker.
+    """
+    # arq's ArqRedis subclasses redis.asyncio.Redis, so the pool itself is the
+    # client. Typed as object at this boundary; the casts below are honest.
+    redis: Any = getattr(arq_pool, "_redis", None) or arq_pool
+    try:
+        job_key = await redis.exists(f"arq:job:{job_id}")
+        if job_key:
+            return True
+        result_key = await redis.exists(f"arq:result:{job_id}")
+        if result_key:
+            return False
+        return False
+    except Exception:  # noqa: BLE001 -- Redis down: the answer is UNKNOWN
+        logger.warning("arq job-state lookup failed; treating state as unknown")
+        return None
+
+
+async def _reconcile_current_phase(
+    db: AsyncSession,
+    session: object,
+    *,
+    arq_pool: object,
+) -> bool:
+    """Bring the durable phase record in line with what ARQ knows.
+
+    An ACTIVE record whose job ARQ no longer holds is marked ``missing``
+    (terminal) so the sweep may charge a fresh attempt; a record whose result
+    key exists is marked ``succeeded``/``failed`` is left to the verdict —
+    either way it stops blocking. A live job, or an unknown Redis state,
+    changes nothing.
+
+    Returns True when the record now counts as active.
+    """
+
+    summary = getattr(session, "internal_summary_json", None) or {}
+    recovery = summary.get("evaluation_recovery") if isinstance(summary, dict) else None
+    current = recovery.get("current") if isinstance(recovery, dict) else None
+    if not isinstance(current, dict):
+        return False
+    phase = current.get("phase")
+    if phase not in ("dispatching", "queued", "running", "retrying"):
+        return False
+
+    job_id = current.get("job_id")
+    if not isinstance(job_id, str) or not job_id:
+        # A record that never named its job cannot be verified; ARQ may still
+        # hold it. Leave it active — the conservative direction.
+        return True
+
+    state = await _arq_job_is_live(arq_pool, job_id)
+    if state is None:
+        # Redis unavailable: unknown is not dead. Skip without charging.
+        return True
+
+    from abridgeai.features.interviews.queries import sessions as _q  # noqa: PLC0415
+
+    if state:
+        return True  # still queued/running/retrying per ARQ
+    # ARQ holds neither the job nor a result it could be resumed from: the
+    # record's job is gone. Mark it missing (terminal) — one narrow, CASed
+    # write scoped to the exact job id and phase we observed.
+    await _q.transition_evaluation_recovery_phase(
+        db,
+        session.id,  # type: ignore[attr-defined]
+        job_id=job_id,
+        from_phase=str(phase),
+        to_phase="missing",
+        extra={"settled_at": utcnow().isoformat()},
+    )
+    return False
 
 
 async def _redrive_one_evaluation(
@@ -181,6 +275,16 @@ async def _redrive_one_evaluation(
     and refunds the attempt whenever no job actually reached Redis.
     """
     session_id = session.id  # type: ignore[attr-defined]
+    # A live claim / active durable job re-checked at stamp time (the candidate
+    # list may be stale) refuses the charge — including a claim that appeared
+    # after the query ran.
+    job_id = _evaluation_job_id(session_id, attempt=1)
+    # The attempt number is only known after the stamp (it returns the NEW
+    # count), but the stamp builds the deterministic job id itself, so pass the
+    # caller-chosen id shape: we must know the id BEFORE dispatch to CAS the
+    # phase. Stamp with an explicit job id derived from the returned count is
+    # two writes; instead stamp reserves with its own default id, so read it
+    # back from the returned attempt count.
     # Snapshot the recovery sub-object ONLY — never the whole summary. See the
     # refund helper: restoring a whole snapshot destroyed concurrent results.
     previous_recovery = (getattr(session, "internal_summary_json", None) or {}).get(
@@ -191,15 +295,21 @@ async def _redrive_one_evaluation(
     attempt = await sessions_queries.stamp_evaluation_recovery_attempt(
         db, session_id, now=utcnow()
     )
-    if attempt is None:
-        # A verdict landed between the candidate query and now. Nothing to
-        # repair, and no attempt was charged.
+    if attempt is not None:
         logger.info(
-            "interview evaluation recovery skipped; verdict already published",
+            "interview.evaluation.dispatch_reserved",
+            extra={"session_id": str(session_id), "attempt": attempt},
+        )
+    if attempt is None:
+        # A verdict landed, a live claim appeared, or the previous recovery's
+        # job is still active — none of it is this sweep's attempt to spend.
+        logger.info(
+            "interview.evaluation.recovery_skipped_live_claim",
             extra={"session_id": str(session_id)},
         )
         return False
 
+    job_id = _evaluation_job_id(session_id, attempt=attempt)
     job: object | None = None
     dispatch_error: Exception | None = None
     try:
@@ -207,17 +317,30 @@ async def _redrive_one_evaluation(
             _EVALUATE_INTERVIEW_SESSION_TASK,
             session.student_id,  # type: ignore[attr-defined]
             session_id,
-            _job_id=_evaluation_job_id(session_id, attempt=attempt),
+            _job_id=job_id,
         )
     except Exception as exc:  # noqa: BLE001 -- transport failure, refunded below
         dispatch_error = exc
 
     if job is not None:
+        # ARQ accepted the job: reserve → queued, scoped to THIS dispatch.
+        await sessions_queries.transition_evaluation_recovery_phase(
+            db,
+            session_id,
+            job_id=job_id,
+            from_phase="dispatching",
+            to_phase="queued",
+            extra={"queued_at": utcnow().isoformat()},
+        )
+        logger.info(
+            "interview.evaluation.dispatch_queued",
+            extra={"session_id": str(session_id), "attempt": attempt, "job_id": job_id[:12]},
+        )
         return True
 
-    # Nothing was queued. Refund the attempt so a dispatch outage cannot consume
-    # the student's grading opportunities. Metadata only — never the transcript,
-    # and never anything the evaluator owns.
+    # Nothing was queued. Refund the attempt (and drop the dispatching record)
+    # so a dispatch outage cannot consume the student's grading opportunities.
+    # Metadata only — never the transcript, never anything the evaluator owns.
     refunded = await sessions_queries.refund_evaluation_recovery_attempt(
         db,
         session_id,
@@ -225,12 +348,12 @@ async def _redrive_one_evaluation(
         previous_recovery=previous_recovery,
     )
     logger.warning(
-        "interview evaluation recovery dispatch failed; attempt refunded",
+        "interview.evaluation.dispatch_refunded",
         extra={
             "session_id": str(session_id),
             "attempt": attempt,
             "refunded": refunded,
-            "job_id": _evaluation_job_id(session_id, attempt=attempt),
+            "job_id": job_id,
             "error": str(dispatch_error) if dispatch_error is not None else "enqueue_refused",
         },
     )

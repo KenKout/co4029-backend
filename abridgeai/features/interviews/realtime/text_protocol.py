@@ -76,6 +76,10 @@ class TurnRejection(StrEnum):
     INVALID_TURN_KEY = "invalid_turn_key"
     TURN_IN_FLIGHT = "turn_in_flight"
     SESSION_CLOSING = "session_closing"
+    # The answer could not be made durable (receipt insert failed). The client
+    # keeps its draft and may retry with the SAME turn_key — the retry is safe
+    # because nothing was acked.
+    SERVER_ERROR = "server_error"
 
 
 class ControlStatus(StrEnum):
@@ -205,9 +209,15 @@ class StateSnapshot:
     is_finished: bool
     has_time_limit: bool
     time_remaining_seconds: int | None = None
+    # The typed turn this snapshot CONFIRMS as durable: set by
+    # `ControlPublisher.acknowledge` after the answer's receipt reached
+    # `applied`. Optional, and absent from every other snapshot — the client
+    # clears its parked sent-draft ONLY when this key matches the turn it sent.
+    # Older clients ignore it; nothing else about the snapshot changes.
+    confirmed_turn_key: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "current_question_id": self.current_question_id,
             "current_question_text": self.current_question_text,
             "question_number": self.question_number,
@@ -219,6 +229,9 @@ class StateSnapshot:
             "has_time_limit": self.has_time_limit,
             "time_remaining_seconds": self.time_remaining_seconds,
         }
+        if self.confirmed_turn_key is not None:
+            payload["confirmed_turn_key"] = self.confirmed_turn_key
+        return payload
 
 
 @dataclass

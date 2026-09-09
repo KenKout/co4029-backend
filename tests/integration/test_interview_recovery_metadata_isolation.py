@@ -328,6 +328,20 @@ async def test_a_refund_is_skipped_once_a_later_sweep_has_charged_its_own(
         assert await sessions_queries.stamp_evaluation_recovery_attempt(
             db, session_id, now=datetime.now(UTC)
         ) == 1
+        # The charge RESERVES the dispatch (current.phase='dispatching'), and
+        # the active-job guard now refuses any charge while that record is
+        # active — exactly what stops sweep 2 billing a live sweep 1. Simulate
+        # the record reaching a TERMINAL phase (the job is gone) so this test
+        # keeps pinning the refund-vs-later-sweep rule it was written for.
+        await db.execute(
+            text(
+                "UPDATE interview_sessions SET internal_summary_json = "
+                "jsonb_set(internal_summary_json, "
+                "'{evaluation_recovery,current,phase}', "
+                "to_jsonb('missing'::text)) WHERE id = :s"
+            ),
+            {"s": session_id},
+        )
         # A later sweep charges its own attempt before our refund lands.
         assert await sessions_queries.stamp_evaluation_recovery_attempt(
             db, session_id, now=datetime.now(UTC) + timedelta(minutes=5)

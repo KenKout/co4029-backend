@@ -26,9 +26,14 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
+from abridgeai.features.interviews.realtime import native_typed_turn
 from abridgeai.features.interviews.realtime import observability as obs
 from abridgeai.features.interviews.realtime import text_protocol as tp
-from abridgeai.features.interviews.realtime.native_turn_intake import TurnIntake
+from abridgeai.features.interviews.realtime.native_turn_intake import (
+    TurnIntake,
+    TypedTurnIntakeError,
+)
+from abridgeai.features.interviews.realtime.native_typed_turn import TypedTurnStore
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -68,6 +73,7 @@ def make_text_input_cb(
     publisher: ControlPublisher,
     *,
     intake: TurnIntake | None = None,
+    receipts: TypedTurnStore | None = None,
 ) -> Callable[[Any, Any], Awaitable[None]]:
     """Build the ``text_input_cb`` for a native session.
 
@@ -80,6 +86,11 @@ def make_text_input_cb(
     It is optional only so a diagnostic harness can build a callback without one;
     a real session always passes it, because without it a resent turn is graded
     twice and a finish can submit while an answer is still being graded.
+
+    ``receipts`` is the durable typed-turn store. Optional so the unit tests of
+    the pure intake/ledger behaviour can run without a database; the runtime
+    wiring ALWAYS passes one. With a store wired, the ack is published only
+    AFTER the receipt commits: it means "your answer is durable", not "in RAM".
     """
     turn_intake = intake if intake is not None else TurnIntake()
 
@@ -96,6 +107,19 @@ def make_text_input_cb(
                 turn_key=_raw_turn_key(ev),
                 turn_action=tp.DEFAULT_TURN_ACTION,
                 rejection=err.rejection,
+            )
+            return
+
+        # Begin BEFORE any await: the closing gate and the single-flight
+        # reservation must be decided synchronously, or a finish racing the
+        # reserve could slip between the reserve and the receipt.
+        try:
+            reserved = turn_intake.begin()
+        except TypedTurnIntakeError:
+            await publisher.reject(
+                turn_key=turn.turn_key,
+                turn_action=turn.turn_action,
+                rejection=tp.TurnRejection.SESSION_CLOSING,
             )
             return
 
@@ -117,20 +141,127 @@ def make_text_input_cb(
             await publisher.ack(turn_key=turn.turn_key, turn_action=turn.turn_action)
             return
 
-        # Ack BEFORE the fold. Grading calls an LLM and can take seconds; the
-        # composer must not sit spinning behind it, and an ack means "received",
-        # not "graded".
-        await publisher.ack(turn_key=turn.turn_key, turn_action=turn.turn_action)
-
-        # Held across the fold AND the reply handoff, so a finish that starts now
-        # waits for this answer instead of submitting a transcript without it.
-        async with turn_intake.processing():
+        async with reserved:
             if turn.turn_action == tp.DEFAULT_TURN_ACTION:
-                await _fold_typed_answer(sess, turn.text, turn_key=turn.turn_key)
+                receipt_row = None
+                if receipts is not None:
+                    try:
+                        receipt_row, _created = await receipts.persist(
+                            session_id=sess.userdata.interview_session_id,
+                            session_question_id=None,
+                            bank_question_id=_current_bank_question_id(sess),
+                            text=turn.text,
+                            turn_key=turn.turn_key or "",
+                        )
+                    except Exception:  # noqa: BLE001 - no durable receipt means NO ack
+                        obs.emit(
+                            obs.EV_TYPED_RECEIPT_FAILED,
+                            session_id=_session_id(sess),
+                            turn_action=turn.turn_action,
+                        )
+                        logger.exception(
+                            "typed receipt failed; turn NOT acked (key=%s)", turn.turn_key
+                        )
+                        await publisher.reject(
+                            turn_key=turn.turn_key,
+                            turn_action=turn.turn_action,
+                            rejection=tp.TurnRejection.SERVER_ERROR,
+                        )
+                        return
+
+                # Durable BEFORE ack. If the receipt was already applied (a
+                # restart between commit and the client settling), this is the
+                # re-ack path — no fold, no echo marker, no reply.
+                if (
+                    receipt_row is not None
+                    and native_typed_turn.receipt_state(receipt_row) == "applied"
+                ):
+                    obs.emit(
+                        obs.EV_TYPED_TURN_APPLIED,
+                        session_id=_session_id(sess),
+                        turn_action="resume",
+                    )
+                    await publisher.ack(turn_key=turn.turn_key, turn_action=turn.turn_action)
+                    return
+
+                # Arm the one-shot echo marker BEFORE the ack, so the SDK's
+                # conversation_item_added copy of this text can be recognized and
+                # dropped — the receipt already IS the transcript row.
+                if receipt_row is not None and turn.turn_key:
+                    turn_intake.arm_echo(turn_key=turn.turn_key, text=turn.text)
+                    userdata = getattr(sess, "userdata", None)
+                    if userdata is not None:
+                        userdata.echo_turn_key = turn.turn_key
+
+                # Ack AFTER the durable receipt. Grading still runs after it and
+                # can take seconds; the composer must not sit spinning behind it.
+                await publisher.ack(turn_key=turn.turn_key, turn_action=turn.turn_action)
+
+                if receipt_row is not None:
+                    await _fold_typed_answer(sess, turn.text, turn_key=turn.turn_key)
+                    await _mark_receipt_applied(
+                        receipts, receipt_row, turn_intake, turn, publisher, sess
+                    )
+                else:
+                    # No store wired (diagnostic harness): old ordering.
+                    await _fold_typed_answer(sess, turn.text, turn_key=turn.turn_key)
+            else:
+                await publisher.ack(turn_key=turn.turn_key, turn_action=turn.turn_action)
 
             await _reply(sess, turn, publisher)
 
     return _on_text_input
+
+
+async def _mark_receipt_applied(
+    receipts: TypedTurnStore | None,
+    receipt_row: Any,  # noqa: ANN401 - store's own row
+    turn_intake: TurnIntake,
+    turn: tp.InboundTurn,
+    publisher: ControlPublisher,
+    sess: Any,  # noqa: ANN401 - see _on_text_input
+) -> None:
+    """Settle the receipt received→applied after the fold's own commit.
+
+    The fold persists runtime state through its own writer; this marks the
+    RECEIPT applied. A crash in between is safe by construction: the retry
+    re-folds (idempotent by turn_key) and re-settles — the candidate's answer
+    is never graded twice because the ledger + ``last_turn_idempotency_key``
+    dedupe, and never lost because the receipt row survives.
+
+    Once applied, the client is told via an ACKNOWLEDGED snapshot
+    (``confirmed_turn_key=K``): that is what lets it drop the parked sent-draft.
+    The ack itself deliberately does not — an ack only ever meant "durable",
+    and "durable" has always been true the moment the receipt committed.
+    """
+    if receipts is None or turn.turn_key is None:
+        return
+    try:
+        applied = await receipts.mark_applied(receipt_row)
+    except Exception:  # noqa: BLE001 - settle is best-effort; the ledger dedupes
+        logger.exception("marking typed receipt applied failed (key=%s)", turn.turn_key)
+        obs.emit(
+            obs.EV_TYPED_TURN_RESUMED,
+            session_id=_session_id(sess),
+            turn_action="settle-failed",
+        )
+        return
+    if applied:
+        obs.emit(
+            obs.EV_TYPED_TURN_APPLIED,
+            session_id=_session_id(sess),
+            turn_action=turn.turn_action,
+        )
+        try:
+            await publisher.acknowledge(turn_key=turn.turn_key)
+        except Exception:  # noqa: BLE001 - a lost confirmation self-heals on retry
+            logger.exception("publishing the confirmed snapshot failed (key=%s)", turn.turn_key)
+
+
+def _current_bank_question_id(sess: Any) -> Any:  # noqa: ANN401 - see _on_text_input
+    """The bank question the answer folds against, at receipt time."""
+    state = getattr(getattr(sess, "userdata", None), "state", None)
+    return getattr(state, "current_question_id", None) if state else None
 
 
 async def _fold_typed_answer(

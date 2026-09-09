@@ -81,6 +81,20 @@ EV_TEXT_TURN_REJECTED = "voice.text_turn_rejected"
 # (silently grading it twice) is a scoring bug with no signal at all.
 EV_TEXT_TURN_DUPLICATE = "voice.text_turn_duplicate"
 
+# The hard stop's submit did not persist and the retry loop is trying again.
+# Each of these is a session staying `in_progress` for another 30s window.
+EV_FINALIZE_RETRY = "voice.finalize_retry"
+
+# The typed-turn receipt could not be made durable, so the turn was NOT acked
+# and the client is free to retry with the same key. Every one of these is a
+# candidate answer that exists only on their screen — alert on it.
+EV_TYPED_RECEIPT_FAILED = "voice.typed_turn_commit_failed"
+
+# A typed answer's receipt reached `applied` (graded and folded) or was found
+# already applied on a retry (re-acked without re-grading).
+EV_TYPED_TURN_APPLIED = "voice.typed_turn_applied"
+EV_TYPED_TURN_RESUMED = "voice.typed_turn_resumed"
+
 # A finish (the model ending, or the hard stop) had to wait for typed turns that
 # were still being graded, and the wait timed out. Every one of these is an answer
 # that may be missing from the transcript the evaluator grades.
@@ -135,6 +149,10 @@ ALL_EVENTS = frozenset(
         EV_TURN_ERROR,
         EV_TEXT_TURN_REJECTED,
         EV_TEXT_TURN_DUPLICATE,
+        EV_TYPED_RECEIPT_FAILED,
+        EV_TYPED_TURN_APPLIED,
+        EV_TYPED_TURN_RESUMED,
+        EV_FINALIZE_RETRY,
         EV_TURN_DRAIN_TIMEOUT,
         EV_SERVER_ADVANCED,
         EV_TOOL_REFUSED,
@@ -208,6 +226,10 @@ __all__ = [
     "EV_TURN_STARTED",
     "EV_TEXT_TURN_REJECTED",
     "EV_TEXT_TURN_DUPLICATE",
+    "EV_TYPED_RECEIPT_FAILED",
+    "EV_TYPED_TURN_APPLIED",
+    "EV_TYPED_TURN_RESUMED",
+    "EV_FINALIZE_RETRY",
     "EV_TURN_DRAIN_TIMEOUT",
     "EV_SERVER_ADVANCED",
     "EV_TOOL_REFUSED",

@@ -170,6 +170,12 @@ class HardStopPlan:
     # is excluded from the deadline sweep — so a refused hard-stop submit there left
     # the row `in_progress` with nothing anywhere that would ever finish it.
     close_fallback: Callable[[], Awaitable[str | None]] | None = None
+    # The session's typed-turn intake, when one exists. A finalization attempt
+    # CLOSES it before draining (new turns get `session_closing` — the finish
+    # has started and cannot be extended), and a FAILED attempt reopens it
+    # generation-guarded, so the session can still accept answers after a
+    # rollback. Optional only for tests that exercise the timer in isolation.
+    turn_intake: Any | None = None  # noqa: ANN401 - TurnIntake; avoids an import cycle
 
 
 class HardStopTimer:
@@ -188,7 +194,18 @@ class HardStopTimer:
         self._plan = plan
         self._session = session
         self._task: asyncio.Task[None] | None = None
-        self._finalized = False
+        # The finalization state machine: open → finalizing → finalized.
+        # `finalizing` is the window where a submit is being ATTEMPTED — a
+        # concurrent route must join the same in-flight task, not start a second
+        # one; `finalized` means a submit PERSISTED. A failed attempt rolls back
+        # to `open` (with the intake reopened), so the timer's retry loop or the
+        # model can finish the session later — "finalizing" is never a latch.
+        self._state: str = "open"
+        self._lock = asyncio.Lock()
+        self._finalize_task: asyncio.Task[bool] | None = None
+        # The closing text the timer route produced, kept for the speech that
+        # follows a successful attempt.
+        self._last_closing: str | None = None
         # Set by the runtime once the publisher exists. Runs after EITHER route
         # submits, so "the interview is over" reaches the client whether the model
         # ended it or the wall clock did.
@@ -196,7 +213,7 @@ class HardStopTimer:
 
     @property
     def fired(self) -> bool:
-        return self._finalized
+        return self._state == "finalized"
 
     def start(self) -> None:
         self._task = asyncio.create_task(self._run())
@@ -210,19 +227,86 @@ class HardStopTimer:
         """Run ``inner`` at most once per session, and disarm the timer.
 
         Wrapping the tool's finalizer rather than guarding inside it keeps
-        ``agent_tools`` unaware that a timer exists.
+        ``agent_tools`` unaware that a timer exists. Both this and the timer's
+        own ``_stop`` drive ONE state machine and ONE in-flight task: whichever
+        route arrives while the other is finalizing awaits the same attempt and
+        returns its outcome, so neither submits twice nor races the drain.
         """
-        if self._finalized:
-            return
-        self._finalized = True
-        self.cancel()
-        # Typed turns first, THEN their transcript writes. A turn mid-grading has
-        # not created its write yet, so flushing without draining submits a
-        # transcript the candidate's last answer never reached.
-        await self._drain_turns()
-        await self._plan.flush_transcript()
-        await inner()
+        async with self._lock:
+            if self._state == "finalized":
+                return
+            if self._finalize_task is not None:
+                # Another route's attempt is live: join it. Same result, one
+                # submit.
+                task = self._finalize_task
+            else:
+                self._state = "finalizing"
+                self.cancel()
+                task = self._finalize_task = asyncio.create_task(
+                    self._attempt(lambda: self._submit_model_route(inner))
+                )
+        await task
+
+    def _submit_model_route(
+        self, inner: Callable[[], Awaitable[None]]
+    ) -> Callable[[], Awaitable[None]]:
+        """The model route's submit step: ``inner`` (it persists the session)."""
+
+        async def _submit() -> None:
+            await inner()
+
+        return _submit
+
+    async def _attempt(
+        self,
+        make_submit: Callable[[], Callable[[], Awaitable[None]]],
+    ) -> bool:
+        """One full finalization attempt under the shared state machine.
+
+        Closes the typed intake BEFORE draining (a turn arriving during the
+        drain is too late to matter and must not extend the finish), drains
+        in-flight turns, flushes their transcript writes, runs the route's own
+        submit, and — only after a submit that did not raise — marks the state
+        finalized, announces the finish, and disarms everything.
+
+        Returns True when the submit persisted. A raise or cancellation rolls
+        the state back to open and reopens the intake (guarded by generation,
+        so a zombie attempt cannot undo the attempt that replaced it); the
+        caller decides whether to retry or propagate.
+        """
+        intake = self._plan.turn_intake
+        closing_generation = intake.close() if intake is not None else None
+        submit = make_submit()
+        try:
+            # Typed turns first, THEN their transcript writes. A turn mid-grading
+            # has not created its write yet, so flushing without draining submits
+            # a transcript the candidate's last answer never reached.
+            await self._drain_turns()
+            await self._plan.flush_transcript()
+            await submit()
+        except asyncio.CancelledError:
+            self._rollback_finalization(closing_generation)
+            raise
+        except Exception:
+            self._rollback_finalization(closing_generation)
+            return False
+        self._state = "finalized"
+        self._finalize_task = None
         await self._announce_finished()
+        return True
+
+    def _rollback_finalization(self, closing_generation: int | None) -> None:
+        """Reopen the session after a failed attempt; clear the in-flight task."""
+        self._state = "open"
+        self._finalize_task = None
+        intake = self._plan.turn_intake
+        if intake is not None:
+            reopened = intake.reopen(expected_generation=closing_generation)
+            if not reopened:
+                logger.warning(
+                    "intake reopen skipped for a superseded finalizer (session=%s)",
+                    self._plan.interview_session_id,
+                )
 
     async def _drain_turns(self) -> None:
         """Wait for typed turns still being graded. Never raises, always bounded."""
@@ -297,55 +381,42 @@ class HardStopTimer:
         """
         try:
             await asyncio.sleep(self._plan.deadline_seconds)
-            while not self._finalized:
+            while self._state != "finalized":
                 await self._stop()
-                if self._finalized:
+                if self._state == "finalized":
                     return
+                obs.emit(
+                    obs.EV_FINALIZE_RETRY,
+                    session_id=self._plan.interview_session_id,
+                )
                 await asyncio.sleep(self._RETRY_AFTER_FAILED_STOP_S)
         except asyncio.CancelledError:
             return
 
     async def _stop(self) -> None:
-        if self._finalized:
+        """The timer route: one attempt through the shared state machine.
+
+        Retried by ``_run`` when the attempt could not persist. Never raises.
+        """
+        async with self._lock:
+            if self._state == "finalized":
+                return
+            if self._finalize_task is None:
+                self._state = "finalizing"
+                self._finalize_task = asyncio.create_task(self._attempt(self._submit_timer_route))
+        await self._finalize_task
+        if self._state != "finalized":
             return
-        self._finalized = True
         # Submit BEFORE speaking. The candidate's answers are already graded
         # evidence at this point, and a transport failure during the goodbye must
         # not be the reason a completed interview was never submitted.
-        closing: str | None = None
-        submitted = False
-        try:
-            await self._drain_turns()
-            await self._plan.flush_transcript()
-            closing = await self._plan.close()
-            submitted = True
-        except Exception:
-            logger.exception(
-                "hard stop failed to finalize (session=%s)",
-                self._plan.interview_session_id,
-            )
-        if not submitted:
-            closing, submitted = await self._close_via_fallback()
+        closing = self._last_closing
         obs.emit(
             obs.EV_CLOSING_EMITTED,
             session_id=self._plan.interview_session_id,
             reason="hard_stop_deadline",
             closing_chars=len(closing or ""),
         )
-        # Only tell the client the interview is over once it actually IS. Announcing
-        # a finish we failed to persist, then shutting the job down, is what left
-        # sessions reading `in_progress` behind a completion screen with no agent
-        # left to finish them. An un-submitted session keeps the job alive instead,
-        # so the model or a rejoin can still end it.
-        if not submitted:
-            logger.error(
-                "hard stop could not submit; leaving the session live rather than "
-                "announcing a finish that did not happen (session=%s)",
-                self._plan.interview_session_id,
-            )
-            self._finalized = False
-            return
-        await self._announce_finished()
         handle = None
         if closing:
             handle = self._session.say(closing, allow_interruptions=False)
@@ -354,6 +425,28 @@ class HardStopTimer:
         job = get_job_context(required=False)
         if job is not None:
             job.shutdown(reason="interview_hard_stop")
+
+    def _submit_timer_route(self) -> Callable[[], Awaitable[None]]:
+        """The timer route's submit step: primary reason, then the fallback.
+
+        The DB submit happens INSIDE the returned callable — after the drain and
+        the flush, where a submit belongs. Raises straight through when neither
+        reason is accepted: that is what makes the attempt "not persisted",
+        which the state machine turns into a rollback and the retry loop into
+        another attempt.
+        """
+
+        async def _submit() -> None:
+            try:
+                closing = await self._plan.close()
+            except Exception:
+                fallback_closing, fallback_ok = await self._close_via_fallback()
+                if not fallback_ok:
+                    raise
+                closing = fallback_closing
+            self._last_closing = closing
+
+        return _submit
 
 
 async def _await_playout(handle: object) -> None:
