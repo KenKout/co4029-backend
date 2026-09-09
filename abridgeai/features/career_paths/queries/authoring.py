@@ -4,7 +4,7 @@ from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 
 from abridgeai.features.career_paths.models import (
     CareerPath,
@@ -214,6 +214,59 @@ async def list_path_stage_counts(
         path_id: by_version.get(version_id, 0)
         for path_id, version_id in version_ids.items()
     }
+
+
+async def list_path_list_stats(
+    db: AsyncSession, career_path_ids: Sequence[UUID]
+) -> dict[UUID, dict[str, int | bool]]:
+    """Batched management-list statistics per path: student_count (ALL
+    enrollments — active + completed + dropped, mirroring the learning
+    program card's count), has_draft_version, and the draft's version_no.
+
+    Enrollments live in access_control (the same model owns the scope
+    relationship), so the count runs as raw SQL rather than importing that
+    feature's ORM model here — the features-are-independent contract.
+    """
+    if not career_path_ids:
+        return {}
+
+    enroll_stmt = text(
+        """
+        SELECT career_path_id, COUNT(*) AS n
+        FROM student_career_enrollments
+        WHERE career_path_id = ANY(:ids)
+          AND deleted_at IS NULL
+        GROUP BY career_path_id
+        """
+    )
+    enroll_rows = (
+        await db.execute(enroll_stmt, {"ids": list(career_path_ids)})
+    ).all()
+
+    draft_stmt = text(
+        """
+        SELECT career_path_id, MAX(version_no) AS draft_no
+        FROM career_path_versions
+        WHERE career_path_id = ANY(:ids)
+          AND deleted_at IS NULL
+          AND status = 'draft'
+        GROUP BY career_path_id
+        """
+    )
+    draft_rows = (
+        await db.execute(draft_stmt, {"ids": list(career_path_ids)})
+    ).all()
+
+    stats: dict[UUID, dict[str, int | bool]] = {
+        pid: {"student_count": 0, "has_draft_version": False, "draft_version_no": 0}
+        for pid in career_path_ids
+    }
+    for row in enroll_rows:
+        stats[row.career_path_id]["student_count"] = row.n
+    for row in draft_rows:
+        stats[row.career_path_id]["has_draft_version"] = True
+        stats[row.career_path_id]["draft_version_no"] = row.draft_no
+    return stats
 
 
 async def list_path_course_counts(

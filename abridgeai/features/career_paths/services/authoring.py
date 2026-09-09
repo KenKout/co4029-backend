@@ -59,8 +59,16 @@ register_conflict_mappings(
 
 
 def _to_authoring(
-    path: CareerPath, *, stage_count: int = 0, course_count: int = 0
+    path: CareerPath,
+    *,
+    stage_count: int = 0,
+    course_count: int = 0,
+    stats: dict[str, int | bool] | None = None,
 ) -> CareerPathAuthoring:
+    # stats: the batched list-surface statistics (student_count /
+    # has_draft_version / draft_version_no) — None on callers that do not
+    # fetch them.
+    extra = stats or {}
     return CareerPathAuthoring(
         id=path.id,
         organization_id=path.organization_id,
@@ -70,6 +78,9 @@ def _to_authoring(
         status=path.status,
         stage_count=stage_count,
         course_count=course_count,
+        student_count=int(extra.get("student_count", 0)),
+        has_draft_version=bool(extra.get("has_draft_version", False)),
+        draft_version_no=int(extra.get("draft_version_no", 0)),
         created_at=path.created_at,
         updated_at=path.updated_at,
         created_by=path.created_by,
@@ -123,11 +134,13 @@ async def list_career_paths_for_org(
     path_ids = [row.id for row in rows]
     stage_counts = await authoring_queries.list_path_stage_counts(db, path_ids)
     course_counts = await authoring_queries.list_path_course_counts(db, path_ids)
+    list_stats = await authoring_queries.list_path_list_stats(db, path_ids)
     return [
         _to_authoring(
             row,
             stage_count=stage_counts.get(row.id, 0),
             course_count=course_counts.get(row.id, 0),
+            stats=list_stats.get(row.id),
         )
         for row in rows
     ]
@@ -137,10 +150,12 @@ async def get_career_path(db: AsyncSession, career_path_id: UUID) -> CareerPathA
     path = await _require_path(db, career_path_id)
     stage_counts = await authoring_queries.list_path_stage_counts(db, [path.id])
     course_counts = await authoring_queries.list_path_course_counts(db, [path.id])
+    list_stats = await authoring_queries.list_path_list_stats(db, [path.id])
     return _to_authoring(
         path,
         stage_count=stage_counts.get(path.id, 0),
         course_count=course_counts.get(path.id, 0),
+        stats=list_stats.get(path.id),
     )
 
 

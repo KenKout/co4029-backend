@@ -20,6 +20,11 @@ class CareerPathAuthoring(BaseModel):
     # table can show depth without N+1 detail fetches. 0 for a fresh path.
     stage_count: int = 0
     course_count: int = 0
+    # List-surface statistics, mirroring the learning program card: total
+    # enrollments (any status) and whether a draft revision is being edited.
+    student_count: int = 0
+    has_draft_version: bool = False
+    draft_version_no: int = 0
     created_at: datetime
     updated_at: datetime
     created_by: UUID | None = None

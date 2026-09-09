@@ -37,6 +37,7 @@ from abridgeai.features.career_paths.routers import (
     career_paths_learner_router,
     me_career_enrollments_router,
 )
+
 # The supported student-to-path route goes through a Learning Program
 # (direct career-path enrollment is disabled), so this mini-app also mounts
 # the program routers for the enroll/progress tests.
@@ -264,13 +265,12 @@ async def org_id_of(path_id: uuid.UUID, engine: AsyncEngine) -> uuid.UUID:
     """Organization owning ``path_id`` (the helper's sneaky dependency)."""
 
     async with engine.begin() as conn:
-        row = (
+        return (
             await conn.execute(
                 text("SELECT organization_id FROM career_paths WHERE id = :pid"),
                 {"pid": path_id},
             )
         ).scalar_one()
-    return row
 
 
 async def _insert_course_with_lesson(
@@ -889,6 +889,64 @@ async def test_manager_list_includes_stage_course_counts(
     row = rows[str(scenario["path_id"])]
     assert row["stage_count"] == 1
     assert row["course_count"] == 3
+
+
+async def test_manager_list_includes_student_count_and_draft_signal(
+    client: httpx.AsyncClient,
+    manager_bearer: str,
+    student_bearer: str,
+    seeded_users: SeededUsers,
+    scenario: dict[str, object],
+    engine: AsyncEngine,
+) -> None:
+    """The management list carries student_count + the draft-revision signal.
+
+    student_count mirrors the learning-program card (ALL enrollments, any
+    status). has_draft_version fires only after a copy-on-write fork of the
+    published path; the badge names Draft v{published + 1}.
+    """
+    headers = {"Authorization": f"Bearer {manager_bearer}"}
+    path_id = str(scenario["path_id"])
+
+    async def _row() -> dict:
+        response = await client.get(
+            "/api/v1/management/career-paths",
+            headers=headers,
+        )
+        assert response.status_code == 200, response.text
+        rows = {p["id"]: p for p in response.json()}
+        return rows[path_id]
+
+    row = await _row()
+    assert row["student_count"] == 0
+    # The scenario fixture keeps its v1 DRAFT on purpose (suites mutate the
+    # path directly) — the draft signal must fire for it.
+    assert row["has_draft_version"] is True
+    assert row["draft_version_no"] == 1
+
+    _faculty_id, _program_id = await _enroll_student_via_program(
+        client,
+        engine,
+        manager_bearer=manager_bearer,
+        student_bearer=student_bearer,
+        path_id=scenario["path_id"],  # type: ignore[arg-type]
+        student_id=seeded_users.student_id,
+        suffix=uuid.uuid4().hex[:8],
+    )
+
+    row = await _row()
+    assert row["student_count"] == 1
+
+    # Fork the published path (copy-on-write) -> a draft revision exists.
+    fork = await client.post(
+        f"/api/v1/management/career-paths/{path_id}/versions",
+        headers=headers,
+    )
+    assert fork.status_code == 201, fork.text
+
+    row = await _row()
+    assert row["has_draft_version"] is True
+    assert row["draft_version_no"] == 2
 
 
 async def test_progress_aggregate(
