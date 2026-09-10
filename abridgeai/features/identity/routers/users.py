@@ -265,6 +265,15 @@ async def get_users_by_ids(
         user = await admin_service.get_user_with_profile(db, uid)
         if user is not None:
             users.append(user)
+    # The org-units people picker filters candidates by role (teachers and
+    # managers), and roles are only populated by the admin list/search
+    # services. Batch-attach them here — one query for the whole set — so
+    # any consumer of this endpoint sees real role codes instead of [].
+    role_map = await access_control_api.get_role_codes_for_users(
+        db, [user.id for user in users]
+    )
+    for user in users:
+        user.roles = role_map.get(user.id, [])
     return users
 
 
