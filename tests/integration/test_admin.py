@@ -29,7 +29,6 @@ import abridgeai.features.interviews.models  # noqa: F401
 import abridgeai.features.materials.models  # noqa: F401
 import abridgeai.features.quizzes.models  # noqa: F401
 from abridgeai.core.audit import audit_maintenance
-from tests.support.db_graph import purge_auth_events_for_users
 from abridgeai.core.config import get_settings
 from abridgeai.core.db import get_db
 from abridgeai.core.security import create_access_token, generate_token, hash_secret
@@ -40,6 +39,7 @@ from abridgeai.features.admin.routers import (
     users_router,
 )
 from abridgeai.features.admin.routers.processing import get_arq_pool
+from tests.support.db_graph import purge_auth_events_for_users
 
 
 def _async_url(database_url: str) -> str:
@@ -1397,7 +1397,7 @@ async def test_dashboard_custom_range(
                     "ts": created_at,
                 },
             )
-        for i, (created_at, cost) in enumerate(
+        for _i, (created_at, cost) in enumerate(
             ((inside_ts, 4.0), (inside_ts + timedelta(hours=1), 6.0), (before_ts, 99.0))
         ):
             cid = str(uuid.uuid4())
