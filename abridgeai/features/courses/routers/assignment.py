@@ -23,7 +23,7 @@ scope.
 
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -128,14 +128,32 @@ async def _resolve_caller_scope(
 async def list_dept_courses(
     current_user: Annotated[CurrentUser, Depends(_REQUIRE_STAFFING)],
     db: Annotated[AsyncSession, Depends(get_db)],
+    faculty_id: str | None = None,
 ) -> list[CourseAuthoring]:
     """List courses in the caller's auto-derived staffing scope.
 
     HOD (``scope_kind=org_unit``) -> dept courses; Manager
     (``scope_kind=organization``) -> org courses; Admin
     (``scope_kind=global``) -> all courses.
+
+    ``faculty_id`` optionally narrows the resolved set server-side: a UUID
+    keeps only that faculty's courses, the literal ``"none"`` keeps only
+    courses with no faculty at all. Narrowing happens INSIDE the resolved
+    scope — it can never widen what the caller is allowed to see.
     """
     scope_kind, organization_id, org_unit_id = await _resolve_caller_scope(db, current_user.user_id)
+
+    faculty_filter: UUID | Literal["none"] | None = None
+    if faculty_id == "none":
+        faculty_filter = "none"
+    elif faculty_id:
+        try:
+            faculty_filter = UUID(faculty_id)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=422, detail="faculty_id must be a UUID or 'none'"
+            ) from exc
+
     if scope_kind == "org_unit" and org_unit_id is not None:
         assignments = await access_control_api.get_role_assignments_for_user(
             db, current_user.user_id
@@ -147,12 +165,16 @@ async def list_dept_courses(
                 if row.scope_kind == "org_unit" and row.org_unit_id is not None
             }
         )
-        return await assignment_service.list_courses_in_faculties(db, faculty_ids)
+        return await assignment_service.list_courses_in_faculties(
+            db, faculty_ids, faculty_filter=faculty_filter
+        )
 
     org_filter = (
         UUID(str(organization_id)) if scope_kind == "organization" and organization_id else None
     )
-    return await assignment_service.list_courses_for_organization(db, org_filter)
+    return await assignment_service.list_courses_for_organization(
+        db, org_filter, faculty_filter=faculty_filter
+    )
 
 
 @router.get("/courses/{course_id}/teachers", response_model=list[TeacherAssignmentRead])

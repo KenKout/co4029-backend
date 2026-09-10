@@ -10,7 +10,7 @@ when the JOIN is unavoidable.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 from sqlalchemy import func, literal, select
@@ -350,12 +350,19 @@ async def get_teacher_role_id(db: AsyncSession) -> UUID:
 
 
 async def list_courses_by_organization(
-    db: AsyncSession, organization_id: UUID | None = None
+    db: AsyncSession,
+    organization_id: UUID | None = None,
+    *,
+    faculty_filter: UUID | Literal["none"] | None = None,
 ) -> list[Course]:
     """List courses optionally filtered by organization, newest first."""
     stmt = select(Course).order_by(Course.created_at.desc())
     if organization_id is not None:
         stmt = stmt.where(Course.organization_id == organization_id)
+    if faculty_filter == "none":
+        stmt = stmt.where(Course.faculty_id.is_(None))
+    elif faculty_filter is not None:
+        stmt = stmt.where(Course.faculty_id == faculty_filter)
     return list((await db.execute(stmt)).scalars().all())
 
 

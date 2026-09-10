@@ -4,7 +4,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from importlib import resources
-from typing import Any, NamedTuple
+from typing import Any, Literal, NamedTuple
 from uuid import UUID
 
 from sqlalchemy import delete, func, or_, select, text, true, update
@@ -850,7 +850,12 @@ async def list_courses_assigned_to_teacher(
     return list((await db.execute(stmt)).scalars().all())
 
 
-async def list_courses_in_faculties(db: AsyncSession, faculty_ids: Sequence[UUID]) -> list[Course]:
+async def list_courses_in_faculties(
+    db: AsyncSession,
+    faculty_ids: Sequence[UUID],
+    *,
+    faculty_filter: UUID | Literal["none"] | None = None,
+) -> list[Course]:
     """Courses owned by any of ``faculty_ids``, newest first.
 
     Takes a set of units rather than one because the caller expands a unit
@@ -872,6 +877,10 @@ async def list_courses_in_faculties(db: AsyncSession, faculty_ids: Sequence[UUID
         .where(Course.faculty_id.in_(list(faculty_ids)))
         .order_by(Course.created_at.desc())
     )
+    if faculty_filter == "none":
+        stmt = stmt.where(Course.faculty_id.is_(None))
+    elif faculty_filter is not None:
+        stmt = stmt.where(Course.faculty_id == faculty_filter)
     return list((await db.execute(stmt)).scalars().all())
 
 

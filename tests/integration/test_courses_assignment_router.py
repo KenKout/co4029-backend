@@ -520,6 +520,50 @@ async def test_faculty_dean_can_assign_in_faculty(
     assert row.granted_by == seeded_users.hod_id
 
 
+async def test_dept_courses_faculty_filter_narrows_scope(
+    client: httpx.AsyncClient,
+    hod_bearer: str,
+    scenario: dict[str, uuid.UUID],
+) -> None:
+    """The worklist's faculty filter is SERVER-side: ?faculty_id= narrows the
+    caller's resolved scope (a UUID -> that faculty's courses, "none" ->
+    unassigned courses) and can never widen it — an out-of-scope faculty id
+    yields an empty list, not another org's courses."""
+    headers = {"Authorization": f"Bearer {hod_bearer}"}
+
+    response = await client.get(
+        "/api/v1/dept/courses",
+        params={"faculty_id": str(scenario["org_unit_a"])},
+        headers=headers,
+    )
+    assert response.status_code == 200, response.text
+    ids = {row["id"] for row in response.json()}
+    assert str(scenario["course_a"]) in ids
+    assert str(scenario["course_b"]) not in ids
+
+    # Out-of-scope faculty: narrowing within the resolved set can't widen it.
+    response = await client.get(
+        "/api/v1/dept/courses",
+        params={"faculty_id": str(scenario["org_unit_b"])},
+        headers=headers,
+    )
+    assert response.status_code == 200, response.text
+    assert response.json() == []
+
+    # "none" -> only courses with no faculty at all; both fixtures have one.
+    response = await client.get(
+        "/api/v1/dept/courses", params={"faculty_id": "none"}, headers=headers
+    )
+    assert response.status_code == 200, response.text
+    assert response.json() == []
+
+    # Junk value is a 422, not a silent unfiltered list.
+    response = await client.get(
+        "/api/v1/dept/courses", params={"faculty_id": "garbage"}, headers=headers
+    )
+    assert response.status_code == 422
+
+
 async def test_faculty_dean_blocks_outside_faculty(
     client: httpx.AsyncClient,
     hod_bearer: str,

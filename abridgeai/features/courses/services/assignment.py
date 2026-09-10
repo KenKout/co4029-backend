@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 from uuid import UUID, uuid4
 
 from abridgeai.core.exceptions import AppError, ConflictError, ForbiddenError, NotFoundError
@@ -587,20 +587,34 @@ async def list_courses_in_faculty(db: AsyncSession, faculty_id: UUID) -> list[Co
 
 
 async def list_courses_in_faculties(
-    db: AsyncSession, faculty_ids: list[UUID]
+    db: AsyncSession,
+    faculty_ids: list[UUID],
+    *,
+    faculty_filter: UUID | Literal["none"] | None = None,
 ) -> list[CourseAuthoring]:
-    """All courses owned by any Faculty in the caller's active scopes."""
-    courses = await authoring_queries.list_courses_in_faculties(db, faculty_ids)
+    """All courses owned by any Faculty in the caller's active scopes.
+
+    ``faculty_filter`` narrows the resolved set (a faculty UUID, or the
+    literal "none" for courses with no faculty) — never widens it.
+    """
+    courses = await authoring_queries.list_courses_in_faculties(
+        db, faculty_ids, faculty_filter=faculty_filter
+    )
     dtos = [CourseAuthoring.model_validate(course) for course in courses]
     await _attach_health_projections(db, courses, dtos)
     return dtos
 
 
 async def list_courses_for_organization(
-    db: AsyncSession, organization_id: UUID | None = None
+    db: AsyncSession,
+    organization_id: UUID | None = None,
+    *,
+    faculty_filter: UUID | Literal["none"] | None = None,
 ) -> list[CourseAuthoring]:
     """Manager/Admin overview — courses optionally filtered by organization."""
-    courses = await assignment_queries.list_courses_by_organization(db, organization_id)
+    courses = await assignment_queries.list_courses_by_organization(
+        db, organization_id, faculty_filter=faculty_filter
+    )
     dtos = [CourseAuthoring.model_validate(course) for course in courses]
     await _attach_health_projections(db, courses, dtos)
     return dtos
