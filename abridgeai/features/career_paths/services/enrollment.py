@@ -30,6 +30,7 @@ from abridgeai.features.career_paths.schemas import (
 from abridgeai.features.career_paths.schemas.public import CareerPathCoursePublic
 from abridgeai.features.career_paths.services import stages as stage_service
 from abridgeai.features.enrollments.api import public as enrollments_api
+from abridgeai.infrastructure.s3 import create_stream_url
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -38,6 +39,18 @@ if TYPE_CHECKING:
     from abridgeai.features.career_paths.models import CareerPath
 
 _STAGE_AWARE_FORMULA = 2
+
+class _RosterAvatarTarget:
+    """Duck-typed storage target for :func:`create_stream_url` (bucket + key).
+
+    Mirrors courses/services/authoring._AuthoringStorageTarget; a local
+    definition keeps the career-paths feature from importing across features.
+    """
+
+    def __init__(self, *, bucket: str, object_key: str) -> None:
+        self.bucket = bucket
+        self.object_key = object_key
+
 
 
 def _to_path_public(path: CareerPath, courses: list[dict[str, object]]) -> CareerPathPublic:
@@ -709,18 +722,33 @@ async def get_roster_progress(
     rows = await student_queries.get_roster_path_progress(
         db, version_id=published.id, career_path_id=career_path_id
     )
-    return [
-        StudentPathProgressAuthoring.model_validate(
-            {
-                "student_id": row["student_id"],
-                "student_email": row["primary_email"],
-                "overall_percent": float(row["overall_percent"]),
-                "completed_courses": int(row["completed_courses"]),
-                "course_count": int(row["course_count"]),
-            }
+    out: list[StudentPathProgressAuthoring] = []
+    for row in rows:
+        avatar_url: str | None = None
+        bucket = row.pop("avatar_bucket", None)
+        object_key = row.pop("avatar_object_key", None)
+        if bucket and object_key:
+            try:
+                url, _ = await create_stream_url(
+                    _RosterAvatarTarget(bucket=bucket, object_key=object_key)
+                )
+                avatar_url = url
+            except Exception:  # noqa: BLE001 — a storage blip must not break the roster
+                avatar_url = None
+        out.append(
+            StudentPathProgressAuthoring.model_validate(
+                {
+                    "student_id": row["student_id"],
+                    "student_email": row["primary_email"],
+                    "student_display_name": row.get("display_name"),
+                    "student_avatar_url": avatar_url,
+                    "overall_percent": float(row["overall_percent"]),
+                    "completed_courses": int(row["completed_courses"]),
+                    "course_count": int(row["course_count"]),
+                }
+            )
         )
-        for row in rows
-    ]
+    return out
 
 
 __all__ = [

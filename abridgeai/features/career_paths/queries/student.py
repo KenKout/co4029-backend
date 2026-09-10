@@ -296,9 +296,14 @@ _ROSTER_PROGRESS_SQL = text(
           AND c.deleted_at IS NULL
     ),
     enrolled_students AS (
-        SELECT sce.student_id, u.primary_email
+        SELECT sce.student_id, u.primary_email,
+               up.display_name,
+               so.bucket AS avatar_bucket,
+               so.object_key AS avatar_object_key
         FROM student_career_enrollments sce
         JOIN users u ON u.id = sce.student_id
+        LEFT JOIN user_profiles up ON up.user_id = sce.student_id
+        LEFT JOIN storage_objects so ON so.id = up.avatar_object_id
         WHERE sce.career_path_id = :career_path_id
           AND sce.deleted_at IS NULL
     ),
@@ -312,7 +317,8 @@ _ROSTER_PROGRESS_SQL = text(
             AND l.status = 'published'
     ),
     student_course_progress AS (
-        SELECT es.student_id, es.primary_email, cl.course_id,
+        SELECT es.student_id, es.primary_email, es.display_name,
+               es.avatar_bucket, es.avatar_object_key, cl.course_id,
                COALESCE(AVG(COALESCE(lp.completion_percent, 0)), 0)::float
                  AS course_percent
         FROM enrolled_students es
@@ -320,21 +326,27 @@ _ROSTER_PROGRESS_SQL = text(
         LEFT JOIN lesson_progress lp
             ON lp.lesson_id = cl.lesson_id
             AND lp.user_id = es.student_id
-        GROUP BY es.student_id, es.primary_email, cl.course_id
+        GROUP BY es.student_id, es.primary_email, es.display_name,
+                 es.avatar_bucket, es.avatar_object_key, cl.course_id
     ),
     aggregated AS (
-        SELECT student_id, primary_email,
+        SELECT student_id, primary_email, display_name,
+               avatar_bucket, avatar_object_key,
                COALESCE(AVG(course_percent), 0)::float AS overall_percent,
                SUM(CASE WHEN course_percent >= 100 THEN 1 ELSE 0 END) AS completed_courses,
                COUNT(course_id) AS course_count
         FROM student_course_progress
-        GROUP BY student_id, primary_email
+        GROUP BY student_id, primary_email, display_name,
+                 avatar_bucket, avatar_object_key
     )
-    SELECT student_id, primary_email, overall_percent,
+    SELECT student_id, primary_email, display_name,
+           avatar_bucket, avatar_object_key, overall_percent,
            completed_courses, course_count
     FROM aggregated
     UNION ALL
-    SELECT es.student_id, es.primary_email, 0::float AS overall_percent,
+    SELECT es.student_id, es.primary_email, es.display_name,
+           es.avatar_bucket, es.avatar_object_key,
+           0::float AS overall_percent,
            0 AS completed_courses, 0 AS course_count
     FROM enrolled_students es
     WHERE NOT EXISTS (SELECT 1 FROM aggregated a WHERE a.student_id = es.student_id)

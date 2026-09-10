@@ -267,6 +267,8 @@ class StudentCareerEnrollmentAuthoring(BaseModel):
 class StudentPathProgressAuthoring(BaseModel):
     student_id: UUID
     student_email: str
+    student_display_name: str | None = None
+    student_avatar_url: str | None = None
     overall_percent: float
     completed_courses: int
     course_count: int

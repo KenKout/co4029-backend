@@ -1033,6 +1033,51 @@ async def test_progress_aggregate(
     assert body["overall_percent"] == 50.0
 
 
+async def test_roster_progress_carries_identity_fields(
+    client: httpx.AsyncClient,
+    manager_bearer: str,
+    student_bearer: str,
+    seeded_users: SeededUsers,
+    scenario: dict[str, object],
+    engine: AsyncEngine,
+) -> None:
+    """The roster-progress rows feed the management Students table, whose
+    identity cell mirrors /admin/users: avatar + display name + email. The
+    payload must therefore carry display_name (from user_profiles) and a
+    presigned avatar_url (or None when the student has no avatar) — never
+    raw bucket/key coordinates."""
+    await _enroll_student_via_program(
+        client,
+        engine,
+        manager_bearer=manager_bearer,
+        student_bearer=student_bearer,
+        path_id=scenario["path_id"],  # type: ignore[arg-type]
+        student_id=seeded_users.student_id,
+        suffix=uuid.uuid4().hex[:8],
+    )
+
+    response = await client.get(
+        f"/api/v1/teacher/career-paths/{scenario['path_id']}/students/progress",
+        headers={"Authorization": f"Bearer {manager_bearer}"},
+    )
+    assert response.status_code == 200, response.text
+    rows = response.json()
+    row = next(r for r in rows if r["student_id"] == str(seeded_users.student_id))
+    async with engine.begin() as conn:
+        profile = (
+            await conn.execute(
+                text(
+                    "SELECT display_name FROM user_profiles WHERE user_id = :uid"
+                ),
+                {"uid": str(seeded_users.student_id)},
+            )
+        ).first()
+    assert row["student_display_name"] == (profile[0] if profile else None)
+    assert "student_avatar_url" in row
+    assert row["student_avatar_url"] is None or "http" in row["student_avatar_url"]
+    assert "avatar_bucket" not in row and "avatar_object_key" not in row
+
+
 async def test_reorder_courses_in_path(
     client: httpx.AsyncClient,
     manager_bearer: str,
