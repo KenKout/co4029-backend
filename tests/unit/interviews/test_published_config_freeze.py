@@ -37,7 +37,15 @@ FROZEN_FIELDS = [
     "security_response_policy",
     "security_max_consecutive_attempts",
     "security_custom_refusal_en",
-    "security_custom_refusal_vi",
+    # Browser-integrity policy (migration 0112): the weights and threshold
+    # decide when a live attempt is flagged. They are snapshotted onto the
+    # session at start precisely so they cannot move mid-cohort — editing a
+    # published config's policy would strand a sitting candidate under new
+    # rules, the exact scenario the snapshot exists to prevent.
+    "integrity_weight_tab_switch",
+    "integrity_weight_focus_lost",
+    "integrity_weight_fullscreen_exit",
+    "integrity_score_threshold",
     # Read before a session exists, so they cannot corrupt a run in flight — but
     # they are the terms of assessment. Lowering max_attempts mid-cohort strands a
     # student who already spent one; raising it gives later students more chances

@@ -167,8 +167,13 @@ def test_authoring_openapi_exposes_policy_knobs_but_not_detector_rules() -> None
         "security_response_policy",
         "security_max_consecutive_attempts",
         "security_custom_refusal_en",
-        "security_custom_refusal_vi",
         "security_incident_summary_enabled",
+        # Browser-integrity policy (migration 0112) is teacher-authorable.
+        "integrity_weight_tab_switch",
+        "integrity_weight_focus_lost",
+        "integrity_weight_fullscreen_exit",
+        "integrity_score_threshold",
     } <= properties
+    assert "security_custom_refusal_vi" not in properties
     assert "security_detection_rules" not in properties
     assert "interview_security_guard_mode" not in properties

@@ -145,6 +145,19 @@ class InterviewConfigPublic(_ORMModel):
     cooldown_minutes: int | None = None
     max_follow_ups_per_question: int = 2
     max_hints_per_question: int = 3
+    # ── Browser-integrity policy disclosure (safe subset) ─────────────────────
+    # The three weights + threshold are EXACTLY what the candidate is told
+    # before starting ("a tab switch costs 3; reach 3 and you get a warning"),
+    # so publishing them is expectation-setting, not leakage. Deliberately
+    # NOT disclosed here or anywhere learner-facing: importance_weight /
+    # min_outcomes_to_pass (rubric), security_response_policy /
+    # security_max_consecutive_attempts / security_custom_refusal_en
+    # (prompt-injection defence), security_incident_summary_enabled (teacher
+    # reporting), and the detection rules themselves.
+    integrity_weight_tab_switch: int = 3
+    integrity_weight_focus_lost: int = 1
+    integrity_weight_fullscreen_exit: int = 2
+    integrity_score_threshold: int = 3
     published_at: datetime | None = None
 
 

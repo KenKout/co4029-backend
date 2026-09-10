@@ -166,16 +166,17 @@ async def deep_clone_interview_config(
         time_limit_minutes=source.time_limit_minutes,
         persona=source.persona,
         persona_profile_json=(
-            dict(source.persona_profile_json)
-            if source.persona_profile_json is not None
-            else None
+            dict(source.persona_profile_json) if source.persona_profile_json is not None else None
         ),
         tts_voice=source.tts_voice,
         supplementary_instructions=source.supplementary_instructions,
         security_response_policy=source.security_response_policy,
         security_max_consecutive_attempts=source.security_max_consecutive_attempts,
         security_custom_refusal_en=source.security_custom_refusal_en,
-        security_custom_refusal_vi=source.security_custom_refusal_vi,
+        integrity_weight_tab_switch=source.integrity_weight_tab_switch,
+        integrity_weight_focus_lost=source.integrity_weight_focus_lost,
+        integrity_weight_fullscreen_exit=source.integrity_weight_fullscreen_exit,
+        integrity_score_threshold=source.integrity_score_threshold,
         security_incident_summary_enabled=source.security_incident_summary_enabled,
         published_at=None,
         created_by=actor_id,

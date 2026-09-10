@@ -87,6 +87,7 @@ from abridgeai.features.interviews.services import security as security_service
 from abridgeai.features.interviews.services.ceremony import (
     FinishReason,
     ensure_ceremony_message,
+    integrity_policy_snapshot_from_config,
     normalize_language,
     onboarding_ceremony_kind,
 )
@@ -257,6 +258,10 @@ async def start_session(
     await _enforce_retake_policy(db, config_id=config_id, student_id=actor.user_id)
     attempt_number = await sessions_queries.get_session_attempt_number(db, actor.user_id, config_id)
 
+    # Snapshot BEFORE building the row: the frozen policy must be what the
+    # config holds at the instant the attempt is allocated.
+    config_for_snapshot = await db.get(InterviewConfig, config_id)
+
     session = InterviewSession(
         interview_config_id=config_id,
         student_id=actor.user_id,
@@ -265,6 +270,14 @@ async def start_session(
         input_mode="hybrid",
         onboarding_stage="identity_check",
         interview_language=normalize_language(language),
+        # Freeze the browser-integrity policy at attempt time: the running
+        # score is compared against THIS snapshot for the whole session, so a
+        # config edited (or re-published with different weights) mid-cohort
+        # cannot re-score an attempt that started under the earlier rules.
+        # Cohort fairness, same rationale as the provenance columns below.
+        integrity_policy_snapshot=integrity_policy_snapshot_from_config(
+            config_for_snapshot
+        ),
         # Stamp the security provenance from the CODE constants at attempt time.
         # These four columns only had a migration ``server_default``, so every
         # session claimed the baseline versions no matter which rules actually
@@ -1127,11 +1140,13 @@ async def _security_action_result(
     }.get(action)
     custom = None
     if config is not None:
-        custom = (
-            config.security_custom_refusal_vi
-            if (language or "en").lower().startswith("vi")
-            else config.security_custom_refusal_en
-        )
+        # Single-source refusal (decision 2026-09-10): the teacher authors ONE
+        # custom text and it is served verbatim for BOTH session languages.
+        # The language branch is gone on purpose — a Vietnamese-language
+        # interview receives the English custom wording; the locale-specific
+        # fallback only applies when NO custom text is configured (inside
+        # ``safe_security_response``).
+        custom = config.security_custom_refusal_en
     response = safe_security_response(
         action,
         language=language,

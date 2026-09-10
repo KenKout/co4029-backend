@@ -222,6 +222,22 @@ class InterviewConfig(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftD
             name="ck_interview_configs_security_max_attempts",
         ),
         CheckConstraint(
+            "integrity_weight_tab_switch BETWEEN 1 AND 5",
+            name="ck_interview_configs_integrity_weight_tab_switch",
+        ),
+        CheckConstraint(
+            "integrity_weight_focus_lost BETWEEN 1 AND 5",
+            name="ck_interview_configs_integrity_weight_focus_lost",
+        ),
+        CheckConstraint(
+            "integrity_weight_fullscreen_exit BETWEEN 1 AND 5",
+            name="ck_interview_configs_integrity_weight_fullscreen_exit",
+        ),
+        CheckConstraint(
+            "integrity_score_threshold BETWEEN 1 AND 20",
+            name="ck_interview_configs_integrity_score_threshold",
+        ),
+        CheckConstraint(
             "max_follow_ups_per_question BETWEEN 0 AND 50",
             name="ck_interview_configs_max_follow_ups",
         ),
@@ -291,7 +307,27 @@ class InterviewConfig(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftD
         Integer, nullable=False, server_default=text("3")
     )
     security_custom_refusal_en: Mapped[str | None] = mapped_column(Text)
-    security_custom_refusal_vi: Mapped[str | None] = mapped_column(Text)
+    # Single-source custom refusal (decision 2026-09-10): the teacher authors
+    # ONE text and it is served verbatim for BOTH session languages; the
+    # platform fallback (no custom text) stays locale-specific inside
+    # ``safe_security_response``. The per-language sibling column was dropped
+    # by migration 0112 (its values COALESCEd into this one). The orchestrator
+    # does not branch on language when choosing the custom text.
+    integrity_weight_tab_switch: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("3")
+    )
+    integrity_weight_focus_lost: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("1")
+    )
+    integrity_weight_fullscreen_exit: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("2")
+    )
+    # Weighted browser-signal score at which the session is flagged + the
+    # learner sees a warning. Prompt-injection ``security_max_consecutive_attempts``
+    # is a SEPARATE counter and deliberately not reused.
+    integrity_score_threshold: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("3")
+    )
     security_incident_summary_enabled: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=text("TRUE")
     )
@@ -517,6 +553,24 @@ class InterviewSession(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     session_security_flagged: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=text("FALSE")
     )
+    # ── Browser-integrity scoring (FR-5.8 extension, 2026-09-10) ──────────────
+    # ``integrity_policy_snapshot`` freezes the weights + threshold in force at
+    # session start, so a config edited (or policy code changed) mid-cohort
+    # never rewrites the rules an in-flight or graded attempt was scored
+    # under — the same fairness rationale as the security provenance columns
+    # above. Keys: tab_switch / focus_lost / fullscreen_exit / score_threshold.
+    integrity_policy_snapshot: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    # Running weighted browser-signal score. Reconnect / disconnect /
+    # warning_issued never score (see ``schemas/integrity.py`` WEIGHTS).
+    integrity_score: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    # Warning already emitted for this session — the server crossing signal is
+    # emitted exactly once, even across retries of the crossing batch.
+    integrity_warning_issued: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("FALSE")
+    )
+    integrity_threshold_flagged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     questions: Mapped[list[InterviewSessionQuestion]] = relationship(
         back_populates="session",
@@ -713,6 +767,13 @@ class AssessmentIntegrityEvent(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
     )
     event_type: Mapped[str] = mapped_column(String(30), nullable=False)
     severity: Mapped[str] = mapped_column(String(20), nullable=False)
+    # Client-generated retry key (a UUID per raw browser signal). The reporter
+    # re-POSTs a batch on network loss; the partial unique index
+    # ``uq_integrity_events_session_client`` (migration 0112) makes the retry
+    # idempotent instead of double-scoring one physical tab switch. NULL on
+    # server-generated rows (warning_issued) and on non-scored reconnect /
+    # disconnect records, which is why the index is partial.
+    client_event_id: Mapped[uuid.UUID | None] = mapped_column(PGUUID(as_uuid=True))
     metadata_json: Mapped[dict[str, Any]] = mapped_column(
         JSONB, nullable=False, server_default=text("'{}'::jsonb")
     )

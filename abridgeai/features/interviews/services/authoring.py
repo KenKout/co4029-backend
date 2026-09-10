@@ -245,7 +245,10 @@ async def create_interview_config(
         security_response_policy=data.get("security_response_policy", "warn_and_continue"),
         security_max_consecutive_attempts=data.get("security_max_consecutive_attempts", 3),
         security_custom_refusal_en=data.get("security_custom_refusal_en"),
-        security_custom_refusal_vi=data.get("security_custom_refusal_vi"),
+        integrity_weight_tab_switch=data.get("integrity_weight_tab_switch", 3),
+        integrity_weight_focus_lost=data.get("integrity_weight_focus_lost", 1),
+        integrity_weight_fullscreen_exit=data.get("integrity_weight_fullscreen_exit", 2),
+        integrity_score_threshold=data.get("integrity_score_threshold", 3),
         security_incident_summary_enabled=bool(data.get("security_incident_summary_enabled", True)),
         created_by=actor.user_id,
     )

@@ -44,6 +44,17 @@ _GRANDFATHERED: dict[str, int] = {
     "services/taking.py": 2236,
     "routers/authoring.py": 1226,
     "routers/learner.py": 1141,
+    # Repinned 2026-09-10 (886 -> 951) for the browser-integrity policy columns
+    # (config knobs + session snapshot/score/warning state, migration 0113).
+    # These columns have exactly one legal home — the tables this file owns —
+    # so they cannot be split into a sibling module; the ratchet tracks the
+    # columns + their contract comments.
+    "models.py": 951,
+    # Repinned 2026-09-10 (757 -> 870): the integrity ingest endpoint grew into
+    # the server-side scoring + one-shot warning contract. Splitting the route
+    # would scatter one transactional flow across files; the growth is the
+    # scoring loop and its evidence row.
+    "routers/learner_sessions.py": 870,
     # Repinned 2026-09-05 (877 -> 890) for the evaluation-claim columns
     # (migration 0107). A schema column has exactly one legal home, so a table
     # this file already owns cannot be split out to stay under the old pin; the
@@ -52,7 +63,6 @@ _GRANDFATHERED: dict[str, int] = {
     # (services/evaluation_claim.py, services/gap_report_writer.py), and
     # services/evaluation.py was brought back under the 800 cap by the split
     # rather than added to this list.
-    "models.py": 890,
 }
 HEURISTIC_PROMPT_TOKENS = ("You are", "JSON")
 INTERVIEWS_FEATURE = Path(__file__).resolve().parents[2] / "abridgeai" / "features" / "interviews"

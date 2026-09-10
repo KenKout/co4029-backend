@@ -44,6 +44,23 @@ def normalize_language(language: str | None) -> str:
     return "vi" if language and language.strip().lower().startswith("vi") else "en"
 
 
+def integrity_policy_snapshot_from_config(config: InterviewConfig | None) -> dict[str, int]:
+    """The browser-integrity policy a NEW session is scored under.
+
+    Frozen onto the session row at start (``start_session``), so a config
+    edited — or republished with different weights — mid-cohort never re-scores
+    an attempt that started under the earlier rules (cohort fairness; same
+    reasoning as the security provenance columns). Keys are the canonical
+    snapshot spellings from ``schemas/integrity.SNAPSHOT_KEYS``.
+    """
+    return {
+        "tab_switch": int(getattr(config, "integrity_weight_tab_switch", 3) or 3),
+        "focus_lost": int(getattr(config, "integrity_weight_focus_lost", 1) or 1),
+        "fullscreen_exit": int(getattr(config, "integrity_weight_fullscreen_exit", 2) or 2),
+        "score_threshold": int(getattr(config, "integrity_score_threshold", 3) or 3),
+    }
+
+
 def _clean(value: str | None, *, limit: int) -> str:
     return re.sub(r"\s+", " ", value or "").strip()[:limit]
 

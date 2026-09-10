@@ -204,9 +204,19 @@ class InterviewConfigCreate(BaseModel):
     supplementary_instructions: str | None = None
     security_response_policy: SecurityResponsePolicyWriteLiteral = "warn_and_continue"
     security_max_consecutive_attempts: int = Field(default=3, ge=2, le=20)
+    # Single-source custom refusal (decision 2026-09-10): served verbatim for
+    # BOTH session languages. ``security_custom_refusal_vi`` was removed from
+    # the write contract (and the DB) by migration 0112; the platform fallback
+    # when this is empty stays locale-specific.
     security_custom_refusal_en: str | None = Field(default=None, max_length=500)
-    security_custom_refusal_vi: str | None = Field(default=None, max_length=500)
     security_incident_summary_enabled: bool = True
+    # Browser-integrity weights (1..5 each) + the warning threshold. Scored
+    # server-side at integrity ingest; unrelated to the prompt-injection
+    # consecutive-attempt counter above.
+    integrity_weight_tab_switch: int = Field(default=3, ge=1, le=5)
+    integrity_weight_focus_lost: int = Field(default=1, ge=1, le=5)
+    integrity_weight_fullscreen_exit: int = Field(default=2, ge=1, le=5)
+    integrity_score_threshold: int = Field(default=3, ge=1, le=20)
 
 
 class InterviewConfigUpdate(BaseModel):
@@ -237,8 +247,11 @@ class InterviewConfigUpdate(BaseModel):
     security_response_policy: SecurityResponsePolicyWriteLiteral | None = None
     security_max_consecutive_attempts: int | None = Field(default=None, ge=2, le=20)
     security_custom_refusal_en: str | None = Field(default=None, max_length=500)
-    security_custom_refusal_vi: str | None = Field(default=None, max_length=500)
     security_incident_summary_enabled: bool | None = None
+    integrity_weight_tab_switch: int | None = Field(default=None, ge=1, le=5)
+    integrity_weight_focus_lost: int | None = Field(default=None, ge=1, le=5)
+    integrity_weight_fullscreen_exit: int | None = Field(default=None, ge=1, le=5)
+    integrity_score_threshold: int | None = Field(default=None, ge=1, le=20)
 
 
 class InterviewConfigAuthoring(InterviewConfigPublic):
@@ -261,8 +274,13 @@ class InterviewConfigAuthoring(InterviewConfigPublic):
     security_response_policy: SecurityResponsePolicyLiteral = "warn_and_continue"
     security_max_consecutive_attempts: int = 3
     security_custom_refusal_en: str | None = None
-    security_custom_refusal_vi: str | None = None
     security_incident_summary_enabled: bool = True
+    # Browser-integrity policy (see InterviewConfigCreate). Weights are scored
+    # by the server; the threshold is the flag/warning line.
+    integrity_weight_tab_switch: int = 3
+    integrity_weight_focus_lost: int = 1
+    integrity_weight_fullscreen_exit: int = 2
+    integrity_score_threshold: int = 3
     generation_run_id: UUID | None = None
     draft_question_count: int | None = None
     published_at: datetime | None = None

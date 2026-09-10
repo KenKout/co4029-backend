@@ -26,7 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from abridgeai.core.config import get_settings
 from abridgeai.core.db import get_db
 from abridgeai.core.exceptions import AppError, ForbiddenError, NotFoundError
-from abridgeai.core.security import CurrentUser, get_current_user
+from abridgeai.core.security import CurrentUser, get_current_user, utcnow
 from abridgeai.features.interviews.routers._deps import require_session_owner_access
 from abridgeai.features.interviews.routers.learner import (
     _bad_request,
@@ -51,7 +51,10 @@ from abridgeai.features.interviews.schemas import (
     InterviewSubmitAnswerResponse,
     RealtimeTokenResponse,
 )
-from abridgeai.features.interviews.schemas.integrity import IntegrityEventBatchRequest
+from abridgeai.features.interviews.schemas.integrity import (
+    IntegrityEventBatchRequest,
+    IntegrityEventBatchResponse,
+)
 from abridgeai.features.interviews.services import narration as narration_service
 from abridgeai.features.interviews.services import narration_cache
 from abridgeai.features.interviews.services import onboarding as onboarding_service
@@ -525,26 +528,89 @@ async def record_integrity_events(
     payload: IntegrityEventBatchRequest,
     current_user: Annotated[CurrentUser, Depends(_REQUIRE_SESSION_OWNER)],
     db: Annotated[AsyncSession, Depends(get_db)],
-) -> dict[str, int]:
-    """Best-effort ingest of browser integrity signals for a live session.
+) -> IntegrityEventBatchResponse:
+    """Score + record browser integrity signals for a live session.
 
-    Owner/existence enforced by the dep. Events are recorded only while the
-    session is ``in_progress`` (late events for finished sessions are silently
-    dropped — this never blocks the interview). Post-session / teacher review
-    only; never surfaced to the student.
+    Best-effort by contract: this endpoint never blocks the interview. Events
+    are recorded only while the session is ``in_progress`` (late events for
+    finished sessions are silently dropped). Each scored signal
+    (``tab_switch`` / ``focus_lost`` / ``fullscreen_exit``) adds the weight
+    snapshotted onto the session at start; when the running score first
+    reaches the snapshotted threshold the server flags the session
+    (``integrity_warning_issued``), appends its own ``warning_issued`` event
+    with the score evidence, and reports ``warning_issued=true`` in THAT
+    response only. The interview continues either way — browser signals are
+    review/deterrence evidence, never a termination trigger, and never
+    tamper-proof proof of misconduct.
     """
+    from sqlalchemy import select  # noqa: PLC0415
+
     from abridgeai.features.interviews.models import (  # noqa: PLC0415
         AssessmentIntegrityEvent,
+        InterviewConfig,
         InterviewSession,
+    )
+    from abridgeai.features.interviews.schemas.integrity import (  # noqa: PLC0415
+        add_weighted_score,
+        coerce_client_event_id,
+        is_scored_event,
+        warn_once_and_score,
+    )
+    from abridgeai.features.interviews.services.ceremony import (  # noqa: PLC0415
+        integrity_policy_snapshot_from_config,
     )
 
     session = await db.get(InterviewSession, session_id)
     if session is None:  # pragma: no cover - dep already 404s; defensive
         raise _not_found("interview_session", session_id)
     if session.status != "in_progress":
-        return {"accepted": 0}
+        # Terminal sessions keep the old accepted-only shape semantics: a
+        # batch arriving after the fact is dropped, nothing is scored.
+        return IntegrityEventBatchResponse(accepted=0, integrity_score=0)
+
+    # Per-session policy snapshot (frozen at start by ``start_session``) — a
+    # config edited mid-cohort must not re-score live attempts (cohort
+    # fairness). Fall back to the config defaults defensively for rows created
+    # before the snapshot existed.
+    policy = dict(session.integrity_policy_snapshot or {})
+    if not policy:
+        config = await db.get(InterviewConfig, session.interview_config_id)
+        policy = integrity_policy_snapshot_from_config(config)
+
+    score_before = int(session.integrity_score or 0)
+    warned_already = bool(session.integrity_warning_issued)
+    score_after = score_before
 
     for item in payload.events:
+        if not is_scored_event(item.event_type):
+            # reconnect / disconnect: recorded for the teacher timeline, never
+            # scored (a network blip is not an integrity signal).
+            db.add(
+                AssessmentIntegrityEvent(
+                    assessment_kind="interview",
+                    interview_session_id=session_id,
+                    student_id=current_user.user_id,
+                    event_type=item.event_type,
+                    severity=item.severity,
+                    metadata_json=dict(item.metadata),
+                )
+            )
+            continue
+        client_event_id = coerce_client_event_id(item.metadata.get("client_event_id"))
+        existing = None
+        if client_event_id is not None:
+            existing = (
+                await db.execute(
+                    select(AssessmentIntegrityEvent.id).where(
+                        AssessmentIntegrityEvent.interview_session_id == session_id,
+                        AssessmentIntegrityEvent.client_event_id == client_event_id,
+                    )
+                )
+            ).scalar_one_or_none()
+        if existing is not None:
+            # Idempotent retry: the batch was already persisted (and scored).
+            continue
+        score_after = add_weighted_score(score_after, item.event_type, policy)
         db.add(
             AssessmentIntegrityEvent(
                 assessment_kind="interview",
@@ -552,11 +618,50 @@ async def record_integrity_events(
                 student_id=current_user.user_id,
                 event_type=item.event_type,
                 severity=item.severity,
+                client_event_id=client_event_id,
                 metadata_json=dict(item.metadata),
             )
         )
+
+    warning_issued = False
+    if not warned_already:
+        decision = warn_once_and_score(score_after, int(policy.get("score_threshold", 0) or 0))
+        warning_issued = decision.reaches_threshold
+        if decision.reaches_threshold:
+            # Server-generated evidence row: the client cannot write this event
+            # type into the timeline (its own warning_issued posts are recorded
+            # but never score and never set the flag).
+            db.add(
+                AssessmentIntegrityEvent(
+                    assessment_kind="interview",
+                    interview_session_id=session_id,
+                    student_id=current_user.user_id,
+                    event_type="warning_issued",
+                    severity="warning",
+                    metadata_json={
+                        "integrity_score_after": score_after,
+                        "integrity_score_threshold": int(policy.get("score_threshold", 0) or 0),
+                        "integrity_weight_tab_switch": int(policy.get("tab_switch", 0) or 0),
+                        "integrity_weight_focus_lost": int(policy.get("focus_lost", 0) or 0),
+                        "integrity_weight_fullscreen_exit": int(
+                            policy.get("fullscreen_exit", 0) or 0
+                        ),
+                    },
+                )
+            )
+            session.integrity_warning_issued = True
+            session.session_security_flagged = True
+            session.integrity_threshold_flagged_at = utcnow()
+
+    if score_after != score_before or warning_issued:
+        session.integrity_score = score_after
     await db.commit()
-    return {"accepted": len(payload.events)}
+    return IntegrityEventBatchResponse(
+        accepted=len(payload.events),
+        integrity_score=score_after,
+        integrity_score_threshold=int(policy.get("score_threshold", 0) or 0),
+        warning_issued=warning_issued,
+    )
 
 
 @router.get("/interview-sessions/{session_id}", response_model=InterviewSessionPublic)
@@ -753,5 +858,3 @@ async def finish_session(
         retake_available_at=retake.retake_available_at,
         can_retake=retake.can_retake,
     )
-
-
