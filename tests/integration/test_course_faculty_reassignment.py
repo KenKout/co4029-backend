@@ -1,14 +1,4 @@
-"""Reassigning a course's owning faculty, and labelling it in list reads.
-
-``faculty_id`` was set once at creation and then frozen, so every course created
-before the faculty feature sat at NULL with no route to fix it — and a "filter by
-faculty" view could never match them. It is now PATCHable, which makes the
-tenancy check the load-bearing part: without it a manager could move a course
-into another organization's faculty by sending any UUID.
-
-The list reads also gained ``faculty_name``, because a row carrying only
-``faculty_id`` forces the SPA to render a UUID or issue one request per row.
-"""
+"""Immutable course-faculty ownership and readable faculty labels."""
 
 from __future__ import annotations
 
@@ -16,7 +6,6 @@ import uuid
 from collections.abc import AsyncIterator
 from pathlib import Path
 
-import pytest
 import pytest_asyncio
 from alembic import command
 from alembic.config import Config
@@ -30,7 +19,6 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from abridgeai.core.config import get_settings
-from abridgeai.core.exceptions import AppError
 from abridgeai.core.security import CurrentUser
 from abridgeai.features.courses.schemas.request import CourseUpdate
 from abridgeai.features.courses.services import assignment as assignment_service
@@ -117,12 +105,13 @@ async def scenario(
         await conn.execute(
             text(
                 "INSERT INTO courses "
-                "(id, organization_id, owner_user_id, slug, title, status) "
-                "VALUES (:id, :org, :owner, :slug, :title, 'draft')"
+                "(id, organization_id, faculty_id, owner_user_id, slug, title, status) "
+                "VALUES (:id, :org, :faculty, :owner, :slug, :title, 'draft')"
             ),
             {
                 "id": course_id,
                 "org": seeded_users.organization_id,
+                "faculty": home_faculty,
                 "owner": seeded_users.teacher_id,
                 "slug": f"zz-faculty-course-{suffix}",
                 "title": f"ZZ Faculty Course {suffix}",
@@ -151,103 +140,13 @@ def _actor(seeded_users: SeededUsers) -> CurrentUser:
     return CurrentUser(user_id=seeded_users.manager_id, session_id=uuid.uuid4())
 
 
-async def test_faculty_can_be_assigned_after_creation(
+async def test_an_unrelated_patch_preserves_the_faculty(
     session_factory: async_sessionmaker[AsyncSession],
     seeded_users: SeededUsers,
     scenario: dict[str, uuid.UUID],
 ) -> None:
-    """The gap this closes: a NULL-faculty course could never be fixed."""
+    """No update payload can express a faculty transfer or unassignment."""
     async with session_factory() as session:
-        dto = await authoring_service.update_course(
-            session,
-            scenario["course_id"],
-            CourseUpdate(faculty_id=scenario["home_faculty"]),
-            _actor(seeded_users),
-        )
-        assert dto.faculty_id == scenario["home_faculty"]
-        await session.commit()
-
-
-async def test_a_foreign_faculty_is_refused(
-    session_factory: async_sessionmaker[AsyncSession],
-    seeded_users: SeededUsers,
-    scenario: dict[str, uuid.UUID],
-) -> None:
-    """The reason the check exists: no moving a course out of its tenant.
-
-    A PATCH body is just a UUID; without validation this would succeed and the
-    course would silently belong to another organization.
-    """
-    async with session_factory() as session:
-        with pytest.raises(AppError, match="live top-level faculty"):
-            await authoring_service.update_course(
-                session,
-                scenario["course_id"],
-                CourseUpdate(faculty_id=scenario["foreign_faculty"]),
-                _actor(seeded_users),
-            )
-
-
-async def test_a_nonexistent_faculty_is_refused(
-    session_factory: async_sessionmaker[AsyncSession],
-    seeded_users: SeededUsers,
-    scenario: dict[str, uuid.UUID],
-) -> None:
-    async with session_factory() as session:
-        with pytest.raises(AppError, match="live top-level faculty"):
-            await authoring_service.update_course(
-                session,
-                scenario["course_id"],
-                CourseUpdate(faculty_id=uuid.uuid4()),
-                _actor(seeded_users),
-            )
-
-
-async def test_explicit_null_unassigns_rather_than_inferring(
-    session_factory: async_sessionmaker[AsyncSession],
-    seeded_users: SeededUsers,
-    scenario: dict[str, uuid.UUID],
-) -> None:
-    """``faculty_id: null`` means UNASSIGN, not "pick one for me".
-
-    Creation infers a faculty from the actor's affiliations when none is given.
-    Reusing that logic here would make clearing the field silently move the
-    course to whatever faculty the CALLER belongs to — an edit nobody requested.
-    """
-    async with session_factory() as session:
-        await authoring_service.update_course(
-            session,
-            scenario["course_id"],
-            CourseUpdate(faculty_id=scenario["home_faculty"]),
-            _actor(seeded_users),
-        )
-        await session.commit()
-
-        dto = await authoring_service.update_course(
-            session,
-            scenario["course_id"],
-            CourseUpdate(faculty_id=None),
-            _actor(seeded_users),
-        )
-        assert dto.faculty_id is None
-        await session.commit()
-
-
-async def test_a_patch_that_omits_faculty_leaves_it_alone(
-    session_factory: async_sessionmaker[AsyncSession],
-    seeded_users: SeededUsers,
-    scenario: dict[str, uuid.UUID],
-) -> None:
-    """Omitted != null. Editing the description must not clear the faculty."""
-    async with session_factory() as session:
-        await authoring_service.update_course(
-            session,
-            scenario["course_id"],
-            CourseUpdate(faculty_id=scenario["home_faculty"]),
-            _actor(seeded_users),
-        )
-        await session.commit()
-
         dto = await authoring_service.update_course(
             session,
             scenario["course_id"],
@@ -269,14 +168,6 @@ async def test_list_reads_carry_the_faculty_name(
     neighbour's label — the batched lookup is keyed per course, not per page.
     """
     async with session_factory() as session:
-        await authoring_service.update_course(
-            session,
-            scenario["course_id"],
-            CourseUpdate(faculty_id=scenario["home_faculty"]),
-            _actor(seeded_users),
-        )
-        await session.commit()
-
         rows = await assignment_service.list_courses_for_organization(
             session, seeded_users.organization_id
         )
@@ -299,15 +190,6 @@ async def test_a_retired_faculty_reads_as_unassigned(
     Naming a retired faculty would present it as current; the id stays on the row
     for history, but the label reads as unassigned.
     """
-    async with session_factory() as session:
-        await authoring_service.update_course(
-            session,
-            scenario["course_id"],
-            CourseUpdate(faculty_id=scenario["home_faculty"]),
-            _actor(seeded_users),
-        )
-        await session.commit()
-
     async with engine.begin() as conn:
         await conn.execute(
             text("UPDATE org_units SET deleted_at = NOW() WHERE id = :id"),

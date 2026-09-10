@@ -5,9 +5,10 @@ from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
+from pydantic import ValidationError
 
 from abridgeai.core.exceptions import ConflictError, ForbiddenError
-from abridgeai.features.access_control.schemas.admin import MembershipCreate
+from abridgeai.features.access_control.schemas.admin import MembershipCreate, MembershipPatch
 from abridgeai.features.access_control.services import admin as service
 from abridgeai.features.identity.schemas.profile import UserCreate
 
@@ -94,3 +95,11 @@ def test_invite_identifier_matches_selected_role() -> None:
             role_code="teacher",
             student_code="SV-001",
         )
+
+
+def test_membership_cannot_carry_a_single_faculty_pointer() -> None:
+    """Faculty affiliation has one source of truth: user_faculty_assignments."""
+    with pytest.raises(ValidationError, match="org_unit_id"):
+        MembershipCreate(user_id=uuid4(), org_unit_id=uuid4())
+    with pytest.raises(ValidationError, match="org_unit_id"):
+        MembershipPatch(org_unit_id=uuid4())

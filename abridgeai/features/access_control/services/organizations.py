@@ -32,8 +32,6 @@ from abridgeai.features.access_control.models import (
 )
 from abridgeai.features.access_control.queries import organizations as org_queries
 from abridgeai.features.access_control.schemas.admin import (
-    BulkAssignUnitRequest,
-    BulkAssignUnitResult,
     FacultyMembersAddRequest,
     MembershipPatch,
     OrganizationCreate,
@@ -457,51 +455,6 @@ async def patch_unit(
     return updated
 
 
-async def assign_memberships_to_unit(
-    db: AsyncSession,
-    organization_id: UUID,
-    payload: BulkAssignUnitRequest,
-) -> BulkAssignUnitResult:
-    """Move a set of memberships into ``org_unit_id`` in one statement.
-
-    Two checks stand between a request body and the write, and both matter:
-
-    1. The target unit must exist, be live, and belong to ``organization_id``
-       — otherwise a manager could file their people under another tenant's
-       department, which would then leak them into that tenant's scope
-       filters.
-    2. EVERY membership id must belong to ``organization_id``. Ids come from
-       the client, and a foreign id is not skipped quietly — the whole call
-       is rejected. A silent partial write here is worse than an error: the
-       caller believes the cohort moved, and nobody looks again.
-
-    Ids that are simply missing or soft-deleted ARE tolerated and reported
-    in ``skipped``; that is a stale selection, not an attack, and failing the
-    whole batch because one person was removed mid-flow would be hostile.
-    """
-    await get_organization(db, organization_id)
-
-    if payload.org_unit_id is not None:
-        unit = await org_queries.get_unit(db, payload.org_unit_id)
-        if unit is None or unit.deleted_at is not None:
-            raise AppError("org_unit_id does not exist or is deleted")
-        if unit.organization_id != organization_id:
-            raise AppError("org_unit_id belongs to a different organization")
-
-    rows = await org_queries.list_memberships_by_ids(db, payload.membership_ids)
-    found = {row.id: row for row in rows}
-
-    foreign = [r.id for r in rows if r.organization_id != organization_id]
-    if foreign:
-        raise AppError("membership_ids contains memberships from a different organization")
-
-    skipped = [mid for mid in payload.membership_ids if mid not in found]
-    assigned = await org_queries.bulk_update_membership_unit(
-        db, [r.id for r in rows], payload.org_unit_id
-    )
-    return BulkAssignUnitResult(assigned=assigned, skipped=skipped)
-
-
 async def delete_unit(
     db: AsyncSession,
     unit_id: UUID,
@@ -692,12 +645,6 @@ async def patch_membership(
     if current is None or current.deleted_at is not None:
         raise NotFoundError("Membership not found")
     fields = payload.model_dump(exclude_unset=True)
-    if "org_unit_id" in fields and fields["org_unit_id"] is not None:
-        unit = await org_queries.get_unit(db, fields["org_unit_id"])
-        if unit is None or unit.deleted_at is not None:
-            raise AppError("org_unit_id does not exist or is deleted")
-        if unit.organization_id != current.organization_id:
-            raise AppError("org_unit_id belongs to a different organization")
     if fields.get("status") == "left" and current.status != "left" and current.left_at is None:
         fields["left_at"] = org_queries.now_utc()
     updated = await org_queries.update_membership(db, membership_id, fields=fields)

@@ -582,7 +582,6 @@ async def add_organization_membership(
         db,
         user_id=payload.user_id,
         organization_id=organization_id,
-        org_unit_id=payload.org_unit_id,
         status=payload.status,
         student_code=payload.student_code,
         employee_code=payload.employee_code,

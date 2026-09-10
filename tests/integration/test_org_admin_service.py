@@ -14,9 +14,6 @@ The rules worth stating, because they are what these tests defend:
   scope AND an active ``user_faculty_assignments`` row for that faculty —
   both halves, so a stale role row alone grants nothing. A Faculty Dean may
   staff their own faculty but may not appoint or remove another Dean.
-* **Bulk assignment is all-or-nothing across tenants but tolerant of
-  staleness.** A membership id from another organization rejects the whole
-  batch; an id that has simply vanished is reported in ``skipped``.
 * **A faculty is archived only when nothing lives in it.** Programs, courses
   and active staff assignments each block it.
 * **Leaving is not deleting.** ``delete_membership`` sets ``status='left'``
@@ -51,7 +48,6 @@ from abridgeai.core.config import get_settings
 from abridgeai.core.exceptions import AppError, ForbiddenError, NotFoundError
 from abridgeai.features.access_control.queries import organizations as org_queries
 from abridgeai.features.access_control.schemas.admin import (
-    BulkAssignUnitRequest,
     FacultyMembersAddRequest,
     MembershipPatch,
     OrganizationCreate,
@@ -621,118 +617,6 @@ async def test_unit_tree_is_returned_for_the_tenant(db: AsyncSession, tenant: Te
 
 
 # ---------------------------------------------------------------------------
-# Bulk membership assignment
-# ---------------------------------------------------------------------------
-
-
-async def test_bulk_assign_moves_the_named_memberships(db: AsyncSession, tenant: Tenant) -> None:
-    ids = [tenant.membership_ids[tenant.teacher], tenant.membership_ids[tenant.manager]]
-    result = await svc.assign_memberships_to_unit(
-        db,
-        tenant.org_id,
-        BulkAssignUnitRequest(membership_ids=ids, org_unit_id=tenant.faculty_a),
-    )
-    await db.commit()
-    assert result.assigned == 2
-    assert result.skipped == []
-
-    row = await org_queries.get_membership(db, ids[0])
-    assert row is not None
-    assert row.org_unit_id == tenant.faculty_a
-
-
-async def test_bulk_assign_rejects_the_whole_batch_on_a_foreign_id(
-    db: AsyncSession, tenant: Tenant
-) -> None:
-    """One membership from another tenant fails everything.
-
-    Ids arrive in a request body. Skipping the foreign one quietly would file
-    that person under this tenant's faculty — or, read the other way, tell
-    the caller a cohort moved when it partly did not. A partial write nobody
-    is told about is worse than an error.
-    """
-    mine = tenant.membership_ids[tenant.teacher]
-    with pytest.raises(AppError, match="different organization"):
-        await svc.assign_memberships_to_unit(
-            db,
-            tenant.org_id,
-            BulkAssignUnitRequest(
-                membership_ids=[mine, tenant.foreign_membership_id],
-                org_unit_id=tenant.faculty_a,
-            ),
-        )
-    await db.rollback()
-
-    row = await org_queries.get_membership(db, mine)
-    assert row is not None
-    assert row.org_unit_id is None, "nothing may be written when the batch is rejected"
-
-
-async def test_bulk_assign_tolerates_a_stale_selection(db: AsyncSession, tenant: Tenant) -> None:
-    """A membership removed mid-flow is reported, not fatal.
-
-    That is a stale UI selection, not an attack — failing the batch because
-    one person left while the manager was choosing would be hostile.
-    """
-    gone = uuid.uuid4()
-    result = await svc.assign_memberships_to_unit(
-        db,
-        tenant.org_id,
-        BulkAssignUnitRequest(
-            membership_ids=[tenant.membership_ids[tenant.teacher], gone],
-            org_unit_id=tenant.faculty_a,
-        ),
-    )
-    await db.commit()
-    assert result.assigned == 1
-    assert result.skipped == [gone]
-
-
-async def test_bulk_assign_rejects_a_unit_from_another_tenant(
-    db: AsyncSession, tenant: Tenant
-) -> None:
-    with pytest.raises(AppError, match="different organization"):
-        await svc.assign_memberships_to_unit(
-            db,
-            tenant.org_id,
-            BulkAssignUnitRequest(
-                membership_ids=[tenant.membership_ids[tenant.teacher]],
-                org_unit_id=tenant.foreign_faculty,
-            ),
-        )
-
-
-async def test_bulk_assign_rejects_a_missing_unit(db: AsyncSession, tenant: Tenant) -> None:
-    with pytest.raises(AppError, match="does not exist"):
-        await svc.assign_memberships_to_unit(
-            db,
-            tenant.org_id,
-            BulkAssignUnitRequest(
-                membership_ids=[tenant.membership_ids[tenant.teacher]],
-                org_unit_id=uuid.uuid4(),
-            ),
-        )
-
-
-async def test_bulk_assign_can_clear_the_unit(db: AsyncSession, tenant: Tenant) -> None:
-    """``org_unit_id=None`` unfiles people, and must skip the unit checks."""
-    ids = [tenant.membership_ids[tenant.teacher]]
-    await svc.assign_memberships_to_unit(
-        db, tenant.org_id, BulkAssignUnitRequest(membership_ids=ids, org_unit_id=tenant.faculty_a)
-    )
-    await db.commit()
-
-    result = await svc.assign_memberships_to_unit(
-        db, tenant.org_id, BulkAssignUnitRequest(membership_ids=ids, org_unit_id=None)
-    )
-    await db.commit()
-    assert result.assigned == 1
-    row = await org_queries.get_membership(db, ids[0])
-    assert row is not None
-    assert row.org_unit_id is None
-
-
-# ---------------------------------------------------------------------------
 # Faculty staffing
 # ---------------------------------------------------------------------------
 
@@ -983,16 +867,6 @@ async def test_listing_rejects_a_faculty_from_another_tenant(
 # ---------------------------------------------------------------------------
 
 
-async def test_patch_membership_validates_the_target_unit(db: AsyncSession, tenant: Tenant) -> None:
-    membership_id = tenant.membership_ids[tenant.teacher]
-    with pytest.raises(AppError, match="does not exist"):
-        await svc.patch_membership(db, membership_id, MembershipPatch(org_unit_id=uuid.uuid4()))
-    with pytest.raises(AppError, match="different organization"):
-        await svc.patch_membership(
-            db, membership_id, MembershipPatch(org_unit_id=tenant.foreign_faculty)
-        )
-
-
 async def test_patch_membership_can_change_status(db: AsyncSession, tenant: Tenant) -> None:
     membership_id = tenant.membership_ids[tenant.teacher]
     updated = await svc.patch_membership(db, membership_id, MembershipPatch(status="suspended"))
@@ -1110,14 +984,3 @@ async def test_active_org_member_user_ids_filters_to_the_tenant(
     assert tenant.outsider not in members
 
 
-async def test_bulk_update_membership_unit_short_circuits_on_empty(
-    db: AsyncSession,
-) -> None:
-    """An empty id list must not become ``IN ()`` — that is a SQL error."""
-    assert await org_queries.bulk_update_membership_unit(db, [], None) == 0
-
-
-async def test_list_memberships_by_ids_short_circuits_on_empty(
-    db: AsyncSession,
-) -> None:
-    assert await org_queries.list_memberships_by_ids(db, []) == []

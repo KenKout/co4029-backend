@@ -100,7 +100,6 @@ class ProgramRead(BaseModel):
     id: UUID
     organization_id: UUID
     faculty_id: UUID
-    owner_faculty_dean_id: UUID | None
     slug: str
     name: str
     description: str | None

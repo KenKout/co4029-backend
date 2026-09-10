@@ -313,7 +313,6 @@ async def create_program(
     probe = LearningProgram(
         organization_id=organization_id,
         faculty_id=payload.faculty_id,
-        owner_faculty_dean_id=None,
         slug=payload.slug,
         name=payload.name,
         description=payload.description,

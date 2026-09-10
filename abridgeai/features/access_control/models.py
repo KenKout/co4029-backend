@@ -173,7 +173,12 @@ class OrganizationDomain(
 class OrganizationMembership(
     UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftDeleteMixin, Base
 ):
-    """User ↔ organization membership with optional org_unit scope."""
+    """User ↔ organization membership.
+
+    Faculty affiliation lives exclusively in :class:`UserFacultyAssignment`:
+    membership is the tenant boundary, while staff may belong to several
+    faculties at the same time.
+    """
 
     __tablename__ = "organization_memberships"
     __table_args__ = (
@@ -200,10 +205,6 @@ class OrganizationMembership(
         ForeignKey("organizations.id", ondelete="NO ACTION"),
         nullable=False,
         index=True,
-    )
-    org_unit_id: Mapped[uuid.UUID | None] = mapped_column(
-        PGUUID(as_uuid=True),
-        ForeignKey("org_units.id", ondelete="SET NULL"),
     )
     status: Mapped[str] = mapped_column(String(20), nullable=False, server_default=text("'active'"))
     student_code: Mapped[str | None] = mapped_column(String(50))

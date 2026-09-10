@@ -68,9 +68,6 @@ class LearningProgram(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftD
     faculty_id: Mapped[uuid.UUID] = mapped_column(
         PGUUID(as_uuid=True), ForeignKey("org_units.id", ondelete="NO ACTION"), index=True
     )
-    owner_faculty_dean_id: Mapped[uuid.UUID | None] = mapped_column(
-        PGUUID(as_uuid=True), ForeignKey("users.id", ondelete="NO ACTION")
-    )
     slug: Mapped[str] = mapped_column(String(100))
     name: Mapped[str] = mapped_column(String(255))
     description: Mapped[str | None] = mapped_column(Text)

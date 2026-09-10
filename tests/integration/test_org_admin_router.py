@@ -561,45 +561,6 @@ async def test_a_master_dean_can_create_and_rename_a_faculty(
 
 
 # ---------------------------------------------------------------------------
-# Bulk assign
-# ---------------------------------------------------------------------------
-
-
-async def test_bulk_assign_reports_assigned_and_skipped(
-    client: httpx.AsyncClient, engine: AsyncEngine, world: World
-) -> None:
-    token = await _bearer(engine, world.master)
-    stale = str(uuid.uuid4())
-    resp = await client.post(
-        f"/api/v1/admin/organizations/{world.org_a}/memberships/assign-unit",
-        json={
-            "membership_ids": [str(world.membership_a), stale],
-            "org_unit_id": str(world.faculty_a),
-        },
-        headers=_auth(token),
-    )
-    assert resp.status_code == 200, resp.text
-    body = resp.json()
-    assert body["assigned"] == 1
-    assert body["skipped"] == [stale]
-
-
-async def test_bulk_assign_rejects_a_foreign_membership_with_422(
-    client: httpx.AsyncClient, engine: AsyncEngine, world: World
-) -> None:
-    token = await _bearer(engine, world.master)
-    resp = await client.post(
-        f"/api/v1/admin/organizations/{world.org_a}/memberships/assign-unit",
-        json={
-            "membership_ids": [str(world.membership_a), str(world.membership_b)],
-            "org_unit_id": str(world.faculty_a),
-        },
-        headers=_auth(token),
-    )
-    assert resp.status_code == 422, resp.text
-
-
-# ---------------------------------------------------------------------------
 # Faculty staffing
 # ---------------------------------------------------------------------------
 

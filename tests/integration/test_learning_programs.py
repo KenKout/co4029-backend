@@ -190,7 +190,6 @@ async def test_program_selection_and_dean_approved_switch_are_historical(
             ProgramCreate(
                 organization_id=seeded_users.organization_id,
                 faculty_id=faculty_id,
-                owner_faculty_dean_id=seeded_users.hod_id,
                 slug=f"program-{uuid.uuid4().hex[:8]}",
                 name="Versioned Program",
                 career_path_ids=[path_a, path_b],
@@ -250,7 +249,6 @@ async def test_request_path_change_notifies_faculty_dean_with_deep_link(
             ProgramCreate(
                 organization_id=seeded_users.organization_id,
                 faculty_id=faculty_id,
-                owner_faculty_dean_id=seeded_users.hod_id,
                 slug=f"program-{uuid.uuid4().hex[:8]}",
                 name="Dean Notify Program",
                 career_path_ids=[path_a, path_b],
@@ -472,7 +470,6 @@ async def test_it_admin_cannot_operate_academic_programs(
                 ProgramCreate(
                     organization_id=seeded_users.organization_id,
                     faculty_id=faculty_id,
-                    owner_faculty_dean_id=seeded_users.hod_id,
                     slug=f"admin-blocked-{uuid.uuid4().hex[:8]}",
                     name="Admin Must Not Create This",
                     career_path_ids=[path_a],
