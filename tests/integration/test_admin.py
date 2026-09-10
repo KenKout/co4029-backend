@@ -1082,6 +1082,15 @@ async def test_active_users_trend(
     users whose session was created that calendar day. The admin bearer
     session lands today; two more sessions are pinned 3 days back.
     """
+    # Isolate the window FIRST: auth_sessions accumulates rows from every
+    # other test (and this suite shares one Postgres across runs), and the
+    # trend counts every session in the window — not just ours. Same
+    # isolation the latency test below applies to http_audit_log: tests run
+    # serially and each test recreates the sessions it needs, so clear the
+    # whole table before minting the admin bearer and pinning the fixtures
+    # (wiping after _bearer would 401 the stats call itself).
+    async with engine.begin() as conn:
+        await conn.execute(text("DELETE FROM auth_sessions"))
     token, _ = await _bearer(engine, seeded_users.admin_id)
     three_days_ago = datetime.now(tz=UTC) - timedelta(days=3)
     for uid in (seeded_users.student_id, seeded_users.manager_id):
