@@ -134,8 +134,8 @@ async def quiz_with_questions(engine: AsyncEngine) -> AsyncIterator[dict]:
         await conn.execute(
             text(
                 "INSERT INTO organization_memberships "
-                "(id, user_id, organization_id, org_unit_id, status) "
-                "VALUES (gen_random_uuid(), :uid, :org, NULL, 'active')"
+                "(id, user_id, organization_id, status) "
+                "VALUES (gen_random_uuid(), :uid, :org, 'active')"
             ),
             {"uid": student_id, "org": org_id},
         )

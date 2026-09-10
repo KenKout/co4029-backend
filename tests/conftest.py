@@ -328,8 +328,6 @@ async def _insert_memberships(
     *,
     org_id: str,
     user_ids: list[str],
-    faculty_user_ids: set[str],
-    org_unit_id: str | None,
 ) -> None:
     """Seed organization_memberships rows for the test cohort.
 
@@ -344,13 +342,12 @@ async def _insert_memberships(
         await session.execute(
             text(
                 "INSERT INTO organization_memberships "
-                "(id, user_id, organization_id, org_unit_id, status) "
-                "VALUES (gen_random_uuid(), :user_id, :org_id, :org_unit_id, 'active')"
+                "(id, user_id, organization_id, status) "
+                "VALUES (gen_random_uuid(), :user_id, :org_id, 'active')"
             ),
             {
                 "user_id": uid,
                 "org_id": org_id,
-                "org_unit_id": org_unit_id if uid in faculty_user_ids else None,
             },
         )
 
@@ -407,8 +404,6 @@ async def seeded_users(test_engine: AsyncEngine) -> SeededUsers:
             session,
             org_id=org["id"],
             user_ids=member_user_ids,
-            faculty_user_ids=faculty_user_ids,
-            org_unit_id=org_unit["id"],
         )
         await _insert_faculty_assignments(
             session,

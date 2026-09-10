@@ -190,10 +190,10 @@ async def unenrolled_bearer(engine: AsyncEngine, seeded_users: SeededUsers) -> A
         await conn.execute(
             text(
                 "INSERT INTO organization_memberships "
-                "(id, user_id, organization_id, org_unit_id, status) "
-                "VALUES (gen_random_uuid(), :uid, :org, :unit, 'active')"
+                "(id, user_id, organization_id, status) "
+                "VALUES (gen_random_uuid(), :uid, :org, 'active')"
             ),
-            {"uid": uid, "org": seeded_users.organization_id, "unit": seeded_users.org_unit_id},
+            {"uid": uid, "org": seeded_users.organization_id},
         )
         await conn.execute(
             text(
@@ -858,10 +858,10 @@ async def test_dropped_enrollment_blocked(
         await conn.execute(
             text(
                 "INSERT INTO organization_memberships "
-                "(id, user_id, organization_id, org_unit_id, status) "
-                "VALUES (gen_random_uuid(), :uid, :org, :unit, 'active')"
+                "(id, user_id, organization_id, status) "
+                "VALUES (gen_random_uuid(), :uid, :org, 'active')"
             ),
-            {"uid": dropped_uid, "org": seeded_users.organization_id, "unit": seeded_users.org_unit_id},
+            {"uid": dropped_uid, "org": seeded_users.organization_id},
         )
         await conn.execute(
             text(
@@ -934,10 +934,10 @@ async def test_completed_enrollment_still_reads(
         await conn.execute(
             text(
                 "INSERT INTO organization_memberships "
-                "(id, user_id, organization_id, org_unit_id, status) "
-                "VALUES (gen_random_uuid(), :uid, :org, :unit, 'active')"
+                "(id, user_id, organization_id, status) "
+                "VALUES (gen_random_uuid(), :uid, :org, 'active')"
             ),
-            {"uid": completed_uid, "org": seeded_users.organization_id, "unit": seeded_users.org_unit_id},
+            {"uid": completed_uid, "org": seeded_users.organization_id},
         )
         await conn.execute(
             text(
