@@ -27,8 +27,6 @@ import httpx
 import pytest_asyncio
 from fastapi import FastAPI
 from sqlalchemy import text
-
-from tests.support.db_graph import purge_auth_events_for_users
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -44,6 +42,7 @@ from abridgeai.features.access_control.queries import (
     load_user_permissions,
 )
 from abridgeai.features.access_control.routers.admin import router as admin_router
+from tests.support.db_graph import purge_auth_events_for_users
 
 
 def _async_url(database_url: str) -> str:
