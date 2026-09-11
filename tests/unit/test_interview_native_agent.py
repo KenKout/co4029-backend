@@ -1195,7 +1195,11 @@ async def test_the_server_does_not_advance_at_the_buzzer(
     model asking permission, wrong as a trigger: it would put a fresh question to
     the candidate with seconds left instead of closing."""
     setup = _setup()
-    setup.userdata.below_closing_threshold = True
+    # Simulate the closing window via the LIVE derivation inputs (the frozen
+    # bool is no longer read): 0 seconds remain of a 30-minute session.
+    setup.userdata.total_duration_seconds = 1800
+    setup.userdata.time_remaining_seconds = 0
+    setup.userdata.clock_read_monotonic = None
     _grades_to(setup, COVERAGE_SUFFICIENT_POINTS)
     _fake, agent, hard_stop = await _run(monkeypatch, job_ctx, setup)
     try:

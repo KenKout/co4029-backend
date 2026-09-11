@@ -20,6 +20,7 @@ created here and never updated reads as a session that made no progress.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
@@ -34,7 +35,6 @@ from abridgeai.features.interviews.orchestrator.coverage import is_provisionally
 from abridgeai.features.interviews.orchestrator.decision import (
     DEFAULT_MAX_FOLLOWUPS_PER_QUESTION,
     MAX_CANNOT_ANSWER_HINTS,
-    DecisionInputs,
 )
 from abridgeai.features.interviews.orchestrator.interviewer_identity import identity_from_config
 from abridgeai.features.interviews.orchestrator.selection import (
@@ -59,13 +59,6 @@ if TYPE_CHECKING:
     from abridgeai.features.interviews.orchestrator.sufficiency import SufficiencyVerdict
 
 logger = logging.getLogger(__name__)
-
-# The fraction of remaining time below which the interview must head for the
-# closing. Read off ``DecisionInputs`` rather than restated, so the native path
-# and the routed path cannot drift apart on the one number that decides whether
-# ending is allowed. NOT ``decision._LOW_TIME_FRACTION`` (0.2), which is the
-# looser "stop probing" threshold.
-_CLOSING_TIME_FRACTION: float = DecisionInputs.closing_time_fraction
 
 
 class NativeSetupError(RuntimeError):
@@ -247,29 +240,38 @@ class StateWriter:
         self._session_id = session_id
         self._state = state
         self._version: int | None = None
+        # Serialises grader/tools saves on ONE state object so interleaved
+        # saves cannot interleave read-modify-write cycles in memory.
+        self._save_lock = asyncio.Lock()
 
     def adopt_version(self, version: int) -> None:
         self._version = version
 
-    async def save(self, *, turn_key: str | None = None) -> None:
+    async def save(
+        self, *, turn_key: str | None = None, strict: bool = False
+    ) -> None:
         """Persist the in-room state, optionally stamping the turn that produced it.
 
         ``turn_key`` is the typed door's client idempotency key. Recording it makes
         the duplicate check survive an agent restart: the in-process ledger is gone
         after a crash, but ``last_turn_idempotency_key`` is loaded back at setup, so
         a client that reconnects to a fresh process and retries is still recognised.
+
+        Strictness (plan §2): ``strict=True`` is the TYPED path — a CAS loss
+        raises :class:`state_repo.StaleStateError` after the shared state has been
+        re-synced to the persisted winner, so a retry replays the fold onto
+        CURRENT state instead of overwriting it with a stale copy. The spoken
+        path (strict=False, the default) logs and continues best-effort: there is
+        no receipt there and a failure must not cost the candidate their reply.
         """
-        async with get_sessionmaker()() as db:
+        async with self._save_lock, get_sessionmaker()() as db:
             loaded = await state_repo.load_or_init(db, self._session_id)
             expected = self._version if self._version is not None else loaded.version
             if expected != loaded.version:
-                logger.warning(
-                    "runtime state changed underneath the agent; in-room state wins "
-                    "(session=%s, held=%s, found=%s)",
-                    self._session_id,
-                    expected,
-                    loaded.version,
-                )
+                # A foreign writer moved the row between our saves. The CAS
+                # below will fail against it — re-sync to the winner now so
+                # BOTH paths make an honest decision on current state.
+                self._sync_from_winner(loaded.data)
                 expected = loaded.version
             try:
                 self._version = await state_repo.save(
@@ -280,6 +282,14 @@ class StateWriter:
                     turn_idempotency_key=turn_key,
                 )
             except state_repo.StaleStateError:
+                if strict:
+                    # Re-sync the shared object to the persisted winner before
+                    # raising, so the typed caller's retry folds onto the
+                    # winner's state (never double-awarding coverage/counters
+                    # that the winner already recorded).
+                    self._sync_from_winner(loaded.data)
+                    self._version = None
+                    raise
                 logger.warning(
                     "runtime state save lost a race; will re-sync next turn (session=%s)",
                     self._session_id,
@@ -287,6 +297,29 @@ class StateWriter:
                 self._version = None
                 return
             await db.commit()
+
+    def _sync_from_winner(self, loaded_data: object) -> None:
+        """Copy the persisted winner's fields onto the shared in-room state.
+
+        The state object is shared by reference (tools and grader both hold
+        ``userdata.state``), so it is updated IN PLACE rather than replaced.
+        Fields absent from the loaded dict are left alone — the loader may be
+        a lightweight fake in tests.
+        """
+        data_dict: dict[str, object] | None = None
+        if isinstance(loaded_data, dict):
+            data_dict = loaded_data
+        else:
+            to_dict = getattr(loaded_data, "to_dict", None)
+            if callable(to_dict):
+                result = to_dict()
+                if isinstance(result, dict):
+                    data_dict = result
+        if data_dict is None:
+            return
+        for key, value in data_dict.items():
+            if hasattr(self._state, key):
+                setattr(self._state, key, value)
 
 
 async def _submit_and_discard_closing(session_id: UUID, student_id: UUID, *, language: str) -> bool:
@@ -331,6 +364,8 @@ def _make_turn_grader(
         question_text: str,
         turn_id: str,
         turn_key: str | None = None,
+        message_id: str | None = None,
+        question_id: str | None = None,
     ) -> None:
         from abridgeai.core.db import get_sessionmaker  # noqa: PLC0415
         from abridgeai.features.interviews.orchestrator.sufficiency_logic import (  # noqa: PLC0415
@@ -357,11 +392,26 @@ def _make_turn_grader(
                     outcome_id=outcome_id,
                 )
 
-            async def _enqueue(*, turn_id: str, probe_verdict: dict[str, Any]) -> None:
-                question_id = question_id_getter()
+            async def _enqueue(
+                *,
+                turn_id: str,
+                probe_verdict: dict[str, Any],
+                message_id: str | None = None,
+                question_id: str | None = None,
+            ) -> None:
+                # The question id arrives CAPTURED (pre-fold/advance) from the
+                # typed context — calling the getter here would race the
+                # advance and reconcile the answer against the WRONG question.
                 if question_id is None:
                     # Nothing to re-analyse against; the probe's fold stands.
                     return
+                payload: dict[str, Any] = {
+                    "question_id": str(question_id),
+                    "turn_id": turn_id,
+                    "probe_verdict": probe_verdict,
+                }
+                if message_id is not None:
+                    payload["message_id"] = str(message_id)
                 pool = await bridge._get_arq_pool()  # noqa: SLF001
                 if pool is None:
                     return
@@ -369,11 +419,7 @@ def _make_turn_grader(
                     RECONCILE_TURN_ANALYSIS_TASK,
                     str(student_id),
                     str(session_id),
-                    {
-                        "question_id": str(question_id),
-                        "turn_id": turn_id,
-                        "probe_verdict": probe_verdict,
-                    },
+                    payload,
                 )
 
             await grade_native_turn(
@@ -386,7 +432,12 @@ def _make_turn_grader(
                 # Stamps this turn's client key as the last one processed, in the
                 # SAME write that persists the coverage it produced — so the key
                 # can never be recorded for a fold that did not land.
-                save_state=partial(writer.save, turn_key=turn_key),
+                # strict=True: the typed path must SEE a CAS loss (the receipt
+                # goes failed, the client keeps its retryable draft) instead of
+                # the fold being recorded applied over a foreign winner.
+                save_state=partial(writer.save, turn_key=turn_key, strict=True),
+                message_id=message_id,
+                question_id=question_id,
             )
 
     return _grade
@@ -498,8 +549,11 @@ async def load_native_setup(
             if getattr(config, "max_hints_per_question", None) is not None
             else MAX_CANNOT_ANSWER_HINTS
         ),
-        below_closing_threshold=(
-            time_fraction is not None and time_fraction <= _CLOSING_TIME_FRACTION
+        # No frozen closing flag at join (plan §6): readers derive it live via
+        # `below_closing_threshold_now()`. The TOTAL duration is injected so
+        # that derivation has its denominator.
+        total_duration_seconds=(
+            (int(getattr(config, "time_limit_minutes", 0) or 0) * 60) or None
         ),
         # Prefer the prompt for the question runtime state says we are on. The
         # bridge helper reads the highest-sequence TRANSCRIPT row, which lags the

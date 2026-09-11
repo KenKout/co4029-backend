@@ -69,7 +69,15 @@ class InterviewUserdata:
     questions_total: int = 0
     max_follow_ups_per_question: int = 2
     max_hints_per_question: int = 3
+    # DEPRECATED field kept for one release: the value was snapshotted ONCE at
+    # join, so a session that crossed the closing threshold mid-interview never
+    # saw the agent's urgency change. All readers must call
+    # :meth:`below_closing_threshold_now` instead. New code: do not read this.
     below_closing_threshold: bool = False
+    # Total configured duration in SECONDS (config.time_limit_minutes * 60),
+    # injected at setup so the live fraction can be derived anywhere. 0/None =
+    # untimed.
+    total_duration_seconds: int | None = None
     current_question_text: str | None = None
     # Seconds left on the session clock AS OF ``clock_read_monotonic``. None means
     # the session is UNTIMED — distinct from 0, and the reminder must not report it
@@ -161,6 +169,24 @@ class InterviewUserdata:
             return self.time_remaining_seconds
         elapsed = time.monotonic() - self.clock_read_monotonic
         return max(0, int(self.time_remaining_seconds - elapsed))
+
+    def below_closing_threshold_now(self) -> bool:
+        """Whether the session is in its closing window AS OF NOW.
+
+        Derived live: remaining / total against the SHARED orchestrator closing
+        fraction (``DecisionInputs.closing_time_fraction``) — no duplicate
+        literal. Untimed sessions (or a nonsensical total) are never "closing".
+        This replaces the join-time ``below_closing_threshold`` bool, which was
+        frozen at setup and never crossed mid-interview.
+        """
+        remaining = self.remaining_seconds_now()
+        if remaining is None or not self.total_duration_seconds or self.total_duration_seconds <= 0:
+            return False
+        from abridgeai.features.interviews.orchestrator.decision import (  # noqa: PLC0415
+            DecisionInputs,
+        )
+
+        return (remaining / self.total_duration_seconds) <= DecisionInputs.closing_time_fraction
 
 
 __all__ = ["InterviewUserdata", "SelectedQuestion"]

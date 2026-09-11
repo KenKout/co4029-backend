@@ -24,6 +24,8 @@ from abridgeai.features.interviews.realtime import observability as obs
 if TYPE_CHECKING:
     from uuid import UUID
 
+    from sqlalchemy.ext.asyncio import AsyncSession
+
 logger = logging.getLogger(__name__)
 
 # `role` is CHECK-constrained to these on `interview_session_messages`.
@@ -34,8 +36,8 @@ _ROLE_BY_SDK: dict[str, str] = {
 }
 
 
-async def _resolve_session_question(
-    db: object, session_id: UUID, bank_question_id: UUID | None
+async def resolve_session_question(
+    db: AsyncSession, session_id: UUID, bank_question_id: UUID | None
 ) -> UUID | None:
     """Map a BANK question id onto this session's own question row.
 
@@ -48,6 +50,10 @@ async def _resolve_session_question(
     Created on demand: the native path never materialised these rows (the routed
     path did it inside ``take_session_step``), so the first time a question is
     recorded there is nothing to link to.
+
+    Shared by the transcript writer and the typed-turn receipt path so the two
+    cannot drift; concurrent creators converge on the unique
+    ``(session_id, sequence_no)`` slot via rollback + reload in the caller.
     """
     from sqlalchemy import func, select  # noqa: PLC0415
 
@@ -57,7 +63,7 @@ async def _resolve_session_question(
 
     if bank_question_id is None:
         return None
-    found = await db.scalar(  # type: ignore[attr-defined]
+    found: UUID | None = await db.scalar(
         select(InterviewSessionQuestion.id).where(
             InterviewSessionQuestion.session_id == session_id,
             InterviewSessionQuestion.interview_question_id == bank_question_id,
@@ -66,7 +72,7 @@ async def _resolve_session_question(
     if found is not None:
         return found
     next_sequence = (
-        await db.scalar(  # type: ignore[attr-defined]
+        await db.scalar(
             select(func.coalesce(func.max(InterviewSessionQuestion.sequence_no), 0)).where(
                 InterviewSessionQuestion.session_id == session_id
             )
@@ -78,9 +84,32 @@ async def _resolve_session_question(
         interview_question_id=bank_question_id,
         sequence_no=next_sequence,
     )
-    db.add(row)  # type: ignore[attr-defined]
-    await db.flush()  # type: ignore[attr-defined]
+    db.add(row)
+    try:
+        await db.flush()
+    except Exception:
+        # A concurrent creator won the sequence slot: roll back this attempt
+        # and reuse ITS row instead of losing the answer to an IntegrityError.
+        # (The transcript writer swallows everything; the receipt path must
+        # NOT — so the convergence happens here, before any error can escape.)
+        await db.rollback()
+        found_retry: UUID | None = await db.scalar(
+            select(InterviewSessionQuestion.id).where(
+                InterviewSessionQuestion.session_id == session_id,
+                InterviewSessionQuestion.interview_question_id == bank_question_id,
+            )
+        )
+        if found_retry is not None:
+            return found_retry
+        raise
     return row.id
+
+
+async def _resolve_session_question(
+    db: AsyncSession, session_id: UUID, bank_question_id: UUID | None
+) -> UUID | None:
+    """Backwards-compatible shim over :func:`resolve_session_question`."""
+    return await resolve_session_question(db, session_id, bank_question_id)
 
 
 async def record_turn(
@@ -131,4 +160,4 @@ async def record_turn(
         logger.exception("failed to record native turn (session=%s)", session_id)
 
 
-__all__ = ["record_turn"]
+__all__ = ["record_turn", "resolve_session_question"]

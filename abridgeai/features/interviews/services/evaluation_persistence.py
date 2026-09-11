@@ -39,11 +39,26 @@ _logger = logging.getLogger("abridgeai.features.interviews.services.evaluation_p
 async def _list_candidate_answers(
     db: AsyncSession, session_id: UUID
 ) -> list[InterviewSessionMessage]:
+    """The gradeable user turns for one session.
+
+    Single predicate chain: user row, linked to a session question, not
+    onboarding, and — for typed-turn receipts — fully APPLIED. A receipt still
+    in ``received`` (fold in flight at finish) or ``failed`` (fold raised) is
+    NOT evidence and must not enter the rubric/outcome prompts; ordinary
+    REST/voice user rows have no receipt marker and keep the old behavior.
+    The receipt state check lives in the shared evaluation predicate
+    (:func:`abridgeai.features.interviews.ai.stages.evaluation.logic.
+    _is_candidate_answer`) so direct/internal callers cannot bypass it.
+    """
+    from abridgeai.features.interviews.ai.stages.evaluation.logic import (  # noqa: PLC0415
+        _is_candidate_answer,
+    )
+
     messages = await sessions_queries.list_session_messages(db, session_id)
     return [
         m
         for m in messages
-        if getattr(m, "role", None) == "user"
+        if _is_candidate_answer(m)
         and getattr(m, "session_question_id", None) is not None
         and (getattr(m, "metadata_json", None) or {}).get("kind") != "onboarding"
     ]

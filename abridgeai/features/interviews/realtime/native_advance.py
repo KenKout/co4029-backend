@@ -88,7 +88,7 @@ async def advance_if_resolved(userdata: InterviewUserdata, selector: PoolSizer) 
     rejoin lands on the question the candidate was actually moved to.
     """
     state = userdata.state
-    if state is None or userdata.finished or userdata.below_closing_threshold:
+    if state is None or userdata.finished or userdata.below_closing_threshold_now():
         return AdvanceOutcome(advanced=False)
     # Fragment guard: a spoken answer commits in pieces, and right after an
     # advance every piece looks "resolved" (the outcome it targeted was ticked

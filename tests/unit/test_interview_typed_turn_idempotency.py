@@ -66,10 +66,10 @@ class _Agent:
         self.folded: list[tuple[str, str | None]] = []
         self.gate: asyncio.Event | None = None
 
-    async def fold_turn(self, *, answer_text: str, turn_key: str | None = None) -> None:
+    async def fold_turn(self, **kwargs: Any) -> None:
         if self.gate is not None:
             await self.gate.wait()
-        self.folded.append((answer_text, turn_key))
+        self.folded.append((kwargs.get("answer_text"), kwargs.get("turn_key")))
 
 
 class _Session:
@@ -302,8 +302,8 @@ async def test_a_failing_fold_still_releases_the_in_flight_slot() -> None:
     """Otherwise one bad turn makes every later finish wait out the full timeout."""
 
     class _Boom(_Agent):
-        async def fold_turn(self, *, answer_text: str, turn_key: str | None = None) -> None:
-            del answer_text, turn_key
+        async def fold_turn(self, **kwargs: Any) -> None:
+            del kwargs
             raise RuntimeError("gateway down")
 
     intake = TurnIntake()

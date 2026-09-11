@@ -29,6 +29,7 @@ import asyncio
 import logging
 from dataclasses import replace
 from typing import TYPE_CHECKING
+from uuid import uuid4
 
 from abridgeai.features.interviews.orchestrator.tools import build_progress_report
 from abridgeai.features.interviews.realtime import text_protocol as tp
@@ -102,6 +103,12 @@ class ControlPublisher:
         self._session = session
         self._interview_session_id = interview_session_id
         self._seq = 0
+        # The agent's stream epoch: an opaque UUID owned for THIS publisher's
+        # lifetime. A replacement agent (hard-stop reload, crash recovery) is a
+        # new publisher with a new epoch and a seq that restarts at 1 — the
+        # client's ordering tracker scopes seq comparisons to the active epoch
+        # instead of reading the new agent's frames as stale.
+        self._stream_id = str(uuid4())
         self._lock = asyncio.Lock()
 
     async def ack(self, *, turn_key: str | None, turn_action: str) -> None:
@@ -216,6 +223,7 @@ class ControlPublisher:
         async with self._lock:
             self._seq += 1
             event.seq = self._seq
+            event.stream_id = self._stream_id
             try:
                 await local.send_text(event.to_json(), topic=tp.TOPIC_CONTROL)
             except Exception:  # noqa: BLE001 - client convenience channel; never fail a turn

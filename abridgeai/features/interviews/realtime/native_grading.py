@@ -59,6 +59,8 @@ async def grade_native_turn(
     enqueue_reconcile: Callable[..., Awaitable[None]],
     save_state: Callable[[], Awaitable[None]],
     allowed_other_outcome_ids: tuple[str, ...] = (),
+    message_id: str | None = None,
+    question_id: str | None = None,
 ) -> None:
     """Fold this answer into coverage, then defer the authoritative analysis.
 
@@ -67,6 +69,16 @@ async def grade_native_turn(
     State is persisted either way, because the tools mutated it this turn (hint
     ladder, refusal counters) and a rejoin that reset those bounds would hand a
     stubborn model a fresh budget to argue with.
+
+    Reconciliation ordering (plan §3): the provisional fold is PERSISTED first
+    (``save_state``), then the full re-analysis is enqueued — a lost enqueue then
+    only costs precision, while a save lost after enqueue would leave the worker
+    reconciling a delta against state that never landed. The enqueue payload
+    carries the durable message id and the CAPTURED question id when the typed
+    caller supplied them, so the worker's payload points at exact receipt rows
+    regardless of how far the state has advanced by the time it runs. Without
+    those the enqueue still fires (legacy shape, ``question_id_getter``-free) —
+    the worker degrades to its turn-id-keyed path.
     """
     if not answer_text.strip():
         # Silence or an empty transcript is not an answer; grading it would cost a
@@ -87,14 +99,23 @@ async def grade_native_turn(
 
     if verdict is not None:
         _apply_verdict(state, verdict, turn_id=turn_id, allowed=allowed_other_outcome_ids)
-        try:
-            # Enqueued AFTER the fold so the worker's delta is computed against
-            # exactly what the probe awarded.
-            await enqueue_reconcile(turn_id=turn_id, probe_verdict=verdict.to_dict())
-        except Exception:  # noqa: BLE001 -- a lost reconcile costs precision, not the turn
-            logger.exception("could not enqueue turn reconciliation (turn=%s)", turn_id)
 
+    # Persist the provisional fold BEFORE enqueueing the authoritative
+    # re-analysis (see docstring for the ordering rationale).
     await save_state()
+
+    if verdict is None:
+        return
+
+    payload_kwargs: dict[str, str] = {}
+    if message_id is not None:
+        payload_kwargs["message_id"] = message_id
+    if question_id is not None:
+        payload_kwargs["question_id"] = question_id
+    try:
+        await enqueue_reconcile(turn_id=turn_id, probe_verdict=verdict.to_dict(), **payload_kwargs)
+    except Exception:  # noqa: BLE001 -- a lost reconcile costs precision, not the turn
+        logger.exception("could not enqueue turn reconciliation (turn=%s)", turn_id)
 
 
 def _apply_verdict(

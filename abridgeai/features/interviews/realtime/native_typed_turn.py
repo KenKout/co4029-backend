@@ -96,12 +96,34 @@ async def persist_receipt(
     returns, so an ACK always means the receipt is DURABLE. The unique index
     makes the insert-or-load atomic — two copies of the same turn race to
     insert and the loser loads the winner's row instead.
+
+    LINKAGE (owned here, not by the caller): ``session_question_id`` may arrive
+    as a BANK question id (the typed door captures it pre-fold from the live
+    state) or None. When it is not already a resolvable session-question link,
+    resolve it HERE via the shared transcript resolver — created on demand
+    inside the caller's transaction, concurrent creators converging by
+    constraint + reload. A typed receipt stored with a NULL linkage is
+    invisible to the evaluator's candidate filter, so the answer could be
+    acked/applied yet never graded; resolving at receipt time closes that gap.
+
+    Distinguishing bank ids from session ids on read would need a lookup that
+    fails soft; instead the resolver is IDEMPOTENT — a bank id that already has
+    a session-question row resolves to it, and one that doesn't gets its row
+    created, so passing either id through is safe.
     """
     from sqlalchemy import select  # noqa: PLC0415
 
     from abridgeai.features.interviews.models import (  # noqa: PLC0415
         InterviewSessionMessage,
     )
+    from abridgeai.features.interviews.realtime.native_transcript import (  # noqa: PLC0415
+        resolve_session_question,
+    )
+
+    if session_question_id is None and bank_question_id is not None:
+        session_question_id = await resolve_session_question(
+            db, session_id, bank_question_id
+        )
 
     token = uuid_token()
     row = InterviewSessionMessage(

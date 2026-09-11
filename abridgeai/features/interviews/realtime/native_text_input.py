@@ -241,7 +241,11 @@ async def _process_answer_turn(
         try:
             receipt_row, _created = await receipts.persist(
                 session_id=sess.userdata.interview_session_id,
-                session_question_id=None,
+                # The bank question captured NOW (pre-fold) rides the linkage
+                # slot: the store resolves it to the session-question id before
+                # creating the row. Passing None here was the linkage gap — an
+                # acked, applied answer the evaluator filtered out.
+                session_question_id=_current_bank_question_id(sess),
                 bank_question_id=_current_bank_question_id(sess),
                 text=turn.text,
                 turn_key=turn.turn_key or "",
@@ -319,9 +323,18 @@ async def _process_answer_turn(
 
     # STRICT typed fold: a persistence failure here must NOT be swallowed into
     # an applied receipt — the candidate's draft stays retryable and the
-    # receipt goes failed, not applied.
+    # receipt goes failed, not applied. The durable receipt's message id and
+    # the captured bank question ride along so the deferred reconciliation
+    # payload points at exact rows no matter how far state advances.
     try:
-        await _fold_typed_answer(sess, turn.text, turn_key=turn.turn_key, strict=True)
+        await _fold_typed_answer(
+            sess,
+            turn.text,
+            turn_key=turn.turn_key,
+            strict=True,
+            message_id=getattr(receipt_row, "id", None),
+            question_id=_current_bank_question_id(sess),
+        )
     except Exception as exc:  # noqa: BLE001 - converted to FAILED below
         await _mark_receipt_failed(receipts, receipt_row, turn, publisher, sess, exc)
         return False
@@ -451,6 +464,8 @@ async def _fold_typed_answer(
     *,
     turn_key: str | None,
     strict: bool = False,
+    message_id: str | None = None,
+    question_id: str | None = None,
 ) -> None:
     """Run the graded fold a spoken turn gets from ``on_user_turn_completed``.
 
@@ -478,7 +493,13 @@ async def _fold_typed_answer(
         logger.warning("typed turn on an agent with no fold_turn; answer not graded")
         return
     if strict:
-        await fold(answer_text=text, turn_key=turn_key)
+        await fold(
+            answer_text=text,
+            turn_key=turn_key,
+            message_id=message_id,
+            question_id=question_id,
+            strict=True,
+        )
         return
     try:
         await fold(answer_text=text, turn_key=turn_key)

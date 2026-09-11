@@ -61,6 +61,10 @@ class Interview:
     finished: bool = False
     last_advance_monotonic: float | None = None
     max_hints: int = 3
+
+    def below_closing_threshold_now(self) -> bool:
+        """Mirror the real userdata's live derivation: the frozen flag stands in."""
+        return self.below_closing_threshold
     interview_session_id: str = "test-session"
     publish_agent_action_calls: list[str] = field(default_factory=list)
 

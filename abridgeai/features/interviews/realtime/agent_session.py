@@ -60,7 +60,7 @@ def build_state_reminder(data: InterviewUserdata, *, opening: bool = False) -> s
         questions_remaining=data.questions_remaining,
         max_follow_ups_per_question=data.max_follow_ups_per_question,
         max_hints=data.max_hints_per_question,
-        below_closing_threshold=data.below_closing_threshold,
+        below_closing_threshold=data.below_closing_threshold_now(),
         outcome_titles=data.outcome_titles,
         # Derived NOW, not the stored snapshot: the note is rebuilt every turn and
         # the stored value is the reading taken at setup, so the model was told

@@ -343,9 +343,23 @@ def _outcome_for_prompt(outcome: InterviewOutcome) -> dict[str, Any]:
 
 
 def _is_candidate_answer(message: InterviewSessionMessage) -> bool:
-    """Filter for student utterances; AI / system messages are not scored."""
+    """Filter for student utterances; AI / system messages are not scored.
 
-    return getattr(message, "role", None) == "user"
+    Typed-turn receipts (``metadata_json.source == 'native_agent'``) carry a
+    ``turn_state`` state machine — ``received`` (durable, fold not finished),
+    ``failed`` (fold raised), ``applied`` (folded into runtime state). Only an
+    ``applied`` receipt is evidence: a ``received`` receipt could still fail
+    and never reach the graded conversation, and a ``failed`` one provably
+    didn't. Non-receipt user rows (REST/voice answers) have no receipt marker
+    and stay eligible, as do rows without a question link at THIS stage —
+    linkage filtering is the caller's job (``_list_candidate_answers``).
+    """
+    if getattr(message, "role", None) != "user":
+        return False
+    metadata = getattr(message, "metadata_json", None) or {}
+    if not isinstance(metadata, dict) or metadata.get("source") != "native_agent":
+        return True  # ordinary REST / voice user row
+    return metadata.get("turn_state") == "applied"
 
 
 def _candidate_response_text(message: InterviewSessionMessage) -> str:

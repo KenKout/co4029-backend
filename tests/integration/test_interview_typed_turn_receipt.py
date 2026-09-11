@@ -16,6 +16,7 @@ Pinned here:
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -96,6 +97,12 @@ async def receipt_probe(test_engine: AsyncEngine) -> AsyncIterator[dict[str, Any
     yield {"session_id": session_id}
 
     async with test_engine.begin() as conn:
+        # The linkage tests insert interview_questions rows referencing this
+        # config; delete them first or the config delete violates its FK.
+        await conn.execute(
+            text("DELETE FROM interview_questions WHERE interview_config_id = :c"),
+            {"c": config_id},
+        )
         await conn.execute(text("DELETE FROM interview_sessions WHERE id = :s"), {"s": session_id})
         await conn.execute(text("DELETE FROM interview_configs WHERE id = :c"), {"c": config_id})
         await conn.execute(text("DELETE FROM modules WHERE id = :m"), {"m": module_id})
@@ -182,6 +189,138 @@ async def test_a_second_persist_of_the_same_key_loads_the_first_row(
         assert second.id == first.id
 
     assert await _count_rows(test_engine, session_id) == 1
+
+
+async def test_a_bank_question_id_is_resolved_to_a_session_question_row(
+    receipt_probe: dict[str, Any], test_engine: AsyncEngine
+) -> None:
+    """THE linkage fix: the receipt is FK-linked via a created session-question.
+
+    A bank id is not a session-question id (different table); the resolver
+    creates the asked-question row on demand and the receipt links to IT, so
+    the evaluator's ``session_question_id IS NOT NULL`` candidate filter finds
+    the answer.
+    """
+    session_id = receipt_probe["session_id"]
+    bank_question_id = uuid.uuid4()
+
+    # The resolver needs the bank question to exist (FK on
+    # interview_session_questions.interview_question_id → interview_questions,
+    # ondelete SET NULL means the row can still be created; but create the
+    # bank question properly so the link is real).
+    async with test_engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO interview_questions "
+                "(id, interview_config_id, position, question_type, prompt_text, "
+                " review_status, ai_generated, source_refs_json) "
+                "SELECT :qid, ic.id, 99, 'conceptual', 'Bank question?', "
+                "       'approved', false, '[]'::jsonb "
+                "FROM interview_configs ic WHERE ic.id = ("
+                "  SELECT interview_config_id FROM interview_sessions WHERE id = :sid)"
+            ),
+            {"qid": bank_question_id, "sid": session_id},
+        )
+
+    async with _maker(test_engine)() as db:
+        row, created = await ntt.persist_receipt(
+            db,
+            session_id=session_id,
+            session_question_id=None,
+            bank_question_id=bank_question_id,
+            text="my linked answer",
+            turn_key="tk-link-0005",
+        )
+        assert created is True
+        # The row's linkage is NOT the bank id — it is the created
+        # session-question row, whose interview_question_id points back.
+        assert row.session_question_id is not None
+        assert row.session_question_id != bank_question_id
+
+    async with test_engine.begin() as conn:
+        asked = (
+            await conn.execute(
+                text(
+                    "SELECT iq.interview_question_id FROM interview_session_questions iq "
+                    "WHERE iq.id = :sid"
+                ),
+                {"sid": row.session_question_id},
+            )
+        ).scalar_one()
+    assert asked == bank_question_id, (
+        "the created session-question row does not point back at the bank question"
+    )
+
+
+async def test_concurrent_resolution_of_the_same_bank_question_converges(
+    receipt_probe: dict[str, Any], test_engine: AsyncEngine
+) -> None:
+    """Two creators of the same link: the loser reloads, the answer survives.
+
+    The resolver's flush can lose the (session, sequence) unique slot to a
+    concurrent creator; convergence is constraint + reload, never a lost
+    answer.
+    """
+    session_id = receipt_probe["session_id"]
+    bank_question_id = uuid.uuid4()
+    async with test_engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO interview_questions "
+                "(id, interview_config_id, position, question_type, prompt_text, "
+                " review_status, ai_generated, source_refs_json) "
+                "SELECT :qid, ic.id, 98, 'conceptual', 'Race question?', "
+                "       'approved', false, '[]'::jsonb "
+                "FROM interview_configs ic WHERE ic.id = ("
+                "  SELECT interview_config_id FROM interview_sessions WHERE id = :sid)"
+            ),
+            {"qid": bank_question_id, "sid": session_id},
+        )
+
+    # Race two FULL persist_receipt calls (the production entry point): the
+    # resolver's flush, the receipt insert, and the commit share ONE
+    # transaction there, so convergence is judged on durable rows — not on
+    # in-memory ids a later rollback could invalidate.
+    maker = _maker(test_engine)
+
+    async def _persist(turn_key: str) -> Any:
+        async with maker() as db:
+            row, _created = await ntt.persist_receipt(
+                db,
+                session_id=session_id,
+                session_question_id=None,
+                bank_question_id=bank_question_id,
+                text=f"racing answer {turn_key}",
+                turn_key=turn_key,
+            )
+            return row
+
+    rows = list(await asyncio.gather(_persist("tk-race-0001"), _persist("tk-race-0002")))
+
+    # THE guarantee that matters: NO answer is lost. Every racing receipt is
+    # durably linked to a session-question row that points back at the SAME
+    # bank question. (When the two creations overlap, the constraint+reload
+    # path converges them onto one row; when they interleave after a commit,
+    # a second row for the same bank question is benign — both links resolve,
+    # nothing is lost, and future resolves reuse whichever exists.)
+    assert all(r.session_question_id is not None for r in rows), (
+        "a racing receipt was persisted without its question link"
+    )
+
+    async with test_engine.begin() as conn:
+        ids = [r.session_question_id for r in rows]
+        linked_banks = (
+            await conn.execute(
+                text(
+                    "SELECT iq.interview_question_id FROM interview_session_questions iq "
+                    "WHERE iq.id = ANY(:ids)"
+                ),
+                {"ids": ids},
+            )
+        ).scalars().all()
+    assert set(linked_banks) == {bank_question_id}, (
+        "a racing receipt's session-question row points at the WRONG bank question"
+    )
 
 
 async def test_the_received_to_applied_cas_is_one_shot(

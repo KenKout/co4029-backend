@@ -56,10 +56,10 @@ class _Agent:
         self.folded: list[tuple[str, str | None]] = []
         self.gate: asyncio.Event | None = None
 
-    async def fold_turn(self, *, answer_text: str, turn_key: str | None = None) -> None:
+    async def fold_turn(self, **kwargs: Any) -> None:
         if self.gate is not None:
             await self.gate.wait()
-        self.folded.append((answer_text, turn_key))
+        self.folded.append((kwargs.get("answer_text"), kwargs.get("turn_key")))
 
 
 class _Session:
@@ -322,7 +322,7 @@ class _Boom(_Agent):
         super().__init__()
         self.calls = 0
 
-    async def fold_turn(self, *, answer_text: str, turn_key: str | None = None) -> None:
+    async def fold_turn(self, **kwargs: Any) -> None:
         self.calls += 1
         raise RuntimeError("grading probe down")
 
@@ -374,7 +374,7 @@ async def test_a_failed_receipt_is_retriable_in_the_same_process() -> None:
             super().__init__()
             self.calls = 0
 
-        async def fold_turn(self, *, answer_text: str, turn_key: str | None = None) -> None:
+        async def fold_turn(self, **kwargs: Any) -> None:
             self.calls += 1
             if self.calls == 1:
                 raise RuntimeError("transient DB outage")

@@ -90,7 +90,9 @@ class _Agent:
         self.folded_keys: list[str | None] = []
         self.on_fold: Callable[[str], Awaitable[None]] | None = None
 
-    async def fold_turn(self, *, answer_text: str, turn_key: str | None = None) -> None:
+    async def fold_turn(self, **kwargs: Any) -> None:
+        answer_text = kwargs.get("answer_text")
+        turn_key = kwargs.get("turn_key")
         self.folded.append(answer_text)
         self.folded_keys.append(turn_key)
         if self.on_fold is not None:

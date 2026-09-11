@@ -272,6 +272,14 @@ class ControlEvent:
     # utterance against the pinned card by payload rather than by guessing the
     # server's lead-in wording.
     action_text: str | None = None
+    # The publishing agent's epoch (opaque UUID, stamped centrally in
+    # ControlPublisher._publish under the same lock as `seq`). Agent
+    # replacement in one room restarts `seq`, so a global-sequence client would
+    # read the NEW agent's frames as stale; ordering must be scoped to the
+    # active stream instead. Optional + additive: old clients ignore it, and a
+    # frame without one keeps its legacy global-sequence meaning.
+
+    stream_id: str | None = None
 
     def to_json(self) -> str:
         payload: dict[str, Any] = {
@@ -280,6 +288,8 @@ class ControlEvent:
             "seq": self.seq,
             "turn_action": self.turn_action,
         }
+        if self.stream_id is not None:
+            payload["stream_id"] = self.stream_id
         if self.state_version is not None:
             payload["state_version"] = self.state_version
         if self.rejection is not None:

@@ -284,7 +284,8 @@ def _questions_remaining(ctx: RunContext[object]) -> int:
 
 
 def _below_closing_threshold(ctx: RunContext[object]) -> bool:
-    return bool(ctx.userdata.below_closing_threshold)  # type: ignore[attr-defined]
+    # Live derivation (plan §6): the join-time bool never crossed mid-interview.
+    return bool(ctx.userdata.below_closing_threshold_now())  # type: ignore[attr-defined]
 
 
 def _max_followups(ctx: RunContext[object]) -> int:

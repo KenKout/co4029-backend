@@ -115,6 +115,10 @@ class InterviewAgent(Agent):
         # brain's own `state_version`; this covers events emitted BEFORE the brain
         # runs (accepted / rejected) which have no brain version yet.
         self._control_seq = 0
+        # Same epoch contract as the native ControlPublisher: this runtime owns
+        # one opaque stream id for its lifetime, stamped on every control
+        # event, so a client scopes seq comparisons to the active stream.
+        self._control_stream_id = str(uuid4())
 
     async def on_enter(self) -> None:
         """Speak the greeting completely, then begin with question one."""
@@ -211,6 +215,7 @@ class InterviewAgent(Agent):
                     status=tp.ControlStatus.REJECTED,
                     turn_key=(attributes or {}).get(tp.ATTR_TURN_KEY),
                     seq=self._next_control_seq(),
+                    stream_id=self._control_stream_id,
                     rejection=exc.rejection,
                 )
             )
@@ -231,6 +236,7 @@ class InterviewAgent(Agent):
                 status=tp.ControlStatus.ACCEPTED,
                 turn_key=turn.turn_key,
                 seq=self._next_control_seq(),
+                    stream_id=self._control_stream_id,
                 turn_action=turn.turn_action,
             )
         )
@@ -335,6 +341,7 @@ class InterviewAgent(Agent):
                         status=tp.ControlStatus.FAILED,
                         turn_key=client_turn_key,
                         seq=self._next_control_seq(),
+                    stream_id=self._control_stream_id,
                         turn_action=turn_action,
                         error_class=type(exc).__name__,
                     )
@@ -371,6 +378,7 @@ class InterviewAgent(Agent):
                     status=tp.ControlStatus.COMPLETED,
                     turn_key=client_turn_key,
                     seq=self._next_control_seq(),
+                    stream_id=self._control_stream_id,
                     turn_action=turn_action,
                     state_version=result.state_version,
                     state=self._control_state(result),
@@ -464,6 +472,7 @@ class InterviewAgent(Agent):
                 status=tp.ControlStatus.REJECTED,
                 turn_key=turn.turn_key,
                 seq=self._next_control_seq(),
+                    stream_id=self._control_stream_id,
                 turn_action=turn.turn_action,
                 rejection=rejection,
             )

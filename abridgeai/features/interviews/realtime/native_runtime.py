@@ -199,7 +199,15 @@ class NativeInterviewAgent(InterviewToolsMixin, Agent):
         """
         await self.fold_turn(answer_text=(new_message.text_content or ""))
 
-    async def fold_turn(self, *, answer_text: str, turn_key: str | None = None) -> None:
+    async def fold_turn(
+        self,
+        *,
+        answer_text: str,
+        turn_key: str | None = None,
+        message_id: str | None = None,
+        question_id: str | None = None,
+        strict: bool = False,
+    ) -> None:
         """Grade one candidate answer, then refresh the state note.
 
         The single graded path, shared by the spoken and typed doors. Takes no
@@ -211,6 +219,11 @@ class NativeInterviewAgent(InterviewToolsMixin, Agent):
         that lands on a DIFFERENT agent process — the in-memory ledger is empty
         there — still be recognised as the same turn. A spoken turn has no key: the
         SDK's end-of-turn commits are not client retries.
+
+        ``message_id``/``question_id`` (typed door only) ride into the deferred
+        reconciliation payload so the worker's analysis points at the durable
+        receipt row and the CAPTURED question — both are read before the fold can
+        advance the question pointer.
         """
         userdata = self._setup.userdata
         # Belongs to the PREVIOUS turn: the model has had its chance to ask the
@@ -236,8 +249,17 @@ class NativeInterviewAgent(InterviewToolsMixin, Agent):
                     question_text=(userdata.current_question_text or ""),
                     turn_id=str(uuid4()),
                     turn_key=turn_key,
+                    message_id=message_id,
+                    question_id=question_id,
                 )
             except Exception:  # noqa: BLE001 -- grading must never cost the reply
+                if strict:
+                    # The typed path's receipt contract: a fold that failed to
+                    # persist must surface to the door, which marks the receipt
+                    # failed and leaves the candidate's draft retryable.
+                    # Swallowing here would ack an applied receipt over state
+                    # that never landed.
+                    raise
                 logger.exception(
                     "native turn grading failed (session=%s)", userdata.interview_session_id
                 )
@@ -539,6 +561,12 @@ def _make_receipt_store(
     callback needs no DB knowledge. The question id is read at persist time —
     the answer belongs to the question it folds against, and the fold may
     advance the pointer before the receipt is read again.
+
+    ``question_id_getter`` is the CAPTURED bank id (read once, before the
+    fold/advance) and is passed as ``session_question_id``-slot input to
+    ``persist_receipt``, which OWNS resolving it to the session-question id —
+    the parameter names on the callback contract are historical; what the
+    store passes is "the question this answer belongs to, as captured".
     """
 
     class _PgStore:
@@ -553,12 +581,18 @@ def _make_receipt_store(
         ) -> tuple[Any, bool]:
             from abridgeai.core.db import get_sessionmaker  # noqa: PLC0415
 
+            # Capture the live bank question NOW (pre-fold) when the caller
+            # could not supply one; ``persist_receipt`` resolves it to the
+            # session-question id before creating the row.
+            captured_bank = bank_question_id
+            if captured_bank is None:
+                captured_bank = question_id_getter()
             async with get_sessionmaker()() as db:
                 row, created = await native_typed_turn.persist_receipt(
                     db,
                     session_id=session_id,
                     session_question_id=session_question_id,
-                    bank_question_id=bank_question_id,
+                    bank_question_id=captured_bank,
                     text=text,
                     turn_key=turn_key,
                 )

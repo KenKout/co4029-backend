@@ -148,6 +148,10 @@ max-complexity = 12
 # LLM-free CLI that prints a human report to stdout (T20), has long usage lines
 # (E501), and imports abridgeai after a sys.path insert (E402).
 "scripts/analysis_isolation_report.py" = ["T20", "E501", "E402", "I001"]
+# Typed-receipt linkage remediation — an operator CLI over historical data:
+# dry-run by default, prints its report to stdout (T20), and writes the JSON
+# export synchronously inside the async run (ASYNC230 is intentional here).
+"scripts/backfill_typed_receipt_linkage.py" = ["T20", "ASYNC230"]
 # Interview quality report — a manual-trigger, read-only diagnostics CLI
 # (calibration / contingency / leading-question metrics over a finished
 # session). Prints a human report to stdout (T20), has long usage + rubric
