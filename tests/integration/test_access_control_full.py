@@ -745,7 +745,6 @@ async def test_admin_router_membership_endpoints(
             headers={"Authorization": f"Bearer {admin_token}"},
             json={
                 "user_id": str(member_user_id),
-                "org_unit_id": str(scenario.org_unit_id),
                 "status": "active",
                 "student_code": "T113-MEM-001",
             },
