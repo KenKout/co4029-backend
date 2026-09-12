@@ -135,6 +135,21 @@ class QuizIntegrityEventBatchRequest(BaseModel):
     events: list[QuizIntegrityEventItem] = Field(min_length=1, max_length=_QUIZ_INTEGRITY_MAX_BATCH)
 
 
+class QuizIntegrityEventBatchResponse(BaseModel):
+    """Server-authoritative ingest result (migration 0115).
+
+    ``warning_issued`` is True ONLY on the request whose events first crossed
+    the attempt's threshold; a retried crossing batch re-reads the persisted
+    flag and reports False. The client cannot forge a warning - the flag lives
+    on the attempt row.
+    """
+
+    accepted: int
+    integrity_score: int = 0
+    integrity_score_threshold: int = 0
+    warning_issued: bool = False
+
+
 @router.get("/quizzes/{quiz_id}", response_model=QuizPublic)
 async def get_published_quiz(
     quiz_id: str,
@@ -383,33 +398,93 @@ async def record_answer(
 @router.post(
     "/attempts/{attempt_id}/integrity-events",
     status_code=status.HTTP_202_ACCEPTED,
+    response_model=QuizIntegrityEventBatchResponse,
 )
 async def record_quiz_integrity_events(
     attempt_id: UUID,
     payload: QuizIntegrityEventBatchRequest,
     current_user: Annotated[CurrentUser, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
-) -> dict[str, int]:
-    """Best-effort ingest of browser integrity signals for a live attempt.
+) -> QuizIntegrityEventBatchResponse:
+    """Record and SCORE browser integrity signals for a live attempt.
 
     Ownership is enforced (attempt must belong to the caller). Events are
-    recorded only while the attempt is ``in_progress`` — late events for a
+    recorded only while the attempt is ``in_progress`` - late events for a
     submitted/graded/abandoned attempt are silently dropped so this never
-    blocks the take. Append-only; post-attempt / teacher review only, never
-    surfaced to the student.
+    blocks the take. Append-only; the timeline is teacher-review only.
+
+    Scoring (migration 0115) is deliberately the interview's, imported rather
+    than reimplemented: the server weighs each signal against the attempt's
+    FROZEN policy snapshot and flags the attempt the first time the weighted
+    score reaches the threshold. Client-supplied severities and metadata never
+    influence the score, and ``warning_issued`` / ``reconnect`` / ``disconnect``
+    never score at all - a network blip is not an integrity signal, and a
+    client cannot post its way to a warning.
     """
+    from sqlalchemy import select  # noqa: PLC0415
+
+    from abridgeai.core.time import utcnow  # noqa: PLC0415
     from abridgeai.features.interviews.models import (  # noqa: PLC0415
         AssessmentIntegrityEvent,
     )
-    from abridgeai.features.quizzes.models import QuizAttempt  # noqa: PLC0415
+    from abridgeai.features.interviews.schemas.integrity import (  # noqa: PLC0415
+        add_weighted_score,
+        coerce_client_event_id,
+        is_scored_event,
+        warn_once_and_score,
+    )
+    from abridgeai.features.quizzes.models import Quiz, QuizAttempt  # noqa: PLC0415
+    from abridgeai.features.quizzes.services.integrity import (  # noqa: PLC0415
+        integrity_policy_snapshot_from_quiz,
+    )
 
     attempt = await db.get(QuizAttempt, attempt_id)
     if attempt is None or attempt.student_id != current_user.user_id:
         raise _not_found("quiz_attempt", attempt_id)
     if attempt.status != "in_progress":
-        return {"accepted": 0}
+        return QuizIntegrityEventBatchResponse(accepted=0)
+
+    # The snapshot frozen at start wins. Falling back to the quiz's CURRENT
+    # settings only covers attempts created before the column existed; those
+    # rows would otherwise score under an empty policy.
+    policy = dict(attempt.integrity_policy_snapshot or {})
+    if not policy:
+        policy = integrity_policy_snapshot_from_quiz(await db.get(Quiz, attempt.quiz_id))
+
+    score_before = int(attempt.integrity_score or 0)
+    warned_already = bool(attempt.integrity_warning_issued)
+    score_after = score_before
+    threshold = int(policy.get("score_threshold", 0) or 0)
 
     for item in payload.events:
+        if not is_scored_event(item.event_type):
+            # reconnect / disconnect / a client-posted warning: kept on the
+            # timeline for the teacher, never scored.
+            db.add(
+                AssessmentIntegrityEvent(
+                    assessment_kind="quiz",
+                    quiz_attempt_id=attempt_id,
+                    student_id=current_user.user_id,
+                    event_type=item.event_type,
+                    severity=item.severity,
+                    metadata_json=dict(item.metadata),
+                )
+            )
+            continue
+        client_event_id = coerce_client_event_id(item.metadata.get("client_event_id"))
+        if client_event_id is not None:
+            existing = (
+                await db.execute(
+                    select(AssessmentIntegrityEvent.id).where(
+                        AssessmentIntegrityEvent.quiz_attempt_id == attempt_id,
+                        AssessmentIntegrityEvent.client_event_id == client_event_id,
+                    )
+                )
+            ).scalar_one_or_none()
+            if existing is not None:
+                # Idempotent retry: already persisted and already scored.
+                continue
+        score_after = add_weighted_score(score_after, item.event_type, policy)
         db.add(
             AssessmentIntegrityEvent(
                 assessment_kind="quiz",
@@ -417,11 +492,48 @@ async def record_quiz_integrity_events(
                 student_id=current_user.user_id,
                 event_type=item.event_type,
                 severity=item.severity,
+                client_event_id=client_event_id,
                 metadata_json=dict(item.metadata),
             )
         )
+
+    warning_issued = False
+    if not warned_already:
+        warning_issued = warn_once_and_score(score_after, threshold).reaches_threshold
+        if warning_issued:
+            # Server-generated evidence row. A client may post `warning_issued`
+            # itself, but that copy never scores and never sets the flag, so
+            # this row is the only authoritative one on the timeline.
+            db.add(
+                AssessmentIntegrityEvent(
+                    assessment_kind="quiz",
+                    quiz_attempt_id=attempt_id,
+                    student_id=current_user.user_id,
+                    event_type="warning_issued",
+                    severity="warning",
+                    metadata_json={
+                        "integrity_score_after": score_after,
+                        "integrity_score_threshold": threshold,
+                        "integrity_weight_tab_switch": int(policy.get("tab_switch", 0) or 0),
+                        "integrity_weight_focus_lost": int(policy.get("focus_lost", 0) or 0),
+                        "integrity_weight_fullscreen_exit": int(
+                            policy.get("fullscreen_exit", 0) or 0
+                        ),
+                    },
+                )
+            )
+            attempt.integrity_warning_issued = True
+            attempt.integrity_threshold_flagged_at = utcnow()
+
+    if score_after != score_before:
+        attempt.integrity_score = score_after
     await db.commit()
-    return {"accepted": len(payload.events)}
+    return QuizIntegrityEventBatchResponse(
+        accepted=len(payload.events),
+        integrity_score=score_after,
+        integrity_score_threshold=threshold,
+        warning_issued=warning_issued,
+    )
 
 
 @router.post("/attempts/{attempt_id}/submit", response_model=QuizAttemptRead)

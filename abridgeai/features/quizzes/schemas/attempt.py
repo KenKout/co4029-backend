@@ -290,6 +290,23 @@ class QuizAttemptTeacherRead(BaseModel):
     time_taken_seconds: int | None = None
     score_percent: Decimal | None = None
     passed: bool | None = None
+    # Count of WARNING-level proctoring events (tab switch, fullscreen exit)
+    # recorded during the take. The events themselves stay on the detail
+    # payload; this is only the "is there anything to look at here" signal the
+    # Assessments list needs so flagged attempts are findable without opening
+    # each one. 0 for an honest take, and for any attempt taken before
+    # proctoring existed.
+    integrity_flags: int = 0
+    # Weighted proctoring score and the threshold it was scored against
+    # (migration 0115). Both come from the attempt row: the threshold is the
+    # one FROZEN at start, not the quiz's current setting, so a teacher who
+    # retunes the quiz later still sees the rule this attempt was judged by.
+    integrity_score: int = 0
+    integrity_score_threshold: int = 0
+    # True once the score reached the threshold. Not derived client-side from
+    # score >= threshold: the crossing is a persisted one-shot server decision,
+    # and recomputing it would disagree with the timeline after a retune.
+    integrity_flagged: bool = False
 
 
 __all__ = [

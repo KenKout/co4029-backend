@@ -221,17 +221,58 @@ async def quiz_results_summary(
     }
 
 
+def _integrity_flag_count_subquery() -> Any:  # noqa: ANN401 -- SQLAlchemy element
+    """Correlated count of WARNING-level proctoring events per attempt.
+
+    Only ``severity='warning'`` is counted — `focus_lost` is recorded at
+    ``info`` because it fires on every address-bar click and OS notification,
+    so counting it would flag nearly every honest attempt and the column would
+    mean nothing.
+
+    Correlated rather than a GROUP BY join so an attempt with no events still
+    yields a row (with 0): the overwhelmingly common case is the honest take,
+    and an inner join would silently drop it from the Assessments tab.
+
+    The events table belongs to the interviews feature (quizzes write into it
+    with ``assessment_kind='quiz'``) — imported locally, matching
+    :func:`list_integrity_events_for_attempt` directly below.
+    """
+    from abridgeai.features.interviews.models import AssessmentIntegrityEvent  # noqa: PLC0415
+
+    return (
+        select(func.count())
+        .select_from(AssessmentIntegrityEvent)
+        .where(
+            AssessmentIntegrityEvent.assessment_kind == "quiz",
+            AssessmentIntegrityEvent.quiz_attempt_id == QuizAttempt.id,
+            AssessmentIntegrityEvent.severity == "warning",
+        )
+        .correlate(QuizAttempt)
+        .scalar_subquery()
+    )
+
+
 async def list_attempts_for_course(db: AsyncSession, course_id: UUID) -> list[Any]:
     """Every quiz attempt (any student, any quiz) in a course, newest first.
 
     Powers the teacher's course-wide "Assessments" tab. Returns SQLAlchemy
-    ``Row`` objects with ``.QuizAttempt`` and ``.title`` (the quiz title,
-    aliased so the router doesn't need a second round-trip). Callers
-    resolve student display names separately via a batched lookup —
-    mirrors the pattern in ``interviews.routers.authoring.list_config_sessions``.
+    ``Row`` objects with ``.QuizAttempt``, ``.title`` (the quiz title,
+    aliased so the router doesn't need a second round-trip) and
+    ``.integrity_flags``. Callers resolve student display names separately
+    via a batched lookup — mirrors the pattern in
+    ``interviews.routers.authoring.list_config_sessions``.
+
+    ``integrity_flags`` is what makes a suspicious attempt findable: the
+    proctoring events themselves are only on the single-attempt detail
+    payload, so without a count here a teacher had to open every attempt in
+    the course one at a time to discover any of them.
     """
     stmt = (
-        select(QuizAttempt, Quiz.title)
+        select(
+            QuizAttempt,
+            Quiz.title,
+            _integrity_flag_count_subquery().label("integrity_flags"),
+        )
         .join(Quiz, Quiz.id == QuizAttempt.quiz_id)
         .where(Quiz.course_id == course_id)
         .order_by(QuizAttempt.started_at.desc())
@@ -288,10 +329,15 @@ async def list_attempts_for_student_in_course(
     """Every quiz attempt by one student across a course's quizzes, newest first.
 
     Powers the teacher's per-student profile quiz-attempts section. Same
-    row shape as :func:`list_attempts_for_course`.
+    row shape as :func:`list_attempts_for_course`, ``integrity_flags``
+    included.
     """
     stmt = (
-        select(QuizAttempt, Quiz.title)
+        select(
+            QuizAttempt,
+            Quiz.title,
+            _integrity_flag_count_subquery().label("integrity_flags"),
+        )
         .join(Quiz, Quiz.id == QuizAttempt.quiz_id)
         .where(Quiz.course_id == course_id, QuizAttempt.student_id == student_id)
         .order_by(QuizAttempt.started_at.desc())

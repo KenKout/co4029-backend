@@ -215,6 +215,22 @@ class Quiz(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftDeleteMixin,
     require_subnet: Mapped[str | None] = mapped_column(String(1024))
     delay1_seconds: Mapped[int | None] = mapped_column(Integer)
     delay2_seconds: Mapped[int | None] = mapped_column(Integer)
+    # ── Browser-integrity scoring (migration 0115) ───────────────────────────
+    # Same weights, bounds and defaults as ``interview_configs``: one tab
+    # switch must not be worth more in a quiz than in an interview.
+    integrity_weight_tab_switch: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("3")
+    )
+    integrity_weight_focus_lost: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("1")
+    )
+    integrity_weight_fullscreen_exit: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("2")
+    )
+    # Weighted score at which the attempt is flagged for the teacher.
+    integrity_score_threshold: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("3")
+    )
 
     questions: Mapped[list[QuizQuestion]] = relationship(
         back_populates="quiz",
@@ -467,6 +483,23 @@ class QuizAttempt(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     # Phase 6 (migration 0050): deterministic per-attempt question/option order
     # (shuffle). NULL = natural order. Re-read verbatim on resume/review.
     layout: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    # ── Browser-integrity scoring (migration 0115) ───────────────────────────
+    # The snapshot freezes the weights + threshold in force when the attempt
+    # STARTED, so a teacher editing the quiz mid-cohort never re-scores an
+    # attempt taken under the older rules. Keys: tab_switch / focus_lost /
+    # fullscreen_exit / score_threshold.
+    integrity_policy_snapshot: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    # Running weighted score. reconnect / disconnect / warning_issued never
+    # score — see ``interviews.schemas.integrity.DEFAULT_WEIGHTS``.
+    integrity_score: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    # One-shot: the crossing is reported to the client exactly once, even if
+    # the crossing batch is retried.
+    integrity_warning_issued: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("FALSE")
+    )
+    integrity_threshold_flagged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     quiz: Mapped[Quiz] = relationship(back_populates="attempts")
     answers: Mapped[list[QuizAttemptAnswer]] = relationship(

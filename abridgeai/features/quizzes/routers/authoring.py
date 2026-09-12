@@ -261,6 +261,7 @@ def _attempt_teacher_view(
     attempt: Any,  # noqa: ANN401  -- ORM row
     quiz_title: str,
     student_name: str | None,
+    integrity_flags: int = 0,
 ) -> QuizAttemptTeacherRead:
     return QuizAttemptTeacherRead(
         id=attempt.id,
@@ -275,6 +276,15 @@ def _attempt_teacher_view(
         time_taken_seconds=attempt.time_taken_seconds,
         score_percent=attempt.score_percent,
         passed=attempt.passed,
+        integrity_flags=integrity_flags,
+        integrity_score=int(getattr(attempt, "integrity_score", 0) or 0),
+        integrity_score_threshold=int(
+            (getattr(attempt, "integrity_policy_snapshot", None) or {}).get(
+                "score_threshold", 0
+            )
+            or 0
+        ),
+        integrity_flagged=bool(getattr(attempt, "integrity_warning_issued", False)),
     )
 
 
@@ -297,7 +307,12 @@ async def list_course_quiz_attempts(
     rows = await _analytics_q.list_attempts_for_course(db, course_id)
     names = await _resolve_student_names(db, {row.QuizAttempt.student_id for row in rows})
     return [
-        _attempt_teacher_view(row.QuizAttempt, row.title, names.get(row.QuizAttempt.student_id))
+        _attempt_teacher_view(
+            row.QuizAttempt,
+            row.title,
+            names.get(row.QuizAttempt.student_id),
+            int(row.integrity_flags or 0),
+        )
         for row in rows
     ]
 
@@ -322,7 +337,12 @@ async def list_student_quiz_attempts(
     rows = await _analytics_q.list_attempts_for_student_in_course(db, course_id, student_id)
     names = await _resolve_student_names(db, {student_id})
     student_name = names.get(student_id)
-    return [_attempt_teacher_view(row.QuizAttempt, row.title, student_name) for row in rows]
+    return [
+        _attempt_teacher_view(
+            row.QuizAttempt, row.title, student_name, int(row.integrity_flags or 0)
+        )
+        for row in rows
+    ]
 
 
 @router.get(

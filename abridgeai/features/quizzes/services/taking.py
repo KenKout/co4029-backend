@@ -59,6 +59,9 @@ from abridgeai.features.quizzes.services.attempt_reading import (  # noqa: F401
     project_attempt_summary,
 )
 from abridgeai.features.quizzes.services.grader import grade_answer, needs_manual_grade
+from abridgeai.features.quizzes.services.integrity import (
+    integrity_policy_snapshot_from_quiz,
+)
 from abridgeai.features.spaced_repetition.api.public import (
     CardReviewResult,
     record_card_review,
@@ -450,6 +453,11 @@ async def start_attempt(
         student_id=actor.user_id,
         attempt_number=next_number,
         idempotency_key=idempotency_key,
+        # Freeze the integrity policy NOW. Editing the quiz's weights or
+        # threshold later must not re-score an attempt already under way —
+        # the same cohort-fairness rule the interview applies at session
+        # start (migration 0115).
+        integrity_policy_snapshot=integrity_policy_snapshot_from_quiz(quiz),
     )
     db.add(attempt)
     await flush_or_conflict(db)

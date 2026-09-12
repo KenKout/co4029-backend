@@ -93,6 +93,16 @@ register_conflict_mappings(
 _DATETIME_PATCH_KEYS = frozenset({"available_from", "available_until", "due_at"})
 
 
+# Weight/threshold bounds, mirroring the CHECK constraints added in 0115 and
+# the identical bounds on ``interview_configs``.
+_INTEGRITY_PATCH_BOUNDS: dict[str, tuple[int, int]] = {
+    "integrity_weight_tab_switch": (1, 5),
+    "integrity_weight_focus_lost": (1, 5),
+    "integrity_weight_fullscreen_exit": (1, 5),
+    "integrity_score_threshold": (1, 20),
+}
+
+
 def _coerce_patch_value(key: str, value: object) -> object:
     """Coerce known datetime-typed PATCH keys from ISO strings to datetime.
 
@@ -113,6 +123,19 @@ def _coerce_patch_value(key: str, value: object) -> object:
             return ReviewOptions.model_validate(value).model_dump()
         except Exception as exc:  # noqa: BLE001
             raise AppError("review_options is not a valid review-visibility matrix") from exc
+    # Integrity knobs are CHECK-constrained in the DB (weights 1..5, threshold
+    # 1..20). Range-check here so a bad value is a 400 naming the field rather
+    # than a 500 from the constraint, and so one stray knob cannot fail the
+    # whole settings save opaquely.
+    if key in _INTEGRITY_PATCH_BOUNDS:
+        low, high = _INTEGRITY_PATCH_BOUNDS[key]
+        try:
+            number = int(value)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            raise AppError(f"{key} must be an integer between {low} and {high}") from None
+        if not low <= number <= high:
+            raise AppError(f"{key} must be between {low} and {high}")
+        return number
     if key not in _DATETIME_PATCH_KEYS or value is None:
         return value
     if isinstance(value, datetime):
