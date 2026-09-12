@@ -947,8 +947,14 @@ class _AttrShim:
     untouched.
     """
 
+    #: Settings removed from the product that a cached client bundle may still
+    #: send. Dropped on arrival so a stale tab gets a clean no-op instead of a
+    #: phantom attribute on the model (or a spurious published-quiz freeze
+    #: rejection for a field that no longer exists).
+    _RETIRED_KEYS = frozenset({"browser_security"})
+
     def __init__(self, data: dict[str, Any]) -> None:
-        self._data = dict(data)
+        self._data = {k: v for k, v in data.items() if k not in self._RETIRED_KEYS}
 
     def model_dump(
         self,

@@ -213,9 +213,6 @@ class Quiz(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftDeleteMixin,
     # Phase 12 (migration 0056): access rules enforced in the start-attempt gate.
     require_password: Mapped[str | None] = mapped_column(String(255))
     require_subnet: Mapped[str | None] = mapped_column(String(1024))
-    browser_security: Mapped[str] = mapped_column(
-        String(20), nullable=False, server_default=text("'none'")
-    )
     delay1_seconds: Mapped[int | None] = mapped_column(Integer)
     delay2_seconds: Mapped[int | None] = mapped_column(Integer)
 

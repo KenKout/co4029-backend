@@ -385,13 +385,6 @@ class QuizPublic(_ORMModel):
     # ``outcome_count`` pattern. Defaults to 0 so a bare model_validate (without
     # the count wired) still validates.
     question_count: int = 0
-    # Proctoring mode. Exposed to the STUDENT because the client is what
-    # enforces it: 'securewindow' is the teacher asking for the take to run in
-    # browser fullscreen, and a setting the client cannot read is a setting
-    # that does nothing. Not sensitive — the student is already told the
-    # attempt is monitored, and hiding the mode would only mean surprising
-    # them with a fullscreen prompt.
-    browser_security: Literal["none", "securewindow"] = "none"
 
 
 class QuizForTakingPublic(_ORMModel):

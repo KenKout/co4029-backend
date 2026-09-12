@@ -472,7 +472,6 @@ async def deep_clone_quiz(
         grace_period_seconds=source.grace_period_seconds,
         require_password=source.require_password,
         require_subnet=source.require_subnet,
-        browser_security=source.browser_security,
         delay1_seconds=source.delay1_seconds,
         delay2_seconds=source.delay2_seconds,
         created_by=actor_id,
