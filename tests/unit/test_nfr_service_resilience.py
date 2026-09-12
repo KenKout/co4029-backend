@@ -1,6 +1,6 @@
 """Automated NFR checks for graceful optional-service degradation."""
 
-from abridgeai.api.healthz import CheckStatus, _aggregate_status
+from abridgeai.api.healthz import CheckStatus, _classify_composite
 
 
 def test_ai_dependency_failure_degrades_without_downing_core_services() -> None:
@@ -12,7 +12,7 @@ def test_ai_dependency_failure_degrades_without_downing_core_services() -> None:
         "llm": CheckStatus(status="unhealthy", latency_ms=None),
     }
 
-    assert _aggregate_status(checks) == "degraded"
+    assert _classify_composite(checks) == "degraded"
 
 
 def test_disabled_optional_services_keep_core_platform_healthy() -> None:
@@ -24,4 +24,4 @@ def test_disabled_optional_services_keep_core_platform_healthy() -> None:
         "llm": CheckStatus(status="skipped", latency_ms=None),
     }
 
-    assert _aggregate_status(checks) == "ok"
+    assert _classify_composite(checks) == "ok"
