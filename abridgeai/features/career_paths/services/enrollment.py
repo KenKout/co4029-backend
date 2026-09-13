@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 from uuid import UUID
 
 from abridgeai.core.db.conflict_mapper import flush_or_conflict
@@ -53,12 +53,40 @@ class _RosterAvatarTarget:
 
 
 
+async def _course_thumbnail_urls(
+    db: AsyncSession, courses: list[dict[str, object]]
+) -> dict[UUID, str]:
+    """Presigned thumbnails for the courses of ONE path.
+
+    Used by the single-path reads, which actually render course rows. The
+    paths LISTING deliberately skips this: it draws path cards, so minting a
+    URL for every course of every path on the page would be presigns nobody
+    displays.
+
+    Cross-feature traffic goes through ``courses.api.public`` per the
+    import-linter contract. A storage failure yields a missing key, never an
+    exception — the client falls back to the slug gradient.
+    """
+    from abridgeai.features.courses.api import public as courses_api  # noqa: PLC0415
+
+    ids = [cast("UUID", c["course_id"]) for c in courses]
+    if not ids:
+        return {}
+    return await courses_api.get_course_thumbnail_urls(db, ids)
+
+
 def _to_path_public(
     path: CareerPath,
     courses: list[dict[str, object]],
     *,
     thumbnail_url: str | None = None,
+    course_thumbnail_urls: dict[UUID, str] | None = None,
 ) -> CareerPathPublic:
+    """``thumbnail_url`` is the PATH's own image; ``course_thumbnail_urls``
+    maps course id -> the course's, so a path lists courses with the same
+    artwork the catalogue shows. A course missing from the map keeps
+    ``thumbnail_url = None`` and the client falls back to its gradient."""
+    course_thumbnails = course_thumbnail_urls or {}
     return CareerPathPublic.model_validate(
         {
             "id": path.id,
@@ -76,6 +104,9 @@ def _to_path_public(
                         "position": row["position"],
                         "is_required": row["is_required"],
                         "stage_id": row.get("stage_id"),
+                        "thumbnail_url": course_thumbnails.get(
+                            cast("UUID", row["course_id"])
+                        ),
                     }
                 )
                 for row in courses
@@ -548,7 +579,10 @@ async def get_published_path_with_courses(
         return None
     courses = await list_published_career_path_courses(db, published.id)
     return _to_path_public(
-        path, courses, thumbnail_url=await _thumbnail_url(db, path.id)
+        path,
+        courses,
+        thumbnail_url=await _thumbnail_url(db, path.id),
+        course_thumbnail_urls=await _course_thumbnail_urls(db, courses),
     )
 
 
@@ -617,7 +651,10 @@ async def get_published_path_detail_for_user(
 
     courses = await list_published_career_path_courses(db, published.id)
     base = _to_path_public(
-        path, courses, thumbnail_url=await _thumbnail_url(db, path.id)
+        path,
+        courses,
+        thumbnail_url=await _thumbnail_url(db, path.id),
+        course_thumbnail_urls=await _course_thumbnail_urls(db, courses),
     )
     stages = await authoring_queries.list_stages_for_version(db, published.id)
 

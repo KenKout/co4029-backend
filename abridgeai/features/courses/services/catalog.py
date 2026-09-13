@@ -307,6 +307,34 @@ async def _mint_course_thumbnail_url(db: AsyncSession, course_id: UUID) -> str |
         return None
 
 
+async def get_course_thumbnail_urls(
+    db: AsyncSession, course_ids: list[UUID]
+) -> dict[UUID, str]:
+    """Short-lived presigned thumbnail URLs, keyed by course id.
+
+    For sibling features listing courses (the career-path roadmap). A course
+    with no thumbnail — or one whose presign fails — is absent from the map
+    rather than mapped to ``None``: the caller then leaves ``thumbnail_url``
+    unset and the client paints its gradient placeholder, which is the same
+    outcome the single-course path already produces.
+    """
+    from abridgeai.features.courses.queries.published import (  # noqa: PLC0415
+        list_published_course_thumbnail_storage_targets,
+    )
+
+    targets = await list_published_course_thumbnail_storage_targets(db, course_ids)
+    urls: dict[UUID, str] = {}
+    for course_id, (bucket, object_key) in targets.items():
+        try:
+            url, _ = await create_stream_url(
+                _StorageTarget(bucket=bucket, object_key=object_key)
+            )
+            urls[course_id] = url
+        except Exception:  # noqa: BLE001, S112 -- a storage blip must not break the read
+            continue
+    return urls
+
+
 async def get_published_course_detail(
     db: AsyncSession,
     course_id_or_slug: str | UUID,

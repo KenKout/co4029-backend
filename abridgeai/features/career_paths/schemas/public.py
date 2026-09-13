@@ -14,6 +14,7 @@ class CareerPathCoursePublic(BaseModel):
     position: int
     is_required: bool
     stage_id: UUID | None = None
+    thumbnail_url: str | None = None
 
     model_config = ConfigDict(from_attributes=True)
 

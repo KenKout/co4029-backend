@@ -43,6 +43,21 @@ async def get_course_by_id(db: AsyncSession, course_id: UUID) -> CourseDTO | Non
     return CourseDTO.model_validate(course) if course else None
 
 
+async def get_course_thumbnail_urls(
+    db: AsyncSession, course_ids: list[UUID]
+) -> dict[UUID, str]:
+    """Short-lived presigned thumbnail URLs for a batch of published courses.
+
+    Exposed so a sibling feature listing courses — the career-path roadmap —
+    can show the same image the catalogue shows, instead of every course
+    falling back to its slug gradient. Courses with no thumbnail are absent
+    from the map; the caller leaves the field unset.
+    """
+    from abridgeai.features.courses.services import catalog as catalog_service  # noqa: PLC0415
+
+    return await catalog_service.get_course_thumbnail_urls(db, course_ids)
+
+
 async def list_course_manager_ids(db: AsyncSession, course_id: UUID) -> list[UUID]:
     """User ids who can manage a course: owner + active assigned teachers.
 
@@ -241,6 +256,7 @@ __all__ = [
     "OrgDTO",
     "find_module_items",
     "get_course_by_id",
+    "get_course_thumbnail_urls",
     "get_course_slug",
     "get_lesson_by_id",
     "get_lesson_title",

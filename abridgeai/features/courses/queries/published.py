@@ -656,8 +656,33 @@ async def get_published_course_thumbnail_storage_target(
     return row.bucket, row.object_key
 
 
+async def list_published_course_thumbnail_storage_targets(
+    db: AsyncSession, course_ids: list[UUID]
+) -> dict[UUID, tuple[str, str]]:
+    """Bucket + object_key per published course that HAS a thumbnail.
+
+    The batched form of :func:`get_published_course_thumbnail_storage_target`,
+    for callers rendering a list of courses: one round trip instead of one per
+    course. Courses without a thumbnail (or not published) are simply absent
+    from the result, so the caller falls back to the gradient exactly as before.
+    """
+    if not course_ids:
+        return {}
+    stmt = (
+        select(Course.id, StorageObject.bucket, StorageObject.object_key)
+        .join(StorageObject, Course.thumbnail_object_id == StorageObject.id)
+        .where(
+            Course.id.in_(course_ids),
+            published_course_clause(),
+        )
+    )
+    rows = (await db.execute(stmt)).all()
+    return {row.id: (row.bucket, row.object_key) for row in rows}
+
+
 __all__ = [
     "get_published_course_by_id",
+    "list_published_course_thumbnail_storage_targets",
     "get_published_course_by_slug",
     "get_published_course_content",
     "list_enrolled_courses",
