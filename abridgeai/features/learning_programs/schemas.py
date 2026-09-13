@@ -90,6 +90,7 @@ class ProgramPathRead(BaseModel):
     name: str
     slug: str
     description: str | None
+    thumbnail_url: str | None = None
     status: str
     position: int
 

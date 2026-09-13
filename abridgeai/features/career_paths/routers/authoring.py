@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from abridgeai.core.db import get_db
@@ -214,6 +214,40 @@ async def get_career_path(
             db, current_user, career_path_id, _PATH_READ_CODES
         )
         return await authoring_service.get_career_path(db, career_path_id)
+    except NotFoundError as exc:
+        raise _not_found(str(exc)) from exc
+
+
+@management_router.put(
+    "/{career_path_id}/thumbnail",
+    response_model=CareerPathAuthoring,
+)
+async def upload_career_path_thumbnail(
+    career_path_id: UUID,
+    request: Request,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_PATH_MANAGE)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> CareerPathAuthoring:
+    """Upload a JPEG/PNG/WebP/GIF thumbnail up to 5 MiB."""
+    try:
+        await _ensure_caller_in_path_org(
+            db, current_user, career_path_id, _PATH_MANAGE_CODES
+        )
+        data = await request.body()
+        content_type = request.headers.get("content-type", "application/octet-stream")
+        content_type = content_type.split(";", 1)[0].strip().lower()
+        return await authoring_service.upload_career_path_thumbnail(
+            db,
+            career_path_id,
+            data=data,
+            content_type=content_type,
+            uploaded_by=current_user.user_id,
+        )
+    except authoring_service.ThumbnailUploadError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
     except NotFoundError as exc:
         raise _not_found(str(exc)) from exc
 

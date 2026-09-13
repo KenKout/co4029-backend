@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from datetime import datetime
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
@@ -14,9 +15,65 @@ from abridgeai.features.career_paths.models import (
     StudentStageProgress,
 )
 from abridgeai.features.courses.api import public as courses_api
+from abridgeai.features.identity.api import public as identity_api
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
+
+
+async def list_career_path_thumbnail_storage_targets(
+    db: AsyncSession, career_path_ids: Sequence[UUID]
+) -> dict[UUID, tuple[str, str]]:
+    """Resolve thumbnail storage locations in one query.
+
+    No lifecycle filter is applied: an archived path remains visible to
+    students already enrolled through a Learning Program.
+    """
+    if not career_path_ids:
+        return {}
+    stmt = select(CareerPath.id, CareerPath.thumbnail_object_id).where(
+        CareerPath.id.in_(career_path_ids),
+        CareerPath.thumbnail_object_id.is_not(None),
+    )
+    path_objects = {
+        path_id: object_id
+        for path_id, object_id in (await db.execute(stmt)).all()
+        if object_id is not None
+    }
+    targets = await identity_api.get_storage_object_targets(
+        db, list(path_objects.values())
+    )
+    return {
+        path_id: targets[object_id]
+        for path_id, object_id in path_objects.items()
+        if object_id in targets
+    }
+
+
+def insert_thumbnail_storage_object(
+    db: AsyncSession,
+    *,
+    object_id: UUID,
+    bucket: str,
+    object_key: str,
+    original_filename: str,
+    mime_type: str,
+    size_bytes: int,
+    uploaded_by: UUID,
+    uploaded_at: datetime,
+) -> None:
+    """Stage the storage metadata row owned by the identity feature."""
+    identity_api.add_storage_object(
+        db,
+        object_id=object_id,
+        bucket=bucket,
+        object_key=object_key,
+        original_filename=original_filename,
+        mime_type=mime_type,
+        size_bytes=size_bytes,
+        uploaded_by=uploaded_by,
+        uploaded_at=uploaded_at,
+    )
 
 
 async def list_versions(

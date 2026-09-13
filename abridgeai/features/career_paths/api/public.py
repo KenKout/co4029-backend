@@ -16,6 +16,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from abridgeai.core.db.conflict_mapper import flush_or_conflict
 from abridgeai.features.access_control.models import StudentCareerEnrollment
 from abridgeai.features.career_paths.queries import student as student_queries
+from abridgeai.features.career_paths.services import authoring as authoring_service
+
+
+async def get_career_path_thumbnail_urls(
+    db: AsyncSession, career_path_ids: list[UUID]
+) -> dict[UUID, str]:
+    """Short-lived thumbnail URLs for sibling features' path cards."""
+    return await authoring_service.get_career_path_thumbnail_urls(db, career_path_ids)
 
 
 async def list_user_career_enrollments(
@@ -134,6 +142,7 @@ async def release_program_path_access(
 
 
 __all__ = [
+    "get_career_path_thumbnail_urls",
     "get_path_course_progress_for_user",
     "get_version_course_progress_for_user",
     "ensure_program_path_access",

@@ -53,13 +53,19 @@ class _RosterAvatarTarget:
 
 
 
-def _to_path_public(path: CareerPath, courses: list[dict[str, object]]) -> CareerPathPublic:
+def _to_path_public(
+    path: CareerPath,
+    courses: list[dict[str, object]],
+    *,
+    thumbnail_url: str | None = None,
+) -> CareerPathPublic:
     return CareerPathPublic.model_validate(
         {
             "id": path.id,
             "slug": path.slug,
             "name": path.name,
             "description": path.description,
+            "thumbnail_url": thumbnail_url,
             "status": "published",
             "courses": [
                 CareerPathCoursePublic.model_validate(
@@ -76,6 +82,28 @@ def _to_path_public(path: CareerPath, courses: list[dict[str, object]]) -> Caree
             ],
         }
     )
+
+
+async def _thumbnail_urls(
+    db: AsyncSession, path_ids: list[UUID]
+) -> dict[UUID, str]:
+    targets = await authoring_queries.list_career_path_thumbnail_storage_targets(
+        db, path_ids
+    )
+    urls: dict[UUID, str] = {}
+    for path_id, target in targets.items():
+        try:
+            url, _ = await create_stream_url(
+                _RosterAvatarTarget(bucket=target[0], object_key=target[1])
+            )
+            urls[path_id] = url
+        except Exception:  # noqa: BLE001, S112 -- image failure must not break reads
+            continue
+    return urls
+
+
+async def _thumbnail_url(db: AsyncSession, path_id: UUID) -> str | None:
+    return (await _thumbnail_urls(db, [path_id])).get(path_id)
 
 
 def _to_authoring_enrollment(
@@ -519,7 +547,9 @@ async def get_published_path_with_courses(
     if published is None:
         return None
     courses = await list_published_career_path_courses(db, published.id)
-    return _to_path_public(path, courses)
+    return _to_path_public(
+        path, courses, thumbnail_url=await _thumbnail_url(db, path.id)
+    )
 
 
 async def _visible_career_path_ids(db: AsyncSession, user_id: UUID) -> set[UUID] | None:
@@ -586,7 +616,9 @@ async def get_published_path_detail_for_user(
         return None
 
     courses = await list_published_career_path_courses(db, published.id)
-    base = _to_path_public(path, courses)
+    base = _to_path_public(
+        path, courses, thumbnail_url=await _thumbnail_url(db, path.id)
+    )
     stages = await authoring_queries.list_stages_for_version(db, published.id)
 
     by_stage: dict[str, list[CareerPathCoursePublic]] = {}
@@ -673,6 +705,7 @@ async def list_published_paths(
         restrict_to_ids=restrict_to_ids,
     )
     results: list[CareerPathPublic] = []
+    thumbnail_urls = await _thumbnail_urls(db, [path.id for path in paths])
     for path in paths:
         published = await authoring_queries.get_published_version(db, path.id)
         if published is None:
@@ -680,7 +713,11 @@ async def list_published_paths(
         if published is None:
             continue
         courses = await list_published_career_path_courses(db, published.id)
-        results.append(_to_path_public(path, courses))
+        results.append(
+            _to_path_public(
+                path, courses, thumbnail_url=thumbnail_urls.get(path.id)
+            )
+        )
     next_cursor = (
         encode_composite_cursor(paths[-1].created_at, paths[-1].id) if len(paths) == limit else None
     )

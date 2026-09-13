@@ -13,6 +13,8 @@ class CareerPathAuthoring(BaseModel):
     slug: str
     name: str
     description: str | None = None
+    thumbnail_object_id: UUID | None = None
+    thumbnail_url: str | None = None
     status: str
     max_concurrent: int | None = None
     # List-surface enrichment (authoring service): how many stages the path

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
-from uuid import UUID
+from uuid import UUID, uuid4
 
+from abridgeai.core.config import get_settings
 from abridgeai.core.db.conflict_mapper import (
     flush_or_conflict,
     register_conflict_mappings,
@@ -37,6 +39,7 @@ from abridgeai.features.career_paths.schemas import (
 )
 from abridgeai.features.courses.api import public as courses_api
 from abridgeai.features.enrollments.api import public as enrollments_api
+from abridgeai.infrastructure.s3 import create_stream_url, put_object_bytes
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -46,6 +49,24 @@ if TYPE_CHECKING:
 _OFFSET = 100_000
 # "cap of 1 but this many required courses in one stage" → publish warning.
 _CAP_ONE_MANY_REQUIRED = 4
+
+_THUMBNAIL_MIME_TYPES: dict[str, str] = {
+    "image/jpeg": "jpg",
+    "image/png": "png",
+    "image/webp": "webp",
+    "image/gif": "gif",
+}
+_THUMBNAIL_MAX_BYTES = 5 * 1024 * 1024
+
+
+@dataclass
+class _ThumbnailStorageTarget:
+    bucket: str
+    object_key: str
+
+
+class ThumbnailUploadError(ValueError):
+    """Raised when a Career Path thumbnail is empty, too large, or unsupported."""
 
 
 register_conflict_mappings(
@@ -64,6 +85,7 @@ def _to_authoring(
     stage_count: int = 0,
     course_count: int = 0,
     stats: dict[str, int | bool] | None = None,
+    thumbnail_url: str | None = None,
 ) -> CareerPathAuthoring:
     # stats: the batched list-surface statistics (student_count /
     # has_draft_version / draft_version_no) — None on callers that do not
@@ -75,6 +97,8 @@ def _to_authoring(
         slug=path.slug,
         name=path.name,
         description=path.description,
+        thumbnail_object_id=getattr(path, "thumbnail_object_id", None),
+        thumbnail_url=thumbnail_url,
         status=path.status,
         stage_count=stage_count,
         course_count=course_count,
@@ -135,12 +159,14 @@ async def list_career_paths_for_org(
     stage_counts = await authoring_queries.list_path_stage_counts(db, path_ids)
     course_counts = await authoring_queries.list_path_course_counts(db, path_ids)
     list_stats = await authoring_queries.list_path_list_stats(db, path_ids)
+    thumbnail_urls = await get_career_path_thumbnail_urls(db, path_ids)
     return [
         _to_authoring(
             row,
             stage_count=stage_counts.get(row.id, 0),
             course_count=course_counts.get(row.id, 0),
             stats=list_stats.get(row.id),
+            thumbnail_url=thumbnail_urls.get(row.id),
         )
         for row in rows
     ]
@@ -151,12 +177,33 @@ async def get_career_path(db: AsyncSession, career_path_id: UUID) -> CareerPathA
     stage_counts = await authoring_queries.list_path_stage_counts(db, [path.id])
     course_counts = await authoring_queries.list_path_course_counts(db, [path.id])
     list_stats = await authoring_queries.list_path_list_stats(db, [path.id])
+    thumbnail_urls = await get_career_path_thumbnail_urls(db, [path.id])
     return _to_authoring(
         path,
         stage_count=stage_counts.get(path.id, 0),
         course_count=course_counts.get(path.id, 0),
         stats=list_stats.get(path.id),
+        thumbnail_url=thumbnail_urls.get(path.id),
     )
+
+
+async def get_career_path_thumbnail_urls(
+    db: AsyncSession, career_path_ids: list[UUID]
+) -> dict[UUID, str]:
+    """Mint short-lived URLs without allowing storage failures to break reads."""
+    targets = await authoring_queries.list_career_path_thumbnail_storage_targets(
+        db, career_path_ids
+    )
+    urls: dict[UUID, str] = {}
+    for path_id, (bucket, object_key) in targets.items():
+        try:
+            url, _ = await create_stream_url(
+                _ThumbnailStorageTarget(bucket=bucket, object_key=object_key)
+            )
+            urls[path_id] = url
+        except Exception:  # noqa: BLE001, S112 -- thumbnail failure must not break reads
+            continue
+    return urls
 
 
 async def get_path_impact(db: AsyncSession, career_path_id: UUID) -> CareerPathImpactRead:
@@ -394,7 +441,56 @@ async def update_career_path(
     path.updated_by = actor.user_id
     await flush_or_conflict(db)
     await db.refresh(path)
-    return _to_authoring(path)
+    return await get_career_path(db, path.id)
+
+
+async def upload_career_path_thumbnail(
+    db: AsyncSession,
+    career_path_id: UUID,
+    *,
+    data: bytes,
+    content_type: str,
+    uploaded_by: UUID,
+) -> CareerPathAuthoring:
+    """Validate and store the image used on learner Career Path cards."""
+    ext = _THUMBNAIL_MIME_TYPES.get(content_type)
+    if ext is None:
+        raise ThumbnailUploadError(
+            "unsupported_thumbnail_type: allowed types are JPEG, PNG, WebP, GIF."
+        )
+    if not data:
+        raise ThumbnailUploadError("empty_thumbnail: the uploaded file is empty.")
+    if len(data) > _THUMBNAIL_MAX_BYTES:
+        raise ThumbnailUploadError("thumbnail_too_large: images must be 5 MiB or smaller.")
+
+    path = await _require_path(db, career_path_id)
+    settings = get_settings()
+    bucket = settings.s3_bucket_name or "abridgeai-local"
+    object_id = uuid4()
+    object_key = f"career-path-thumbnails/{career_path_id}/{object_id}.{ext}"
+
+    await put_object_bytes(
+        _ThumbnailStorageTarget(bucket=bucket, object_key=object_key),
+        data,
+        content_type=content_type,
+    )
+    authoring_queries.insert_thumbnail_storage_object(
+        db,
+        object_id=object_id,
+        bucket=bucket,
+        object_key=object_key,
+        original_filename=f"thumbnail.{ext}",
+        mime_type=content_type,
+        size_bytes=len(data),
+        uploaded_by=uploaded_by,
+        uploaded_at=datetime.now(tz=UTC),
+    )
+    await db.flush()
+    path.thumbnail_object_id = object_id
+    path.updated_by = uploaded_by
+    await db.commit()
+    await db.refresh(path)
+    return await get_career_path(db, path.id)
 
 
 async def add_course_to_path(
@@ -993,7 +1089,7 @@ async def publish_path(
     path.updated_by = actor.user_id
     await db.flush()
     await db.refresh(path)
-    return _to_authoring(path)
+    return await get_career_path(db, path.id)
 
 
 async def create_path_version(
@@ -1080,7 +1176,7 @@ async def archive_path(
     path.updated_by = actor.user_id
     await db.flush()
     await db.refresh(path)
-    return _to_authoring(path)
+    return await get_career_path(db, path.id)
 
 
 async def soft_delete_path(db: AsyncSession, career_path_id: UUID, actor: CurrentUser) -> None:
@@ -1109,6 +1205,7 @@ __all__ = [
     "reorder_stages",
     "soft_delete_path",
     "update_career_path",
+    "upload_career_path_thumbnail",
     "update_stage",
     "validate_path_for_publish",
 ]

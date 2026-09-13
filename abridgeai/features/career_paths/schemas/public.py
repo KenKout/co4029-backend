@@ -23,6 +23,7 @@ class CareerPathPublic(BaseModel):
     slug: str
     name: str
     description: str | None = None
+    thumbnail_url: str | None = None
     status: Literal["published"]
     courses: list[CareerPathCoursePublic] = []
 

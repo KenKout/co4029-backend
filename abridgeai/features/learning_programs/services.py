@@ -152,9 +152,20 @@ async def _require_owner_dean(
 
 
 async def _paths_for_version(db: AsyncSession, version_id: UUID) -> list[ProgramPathRead]:
+    rows = await queries.list_version_paths(db, version_id)
+    thumbnail_urls = await career_paths_api.get_career_path_thumbnail_urls(
+        db, [cast(UUID, row["career_path_id"]) for row in rows]
+    )
     return [
-        ProgramPathRead.model_validate(row)
-        for row in await queries.list_version_paths(db, version_id)
+        ProgramPathRead.model_validate(
+            {
+                **row,
+                "thumbnail_url": thumbnail_urls.get(
+                    cast(UUID, row["career_path_id"])
+                ),
+            }
+        )
+        for row in rows
     ]
 
 

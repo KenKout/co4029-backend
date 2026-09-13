@@ -24,12 +24,13 @@ test_api_public.py::test_dto_excludes_secrets`` enforces this.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from datetime import datetime
 from uuid import UUID
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from abridgeai.features.identity.models import AuthSession, User, UserProfile
+from abridgeai.features.identity.models import AuthSession, StorageObject, User, UserProfile
 
 from ._dto import UserDTO, UserProfileDTO
 
@@ -76,6 +77,48 @@ async def get_users_by_ids(db: AsyncSession, user_ids: Sequence[UUID]) -> dict[U
     )
     rows = (await db.execute(stmt)).all()
     return {user.id: _user_to_dto(user, display_name) for user, display_name in rows}
+
+
+async def get_storage_object_targets(
+    db: AsyncSession, object_ids: Sequence[UUID]
+) -> dict[UUID, tuple[str, str]]:
+    """Resolve opaque storage IDs to bucket/key pairs for sibling features."""
+    if not object_ids:
+        return {}
+    stmt = select(StorageObject.id, StorageObject.bucket, StorageObject.object_key).where(
+        StorageObject.id.in_(object_ids)
+    )
+    return {
+        object_id: (bucket, object_key)
+        for object_id, bucket, object_key in (await db.execute(stmt)).all()
+    }
+
+
+def add_storage_object(
+    db: AsyncSession,
+    *,
+    object_id: UUID,
+    bucket: str,
+    object_key: str,
+    original_filename: str,
+    mime_type: str,
+    size_bytes: int,
+    uploaded_by: UUID,
+    uploaded_at: datetime,
+) -> None:
+    """Stage object metadata while keeping the identity ORM model private."""
+    db.add(
+        StorageObject(
+            id=object_id,
+            bucket=bucket,
+            object_key=object_key,
+            original_filename=original_filename,
+            mime_type=mime_type,
+            size_bytes=size_bytes,
+            uploaded_by=uploaded_by,
+            uploaded_at=uploaded_at,
+        )
+    )
 
 
 async def get_user_profile(db: AsyncSession, user_id: UUID) -> UserProfileDTO | None:
@@ -164,10 +207,12 @@ async def find_or_create_student(
 
 
 __all__ = [
+    "add_storage_object",
     "find_or_create_student",
     "UserDTO",
     "UserProfileDTO",
     "get_active_session_count",
+    "get_storage_object_targets",
     "get_user_by_id",
     "get_user_locale",
     "get_user_profile",

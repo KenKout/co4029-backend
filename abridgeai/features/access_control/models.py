@@ -494,6 +494,10 @@ class CareerPath(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftDelete
     slug: Mapped[str] = mapped_column(String(100), nullable=False)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     description: Mapped[str | None] = mapped_column(Text)
+    thumbnail_object_id: Mapped[uuid.UUID | None] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("storage_objects.id", ondelete="SET NULL"),
+    )
     status: Mapped[str] = mapped_column(String(20), nullable=False, server_default=text("'draft'"))
     max_concurrent: Mapped[int | None] = mapped_column(Integer)
     """Attention cap: how many courses of THIS path a student should have in
