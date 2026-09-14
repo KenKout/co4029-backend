@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from pydantic import SecretStr
 
+from abridgeai.ai.chunking import TimestampAwareChunker
 from abridgeai.ai.extraction import (
     CODE_MIMES,
     EXTRACTOR_REGISTRY,
@@ -222,6 +223,40 @@ async def test_audio_extractor_uses_whisper_api() -> None:
     assert result.source_locations[1].timestamp_end_ms == 1500
     fake_client.post.assert_awaited_once()
     db.add.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_audio_extractor_preserves_whisper_text_without_segments() -> None:
+    settings = Settings(
+        audio_extraction_local=False,
+        audio_stt_provider="whisper_api",
+        whisper_model="whisper-1",
+        llm_api_key="sk-test",
+    )
+    db = MagicMock()
+    db.add = MagicMock()
+    db.flush = AsyncMock()
+    extractor = AudioExtractor(settings=settings, db=db)
+    fake_response = _FakeWhisperResponse(
+        payload={
+            "text": "flat transcript from a compatible gateway",
+            "language": "en",
+            "duration": 12.5,
+        }
+    )
+    fake_client = MagicMock()
+    fake_client.__aenter__ = AsyncMock(return_value=fake_client)
+    fake_client.__aexit__ = AsyncMock(return_value=False)
+    fake_client.post = AsyncMock(return_value=fake_response)
+
+    with patch("abridgeai.ai.extraction.audio.httpx.AsyncClient", return_value=fake_client):
+        result = await extractor.extract(b"fake-wav-bytes")
+
+    assert result.text == "flat transcript from a compatible gateway"
+    assert result.metadata["segment_count"] == 1
+    assert result.source_locations == [
+        SourceLocation(timestamp_start_ms=0, timestamp_end_ms=12_500)
+    ]
 
 
 @pytest.mark.asyncio
@@ -448,6 +483,44 @@ async def test_video_extractor_pipeline_orchestration(tmp_path: Any) -> None:
     assert "[Frame OCR @" in result.text
     assert result.source_type == "video"
     assert result.metadata["frame_count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_video_preserves_flat_whisper_transcript_without_segments() -> None:
+    """A text-only Whisper response must still feed chunking, KG, and retrieval."""
+    settings = Settings(ffmpeg_path="ffmpeg", image_ocr_provider="tesseract")
+    audio_extractor = MagicMock()
+    audio_extractor.extract = AsyncMock(
+        return_value=ExtractedContent(
+            text="A complete lecture transcript returned without timestamp segments.",
+            metadata={"duration_seconds": 12.5, "segment_count": 0},
+            source_type="audio",
+            source_locations=[],
+        )
+    )
+    image_extractor = MagicMock()
+
+    async def fake_split(**kwargs: Any) -> Any:
+        from abridgeai.ai.extraction.video import _FfmpegOutputs
+
+        audio_path = f"{kwargs['workdir']}/audio.wav"
+        return _FfmpegOutputs(audio_path=audio_path, frames=[])
+
+    extractor = VideoExtractor(
+        settings=settings,
+        audio_extractor=audio_extractor,
+        image_extractor=image_extractor,
+    )
+    with patch("abridgeai.ai.extraction.video._split_audio_and_frames", side_effect=fake_split):
+        result = await extractor.extract(b"fake-mp4-bytes")
+
+    assert "complete lecture transcript" in result.text
+    assert result.source_locations == [
+        SourceLocation(timestamp_start_ms=0, timestamp_end_ms=12_500)
+    ]
+    chunks = TimestampAwareChunker().chunk(result)
+    assert len(chunks) == 1
+    assert "complete lecture transcript" in chunks[0].content
 
 
 @pytest.mark.asyncio

@@ -422,6 +422,14 @@ class AudioExtractor:
         text, locations = _segments_to_locations(segments)
         if not text and isinstance(payload.get("text"), str):
             text = payload["text"].strip()
+            if text:
+                duration = payload.get("duration")
+                end_ms = (
+                    int(round(float(duration) * 1000)) if duration is not None else None
+                )
+                locations = [
+                    SourceLocation(timestamp_start_ms=0, timestamp_end_ms=end_ms)
+                ]
 
         cost = await compute_cost(self._db, whisper_model, None, None)
         await write_ai_model_call(

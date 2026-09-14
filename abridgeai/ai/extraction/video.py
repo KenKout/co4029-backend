@@ -337,15 +337,24 @@ def _merge(
     frames: list[tuple[float, ExtractedContent]],
 ) -> ExtractedContent:
     parts: list[tuple[int, str, SourceLocation]] = []
-    for loc in audio.source_locations:
+    audio_lines = audio.text.splitlines()
+    for index, loc in enumerate(audio.source_locations):
         start_ms = loc.timestamp_start_ms or 0
-        snippet = ""
-        if loc in audio.source_locations:
-            index = audio.source_locations.index(loc)
-            audio_lines = audio.text.splitlines()
-            if 0 <= index < len(audio_lines):
-                snippet = audio_lines[index]
+        if len(audio.source_locations) == 1:
+            snippet = audio.text.strip()
+        else:
+            snippet = audio_lines[index] if index < len(audio_lines) else ""
         parts.append((start_ms, f"[Audio @ {start_ms}ms] {snippet}".rstrip(), loc))
+
+    if not audio.source_locations and audio.text.strip():
+        duration_seconds = audio.metadata.get("duration_seconds")
+        end_ms = (
+            int(round(float(duration_seconds) * 1000))
+            if duration_seconds is not None
+            else None
+        )
+        fallback_location = SourceLocation(timestamp_start_ms=0, timestamp_end_ms=end_ms)
+        parts.append((0, f"[Audio @ 0ms] {audio.text.strip()}", fallback_location))
 
     for ts_seconds, frame in frames:
         ts_ms = int(round(ts_seconds * 1000))
