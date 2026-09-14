@@ -941,7 +941,11 @@ async def test_quiz_integrity_events_recorded_for_in_progress_attempt(
         headers=_auth(student_token),
     )
     assert resp.status_code == 202, resp.text
-    assert resp.json()["accepted"] == 2
+    body = resp.json()
+    assert body["accepted"] == 2
+    assert body["integrity_score"] == 4
+    assert body["integrity_score_threshold"] == 3
+    assert body["warning_issued"] is True
 
     async with engine.begin() as conn:
         rows = (
@@ -954,8 +958,14 @@ async def test_quiz_integrity_events_recorded_for_in_progress_attempt(
                 {"a": attempt_id},
             )
         ).all()
-    assert len(rows) == 2
-    assert {r[0] for r in rows} == {"focus_lost", "tab_switch"}
+    # The two accepted client events cross the default threshold, so the
+    # server appends one authoritative warning event to the audit timeline.
+    assert len(rows) == 3
+    assert {r[0] for r in rows} == {
+        "focus_lost",
+        "tab_switch",
+        "warning_issued",
+    }
     assert all(r[2] == "quiz" for r in rows)
     assert all(str(r[3]) == str(seeded_users.student_id) for r in rows)
 
