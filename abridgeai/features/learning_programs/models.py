@@ -48,8 +48,8 @@ PATH_CHANGE_REJECTION_REASON_CODES = (
 
 Kept in sync with ``ck_path_change_requests_decision_reason_code`` and with the
 frontend's reject dialog. ``other`` exists so a dean is never forced into a
-wrong bucket, and it REQUIRES the free-text ``decision_reason`` — a bare
-"other" would tell the student nothing.
+wrong bucket, and it REQUIRES the free-text ``decision_reason``. An optional
+``decision_note`` remains separate for every category.
 """
 
 
@@ -224,11 +224,9 @@ class PathChangeRequest(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, Bas
         PGUUID(as_uuid=True), ForeignKey("users.id", ondelete="NO ACTION")
     )
     reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    # Fixed vocabulary for a rejection (filterable / reportable);
-    # ``decision_reason`` keeps the dean's own sentence and is REQUIRED when
-    # the code is ``other``.
     decision_reason_code: Mapped[str | None] = mapped_column(String(40))
     decision_reason: Mapped[str | None] = mapped_column(Text)
+    decision_note: Mapped[str | None] = mapped_column(Text)
     new_attempt_id: Mapped[uuid.UUID | None] = mapped_column(
         PGUUID(as_uuid=True), ForeignKey("program_path_attempts.id", ondelete="NO ACTION")
     )

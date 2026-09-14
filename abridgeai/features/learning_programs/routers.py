@@ -402,6 +402,7 @@ async def reject_change_request(
             approve=False,
             decision_reason=payload.reason,
             decision_reason_code=payload.reason_code,
+            decision_note=payload.note,
             actor=actor,
             arq_pool=arq_pool,
         )

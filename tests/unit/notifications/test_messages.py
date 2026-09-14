@@ -10,6 +10,32 @@ from __future__ import annotations
 from abridgeai.features.notifications import messages
 
 
+class TestPathChangeRejected:
+    def test_other_reason_and_optional_note_are_rendered_separately(self) -> None:
+        body = messages.path_change_rejected_body(
+            target_path_name="Data Engineering",
+            reason_code="other",
+            reason_detail="The intake is closed.",
+            note="Meet your adviser next week.",
+            locale="en",
+        )
+
+        assert "Reason: The intake is closed." in body
+        assert "Dean's note: Meet your adviser next week." in body
+
+    def test_predefined_reason_does_not_require_a_note(self) -> None:
+        body = messages.path_change_rejected_body(
+            target_path_name="Data Engineering",
+            reason_code="documentation_missing",
+            reason_detail=None,
+            note=None,
+            locale="en",
+        )
+
+        assert "Reason: Supporting information" in body
+        assert "Dean's note:" not in body
+
+
 class TestDueCards:
     def test_title_en_plural(self) -> None:
         assert messages.due_cards_title(due_count=3, locale="en") == "You have 3 cards due"

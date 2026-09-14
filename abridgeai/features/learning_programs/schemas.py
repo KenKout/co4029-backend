@@ -234,18 +234,19 @@ class ChangeRequestDecision(BaseModel):
 
 
 class ChangeRequestRejection(BaseModel):
-    """Rejection payload: a code from the fixed list, plus optional detail.
+    """Rejection payload with category, custom reason, and note kept distinct.
 
     ``reason_code='other'`` REQUIRES ``reason``: the whole point of ``other``
     is that the dean types what actually happened, and a bare "other" in the
-    student's notification and in the rejection history would be worse than the
-    canned codes it escapes.
+    student's notification and history would be worse than the canned codes it
+    escapes. ``note`` is optional for every category.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     reason_code: PathChangeRejectionReasonCode
     reason: str | None = Field(default=None, max_length=4000)
+    note: str | None = Field(default=None, max_length=2000)
 
     @model_validator(mode="after")
     def _require_detail_for_other(self) -> ChangeRequestRejection:
@@ -270,6 +271,7 @@ class PathChangeRequestRead(BaseModel):
     reviewed_at: datetime | None
     decision_reason_code: str | None = None
     decision_reason: str | None
+    decision_note: str | None = None
     new_attempt_id: UUID | None
     created_at: datetime
 

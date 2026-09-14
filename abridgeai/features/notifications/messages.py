@@ -428,24 +428,27 @@ def path_change_rejected_body(
     target_path_name: str,
     reason_code: str,
     reason_detail: str | None,
+    note: str | None,
     locale: str | None,
 ) -> str:
     """Body: the reason, then what it means for the student.
 
-    Both the canned sentence and any free text are included — the code says
-    which bucket, the detail says what specifically, and a student reading only
-    the notification should not have to open the app to learn why.
+    A predefined code supplies the reason sentence; ``other`` supplies it from
+    ``reason_detail``. Optional dean guidance is rendered separately as a note.
     """
     lang = _norm(locale)
     canned = _rejection_reason_sentence(reason_code=reason_code, locale=locale)
     detail = (reason_detail or "").strip()
+    dean_note = (note or "").strip()
     parts: list[str] = []
     if lang == "vi":
         parts.append(f'Đề nghị chuyển sang "{target_path_name}" đã bị từ chối.')
         if canned:
             parts.append(f"Lý do: {canned}")
-        if detail:
-            parts.append(f"Ghi chú của trưởng khoa: {detail}")
+        elif detail:
+            parts.append(f"Lý do: {detail}")
+        if dean_note:
+            parts.append(f"Ghi chú của trưởng khoa: {dean_note}")
         parts.append(
             "Bạn vẫn tiếp tục lộ trình hiện tại và quyền đổi lộ trình chưa bị trừ."
         )
@@ -453,8 +456,10 @@ def path_change_rejected_body(
     parts.append(f'Your request to switch to "{target_path_name}" was rejected.')
     if canned:
         parts.append(f"Reason: {canned}")
-    if detail:
-        parts.append(f"Dean's note: {detail}")
+    elif detail:
+        parts.append(f"Reason: {detail}")
+    if dean_note:
+        parts.append(f"Dean's note: {dean_note}")
     parts.append(
         "You stay on your current path, and this does not use up a path change."
     )

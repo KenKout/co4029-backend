@@ -1062,6 +1062,7 @@ async def decide_change_request(  # noqa: C901 - approval is one atomic invarian
     decision_reason: str | None,
     actor: CurrentUser,
     decision_reason_code: str | None = None,
+    decision_note: str | None = None,
     arq_pool: object | None = None,
 ) -> PathChangeRequestRead:
     request = await queries.get_change_request(db, request_id, lock=True)
@@ -1090,13 +1091,20 @@ async def decide_change_request(  # noqa: C901 - approval is one atomic invarian
         # 'other' is the escape hatch from the fixed list, so it has to carry
         # the words the list could not express — otherwise the student receives
         # a rejection whose reason is literally "other".
-        if decision_reason_code == "other" and not (decision_reason or "").strip():
+        custom_reason = (decision_reason or "").strip() or None
+        note = (decision_note or "").strip() or None
+        if decision_reason_code == "other" and custom_reason is None:
             raise ConflictError("rejection_reason_is_required_when_code_is_other")
+        if decision_reason_code != "other" and note is None:
+            note = custom_reason
+        if decision_reason_code != "other":
+            custom_reason = None
         request.status = "rejected"
         request.reviewed_by = actor.user_id
         request.reviewed_at = _now()
         request.decision_reason_code = decision_reason_code
-        request.decision_reason = decision_reason
+        request.decision_reason = custom_reason
+        request.decision_note = note
         request.updated_by = actor.user_id
         await flush_or_conflict(db)
         await notify.notify_path_change_rejected(
@@ -1106,7 +1114,8 @@ async def decide_change_request(  # noqa: C901 - approval is one atomic invarian
             program_name=program.name,
             target_path_name=target_path_name,
             reason_code=decision_reason_code,
-            reason_detail=decision_reason,
+            reason_detail=custom_reason,
+            note=note,
             arq_pool=arq_pool,
         )
         return PathChangeRequestRead.model_validate(request)

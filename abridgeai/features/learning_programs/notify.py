@@ -142,6 +142,7 @@ async def notify_path_change_rejected(
     target_path_name: str,
     reason_code: str,
     reason_detail: str | None,
+    note: str | None,
     arq_pool: object | None = None,
 ) -> None:
     """Tell the student their request was rejected, and why."""
@@ -158,6 +159,7 @@ async def notify_path_change_rejected(
                 target_path_name=target_path_name,
                 reason_code=reason_code,
                 reason_detail=reason_detail,
+                note=note,
                 locale=locale,
             ),
             entity_type="path_change_request",
