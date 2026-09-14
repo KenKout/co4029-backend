@@ -474,17 +474,21 @@ def path_change_approved_title(*, program_name: str, locale: str | None) -> str:
     return f"Path change approved: {program_name}"[:255]
 
 
-def path_change_approved_body(*, target_path_name: str, locale: str | None) -> str:
+def path_change_approved_body(
+    *, target_path_name: str, note: str | None = None, locale: str | None
+) -> str:
     lang = _norm(locale)
     if lang == "vi":
-        return (
+        body = (
             f'Bạn đã được chuyển sang lộ trình "{target_path_name}". Tiến độ trên lộ '
             "trình cũ đã được lưu lại; các khóa học đã hoàn thành vẫn được tính."
         )
-    return (
+        return f"{body} Ghi chú của Trưởng khoa: {note}" if note else body
+    body = (
         f'You have been moved to "{target_path_name}". Your progress on the previous '
         "path was snapshotted, and completed courses still count."
     )
+    return f"{body} Dean's note: {note}" if note else body
 
 
 def syllabus_import_failed_body(*, reason: str, locale: str | None) -> str:

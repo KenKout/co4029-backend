@@ -342,6 +342,7 @@ async def approve_change_request(
             request_id=request_id,
             approve=True,
             decision_reason=payload.reason,
+            decision_note=payload.note,
             actor=actor,
             arq_pool=arq_pool,
         )

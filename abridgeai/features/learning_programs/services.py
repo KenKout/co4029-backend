@@ -1252,6 +1252,7 @@ async def decide_change_request(  # noqa: C901 - approval is one atomic invarian
     request.reviewed_by = actor.user_id
     request.reviewed_at = _now()
     request.decision_reason = decision_reason
+    request.decision_note = (decision_note or "").strip() or None
     request.new_attempt_id = new_attempt.id
     request.updated_by = actor.user_id
     await career_paths_api.ensure_program_path_access(
@@ -1280,6 +1281,7 @@ async def decide_change_request(  # noqa: C901 - approval is one atomic invarian
         request_id=request.id,
         program_name=program.name,
         target_path_name=target_path_name,
+        note=request.decision_note,
         arq_pool=arq_pool,
     )
     return PathChangeRequestRead.model_validate(request)

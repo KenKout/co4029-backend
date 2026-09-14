@@ -294,9 +294,11 @@ async def test_program_selection_and_dean_approved_switch_are_historical(
             request_id=request.id,
             approve=True,
             decision_reason="Approved",
+            decision_note="Keep focusing on the shared foundation courses.",
             actor=dean,
         )
         assert decided.status == "approved"
+        assert decided.decision_note == "Keep focusing on the shared foundation courses."
         refreshed = (await services.list_my_enrollments(db, student))[0]
         assert refreshed.approved_switch_count == 1
         assert [attempt.status for attempt in refreshed.attempts] == ["switched_out", "active"]

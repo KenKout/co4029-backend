@@ -36,6 +36,26 @@ class TestPathChangeRejected:
         assert "Dean's note:" not in body
 
 
+class TestPathChangeApproved:
+    def test_optional_note_is_included_in_english(self) -> None:
+        body = messages.path_change_approved_body(
+            target_path_name="Data Engineering",
+            note="Keep focusing on the shared foundation courses.",
+            locale="en",
+        )
+
+        assert "Dean's note: Keep focusing" in body
+
+    def test_optional_note_is_included_in_vietnamese(self) -> None:
+        body = messages.path_change_approved_body(
+            target_path_name="Kỹ thuật dữ liệu",
+            note="Tiếp tục các môn nền tảng dùng chung.",
+            locale="vi",
+        )
+
+        assert "Ghi chú của Trưởng khoa: Tiếp tục" in body
+
+
 class TestDueCards:
     def test_title_en_plural(self) -> None:
         assert messages.due_cards_title(due_count=3, locale="en") == "You have 3 cards due"

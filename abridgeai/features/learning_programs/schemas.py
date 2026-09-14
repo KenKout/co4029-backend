@@ -229,14 +229,17 @@ class ChangePathRequestCreate(BaseModel):
 
 
 class ChangeRequestDecision(BaseModel):
-    """Approval payload (and the legacy reject shape).
+    """Approval payload with an optional dean note.
 
-    Free-text only. Rejections go through :class:`ChangeRequestRejection`,
-    which additionally demands a reason CODE — an approval needs no
-    justification, a rejection does.
+    ``reason`` remains accepted for backward compatibility with older clients.
+    New clients use ``note``, which is stored in ``decision_note`` so approval
+    guidance is not confused with a rejection reason.
     """
 
+    model_config = ConfigDict(extra="forbid")
+
     reason: str | None = Field(default=None, max_length=4000)
+    note: str | None = Field(default=None, max_length=2000)
 
 
 class ChangeRequestRejection(BaseModel):

@@ -105,6 +105,7 @@ async def notify_path_change_in_progress(
     request_id: UUID,
     program_name: str,
     target_path_name: str,
+    note: str | None = None,
     arq_pool: object | None = None,
 ) -> None:
     """Tell the student their request was picked up for review."""
@@ -182,6 +183,7 @@ async def notify_path_change_approved(
     request_id: UUID,
     program_name: str,
     target_path_name: str,
+    note: str | None = None,
     arq_pool: object | None = None,
 ) -> None:
     """Tell the student the switch was approved and has taken effect."""
@@ -195,7 +197,7 @@ async def notify_path_change_approved(
                 program_name=program_name, locale=locale
             ),
             body=notifications_api.path_change_approved_body(
-                target_path_name=target_path_name, locale=locale
+                target_path_name=target_path_name, note=note, locale=locale
             ),
             entity_type="path_change_request",
             entity_id=request_id,
