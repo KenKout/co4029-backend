@@ -24,10 +24,51 @@ from sqlalchemy.orm import Mapped, mapped_column
 from abridgeai.core.db import (
     AuditedByMixin,
     Base,
+    CreatedAtMixin,
     SoftDeleteMixin,
     TimestampMixin,
     UUIDPrimaryKeyMixin,
 )
+
+
+class QuestionCategory(
+    UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftDeleteMixin, Base
+):
+    __tablename__ = "question_categories"
+    __table_args__ = (
+        UniqueConstraint("context_key", "parent_id", "name", name="uq_question_categories_name"),
+    )
+
+    context_key: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    parent_id: Mapped[uuid.UUID | None] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("question_categories.id", ondelete="NO ACTION")
+    )
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text)
+
+
+class QuestionTag(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
+    __tablename__ = "question_tags"
+    __table_args__ = (UniqueConstraint("context_key", "name", name="uq_question_tags_name"),)
+
+    context_key: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+
+
+class QuestionTagMap(CreatedAtMixin, Base):
+    __tablename__ = "question_tag_map"
+    __table_args__ = (UniqueConstraint("question_id", "tag_id", name="uq_question_tag_map"),)
+
+    question_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("quiz_questions.id", ondelete="NO ACTION"),
+        primary_key=True,
+    )
+    tag_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("question_tags.id", ondelete="NO ACTION"),
+        primary_key=True,
+    )
 
 
 class QuizQuestionBankItem(
@@ -149,4 +190,10 @@ class QuizQuestionBankOption(
     feedback_format: Mapped[str | None] = mapped_column(String(16))
 
 
-__all__ = ["QuizQuestionBankItem", "QuizQuestionBankOption"]
+__all__ = [
+    "QuestionCategory",
+    "QuestionTag",
+    "QuestionTagMap",
+    "QuizQuestionBankItem",
+    "QuizQuestionBankOption",
+]

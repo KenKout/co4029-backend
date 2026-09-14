@@ -279,9 +279,7 @@ def _attempt_teacher_view(
         integrity_flags=integrity_flags,
         integrity_score=int(getattr(attempt, "integrity_score", 0) or 0),
         integrity_score_threshold=int(
-            (getattr(attempt, "integrity_policy_snapshot", None) or {}).get(
-                "score_threshold", 0
-            )
+            (getattr(attempt, "integrity_policy_snapshot", None) or {}).get("score_threshold", 0)
             or 0
         ),
         integrity_flagged=bool(getattr(attempt, "integrity_warning_issued", False)),

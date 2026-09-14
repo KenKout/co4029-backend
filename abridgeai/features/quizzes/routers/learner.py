@@ -423,7 +423,6 @@ async def record_quiz_integrity_events(
     """
     from sqlalchemy import select  # noqa: PLC0415
 
-    from abridgeai.core.time import utcnow  # noqa: PLC0415
     from abridgeai.features.interviews.models import (  # noqa: PLC0415
         AssessmentIntegrityEvent,
     )

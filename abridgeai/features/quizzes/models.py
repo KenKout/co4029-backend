@@ -123,8 +123,6 @@ from abridgeai.core.db import (
     TimestampMixin,
     UUIDPrimaryKeyMixin,
 )
-
-
 class Quiz(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftDeleteMixin, Base):
     __tablename__ = "quizzes"
     __table_args__ = (
@@ -231,7 +229,6 @@ class Quiz(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftDeleteMixin,
     integrity_score_threshold: Mapped[int] = mapped_column(
         Integer, nullable=False, server_default=text("3")
     )
-
     questions: Mapped[list[QuizQuestion]] = relationship(
         back_populates="quiz",
         cascade="save-update, merge, refresh-expire, expunge",
@@ -500,7 +497,6 @@ class QuizAttempt(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         Boolean, nullable=False, server_default=text("FALSE")
     )
     integrity_threshold_flagged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-
     quiz: Mapped[Quiz] = relationship(back_populates="attempts")
     answers: Mapped[list[QuizAttemptAnswer]] = relationship(
         back_populates="attempt",
@@ -772,48 +768,6 @@ class QuizStatisticsCache(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
 
 # ---------------------------------------------------------------------------
-# Phase 11 (migration 0055): shared question bank — categories + tags.
-# ---------------------------------------------------------------------------
-class QuestionCategory(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftDeleteMixin, Base):
-    __tablename__ = "question_categories"
-    __table_args__ = (
-        UniqueConstraint("context_key", "parent_id", "name", name="uq_question_categories_name"),
-    )
-
-    context_key: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
-    parent_id: Mapped[uuid.UUID | None] = mapped_column(
-        PGUUID(as_uuid=True),
-        ForeignKey("question_categories.id", ondelete="NO ACTION"),
-    )
-    name: Mapped[str] = mapped_column(String(255), nullable=False)
-    description: Mapped[str | None] = mapped_column(Text)
-
-
-class QuestionTag(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
-    __tablename__ = "question_tags"
-    __table_args__ = (UniqueConstraint("context_key", "name", name="uq_question_tags_name"),)
-
-    context_key: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
-    name: Mapped[str] = mapped_column(String(100), nullable=False)
-
-
-class QuestionTagMap(CreatedAtMixin, Base):
-    __tablename__ = "question_tag_map"
-    __table_args__ = (UniqueConstraint("question_id", "tag_id", name="uq_question_tag_map"),)
-
-    question_id: Mapped[uuid.UUID] = mapped_column(
-        PGUUID(as_uuid=True),
-        ForeignKey("quiz_questions.id", ondelete="NO ACTION"),
-        primary_key=True,
-    )
-    tag_id: Mapped[uuid.UUID] = mapped_column(
-        PGUUID(as_uuid=True),
-        ForeignKey("question_tags.id", ondelete="NO ACTION"),
-        primary_key=True,
-    )
-
-
-# ---------------------------------------------------------------------------
 # Phase 13 (migration 0057): append-only audit-event log.
 # ---------------------------------------------------------------------------
 class QuizAuditEvent(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
@@ -848,7 +802,13 @@ class QuizAuditEvent(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
     occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
-from abridgeai.features.quizzes.bank_models import QuizQuestionBankItem, QuizQuestionBankOption  # noqa: E402, E501, I001
+from abridgeai.features.quizzes.bank_models import (  # noqa: E402, I001
+    QuestionCategory,
+    QuestionTag,
+    QuestionTagMap,
+    QuizQuestionBankItem,
+    QuizQuestionBankOption,
+)
 __all__ = [
     "QuestionCategory",
     "QuestionTag",
