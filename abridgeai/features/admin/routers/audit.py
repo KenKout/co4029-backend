@@ -205,9 +205,14 @@ async def search_http_audit(
         Query(description="Exclusive upper bound on created_at (optional)."),
     ] = None,
     user_id: Annotated[UUID | None, Query()] = None,
-    path_pattern: Annotated[
+    path_contains: Annotated[
         str | None,
-        Query(description="SQL LIKE pattern, e.g. '/api/v1/admin/%'."),
+        Query(
+            description=(
+                "Case-insensitive substring of the request path, e.g. "
+                "'admin/audit'. Wildcards are escaped, not interpreted."
+            )
+        ),
     ] = None,
     event_kind: Annotated[
         str | None,
@@ -253,7 +258,7 @@ async def search_http_audit(
             since=since,
             until=until,
             user_id=user_id,
-            path_pattern=path_pattern,
+            path_contains=path_contains,
             event_kind=event_kind,
             request_id=request_id,
             limit=limit,

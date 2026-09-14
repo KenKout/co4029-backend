@@ -29,7 +29,13 @@ WHERE h.created_at >= CAST(:since AS timestamptz)
   AND (CAST(:until AS timestamptz) IS NULL OR h.created_at < CAST(:until AS timestamptz))
   AND (CAST(:user_id AS uuid) IS NULL OR h.user_id = CAST(:user_id AS uuid))
   AND (CAST(:request_id AS uuid) IS NULL OR h.request_id = CAST(:request_id AS uuid))
-  AND (CAST(:path_pattern AS text) IS NULL OR h.path LIKE CAST(:path_pattern AS text))
+  -- Substring, not prefix: the stored path is the FULL path
+  -- (/api/v1/admin/audit/http), so a prefix match meant an operator had to
+  -- type the /api/v1 stem before anything matched. ILIKE because nobody
+  -- searching a URL expects case to matter, and ESCAPE so a typed '_'
+  -- is an underscore rather than a single-character wildcard.
+  AND (CAST(:path_contains AS text) IS NULL
+       OR h.path ILIKE '%' || CAST(:path_contains AS text) || '%' ESCAPE '\')
   AND (
       CAST(:event_kind AS text) IS NULL
       OR (

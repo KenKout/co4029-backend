@@ -374,7 +374,10 @@ async def test_admin_audit_http_endpoint_now_returns_200(
         since = (cutoff).isoformat().replace("+00:00", "Z")
         resp = await client.get(
             "/api/v1/admin/audit/http",
-            params={"since": since, "limit": 50, "path_pattern": "/api/v1/%"},
+            # A plain fragment, not a LIKE pattern: the filter is a
+            # case-insensitive substring and escapes wildcards, so a
+            # literal "%" here would now match nothing.
+            params={"since": since, "limit": 50, "path_contains": "api/v1"},
             headers={"Authorization": f"Bearer {token}"},
         )
     finally:

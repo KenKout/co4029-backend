@@ -54,6 +54,24 @@ _DATA_CHANGES_LIST_SQL: dict[str, TextClause] = {
 SUPPORTED_DATA_CHANGE_TABLES: tuple[str, ...] = tuple(_DATA_CHANGES_SQL)
 
 
+def _escape_like(term: str | None) -> str | None:
+    """Neutralise LIKE metacharacters in an operator's search term.
+
+    Without this a path containing ``_`` — which is most of them — would have
+    that character treated as "any single character", and a typed ``%`` would
+    match the whole table. The backslash is escaped first, or it would go on to
+    escape the escapes added after it.
+    """
+    if term is None:
+        return None
+    cleaned = term.strip()
+    if not cleaned:
+        return None
+    for char in ("\\", "%", "_"):
+        cleaned = cleaned.replace(char, "\\" + char)
+    return cleaned
+
+
 async def role_changes(
     db: AsyncSession,
     *,
@@ -87,7 +105,7 @@ async def http_audit_search(
     since: datetime,
     until: datetime | None,
     user_id: UUID | None,
-    path_pattern: str | None,
+    path_contains: str | None,
     event_kind: str | None = None,
     request_id: UUID | None = None,
     limit: int,
@@ -99,7 +117,7 @@ async def http_audit_search(
                 "since": since,
                 "until": until,
                 "user_id": user_id,
-                "path_pattern": path_pattern,
+                "path_contains": _escape_like(path_contains),
                 "event_kind": event_kind,
                 "request_id": request_id,
                 "limit": limit,
