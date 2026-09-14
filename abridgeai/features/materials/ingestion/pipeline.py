@@ -37,11 +37,11 @@ S3 decoupling (plan §4814-4815):
 from __future__ import annotations
 
 import hashlib
-import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from time import perf_counter
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
@@ -72,6 +72,7 @@ from abridgeai.ai.preprocessing.dedup import link_semantic_duplicates
 from abridgeai.ai.preprocessing.normalize import sanitize_json_value
 from abridgeai.core.config import get_settings
 from abridgeai.core.db import get_sessionmaker
+from abridgeai.core.observability import get_logger
 from abridgeai.core.runtime_settings import resolve_settings
 from abridgeai.features.materials.ingestion.preprocess import run_preprocess_stage
 from abridgeai.features.materials.ingestion.progress import clear_progress, publish_progress
@@ -86,7 +87,7 @@ from abridgeai.infrastructure.s3 import download_to_temp
 if TYPE_CHECKING:
     from abridgeai.infrastructure.neo4j import KnowledgeGraphClient
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 _TIMESTAMP_SOURCES: frozenset[str] = frozenset({"audio", "video"})
@@ -507,9 +508,9 @@ async def _capture_failure(
         await db.flush()
     except Exception:
         logger.exception(
-            "failed to flush failure-state for material_version %s during stage %s",
-            ctx.version.id if ctx is not None else "<unloaded>",
-            stage_label,
+            "materials_ingest_failure_state_flush_failed",
+            material_version_id=str(ctx.version.id) if ctx is not None else "<unloaded>",
+            stage=stage_label,
         )
 
 
@@ -527,8 +528,30 @@ async def _run_stages(
     settings = get_settings()
     embed_client = embedding_client or EmbeddingClient(settings)
 
+    def stage_started(stage: str, **metrics: object) -> float:
+        logger.info(
+            "materials_ingest_stage_started",
+            stage=stage,
+            material_version_id=str(ctx.version.id),
+            pipeline_run_id=str(pipeline_run_id),
+            **metrics,
+        )
+        return perf_counter()
+
+    def stage_completed(stage: str, started_at: float, **metrics: object) -> None:
+        logger.info(
+            "materials_ingest_stage_completed",
+            stage=stage,
+            material_version_id=str(ctx.version.id),
+            pipeline_run_id=str(pipeline_run_id),
+            duration_ms=round((perf_counter() - started_at) * 1000),
+            **metrics,
+        )
+
     stage_label = "extraction"
     try:
+        pipeline_started_at = perf_counter()
+        stage_started_at = stage_started(stage_label)
         ctx.version.processing_status = "extracting"
         ctx.version.processing_error = None
         job.status = "running"
@@ -540,6 +563,13 @@ async def _run_stages(
         )
 
         extracted = await _run_extraction(db, ctx, source_path=source_path, llm_gateway=llm_gateway)
+        stage_completed(
+            stage_label,
+            stage_started_at,
+            source_type=extracted.source_type,
+            text_chars=len(extracted.text),
+            source_location_count=len(extracted.source_locations),
+        )
 
         # Stage 1b — preprocessing. Drops blank pages, strips running
         # headers/footers and page numbers, tags cover/instructor/TOC/
@@ -548,6 +578,7 @@ async def _run_stages(
         # deliberately stays "extracting": that column carries a 9-value CHECK
         # constraint, and ``stage_label`` (free-form) is what the UI surfaces.
         stage_label = "preprocessing"
+        stage_started_at = stage_started(stage_label)
         job.progress_percent = 20
         await db.flush()
         await publish_progress(
@@ -574,8 +605,15 @@ async def _run_stages(
         # UntranslatableCharacter); strip control chars from the persisted
         # metadata so a stray NUL in a broken PDF text layer can't fail ingest.
         sanitize_json_value(extracted.metadata)
+        stage_completed(
+            stage_label,
+            stage_started_at,
+            text_chars=len(extracted.text),
+            source_location_count=len(extracted.source_locations),
+        )
 
         stage_label = "chunking"
+        stage_started_at = stage_started(stage_label)
         ctx.version.processing_status = "chunking"
         job.progress_percent = 30
         await db.flush()
@@ -592,6 +630,7 @@ async def _run_stages(
             document_title=ctx.material.title,
             settings=runtime_settings,
         )
+        stage_completed(stage_label, stage_started_at, chunk_count=len(raw_chunks))
 
         stage_label = "embedding"
         ctx.version.processing_status = "embedding"
@@ -610,6 +649,20 @@ async def _run_stages(
         raw_chunks = [c for c in raw_chunks if (c.content or "").strip()]
 
         if not raw_chunks:
+            logger.warning(
+                "materials_ingest_no_chunks",
+                material_version_id=str(ctx.version.id),
+                pipeline_run_id=str(pipeline_run_id),
+                source_type=extracted.source_type,
+                extracted_text_chars=len(extracted.text),
+            )
+            logger.info(
+                "materials_ingest_kg_skipped",
+                material_version_id=str(ctx.version.id),
+                pipeline_run_id=str(pipeline_run_id),
+                reason="no_chunks",
+                missing_dependencies=[],
+            )
             ctx.version.extracted_metadata = dict(ctx.version.extracted_metadata or {}) | {
                 **dict(extracted.metadata or {}),
                 "chunk_count": 0,
@@ -626,6 +679,15 @@ async def _run_stages(
             job.finished_at = _utcnow()
             await db.flush()
             await clear_progress(ctx.version.id)
+            logger.info(
+                "materials_ingest_pipeline_completed",
+                material_version_id=str(ctx.version.id),
+                pipeline_run_id=str(pipeline_run_id),
+                duration_ms=round((perf_counter() - pipeline_started_at) * 1000),
+                chunk_count=0,
+                concept_count=0,
+                relationship_count=0,
+            )
             return
 
         # Anthropic Contextual Retrieval: prepend Stage C section_title +
@@ -635,14 +697,22 @@ async def _run_stages(
         # itself is unchanged in DB — only the embedder input is
         # contextualized.
         embed_inputs = [build_contextual_text(c) for c in raw_chunks]
+        stage_started_at = stage_started(stage_label, chunk_count=len(embed_inputs))
         embeddings = await embed_client.embed(
             embed_inputs,
             db=db,
             pipeline_run_id=pipeline_run_id,
             parent_job_id=job.id,
         )
+        stage_completed(
+            stage_label,
+            stage_started_at,
+            embedding_count=len(embeddings),
+            embedding_dimensions=len(embeddings[0]) if embeddings else 0,
+        )
 
         stage_label = "persist"
+        stage_started_at = stage_started(stage_label, chunk_count=len(raw_chunks))
         ctx.version.processing_status = "enriching"
         job.progress_percent = 80
         await db.flush()
@@ -650,6 +720,7 @@ async def _run_stages(
             ctx.version.id, status="enriching", percent=80, stage_label=stage_label
         )
         persisted = await _persist_chunks(db, ctx, raw_chunks, embeddings)
+        stage_completed(stage_label, stage_started_at, persisted_chunk_count=len(persisted))
 
         kg_summary: dict[str, Any] = {
             "enabled": settings.knowledge_graph_enabled,
@@ -658,6 +729,7 @@ async def _run_stages(
         }
         if settings.knowledge_graph_enabled and kg_client is not None and llm_gateway is not None:
             stage_label = "kg_build"
+            stage_started_at = stage_started(stage_label, chunk_count=len(persisted))
             ctx.version.processing_status = "building_kg"
             job.progress_percent = 95
             await db.flush()
@@ -680,6 +752,14 @@ async def _run_stages(
                     stage_label="kg_build",
                     detail=f"{done}/{total}",
                 )
+                if done == 1 or done == total or done % 10 == 0:
+                    logger.info(
+                        "materials_ingest_kg_progress",
+                        material_version_id=str(ctx.version.id),
+                        pipeline_run_id=str(pipeline_run_id),
+                        chunks_completed=done,
+                        chunks_total=total,
+                    )
 
             summary = await build_knowledge_graph_for_material_version(
                 ctx.version.id,
@@ -697,6 +777,29 @@ async def _run_stages(
                 "concept_count": summary.concept_count,
                 "relationship_count": summary.relationship_count,
             }
+            stage_completed(
+                stage_label,
+                stage_started_at,
+                concept_count=summary.concept_count,
+                relationship_count=summary.relationship_count,
+            )
+        else:
+            missing_dependencies = [
+                name
+                for name, value in (("kg_client", kg_client), ("llm_gateway", llm_gateway))
+                if value is None
+            ]
+            logger.info(
+                "materials_ingest_kg_skipped",
+                material_version_id=str(ctx.version.id),
+                pipeline_run_id=str(pipeline_run_id),
+                reason=(
+                    "feature_disabled"
+                    if not settings.knowledge_graph_enabled
+                    else "missing_dependencies"
+                ),
+                missing_dependencies=missing_dependencies,
+            )
 
         ctx.version.extracted_metadata = dict(ctx.version.extracted_metadata or {}) | {
             **dict(extracted.metadata or {}),
@@ -710,10 +813,27 @@ async def _run_stages(
         job.finished_at = _utcnow()
         await db.flush()
         await clear_progress(ctx.version.id)
+        logger.info(
+            "materials_ingest_pipeline_completed",
+            material_version_id=str(ctx.version.id),
+            pipeline_run_id=str(pipeline_run_id),
+            duration_ms=round((perf_counter() - pipeline_started_at) * 1000),
+            chunk_count=len(persisted),
+            concept_count=kg_summary["concept_count"],
+            relationship_count=kg_summary["relationship_count"],
+        )
 
     except (KeyboardInterrupt, SystemExit):
         raise
     except Exception as exc:
+        logger.exception(
+            "materials_ingest_stage_failed",
+            material_version_id=str(ctx.version.id),
+            pipeline_run_id=str(pipeline_run_id),
+            stage=stage_label,
+            duration_ms=round((perf_counter() - pipeline_started_at) * 1000),
+            error_type=type(exc).__name__,
+        )
         await _capture_failure(db, ctx=ctx, job=job, stage_label=stage_label, exc=exc)
         # Surface the failure to the live-progress channel so the UI flips
         # to "failed" immediately instead of waiting on the DB commit.

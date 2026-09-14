@@ -27,11 +27,11 @@ intermediates are cleaned up automatically on exit, even on error paths.
 from __future__ import annotations
 
 import asyncio
-import logging
 import os
 import re
 import tempfile
 from dataclasses import dataclass
+from time import perf_counter
 from typing import TYPE_CHECKING, BinaryIO
 
 from abridgeai.ai.extraction.audio import AudioExtractor
@@ -40,8 +40,9 @@ from abridgeai.ai.extraction.image import ImageExtractor
 from abridgeai.ai.extraction.registry import register_extractor
 from abridgeai.core.config import Settings, get_settings
 from abridgeai.core.exceptions import AppError
+from abridgeai.core.observability import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -127,9 +128,9 @@ async def _split_audio_and_frames(
         # carry the whole lecture. Whether the ingest can proceed at all is
         # decided by the caller once frame extraction has also run.
         logger.warning(
-            "ffmpeg audio extraction failed (rc=%d); attempting frames-only: %s",
-            rc,
-            stderr.decode("utf-8", "replace")[:300],
+            "video_audio_track_extraction_failed",
+            return_code=rc,
+            error_detail=stderr.decode("utf-8", "replace")[:300],
         )
 
     # Frame extraction is best-effort from here down: the transcript is the
@@ -155,7 +156,7 @@ async def _split_audio_and_frames(
                 max_frames=max_frames,
             )
     except Exception:  # noqa: BLE001 -- degrade to transcript-only
-        logger.warning("video frame extraction failed; continuing audio-only", exc_info=True)
+        logger.warning("video_frame_extraction_failed", exc_info=True)
         frames = []
 
     if not audio_ok and not frames:
@@ -299,10 +300,14 @@ class VideoExtractor:
         )
 
     async def extract(self, source: BinaryIO | bytes | str) -> ExtractedContent:
+        extraction_started_at = perf_counter()
         raw = await asyncio.to_thread(_read_source, source)
+        logger.info("video_extraction_started", source_bytes=len(raw))
         with tempfile.TemporaryDirectory(prefix="abridgeai-video-") as workdir:
             input_path = os.path.join(workdir, "input.bin")
             await asyncio.to_thread(_write_input_blob, raw, input_path)
+            ffmpeg_started_at = perf_counter()
+            logger.info("video_ffmpeg_split_started")
             outputs = await _split_audio_and_frames(
                 ffmpeg_path=self._settings.ffmpeg_path,
                 input_path=input_path,
@@ -310,26 +315,63 @@ class VideoExtractor:
                 scene_threshold=self._settings.video_scene_threshold,
                 max_frames=self._settings.video_max_frames,
             )
+            logger.info(
+                "video_ffmpeg_split_completed",
+                duration_ms=round((perf_counter() - ffmpeg_started_at) * 1000),
+                audio_available=outputs.audio_path is not None,
+                frame_count=len(outputs.frames),
+            )
             if outputs.audio_path is not None:
+                transcription_started_at = perf_counter()
+                logger.info("video_transcription_started")
                 audio_result = await self._audio_extractor.extract(outputs.audio_path)
+                logger.info(
+                    "video_transcription_completed",
+                    duration_ms=round((perf_counter() - transcription_started_at) * 1000),
+                    text_chars=len(audio_result.text),
+                    segment_count=len(audio_result.source_locations),
+                    provider=audio_result.metadata.get("stt_provider"),
+                )
             else:
                 audio_result = ExtractedContent(
                     text="", metadata={"no_audio_stream": True}, source_type="audio"
                 )
             frame_results: list[tuple[float, ExtractedContent]] = []
-            for timestamp_seconds, frame_path in outputs.frames:
+            if outputs.frames:
+                logger.info("video_frame_ocr_started", frame_count=len(outputs.frames))
+            for frame_number, (timestamp_seconds, frame_path) in enumerate(outputs.frames, start=1):
                 try:
                     frame_content = await self._image_extractor.extract(frame_path)
                 except Exception:  # noqa: BLE001 -- one bad frame must not sink the ingest
                     logger.warning(
-                        "frame OCR failed at t=%.1fs; skipping frame",
-                        timestamp_seconds,
+                        "video_frame_ocr_failed",
+                        frame_number=frame_number,
+                        timestamp_seconds=round(timestamp_seconds, 1),
                         exc_info=True,
                     )
                     continue
                 frame_results.append((timestamp_seconds, frame_content))
+                if (
+                    frame_number == 1
+                    or frame_number == len(outputs.frames)
+                    or frame_number % 10 == 0
+                ):
+                    logger.info(
+                        "video_frame_ocr_progress",
+                        frames_completed=frame_number,
+                        frames_total=len(outputs.frames),
+                        frames_with_text=len(frame_results),
+                    )
 
-        return _merge(audio_result, frame_results)
+        result = _merge(audio_result, frame_results)
+        logger.info(
+            "video_extraction_completed",
+            duration_ms=round((perf_counter() - extraction_started_at) * 1000),
+            text_chars=len(result.text),
+            audio_segment_count=result.metadata["audio_segment_count"],
+            frame_count=result.metadata["frame_count"],
+        )
+        return result
 
 
 def _merge(

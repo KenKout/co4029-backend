@@ -26,6 +26,7 @@ from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from time import perf_counter
 from typing import Any
 from uuid import UUID
 
@@ -119,6 +120,8 @@ async def ingest_material_version_task(
         actor_id=str(actor_id),
     )
     sessionmaker = get_sessionmaker()
+    task_started_at = perf_counter()
+    _logger.info("materials_ingest_task_started")
     try:
         async with sessionmaker() as db:
             try:
@@ -150,7 +153,17 @@ async def ingest_material_version_task(
                     if get_settings().knowledge_graph_enabled:
                         kg_client = await stack.enter_async_context(graph_client())
                     with TemporaryDirectory(prefix="abridgeai-worker-") as temp_dir:
+                        download_started_at = perf_counter()
+                        _logger.info(
+                            "materials_ingest_download_started",
+                            storage_bucket=storage_view.bucket,
+                        )
                         local_path = await download_to_temp(storage_view, dest_dir=Path(temp_dir))
+                        _logger.info(
+                            "materials_ingest_download_completed",
+                            duration_ms=round((perf_counter() - download_started_at) * 1000),
+                            source_bytes=local_path.stat().st_size,  # noqa: ASYNC240
+                        )
                         await run_material_ingest(
                             db,
                             material_version_id,
@@ -171,6 +184,10 @@ async def ingest_material_version_task(
                     arq_pool=ctx.get("redis"),
                 )
                 await db.commit()
+                _logger.info(
+                    "materials_ingest_task_completed",
+                    duration_ms=round((perf_counter() - task_started_at) * 1000),
+                )
             except (KeyboardInterrupt, SystemExit):
                 raise
             except Exception as exc:
@@ -178,6 +195,7 @@ async def ingest_material_version_task(
                     "materials_ingest_task_failed",
                     material_version_id=str(material_version_id),
                     pipeline_run_id=str(pipeline_run_id),
+                    duration_ms=round((perf_counter() - task_started_at) * 1000),
                 )
                 # Persist the pipeline's ``_capture_failure`` audit rows
                 # (processing_status='failed', error_message populated)
