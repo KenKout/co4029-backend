@@ -523,6 +523,30 @@ async def test_video_preserves_flat_whisper_transcript_without_segments() -> Non
     assert "complete lecture transcript" in chunks[0].content
 
 
+def test_video_merge_flattens_multiline_frame_ocr_for_timestamp_alignment() -> None:
+    from abridgeai.ai.extraction.video import _merge
+
+    audio = ExtractedContent(
+        text="spoken introduction",
+        metadata={},
+        source_type="audio",
+        source_locations=[SourceLocation(timestamp_start_ms=0, timestamp_end_ms=1_000)],
+    )
+    frame = ExtractedContent(
+        text="Slide title\nFirst bullet\nSecond bullet",
+        metadata={},
+        source_type="image",
+    )
+
+    result = _merge(audio, [(2.0, frame)])
+    chunks = TimestampAwareChunker().chunk(result)
+
+    assert len(result.text.splitlines()) == len(result.source_locations) == 2
+    assert "Slide title First bullet Second bullet" in result.text
+    assert chunks
+    assert all(chunk.content.strip() for chunk in chunks)
+
+
 @pytest.mark.asyncio
 async def test_local_mock_fallback_returns_for_local_env() -> None:
     settings = Settings(environment="local")

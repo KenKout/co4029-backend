@@ -42,6 +42,7 @@ from sqlalchemy.ext.asyncio import (
 
 import abridgeai.features.courses.models  # noqa: F401  -- register course/module/lesson FK targets
 import abridgeai.features.identity.models  # noqa: F401  -- register users + storage_objects FK targets
+from abridgeai.ai.chunking import RawChunk
 from abridgeai.ai.extraction import (
     EXTRACTOR_REGISTRY,
     ExtractedContent,
@@ -659,6 +660,39 @@ async def test_failure_captures_error_state(
             assert job_row.status == "failed"
             assert job_row.error_message is not None
             assert "synthetic extraction failure" in job_row.error_message
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_stub_extractors")
+async def test_empty_chunks_fail_instead_of_marking_material_ready(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        pipeline_mod,
+        "_run_chunking",
+        AsyncMock(return_value=[RawChunk(content=" ", chunk_index=0, metadata={})]),
+    )
+
+    async with _scope_for(engine, mime=_TEST_PDF_MIME, material_type="pdf") as scope:
+        async with session_factory() as db:
+            with pytest.raises(RuntimeError, match="zero non-empty chunks"):
+                await run_material_ingest(
+                    db,
+                    scope.version_id,
+                    uuid.uuid4(),
+                    source_path=Path("/dev/null"),
+                    embedding_client=_FakeEmbeddingClient(),
+                )
+            await db.commit()
+
+        async with session_factory() as db:
+            version = await db.get(LearningMaterialVersion, scope.version_id)
+            assert version is not None
+            assert version.processing_status == "failed"
+            assert version.processing_error is not None
+            assert "zero non-empty chunks" in version.processing_error
 
 
 @pytest.mark.asyncio

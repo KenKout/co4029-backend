@@ -43,6 +43,38 @@ class TimestampAwareChunker:
         max_chunk_ms = int(max_chunk_ms_opt) if max_chunk_ms_opt is not None else None
 
         segments = _segments_with_timestamps(content)
+        if segments is None:
+            text = (content.text or "").strip()
+            if not text:
+                return []
+            timed_locations = [
+                loc
+                for loc in content.source_locations
+                if loc.timestamp_start_ms is not None or loc.timestamp_end_ms is not None
+            ]
+            starts = [
+                loc.timestamp_start_ms
+                for loc in timed_locations
+                if loc.timestamp_start_ms is not None
+            ]
+            ends = [
+                loc.timestamp_end_ms
+                for loc in timed_locations
+                if loc.timestamp_end_ms is not None
+            ]
+            return [
+                RawChunk(
+                    content=text,
+                    chunk_index=0,
+                    metadata={
+                        "source_type": content.source_type,
+                        "timestamp_start_ms": min(starts) if starts else None,
+                        "timestamp_end_ms": max(ends) if ends else None,
+                        "segment_count": len(timed_locations),
+                        "timestamp_alignment_fallback": True,
+                    },
+                )
+            ]
         if not segments:
             text = (content.text or "").strip()
             if not text:
@@ -88,7 +120,7 @@ class TimestampAwareChunker:
 
 def _segments_with_timestamps(
     content: ExtractedContent,
-) -> list[tuple[str, SourceLocation]]:
+) -> list[tuple[str, SourceLocation]] | None:
     locations = list(content.source_locations or [])
     if not locations:
         return []
@@ -99,7 +131,6 @@ def _segments_with_timestamps(
     # fall back to a single-newline split, so both shapes map cleanly onto
     # their locations instead of collapsing to empty segments (which would
     # discard the text entirely and emit a blank chunk).
-    aligned: list[tuple[str, SourceLocation]] = []
     for delimiter in ("\n\n", "\n"):
         text_segments = (content.text or "").split(delimiter)
         if len(text_segments) != len(locations):
@@ -111,11 +142,12 @@ def _segments_with_timestamps(
         if candidate:
             return candidate
 
-    for loc in locations:
-        if loc.timestamp_start_ms is None and loc.timestamp_end_ms is None:
-            continue
-        aligned.append(("", loc))
-    return aligned
+    # Text exists but its logical boundaries cannot be inferred reliably from
+    # newlines (OCR commonly embeds line breaks inside a single frame). Signal
+    # the caller to preserve the complete body as one timestamp-bounded chunk.
+    # Returning blank per-location segments here used to turn valid transcripts
+    # into empty chunks and silently skip embedding + KG ingestion.
+    return None
 
 
 def _build_chunk(

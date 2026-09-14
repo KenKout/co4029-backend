@@ -106,6 +106,27 @@ def test_timestamp_chunker_video_frame_ocr_single_newline() -> None:
         assert c.content.strip(), "no chunk may be empty/whitespace-only"
 
 
+def test_timestamp_chunker_alignment_mismatch_preserves_full_text() -> None:
+    """Embedded OCR newlines must never collapse timestamped content to blanks."""
+    content = ExtractedContent(
+        text="audio segment\nframe title\nframe body",
+        metadata={},
+        source_type="video",
+        source_locations=[
+            SourceLocation(timestamp_start_ms=0, timestamp_end_ms=1_000),
+            SourceLocation(timestamp_start_ms=2_000, timestamp_end_ms=3_000),
+        ],
+    )
+
+    chunks = TimestampAwareChunker().chunk(content)
+
+    assert len(chunks) == 1
+    assert chunks[0].content == content.text
+    assert chunks[0].metadata["timestamp_start_ms"] == 0
+    assert chunks[0].metadata["timestamp_end_ms"] == 3_000
+    assert chunks[0].metadata["timestamp_alignment_fallback"] is True
+
+
 def test_timestamp_chunker_max_chunk_ms() -> None:
     content = _transcript(
         [

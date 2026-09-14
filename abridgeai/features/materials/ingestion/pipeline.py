@@ -649,46 +649,17 @@ async def _run_stages(
         raw_chunks = [c for c in raw_chunks if (c.content or "").strip()]
 
         if not raw_chunks:
-            logger.warning(
+            logger.error(
                 "materials_ingest_no_chunks",
                 material_version_id=str(ctx.version.id),
                 pipeline_run_id=str(pipeline_run_id),
                 source_type=extracted.source_type,
                 extracted_text_chars=len(extracted.text),
             )
-            logger.info(
-                "materials_ingest_kg_skipped",
-                material_version_id=str(ctx.version.id),
-                pipeline_run_id=str(pipeline_run_id),
-                reason="no_chunks",
-                missing_dependencies=[],
+            raise RuntimeError(
+                "chunking produced zero non-empty chunks from "
+                f"{len(extracted.text)} extracted characters"
             )
-            ctx.version.extracted_metadata = dict(ctx.version.extracted_metadata or {}) | {
-                **dict(extracted.metadata or {}),
-                "chunk_count": 0,
-                "knowledge_graph": {
-                    "enabled": settings.knowledge_graph_enabled,
-                    "concept_count": 0,
-                    "relationship_count": 0,
-                },
-            }
-            ctx.version.processing_status = "ready"
-            ctx.version.processed_at = _utcnow()
-            job.status = "completed"
-            job.progress_percent = 100
-            job.finished_at = _utcnow()
-            await db.flush()
-            await clear_progress(ctx.version.id)
-            logger.info(
-                "materials_ingest_pipeline_completed",
-                material_version_id=str(ctx.version.id),
-                pipeline_run_id=str(pipeline_run_id),
-                duration_ms=round((perf_counter() - pipeline_started_at) * 1000),
-                chunk_count=0,
-                concept_count=0,
-                relationship_count=0,
-            )
-            return
 
         # Anthropic Contextual Retrieval: prepend Stage C section_title +
         # context_sentence onto each chunk before embedding so the vector

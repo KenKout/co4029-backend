@@ -380,13 +380,32 @@ def _merge(
 ) -> ExtractedContent:
     parts: list[tuple[int, str, SourceLocation]] = []
     audio_lines = audio.text.splitlines()
-    for index, loc in enumerate(audio.source_locations):
-        start_ms = loc.timestamp_start_ms or 0
-        if len(audio.source_locations) == 1:
-            snippet = audio.text.strip()
-        else:
-            snippet = audio_lines[index] if index < len(audio_lines) else ""
-        parts.append((start_ms, f"[Audio @ {start_ms}ms] {snippet}".rstrip(), loc))
+    if len(audio_lines) == len(audio.source_locations):
+        for snippet, loc in zip(audio_lines, audio.source_locations, strict=True):
+            start_ms = loc.timestamp_start_ms or 0
+            normalized = " ".join(snippet.split())
+            parts.append((start_ms, f"[Audio @ {start_ms}ms] {normalized}".rstrip(), loc))
+    elif audio.source_locations and audio.text.strip():
+        starts = [
+            loc.timestamp_start_ms
+            for loc in audio.source_locations
+            if loc.timestamp_start_ms is not None
+        ]
+        ends = [
+            loc.timestamp_end_ms
+            for loc in audio.source_locations
+            if loc.timestamp_end_ms is not None
+        ]
+        start_ms = min(starts) if starts else 0
+        end_ms = max(ends) if ends else None
+        normalized = " ".join(audio.text.split())
+        aggregate_location = SourceLocation(
+            timestamp_start_ms=start_ms,
+            timestamp_end_ms=end_ms,
+        )
+        parts.append(
+            (start_ms, f"[Audio @ {start_ms}ms] {normalized}", aggregate_location)
+        )
 
     if not audio.source_locations and audio.text.strip():
         duration_seconds = audio.metadata.get("duration_seconds")
@@ -396,11 +415,12 @@ def _merge(
             else None
         )
         fallback_location = SourceLocation(timestamp_start_ms=0, timestamp_end_ms=end_ms)
-        parts.append((0, f"[Audio @ 0ms] {audio.text.strip()}", fallback_location))
+        normalized = " ".join(audio.text.split())
+        parts.append((0, f"[Audio @ 0ms] {normalized}", fallback_location))
 
     for ts_seconds, frame in frames:
         ts_ms = int(round(ts_seconds * 1000))
-        ocr_text = frame.text.strip()
+        ocr_text = " ".join(frame.text.split())
         if not ocr_text:
             continue
         parts.append(
