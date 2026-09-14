@@ -192,7 +192,7 @@ async def get_authoring_stream_url(db: AsyncSession, material_id: UUID) -> Mater
     safe_title = target.title.replace('"', "")
     url, _ = await create_stream_url(
         target,
-        response_headers={"Content-Disposition": f'attachment; filename="{safe_title}"'},
+        response_headers={"Content-Disposition": f'inline; filename="{safe_title}"'},
     )
     from datetime import UTC, datetime, timedelta  # noqa: PLC0415
 
