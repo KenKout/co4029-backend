@@ -55,6 +55,7 @@ async def test_multiple_paths_complete_the_program_only_when_all_are_complete(
                 slug=f"multi-path-{uuid.uuid4().hex[:8]}",
                 name="Multi-path Program",
                 career_path_ids=[path_a, path_b],
+                default_career_path_id=path_a,
             ),
             manager,
         )
@@ -65,20 +66,21 @@ async def test_multiple_paths_complete_the_program_only_when_all_are_complete(
             )
         )[0]
 
-        first = await services.select_path(
-            db, enrollment_id=enrollment.id, career_path_id=path_a, student_id=student
-        )
         second = await services.select_path(
             db, enrollment_id=enrollment.id, career_path_id=path_b, student_id=student
         )
 
-        assert first.selected_path_count == 1
+        assert enrollment.selected_path_count == 1
+        assert enrollment.attempts[0].selection_source == "program_default"
         assert second.selected_path_count == 2
         assert len([attempt for attempt in second.attempts if attempt.status == "active"]) == 2
 
-        assert await programs_api.complete_program_attempts(
-            db, student_id=student, career_path_id=path_a
-        ) == 0
+        assert (
+            await programs_api.complete_program_attempts(
+                db, student_id=student, career_path_id=path_a
+            )
+            == 0
+        )
         after_first = (await services.list_my_enrollments(db, student))[0]
         assert after_first.status == "active"
         assert sorted(attempt.status for attempt in after_first.attempts) == [
@@ -86,9 +88,12 @@ async def test_multiple_paths_complete_the_program_only_when_all_are_complete(
             "completed",
         ]
 
-        assert await programs_api.complete_program_attempts(
-            db, student_id=student, career_path_id=path_b
-        ) == 1
+        assert (
+            await programs_api.complete_program_attempts(
+                db, student_id=student, career_path_id=path_b
+            )
+            == 1
+        )
         finished = (await services.list_my_enrollments(db, student))[0]
         assert finished.status == "completed"
         assert all(attempt.status == "completed" for attempt in finished.attempts)
@@ -209,6 +214,7 @@ async def _seed_program_context(
             )
     return faculty_id, path_a, path_b
 
+
 @pytest_asyncio.fixture(autouse=True)
 async def _drain_program_contexts(engine: AsyncEngine) -> AsyncIterator[None]:
     """Remove everything `_seed_program_context` created, after every test."""
@@ -266,6 +272,7 @@ async def test_program_selection_and_dean_approved_switch_are_historical(
                 slug=f"program-{uuid.uuid4().hex[:8]}",
                 name="Versioned Program",
                 career_path_ids=[path_a, path_b],
+                default_career_path_id=path_a,
             ),
             manager,
         )
@@ -274,13 +281,9 @@ async def test_program_selection_and_dean_approved_switch_are_historical(
             db, program_id=program.id, student_ids=[student], actor=manager
         )
         enrollment = enrollments[0]
-        assert enrollment.status == "awaiting_path"
-
-        selected = await services.select_path(
-            db, enrollment_id=enrollment.id, career_path_id=path_a, student_id=student
-        )
-        assert selected.status == "active"
-        assert selected.attempts[-1].career_path_id == path_a
+        assert enrollment.status == "active"
+        assert enrollment.attempts[-1].career_path_id == path_a
+        assert enrollment.attempts[-1].selection_source == "program_default"
 
         request = await services.request_path_change(
             db,
@@ -327,6 +330,7 @@ async def test_request_path_change_notifies_faculty_dean_with_deep_link(
                 slug=f"program-{uuid.uuid4().hex[:8]}",
                 name="Dean Notify Program",
                 career_path_ids=[path_a, path_b],
+                default_career_path_id=path_a,
             ),
             manager,
         )
@@ -335,12 +339,6 @@ async def test_request_path_change_notifies_faculty_dean_with_deep_link(
             db, program_id=program.id, student_ids=[student], actor=manager
         )
         enrollment = enrollments[0]
-        await services.select_path(
-            db,
-            enrollment_id=enrollment.id,
-            career_path_id=path_a,
-            student_id=student,
-        )
         request = await services.request_path_change(
             db,
             enrollment_id=enrollment.id,
@@ -351,14 +349,18 @@ async def test_request_path_change_notifies_faculty_dean_with_deep_link(
         await db.flush()
 
         rows = (
-            await db.execute(
-                text(
-                    "SELECT category, entity_type, entity_id, action_url, title "
-                    "FROM notifications WHERE user_id = :uid ORDER BY created_at DESC"
-                ),
-                {"uid": seeded_users.hod_id},
+            (
+                await db.execute(
+                    text(
+                        "SELECT category, entity_type, entity_id, action_url, title "
+                        "FROM notifications WHERE user_id = :uid ORDER BY created_at DESC"
+                    ),
+                    {"uid": seeded_users.hod_id},
+                )
             )
-        ).mappings().all()
+            .mappings()
+            .all()
+        )
         assert rows, "dean received no notification after a path change request"
         match = next(
             (r for r in rows if r["entity_id"] == request.id),
@@ -367,10 +369,7 @@ async def test_request_path_change_notifies_faculty_dean_with_deep_link(
         assert match is not None, f"no notification for request id {request.id}"
         assert match["category"] == "path_change_review"
         assert match["entity_type"] == "path_change_request"
-        assert (
-            match["action_url"]
-            == f"/management/learning-programs/{program.id}?tab=requests"
-        )
+        assert match["action_url"] == f"/management/learning-programs/{program.id}?tab=requests"
         assert "Path change request from" in match["title"]
         await db.rollback()
 
@@ -391,6 +390,7 @@ async def test_removing_path_from_new_draft_preserves_pinned_versions_and_old_en
                 slug=f"remove-path-{uuid.uuid4().hex[:8]}",
                 name="Path removal preserves history",
                 career_path_ids=[path_a, path_b],
+                default_career_path_id=path_a,
             ),
             manager,
         )
@@ -452,6 +452,7 @@ async def test_publish_rejects_path_archived_after_draft_was_created(
                 slug=f"archive-before-publish-{uuid.uuid4().hex[:8]}",
                 name="Archived path publish guard",
                 career_path_ids=[path_a, path_b],
+                default_career_path_id=path_a,
             ),
             manager,
         )
@@ -462,6 +463,83 @@ async def test_publish_rejects_path_archived_after_draft_was_created(
 
         with pytest.raises(ConflictError, match="program_contains_unavailable_paths"):
             await services.publish_program(db, program_id=program.id, actor=manager)
+        await db.rollback()
+
+
+@pytest.mark.asyncio
+async def test_new_program_version_requires_exactly_one_default_path(
+    engine: AsyncEngine, seeded_users: SeededUsers
+) -> None:
+    faculty_id, path_a, path_b = await _seed_program_context(engine, seeded_users)
+    factory = async_sessionmaker(engine, expire_on_commit=False, autoflush=False)
+    manager = CurrentUser(seeded_users.manager_id, uuid.uuid4())
+
+    async with factory() as db:
+        program = await services.create_program(
+            db,
+            ProgramCreate(
+                faculty_id=faculty_id,
+                slug=f"default-required-{uuid.uuid4().hex[:8]}",
+                name="Default path required",
+                career_path_ids=[path_a, path_b],
+            ),
+            manager,
+        )
+
+        with pytest.raises(ConflictError, match="program_requires_exactly_one_default_path"):
+            await services.publish_program(db, program_id=program.id, actor=manager)
+
+        updated = await services.update_program(
+            db,
+            program_id=program.id,
+            payload=ProgramUpdate(default_career_path_id=path_b),
+            actor=manager,
+        )
+        assert [path.career_path_id for path in updated.paths if path.is_default] == [path_b]
+        await services.publish_program(db, program_id=program.id, actor=manager)
+        await db.rollback()
+
+
+@pytest.mark.asyncio
+async def test_default_path_must_be_replaced_before_removal(
+    engine: AsyncEngine, seeded_users: SeededUsers
+) -> None:
+    faculty_id, path_a, path_b = await _seed_program_context(engine, seeded_users)
+    factory = async_sessionmaker(engine, expire_on_commit=False, autoflush=False)
+    manager = CurrentUser(seeded_users.manager_id, uuid.uuid4())
+
+    async with factory() as db:
+        program = await services.create_program(
+            db,
+            ProgramCreate(
+                faculty_id=faculty_id,
+                slug=f"replace-default-{uuid.uuid4().hex[:8]}",
+                name="Replace default atomically",
+                career_path_ids=[path_a, path_b],
+                default_career_path_id=path_a,
+            ),
+            manager,
+        )
+
+        with pytest.raises(ConflictError, match="default_path_must_be_replaced_before_removal"):
+            await services.update_program(
+                db,
+                program_id=program.id,
+                payload=ProgramUpdate(career_path_ids=[path_b]),
+                actor=manager,
+            )
+
+        updated = await services.update_program(
+            db,
+            program_id=program.id,
+            payload=ProgramUpdate(
+                career_path_ids=[path_b],
+                default_career_path_id=path_b,
+            ),
+            actor=manager,
+        )
+        assert len(updated.paths) == 1
+        assert updated.paths[0].is_default is True
         await db.rollback()
 
 
@@ -494,6 +572,7 @@ async def test_concurrency_cap_conflict_is_human_readable(
                 slug=f"cap-first-{uuid.uuid4().hex[:8]}",
                 name="Cap Program One",
                 career_path_ids=[path_a],
+                default_career_path_id=path_a,
             ),
             manager,
         )
@@ -509,6 +588,7 @@ async def test_concurrency_cap_conflict_is_human_readable(
                 slug=f"cap-second-{uuid.uuid4().hex[:8]}",
                 name="Cap Program Two",
                 career_path_ids=[path_b],
+                default_career_path_id=path_b,
             ),
             manager,
         )
@@ -548,6 +628,7 @@ async def test_it_admin_cannot_operate_academic_programs(
                     slug=f"admin-blocked-{uuid.uuid4().hex[:8]}",
                     name="Admin Must Not Create This",
                     career_path_ids=[path_a],
+                    default_career_path_id=path_a,
                 ),
                 admin,
             )
@@ -573,19 +654,16 @@ async def test_program_list_cards_carry_dean_and_draft_stats(
                 slug=f"list-cards-{uuid.uuid4().hex[:8]}",
                 name="List Cards Program",
                 career_path_ids=[path_a, path_b],
+                default_career_path_id=path_a,
             ),
             manager,
         )
         await services.publish_program(db, program_id=program.id, actor=manager)
-        await services.enroll_students(
-            db, program_id=program.id, student_ids=[student], actor=manager
-        )
-        selected = await services.select_path(
-            db,
-            enrollment_id=(await services.list_my_enrollments(db, student))[0].id,
-            career_path_id=path_a,
-            student_id=student,
-        )
+        selected = (
+            await services.enroll_students(
+                db, program_id=program.id, student_ids=[student], actor=manager
+            )
+        )[0]
         await services.request_path_change(
             db,
             enrollment_id=selected.id,
@@ -609,7 +687,7 @@ async def test_program_list_cards_carry_dean_and_draft_stats(
         card = next(c for c in cards if c.id == program.id)
         assert card.path_change_request_count == 1
         assert card.has_draft_version is True
-        assert card.student_count == 1  # awaiting_path counts as enrolled
+        assert card.student_count == 1
 
         archived = await services.archive_program(db, program_id=program.id, actor=manager)
         assert archived.status == "archived"

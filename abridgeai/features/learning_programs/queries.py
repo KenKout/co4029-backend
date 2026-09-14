@@ -204,6 +204,7 @@ async def list_version_paths(db: AsyncSession, version_id: UUID) -> list[dict[st
             CareerPath.description,
             CareerPath.status,
             LearningProgramVersionPath.position,
+            LearningProgramVersionPath.is_default,
         )
         .join(CareerPath, CareerPath.id == LearningProgramVersionPath.career_path_id)
         .join(

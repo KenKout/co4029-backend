@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import Any
 
 from sqlalchemy import (
+    Boolean,
     CheckConstraint,
     DateTime,
     ForeignKey,
@@ -121,6 +122,10 @@ class LearningProgramVersionPath(CreatedAtMixin, Base):
         PGUUID(as_uuid=True), ForeignKey("career_path_versions.id", ondelete="NO ACTION")
     )
     position: Mapped[int] = mapped_column(Integer)
+    # Nullable-by-version semantics are intentional: versions published before
+    # the default-path feature keep every mapping False.  Every newly published
+    # version is validated by the service to have exactly one True row.
+    is_default: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("FALSE"))
 
 
 class ProgramEnrollment(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, Base):
@@ -160,6 +165,10 @@ class ProgramPathAttempt(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, Ba
             "status IN ('active','completed','switched_out','cancelled')",
             name="ck_program_path_attempts_status",
         ),
+        CheckConstraint(
+            "selection_source IN ('student','program_default','path_change')",
+            name="ck_program_path_attempts_selection_source",
+        ),
     )
 
     program_enrollment_id: Mapped[uuid.UUID] = mapped_column(
@@ -175,6 +184,9 @@ class ProgramPathAttempt(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, Ba
         PGUUID(as_uuid=True), ForeignKey("program_path_attempts.id", ondelete="NO ACTION")
     )
     status: Mapped[str] = mapped_column(String(20), server_default=text("'active'"))
+    selection_source: Mapped[str] = mapped_column(
+        String(20), nullable=False, server_default=text("'student'")
+    )
     selected_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=text("NOW()")
     )

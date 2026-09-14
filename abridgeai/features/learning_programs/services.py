@@ -160,9 +160,7 @@ async def _paths_for_version(db: AsyncSession, version_id: UUID) -> list[Program
         ProgramPathRead.model_validate(
             {
                 **row,
-                "thumbnail_url": thumbnail_urls.get(
-                    cast(UUID, row["career_path_id"])
-                ),
+                "thumbnail_url": thumbnail_urls.get(cast(UUID, row["career_path_id"])),
             }
         )
         for row in rows
@@ -290,9 +288,7 @@ async def list_program_versions(
                     "published_by": version.updated_by
                     if version.published_at is not None
                     else None,
-                    "published_by_name": publisher.display_name
-                    if publisher is not None
-                    else None,
+                    "published_by_name": publisher.display_name if publisher is not None else None,
                 }
             )
         )
@@ -361,6 +357,7 @@ async def create_program(
                 career_path_id=path.id,
                 career_path_version_id=path_version.id,
                 position=position,
+                is_default=path.id == payload.default_career_path_id,
             )
         )
     await flush_or_conflict(db)
@@ -372,9 +369,7 @@ async def list_programs(
 ) -> list[ProgramRead]:
     programs = await queries.list_programs(db, organization_id)
     visible = [
-        program
-        for program in programs
-        if await _actor_can_operate(db, actor.user_id, program)
+        program for program in programs if await _actor_can_operate(db, actor.user_id, program)
     ]
     if not visible:
         return []
@@ -387,9 +382,7 @@ async def list_programs(
             dto.model_copy(
                 update={
                     "student_count": stats.get("student_count", 0),
-                    "path_change_request_count": stats.get(
-                        "path_change_request_count", 0
-                    ),
+                    "path_change_request_count": stats.get("path_change_request_count", 0),
                     "has_draft_version": bool(stats.get("has_draft_version", False)),
                 }
             )
@@ -397,9 +390,7 @@ async def list_programs(
     return result
 
 
-async def _actor_can_operate(
-    db: AsyncSession, actor_id: UUID, program: LearningProgram
-) -> bool:
+async def _actor_can_operate(db: AsyncSession, actor_id: UUID, program: LearningProgram) -> bool:
     try:
         await _require_operator(db, actor_id=actor_id, program=program)
         return True
@@ -451,38 +442,51 @@ async def update_program(
         )
         db.add(draft)
         await flush_or_conflict(db)
-        path_ids = payload.career_path_ids
-        if path_ids is None:
-            for row in source_paths:
-                db.add(
-                    LearningProgramVersionPath(
-                        program_version_id=draft.id,
-                        career_path_id=row["career_path_id"],
-                        career_path_version_id=row["career_path_version_id"],
-                        position=row["position"],
-                    )
-                )
-        else:
-            await _replace_draft_paths(
-                db,
-                program,
-                draft,
-                path_ids,
-                existing_paths=source_paths,
-            )
+        path_ids = (
+            payload.career_path_ids
+            if payload.career_path_ids is not None
+            else [cast(UUID, row["career_path_id"]) for row in source_paths]
+        )
+        default_path_id = _resolve_draft_default(
+            payload=payload,
+            path_ids=path_ids,
+            existing_paths=source_paths,
+        )
+        await _replace_draft_paths(
+            db,
+            program,
+            draft,
+            path_ids,
+            default_career_path_id=default_path_id,
+            existing_paths=source_paths,
+        )
         current = draft
     else:
         if payload.max_path_switches is not None:
             current.max_path_switches = payload.max_path_switches
         current.updated_by = actor.user_id
-        if payload.career_path_ids is not None:
+        if (
+            payload.career_path_ids is not None
+            or "default_career_path_id" in payload.model_fields_set
+        ):
             source_paths = await queries.list_version_paths(db, current.id)
+            path_ids = (
+                payload.career_path_ids
+                if payload.career_path_ids is not None
+                else [cast(UUID, row["career_path_id"]) for row in source_paths]
+            )
+            default_path_id = _resolve_draft_default(
+                payload=payload,
+                path_ids=path_ids,
+                existing_paths=source_paths,
+            )
             await queries.delete_version_paths(db, current.id)
             await _replace_draft_paths(
                 db,
                 program,
                 current,
-                payload.career_path_ids,
+                path_ids,
+                default_career_path_id=default_path_id,
                 existing_paths=source_paths,
             )
     await flush_or_conflict(db)
@@ -495,14 +499,15 @@ async def _replace_draft_paths(
     version: LearningProgramVersion,
     path_ids: list[UUID],
     *,
+    default_career_path_id: UUID | None = None,
     existing_paths: list[dict[str, object]] | None = None,
 ) -> None:
     if len(path_ids) != len(set(path_ids)):
         raise ConflictError("career_path_ids_must_be_unique")
+    if default_career_path_id is not None and default_career_path_id not in path_ids:
+        raise ConflictError("default_path_must_belong_to_program_version")
 
-    existing_by_id = {
-        cast(UUID, row["career_path_id"]): row for row in (existing_paths or [])
-    }
+    existing_by_id = {cast(UUID, row["career_path_id"]): row for row in (existing_paths or [])}
     added_path_ids = [path_id for path_id in path_ids if path_id not in existing_by_id]
     resolved = await queries.resolve_published_path_versions(
         db,
@@ -522,6 +527,7 @@ async def _replace_draft_paths(
                     career_path_id=path_id,
                     career_path_version_id=cast(UUID, existing["career_path_version_id"]),
                     position=position,
+                    is_default=path_id == default_career_path_id,
                 )
             )
             continue
@@ -535,8 +541,35 @@ async def _replace_draft_paths(
                 career_path_id=path.id,
                 career_path_version_id=path_version.id,
                 position=position,
+                is_default=path.id == default_career_path_id,
             )
         )
+
+
+def _resolve_draft_default(
+    *,
+    payload: ProgramUpdate,
+    path_ids: list[UUID],
+    existing_paths: list[dict[str, object]],
+) -> UUID | None:
+    existing_default = next(
+        (
+            cast(UUID, row["career_path_id"])
+            for row in existing_paths
+            if bool(row.get("is_default"))
+        ),
+        None,
+    )
+    if "default_career_path_id" in payload.model_fields_set:
+        requested = payload.default_career_path_id
+        if requested is None and existing_default is not None:
+            raise ConflictError("default_path_must_be_replaced_before_removal")
+        if requested is not None and requested not in path_ids:
+            raise ConflictError("default_path_must_belong_to_program_version")
+        return requested
+    if existing_default is not None and existing_default not in path_ids:
+        raise ConflictError("default_path_must_be_replaced_before_removal")
+    return existing_default
 
 
 async def publish_program(db: AsyncSession, *, program_id: UUID, actor: CurrentUser) -> ProgramRead:
@@ -552,6 +585,8 @@ async def publish_program(db: AsyncSession, *, program_id: UUID, actor: CurrentU
     paths = await queries.list_version_paths(db, version.id)
     if not paths:
         raise ConflictError("program_requires_at_least_one_path")
+    if sum(bool(path["is_default"]) for path in paths) != 1:
+        raise ConflictError("program_requires_exactly_one_default_path")
     invalid_path_ids = await queries.list_unpublishable_version_path_ids(
         db,
         version_id=version.id,
@@ -616,6 +651,7 @@ async def import_students_from_csv(
     version = await queries.get_current_version(db, program.id, published_only=True)
     if version is None:
         raise ConflictError("program_has_no_published_version")
+    default_path = await _get_enrollable_default_path(db, version.id)
 
     limit = int(
         await resolve_setting(
@@ -691,16 +727,15 @@ async def import_students_from_csv(
             # file is reinstated onto the current version rather than
             # colliding with their old row.
             if existing is None:
-                db.add(
-                    ProgramEnrollment(
-                        learning_program_id=program.id,
-                        program_version_id=version.id,
-                        student_id=student_id,
-                        status="awaiting_path",
-                        created_by=actor.user_id,
-                        updated_by=actor.user_id,
-                    )
+                existing = ProgramEnrollment(
+                    learning_program_id=program.id,
+                    program_version_id=version.id,
+                    student_id=student_id,
+                    status="awaiting_path",
+                    created_by=actor.user_id,
+                    updated_by=actor.user_id,
                 )
+                db.add(existing)
             else:
                 existing.program_version_id = version.id
                 existing.status = "awaiting_path"
@@ -709,12 +744,16 @@ async def import_students_from_csv(
                 existing.withdrawal_reason = None
                 existing.updated_by = actor.user_id
             await flush_or_conflict(db)
+            await _activate_default_path(
+                db,
+                enrollment=existing,
+                actor_id=actor.user_id,
+                default_path=default_path,
+            )
             result.enrolled.append(student_id)
         except (ConflictError, NotFoundError, ValueError) as exc:
             result.failures.append(
-                ProgramCsvImportFailure(
-                    row_number=row_number, identifier=email, reason=str(exc)
-                )
+                ProgramCsvImportFailure(row_number=row_number, identifier=email, reason=str(exc))
             )
 
     return result
@@ -732,6 +771,7 @@ async def enroll_students(
     version = await queries.get_current_version(db, program.id, published_only=True)
     if version is None:
         raise ConflictError("program_has_no_published_version")
+    default_path = await _get_enrollable_default_path(db, version.id)
     roles = await access_control_api.get_role_codes_for_users(db, student_ids)
     bad = [student_id for student_id in student_ids if "student" not in roles.get(student_id, ())]
     if bad:
@@ -792,8 +832,64 @@ async def enroll_students(
             existing.withdrawal_reason = None
             existing.updated_by = actor.user_id
         await flush_or_conflict(db)
+        await _activate_default_path(
+            db,
+            enrollment=existing,
+            actor_id=actor.user_id,
+            default_path=default_path,
+        )
         result.append(await _enrollment_out(db, existing))
     return result
+
+
+async def _activate_default_path(
+    db: AsyncSession,
+    *,
+    enrollment: ProgramEnrollment,
+    actor_id: UUID,
+    default_path: dict[str, object] | None,
+) -> bool:
+    """Start the pinned version's default path, when it has one.
+
+    A missing default means the enrollment belongs to a legacy published
+    version.  It intentionally remains ``awaiting_path`` so existing student
+    choice flows continue to work without a data backfill.
+    """
+    if default_path is None:
+        return False
+
+    attempt = ProgramPathAttempt(
+        program_enrollment_id=enrollment.id,
+        career_path_id=cast(UUID, default_path["career_path_id"]),
+        career_path_version_id=cast(UUID, default_path["career_path_version_id"]),
+        status="active",
+        selection_source="program_default",
+        created_by=actor_id,
+        updated_by=actor_id,
+    )
+    db.add(attempt)
+    enrollment.status = "active"
+    enrollment.updated_by = actor_id
+    await flush_or_conflict(db)
+    await career_paths_api.ensure_program_path_access(
+        db,
+        student_id=enrollment.student_id,
+        career_path_id=attempt.career_path_id,
+        version_id=attempt.career_path_version_id,
+        actor_id=actor_id,
+    )
+    return True
+
+
+async def _get_enrollable_default_path(
+    db: AsyncSession, version_id: UUID
+) -> dict[str, object] | None:
+    """Resolve and validate the default before any enrollment rows are written."""
+    paths = await queries.list_version_paths(db, version_id)
+    default_path = next((row for row in paths if bool(row["is_default"])), None)
+    if default_path is not None and default_path["status"] == "archived":
+        raise ConflictError("program_default_path_is_archived")
+    return default_path
 
 
 async def withdraw_student(
@@ -989,6 +1085,7 @@ async def select_path(
         career_path_id=career_path_id,
         career_path_version_id=target["career_path_version_id"],
         status="active",
+        selection_source="student",
         created_by=student_id,
         updated_by=student_id,
     )
@@ -1236,6 +1333,7 @@ async def decide_change_request(  # noqa: C901 - approval is one atomic invarian
         career_path_version_id=request.target_career_path_version_id,
         previous_attempt_id=attempt.id,
         status="active",
+        selection_source="path_change",
         created_by=actor.user_id,
         updated_by=actor.user_id,
     )

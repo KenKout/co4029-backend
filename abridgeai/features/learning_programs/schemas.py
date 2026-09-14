@@ -32,6 +32,16 @@ class ProgramCreate(BaseModel):
     description: str | None = None
     max_path_switches: int = Field(default=3, ge=0, le=100)
     career_path_ids: list[UUID] = Field(default_factory=list)
+    default_career_path_id: UUID | None = None
+
+    @model_validator(mode="after")
+    def _default_must_be_selected(self) -> ProgramCreate:
+        if (
+            self.default_career_path_id is not None
+            and self.default_career_path_id not in self.career_path_ids
+        ):
+            raise ValueError("default_path_must_belong_to_program_version")
+        return self
 
 
 class ProgramUpdate(BaseModel):
@@ -42,6 +52,17 @@ class ProgramUpdate(BaseModel):
     description: str | None = None
     max_path_switches: int | None = Field(default=None, ge=0, le=100)
     career_path_ids: list[UUID] | None = None
+    default_career_path_id: UUID | None = None
+
+    @model_validator(mode="after")
+    def _default_must_be_selected(self) -> ProgramUpdate:
+        if (
+            self.career_path_ids is not None
+            and self.default_career_path_id is not None
+            and self.default_career_path_id not in self.career_path_ids
+        ):
+            raise ValueError("default_path_must_belong_to_program_version")
+        return self
 
 
 class ProgramVersionRead(BaseModel):
@@ -93,6 +114,7 @@ class ProgramPathRead(BaseModel):
     thumbnail_url: str | None = None
     status: str
     position: int
+    is_default: bool = False
 
 
 class ProgramRead(BaseModel):
@@ -135,6 +157,7 @@ class PathAttemptRead(BaseModel):
     career_path_version_id: UUID
     previous_attempt_id: UUID | None
     status: str
+    selection_source: str = "student"
     selected_at: datetime
     ended_at: datetime | None
     exit_snapshot: dict[str, object] | None
