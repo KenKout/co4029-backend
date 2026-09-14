@@ -149,6 +149,19 @@ _SPECS: tuple[SettingSpec, ...] = (
         ),
     ),
     SettingSpec(
+        key="learning_program.max_career_paths_per_enrollment",
+        group="careerpath",
+        type="int",
+        default=1,
+        minimum=1,
+        maximum=10,
+        label="Career paths per learning program",
+        description=(
+            "Maximum career paths a student may select concurrently inside one "
+            "learning program. Existing selections are grandfathered when lowered."
+        ),
+    ),
+    SettingSpec(
         key="ai.llm_timeout_seconds",
         group="ai",
         type="float",

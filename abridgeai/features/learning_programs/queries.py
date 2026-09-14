@@ -487,13 +487,22 @@ async def list_attempts(db: AsyncSession, enrollment_id: UUID) -> list[ProgramPa
     return list((await db.scalars(stmt)).all())
 
 
-async def get_active_attempt(
+async def list_active_attempts(
     db: AsyncSession, enrollment_id: UUID, *, lock: bool = False
-) -> ProgramPathAttempt | None:
+) -> list[ProgramPathAttempt]:
     stmt = select(ProgramPathAttempt).where(
         ProgramPathAttempt.program_enrollment_id == enrollment_id,
         ProgramPathAttempt.status == "active",
     )
+    if lock:
+        stmt = stmt.with_for_update()
+    return list((await db.scalars(stmt)).all())
+
+
+async def get_attempt(
+    db: AsyncSession, attempt_id: UUID, *, lock: bool = False
+) -> ProgramPathAttempt | None:
+    stmt = select(ProgramPathAttempt).where(ProgramPathAttempt.id == attempt_id)
     if lock:
         stmt = stmt.with_for_update()
     return (await db.scalars(stmt)).one_or_none()

@@ -138,6 +138,9 @@ class PathAttemptRead(BaseModel):
     selected_at: datetime
     ended_at: datetime | None
     exit_snapshot: dict[str, object] | None
+    progress_percent: float = 0
+    completed_courses: int = 0
+    total_courses: int = 0
 
 
 class ProgramCsvImportRow(BaseModel):
@@ -196,6 +199,8 @@ class ProgramEnrollmentRead(BaseModel):
     program_version_no: int
     max_path_switches: int
     approved_switch_count: int = 0
+    max_career_paths: int = 1
+    selected_path_count: int = 0
     current_progress_percent: float = 0
     current_completed_courses: int = 0
     current_total_courses: int = 0
@@ -219,6 +224,7 @@ class SelectPathRequest(BaseModel):
 
 class ChangePathRequestCreate(BaseModel):
     target_career_path_id: UUID
+    from_attempt_id: UUID | None = None
     reason: str = Field(min_length=1, max_length=4000)
 
 

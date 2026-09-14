@@ -17,6 +17,13 @@ from abridgeai.core.settings_registry import (
 
 
 class TestRegistryShape:
+    def test_multi_path_limit_defaults_to_one_for_backward_compatibility(self) -> None:
+        spec = SETTINGS_REGISTRY["learning_program.max_career_paths_per_enrollment"]
+
+        assert spec.default == 1
+        assert spec.minimum == 1
+        assert spec.maximum == 10
+
     def test_every_spec_key_matches_its_map_key(self) -> None:
         for key, spec in SETTINGS_REGISTRY.items():
             assert spec.key == key

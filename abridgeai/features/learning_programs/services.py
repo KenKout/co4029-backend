@@ -49,7 +49,7 @@ register_conflict_mappings(
     {
         "uq_learning_programs_org_slug": "learning_program_slug_taken",
         "uq_program_enrollments_program_student": "student_already_enrolled_in_program",
-        "uq_program_path_attempts_one_active": "program_already_has_an_active_path",
+        "uq_program_path_attempts_active_path": "path_already_selected",
         "uq_path_change_requests_one_pending": "program_already_has_a_pending_path_change",
     }
 )
@@ -817,8 +817,8 @@ async def withdraw_student(
     enrollment.withdrawn_at = _now()
     enrollment.withdrawal_reason = reason
     enrollment.updated_by = actor.user_id
-    attempt = await queries.get_active_attempt(db, enrollment.id, lock=True)
-    if attempt is not None:
+    attempts = await queries.list_active_attempts(db, enrollment.id, lock=True)
+    for attempt in attempts:
         attempt.exit_snapshot = await queries.build_exit_snapshot(
             db, student_id=student_id, attempt=attempt
         )
@@ -855,16 +855,42 @@ async def _enrollment_out(db: AsyncSession, enrollment: ProgramEnrollment) -> Pr
         raise NotFoundError("program_enrollment_parent_not_found")
     attempts = await queries.list_attempts(db, enrollment.id)
     pending = await queries.get_pending_request(db, enrollment.id)
-    active_attempt = next((row for row in attempts if row.status == "active"), None)
-    progress_rows: list[dict[str, object]] = []
-    if active_attempt is not None:
-        progress_rows = await career_paths_api.get_version_course_progress_for_user(
-            db,
-            version_id=active_attempt.career_path_version_id,
-            student_id=enrollment.student_id,
+    selected_attempts = [row for row in attempts if row.status in ("active", "completed")]
+    attempt_outputs: list[PathAttemptRead] = []
+    completed_courses = 0
+    total_courses = 0
+    for attempt in attempts:
+        progress_rows: list[dict[str, object]] = []
+        if attempt.status in ("active", "completed"):
+            progress_rows = await career_paths_api.get_version_course_progress_for_user(
+                db,
+                version_id=attempt.career_path_version_id,
+                student_id=enrollment.student_id,
+            )
+        attempt_completed = sum(bool(row.get("satisfied")) for row in progress_rows)
+        attempt_total = len(progress_rows)
+        completed_courses += attempt_completed
+        total_courses += attempt_total
+        attempt_outputs.append(
+            PathAttemptRead.model_validate(
+                {
+                    **attempt.__dict__,
+                    "progress_percent": round(
+                        (attempt_completed / attempt_total * 100) if attempt_total else 0,
+                        2,
+                    ),
+                    "completed_courses": attempt_completed,
+                    "total_courses": attempt_total,
+                }
+            )
         )
-    completed_courses = sum(bool(row.get("satisfied")) for row in progress_rows)
-    total_courses = len(progress_rows)
+    max_career_paths = int(
+        await resolve_setting(
+            db,
+            "learning_program.max_career_paths_per_enrollment",
+            organization_id=program.organization_id,
+        )
+    )
     # Same expiry hazard as _program_out: a flush after mutating this row
     # (e.g. select_path flipping status) expires server-side columns such as
     # ``completed_at`` / ``withdrawn_at``, which then vanish from ``__dict__``
@@ -878,13 +904,15 @@ async def _enrollment_out(db: AsyncSession, enrollment: ProgramEnrollment) -> Pr
             "program_version_no": version.version_no,
             "max_path_switches": version.max_path_switches,
             "approved_switch_count": await queries.count_approved_switches(db, enrollment.id),
+            "max_career_paths": max_career_paths,
+            "selected_path_count": len(selected_attempts),
             "current_progress_percent": round(
                 (completed_courses / total_courses * 100) if total_courses else 0, 2
             ),
             "current_completed_courses": completed_courses,
             "current_total_courses": total_courses,
             "paths": await _paths_for_version(db, version.id),
-            "attempts": [PathAttemptRead.model_validate(row) for row in attempts],
+            "attempts": attempt_outputs,
             "pending_change_request": (
                 PathChangeRequestRead.model_validate(pending).model_dump(mode="json")
                 if pending is not None
@@ -924,8 +952,32 @@ async def select_path(
     enrollment = await queries.get_enrollment(db, enrollment_id, lock=True)
     if enrollment is None or enrollment.student_id != student_id:
         raise NotFoundError("program_enrollment_not_found")
-    if enrollment.status != "awaiting_path":
-        raise ConflictError("initial_path_can_only_be_selected_once")
+    if enrollment.status not in ("awaiting_path", "active"):
+        raise ConflictError("paths_can_only_be_added_to_an_open_program")
+    program = await queries.get_program(db, enrollment.learning_program_id)
+    if program is None:
+        raise NotFoundError("learning_program_not_found")
+    selected = [
+        attempt
+        for attempt in await queries.list_attempts(db, enrollment.id)
+        if attempt.status in ("active", "completed")
+    ]
+    if any(attempt.career_path_id == career_path_id for attempt in selected):
+        raise ConflictError("path_already_selected")
+    limit = int(
+        await resolve_setting(
+            db,
+            "learning_program.max_career_paths_per_enrollment",
+            organization_id=program.organization_id,
+        )
+    )
+    if len(selected) >= limit:
+        raise ProgramConflictError(
+            "career_path_selection_limit_reached",
+            f"This learning program allows at most {limit} selected career path"
+            f"{'s' if limit != 1 else ''}.",
+            limit=limit,
+        )
     paths = await queries.list_version_paths(db, enrollment.program_version_id)
     target = next((row for row in paths if row["career_path_id"] == career_path_id), None)
     if target is None:
@@ -961,6 +1013,7 @@ async def request_path_change(
     target_path_id: UUID,
     reason: str,
     student_id: UUID,
+    from_attempt_id: UUID | None = None,
     arq_pool: object | None = None,
 ) -> PathChangeRequestRead:
     enrollment = await queries.get_enrollment(db, enrollment_id, lock=True)
@@ -968,9 +1021,24 @@ async def request_path_change(
         raise NotFoundError("program_enrollment_not_found")
     if enrollment.status != "active":
         raise ConflictError("only_active_programs_can_change_path")
-    attempt = await queries.get_active_attempt(db, enrollment.id, lock=True)
-    if attempt is None:
+    active_attempts = await queries.list_active_attempts(db, enrollment.id, lock=True)
+    if not active_attempts:
         raise ConflictError("active_path_attempt_not_found")
+    if from_attempt_id is None:
+        if len(active_attempts) != 1:
+            raise ConflictError("source_path_attempt_is_required")
+        attempt = active_attempts[0]
+    else:
+        attempt = next((row for row in active_attempts if row.id == from_attempt_id), None)
+        if attempt is None:
+            raise ConflictError("source_path_attempt_is_not_active")
+    selected_attempts = [
+        row
+        for row in await queries.list_attempts(db, enrollment.id)
+        if row.status in ("active", "completed")
+    ]
+    if any(row.career_path_id == target_path_id for row in selected_attempts):
+        raise ConflictError("path_already_selected")
     if attempt.career_path_id == target_path_id:
         raise ConflictError("target_path_must_differ_from_current_path")
     if await queries.get_pending_request(db, enrollment.id) is not None:
@@ -1121,9 +1189,23 @@ async def decide_change_request(  # noqa: C901 - approval is one atomic invarian
         return PathChangeRequestRead.model_validate(request)
     if enrollment.status != "active":
         raise ConflictError("program_is_not_active")
-    attempt = await queries.get_active_attempt(db, enrollment.id, lock=True)
-    if attempt is None or attempt.id != request.from_attempt_id:
+    attempt = await queries.get_attempt(db, request.from_attempt_id, lock=True)
+    if (
+        attempt is None
+        or attempt.program_enrollment_id != enrollment.id
+        or attempt.status != "active"
+    ):
         raise ConflictError("active_path_changed_since_request")
+    selected_attempts = [
+        row
+        for row in await queries.list_attempts(db, enrollment.id)
+        if row.status in ("active", "completed")
+    ]
+    if any(
+        row.id != attempt.id and row.career_path_id == request.target_career_path_id
+        for row in selected_attempts
+    ):
+        raise ConflictError("path_already_selected")
     version = await queries.get_version(db, enrollment.program_version_id)
     if version is None:
         raise NotFoundError("program_version_not_found")

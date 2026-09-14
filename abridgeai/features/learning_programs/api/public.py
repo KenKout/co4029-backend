@@ -132,7 +132,7 @@ async def list_student_program_enrollments(
 async def complete_program_attempts(
     db: AsyncSession, *, student_id: UUID, career_path_id: UUID
 ) -> int:
-    """Complete active programs whose exact pinned path version reached 100%."""
+    """Complete matching paths, then programs whose every selected path is done."""
     stmt = (
         select(ProgramPathAttempt, ProgramEnrollment)
         .join(ProgramEnrollment, ProgramEnrollment.id == ProgramPathAttempt.program_enrollment_id)
@@ -146,7 +146,7 @@ async def complete_program_attempts(
     )
     rows = list((await db.execute(stmt)).all())
     now = datetime.now(UTC)
-    completed = 0
+    touched_enrollments: dict[UUID, ProgramEnrollment] = {}
     for attempt, enrollment in rows:
         # The same path can be pinned at different versions by different
         # programs. Never let a 100% result on one version complete them all.
@@ -160,6 +160,21 @@ async def complete_program_attempts(
         attempt.status = "completed"
         attempt.ended_at = now
         attempt.updated_by = student_id
+        touched_enrollments[enrollment.id] = enrollment
+    if touched_enrollments:
+        await flush_or_conflict(db)
+    completed = 0
+    for enrollment in touched_enrollments.values():
+        remaining = await db.scalar(
+            select(ProgramPathAttempt.id)
+            .where(
+                ProgramPathAttempt.program_enrollment_id == enrollment.id,
+                ProgramPathAttempt.status == "active",
+            )
+            .limit(1)
+        )
+        if remaining is not None:
+            continue
         enrollment.status = "completed"
         enrollment.completed_at = now
         enrollment.updated_by = student_id

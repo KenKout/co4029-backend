@@ -457,6 +457,7 @@ async def request_path_change(
             db,
             enrollment_id=enrollment_id,
             target_path_id=payload.target_career_path_id,
+            from_attempt_id=payload.from_attempt_id,
             reason=payload.reason,
             student_id=actor.user_id,
             arq_pool=arq_pool,

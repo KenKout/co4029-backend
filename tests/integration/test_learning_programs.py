@@ -14,12 +14,85 @@ from abridgeai.core.config import get_settings
 from abridgeai.core.exceptions import ConflictError, ForbiddenError
 from abridgeai.core.security import CurrentUser
 from abridgeai.features.learning_programs import services
+from abridgeai.features.learning_programs.api import public as programs_api
 from abridgeai.features.learning_programs.schemas import ProgramCreate, ProgramUpdate
 from tests.support.db_graph import hard_delete_graph
 
 
 def _async_url(url: str) -> str:
     return url.replace("+psycopg://", "+psycopg_async://")
+
+
+@pytest.mark.asyncio
+async def test_multiple_paths_complete_the_program_only_when_all_are_complete(
+    engine: AsyncEngine,
+    seeded_users: SeededUsers,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    faculty_id, path_a, path_b = await _seed_program_context(engine, seeded_users)
+    factory = async_sessionmaker(engine, expire_on_commit=False, autoflush=False)
+    manager = CurrentUser(seeded_users.manager_id, uuid.uuid4())
+    student = seeded_users.student_id
+
+    async def two_path_limit(*args: object, **kwargs: object) -> int:
+        return 2
+
+    async def completed_progress(*args: object, **kwargs: object) -> list[dict[str, object]]:
+        return [{"satisfied": True}]
+
+    monkeypatch.setattr(services, "resolve_setting", two_path_limit)
+    monkeypatch.setattr(
+        programs_api.career_paths_api,
+        "get_version_course_progress_for_user",
+        completed_progress,
+    )
+
+    async with factory() as db:
+        program = await services.create_program(
+            db,
+            ProgramCreate(
+                faculty_id=faculty_id,
+                slug=f"multi-path-{uuid.uuid4().hex[:8]}",
+                name="Multi-path Program",
+                career_path_ids=[path_a, path_b],
+            ),
+            manager,
+        )
+        await services.publish_program(db, program_id=program.id, actor=manager)
+        enrollment = (
+            await services.enroll_students(
+                db, program_id=program.id, student_ids=[student], actor=manager
+            )
+        )[0]
+
+        first = await services.select_path(
+            db, enrollment_id=enrollment.id, career_path_id=path_a, student_id=student
+        )
+        second = await services.select_path(
+            db, enrollment_id=enrollment.id, career_path_id=path_b, student_id=student
+        )
+
+        assert first.selected_path_count == 1
+        assert second.selected_path_count == 2
+        assert len([attempt for attempt in second.attempts if attempt.status == "active"]) == 2
+
+        assert await programs_api.complete_program_attempts(
+            db, student_id=student, career_path_id=path_a
+        ) == 0
+        after_first = (await services.list_my_enrollments(db, student))[0]
+        assert after_first.status == "active"
+        assert sorted(attempt.status for attempt in after_first.attempts) == [
+            "active",
+            "completed",
+        ]
+
+        assert await programs_api.complete_program_attempts(
+            db, student_id=student, career_path_id=path_b
+        ) == 1
+        finished = (await services.list_my_enrollments(db, student))[0]
+        assert finished.status == "completed"
+        assert all(attempt.status == "completed" for attempt in finished.attempts)
+        await db.rollback()
 
 
 @pytest_asyncio.fixture
