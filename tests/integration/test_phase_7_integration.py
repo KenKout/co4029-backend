@@ -592,17 +592,20 @@ async def test_career_path_lifecycle(
         headers={"Authorization": f"Bearer {manager_bearer}"},
     )
     assert enroll_resp.status_code == 201, enroll_resp.text
-    enrollment_id = enroll_resp.json()[0]["id"]
+    enrollment = enroll_resp.json()[0]
+    enrollment_id = enrollment["id"]
 
-    # The student picks the path. This is what writes the career-enrollment
-    # projection (career_paths.api.public::ensure_program_path_access) that
-    # /me/career-enrollments authorizes through.
-    select_resp = await client.post(
-        f"/api/v1/me/learning-program-enrollments/{enrollment_id}/select-path",
-        json={"career_path_id": str(path_id)},
-        headers={"Authorization": f"Bearer {student_bearer}"},
-    )
-    assert select_resp.status_code == 200, select_resp.text
+    # Current published programs activate their default path at enrollment;
+    # legacy versions without a default still use explicit student selection.
+    # Either route writes the career-enrollment projection that the learner
+    # endpoints authorize through.
+    if enrollment["selected_path_count"] == 0:
+        select_resp = await client.post(
+            f"/api/v1/me/learning-program-enrollments/{enrollment_id}/select-path",
+            json={"career_path_id": str(path_id)},
+            headers={"Authorization": f"Bearer {student_bearer}"},
+        )
+        assert select_resp.status_code == 200, select_resp.text
 
     direct_enroll = await client.post(
         f"/api/v1/management/career-paths/{path_id}/students",

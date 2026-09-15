@@ -33,14 +33,17 @@ async def test_seed_users(test_engine: AsyncEngine, seeded_users: SeededUsers) -
         )
         assert profile_count == 5
 
-        assignment_count = await session.scalar(
+        assigned_user_count = await session.scalar(
             text(
-                "SELECT COUNT(*) FROM user_role_assignments ra "
+                "SELECT COUNT(DISTINCT ra.user_id) FROM user_role_assignments ra "
                 "WHERE ra.user_id = ANY(CAST(:ids AS uuid[]))"
             ),
             {"ids": seeded_ids},
         )
-        assert assignment_count == 5
+        # Integration tests may temporarily grant an additional faculty-scoped
+        # role to a seeded manager. The fixture contract is that all five seed
+        # users have a role, not that they can only ever have one assignment.
+        assert assigned_user_count == 5
 
 
 @pytest.mark.parametrize(

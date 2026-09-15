@@ -250,14 +250,20 @@ async def _enroll_student_via_program(
         headers={"Authorization": f"Bearer {manager_bearer}"},
     )
     assert enroll.status_code == 201, enroll.text
-    enrollment_id = enroll.json()[0]["id"]
+    enrollment = enroll.json()[0]
+    enrollment_id = enrollment["id"]
 
-    select = await client.post(
-        f"/api/v1/me/learning-program-enrollments/{enrollment_id}/select-path",
-        json={"career_path_id": str(path_id)},
-        headers={"Authorization": f"Bearer {student_bearer}"},
-    )
-    assert select.status_code == 200, select.text
+    # Published programs now activate their default path during enrollment.
+    # Legacy versions without a default still require the student's explicit
+    # selection, so keep covering both supported states without selecting an
+    # already-active path a second time.
+    if enrollment["selected_path_count"] == 0:
+        select = await client.post(
+            f"/api/v1/me/learning-program-enrollments/{enrollment_id}/select-path",
+            json={"career_path_id": str(path_id)},
+            headers={"Authorization": f"Bearer {student_bearer}"},
+        )
+        assert select.status_code == 200, select.text
     return faculty_id, program_id
 
 
