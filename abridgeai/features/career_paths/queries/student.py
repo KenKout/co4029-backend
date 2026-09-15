@@ -62,13 +62,7 @@ _MY_PROGRAM_CAREER_PATH_IDS_SQL = text(
 
 
 async def list_my_program_career_path_ids(db: AsyncSession, student_id: UUID) -> set[UUID]:
-    """Career-path ids the student's live program enrolments offer.
-
-    An EMPTY set is meaningful and is not the same as "no restriction": it means
-    the student is in no learning program at all, and callers treat that as
-    "show the whole org catalog" (the pre-program behaviour, which is what a
-    directly-enrolled or browsing student still needs).
-    """
+    """Career-path ids the student's live program enrolments offer."""
     rows = (await db.execute(_MY_PROGRAM_CAREER_PATH_IDS_SQL, {"student_id": student_id})).all()
     return {row[0] for row in rows}
 
@@ -259,16 +253,7 @@ async def list_latched_stage_ids(db: AsyncSession, enrollment_id: UUID) -> set[U
 
 
 async def latch_stage_complete(db: AsyncSession, *, enrollment_id: UUID, stage_id: UUID) -> bool:
-    """Insert the latch row for a stage that just evaluated complete.
-
-    Idempotent via ``ON CONFLICT DO NOTHING`` on the
-    ``(enrollment_id, stage_id)`` unique constraint — two concurrent reads
-    both evaluating a stage complete must not raise. Returns ``True`` iff
-    this call wrote the row (so the caller knows whether to commit).
-
-    Never UPDATEs and never DELETEs: the table is append-only, which is
-    exactly what makes stage completion irreversible.
-    """
+    """Insert the latch row for a stage that just evaluated complete."""
     result = await db.execute(
         _INSERT_STAGE_LATCH_SQL,
         {"enrollment_id": enrollment_id, "stage_id": stage_id},
@@ -306,6 +291,7 @@ _ROSTER_PROGRESS_SQL = text(
         LEFT JOIN storage_objects so ON so.id = up.avatar_object_id
         WHERE sce.career_path_id = :career_path_id
           AND sce.deleted_at IS NULL
+          AND sce.status <> 'dropped'
     ),
     course_lessons AS (
         SELECT pc.course_id, l.id AS lesson_id
@@ -358,9 +344,6 @@ _ROSTER_PROGRESS_SQL = text(
 async def get_roster_path_progress(
     db: AsyncSession, *, version_id: UUID, career_path_id: UUID
 ) -> list[dict[str, Any]]:
-    """Roster progress: every ACTIVE enrollment of the path (any version
-    pin), measured against ``version_id``'s course list (Gap 3: the
-    manager's shared denominator is the current published version)."""
     rows = (
         await db.execute(
             _ROSTER_PROGRESS_SQL,

@@ -1084,6 +1084,132 @@ async def test_roster_progress_carries_identity_fields(
     assert "avatar_bucket" not in row and "avatar_object_key" not in row
 
 
+async def test_roster_progress_excludes_dropped_enrollments(
+    client: httpx.AsyncClient,
+    manager_bearer: str,
+    seeded_users: SeededUsers,
+    engine: AsyncEngine,
+) -> None:
+    suffix = uuid.uuid4().hex[:8]
+    path_id, stage_id, course_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    active, completed, dropped = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO courses (id, organization_id, owner_user_id, "
+                "slug, title, status) "
+                "VALUES (:id, :org, :owner, :slug, 'Roster Course', 'published')"
+            ),
+            {
+                "id": course_id,
+                "org": seeded_users.organization_id,
+                "owner": seeded_users.admin_id,
+                "slug": f"roster-drop-{suffix}",
+            },
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO career_paths (id, organization_id, slug, name, status) "
+                "VALUES (:id, :org, :slug, 'Roster Drop Path', 'published')"
+            ),
+            {
+                "id": path_id,
+                "org": seeded_users.organization_id,
+                "slug": f"roster-drop-{suffix}",
+            },
+        )
+        version_id = (
+            await conn.execute(
+                text(
+                    "INSERT INTO career_path_versions "
+                    "(id, career_path_id, version_no, status, published_at) "
+                    "VALUES (gen_random_uuid(), :pid, 1, 'published', NOW()) "
+                    "RETURNING id"
+                ),
+                {"pid": path_id},
+            )
+        ).scalar_one()
+        await conn.execute(
+            text(
+                "INSERT INTO career_path_stages "
+                "(id, version_id, position, unlock_policy, enforcement) "
+                "VALUES (:sid, :vid, 1, 'always', 'advisory')"
+            ),
+            {"sid": stage_id, "vid": version_id},
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO career_course_items "
+                "(version_id, course_id, stage_id, position, is_required) "
+                "VALUES (:vid, :cid, :sid, 1, TRUE)"
+            ),
+            {"vid": version_id, "cid": course_id, "sid": stage_id},
+        )
+        for uid, enrollment_status in (
+            (active, "active"),
+            (completed, "completed"),
+            (dropped, "dropped"),
+        ):
+            await conn.execute(
+                text("INSERT INTO users (id, primary_email) VALUES (:id, :email)"),
+                {"id": uid, "email": f"roster-{uid.hex[:6]}@test.local"},
+            )
+            await conn.execute(
+                text(
+                    "INSERT INTO student_career_enrollments "
+                    "(id, career_path_id, version_id, student_id, status) "
+                    "VALUES (gen_random_uuid(), :pid, :vid, :sid, :status)"
+                ),
+                {
+                    "pid": path_id,
+                    "vid": version_id,
+                    "sid": uid,
+                    "status": enrollment_status,
+                },
+            )
+
+    response = await client.get(
+        f"/api/v1/teacher/career-paths/{path_id}/students/progress",
+        headers={"Authorization": f"Bearer {manager_bearer}"},
+    )
+    assert response.status_code == 200, response.text
+    returned = {row["student_id"] for row in response.json()}
+    assert str(active) in returned
+    assert str(completed) in returned
+    assert str(dropped) not in returned
+
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("DELETE FROM student_career_enrollments WHERE career_path_id = :pid"),
+            {"pid": path_id},
+        )
+        await conn.execute(
+            text(
+                "DELETE FROM career_course_items WHERE version_id IN "
+                "(SELECT id FROM career_path_versions WHERE career_path_id = :pid)"
+            ),
+            {"pid": path_id},
+        )
+        await conn.execute(
+            text(
+                "DELETE FROM career_path_stages WHERE version_id IN "
+                "(SELECT id FROM career_path_versions WHERE career_path_id = :pid)"
+            ),
+            {"pid": path_id},
+        )
+        await conn.execute(
+            text("DELETE FROM career_path_versions WHERE career_path_id = :pid"),
+            {"pid": path_id},
+        )
+        await conn.execute(text("DELETE FROM career_paths WHERE id = :pid"), {"pid": path_id})
+        await conn.execute(
+            text("DELETE FROM users WHERE id = ANY(CAST(:ids AS uuid[]))"),
+            {"ids": [str(active), str(completed), str(dropped)]},
+        )
+        await hard_delete_graph(conn, "courses", [str(course_id)])
+
+
 async def test_reorder_courses_in_path(
     client: httpx.AsyncClient,
     manager_bearer: str,
