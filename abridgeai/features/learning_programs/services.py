@@ -177,6 +177,32 @@ async def _target_path_name(db: AsyncSession, career_path_id: UUID) -> str:
     return await queries.get_career_path_name(db, career_path_id) or "the requested path"
 
 
+async def _career_path_limit_ceiling(db: AsyncSession, organization_id: UUID) -> int:
+    """Organization guardrail for manager-owned per-program path limits."""
+    return int(
+        await resolve_setting(
+            db,
+            "learning_program.max_career_paths_per_enrollment",
+            organization_id=organization_id,
+        )
+    )
+
+
+async def _require_path_limit_within_ceiling(
+    db: AsyncSession, *, organization_id: UUID, requested: int
+) -> int:
+    ceiling = await _career_path_limit_ceiling(db, organization_id)
+    if requested > ceiling:
+        raise ProgramConflictError(
+            "career_path_limit_exceeds_organization_ceiling",
+            f"This organization allows at most {ceiling} career path"
+            f"{'s' if ceiling != 1 else ''} per learning program.",
+            requested=requested,
+            ceiling=ceiling,
+        )
+    return ceiling
+
+
 async def _program_out(
     db: AsyncSession, program: LearningProgram, version: LearningProgramVersion | None = None
 ) -> ProgramRead:
@@ -248,6 +274,7 @@ async def get_authoring_options(db: AsyncSession, actor: CurrentUser) -> Program
         faculties=[ProgramOptionRead(id=row.id, name=row.name) for row in allowed_faculties],
         career_paths=career_path_options,
         default_faculty_id=default_faculty_id,
+        max_career_paths_per_program=await _career_path_limit_ceiling(db, primary_org.id),
     )
 
 
@@ -315,6 +342,11 @@ async def create_program(
     if primary_org is None:
         raise ForbiddenError("primary_organization_required")
     organization_id = primary_org.id
+    await _require_path_limit_within_ceiling(
+        db,
+        organization_id=organization_id,
+        requested=payload.max_career_paths_per_enrollment,
+    )
     if not await queries.faculty_is_valid(db, payload.faculty_id, organization_id):
         raise ConflictError("faculty_must_belong_to_organization")
     probe = LearningProgram(
@@ -345,6 +377,7 @@ async def create_program(
         version_no=1,
         status="draft",
         max_path_switches=payload.max_path_switches,
+        max_career_paths_per_enrollment=payload.max_career_paths_per_enrollment,
         created_by=actor.user_id,
         updated_by=actor.user_id,
     )
@@ -428,6 +461,12 @@ async def update_program(
     current = await queries.get_current_version(db, program.id)
     if current is None:
         raise NotFoundError("learning_program_version_not_found")
+    if payload.max_career_paths_per_enrollment is not None:
+        await _require_path_limit_within_ceiling(
+            db,
+            organization_id=program.organization_id,
+            requested=payload.max_career_paths_per_enrollment,
+        )
     if current.status == "published":
         source_paths = await queries.list_version_paths(db, current.id)
         draft = LearningProgramVersion(
@@ -437,6 +476,11 @@ async def update_program(
             max_path_switches=payload.max_path_switches
             if payload.max_path_switches is not None
             else current.max_path_switches,
+            max_career_paths_per_enrollment=(
+                payload.max_career_paths_per_enrollment
+                if payload.max_career_paths_per_enrollment is not None
+                else current.max_career_paths_per_enrollment
+            ),
             created_by=actor.user_id,
             updated_by=actor.user_id,
         )
@@ -464,6 +508,10 @@ async def update_program(
     else:
         if payload.max_path_switches is not None:
             current.max_path_switches = payload.max_path_switches
+        if payload.max_career_paths_per_enrollment is not None:
+            current.max_career_paths_per_enrollment = (
+                payload.max_career_paths_per_enrollment
+            )
         current.updated_by = actor.user_id
         if (
             payload.career_path_ids is not None
@@ -585,6 +633,19 @@ async def publish_program(db: AsyncSession, *, program_id: UUID, actor: CurrentU
     paths = await queries.list_version_paths(db, version.id)
     if not paths:
         raise ConflictError("program_requires_at_least_one_path")
+    if version.max_career_paths_per_enrollment > len(paths):
+        raise ProgramConflictError(
+            "career_path_limit_exceeds_program_paths",
+            "The student path limit cannot exceed the number of Career Paths "
+            "attached to this program.",
+            requested=version.max_career_paths_per_enrollment,
+            path_count=len(paths),
+        )
+    await _require_path_limit_within_ceiling(
+        db,
+        organization_id=program.organization_id,
+        requested=version.max_career_paths_per_enrollment,
+    )
     if sum(bool(path["is_default"]) for path in paths) != 1:
         raise ConflictError("program_requires_exactly_one_default_path")
     invalid_path_ids = await queries.list_unpublishable_version_path_ids(
@@ -980,13 +1041,6 @@ async def _enrollment_out(db: AsyncSession, enrollment: ProgramEnrollment) -> Pr
                 }
             )
         )
-    max_career_paths = int(
-        await resolve_setting(
-            db,
-            "learning_program.max_career_paths_per_enrollment",
-            organization_id=program.organization_id,
-        )
-    )
     # Same expiry hazard as _program_out: a flush after mutating this row
     # (e.g. select_path flipping status) expires server-side columns such as
     # ``completed_at`` / ``withdrawn_at``, which then vanish from ``__dict__``
@@ -1000,7 +1054,7 @@ async def _enrollment_out(db: AsyncSession, enrollment: ProgramEnrollment) -> Pr
             "program_version_no": version.version_no,
             "max_path_switches": version.max_path_switches,
             "approved_switch_count": await queries.count_approved_switches(db, enrollment.id),
-            "max_career_paths": max_career_paths,
+            "max_career_paths": version.max_career_paths_per_enrollment,
             "selected_path_count": len(selected_attempts),
             "current_progress_percent": round(
                 (completed_courses / total_courses * 100) if total_courses else 0, 2
@@ -1053,6 +1107,9 @@ async def select_path(
     program = await queries.get_program(db, enrollment.learning_program_id)
     if program is None:
         raise NotFoundError("learning_program_not_found")
+    version = await queries.get_version(db, enrollment.program_version_id)
+    if version is None:
+        raise NotFoundError("learning_program_version_not_found")
     selected = [
         attempt
         for attempt in await queries.list_attempts(db, enrollment.id)
@@ -1060,13 +1117,7 @@ async def select_path(
     ]
     if any(attempt.career_path_id == career_path_id for attempt in selected):
         raise ConflictError("path_already_selected")
-    limit = int(
-        await resolve_setting(
-            db,
-            "learning_program.max_career_paths_per_enrollment",
-            organization_id=program.organization_id,
-        )
-    )
+    limit = version.max_career_paths_per_enrollment
     if len(selected) >= limit:
         raise ProgramConflictError(
             "career_path_selection_limit_reached",

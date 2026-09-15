@@ -31,6 +31,7 @@ class ProgramCreate(BaseModel):
     name: str = Field(min_length=1, max_length=255)
     description: str | None = None
     max_path_switches: int = Field(default=3, ge=0, le=100)
+    max_career_paths_per_enrollment: int = Field(default=1, ge=1, le=10)
     career_path_ids: list[UUID] = Field(default_factory=list)
     default_career_path_id: UUID | None = None
 
@@ -51,6 +52,7 @@ class ProgramUpdate(BaseModel):
     )
     description: str | None = None
     max_path_switches: int | None = Field(default=None, ge=0, le=100)
+    max_career_paths_per_enrollment: int | None = Field(default=None, ge=1, le=10)
     career_path_ids: list[UUID] | None = None
     default_career_path_id: UUID | None = None
 
@@ -72,6 +74,7 @@ class ProgramVersionRead(BaseModel):
     version_no: int
     status: str
     max_path_switches: int
+    max_career_paths_per_enrollment: int
     published_at: datetime | None
     published_by: UUID | None = None
     published_by_name: str | None = None
@@ -102,6 +105,7 @@ class ProgramAuthoringOptions(BaseModel):
     faculties: list[ProgramOptionRead] = Field(default_factory=list)
     career_paths: list[CareerPathOptionRead] = Field(default_factory=list)
     default_faculty_id: UUID | None = None
+    max_career_paths_per_program: int = 10
 
 
 class ProgramPathRead(BaseModel):
@@ -251,6 +255,21 @@ class ChangePathRequestCreate(BaseModel):
     reason: str = Field(min_length=1, max_length=4000)
 
 
+class DropPathRequestCreate(BaseModel):
+    """Ask to end one Career Path attempt without taking another.
+
+    ``from_attempt_id`` is required, where the change payload allows it to be
+    inferred. A drop is only permitted while two or more paths are active
+    (a student must always be sitting at least one), so there is never a
+    single obvious attempt to infer.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    from_attempt_id: UUID
+    reason: str = Field(min_length=1, max_length=4000)
+
+
 class ChangeRequestDecision(BaseModel):
     """Approval payload with an optional dean note.
 
@@ -293,8 +312,10 @@ class PathChangeRequestRead(BaseModel):
     id: UUID
     program_enrollment_id: UUID
     from_attempt_id: UUID
-    target_career_path_id: UUID
-    target_career_path_version_id: UUID
+    kind: str = "change"
+    # Both NULL on a drop request, which has no destination.
+    target_career_path_id: UUID | None = None
+    target_career_path_version_id: UUID | None = None
     reason: str
     status: str
     in_progress_at: datetime | None = None
@@ -313,6 +334,7 @@ __all__ = [
     "ChangePathRequestCreate",
     "ChangeRequestDecision",
     "ChangeRequestRejection",
+    "DropPathRequestCreate",
     "PathChangeRejectionReasonCode",
     "PathAttemptRead",
     "PathChangeRequestRead",

@@ -36,6 +36,15 @@ Mirrors the partial unique index ``uq_path_change_requests_one_open``
 must keep blocking a second request the same way ``pending`` does.
 """
 
+PATH_REQUEST_KINDS = ("change", "drop")
+"""What a student is asking for on their own enrolment.
+
+``change`` moves one attempt to a different Career Path; ``drop`` ends one
+without a replacement. They share this table, the review queue and the switch
+budget, and differ only in whether a destination exists — see
+``ck_path_change_requests_kind_target`` (migration 0122).
+"""
+
 PATH_CHANGE_REJECTION_REASON_CODES = (
     "insufficient_justification",
     "progress_loss_too_high",
@@ -88,6 +97,10 @@ class LearningProgramVersion(
         ),
         CheckConstraint("version_no > 0", name="ck_learning_program_versions_no"),
         CheckConstraint("max_path_switches >= 0", name="ck_learning_program_versions_switches"),
+        CheckConstraint(
+            "max_career_paths_per_enrollment BETWEEN 1 AND 10",
+            name="ck_learning_program_versions_career_path_limit",
+        ),
     )
 
     learning_program_id: Mapped[uuid.UUID] = mapped_column(
@@ -96,6 +109,9 @@ class LearningProgramVersion(
     version_no: Mapped[int] = mapped_column(Integer)
     status: Mapped[str] = mapped_column(String(20), server_default=text("'draft'"))
     max_path_switches: Mapped[int] = mapped_column(Integer, server_default=text("3"))
+    max_career_paths_per_enrollment: Mapped[int] = mapped_column(
+        Integer, server_default=text("1")
+    )
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
@@ -202,6 +218,17 @@ class PathChangeRequest(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, Bas
             name="ck_path_change_requests_status",
         ),
         CheckConstraint(
+            "kind IN ('change','drop')",
+            name="ck_path_change_requests_kind",
+        ),
+        CheckConstraint(
+            "(kind = 'change' AND target_career_path_id IS NOT NULL "
+            "AND target_career_path_version_id IS NOT NULL) "
+            "OR (kind = 'drop' AND target_career_path_id IS NULL "
+            "AND target_career_path_version_id IS NULL)",
+            name="ck_path_change_requests_kind_target",
+        ),
+        CheckConstraint(
             "decision_reason_code IS NULL OR decision_reason_code IN ("
             "'insufficient_justification','progress_loss_too_high',"
             "'target_path_not_suitable','preserve_remaining_switch',"
@@ -216,10 +243,13 @@ class PathChangeRequest(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, Bas
     from_attempt_id: Mapped[uuid.UUID] = mapped_column(
         PGUUID(as_uuid=True), ForeignKey("program_path_attempts.id", ondelete="NO ACTION")
     )
-    target_career_path_id: Mapped[uuid.UUID] = mapped_column(
+    kind: Mapped[str] = mapped_column(String(20), nullable=False, server_default=text("'change'"))
+    # NULL for a drop, which has no destination. The kind/target CHECK above is
+    # what keeps that from degrading into "a switch with a missing target".
+    target_career_path_id: Mapped[uuid.UUID | None] = mapped_column(
         PGUUID(as_uuid=True), ForeignKey("career_paths.id", ondelete="NO ACTION")
     )
-    target_career_path_version_id: Mapped[uuid.UUID] = mapped_column(
+    target_career_path_version_id: Mapped[uuid.UUID | None] = mapped_column(
         PGUUID(as_uuid=True), ForeignKey("career_path_versions.id", ondelete="NO ACTION")
     )
     reason: Mapped[str] = mapped_column(Text)
@@ -303,6 +333,7 @@ class CourseEnrollmentEntitlement(UUIDPrimaryKeyMixin, Base):
 __all__ = [
     "PATH_CHANGE_OPEN_STATUSES",
     "PATH_CHANGE_REJECTION_REASON_CODES",
+    "PATH_REQUEST_KINDS",
     "CourseCompletionAward",
     "CourseEnrollmentEntitlement",
     "LearningProgram",

@@ -152,13 +152,14 @@ _SPECS: tuple[SettingSpec, ...] = (
         key="learning_program.max_career_paths_per_enrollment",
         group="careerpath",
         type="int",
-        default=1,
+        default=10,
         minimum=1,
         maximum=10,
-        label="Career paths per learning program",
+        label="Career paths per program ceiling",
         description=(
-            "Maximum career paths a student may select concurrently inside one "
-            "learning program. Existing selections are grandfathered when lowered."
+            "Organization ceiling for the per-program limit set by managers. "
+            "Published program versions and existing selections are grandfathered "
+            "when this ceiling is lowered."
         ),
     ),
     SettingSpec(

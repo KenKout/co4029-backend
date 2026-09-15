@@ -54,6 +54,7 @@ async def test_multiple_paths_complete_the_program_only_when_all_are_complete(
                 faculty_id=faculty_id,
                 slug=f"multi-path-{uuid.uuid4().hex[:8]}",
                 name="Multi-path Program",
+                max_career_paths_per_enrollment=2,
                 career_path_ids=[path_a, path_b],
                 default_career_path_id=path_a,
             ),
@@ -65,6 +66,9 @@ async def test_multiple_paths_complete_the_program_only_when_all_are_complete(
                 db, program_id=program.id, student_ids=[student], actor=manager
             )
         )[0]
+
+        assert program.current_version.max_career_paths_per_enrollment == 2
+        assert enrollment.max_career_paths == 2
 
         second = await services.select_path(
             db, enrollment_id=enrollment.id, career_path_id=path_b, student_id=student

@@ -17,10 +17,10 @@ from abridgeai.core.settings_registry import (
 
 
 class TestRegistryShape:
-    def test_multi_path_limit_defaults_to_one_for_backward_compatibility(self) -> None:
+    def test_multi_path_ceiling_allows_manager_configuration_by_default(self) -> None:
         spec = SETTINGS_REGISTRY["learning_program.max_career_paths_per_enrollment"]
 
-        assert spec.default == 1
+        assert spec.default == 10
         assert spec.minimum == 1
         assert spec.maximum == 10
 
