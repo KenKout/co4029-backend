@@ -31,6 +31,7 @@ from typing import TYPE_CHECKING, Any, BinaryIO
 
 import httpx
 
+from abridgeai.ai.extraction.audio_payloads import parse_deepgram_payload
 from abridgeai.ai.extraction.base import ExtractedContent, SourceLocation
 from abridgeai.ai.extraction.registry import register_extractor
 from abridgeai.ai.llm.audit import write_ai_model_call
@@ -72,60 +73,6 @@ def _segments_to_locations(
             )
         )
     return "\n".join(parts).strip(), locations
-
-
-def _parse_deepgram_payload(
-    payload: dict[str, Any],
-) -> tuple[str, list[SourceLocation], dict[str, Any]]:
-    """Map a Deepgram /v1/listen response to (text, locations, meta).
-
-    Prefers ``results.utterances`` (sentence-level segments with start/end)
-    so each ``SourceLocation`` carries wall-clock ms timings. Falls back to
-    the first channel alternative's flat ``transcript`` when utterances are
-    absent (e.g. ``utterances=false`` or a very short clip). Language +
-    duration are pulled from the top-level metadata / channel detection.
-    """
-    results = payload.get("results") or {}
-    utterances = results.get("utterances") or []
-
-    parts: list[str] = []
-    locations: list[SourceLocation] = []
-    for utt in utterances:
-        text = (utt.get("transcript") or "").strip()
-        if not text:
-            continue
-        start = utt.get("start")
-        end = utt.get("end")
-        parts.append(text)
-        locations.append(
-            SourceLocation(
-                timestamp_start_ms=int(round(float(start) * 1000)) if start is not None else None,
-                timestamp_end_ms=int(round(float(end) * 1000)) if end is not None else None,
-            )
-        )
-
-    channels = results.get("channels") or []
-    first_alt: dict[str, Any] = {}
-    if channels:
-        alts = channels[0].get("alternatives") or []
-        if alts:
-            first_alt = alts[0]
-
-    if not parts:
-        flat = (first_alt.get("transcript") or "").strip()
-        if flat:
-            parts.append(flat)
-            locations.append(SourceLocation(timestamp_start_ms=0, timestamp_end_ms=None))
-
-    text = "\n".join(parts).strip()
-    language = first_alt.get("language")
-    if not language and channels:
-        language = channels[0].get("detected_language")
-    meta: dict[str, Any] = {
-        "duration": (payload.get("metadata") or {}).get("duration"),
-        "language": language,
-    }
-    return text, locations, meta
 
 
 def _faster_whisper_transcribe(raw: bytes, *, model_name: str) -> dict[str, Any]:
@@ -259,7 +206,7 @@ class AudioExtractor:
             )
             raise AppError("Deepgram STT returned non-JSON body") from exc
 
-        text, locations, meta = _parse_deepgram_payload(payload)
+        text, locations, meta = parse_deepgram_payload(payload)
 
         cost = await compute_cost(self._db, model, None, None)
         await write_ai_model_call(

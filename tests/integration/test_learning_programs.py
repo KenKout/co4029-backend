@@ -784,6 +784,34 @@ async def test_approved_path_drop_ends_one_path_and_consumes_a_switch(
 
 
 @pytest.mark.asyncio
+async def test_single_path_program_selects_its_only_default_automatically(
+    engine: AsyncEngine, seeded_users: SeededUsers
+) -> None:
+    faculty_id, path_a, _path_b = await _seed_program_context(engine, seeded_users)
+    factory = async_sessionmaker(engine, expire_on_commit=False, autoflush=False)
+    manager = CurrentUser(seeded_users.manager_id, uuid.uuid4())
+
+    async with factory() as db:
+        program = await services.create_program(
+            db,
+            ProgramCreate(
+                faculty_id=faculty_id,
+                slug=f"single-default-{uuid.uuid4().hex[:8]}",
+                name="Single path default",
+                career_path_ids=[path_a],
+            ),
+            manager,
+        )
+
+        assert len(program.paths) == 1
+        assert program.paths[0].career_path_id == path_a
+        assert program.paths[0].is_default is True
+        published = await services.publish_program(db, program_id=program.id, actor=manager)
+        assert published.status == "published"
+        await db.rollback()
+
+
+@pytest.mark.asyncio
 async def test_student_must_keep_at_least_one_active_path(
     engine: AsyncEngine, seeded_users: SeededUsers
 ) -> None:

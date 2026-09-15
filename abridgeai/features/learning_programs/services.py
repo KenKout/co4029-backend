@@ -388,6 +388,9 @@ async def create_program(
     )
     db.add(version)
     await flush_or_conflict(db)
+    default_career_path_id = payload.default_career_path_id
+    if default_career_path_id is None and len(resolved) == 1:
+        default_career_path_id = resolved[0][0].id
     for position, (path, path_version) in enumerate(resolved, start=1):
         db.add(
             LearningProgramVersionPath(
@@ -395,7 +398,7 @@ async def create_program(
                 career_path_id=path.id,
                 career_path_version_id=path_version.id,
                 position=position,
-                is_default=path.id == payload.default_career_path_id,
+                is_default=path.id == default_career_path_id,
             )
         )
     await flush_or_conflict(db)
@@ -557,6 +560,8 @@ async def _replace_draft_paths(
 ) -> None:
     if len(path_ids) != len(set(path_ids)):
         raise ConflictError("career_path_ids_must_be_unique")
+    if default_career_path_id is None and len(path_ids) == 1:
+        default_career_path_id = path_ids[0]
     if default_career_path_id is not None and default_career_path_id not in path_ids:
         raise ConflictError("default_path_must_belong_to_program_version")
 

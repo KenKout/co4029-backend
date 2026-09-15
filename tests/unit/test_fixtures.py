@@ -10,27 +10,35 @@ from abridgeai.core.security import decode_access_token
 
 @pytest.mark.asyncio
 async def test_seed_users(test_engine: AsyncEngine, seeded_users: SeededUsers) -> None:
+    seeded_ids = [
+        str(seeded_users.student_id),
+        str(seeded_users.teacher_id),
+        str(seeded_users.hod_id),
+        str(seeded_users.manager_id),
+        str(seeded_users.admin_id),
+    ]
     async with AsyncSession(test_engine) as session:
         user_count = await session.scalar(
-            text("SELECT COUNT(*) FROM users WHERE primary_email LIKE 'test-%@abridgeai.local'")
+            text("SELECT COUNT(*) FROM users WHERE id = ANY(CAST(:ids AS uuid[]))"),
+            {"ids": seeded_ids},
         )
         assert user_count == 5
 
         profile_count = await session.scalar(
             text(
                 "SELECT COUNT(*) FROM user_profiles up "
-                "JOIN users u ON u.id = up.user_id "
-                "WHERE u.primary_email LIKE 'test-%@abridgeai.local'"
-            )
+                "WHERE up.user_id = ANY(CAST(:ids AS uuid[]))"
+            ),
+            {"ids": seeded_ids},
         )
         assert profile_count == 5
 
         assignment_count = await session.scalar(
             text(
                 "SELECT COUNT(*) FROM user_role_assignments ra "
-                "JOIN users u ON u.id = ra.user_id "
-                "WHERE u.primary_email LIKE 'test-%@abridgeai.local'"
-            )
+                "WHERE ra.user_id = ANY(CAST(:ids AS uuid[]))"
+            ),
+            {"ids": seeded_ids},
         )
         assert assignment_count == 5
 
