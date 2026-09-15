@@ -351,6 +351,47 @@ async def test_teacher_reply_notifies_thread_participants_and_closed_topic_locks
     assert teacher_after.status_code == 201, teacher_after.text
 
 
+async def test_reply_to_reply_keeps_flat_thread_and_exact_target(
+    client: httpx.AsyncClient,
+    engine: AsyncEngine,
+    seeded_users: SeededUsers,
+    teacher_auth: tuple[uuid.UUID, str],
+    student_auth: tuple[uuid.UUID, str],
+) -> None:
+    _, teacher_token = teacher_auth
+    _, student_token = student_auth
+    g = await _seed_graph(engine, seeded_users)
+
+    topic = await client.post(
+        f"/api/v1/lessons/{g.lesson_id}/discussion/topics",
+        headers=_auth(teacher_token),
+        json={"title": "Nested reply target"},
+    )
+    topic_id = topic.json()["id"]
+    root = await client.post(
+        f"/api/v1/discussion/topics/{topic_id}/comments",
+        headers=_auth(student_token),
+        json={"body": "Root question"},
+    )
+    first_reply = await client.post(
+        f"/api/v1/discussion/topics/{topic_id}/comments",
+        headers=_auth(teacher_token),
+        json={"body": "First answer", "parent_comment_id": root.json()["id"]},
+    )
+    nested_reply = await client.post(
+        f"/api/v1/discussion/topics/{topic_id}/comments",
+        headers=_auth(student_token),
+        json={
+            "body": "Reply to the answer",
+            "parent_comment_id": first_reply.json()["id"],
+        },
+    )
+
+    assert nested_reply.status_code == 201, nested_reply.text
+    assert nested_reply.json()["parent_comment_id"] == root.json()["id"]
+    assert nested_reply.json()["reply_to_comment_id"] == first_reply.json()["id"]
+
+
 async def test_comment_edit_delete_and_moderation_perimeters(
     client: httpx.AsyncClient,
     engine: AsyncEngine,

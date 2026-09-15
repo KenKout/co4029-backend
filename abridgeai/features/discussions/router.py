@@ -104,10 +104,10 @@ async def _require_course_manage(
         raise deps.not_found("course", course_id)
 
 
-async def _resolve_reply_parent(
+async def _resolve_reply_links(
     db: AsyncSession, topic_id: UUID, parent_comment_id: UUID | None
-) -> UUID | None:
-    """Validate a reply target and flatten it to one level.
+) -> tuple[UUID | None, UUID | None]:
+    """Validate a reply target and return visual-parent + exact-target IDs.
 
     Two rules, both about keeping a thread readable rather than about safety:
 
@@ -118,11 +118,11 @@ async def _resolve_reply_parent(
       and there is no UI that could render it.
     """
     if parent_comment_id is None:
-        return None
+        return None, None
     parent = await queries.get_comment(db, parent_comment_id)
     if parent is None or parent.topic_id != topic_id:
         raise deps.not_found("discussion_comment", parent_comment_id)
-    return parent.parent_comment_id or parent.id
+    return parent.parent_comment_id or parent.id, parent.id
 
 
 def _topic_read(
@@ -163,6 +163,7 @@ def _comment_read(
         author_id=comment.author_id,
         body=comment.body,
         parent_comment_id=comment.parent_comment_id,
+        reply_to_comment_id=comment.reply_to_comment_id,
         created_at=comment.created_at,
         updated_at=comment.updated_at,
         author=author,
@@ -449,12 +450,15 @@ async def create_comment(
     viewer_can_manage = await deps.can_manage(db, current_user, course_id)
     if topic.status == "closed" and not viewer_can_manage:
         raise deps.not_found("discussion_topic", topic_id)
-    parent_id = await _resolve_reply_parent(db, topic_id, payload.parent_comment_id)
+    parent_id, reply_to_id = await _resolve_reply_links(
+        db, topic_id, payload.parent_comment_id
+    )
     comment = LessonDiscussionComment(
         topic_id=topic_id,
         author_id=current_user.user_id,
         body=payload.body,
         parent_comment_id=parent_id,
+        reply_to_comment_id=reply_to_id,
     )
     db.add(comment)
     await db.flush()

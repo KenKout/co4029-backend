@@ -96,7 +96,7 @@ async def mention_counts_for_topics(
         )
         .where(
             LessonDiscussionComment.topic_id.in_(topic_ids),
-            LessonDiscussionComment.parent_comment_id.in_(mine),
+            LessonDiscussionComment.reply_to_comment_id.in_(mine),
             LessonDiscussionComment.author_id != viewer_id,
         )
         .group_by(LessonDiscussionComment.topic_id)

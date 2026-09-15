@@ -150,6 +150,9 @@ class DiscussionCommentRead(_ORMModel):
     author_id: UUID
     body: str
     parent_comment_id: UUID | None = None
+    #: Exact message selected by Reply. Unlike ``parent_comment_id``, this is
+    #: not flattened when replying to an existing reply.
+    reply_to_comment_id: UUID | None = None
     created_at: datetime
     updated_at: datetime
     author: DiscussionCommentAuthor | None = None

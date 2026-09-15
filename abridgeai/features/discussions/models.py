@@ -4,7 +4,7 @@ Course discussion: a teacher who can manage the course posts a **topic**
 (open questions / prompt) either on one lesson or on the course as a whole;
 enrolled students post **comments** to discuss it.
 
-Two tables (migrations 0039 + 0111):
+Two tables (migrations 0039 + 0111 + 0120):
 
 * ``lesson_discussion_topics`` — one row per teacher-authored topic. Exactly
   one of ``lesson_id`` / ``course_id`` is set (CHECK
@@ -12,10 +12,9 @@ Two tables (migrations 0039 + 0111):
   lesson-scoped or course-scoped. ``status`` gates whether new comments are
   accepted (``open`` / ``closed``).
 * ``lesson_discussion_comments`` — one row per student/teacher comment on a
-  topic. ``parent_comment_id`` is the one-level reply thread: a reply carries
-  its parent, and the client renders the pair. It doubles as the mention
-  target — a reply is the only way to name someone, so who was mentioned is
-  the parent's author rather than anything parsed out of the body.
+  topic. ``parent_comment_id`` keeps the one-level visual thread, while
+  ``reply_to_comment_id`` preserves the exact message selected by Reply. This
+  lets the client quote and navigate to a reply without nesting the thread.
 The ``lesson_`` prefix on the first two tables predates course-scoped topics
 and is now a misnomer. It is kept deliberately: renaming would churn every
 model, query, test and generated client type to buy nothing at runtime.
@@ -129,6 +128,15 @@ class LessonDiscussionComment(
     # reply to a reply is stored against the same top-level parent, so a thread
     # cannot grow into a tree nobody can follow on a phone.
     parent_comment_id: Mapped[uuid.UUID | None] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("lesson_discussion_comments.id", ondelete="NO ACTION"),
+        nullable=True,
+        index=True,
+    )
+    # Exact comment selected by Reply. For a direct reply to a root this equals
+    # parent_comment_id; for reply-of-reply it points at the child while
+    # parent_comment_id remains the root used for one-level rendering.
+    reply_to_comment_id: Mapped[uuid.UUID | None] = mapped_column(
         PGUUID(as_uuid=True),
         ForeignKey("lesson_discussion_comments.id", ondelete="NO ACTION"),
         nullable=True,
