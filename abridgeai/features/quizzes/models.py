@@ -123,6 +123,8 @@ from abridgeai.core.db import (
     TimestampMixin,
     UUIDPrimaryKeyMixin,
 )
+
+
 class Quiz(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftDeleteMixin, Base):
     __tablename__ = "quizzes"
     __table_args__ = (
@@ -173,6 +175,9 @@ class Quiz(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftDeleteMixin,
         Boolean, nullable=False, server_default=text("FALSE")
     )
     show_hints: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("TRUE"))
+    require_camera: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("FALSE")
+    )
     initial_ef: Mapped[Decimal | None] = mapped_column(Numeric(4, 2))
     min_ef_for_unlock: Mapped[Decimal | None] = mapped_column(Numeric(4, 2))
     coverage_threshold: Mapped[Decimal | None] = mapped_column(Numeric(5, 2))

@@ -1478,3 +1478,66 @@ async def test_quiz_results_endpoint_zero_attempts(
     assert body["per_student"] == []
     assert len(body["per_question"]) == 1
     assert body["per_question"][0]["question_id"] == str(question_id)
+
+
+async def test_quiz_session_takeover_replaces_old_mutation_owner(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    scenario: dict[str, uuid.UUID],
+    engine: AsyncEngine,
+    seeded_users: SeededUsers,
+) -> None:
+    quiz_id, question_id, option_ids = await _seed_published_quiz_with_question(
+        client, admin_bearer, engine, scenario, title="Session guard quiz"
+    )
+    session_one = await _seed_session(engine, seeded_users.student_id)
+    session_two = await _seed_session(engine, seeded_users.student_id)
+    token_one = create_access_token(user_id=seeded_users.student_id, session_id=session_one)
+    token_two = create_access_token(user_id=seeded_users.student_id, session_id=session_two)
+
+    started = await client.post(
+        f"/api/v1/quizzes/{quiz_id}/attempts",
+        json={"quiz_id": str(quiz_id), "idempotency_key": str(uuid.uuid4())},
+        headers=_auth(token_one),
+    )
+    assert started.status_code == 201
+    attempt_id = started.json()["attempt_id"]
+
+    heartbeat = await client.post(
+        f"/api/v1/attempts/{attempt_id}/session/heartbeat",
+        headers=_auth(token_one),
+    )
+    assert heartbeat.status_code == 204
+
+    blocked_claim = await client.post(
+        f"/api/v1/attempts/{attempt_id}/session/claim",
+        headers=_auth(token_two),
+    )
+    assert blocked_claim.status_code == 409
+    assert blocked_claim.json()["detail"]["error"] == "attempt_active_elsewhere"
+
+    takeover = await client.post(
+        f"/api/v1/attempts/{attempt_id}/session/takeover",
+        headers=_auth(token_two),
+    )
+    assert takeover.status_code == 204
+
+    stale_answer = await client.post(
+        f"/api/v1/attempts/{attempt_id}/answers",
+        json={"question_id": str(question_id), "selected_option_id": str(option_ids["A"])},
+        headers=_auth(token_one),
+    )
+    assert stale_answer.status_code == 409
+    assert stale_answer.json()["detail"]["error"] == "quiz_session_replaced"
+
+    stale_release = await client.post(
+        f"/api/v1/attempts/{attempt_id}/session/release",
+        headers=_auth(token_one),
+    )
+    assert stale_release.status_code == 409
+
+    release = await client.post(
+        f"/api/v1/attempts/{attempt_id}/session/release",
+        headers=_auth(token_two),
+    )
+    assert release.status_code == 204

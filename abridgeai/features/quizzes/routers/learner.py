@@ -21,7 +21,7 @@ from __future__ import annotations
 from typing import Annotated, Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -30,6 +30,7 @@ from abridgeai.core.exceptions import NotFoundError
 from abridgeai.core.observability import get_logger
 from abridgeai.core.security import CurrentUser, get_current_user, utcnow
 from abridgeai.features.courses.api.public import can_view_course_content
+from abridgeai.features.quizzes.models import QuizAttempt
 from abridgeai.features.quizzes.queries.published import (
     QuizClosed,
     QuizNotYetOpen,
@@ -45,6 +46,7 @@ from abridgeai.features.quizzes.schemas import (
 from abridgeai.features.quizzes.services import (
     learner_progress as learner_progress_service,
 )
+from abridgeai.features.quizzes.services import session_guard
 from abridgeai.features.quizzes.services import taking as taking_service
 
 # NOTE: QuizClosed / QuizNotYetOpen are imported above from queries.published
@@ -57,10 +59,10 @@ from abridgeai.features.quizzes.services.taking import (
     CooldownActive,
     InvalidAnswerOption,
     MaxAttemptsReached,
+    QuestionNotInAttempt,
     QuizPasswordIncorrect,
     QuizPasswordRequired,
     QuizSubnetBlocked,
-    QuestionNotInAttempt,
 )
 from abridgeai.features.spaced_repetition.api.public import (
     dispatch_remediation_for_card_failure,
@@ -69,6 +71,63 @@ from abridgeai.features.spaced_repetition.api.public import (
 router = APIRouter(tags=["quizzes-learner"])
 
 _logger = get_logger(__name__)
+
+
+def _session_guard_unavailable(exc: Exception) -> HTTPException:
+    del exc
+    return HTTPException(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        detail={"error": "quiz_session_guard_unavailable"},
+    )
+
+
+async def _require_session_owner(
+    attempt_id: UUID,
+    current_user: CurrentUser,
+) -> None:
+    try:
+        owned = await session_guard.validate_and_renew(attempt_id, current_user.session_id)
+    except session_guard.QuizSessionGuardUnavailable as exc:
+        raise _session_guard_unavailable(exc) from exc
+    if not owned:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"error": "quiz_session_replaced"},
+        )
+
+
+async def _require_live_owned_attempt(
+    db: AsyncSession,
+    attempt_id: UUID,
+    current_user: CurrentUser,
+) -> QuizAttempt:
+    attempt = await db.get(QuizAttempt, attempt_id)
+    if attempt is None or attempt.student_id != current_user.user_id:
+        raise _not_found("quiz_attempt", attempt_id)
+    if attempt.status != "in_progress":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"reason": "attempt_not_in_progress"},
+        )
+    return attempt
+
+
+async def _claim_new_attempt(
+    db: AsyncSession,
+    attempt: QuizAttempt,
+    current_user: CurrentUser,
+) -> None:
+    try:
+        claimed = await session_guard.claim(attempt.id, current_user.session_id)
+    except session_guard.QuizSessionGuardUnavailable as exc:
+        await db.rollback()
+        raise _session_guard_unavailable(exc) from exc
+    if not claimed:
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"error": "attempt_active_elsewhere"},
+        )
 
 
 def _not_found(resource: str, resource_id: UUID | str) -> HTTPException:
@@ -214,7 +273,7 @@ async def get_published_quiz(
     response_model=QuizAttemptProgressRead,
     status_code=status.HTTP_201_CREATED,
 )
-async def start_attempt(
+async def start_attempt(  # noqa: C901 -- existing error mapping + session-claim transaction
     quiz_id: str,
     payload: QuizAttemptStart,
     request: Request,
@@ -255,7 +314,7 @@ async def start_attempt(
     ):
         raise _not_found("quiz", quiz_id)
     try:
-        _, take_payload = await taking_service.start_attempt(
+        attempt, take_payload = await taking_service.start_attempt(
             db,
             quiz.id,
             current_user,
@@ -333,6 +392,7 @@ async def start_attempt(
             },
             headers={"Retry-After": str(retry_after_seconds)},
         ) from exc
+    await _claim_new_attempt(db, attempt, current_user)
     await db.commit()
     return take_payload
 
@@ -357,6 +417,8 @@ async def record_answer(
     rolled-back review can never trigger a ghost notification.
     Remediation failures are logged and never surface to the student.
     """
+    await _require_live_owned_attempt(db, attempt_id, current_user)
+    await _require_session_owner(attempt_id, current_user)
     try:
         answer, review = await taking_service.answer_attempt(db, attempt_id, payload, current_user)
     except NotFoundError as exc:
@@ -442,6 +504,7 @@ async def record_quiz_integrity_events(
         raise _not_found("quiz_attempt", attempt_id)
     if attempt.status != "in_progress":
         return QuizIntegrityEventBatchResponse(accepted=0)
+    await _require_session_owner(attempt_id, current_user)
 
     # The snapshot frozen at start wins. Falling back to the quiz's CURRENT
     # settings only covers attempts created before the column existed; those
@@ -542,6 +605,8 @@ async def submit_attempt(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> QuizAttemptRead:
     """Grade and finalize an attempt."""
+    await _require_live_owned_attempt(db, attempt_id, current_user)
+    await _require_session_owner(attempt_id, current_user)
     try:
         attempt = await taking_service.submit_attempt(db, attempt_id, current_user)
     except NotFoundError as exc:
@@ -552,7 +617,78 @@ async def submit_attempt(
             detail={"reason": "attempt_not_in_progress"},
         ) from exc
     await db.commit()
+    try:
+        await session_guard.release(attempt_id, current_user.session_id)
+    except session_guard.QuizSessionGuardUnavailable:
+        _logger.warning("quiz_session_release_failed", attempt_id=str(attempt_id))
     return await taking_service.project_attempt_summary(db, attempt)
+
+
+@router.post("/attempts/{attempt_id}/session/claim", status_code=status.HTTP_204_NO_CONTENT)
+async def claim_attempt_session(
+    attempt_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> Response:
+    """Claim/renew the ephemeral owner for a resumable attempt."""
+    await _require_live_owned_attempt(db, attempt_id, current_user)
+    try:
+        claimed = await session_guard.claim(attempt_id, current_user.session_id)
+    except session_guard.QuizSessionGuardUnavailable as exc:
+        raise _session_guard_unavailable(exc) from exc
+    if not claimed:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"error": "attempt_active_elsewhere"},
+        )
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post("/attempts/{attempt_id}/session/heartbeat", status_code=status.HTTP_204_NO_CONTENT)
+async def heartbeat_attempt_session(
+    attempt_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> Response:
+    """Renew the owner while the quiz workspace remains open."""
+    await _require_live_owned_attempt(db, attempt_id, current_user)
+    await _require_session_owner(attempt_id, current_user)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post("/attempts/{attempt_id}/session/takeover", status_code=status.HTTP_204_NO_CONTENT)
+async def takeover_attempt_session(
+    attempt_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> Response:
+    """Explicitly move ownership to this authentication session."""
+    await _require_live_owned_attempt(db, attempt_id, current_user)
+    try:
+        await session_guard.takeover(attempt_id, current_user.session_id)
+    except session_guard.QuizSessionGuardUnavailable as exc:
+        raise _session_guard_unavailable(exc) from exc
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post("/attempts/{attempt_id}/session/release", status_code=status.HTTP_204_NO_CONTENT)
+async def release_attempt_session(
+    attempt_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> Response:
+    """Release ownership without closing the resumable attempt."""
+    await _require_live_owned_attempt(db, attempt_id, current_user)
+    try:
+        released = await session_guard.release(attempt_id, current_user.session_id)
+    except session_guard.QuizSessionGuardUnavailable as exc:
+        raise _session_guard_unavailable(exc) from exc
+    if not released:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"error": "quiz_session_replaced"},
+        )
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.get("/attempts/{attempt_id}", response_model=QuizAttemptRead)
@@ -626,8 +762,7 @@ async def list_my_attempts(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> list[QuizAttemptRead]:
     """List the calling student's attempts on this quiz."""
-    attempts = await taking_service.get_attempt_history(db, quiz_id, current_user)
-    return attempts
+    return await taking_service.get_attempt_history(db, quiz_id, current_user)
 
 
 @router.get(

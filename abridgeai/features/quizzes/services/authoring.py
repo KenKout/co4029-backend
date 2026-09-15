@@ -490,6 +490,7 @@ async def create_quiz(
         shuffle_questions=data.get("shuffle_questions", False),
         shuffle_options=data.get("shuffle_options", False),
         show_hints=data.get("show_hints", True),
+        require_camera=data.get("require_camera", False),
         initial_ef=data.get("initial_ef"),
         min_ef_for_unlock=data.get("min_ef_for_unlock"),
         coverage_threshold=data.get("coverage_threshold"),

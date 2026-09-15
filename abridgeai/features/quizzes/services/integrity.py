@@ -28,7 +28,7 @@ _DEFAULTS = {
 }
 
 
-def integrity_policy_snapshot_from_quiz(quiz: Any) -> dict[str, int]:  # noqa: ANN401 -- ORM row
+def integrity_policy_snapshot_from_quiz(quiz: Any) -> dict[str, Any]:  # noqa: ANN401 -- ORM row
     """The integrity policy a NEW attempt is scored under.
 
     Frozen onto the attempt row at start, so a quiz edited — or its weights
@@ -58,6 +58,7 @@ def integrity_policy_snapshot_from_quiz(quiz: Any) -> dict[str, int]:  # noqa: A
             getattr(quiz, "integrity_score_threshold", _DEFAULTS["score_threshold"])
             or _DEFAULTS["score_threshold"]
         ),
+        "require_camera": bool(getattr(quiz, "require_camera", False)),
     }
 
 

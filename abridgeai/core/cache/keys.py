@@ -154,6 +154,12 @@ USER_SESSIONS_INDEX: Final = CacheKey(
     description="Reverse-index SET of session_ids owned by a user (cascade).",
 )
 
+QUIZ_ATTEMPT_SESSION: Final = CacheKey(
+    pattern="quiz_attempt_session:{attempt_id}",
+    ttl_seconds=90,
+    description="Ephemeral authentication-session owner of a live quiz attempt.",
+)
+
 
 __all__ = [
     "CARDS_DUE",
@@ -170,4 +176,5 @@ __all__ = [
     "SESSION_BY_REFRESH_HASH",
     "USER_SESSIONS_INDEX",
     "USER_STATUS",
+    "QUIZ_ATTEMPT_SESSION",
 ]

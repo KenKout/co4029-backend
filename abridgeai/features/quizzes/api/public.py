@@ -458,6 +458,7 @@ async def deep_clone_quiz(
         shuffle_questions=source.shuffle_questions,
         shuffle_options=source.shuffle_options,
         show_hints=source.show_hints,
+        require_camera=source.require_camera,
         initial_ef=source.initial_ef,
         min_ef_for_unlock=source.min_ef_for_unlock,
         coverage_threshold=source.coverage_threshold,

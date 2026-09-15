@@ -142,6 +142,7 @@ class QuizAuthoring(QuizPublic):
     integrity_weight_focus_lost: int = 1
     integrity_weight_fullscreen_exit: int = 2
     integrity_score_threshold: int = 3
+    require_camera: bool = False
     # Moodle-style headline-score policy (migration 0033). Patchable via
     # PATCH /teacher/quizzes/{id}; surfaced so the Settings tab can edit it
     # and the results dashboard can label the headline column.

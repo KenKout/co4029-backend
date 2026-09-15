@@ -370,6 +370,7 @@ class QuizPublic(_ORMModel):
     allow_retakes: bool = True
     cooldown_hours: int | None = None
     show_hints: bool = True
+    require_camera: bool = False
     # Scheduling window (migration 0032). NULL = no restriction.
     available_from: datetime | None = None
     available_until: datetime | None = None
