@@ -696,3 +696,175 @@ async def test_program_list_cards_carry_dean_and_draft_stats(
         archived = await services.archive_program(db, program_id=program.id, actor=manager)
         assert archived.status == "archived"
         await db.rollback()
+
+
+@pytest.mark.asyncio
+async def test_approved_path_drop_ends_one_path_and_consumes_a_switch(
+    engine: AsyncEngine, seeded_users: SeededUsers
+) -> None:
+    """A drop is a reviewed decision, not a self-service undo.
+
+    It rides the same queue as a change and spends the same budget, so a
+    student cannot drop-then-add their way around the dean.
+    """
+    faculty_id, path_a, path_b = await _seed_program_context(engine, seeded_users)
+    factory = async_sessionmaker(engine, expire_on_commit=False, autoflush=False)
+    manager = CurrentUser(seeded_users.manager_id, uuid.uuid4())
+    student = seeded_users.student_id
+    dean = CurrentUser(seeded_users.hod_id, uuid.uuid4())
+
+    async with factory() as db:
+        program = await services.create_program(
+            db,
+            ProgramCreate(
+                organization_id=seeded_users.organization_id,
+                faculty_id=faculty_id,
+                slug=f"drop-{uuid.uuid4().hex[:8]}",
+                name="Droppable Program",
+                max_career_paths_per_enrollment=2,
+                career_path_ids=[path_a, path_b],
+                default_career_path_id=path_a,
+            ),
+            manager,
+        )
+        await services.publish_program(db, program_id=program.id, actor=manager)
+        enrollment = (
+            await services.enroll_students(
+                db, program_id=program.id, student_ids=[student], actor=manager
+            )
+        )[0]
+        # Auto-enrolled onto the default, then the student adds the second.
+        added = await services.select_path(
+            db, enrollment_id=enrollment.id, career_path_id=path_b, student_id=student
+        )
+        assert added.selected_path_count == 2
+        drop_target = next(
+            attempt
+            for attempt in added.attempts
+            if attempt.career_path_id == path_b and attempt.status == "active"
+        )
+
+        request = await services.request_path_drop(
+            db,
+            enrollment_id=enrollment.id,
+            from_attempt_id=drop_target.id,
+            reason="I took on more than I can carry this semester",
+            student_id=student,
+        )
+        assert request.kind == "drop"
+        # A drop has no destination; the CHECK in migration 0122 is what keeps
+        # that from reading as a switch with a missing target.
+        assert request.target_career_path_id is None
+
+        decided = await services.decide_change_request(
+            db,
+            request_id=request.id,
+            approve=True,
+            decision_reason=None,
+            decision_note="Focus on the remaining path.",
+            actor=dean,
+        )
+        assert decided.status == "approved"
+        # No replacement attempt: this is what separates an approved drop from
+        # an approved change in the student's own history.
+        assert decided.new_attempt_id is None
+
+        refreshed = (await services.list_my_enrollments(db, student))[0]
+        assert refreshed.status == "active"
+        dropped = next(row for row in refreshed.attempts if row.id == drop_target.id)
+        assert dropped.status == "cancelled"
+        assert dropped.ended_at is not None
+        # Progress is kept, not erased — the same treatment a switch gets.
+        assert dropped.exit_snapshot is not None
+        remaining = [row for row in refreshed.attempts if row.status == "active"]
+        assert [row.career_path_id for row in remaining] == [path_a]
+        # Consumed, never refunded.
+        assert refreshed.approved_switch_count == 1
+        await db.rollback()
+
+
+@pytest.mark.asyncio
+async def test_student_must_keep_at_least_one_active_path(
+    engine: AsyncEngine, seeded_users: SeededUsers
+) -> None:
+    """Dropping the only path is leaving the program, which is a withdrawal.
+
+    Checked when the request is filed AND again at approval, because the
+    second path can end in between — an approved drop, a switch, or a
+    completion — and an active enrolment with no active path is a state
+    nothing else in the feature can produce or recover from.
+    """
+    faculty_id, path_a, path_b = await _seed_program_context(engine, seeded_users)
+    factory = async_sessionmaker(engine, expire_on_commit=False, autoflush=False)
+    manager = CurrentUser(seeded_users.manager_id, uuid.uuid4())
+    student = seeded_users.student_id
+    dean = CurrentUser(seeded_users.hod_id, uuid.uuid4())
+
+    async with factory() as db:
+        program = await services.create_program(
+            db,
+            ProgramCreate(
+                organization_id=seeded_users.organization_id,
+                faculty_id=faculty_id,
+                slug=f"lastpath-{uuid.uuid4().hex[:8]}",
+                name="Single Path Program",
+                max_career_paths_per_enrollment=2,
+                career_path_ids=[path_a, path_b],
+                default_career_path_id=path_a,
+            ),
+            manager,
+        )
+        await services.publish_program(db, program_id=program.id, actor=manager)
+        enrollment = (
+            await services.enroll_students(
+                db, program_id=program.id, student_ids=[student], actor=manager
+            )
+        )[0]
+        only_attempt = enrollment.attempts[-1]
+
+        # Filing is refused while it is the student's only active path.
+        with pytest.raises(ConflictError, match="at_least_one_path_must_remain"):
+            await services.request_path_drop(
+                db,
+                enrollment_id=enrollment.id,
+                from_attempt_id=only_attempt.id,
+                reason="I want out of this one",
+                student_id=student,
+            )
+
+        # With a second path added the request is legal...
+        added = await services.select_path(
+            db, enrollment_id=enrollment.id, career_path_id=path_b, student_id=student
+        )
+        second = next(
+            row
+            for row in added.attempts
+            if row.career_path_id == path_b and row.status == "active"
+        )
+        request = await services.request_path_drop(
+            db,
+            enrollment_id=enrollment.id,
+            from_attempt_id=second.id,
+            reason="Dropping the second path",
+            student_id=student,
+        )
+
+        # ...until the OTHER path goes away before the dean decides. The
+        # approval must re-check rather than trust the filing-time answer.
+        await db.execute(
+            text(
+                "UPDATE program_path_attempts SET status = 'cancelled', ended_at = NOW() "
+                "WHERE id = :attempt_id"
+            ),
+            {"attempt_id": only_attempt.id},
+        )
+        with pytest.raises(ConflictError, match="at_least_one_path_must_remain"):
+            await services.decide_change_request(
+                db,
+                request_id=request.id,
+                approve=True,
+                decision_reason=None,
+                decision_note=None,
+                actor=dean,
+            )
+        await db.rollback()

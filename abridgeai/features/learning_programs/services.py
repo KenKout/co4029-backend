@@ -95,10 +95,14 @@ async def _notify_owning_deans(
     program: LearningProgram,
     request_id: UUID,
     student_id: UUID,
-    target_path_id: UUID,
+    subject_path_id: UUID,
+    kind: str = "change",
     arq_pool: object | None = None,
 ) -> None:
-    """Fan out the "student filed a path change request" notification.
+    """Fan out the "student filed a path request" notification.
+
+    ``subject_path_id`` is the path the message is about: where the student
+    wants to go for a change, and the one they want to end for a drop.
 
     Pull-based badges on the program card exist, but a filed request is
     exactly the push moment: without it the dean only finds out by
@@ -111,7 +115,7 @@ async def _notify_owning_deans(
         faculty_id=program.faculty_id,
     )
     student_label = await _student_label(db, student_id)
-    target_path_name = await _target_path_name(db, target_path_id)
+    subject_path_name = await _target_path_name(db, subject_path_id)
     for dean_id in dean_ids:
         if dean_id == student_id:
             continue
@@ -122,7 +126,8 @@ async def _notify_owning_deans(
             program_id=program.id,
             program_name=program.name,
             student_label=student_label,
-            target_path_name=target_path_name,
+            target_path_name=subject_path_name,
+            kind=kind,
             arq_pool=arq_pool,
         )
 
@@ -1224,7 +1229,95 @@ async def request_path_change(
             program=program,
             request_id=request.id,
             student_id=student_id,
-            target_path_id=target_path_id,
+            subject_path_id=target_path_id,
+            arq_pool=arq_pool,
+        )
+
+    return PathChangeRequestRead.model_validate(request)
+
+
+async def _subject_path_name(db: AsyncSession, request: PathChangeRequest) -> str:
+    """The path a notification about this request should name.
+
+    A change is about where the student is going; a drop is about the path
+    they are ending, which is the only path it mentions at all.
+    """
+    if request.kind == "drop":
+        attempt = await queries.get_attempt(db, request.from_attempt_id)
+        if attempt is None:
+            return "the requested path"
+        return await _target_path_name(db, attempt.career_path_id)
+    return await _target_path_name(db, cast(UUID, request.target_career_path_id))
+
+
+async def request_path_drop(
+    db: AsyncSession,
+    *,
+    enrollment_id: UUID,
+    from_attempt_id: UUID,
+    reason: str,
+    student_id: UUID,
+    arq_pool: object | None = None,
+) -> PathChangeRequestRead:
+    """File a request to end one Career Path without taking another.
+
+    Same review queue, same one-open-request slot and same switch budget as a
+    change: an approved drop consumes a switch and is never refunded, so a
+    student cannot use drop-then-add to dodge the dean.
+
+    The rule this adds is that a student must always be sitting at least one
+    active path. Dropping the last one is leaving the program, which is
+    withdrawal — an operator action with its own record — not a path edit.
+    """
+    enrollment = await queries.get_enrollment(db, enrollment_id, lock=True)
+    if enrollment is None or enrollment.student_id != student_id:
+        raise NotFoundError("program_enrollment_not_found")
+    if enrollment.status != "active":
+        raise ConflictError("only_active_programs_can_drop_path")
+    active_attempts = await queries.list_active_attempts(db, enrollment.id, lock=True)
+    if not active_attempts:
+        raise ConflictError("active_path_attempt_not_found")
+    if len(active_attempts) < 2:
+        raise ProgramConflictError(
+            "at_least_one_path_must_remain",
+            "This is your only active career path, so it cannot be dropped. "
+            "Ask your program manager to withdraw you from the program instead.",
+            active_path_count=len(active_attempts),
+        )
+    attempt = next((row for row in active_attempts if row.id == from_attempt_id), None)
+    if attempt is None:
+        raise ConflictError("source_path_attempt_is_not_active")
+    if await queries.get_pending_request(db, enrollment.id) is not None:
+        raise ConflictError("program_already_has_a_pending_path_change")
+    version = await queries.get_version(db, enrollment.program_version_id)
+    if version is None:
+        raise NotFoundError("program_version_not_found")
+    if await queries.count_approved_switches(db, enrollment.id) >= version.max_path_switches:
+        raise ConflictError("path_switch_limit_reached")
+
+    request = PathChangeRequest(
+        program_enrollment_id=enrollment.id,
+        from_attempt_id=attempt.id,
+        kind="drop",
+        target_career_path_id=None,
+        target_career_path_version_id=None,
+        reason=reason,
+        status="pending",
+        created_by=student_id,
+        updated_by=student_id,
+    )
+    db.add(request)
+    await flush_or_conflict(db)
+
+    program = await queries.get_program(db, version.learning_program_id)
+    if program is not None:
+        await _notify_owning_deans(
+            db,
+            program=program,
+            request_id=request.id,
+            student_id=student_id,
+            subject_path_id=attempt.career_path_id,
+            kind="drop",
             arq_pool=arq_pool,
         )
 
@@ -1298,7 +1391,7 @@ async def decide_change_request(  # noqa: C901 - approval is one atomic invarian
     # terminal states are refused.
     if request.status not in PATH_CHANGE_OPEN_STATUSES:
         raise ConflictError("request_is_not_open")
-    target_path_name = await _target_path_name(db, request.target_career_path_id)
+    target_path_name = await _subject_path_name(db, request)
     if not approve:
         if decision_reason_code is None:
             raise ConflictError("rejection_reason_code_is_required")
@@ -1327,6 +1420,7 @@ async def decide_change_request(  # noqa: C901 - approval is one atomic invarian
             db,
             student_user_id=enrollment.student_id,
             request_id=request.id,
+            kind=request.kind,
             program_name=program.name,
             target_path_name=target_path_name,
             reason_code=decision_reason_code,
@@ -1344,6 +1438,19 @@ async def decide_change_request(  # noqa: C901 - approval is one atomic invarian
         or attempt.status != "active"
     ):
         raise ConflictError("active_path_changed_since_request")
+    if request.kind == "drop":
+        return await _approve_path_drop(
+            db,
+            request=request,
+            enrollment=enrollment,
+            attempt=attempt,
+            program_name=program.name,
+            dropped_path_name=target_path_name,
+            decision_reason=decision_reason,
+            decision_note=decision_note,
+            actor_id=actor.user_id,
+            arq_pool=arq_pool,
+        )
     selected_attempts = [
         row
         for row in await queries.list_attempts(db, enrollment.id)
@@ -1428,8 +1535,94 @@ async def decide_change_request(  # noqa: C901 - approval is one atomic invarian
         db,
         student_user_id=enrollment.student_id,
         request_id=request.id,
+        kind="change",
         program_name=program.name,
         target_path_name=target_path_name,
+        note=request.decision_note,
+        arq_pool=arq_pool,
+    )
+    return PathChangeRequestRead.model_validate(request)
+
+
+async def _approve_path_drop(
+    db: AsyncSession,
+    *,
+    request: PathChangeRequest,
+    enrollment: ProgramEnrollment,
+    attempt: ProgramPathAttempt,
+    program_name: str,
+    dropped_path_name: str,
+    decision_reason: str | None,
+    decision_note: str | None,
+    actor_id: UUID,
+    arq_pool: object | None,
+) -> PathChangeRequestRead:
+    """End one attempt, grant nothing in its place.
+
+    The "at least one active path" rule is re-checked HERE, not only when the
+    request was filed. Between filing and decision the student's other path
+    can have been switched out, completed, or dropped by an earlier approval,
+    and approving blindly would leave an active enrolment with no active path
+    — a state nothing else in the feature can produce or recover from.
+
+    No ``new_attempt_id`` is written: the request is terminal on its own, and
+    a NULL there is what distinguishes an approved drop from an approved
+    change in the history the student reads.
+    """
+    version = await queries.get_version(db, enrollment.program_version_id)
+    if version is None:
+        raise NotFoundError("program_version_not_found")
+    if await queries.count_approved_switches(db, enrollment.id) >= version.max_path_switches:
+        raise ConflictError("path_switch_limit_reached")
+
+    remaining = [
+        row
+        for row in await queries.list_active_attempts(db, enrollment.id, lock=True)
+        if row.id != attempt.id
+    ]
+    if not remaining:
+        raise ProgramConflictError(
+            "at_least_one_path_must_remain",
+            f"Approving this would leave {await _student_label(db, enrollment.student_id)} "
+            "with no active career path. Withdraw them from the program instead.",
+            active_path_count=1,
+        )
+
+    attempt.exit_snapshot = await queries.build_exit_snapshot(
+        db, student_id=enrollment.student_id, attempt=attempt
+    )
+    attempt.status = "cancelled"
+    attempt.ended_at = _now()
+    attempt.updated_by = actor_id
+    await queries.revoke_path_entitlements(db, attempt_id=attempt.id)
+    if not await queries.count_other_active_path_attempts(
+        db,
+        student_id=enrollment.student_id,
+        career_path_id=attempt.career_path_id,
+        excluding_attempt_id=attempt.id,
+    ):
+        await career_paths_api.release_program_path_access(
+            db,
+            student_id=enrollment.student_id,
+            career_path_id=attempt.career_path_id,
+            actor_id=actor_id,
+        )
+
+    request.status = "approved"
+    request.reviewed_by = actor_id
+    request.reviewed_at = _now()
+    request.decision_reason = decision_reason
+    request.decision_note = (decision_note or "").strip() or None
+    request.updated_by = actor_id
+    enrollment.updated_by = actor_id
+    await flush_or_conflict(db)
+    await notify.notify_path_change_approved(
+        db,
+        student_user_id=enrollment.student_id,
+        request_id=request.id,
+        kind="drop",
+        program_name=program_name,
+        target_path_name=dropped_path_name,
         note=request.decision_note,
         arq_pool=arq_pool,
     )
@@ -1481,8 +1674,9 @@ async def mark_change_request_in_progress(
         db,
         student_user_id=enrollment.student_id,
         request_id=request.id,
+        kind=request.kind,
         program_name=program.name,
-        target_path_name=await _target_path_name(db, request.target_career_path_id),
+        target_path_name=await _subject_path_name(db, request),
         arq_pool=arq_pool,
     )
     return PathChangeRequestRead.model_validate(request)
@@ -1502,6 +1696,7 @@ __all__ = [
     "mark_change_request_in_progress",
     "publish_program",
     "request_path_change",
+    "request_path_drop",
     "select_path",
     "update_program",
     "withdraw_student",

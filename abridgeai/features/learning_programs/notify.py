@@ -1,4 +1,4 @@
-"""Path-change review → student notifications (cross-feature).
+"""Path request review → student notifications (cross-feature).
 
 A Faculty Dean's moves on a path-change request are invisible to the student who
 filed it unless we say so. Three moments are worth a notification, and they map
@@ -10,7 +10,11 @@ one-to-one onto the request's non-terminal → terminal transitions:
 * **rejected** — with the structured reason (and the dean's own words when they
   picked ``other``), because "rejected" with no reason is what makes a student
   re-file the same request.
-* **approved** — the switch already happened when this fires.
+* **approved** — the switch or drop already happened when this fires.
+
+Both request kinds ride these same three moments; ``kind`` only changes the
+wording, because a student who asked to drop a path must not be told they
+"stay on their current path".
 
 All three go out under the ``path_change_review`` category so a student gets one
 preference toggle for "decisions about my path change" rather than per-event
@@ -67,9 +71,10 @@ async def notify_dean_path_change_requested(
     program_name: str,
     student_label: str,
     target_path_name: str,
+    kind: str = "change",
     arq_pool: object | None = None,
 ) -> None:
-    """Tell every owning Faculty Dean a student filed a path change request."""
+    """Tell every owning Faculty Dean a student filed a path request."""
     try:
         locale = await get_user_locale(db, dean_user_id)
         await notifications_api.send_notification(
@@ -77,12 +82,13 @@ async def notify_dean_path_change_requested(
             recipient_user_id=dean_user_id,
             notification_type=_CATEGORY,
             title=notifications_api.path_change_requested_title(
-                student_label=student_label, locale=locale
+                student_label=student_label, kind=kind, locale=locale
             ),
             body=notifications_api.path_change_requested_body(
                 student_label=student_label,
                 target_path_name=target_path_name,
                 program_name=program_name,
+                kind=kind,
                 locale=locale,
             ),
             entity_type="path_change_request",
@@ -105,6 +111,7 @@ async def notify_path_change_in_progress(
     request_id: UUID,
     program_name: str,
     target_path_name: str,
+    kind: str = "change",
     note: str | None = None,
     arq_pool: object | None = None,
 ) -> None:
@@ -119,7 +126,7 @@ async def notify_path_change_in_progress(
                 program_name=program_name, locale=locale
             ),
             body=notifications_api.path_change_in_progress_body(
-                target_path_name=target_path_name, locale=locale
+                target_path_name=target_path_name, kind=kind, locale=locale
             ),
             entity_type="path_change_request",
             entity_id=request_id,
@@ -144,6 +151,7 @@ async def notify_path_change_rejected(
     reason_code: str,
     reason_detail: str | None,
     note: str | None,
+    kind: str = "change",
     arq_pool: object | None = None,
 ) -> None:
     """Tell the student their request was rejected, and why."""
@@ -161,6 +169,7 @@ async def notify_path_change_rejected(
                 reason_code=reason_code,
                 reason_detail=reason_detail,
                 note=note,
+                kind=kind,
                 locale=locale,
             ),
             entity_type="path_change_request",
@@ -183,10 +192,11 @@ async def notify_path_change_approved(
     request_id: UUID,
     program_name: str,
     target_path_name: str,
+    kind: str = "change",
     note: str | None = None,
     arq_pool: object | None = None,
 ) -> None:
-    """Tell the student the switch was approved and has taken effect."""
+    """Tell the student the decision was approved and has taken effect."""
     try:
         locale = await get_user_locale(db, student_user_id)
         await notifications_api.send_notification(
@@ -197,7 +207,7 @@ async def notify_path_change_approved(
                 program_name=program_name, locale=locale
             ),
             body=notifications_api.path_change_approved_body(
-                target_path_name=target_path_name, note=note, locale=locale
+                target_path_name=target_path_name, note=note, kind=kind, locale=locale
             ),
             entity_type="path_change_request",
             entity_id=request_id,

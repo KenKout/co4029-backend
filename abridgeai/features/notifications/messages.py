@@ -359,11 +359,22 @@ def discussion_comment_body(
     )
 
 
-def path_change_requested_title(*, student_label: str, locale: str | None) -> str:
-    """Dean-facing title: a student filed a path change request."""
+def path_change_requested_title(
+    *, student_label: str, kind: str = "change", locale: str | None
+) -> str:
+    """Dean-facing title: a student filed a path request.
+
+    ``kind`` is ``change`` or ``drop``. The two are different asks and the
+    dean triages them differently, so the title says which it is rather than
+    making them open the request to find out.
+    """
     lang = _norm(locale)
     if lang == "vi":
+        if kind == "drop":
+            return f"Đề nghị bỏ lộ trình từ {student_label}"[:255]
         return f"Đề nghị đổi lộ trình từ {student_label}"[:255]
+    if kind == "drop":
+        return f"Path drop request from {student_label}"[:255]
     return f"Path change request from {student_label}"[:255]
 
 
@@ -372,14 +383,29 @@ def path_change_requested_body(
     student_label: str,
     target_path_name: str,
     program_name: str,
+    kind: str = "change",
     locale: str | None,
 ) -> str:
-    """Dean-facing body: who wants to move where, and where to review it."""
+    """Dean-facing body: what the student is asking, and where to review it.
+
+    For a drop, ``target_path_name`` is the path being ended — a drop has no
+    destination.
+    """
     lang = _norm(locale)
     if lang == "vi":
+        if kind == "drop":
+            return (
+                f'{student_label} muốn bỏ lộ trình "{target_path_name}" '
+                f"trong chương trình {program_name}. Mở đề nghị để xem xét."
+            )
         return (
             f'{student_label} muốn chuyển sang lộ trình "{target_path_name}" '
-            f'trong chương trình {program_name}. Mở đề nghị để xem xét.'
+            f"trong chương trình {program_name}. Mở đề nghị để xem xét."
+        )
+    if kind == "drop":
+        return (
+            f'{student_label} wants to drop "{target_path_name}" in '
+            f"{program_name}. Open the request to review it."
         )
     return (
         f'{student_label} wants to switch to "{target_path_name}" in '
@@ -391,11 +417,13 @@ def path_change_in_progress_title(*, program_name: str, locale: str | None) -> s
     """Title: the Faculty Dean has picked the request up (no decision yet)."""
     lang = _norm(locale)
     if lang == "vi":
-        return f"Đề nghị đổi lộ trình đang được xem xét: {program_name}"[:255]
-    return f"Path change request under review: {program_name}"[:255]
+        return f"Đề nghị lộ trình đang được xem xét: {program_name}"[:255]
+    return f"Path request under review: {program_name}"[:255]
 
 
-def path_change_in_progress_body(*, target_path_name: str, locale: str | None) -> str:
+def path_change_in_progress_body(
+    *, target_path_name: str, kind: str = "change", locale: str | None
+) -> str:
     """Body: says explicitly that nothing has changed yet.
 
     The whole value of this signal is removing the "has anyone even looked at
@@ -403,13 +431,21 @@ def path_change_in_progress_body(*, target_path_name: str, locale: str | None) -
     """
     lang = _norm(locale)
     if lang == "vi":
+        ask = (
+            f'bỏ lộ trình "{target_path_name}"'
+            if kind == "drop"
+            else f'chuyển sang "{target_path_name}"'
+        )
         return (
-            f'Trưởng khoa đã nhận đề nghị chuyển sang "{target_path_name}" và đang '
+            f"Trưởng khoa đã nhận đề nghị {ask} và đang "
             "kiểm tra dữ liệu học tập của bạn. Lộ trình hiện tại chưa thay đổi; "
             "bạn sẽ được thông báo khi có quyết định."
         )
+    ask = (
+        f'drop "{target_path_name}"' if kind == "drop" else f'switch to "{target_path_name}"'
+    )
     return (
-        f'Your Faculty Dean has opened your request to switch to "{target_path_name}" '
+        f"Your Faculty Dean has opened your request to {ask} "
         "and is checking your record. Nothing has changed yet — you will be "
         "notified when a decision is made."
     )
@@ -419,8 +455,8 @@ def path_change_rejected_title(*, program_name: str, locale: str | None) -> str:
     """Title: the request was rejected."""
     lang = _norm(locale)
     if lang == "vi":
-        return f"Đề nghị đổi lộ trình bị từ chối: {program_name}"[:255]
-    return f"Path change request rejected: {program_name}"[:255]
+        return f"Đề nghị lộ trình bị từ chối: {program_name}"[:255]
+    return f"Path request rejected: {program_name}"[:255]
 
 
 def path_change_rejected_body(
@@ -429,6 +465,7 @@ def path_change_rejected_body(
     reason_code: str,
     reason_detail: str | None,
     note: str | None,
+    kind: str = "change",
     locale: str | None,
 ) -> str:
     """Body: the reason, then what it means for the student.
@@ -442,7 +479,12 @@ def path_change_rejected_body(
     dean_note = (note or "").strip()
     parts: list[str] = []
     if lang == "vi":
-        parts.append(f'Đề nghị chuyển sang "{target_path_name}" đã bị từ chối.')
+        opening = (
+            f'Đề nghị bỏ lộ trình "{target_path_name}" đã bị từ chối.'
+            if kind == "drop"
+            else f'Đề nghị chuyển sang "{target_path_name}" đã bị từ chối.'
+        )
+        parts.append(opening)
         if canned:
             parts.append(f"Lý do: {canned}")
         elif detail:
@@ -453,41 +495,70 @@ def path_change_rejected_body(
             "Bạn vẫn tiếp tục lộ trình hiện tại và quyền đổi lộ trình chưa bị trừ."
         )
         return " ".join(parts)
-    parts.append(f'Your request to switch to "{target_path_name}" was rejected.')
+    parts.append(
+        f'Your request to drop "{target_path_name}" was rejected.'
+        if kind == "drop"
+        else f'Your request to switch to "{target_path_name}" was rejected.'
+    )
     if canned:
         parts.append(f"Reason: {canned}")
     elif detail:
         parts.append(f"Reason: {detail}")
     if dean_note:
         parts.append(f"Dean's note: {dean_note}")
+    # A rejection costs no switch budget either way — that is the reassurance
+    # the student needs most, and it is true of both kinds.
     parts.append(
-        "You stay on your current path, and this does not use up a path change."
+        "You stay on this path, and this does not use up a path change."
+        if kind == "drop"
+        else "You stay on your current path, and this does not use up a path change."
     )
     return " ".join(parts)
 
 
 def path_change_approved_title(*, program_name: str, locale: str | None) -> str:
-    """Title: the request was approved and the switch has happened."""
+    """Title: the request was approved and has taken effect."""
     lang = _norm(locale)
     if lang == "vi":
-        return f"Đề nghị đổi lộ trình được chấp thuận: {program_name}"[:255]
-    return f"Path change approved: {program_name}"[:255]
+        return f"Đề nghị lộ trình được chấp thuận: {program_name}"[:255]
+    return f"Path request approved: {program_name}"[:255]
 
 
 def path_change_approved_body(
-    *, target_path_name: str, note: str | None = None, locale: str | None
+    *, target_path_name: str, note: str | None = None, kind: str = "change", locale: str | None
 ) -> str:
+    """Body: what just happened to the student's paths.
+
+    Both kinds say progress was snapshotted, because it was — an approved
+    drop keeps the record and the completed courses exactly as a switch does.
+    The drop wording also states that the switch allowance was spent, since
+    an approved drop consumes one and is never refunded.
+    """
     lang = _norm(locale)
     if lang == "vi":
-        body = (
-            f'Bạn đã được chuyển sang lộ trình "{target_path_name}". Tiến độ trên lộ '
-            "trình cũ đã được lưu lại; các khóa học đã hoàn thành vẫn được tính."
-        )
+        if kind == "drop":
+            body = (
+                f'Lộ trình "{target_path_name}" đã được gỡ khỏi chương trình của bạn. '
+                "Tiến độ đã được lưu lại và các khóa học đã hoàn thành vẫn được tính. "
+                "Lần đổi lộ trình này đã được tính vào hạn mức của bạn."
+            )
+        else:
+            body = (
+                f'Bạn đã được chuyển sang lộ trình "{target_path_name}". Tiến độ trên lộ '
+                "trình cũ đã được lưu lại; các khóa học đã hoàn thành vẫn được tính."
+            )
         return f"{body} Ghi chú của Trưởng khoa: {note}" if note else body
-    body = (
-        f'You have been moved to "{target_path_name}". Your progress on the previous '
-        "path was snapshotted, and completed courses still count."
-    )
+    if kind == "drop":
+        body = (
+            f'"{target_path_name}" has been removed from your program. Your progress '
+            "was snapshotted and completed courses still count. This used one of "
+            "your path changes."
+        )
+    else:
+        body = (
+            f'You have been moved to "{target_path_name}". Your progress on the previous '
+            "path was snapshotted, and completed courses still count."
+        )
     return f"{body} Dean's note: {note}" if note else body
 
 

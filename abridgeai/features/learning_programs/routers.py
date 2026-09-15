@@ -20,6 +20,7 @@ from abridgeai.features.learning_programs.schemas import (
     ChangePathRequestCreate,
     ChangeRequestDecision,
     ChangeRequestRejection,
+    DropPathRequestCreate,
     PathChangeRequestRead,
     ProgramAuthoringOptions,
     ProgramCreate,
@@ -458,6 +459,40 @@ async def request_path_change(
             db,
             enrollment_id=enrollment_id,
             target_path_id=payload.target_career_path_id,
+            from_attempt_id=payload.from_attempt_id,
+            reason=payload.reason,
+            student_id=actor.user_id,
+            arq_pool=arq_pool,
+        )
+        await db.commit()
+        return result
+    except (NotFoundError, ForbiddenError, ConflictError) as exc:
+        raise _http_error(exc) from exc
+
+
+@learner_router.post(
+    "/{enrollment_id}/path-drop-requests",
+    response_model=PathChangeRequestRead,
+    status_code=status.HTTP_201_CREATED,
+)
+async def request_path_drop(
+    enrollment_id: UUID,
+    payload: DropPathRequestCreate,
+    actor: Annotated[CurrentUser, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    arq_pool: Annotated[object | None, Depends(get_arq_pool)] = None,
+) -> PathChangeRequestRead:
+    """Ask a Faculty Dean to end one Career Path without taking another.
+
+    Shares the review queue, the one-open-request slot and the switch budget
+    with a path change, so the dean's approve/reject/in-progress endpoints
+    serve both kinds. A student must keep at least one active path, so the
+    last one cannot be dropped — that is a withdrawal.
+    """
+    try:
+        result = await services.request_path_drop(
+            db,
+            enrollment_id=enrollment_id,
             from_attempt_id=payload.from_attempt_id,
             reason=payload.reason,
             student_id=actor.user_id,
