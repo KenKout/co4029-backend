@@ -7,6 +7,7 @@ back with ``routers.authoring`` which imports them from here.
 
 from __future__ import annotations
 
+import logging
 from typing import Annotated, Any
 from uuid import UUID
 
@@ -31,9 +32,12 @@ from abridgeai.features.interviews.schemas import (
     InterviewTranscriptRead,
     InterviewTranscriptTurn,
     SecuritySessionSummary,
+    TeacherInterviewRecordingRead,
 )
 
 router = APIRouter(prefix="/teacher", tags=["interviews-authoring"])
+
+logger = logging.getLogger(__name__)
 
 _REQUIRE_CONFIG = require_interview_authoring_access()
 _REQUIRE_SESSION_AUTHORING = require_session_authoring_access()
@@ -477,6 +481,46 @@ async def update_session_gap_report_notes(
     return await get_session_gap_report_authoring(
         session_id=session_id, current_user=current_user, db=db
     )
+
+
+@router.get(
+    "/interview-sessions/{session_id}/recording",
+    response_model=TeacherInterviewRecordingRead,
+)
+async def get_session_recording(
+    session_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_SESSION_AUTHORING)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> TeacherInterviewRecordingRead:
+    """Signed, short-lived playback URL for the session's audio recording.
+
+    Teacher-only (course-scoped ``require_session_authoring_access`` — the
+    same perimeter as the transcript/gap-report endpoints). The response is
+    availability-state only: bucket/key, storage object id, Egress id and
+    provider errors never leave the server. Every successful URL mint is
+    audited via the structured log (the HTTP middleware already persists the
+    request row; the ``interview.recording.url_mint`` event carries the ids).
+    """
+    del current_user
+    from abridgeai.features.interviews.services import recording as recording_service
+
+    payload = await recording_service.get_playback_url(db, session_id=session_id) or {}
+    state = payload.get("state", "not_recorded")
+    recording_read = TeacherInterviewRecordingRead(
+        session_id=session_id,
+        state=state,  # type: ignore[arg-type]  # service emits the same vocabulary
+        media_kind="audio" if state == "available" else None,
+        stream_url=payload.get("stream_url"),
+        expires_at=payload.get("expires_at"),
+        duration_seconds=payload.get("duration_seconds"),
+        recorded_at=payload.get("recorded_at"),
+    )
+    if state == "available":
+        logger.info(
+            "interview.recording.url_mint",
+            extra={"session_id": str(session_id)},
+        )
+    return recording_read
 
 
 __all__ = [

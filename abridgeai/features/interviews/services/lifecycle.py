@@ -88,6 +88,23 @@ async def sweep_expired_interview_sessions(
             continue
         finalised += 1
 
+        # Terminal path #3 (recording): the sweep closed this session, so its
+        # recording must stop too. Best-effort and COMMITTED SEPARATELY — the
+        # finalisation above already committed inside the query helper, and a
+        # swallowed stop failure must never roll it back (see the two-writer
+        # commit-ordering lesson: a best-effort side effect never shares the
+        # transaction it reacts to).
+        try:
+            from abridgeai.features.interviews.services import (  # noqa: PLC0415
+                recording as recording_service,
+            )
+
+            await recording_service.stop_recording_for_session(db, session_id=session.id)
+            await db.commit()
+        except Exception:  # noqa: BLE001 -- advisory side effect, never fatal
+            await db.rollback()
+            logger.warning("recording stop failed during sweep (session=%s)", session.id)
+
         if terminal_status == "timed_out" and arq_pool is not None:
             await arq_pool.enqueue_job(  # type: ignore[attr-defined]
                 _EVALUATE_INTERVIEW_SESSION_TASK,

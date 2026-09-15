@@ -15,6 +15,10 @@ from abridgeai.features.interviews.queries.published import (
     list_published_outcomes_for_config,
     list_published_questions_for_config,
 )
+from abridgeai.features.interviews.queries.recordings import (
+    get_recording_by_egress_id,
+    get_recording_for_session,
+)
 from abridgeai.features.interviews.queries.sessions import (
     get_active_session,
     get_gap_report_for_session,
@@ -37,6 +41,8 @@ __all__ = [
     "get_interview_with_full_config",
     "get_outcome_evaluations",
     "get_published_interview",
+    "get_recording_by_egress_id",
+    "get_recording_for_session",
     "get_session",
     "get_session_attempt_number",
     "get_session_with_responses",

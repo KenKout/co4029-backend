@@ -34,6 +34,7 @@ from abridgeai.features.interviews.orchestrator.interviewer_identity import (
 )
 from abridgeai.features.interviews.realtime import observability as obs
 from abridgeai.features.interviews.schemas.session import InterviewSubmitAnswerResponse
+from abridgeai.features.interviews.services import recording as recording_service
 from abridgeai.features.interviews.services.ceremony import (
     ensure_ceremony_message,
     onboarding_ceremony_kind,
@@ -567,6 +568,14 @@ async def finalize_session(
             reason=reason,  # type: ignore[arg-type]  # FinishReason is a str Literal
             language=language,
         )
+        # Terminal path #2: native-agent finalization bypasses the HTTP
+        # /finish route, so it must stop Egress explicitly as well.
+        try:
+            await recording_service.stop_recording_for_session(db, session_id=session_id)
+            await db.commit()
+        except Exception:  # noqa: BLE001 -- recording is advisory to interview completion
+            await db.rollback()
+            logger.warning("native finalize: recording stop failed (session=%s)", session_id)
         closing_message = await ensure_ceremony_message(
             db,
             session=session,

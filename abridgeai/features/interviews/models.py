@@ -160,11 +160,6 @@ Forward references
   side-effect-import the owning models module before flushing
   cross-feature FKs (T3.5/T5.1 recipe).
 
-No alembic migration generated
-------------------------------
-Baseline 0001 already creates all 9 tables verbatim. T6.1 ports ORM
-classes only; no DDL drift is introduced. ``alembic upgrade head``
-remains a no-op for this task.
 """
 
 from __future__ import annotations
@@ -177,6 +172,7 @@ from pgvector.sqlalchemy import (
     HALFVEC,  # type: ignore[import-not-found,import-untyped,unused-ignore]
 )
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     CheckConstraint,
     DateTime,
@@ -529,6 +525,13 @@ class InterviewSession(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         PGUUID(as_uuid=True),
         ForeignKey("storage_objects.id", ondelete="SET NULL"),
     )
+    # Candidate's consent decision is durable even when recording is declined;
+    # the recording row stores a second copy of accepted provenance because it
+    # is the row reconciliation/retention operates on.
+    recording_consent_status: Mapped[str | None] = mapped_column(String(20))
+    recording_consent_policy_version: Mapped[str | None] = mapped_column(String(32))
+    recording_consented_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    recording_consent_scope: Mapped[str | None] = mapped_column(String(20))
     pass_verdict: Mapped[bool | None] = mapped_column(Boolean)
     # Exclusive-owner claim for the async evaluation (migration 0107). Written
     # only by the atomic claim/release helpers in ``queries.sessions``; see
@@ -830,6 +833,106 @@ class InterviewSecurityEvent(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
     session: Mapped[InterviewSession] = relationship(back_populates="security_events")
 
 
+class InterviewRecording(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    """Durable lifecycle record for one session's LiveKit audio Egress.
+
+    One row per :class:`InterviewSession` (UNIQUE ``session_id``). This — NOT
+    ``InterviewSession.internal_summary_json`` — is the queryable recording
+    state: reconciliation sweeps need indexed status/attempt columns, and a
+    JSONB blob has two-writer hazards (see the evaluation-recovery history).
+
+    Status lifecycle (``ck_interview_recordings_status``):
+
+        pending ──▶ active ──▶ complete
+                      │──▶ failed        (Egress errored / retries exhausted)
+                      └──▶ cancelled     (stop before any output)
+        complete ──▶ expired               (30-day retention tombstone applied)
+
+    Consent provenance lives here too: a row is only CLAIMED (and Egress only
+    started) after the candidate's affirmative consent, so a recording without
+    ``consented_at`` + ``consent_policy_version`` cannot exist. The interview
+    itself never depends on this row — provider/flag/consent failures leave a
+    dead recording row, not a broken interview.
+
+    ``deleted_at`` is the retention tombstone: set when the S3 object has been
+    deleted past the retention deadline. The ``storage_object_id`` FK and the
+    session playback pointer are cleared WITH it (same transaction), so an
+    expired recording can never be replayed; the row itself is kept as the
+    audit record that a recording existed and when it was destroyed.
+    """
+
+    __tablename__ = "interview_recordings"
+    __table_args__ = (
+        UniqueConstraint("session_id", name="uq_interview_recordings_session"),
+        UniqueConstraint("egress_id", name="uq_interview_recordings_egress"),
+        CheckConstraint(
+            "status IN ('pending', 'active', 'complete', 'failed', 'cancelled', 'expired')",
+            name="ck_interview_recordings_status",
+        ),
+        CheckConstraint(
+            "consent_scope IN ('audio_only')",
+            name="ck_interview_recordings_consent_scope",
+        ),
+        # A live (non-expired) recording with output must point at exactly one
+        # storage object; the tombstone must have cleared it. Both halves of
+        # the retention invariant, enforced where the retention sweeper can
+        # never half-apply them.
+        CheckConstraint(
+            "(status = 'expired' AND deleted_at IS NOT NULL AND storage_object_id IS NULL) "
+            "OR (status <> 'expired' AND deleted_at IS NULL)",
+            name="ck_interview_recordings_tombstone",
+        ),
+    )
+
+    session_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("interview_sessions.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    # LiveKit Egress job id. Nullable only during the atomic claim-to-start
+    # window; once the provider accepts a job it is non-null and UNIQUE.
+    egress_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    room_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(20), nullable=False, server_default=text("'pending'")
+    )
+    # Final playback source. SET NULL on retention expiry (with the tombstone).
+    storage_object_id: Mapped[uuid.UUID | None] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("storage_objects.id", ondelete="SET NULL"),
+    )
+    # Egress destination as requested (``interviews/recordings/{session}/{rec}/audio.mp3``).
+    # The canonical storage_objects row is derived from the Egress result, not
+    # from this — LiveKit may rewrite the path (manifest siblings etc.), so
+    # this column is provenance, not truth.
+    destination_file: Mapped[str] = mapped_column(
+        String(500), nullable=False, server_default=text("''")
+    )
+    mime_type: Mapped[str | None] = mapped_column(String(100))
+    size_bytes: Mapped[int | None] = mapped_column(BigInteger)
+    duration_seconds: Mapped[float | None] = mapped_column(Float)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # ── Consent provenance (never start without these) ────────────────────────
+    consent_policy_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    consented_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    consent_scope: Mapped[str] = mapped_column(
+        String(20), nullable=False, server_default=text("'audio_only'")
+    )
+    # Retention: deadline stamped when the output is attached (completion +
+    # settings window). NULL while the recording is still pending/active.
+    retention_delete_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # ── Bounded reconciliation state ─────────────────────────────────────────
+    last_reconcile_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    reconcile_attempts: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0")
+    )
+    last_error: Mapped[str | None] = mapped_column(Text)
+    # Retention tombstone timestamp (audit: when the audio was destroyed).
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    session: Mapped[InterviewSession] = relationship(foreign_keys=[session_id])
+
+
 class InterviewRuntimeState(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     """Persistent adaptive-interviewer runtime state (Phase 1).
 
@@ -939,6 +1042,7 @@ __all__ = [
     "InterviewOutcomeEvaluation",
     "InterviewQuestion",
     "InterviewQuestionBankItem",
+    "InterviewRecording",
     "InterviewRuntimeState",
     "InterviewSecurityEvent",
     "InterviewSession",

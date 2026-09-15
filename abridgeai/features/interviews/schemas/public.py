@@ -184,6 +184,10 @@ class InterviewForTakingPublic(_ORMModel):
     config: InterviewConfigPublic
     first_question: InterviewQuestionPublic | None = None
     outcome_count: int = 0
+    # Global feature gate/policy disclosure for the learner's start dialog.
+    # These are additive and do not expose provider credentials or storage data.
+    recording_consent_required: bool = False
+    recording_policy_version: str | None = None
 
 
 class InterviewProgressRead(BaseModel):

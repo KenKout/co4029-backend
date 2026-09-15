@@ -296,6 +296,37 @@ class Settings(BaseSettings):
     livekit_api_secret: SecretStr | None = None
     livekit_agent_name: str = "interview-agent"
     interview_voice_token_ttl_seconds: int = Field(default=900, ge=60, le=24 * 60 * 60)
+
+    # ── Interview audio recording (LiveKit Egress) ────────────────────────────
+    # OFF by default: an existing deployment records nothing until operators
+    # provision an Egress-capable LiveKit project, a private recording bucket
+    # (write-only for Egress; head/get/delete for API/ARQ) and flip this flag.
+    # Recording is also gated per-session on the candidate's AFFIRMATIVE
+    # consent (``interview-recording-consent`` DTO at onboarding) — the flag
+    # alone never starts a recording.
+    interview_recording_enabled: bool = False
+    # Version of the recording-policy text the consent timestamp refers to.
+    # Bump it when the consent wording changes: stored consent with an older
+    # version is treated as not-yet-given for NEW sessions.
+    interview_recording_policy_version: str = "2026-09-15"
+    # Audio-only Egress output container. MP3 keeps browser <audio>/Vidstack
+    # playback identical across browsers; OGG is the alternative.
+    interview_recording_format: Literal["mp3", "ogg"] = "mp3"
+    # Private S3 prefix Egress writes into (under ``s3_bucket_name``). The
+    # bucket lifecycle rule should match this window; the sweeper is the
+    # application-side enforcement of the same deadline.
+    interview_recording_s3_prefix: str = "interviews/recordings"
+    interview_recording_retention_days: int = Field(default=30, ge=1, le=365)
+    # Webhook signature validation: LiveKit signs each delivery with the API
+    # secret; the leeway absorbs clock skew between LiveKit and this host.
+    livekit_webhook_enabled: bool = False
+    livekit_webhook_max_skew_seconds: int = Field(default=300, ge=0, le=3600)
+    # Reconciliation: how often (minutes) the ARQ sweep may re-inspect an
+    # unresolved Egress job, and how many attempts before it marks the
+    # recording permanently failed. Attempts are charged per sweep pass over
+    # an unresolved row, so attempts × cadence ≈ the total repair window.
+    interview_recording_reconcile_max_attempts: int = Field(default=12, ge=1, le=100)
+
     # Machine-CPU fraction above which the agent worker reports itself
     # unavailable, and LiveKit stops dispatching interviews to it. Every such
     # window is a candidate meeting an interview with nobody in it.

@@ -550,6 +550,35 @@ async def terminalize_in_progress_session(
     return result.scalar_one_or_none() is not None
 
 
+async def set_recording_pointer_if_absent(
+    db: AsyncSession,
+    *,
+    session_id: UUID,
+    storage_object_id: UUID,
+) -> bool:
+    """Attach the recording playback pointer — never overwrite a different one.
+
+    ``InterviewSession.recording_object_id`` is the final playback pointer the
+    replay feature reads. A completed recording attaches it exactly once, but
+    a repair path can race a manual/legacy pointer: the conditional WHERE
+    means this only writes over ``NULL`` (or the identical value), so the
+    "no pointer overwrite" invariant holds no matter which caller wins.
+    """
+    from sqlalchemy import update  # noqa: PLC0415
+
+    result = await db.execute(
+        update(InterviewSession)
+        .where(
+            InterviewSession.id == session_id,
+            InterviewSession.recording_object_id.is_(None)
+            | (InterviewSession.recording_object_id == storage_object_id),
+        )
+        .values(recording_object_id=storage_object_id)
+        .returning(InterviewSession.id)
+    )
+    return result.scalar_one_or_none() is not None
+
+
 async def finalize_expired_in_progress_session(
     db: AsyncSession,
     session_id: UUID,

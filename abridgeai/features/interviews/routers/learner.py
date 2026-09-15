@@ -32,6 +32,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from abridgeai.core.config import get_settings
 from abridgeai.core.db import get_db
 from abridgeai.core.security import CurrentUser, get_current_user
 from abridgeai.features.courses.api.public import can_view_course_content
@@ -211,6 +212,7 @@ async def get_interview_for_taking(
             )
         )
     ).scalar_one()
+    settings = get_settings()
     return InterviewForTakingPublic(
         config=InterviewConfigPublic.model_validate(config),
         first_question=(
@@ -219,6 +221,12 @@ async def get_interview_for_taking(
             else None
         ),
         outcome_count=int(outcome_count),
+        recording_consent_required=settings.interview_recording_enabled,
+        recording_policy_version=(
+            settings.interview_recording_policy_version
+            if settings.interview_recording_enabled
+            else None
+        ),
     )
 
 

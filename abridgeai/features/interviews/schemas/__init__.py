@@ -91,6 +91,8 @@ from abridgeai.features.interviews.schemas.session import (
     InterviewOnboardingRespondRequest,
     InterviewOnboardingRespondResponse,
     InterviewOnboardingStageLiteral,
+    InterviewRecordingConsentRequest,
+    InterviewRecordingConsentResponse,
     InterviewRubricScore,
     InterviewSessionFinishRequest,
     InterviewSessionFinishResponse,
@@ -100,7 +102,9 @@ from abridgeai.features.interviews.schemas.session import (
     InterviewSessionStartResponse,
     InterviewSubmitAnswerRequest,
     InterviewSubmitAnswerResponse,
+    RecordingAvailabilityLiteral,
     SessionStatusLiteral,
+    TeacherInterviewRecordingRead,
 )
 
 __all__ = [
@@ -117,6 +121,8 @@ __all__ = [
     "InterviewOnboardingRespondRequest",
     "InterviewOnboardingRespondResponse",
     "InterviewOnboardingStageLiteral",
+    "InterviewRecordingConsentRequest",
+    "InterviewRecordingConsentResponse",
     "InterviewConfigAuthoring",
     "InterviewConfigCreate",
     "InterviewConfigPublic",
@@ -169,6 +175,8 @@ __all__ = [
     "ReviewStatusLiteral",
     "SecurityResponsePolicyLiteral",
     "SecuritySessionSummary",
+    "RecordingAvailabilityLiteral",
     "SessionStatusLiteral",
+    "TeacherInterviewRecordingRead",
     "StudyPlanItem",
 ]

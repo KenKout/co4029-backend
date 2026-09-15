@@ -151,6 +151,9 @@ from abridgeai.features.interviews.routers import (
 from abridgeai.features.interviews.routers import (
     learner_sessions_router as interviews_learner_sessions_router,
 )
+from abridgeai.features.interviews.routers import (
+    livekit_webhook_router as interviews_livekit_webhook_router,
+)
 from abridgeai.features.interviews.routers.authoring import (
     get_arq_pool as interviews_authoring_get_arq_pool,
 )
@@ -338,6 +341,9 @@ def create_app() -> FastAPI:
     app.include_router(interviews_learner_sessions_router, prefix=API_V1_PREFIX)
     app.include_router(interviews_authoring_router, prefix=API_V1_PREFIX)
     app.include_router(interviews_authoring_sessions_router, prefix=API_V1_PREFIX)
+    # LiveKit signs its own server-to-server delivery; this route is deliberately
+    # not under /api/v1 and does not use user authentication.
+    app.include_router(interviews_livekit_webhook_router)
 
     # Phase 7 -- enrollments (T7.1)
     app.include_router(me_enrollments_router, prefix=API_V1_PREFIX)

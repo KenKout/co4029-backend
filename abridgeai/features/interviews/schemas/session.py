@@ -66,6 +66,16 @@ EvaluationStateLiteral = Literal[
 ]
 InterviewFinishReasonLiteral = Literal["natural", "ended_early", "timed_out"]
 InterviewLanguageLiteral = Literal["en", "vi"]
+# Recording availability surfaced to the teacher gap-report workspace. The
+# provider identities (bucket/key, storage object id, egress id, error text)
+# NEVER appear on the DTO — only the state and the signed playback URL.
+RecordingAvailabilityLiteral = Literal[
+    "not_recorded",
+    "processing",
+    "available",
+    "failed",
+    "expired",
+]
 InterviewTurnActionLiteral = Literal[
     "answer",
     "repeat",
@@ -140,6 +150,11 @@ class InterviewSessionStartRequest(BaseModel):
     # can be mid-flight.
     input_mode: InputModeLiteral | None = None
     idempotency_key: UUID | None = None
+    # Explicit consent is submitted with session creation, before the first
+    # realtime token/room join. The policy version is echoed by the taking
+    # payload; stale/omitted consent keeps the interview unrecorded.
+    recording_consent_accepted: bool = False
+    recording_consent_policy_version: str | None = Field(default=None, max_length=32)
 
 
 class InterviewSessionStartResponse(BaseModel):
@@ -441,9 +456,56 @@ class InterviewSessionFinishResponse(BaseModel):
     can_retake: bool = True
 
 
+class InterviewRecordingConsentRequest(BaseModel):
+    """Candidate's AFFIRMATIVE recording consent, given before joining.
+
+    The candidate must actively accept the current recording policy: the DTO
+    is only valid with ``accepted=True`` and the CURRENT policy version (a
+    stale version means the wording changed and consent must be re-given).
+    Absent body = no consent; the interview proceeds unrecorded either way.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    accepted: bool = False
+    policy_version: str | None = Field(default=None, max_length=32)
+
+
+class InterviewRecordingConsentResponse(BaseModel):
+    """Result of recording the consent decision for this session."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    session_id: UUID
+    recorded: bool
+    consented: bool
+    policy_version: str
+
+
+class TeacherInterviewRecordingRead(BaseModel):
+    """Teacher-side replay payload (gap-report workspace, Transcript tab).
+
+    Availability-state only — no provider identity leaks. ``stream_url`` is a
+    SHORT-LIVED presigned GET (inline disposition, TTL =
+    ``s3_url_ttl_seconds``); the client refreshes it before ``expires_at``.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    session_id: UUID
+    state: RecordingAvailabilityLiteral
+    media_kind: Literal["audio"] | None = None
+    stream_url: str | None = None
+    expires_at: datetime | None = None
+    duration_seconds: float | None = None
+    recorded_at: datetime | None = None
+
+
 __all__ = [
     "InputModeLiteral",
     "InterviewFinishReasonLiteral",
+    "InterviewRecordingConsentRequest",
+    "InterviewRecordingConsentResponse",
     "InterviewRubricScore",
     "InterviewSessionFinishRequest",
     "InterviewSessionFinishResponse",
@@ -453,5 +515,7 @@ __all__ = [
     "InterviewSessionStartResponse",
     "InterviewSubmitAnswerRequest",
     "InterviewSubmitAnswerResponse",
+    "RecordingAvailabilityLiteral",
     "SessionStatusLiteral",
+    "TeacherInterviewRecordingRead",
 ]

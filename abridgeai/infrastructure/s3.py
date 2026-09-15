@@ -252,6 +252,8 @@ async def create_stream_url(
             params["ResponseContentDisposition"] = response_headers["Content-Disposition"]
         if "Content-Type" in response_headers:
             params["ResponseContentType"] = response_headers["Content-Type"]
+        if "Cache-Control" in response_headers:
+            params["ResponseCacheControl"] = response_headers["Cache-Control"]
 
     async with _session().client("s3", **_client_kwargs(settings, endpoint)) as client:
         try:

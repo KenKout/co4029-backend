@@ -42,6 +42,8 @@ from abridgeai.features.interviews.schemas import (
     InterviewOnboardingRespondRequest,
     InterviewOnboardingRespondResponse,
     InterviewQuestionPublic,
+    InterviewRecordingConsentRequest,
+    InterviewRecordingConsentResponse,
     InterviewSessionFinishRequest,
     InterviewSessionFinishResponse,
     InterviewSessionPublic,
@@ -59,6 +61,7 @@ from abridgeai.features.interviews.services import narration as narration_servic
 from abridgeai.features.interviews.services import narration_cache
 from abridgeai.features.interviews.services import onboarding as onboarding_service
 from abridgeai.features.interviews.services import real_time as realtime_service
+from abridgeai.features.interviews.services import recording as recording_service
 from abridgeai.features.interviews.services import taking as taking_service
 from abridgeai.features.interviews.services.ceremony import (
     ensure_ceremony_message,
@@ -124,6 +127,17 @@ async def start_session(
         raise _conflict(str(exc)) from exc
     except AppError as exc:
         raise _bad_request(str(exc)) from exc
+    settings = get_settings()
+    # Consent is captured at session creation, before any realtime token can
+    # be minted. Never let a stale policy version authorize recording.
+    await recording_service.persist_recording_consent(
+        db,
+        session=session,
+        accepted=payload.recording_consent_accepted,
+        policy_version=payload.recording_consent_policy_version,
+        room_name=realtime_service.build_room_name(session.id),
+        settings=settings,
+    )
     await db.commit()
     first_question = await _current_session_question(db, session.id)
     opening = await ensure_ceremony_message(
@@ -264,6 +278,25 @@ async def realtime_token(
         session.livekit_room_name = room_name
         await db.commit()
 
+    # Recording (flag + affirmative consent gated) starts WITH the room, so
+    # the Egress sees the interview from the first word. Consent is the
+    # existence of a claimed recording row (created by the consent endpoint);
+    # every failure path inside start_recording_for_session is swallowed into
+    # the recording row + logs — the token mint (and thus the interview)
+    # succeeds regardless.
+    try:
+        await recording_service.start_recording_for_session(
+            db,
+            session_id=session_id,
+            student_id=current_user.user_id,
+            room_name=room_name,
+            consented=True,
+        )
+        await db.commit()
+    except Exception:  # noqa: BLE001 -- advisory side effect, never fatal
+        await db.rollback()
+        logger.warning("realtime_token: recording start failed (session=%s)", session_id)
+
     try:
         return realtime_service.mint_participant_token(
             session_id=session_id,
@@ -275,6 +308,49 @@ async def realtime_token(
         )
     except ValueError as exc:  # credentials missing despite the flag
         raise _voice_unavailable() from exc
+
+
+@router.post(
+    "/interview-sessions/{session_id}/recording-consent",
+    response_model=InterviewRecordingConsentResponse,
+)
+async def submit_recording_consent(
+    session_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_SESSION_OWNER)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    payload: InterviewRecordingConsentRequest | None = None,
+) -> InterviewRecordingConsentResponse:
+    """Record the candidate's explicit recording-consent decision.
+
+    Called BEFORE the candidate joins the voice room. ``accepted=True`` with
+    the CURRENT policy version stores the affirmative consent the recording
+    start requires; anything else (declined, stale version, absent body)
+    records a refusal and the session proceeds UNRECORDED — the interview
+    itself is never gated on consent.
+    """
+    from abridgeai.features.interviews.models import InterviewSession  # noqa: PLC0415
+
+    settings = get_settings()
+    session = await db.get(InterviewSession, session_id)
+    if session is None:  # pragma: no cover - dep already 404s; defensive
+        raise _not_found("interview_session", session_id)
+
+    consented = await recording_service.persist_recording_consent(
+        db,
+        session=session,
+        accepted=bool(payload and payload.accepted),
+        policy_version=payload.policy_version if payload else None,
+        room_name=session.livekit_room_name
+        or realtime_service.build_room_name(session_id),
+        settings=settings,
+    )
+    await db.commit()
+    return InterviewRecordingConsentResponse(
+        session_id=session_id,
+        recorded=True,
+        consented=consented,
+        policy_version=settings.interview_recording_policy_version,
+    )
 
 
 @router.post(
@@ -810,6 +886,16 @@ async def finish_session(
             reason=finish_reason,
             language=_resolve_language(accept_language),
         )
+        # Terminal path #1: the candidate's own finish. Recording stop is
+        # idempotent and best-effort (paths #2 realtime finalize and #3 the
+        # expiry sweep share the same helper) — a failed stop never fails the
+        # submission.
+        try:
+            await recording_service.stop_recording_for_session(db, session_id=session_id)
+            await db.commit()
+        except Exception:  # noqa: BLE001 -- advisory side effect, never fatal
+            await db.rollback()
+            logger.warning("finish_session: recording stop failed (session=%s)", session_id)
     except NotFoundError as exc:
         raise _not_found("interview_session", session_id) from exc
     except ForbiddenError as exc:

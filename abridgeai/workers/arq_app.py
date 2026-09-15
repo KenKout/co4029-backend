@@ -26,6 +26,9 @@ from abridgeai.features.career_paths.workers import snapshot_career_readiness_ta
 from abridgeai.features.enrollments.workers import resync_course_completions_task
 from abridgeai.features.interviews.workers import JOBS as INTERVIEW_JOBS
 from abridgeai.features.interviews.workers.lifecycle import sweep_interview_sessions_task
+from abridgeai.features.interviews.workers.recording import (
+    reconcile_interview_recordings_task,
+)
 from abridgeai.features.materials.workers import JOBS as MATERIAL_JOBS
 from abridgeai.features.materials.workers.cron import cleanup_orphaned_uploads_task
 from abridgeai.features.materials.workers.reaper import reconcile_orphaned_ingests_task
@@ -74,6 +77,9 @@ class WorkerSettings:
         cron(scan_due_cards_task, minute=0),
         # Finalise stale in-progress voice interview sessions every 5 minutes.
         cron(sweep_interview_sessions_task, minute=set(range(0, 60, 5))),
+        # Repair Egress callbacks that were lost and apply the recording's
+        # application-side 30-day retention tombstone on the same cadence.
+        cron(reconcile_interview_recordings_task, minute=set(range(2, 60, 5))),
         # Repair drifted course_enrollments.status rows. The D2 writer's
         # synchronous call sites all swallow their own failures, so this sweep
         # is what keeps `satisfied` (and career-path stage unlock) honest when
