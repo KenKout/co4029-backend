@@ -495,6 +495,7 @@ async def test_full_login_then_me_then_logout(
             )
         assert login.status_code == 200, login.text
         access_token = login.json()["access_token"]
+        refresh_token = login.json()["refresh_token"]
 
         me_response = await client.get(
             "/api/v1/users/me",
@@ -506,8 +507,21 @@ async def test_full_login_then_me_then_logout(
         logout_response = await client.post(
             "/api/v1/auth/logout",
             headers={"Authorization": f"Bearer {access_token}"},
+            json={"refresh_token": refresh_token},
         )
         assert logout_response.status_code == 204, logout_response.text
+
+        async with engine.connect() as conn:
+            logout_events = (
+                await conn.execute(
+                    text(
+                        "SELECT COUNT(*) FROM auth_events "
+                        "WHERE user_id = :uid AND event_type = 'logout'"
+                    ),
+                    {"uid": pre_user_id},
+                )
+            ).scalar_one()
+        assert logout_events == 1
 
         post_logout = await client.get(
             "/api/v1/users/me",
