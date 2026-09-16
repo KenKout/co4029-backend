@@ -35,10 +35,11 @@ stay HTTP-agnostic.
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Annotated, Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from abridgeai.core.db import get_db
@@ -79,6 +80,7 @@ from abridgeai.features.interviews.schemas import (
     InterviewQuestionDuplicateCheck,
     InterviewQuestionDuplicateCheckRequest,
     InterviewQuestionUpdate,
+    InterviewSessionTeacherPage,
     InterviewSessionTeacherRead,
 )
 from abridgeai.features.interviews.services import authoring as authoring_service
@@ -90,6 +92,11 @@ _REQUIRE_CONFIG = require_interview_authoring_access()
 _REQUIRE_OUTCOME = require_outcome_authoring_access()
 _REQUIRE_QUESTION = require_question_authoring_access()
 _REQUIRE_SESSION_AUTHORING = require_session_authoring_access()
+
+# The Assessments tab's Result buckets for interviews. Validated at the
+# boundary so an unrecognised value is a bad request rather than an empty list
+# the teacher would read as "no sessions".
+_INTERVIEW_RESULT_PATTERN = r"^(in_progress|failed|not_graded|passed|not_passed|evaluating)$"
 
 
 def _not_found(resource: str, resource_id: UUID) -> HTTPException:
@@ -305,23 +312,41 @@ async def create_interview_config(
 
 @router.get(
     "/courses/{course_id}/interview-sessions",
-    response_model=list[InterviewSessionTeacherRead],
+    response_model=InterviewSessionTeacherPage,
 )
-async def list_course_interview_sessions(
+async def list_course_interview_sessions(  # noqa: PLR0913 -- one parameter per client control
     course_id: UUID,
     current_user: Annotated[CurrentUser, Depends(_REQUIRE_COURSE_UPDATE)],
     db: Annotated[AsyncSession, Depends(get_db)],
-) -> list[InterviewSessionTeacherRead]:
-    """Every interview session (any student, any config) in this course.
+    limit: Annotated[int, Query(ge=1, le=100)] = 25,
+    cursor: Annotated[str | None, Query()] = None,
+    search: Annotated[str | None, Query(max_length=200)] = None,
+    title: Annotated[str | None, Query(max_length=255)] = None,
+    result: Annotated[str | None, Query(pattern=_INTERVIEW_RESULT_PATTERN)] = None,
+    since: Annotated[datetime | None, Query()] = None,
+) -> InterviewSessionTeacherPage:
+    """One page of interview sessions (any student, any config) in this course.
 
-    Powers the teacher's course-wide "Assessments" tab.
+    Powers the teacher's course-wide "Assessments" tab. Filtering happens in
+    SQL before the page is cut, which also bounds the per-row security-summary
+    lookup below to the rows actually returned.
     """
     del current_user
     from sqlalchemy import text as _text  # noqa: PLC0415
 
     from abridgeai.features.interviews.queries import sessions as _sessions_q  # noqa: PLC0415
 
-    rows = await _sessions_q.list_sessions_for_course(db, course_id)
+    page = await _sessions_q.list_sessions_for_course(
+        db,
+        course_id,
+        limit=limit,
+        cursor=cursor,
+        search=search,
+        title=title,
+        result=result,
+        since=since,
+    )
+    rows = page.items
     student_ids = {row.InterviewSession.student_id for row in rows}
     names: dict[UUID, str] = {}
     if student_ids:
@@ -341,14 +366,14 @@ async def list_course_interview_sessions(
             .all()
         )
         names = {row["id"]: row["name"] for row in name_rows}
-    result: list[InterviewSessionTeacherRead] = []
+    items: list[InterviewSessionTeacherRead] = []
     for row in rows:
         summary = await _security_summary_view(
             db,
             row.InterviewSession,
             enabled=bool(row.security_incident_summary_enabled),
         )
-        result.append(
+        items.append(
             _session_teacher_view(
                 row.InterviewSession,
                 row.title,
@@ -356,7 +381,7 @@ async def list_course_interview_sessions(
                 summary,
             )
         )
-    return result
+    return InterviewSessionTeacherPage(items=items, next_cursor=page.next_cursor)
 
 
 @router.get(

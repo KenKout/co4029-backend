@@ -19,13 +19,19 @@ explicitly checks ``deleted_at IS NULL`` at every level.
 
 from __future__ import annotations
 
+from datetime import datetime
 from importlib import resources
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import case, func, select, text
+from sqlalchemy import case, func, or_, select, text, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from abridgeai.core.pagination.cursor import (
+    CursorPage,
+    decode_composite_cursor,
+    encode_composite_cursor,
+)
 from abridgeai.features.quizzes.models import Quiz, QuizAttempt
 
 _TOP_MISSED_SQL = text(
@@ -252,21 +258,29 @@ def _integrity_flag_count_subquery() -> Any:  # noqa: ANN401 -- SQLAlchemy eleme
     )
 
 
-async def list_attempts_for_course(db: AsyncSession, course_id: UUID) -> list[Any]:
-    """Every quiz attempt (any student, any quiz) in a course, newest first.
+def _quiz_result_bucket_clause() -> Any:  # noqa: ANN401 -- SQLAlchemy element
+    """The attempt's ``Result`` bucket, as the client computes it."""
+    return case(
+        (QuizAttempt.status == "in_progress", "in_progress"),
+        (QuizAttempt.passed.is_(True), "passed"),
+        (QuizAttempt.passed.is_(False), "not_passed"),
+        else_="grading",
+    )
 
-    Powers the teacher's course-wide "Assessments" tab. Returns SQLAlchemy
-    ``Row`` objects with ``.QuizAttempt``, ``.title`` (the quiz title,
-    aliased so the router doesn't need a second round-trip) and
-    ``.integrity_flags``. Callers resolve student display names separately
-    via a batched lookup — mirrors the pattern in
-    ``interviews.routers.authoring.list_config_sessions``.
 
-    ``integrity_flags`` is what makes a suspicious attempt findable: the
-    proctoring events themselves are only on the single-attempt detail
-    payload, so without a count here a teacher had to open every attempt in
-    the course one at a time to discover any of them.
-    """
+async def list_attempts_for_course(  # noqa: PLR0913 -- one filter per client control
+    db: AsyncSession,
+    course_id: UUID,
+    *,
+    limit: int = 25,
+    cursor: str | None = None,
+    search: str | None = None,
+    title: str | None = None,
+    result: str | None = None,
+    since: datetime | None = None,
+) -> CursorPage[Any]:
+    """One page of quiz attempts in a course, newest first."""
+    capped = max(1, min(limit, 100))
     stmt = (
         select(
             QuizAttempt,
@@ -275,24 +289,93 @@ async def list_attempts_for_course(db: AsyncSession, course_id: UUID) -> list[An
         )
         .join(Quiz, Quiz.id == QuizAttempt.quiz_id)
         .where(Quiz.course_id == course_id)
-        .order_by(QuizAttempt.started_at.desc())
     )
-    return list((await db.execute(stmt)).all())
+    if search:
+        needle = f"%{search.strip().lower()}%"
+        student_name_matches = text(
+            "EXISTS (SELECT 1 FROM users u "
+            "LEFT JOIN user_profiles p ON p.user_id = u.id "
+            "WHERE u.id = quiz_attempts.student_id "
+            "AND lower(COALESCE(p.display_name, u.primary_email)) LIKE :needle)"
+        ).bindparams(needle=needle)
+        stmt = stmt.where(
+            or_(func.lower(Quiz.title).like(needle), student_name_matches)
+        )
+    if title:
+        stmt = stmt.where(Quiz.title == title)
+    if result:
+        stmt = stmt.where(_quiz_result_bucket_clause() == result)
+    if since is not None:
+        stmt = stmt.where(
+            func.coalesce(QuizAttempt.submitted_at, QuizAttempt.started_at) >= since
+        )
+    if cursor:
+        after_started, after_id = decode_composite_cursor(cursor)
+        stmt = stmt.where(
+            tuple_(QuizAttempt.started_at, QuizAttempt.id) < (after_started, after_id)
+        )
+    stmt = stmt.order_by(QuizAttempt.started_at.desc(), QuizAttempt.id.desc()).limit(capped)
+    rows = list((await db.execute(stmt)).all())
+    next_cursor = (
+        encode_composite_cursor(rows[-1].QuizAttempt.started_at, rows[-1].QuizAttempt.id)
+        if len(rows) == capped
+        else None
+    )
+    return CursorPage(items=rows, next_cursor=next_cursor)
+
+
+async def course_assessment_facets(db: AsyncSession, course_id: UUID) -> dict[str, Any]:
+    """Whole-course aggregates the paginated list can no longer derive."""
+    quiz_totals = (
+        await db.execute(
+            select(
+                func.count(QuizAttempt.id),
+                func.count(QuizAttempt.id).filter(QuizAttempt.passed.isnot(None)),
+                func.count(QuizAttempt.id).filter(QuizAttempt.passed.is_(True)),
+            )
+            .select_from(QuizAttempt)
+            .join(Quiz, Quiz.id == QuizAttempt.quiz_id)
+            .where(Quiz.course_id == course_id)
+        )
+    ).one()
+    attempt_count, graded_count, passed_count = (int(v or 0) for v in quiz_totals)
+    titles = list(
+        (
+            await db.execute(
+                select(Quiz.title)
+                .join(QuizAttempt, QuizAttempt.quiz_id == Quiz.id)
+                .where(Quiz.course_id == course_id)
+                .distinct()
+                .order_by(Quiz.title)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return {
+        "quiz_attempt_count": attempt_count,
+        "quiz_pass_rate": (passed_count / graded_count * 100) if graded_count else None,
+        "quiz_titles": titles,
+    }
+
+
+async def course_quiz_student_ids(db: AsyncSession, course_id: UUID) -> set[UUID]:
+    """Distinct students with at least one quiz attempt in the course."""
+    rows = (
+        await db.execute(
+            select(QuizAttempt.student_id)
+            .join(Quiz, Quiz.id == QuizAttempt.quiz_id)
+            .where(Quiz.course_id == course_id)
+            .distinct()
+        )
+    ).scalars()
+    return set(rows)
 
 
 async def get_course_attempt_for_review(
     db: AsyncSession, course_id: UUID, attempt_id: UUID
 ) -> Any | None:  # noqa: ANN401 -- SQLAlchemy Row
-    """Load one attempt scoped to a course, for teacher review.
-
-    Returns a ``Row`` with ``.QuizAttempt`` (answers eagerly loaded) and
-    ``.title`` (quiz title), or ``None`` when the attempt doesn't exist or
-    belongs to a quiz outside ``course_id`` (router → 404). Unlike the
-    student-facing ``get_attempt_for_review`` this does NOT filter on
-    ``student_id`` (teachers review any student's attempt) nor on status
-    (teachers may inspect an in-flight attempt), but it DOES enforce the
-    course boundary so a teacher can't read attempts from another course.
-    """
+    """Load one attempt scoped to a course, for teacher review."""
     from sqlalchemy.orm import selectinload  # noqa: PLC0415
 
     stmt = (
@@ -422,34 +505,7 @@ _QUESTION_TYPES_WITH_OPTIONS = ("multiple_choice", "true_false")
 
 
 async def quiz_question_breakdown(db: AsyncSession, quiz_id: UUID) -> list[dict[str, Any]]:
-    """Per-question performance breakdown for a single quiz.
-
-    For each non-soft-deleted question in ``quiz_id``, counts how students
-    performed, considering ONLY answers that belong to COMPLETED attempts
-    (``status IN ('submitted','graded')``). Unlike :func:`top_missed_questions`
-    there is NO minimum-attempts gate — every question is returned so a
-    teacher with a small cohort still sees each one.
-
-    Returns a list with ONE dict per question, ordered by ``correctness_rate``
-    ascending (hardest first) with question ``position`` ascending as a stable
-    tiebreaker. Questions nobody answered sort last (NULL rate) and still
-    appear with zeroed counts.
-
-    Each dict carries:
-
-    * ``question_id`` — :class:`~uuid.UUID`.
-    * ``prompt`` — ``quiz_questions.prompt_text``.
-    * ``correct_count`` — answers where ``is_correct`` (completed attempts).
-    * ``answered_count`` — total answers (completed attempts) for the question.
-    * ``correctness_rate`` — ``correct_count / answered_count`` (0..1);
-      ``None`` when ``answered_count == 0``.
-    * ``option_distribution`` — for MCQ (``multiple_choice`` / ``true_false``):
-      one entry per option ``{option_id, option_key, option_text, is_correct,
-      chosen_count}``; ``[]`` for non-MCQ question types.
-
-    ``chosen_count`` counts completed-attempt answers whose
-    ``selected_option_id`` is that option; options nobody picked report ``0``.
-    """
+    """Per-question performance breakdown for a single quiz."""
     # (a) Per-question correct/answered counts over COMPLETED attempts only.
     # LEFT JOIN so questions with zero answers still return a row.
     per_question_sql = text(

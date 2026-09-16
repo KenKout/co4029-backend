@@ -646,6 +646,13 @@ class InterviewSessionTeacherRead(BaseModel):
     security_summary: SecuritySessionSummary | None = None
 
 
+class InterviewSessionTeacherPage(BaseModel):
+    """One page of :class:`InterviewSessionTeacherRead`, newest session first."""
+
+    items: list[InterviewSessionTeacherRead]
+    next_cursor: str | None = None
+
+
 class InterviewTranscriptTurn(BaseModel):
     """One question/answer turn in a teacher-facing transcript view."""
 

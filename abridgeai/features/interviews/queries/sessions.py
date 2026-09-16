@@ -29,9 +29,14 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import case, func, or_, select, text, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from abridgeai.core.pagination.cursor import (
+    CursorPage,
+    decode_composite_cursor,
+    encode_composite_cursor,
+)
 from abridgeai.core.security import utcnow
 from abridgeai.features.interviews.models import (
     GapReport,
@@ -123,13 +128,45 @@ async def list_sessions_for_config(db: AsyncSession, config_id: UUID) -> list[In
     return list((await db.execute(stmt)).scalars().all())
 
 
-async def list_sessions_for_course(db: AsyncSession, course_id: UUID) -> list[Any]:
-    """Every interview session (any student, any config) in a course, newest first.
+def _interview_result_bucket_clause() -> Any:  # noqa: ANN401 -- SQLAlchemy element
+    """The session's ``Result`` bucket, as the client computes it."""
+    return case(
+        (InterviewSession.status == "in_progress", "in_progress"),
+        (InterviewSession.status == "failed", "failed"),
+        (InterviewSession.status == "abandoned", "not_graded"),
+        (InterviewSession.pass_verdict.is_(True), "passed"),
+        (InterviewSession.pass_verdict.is_(False), "not_passed"),
+        else_="evaluating",
+    )
+
+
+async def list_sessions_for_course(  # noqa: PLR0913 -- one filter per client control
+    db: AsyncSession,
+    course_id: UUID,
+    *,
+    limit: int = 25,
+    cursor: str | None = None,
+    search: str | None = None,
+    title: str | None = None,
+    result: str | None = None,
+    since: datetime | None = None,
+) -> CursorPage[Any]:
+    """One page of interview sessions in a course, newest first.
 
     Powers the teacher's course-wide "Assessments" tab. Returns
     SQLAlchemy ``Row`` objects with ``.InterviewSession`` and ``.title``
     (the interview config title) so the router avoids a second round-trip.
+
+    Filters are applied in SQL rather than by the caller: the router builds a
+    security summary per row, which is a query of its own, so filtering after
+    the fact would pay that cost for rows the teacher never sees — and a match
+    past the page boundary would be dropped entirely.
+
+    Keyset pagination on ``(started_at, id)``; the id breaks ties so a cohort
+    that began an interview in the same second cannot straddle a page boundary
+    and lose or repeat a row.
     """
+    capped = max(1, min(limit, 100))
     stmt = (
         select(
             InterviewSession,
@@ -138,9 +175,101 @@ async def list_sessions_for_course(db: AsyncSession, course_id: UUID) -> list[An
         )
         .join(InterviewConfig, InterviewConfig.id == InterviewSession.interview_config_id)
         .where(InterviewConfig.course_id == course_id)
-        .order_by(InterviewSession.started_at.desc())
     )
-    return list((await db.execute(stmt)).all())
+    if search:
+        needle = f"%{search.strip().lower()}%"
+        # Student display names belong to the identity feature, which this
+        # module may not import (import-linter "Features are independent"),
+        # so the correlated lookup is hand-written SQL — the same escape the
+        # routers already take to resolve names in a batch.
+        student_name_matches = text(
+            "EXISTS (SELECT 1 FROM users u "
+            "LEFT JOIN user_profiles p ON p.user_id = u.id "
+            "WHERE u.id = interview_sessions.student_id "
+            "AND lower(COALESCE(p.display_name, u.primary_email)) LIKE :needle)"
+        ).bindparams(needle=needle)
+        stmt = stmt.where(
+            or_(func.lower(InterviewConfig.title).like(needle), student_name_matches)
+        )
+    if title:
+        stmt = stmt.where(InterviewConfig.title == title)
+    if result:
+        stmt = stmt.where(_interview_result_bucket_clause() == result)
+    if since is not None:
+        stmt = stmt.where(InterviewSession.started_at >= since)
+    if cursor:
+        after_started, after_id = decode_composite_cursor(cursor)
+        stmt = stmt.where(
+            tuple_(InterviewSession.started_at, InterviewSession.id)
+            < (after_started, after_id)
+        )
+    stmt = stmt.order_by(
+        InterviewSession.started_at.desc(), InterviewSession.id.desc()
+    ).limit(capped)
+    rows = list((await db.execute(stmt)).all())
+    next_cursor = (
+        encode_composite_cursor(
+            rows[-1].InterviewSession.started_at, rows[-1].InterviewSession.id
+        )
+        if len(rows) == capped
+        else None
+    )
+    return CursorPage(items=rows, next_cursor=next_cursor)
+
+
+async def course_interview_facets(db: AsyncSession, course_id: UUID) -> dict[str, Any]:
+    """Whole-course interview aggregates for the Assessments tab's tiles.
+
+    Student ids rather than a count, because the caller unions them with the
+    quiz-side population before counting: a student who sat both must be
+    counted once.
+    """
+    session_count = int(
+        (
+            await db.execute(
+                select(func.count(InterviewSession.id))
+                .select_from(InterviewSession)
+                .join(
+                    InterviewConfig,
+                    InterviewConfig.id == InterviewSession.interview_config_id,
+                )
+                .where(InterviewConfig.course_id == course_id)
+            )
+        ).scalar_one()
+        or 0
+    )
+    student_ids = set(
+        (
+            await db.execute(
+                select(InterviewSession.student_id)
+                .join(
+                    InterviewConfig,
+                    InterviewConfig.id == InterviewSession.interview_config_id,
+                )
+                .where(InterviewConfig.course_id == course_id)
+                .distinct()
+            )
+        )
+        .scalars()
+        .all()
+    )
+    titles = list(
+        (
+            await db.execute(
+                select(InterviewConfig.title)
+                .join(
+                    InterviewSession,
+                    InterviewSession.interview_config_id == InterviewConfig.id,
+                )
+                .where(InterviewConfig.course_id == course_id)
+                .distinct()
+                .order_by(InterviewConfig.title)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return {"session_count": session_count, "student_ids": student_ids, "titles": titles}
 
 
 async def list_sessions_for_student_in_course(

@@ -8,6 +8,7 @@ consumers do not need to walk the rubric tables themselves.
 
 from __future__ import annotations
 
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy import func, select
@@ -262,8 +263,16 @@ async def deep_clone_interview_config(
     return clone.id
 
 
+async def course_interview_facets(db: AsyncSession, course_id: UUID) -> dict[str, Any]:
+    """Whole-course interview aggregates for a cross-feature summary."""
+    from abridgeai.features.interviews.queries import sessions as _sessions_q  # noqa: PLC0415
+
+    return await _sessions_q.course_interview_facets(db, course_id)
+
+
 __all__ = [
     "SessionSummaryDTO",
+    "course_interview_facets",
     "deep_clone_interview_config",
     "get_session_summary",
 ]

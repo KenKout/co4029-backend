@@ -309,7 +309,26 @@ class QuizAttemptTeacherRead(BaseModel):
     integrity_flagged: bool = False
 
 
+class QuizAttemptTeacherPage(BaseModel):
+    """One page of :class:`QuizAttemptTeacherRead`, newest attempt first."""
+
+    items: list[QuizAttemptTeacherRead]
+    next_cursor: str | None = None
+
+
+class CourseAssessmentSummaryRead(BaseModel):
+    """Whole-course aggregates for the teacher's Assessments tab."""
+
+    students_assessed: int = 0
+    quiz_attempt_count: int = 0
+    quiz_pass_rate: float | None = None
+    interview_session_count: int = 0
+    quiz_titles: list[str] = []
+    interview_titles: list[str] = []
+
+
 __all__ = [
+    "CourseAssessmentSummaryRead",
     "QuizAttemptRead",
     "QuizAttemptReviewOption",
     "QuizAttemptReviewQuestion",
@@ -318,5 +337,6 @@ __all__ = [
     "QuizAttemptStatusLiteral",
     "QuizAttemptSubmit",
     "QuizAttemptSubmitAnswer",
+    "QuizAttemptTeacherPage",
     "QuizAttemptTeacherRead",
 ]

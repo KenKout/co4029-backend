@@ -36,7 +36,7 @@ from datetime import UTC, datetime
 from typing import Annotated, Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -55,6 +55,7 @@ from abridgeai.features.quizzes.routers.curated_question_bank import (
     router as curated_question_bank_router,
 )
 from abridgeai.features.quizzes.schemas import (
+    CourseAssessmentSummaryRead,
     FeedbackBandIn,
     FeedbackBandRead,
     ManualGradeIn,
@@ -66,6 +67,7 @@ from abridgeai.features.quizzes.schemas import (
     QuizAttemptIntegrityEvent,
     QuizAttemptReviewOption,
     QuizAttemptReviewQuestion,
+    QuizAttemptTeacherPage,
     QuizAttemptTeacherRead,
     QuizAttemptTeacherReview,
     QuizAuthoring,
@@ -101,6 +103,11 @@ router.include_router(curated_question_bank_router)
 _REQUIRE_COURSE_UPDATE = require_course_permission("course_id", "course.update")
 _REQUIRE_QUIZ = require_quiz_authoring_access()
 _REQUIRE_QUESTION = require_question_authoring_access()
+
+# The Assessments tab's Result buckets. Validated at the boundary rather than
+# passed through to SQL: an unrecognised value would otherwise match nothing
+# and read to the teacher as "no attempts" rather than as a bad request.
+_QUIZ_RESULT_PATTERN = r"^(in_progress|passed|not_passed|grading)$"
 
 
 def _not_found(resource: str, resource_id: UUID) -> HTTPException:
@@ -288,31 +295,79 @@ def _attempt_teacher_view(
 
 @router.get(
     "/courses/{course_id}/quiz-attempts",
-    response_model=list[QuizAttemptTeacherRead],
+    response_model=QuizAttemptTeacherPage,
 )
-async def list_course_quiz_attempts(
+async def list_course_quiz_attempts(  # noqa: PLR0913 -- one parameter per client control
     course_id: UUID,
     current_user: Annotated[CurrentUser, Depends(_REQUIRE_COURSE_UPDATE)],
     db: Annotated[AsyncSession, Depends(get_db)],
-) -> list[QuizAttemptTeacherRead]:
-    """Every quiz attempt (any student, any quiz) in this course.
-
-    Powers the teacher's course-wide "Assessments" tab.
-    """
+    limit: Annotated[int, Query(ge=1, le=100)] = 25,
+    cursor: Annotated[str | None, Query()] = None,
+    search: Annotated[str | None, Query(max_length=200)] = None,
+    title: Annotated[str | None, Query(max_length=255)] = None,
+    result: Annotated[str | None, Query(pattern=_QUIZ_RESULT_PATTERN)] = None,
+    since: Annotated[datetime | None, Query()] = None,
+) -> QuizAttemptTeacherPage:
+    """One page of quiz attempts (any student, any quiz) in this course."""
     del current_user
     from abridgeai.features.quizzes.queries import analytics as _analytics_q  # noqa: PLC0415
 
-    rows = await _analytics_q.list_attempts_for_course(db, course_id)
+    page = await _analytics_q.list_attempts_for_course(
+        db,
+        course_id,
+        limit=limit,
+        cursor=cursor,
+        search=search,
+        title=title,
+        result=result,
+        since=since,
+    )
+    rows = page.items
     names = await _resolve_student_names(db, {row.QuizAttempt.student_id for row in rows})
-    return [
-        _attempt_teacher_view(
-            row.QuizAttempt,
-            row.title,
-            names.get(row.QuizAttempt.student_id),
-            int(row.integrity_flags or 0),
-        )
-        for row in rows
-    ]
+    return QuizAttemptTeacherPage(
+        items=[
+            _attempt_teacher_view(
+                row.QuizAttempt,
+                row.title,
+                names.get(row.QuizAttempt.student_id),
+                int(row.integrity_flags or 0),
+            )
+            for row in rows
+        ],
+        next_cursor=page.next_cursor,
+    )
+
+
+@router.get(
+    "/courses/{course_id}/assessment-summary",
+    response_model=CourseAssessmentSummaryRead,
+)
+async def course_assessment_summary(
+    course_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_COURSE_UPDATE)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> CourseAssessmentSummaryRead:
+    """Whole-course assessment aggregates for the Assessments tab's tiles.
+
+    Deliberately independent of the two paginated lists and of whichever tab
+    is open: the tiles describe the course, not the page, and the title
+    dropdowns must offer every title rather than only those on screen.
+    """
+    del current_user
+    from abridgeai.features.interviews.api import public as _interviews_api  # noqa: PLC0415
+    from abridgeai.features.quizzes.queries import analytics as _analytics_q  # noqa: PLC0415
+
+    facets = await _analytics_q.course_assessment_facets(db, course_id)
+    quiz_student_ids = await _analytics_q.course_quiz_student_ids(db, course_id)
+    interview_facets = await _interviews_api.course_interview_facets(db, course_id)
+    return CourseAssessmentSummaryRead(
+        students_assessed=len(quiz_student_ids | interview_facets["student_ids"]),
+        quiz_attempt_count=facets["quiz_attempt_count"],
+        quiz_pass_rate=facets["quiz_pass_rate"],
+        interview_session_count=interview_facets["session_count"],
+        quiz_titles=facets["quiz_titles"],
+        interview_titles=interview_facets["titles"],
+    )
 
 
 @router.get(
