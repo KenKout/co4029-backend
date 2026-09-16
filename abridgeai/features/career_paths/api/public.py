@@ -17,6 +17,7 @@ from abridgeai.core.db.conflict_mapper import flush_or_conflict
 from abridgeai.features.access_control.models import StudentCareerEnrollment
 from abridgeai.features.career_paths.queries import student as student_queries
 from abridgeai.features.career_paths.services import authoring as authoring_service
+from abridgeai.features.career_paths.services import stages as stage_service
 
 
 async def get_career_path_thumbnail_urls(
@@ -87,6 +88,21 @@ async def get_version_course_progress_for_user(
     )
 
 
+async def is_version_complete_for_user(
+    db: AsyncSession,
+    *,
+    version_id: UUID,
+    student_id: UUID,
+) -> bool:
+    """Has ``student_id`` completed this exact career-path version?"""
+    evals = await stage_service.evaluate_stages(
+        db, version_id=version_id, student_id=student_id, enrollment_id=None
+    )
+    if not evals:
+        return False
+    return stage_service.path_complete(evals)
+
+
 async def ensure_program_path_access(
     db: AsyncSession,
     *,
@@ -145,6 +161,7 @@ __all__ = [
     "get_career_path_thumbnail_urls",
     "get_path_course_progress_for_user",
     "get_version_course_progress_for_user",
+    "is_version_complete_for_user",
     "ensure_program_path_access",
     "list_user_career_enrollments",
     "release_program_path_access",

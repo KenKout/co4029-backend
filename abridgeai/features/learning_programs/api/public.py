@@ -150,12 +150,11 @@ async def complete_program_attempts(
     for attempt, enrollment in rows:
         # The same path can be pinned at different versions by different
         # programs. Never let a 100% result on one version complete them all.
-        progress = await career_paths_api.get_version_course_progress_for_user(
+        if not await career_paths_api.is_version_complete_for_user(
             db,
             version_id=attempt.career_path_version_id,
             student_id=student_id,
-        )
-        if not progress or not all(bool(row.get("satisfied")) for row in progress):
+        ):
             continue
         attempt.status = "completed"
         attempt.ended_at = now

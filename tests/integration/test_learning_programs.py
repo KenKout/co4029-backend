@@ -37,14 +37,14 @@ async def test_multiple_paths_complete_the_program_only_when_all_are_complete(
     async def two_path_limit(*args: object, **kwargs: object) -> int:
         return 2
 
-    async def completed_progress(*args: object, **kwargs: object) -> list[dict[str, object]]:
-        return [{"satisfied": True}]
+    async def path_is_complete(*args: object, **kwargs: object) -> bool:
+        return True
 
     monkeypatch.setattr(services, "resolve_setting", two_path_limit)
     monkeypatch.setattr(
         programs_api.career_paths_api,
-        "get_version_course_progress_for_user",
-        completed_progress,
+        "is_version_complete_for_user",
+        path_is_complete,
     )
 
     async with factory() as db:

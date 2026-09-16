@@ -216,6 +216,11 @@ def path_progress_percent(evals: list[StageEval]) -> float:
     return round(done / max(1, total) * 100, 2)
 
 
+def path_complete(evals: list[StageEval]) -> bool:
+    """Is the whole path complete under the stage-aware rules?"""
+    return all(ev.live_complete for ev in evals)
+
+
 def legacy_progress_percent(courses: list[dict[str, Any]]) -> float:
     """Formula version 1: flat mean of every course's completion percent.
 
