@@ -153,7 +153,6 @@ class CareerPathProgressRead(BaseModel):
     in_progress_courses: int
     courses: list[CourseProgressSummary]
     stages: list[StageProgressRead] = []
-    formula_version: int = 1
     max_concurrent: int | None = None
     active_in_path: int = 0
     over_concurrency_cap: bool = False
@@ -168,10 +167,6 @@ class CareerReadinessSnapshotRead(BaseModel):
 
     readiness_score: float
     captured_at: datetime
-    formula_version: int = 1
-    """Which formula produced this point. The chart MUST segment or annotate
-    where this changes — an unsegmented line across two formulas misleads
-    even though every point on it is honest."""
 
 
 class StartCourseResult(BaseModel):

@@ -53,16 +53,12 @@ def _score_from_progress(progress: CareerPathProgressRead) -> Decimal:
 
 async def compute_readiness_score(
     db: AsyncSession, *, career_path_id: UUID, student_id: UUID
-) -> tuple[Decimal, int]:
-    """``(score, formula_version)`` for one (student, path) pair.
-
-    Returns the version alongside the score so the caller stamps the snapshot
-    with the formula that ACTUALLY produced it rather than a column default.
-    """
+) -> Decimal:
+    """Return the stored readiness score for one (student, path) pair."""
     progress = await enrollment_service.get_my_path_progress(
         db, career_path_id=career_path_id, student_id=student_id
     )
-    return _score_from_progress(progress), progress.formula_version
+    return _score_from_progress(progress)
 
 
 async def snapshot_enrollment(
@@ -73,9 +69,7 @@ async def snapshot_enrollment(
         db, career_path_id=career_path_id, student_id=student_id
     )
     score = _score_from_progress(progress)
-    formula_version = progress.formula_version
-    # Gap 3: the snapshot records which version produced the score — the
-    # student's pin, or the latest published version when unenrolled.
+    # Gap 3: the snapshot records the student's pinned path version.
     enrollment = await student_queries.get_my_career_enrollment(
         db, student_id=student_id, career_path_id=career_path_id
     )
@@ -93,7 +87,6 @@ async def snapshot_enrollment(
         career_path_id=career_path_id,
         version_id=version_id,
         readiness_score=score,
-        formula_version=formula_version,
     )
     await enrollment_service.sync_enrollment_completion(
         db,

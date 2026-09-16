@@ -13,6 +13,7 @@ from abridgeai.features.access_control.models import (
     UserFacultyAssignment,
     UserRoleAssignment,
 )
+from abridgeai.features.career_paths.api import public as career_paths_api
 from abridgeai.features.career_paths.models import CareerPathVersion
 from abridgeai.features.learning_programs.models import (
     PATH_CHANGE_OPEN_STATUSES,
@@ -632,15 +633,19 @@ async def build_exit_snapshot(
     )
     completed = [str(row["course_id"]) for row in rows if row["completed"]]
     total = len(rows)
+    overall_percent = await career_paths_api.get_version_progress_percent_for_user(
+        db,
+        version_id=attempt.career_path_version_id,
+        student_id=student_id,
+    )
     return {
         "career_path_id": str(attempt.career_path_id),
         "career_path_version_id": str(attempt.career_path_version_id),
         "completed_course_ids": completed,
         "completed_courses": len(completed),
         "total_courses": total,
-        "overall_percent": round((len(completed) / total * 100) if total else 0, 2),
+        "overall_percent": overall_percent,
         "captured_at": datetime.now(UTC).isoformat(),
-        "formula_version": 1,
     }
 
 

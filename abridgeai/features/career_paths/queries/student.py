@@ -318,7 +318,7 @@ _ROSTER_PROGRESS_SQL = text(
     aggregated AS (
         SELECT student_id, primary_email, display_name,
                avatar_bucket, avatar_object_key,
-               COALESCE(AVG(course_percent), 0)::float AS overall_percent,
+               0::float AS overall_percent,
                SUM(CASE WHEN course_percent >= 100 THEN 1 ELSE 0 END) AS completed_courses,
                COUNT(course_id) AS course_count
         FROM student_course_progress

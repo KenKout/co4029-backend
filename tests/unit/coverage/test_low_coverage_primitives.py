@@ -265,10 +265,8 @@ async def test_readiness_queries_map_rows_and_persist_snapshot(monkeypatch: pyte
         career_path_id=path_id,
         version_id=version_id,
         readiness_score=Decimal("82.50"),
-        formula_version=2,
     )
     assert db.added is snapshot
-    assert snapshot.formula_version == 2
     db.flush.assert_awaited_once()
 
     rows = [SimpleNamespace(student_id=student_id, career_path_id=path_id, version_id=version_id)]

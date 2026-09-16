@@ -532,31 +532,6 @@ _SPECS: tuple[SettingSpec, ...] = (
             "unaffected. Set to 0 for no cap (serve the whole backlog)."
         ),
     ),
-    # -- careerpath -------------------------------------------------------
-    SettingSpec(
-        key="careerpath.progress_formula_version",
-        group="careerpath",
-        type="int",
-        default=1,
-        minimum=1,
-        maximum=2,
-        label="Career path progress formula version",
-        description=(
-            "Which formula computes career-path completion. 1 = the legacy "
-            "flat average of every course's completion percent. 2 = the "
-            "stage-aware formula, which counts a course as done only when it "
-            "is satisfied and credits at most min_optional_to_complete "
-            "optional courses per stage, so electives beyond the quota no "
-            "longer inflate progress. GLOBAL on purpose — a single dated "
-            "cutover keeps the readiness chart segmentable on time rather "
-            "than per path. Every snapshot is stamped with the version that "
-            "actually produced it (career_readiness_snapshots.formula_version), "
-            "so switching this does not retroactively relabel history — but "
-            "the chart MUST segment or annotate at the change, because an "
-            "unsegmented line across two formulas misleads even though every "
-            "point on it is honest."
-        ),
-    ),
     # -- courses (teacher staffing bounds; user decision 2026-08-18) -------
     # Defaults chosen to match the requested behaviour: at least 2 teachers
     # (default min), of which exactly one is the Course Instructor and the

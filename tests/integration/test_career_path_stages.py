@@ -11,7 +11,7 @@ Covers, in the order the plan's review points are numbered:
   the stage
 * #6 reordering a stage into position 1 warns and keeps the stored policy
 * #7 deleting a stage with latched progress is blocked (409)
-* #2 a snapshot written while the setting still reads 1 is stamped 1, not 2
+* #2 every newly-written readiness snapshot is stamped 2
 * D2 ``satisfied`` ⟺ ``course_enrollments.status='completed'``
 * unlock matrix, min-optional quota, zero-total stage, cap warns-never-blocks,
   Pattern B (no eager fan-out) and the Start endpoint's guards
@@ -19,7 +19,6 @@ Covers, in the order the plan's review points are numbered:
 
 from __future__ import annotations
 
-import json
 import uuid
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -46,7 +45,6 @@ import abridgeai.features.interviews.models  # noqa: F401
 import abridgeai.features.progress.models  # noqa: F401
 from abridgeai.core.config import get_settings
 from abridgeai.core.exceptions import AppError, ConflictError, ForbiddenError
-from abridgeai.core.runtime_settings import invalidate_settings_cache
 from abridgeai.core.security import CurrentUser
 from abridgeai.features.career_paths.schemas import (
     CareerPathStageCreate,
@@ -54,9 +52,9 @@ from abridgeai.features.career_paths.schemas import (
 )
 from abridgeai.features.career_paths.services import authoring as authoring_service
 from abridgeai.features.career_paths.services import enrollment as enrollment_service
-from abridgeai.features.career_paths.services import readiness as readiness_service
 from abridgeai.features.career_paths.services import stages as stage_service
 from abridgeai.features.enrollments.api import public as enrollments_api
+from abridgeai.features.learning_programs import queries as learning_program_queries
 from abridgeai.features.progress.services import tracking as tracking_service
 
 
@@ -279,29 +277,6 @@ async def seed(engine: AsyncEngine) -> AsyncIterator[dict]:
             {"ids": [str(manager), str(student)]},
         )
         await conn.execute(text("DELETE FROM organizations WHERE id = :o"), {"o": org})
-
-
-@pytest_asyncio.fixture
-async def formula_v2(engine: AsyncEngine) -> AsyncIterator[None]:
-    """Flip ``careerpath.progress_formula_version`` to 2 globally."""
-    async with engine.begin() as conn:
-        await conn.execute(
-            text(
-                "INSERT INTO system_settings (setting_key, setting_value_json, organization_id) "
-                "VALUES ('careerpath.progress_formula_version', :v, NULL)"
-            ),
-            {"v": json.dumps(2)},
-        )
-    invalidate_settings_cache()
-    yield
-    async with engine.begin() as conn:
-        await conn.execute(
-            text(
-                "DELETE FROM system_settings "
-                "WHERE setting_key='careerpath.progress_formula_version'"
-            )
-        )
-    invalidate_settings_cache()
 
 
 async def _enroll(session_factory, seed) -> None:
@@ -711,63 +686,79 @@ async def test_delete_stage_with_latched_progress_is_blocked(engine, session_fac
             )
 
 
-# --- #2 formula version stamping --------------------------------------
-
-
 @pytest.mark.asyncio
-async def test_snapshot_in_dark_window_is_stamped_1_not_2(engine, session_factory, seed) -> None:
-    """Guards #2: while the setting still reads 1, snapshots must be stamped
-    1. A column default of 2 would mislabel the entire dark window."""
-    await _enroll(session_factory, seed)
-    async with session_factory() as db:
-        await readiness_service.snapshot_enrollment(
-            db, career_path_id=seed["path_id"], student_id=seed["student"]
+async def test_exit_snapshot_uses_stage_aware_progress(engine, session_factory, seed) -> None:
+    """Exit records use quota progress, while retaining raw course counts."""
+    async with engine.begin() as conn:
+        extra_required, _ = await _course_with_lesson(
+            conn, org=seed["org"], owner=seed["manager"], slug=f"exit-r-{uuid.uuid4().hex[:6]}"
         )
+        optional_ids = []
+        for index in range(4):
+            optional, _ = await _course_with_lesson(
+                conn,
+                org=seed["org"],
+                owner=seed["manager"],
+                slug=f"exit-o{index}-{uuid.uuid4().hex[:6]}",
+            )
+            optional_ids.append(optional)
+        await conn.execute(
+            text("UPDATE career_path_stages SET min_optional_to_complete = 1 WHERE id = :stage"),
+            {"stage": seed["stage1"]},
+        )
+
+    async with session_factory() as db:
+        await authoring_service.add_course_to_path(
+            db,
+            seed["path_id"],
+            extra_required,
+            stage_id=seed["stage1"],
+            position=None,
+            is_required=True,
+            actor=_actor(seed["manager"]),
+        )
+        for optional in optional_ids:
+            await authoring_service.add_course_to_path(
+                db,
+                seed["path_id"],
+                optional,
+                stage_id=seed["stage1"],
+                position=None,
+                is_required=False,
+                actor=_actor(seed["manager"]),
+            )
         await db.commit()
 
-    async with engine.connect() as conn:
-        versions = (
-            (
-                await conn.execute(
-                    text(
-                        "SELECT formula_version FROM career_readiness_snapshots "
-                        "WHERE career_path_id = :p"
-                    ),
-                    {"p": seed["path_id"]},
-                )
-            )
-            .scalars()
-            .all()
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO course_completion_awards "
+                "(id, student_id, course_id) VALUES "
+                "(gen_random_uuid(), :student, :required), "
+                "(gen_random_uuid(), :student, :optional), "
+                "(gen_random_uuid(), :student, :extra_required)"
+            ),
+            {
+                "student": seed["student"],
+                "required": seed["req_course"],
+                "optional": seed["opt_course"],
+                "extra_required": extra_required,
+            },
         )
-    assert list(versions) == [1]
 
-
-@pytest.mark.asyncio
-async def test_snapshot_after_cutover_is_stamped_2(
-    engine, session_factory, seed, formula_v2
-) -> None:
-    await _enroll(session_factory, seed)
     async with session_factory() as db:
-        await readiness_service.snapshot_enrollment(
-            db, career_path_id=seed["path_id"], student_id=seed["student"]
+        snapshot = await learning_program_queries.build_exit_snapshot(
+            db,
+            student_id=seed["student"],
+            attempt=SimpleNamespace(
+                career_path_id=seed["path_id"],
+                career_path_version_id=seed["version_id"],
+            ),
         )
-        await db.commit()
 
-    async with engine.connect() as conn:
-        versions = (
-            (
-                await conn.execute(
-                    text(
-                        "SELECT formula_version FROM career_readiness_snapshots "
-                        "WHERE career_path_id = :p"
-                    ),
-                    {"p": seed["path_id"]},
-                )
-            )
-            .scalars()
-            .all()
-        )
-    assert list(versions) == [2]
+    assert snapshot["overall_percent"] == 100.0
+    assert snapshot["completed_courses"] == 3
+    assert snapshot["total_courses"] == 7
 
 
 # --- progress denominator --------------------------------------------
@@ -775,7 +766,7 @@ async def test_snapshot_after_cutover_is_stamped_2(
 
 @pytest.mark.asyncio
 async def test_denominator_counts_required_plus_min_optional(
-    engine, session_factory, seed, formula_v2
+    engine, session_factory, seed
 ) -> None:
     """2 required + "min 1 of 3 optional" → stage_total 3, not 5."""
     async with engine.begin() as conn:
@@ -827,12 +818,11 @@ async def test_denominator_counts_required_plus_min_optional(
     assert stage.required_count == 2
     assert stage.optional_count == 3
     assert stage.stage_total == 3  # 2 required + min_optional 1
-    assert progress.formula_version == 2
 
 
 @pytest.mark.asyncio
 async def test_zero_total_stage_is_complete_and_excluded(
-    session_factory, seed, formula_v2, engine
+    session_factory, seed, engine
 ) -> None:
     """A stage with no required courses and no quota is complete by
     definition and must not sit in the denominator dragging the path down."""

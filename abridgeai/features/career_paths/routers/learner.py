@@ -129,11 +129,7 @@ async def get_my_readiness_history(
     current_user: Annotated[CurrentUser, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> list[CareerReadinessSnapshotRead]:
-    """Most-recent-first readiness snapshots for the calling student (FR-6.8).
-
-    Each point carries ``formula_version``; the chart must segment or annotate
-    where it changes rather than drawing one continuous line across formulas.
-    """
+    """Most-recent-first readiness snapshots for the calling student (FR-6.8)."""
     return await readiness_service.get_my_readiness_history(
         db,
         student_id=current_user.user_id,

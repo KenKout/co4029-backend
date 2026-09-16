@@ -103,6 +103,19 @@ async def is_version_complete_for_user(
     return stage_service.path_complete(evals)
 
 
+async def get_version_progress_percent_for_user(
+    db: AsyncSession,
+    *,
+    version_id: UUID,
+    student_id: UUID,
+) -> float:
+    """Return stage-aware progress for an exact pinned path version."""
+    evals = await stage_service.evaluate_stages(
+        db, version_id=version_id, student_id=student_id, enrollment_id=None
+    )
+    return stage_service.path_progress_percent(evals)
+
+
 async def ensure_program_path_access(
     db: AsyncSession,
     *,
@@ -161,6 +174,7 @@ __all__ = [
     "get_career_path_thumbnail_urls",
     "get_path_course_progress_for_user",
     "get_version_course_progress_for_user",
+    "get_version_progress_percent_for_user",
     "is_version_complete_for_user",
     "ensure_program_path_access",
     "list_user_career_enrollments",

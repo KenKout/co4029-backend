@@ -53,12 +53,6 @@ if TYPE_CHECKING:
 
     from abridgeai.features.career_paths.models import CareerPathStage
 
-_LEGACY_FORMULA = 1
-_STAGE_AWARE_FORMULA = 2
-
-PROGRESS_FORMULA_SETTING = "careerpath.progress_formula_version"
-
-
 @dataclass
 class StageEval:
     """One stage's evaluated state for one student."""
@@ -221,33 +215,6 @@ def path_complete(evals: list[StageEval]) -> bool:
     return all(ev.live_complete for ev in evals)
 
 
-def legacy_progress_percent(courses: list[dict[str, Any]]) -> float:
-    """Formula version 1: flat mean of every course's completion percent.
-
-    Preserved verbatim so the pre-stage behaviour is bit-for-bit reproducible
-    while the cutover setting still reads 1.
-    """
-    if not courses:
-        return 0.0
-    return sum(float(c["completion_percent"]) for c in courses) / len(courses)
-
-
-async def resolve_formula_version(db: AsyncSession) -> int:
-    """The active progress formula version (global runtime setting).
-
-    Global on purpose: a single dated cutover keeps the readiness chart
-    segmentable on time rather than per path. Degrades to the legacy formula
-    if the setting cannot be read — never fails a student's progress read
-    over a tuning knob.
-    """
-    from abridgeai.core.runtime_settings import resolve_setting  # noqa: PLC0415
-
-    try:
-        return int(await resolve_setting(db, PROGRESS_FORMULA_SETTING))
-    except Exception:  # noqa: BLE001 -- tuning knob; fall back to legacy
-        return _LEGACY_FORMULA
-
-
 def stage_is_hard_locked(ev: StageEval) -> bool:
     """Whether a locked stage should actually BLOCK access.
 
@@ -259,12 +226,9 @@ def stage_is_hard_locked(ev: StageEval) -> bool:
 
 
 __all__ = [
-    "PROGRESS_FORMULA_SETTING",
     "StageEval",
     "evaluate_stages",
     "latch_completed_stages",
-    "legacy_progress_percent",
     "path_progress_percent",
-    "resolve_formula_version",
     "stage_is_hard_locked",
 ]

@@ -11,7 +11,6 @@ from sqlalchemy import (
     ForeignKey,
     Integer,
     Numeric,
-    SmallInteger,
     String,
     Text,
     UniqueConstraint,
@@ -304,20 +303,6 @@ class CareerReadinessSnapshot(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
     captured_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("NOW()")
     )
-    formula_version: Mapped[int] = mapped_column(
-        SmallInteger, nullable=False, server_default=text("1")
-    )
-    """Which progress formula produced ``readiness_score``.
-
-    Server default is **1**, matching the default of the
-    ``careerpath.progress_formula_version`` runtime setting — a default of 2
-    while the formula was still gated to 1 would mislabel every snapshot
-    written before the cutover, defeating the column's only purpose.
-    :mod:`services.readiness` writes the value it actually used explicitly
-    rather than relying on this default, and the readiness chart must
-    segment (or annotate) on a version change: honest data on an
-    unsegmented line still misleads.
-    """
 
 
 __all__ = [

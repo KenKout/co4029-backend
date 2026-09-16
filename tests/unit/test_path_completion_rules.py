@@ -4,19 +4,9 @@ Formula 2 credits at most ``min_optional_to_complete`` electives per stage, so
 a stage with a surplus of optional courses can be finished without touching
 them. Anything that decides completion has to run on that same rule.
 
-It did not. ``complete_program_attempts`` tested ``all(satisfied)`` over every
-course in the version, which is strictly stricter: a student could finish
-every required course and the whole elective quota, watch the path read 100%
-and the career-path enrollment flip to completed, and still have the learning
-program sit at ``active`` waiting on electives nobody owed them.
-
-The trigger had the mirror-image problem: completion only ran at
-``overall_percent >= 100``, which under formula 1 (the default) a
-quota-complete path never reaches, so nothing completed at all.
-
 These pin the rule itself and, more importantly, pin the answers TOGETHER —
-a path is complete if and only if it reads 100% under the formula that
-shares its definition, and completion never consults the percentage.
+a path is complete if and only if it reads 100% under the stage-aware formula,
+and completion never consults a separate progress setting.
 """
 
 from __future__ import annotations
@@ -25,10 +15,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from abridgeai.features.career_paths.services.enrollment import is_path_complete
 from abridgeai.features.career_paths.services.stages import (
     StageEval,
-    legacy_progress_percent,
     path_complete,
     path_progress_percent,
 )
@@ -192,45 +180,3 @@ class TestCompletionAgreesWithProgress:
         assert path_progress_percent([done, pending]) < 100.0
         assert path_complete([done, done]) is True
         assert path_progress_percent([done, done]) == 100.0
-
-
-class TestTheCompletionTriggerIsFormulaIndependent:
-    """``is_path_complete`` reads the stages, never ``overall_percent``.
-
-    The percentage comes from whichever formula the global setting selects.
-    Formula 1 — still the default — is a flat mean over EVERY course, so a
-    student who has finished all required work and the whole elective quota
-    still scores below 100 while surplus electives sit untouched. Gating
-    completion on that number meant the enrollment, the program path
-    attempt, and the program enrolment behind it never completed at all.
-    """
-
-    def test_quota_complete_path_scores_below_100_under_formula_1(self) -> None:
-        # Two required + five optional, quota of one; required and one
-        # elective are done. Four of seven courses remain at 0%.
-        courses = [{"completion_percent": 100.0} for _ in range(3)]
-        courses += [{"completion_percent": 0.0} for _ in range(4)]
-        assert legacy_progress_percent(courses) < 100.0
-
-    def test_completion_does_not_consult_the_percentage(self) -> None:
-        """A finished path completes even while the legacy score says 42."""
-        progress = SimpleNamespace(
-            overall_percent=42.0,
-            stages=[SimpleNamespace(complete=True), SimpleNamespace(complete=True)],
-        )
-        assert is_path_complete(progress) is True
-
-    def test_one_outstanding_stage_blocks_completion(self) -> None:
-        progress = SimpleNamespace(
-            overall_percent=100.0,
-            stages=[SimpleNamespace(complete=True), SimpleNamespace(complete=False)],
-        )
-        assert is_path_complete(progress) is False
-
-    def test_a_path_with_no_stages_is_not_complete(self) -> None:
-        """Nothing measured is not the same as nothing outstanding.
-
-        Matches ``is_version_complete_for_user``: both write durable records,
-        and neither treats an unmeasurable path as finished.
-        """
-        assert is_path_complete(SimpleNamespace(overall_percent=100.0, stages=[])) is False

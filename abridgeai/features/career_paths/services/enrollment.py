@@ -38,8 +38,6 @@ if TYPE_CHECKING:
     from abridgeai.core.security import CurrentUser
     from abridgeai.features.career_paths.models import CareerPath
 
-_STAGE_AWARE_FORMULA = 2
-
 class _RosterAvatarTarget:
     """Duck-typed storage target for :func:`create_stream_url` (bucket + key).
 
@@ -332,10 +330,7 @@ async def get_my_path_progress(
     (append-only; see :class:`~..models.StudentStageProgress`). The caller
     owns the transaction — the router commits.
 
-    ``overall_percent`` is produced by whichever formula the global
-    ``careerpath.progress_formula_version`` setting selects, and the version
-    used is returned so the readiness snapshot can stamp exactly what it
-    measured.
+    ``overall_percent`` is produced by the stage-aware formula.
     """
     enrollment = await student_queries.get_my_career_enrollment(
         db, student_id=student_id, career_path_id=career_path_id
@@ -377,12 +372,7 @@ async def get_my_path_progress(
     # Start, which is a better signal of "in progress" than any percentage.
     in_progress = sum(1 for c in courses if c.is_enrolled and not c.satisfied)
 
-    formula_version = await stage_service.resolve_formula_version(db)
-    overall = (
-        stage_service.path_progress_percent(evals)
-        if formula_version >= _STAGE_AWARE_FORMULA
-        else stage_service.legacy_progress_percent(rows)
-    )
+    overall = stage_service.path_progress_percent(evals)
 
     path = await authoring_queries.get_career_path_for_authoring(db, career_path_id)
     cap = path.max_concurrent if path is not None else None
@@ -398,7 +388,6 @@ async def get_my_path_progress(
         in_progress_courses=in_progress,
         courses=courses,
         stages=[_to_stage_read(ev) for ev in evals],
-        formula_version=formula_version,
         max_concurrent=cap,
         active_in_path=active_in_path,
         # Advisory only — the cap NEVER blocks, not even under `hard`
@@ -803,6 +792,13 @@ async def get_roster_progress(
     )
     out: list[StudentPathProgressAuthoring] = []
     for row in rows:
+        evals = await stage_service.evaluate_stages(
+            db,
+            version_id=published.id,
+            student_id=row["student_id"],
+            enrollment_id=None,
+        )
+        overall_percent = stage_service.path_progress_percent(evals)
         avatar_url: str | None = None
         bucket = row.pop("avatar_bucket", None)
         object_key = row.pop("avatar_object_key", None)
@@ -821,7 +817,7 @@ async def get_roster_progress(
                     "student_email": row["primary_email"],
                     "student_display_name": row.get("display_name"),
                     "student_avatar_url": avatar_url,
-                    "overall_percent": float(row["overall_percent"]),
+                    "overall_percent": overall_percent,
                     "completed_courses": int(row["completed_courses"]),
                     "course_count": int(row["course_count"]),
                 }

@@ -20,14 +20,9 @@ _PATH = uuid.uuid4()
 _NOW = datetime(2026, 6, 10, 12, 0, 0, tzinfo=UTC)
 
 
-def _progress(overall: float, formula_version: int = 1) -> SimpleNamespace:
-    """Stand-in for ``CareerPathProgressRead``.
-
-    ``formula_version`` is part of the contract now: the snapshot must be
-    stamped with the formula that actually produced the score rather than
-    inheriting the column default.
-    """
-    return SimpleNamespace(overall_percent=overall, formula_version=formula_version)
+def _progress(overall: float) -> SimpleNamespace:
+    """Stand-in for ``CareerPathProgressRead``."""
+    return SimpleNamespace(overall_percent=overall)
 
 
 class TestComputeReadinessScore:
@@ -37,11 +32,10 @@ class TestComputeReadinessScore:
             "get_my_path_progress",
             new=AsyncMock(return_value=_progress(66.666)),
         ):
-            score, version = await readiness_service.compute_readiness_score(
+            score = await readiness_service.compute_readiness_score(
                 AsyncMock(), career_path_id=_PATH, student_id=_STUDENT
             )
         assert score == Decimal("66.67")
-        assert version == 1
 
     async def test_clamps_to_bounds(self) -> None:
         with patch.object(
@@ -49,24 +43,10 @@ class TestComputeReadinessScore:
             "get_my_path_progress",
             new=AsyncMock(return_value=_progress(105.0)),
         ):
-            score, _version = await readiness_service.compute_readiness_score(
+            score = await readiness_service.compute_readiness_score(
                 AsyncMock(), career_path_id=_PATH, student_id=_STUDENT
             )
         assert score == Decimal("100")
-
-    async def test_returns_the_active_formula_version(self) -> None:
-        """The version travels WITH the score so the caller cannot stamp a
-        snapshot with a formula it did not use."""
-        with patch.object(
-            readiness_service.enrollment_service,
-            "get_my_path_progress",
-            new=AsyncMock(return_value=_progress(50.0, formula_version=2)),
-        ):
-            score, version = await readiness_service.compute_readiness_score(
-                AsyncMock(), career_path_id=_PATH, student_id=_STUDENT
-            )
-        assert score == Decimal("50.00")
-        assert version == 2
 
 
 def _db_with_savepoints() -> MagicMock:
@@ -137,36 +117,6 @@ class TestSnapshotBatch:
         assert insert.await_args.kwargs["readiness_score"] == Decimal("42.00")
         # Gap 3: the snapshot records which VERSION produced the score.
         assert insert.await_args.kwargs["version_id"] == self._VERSION
-
-    async def test_snapshot_stamps_the_version_actually_used(self) -> None:
-        """Guards review point #2: the write must pass ``formula_version``
-        EXPLICITLY. Relying on the column default (1) would mislabel every
-        snapshot taken after the formula flipped to 2."""
-        insert = AsyncMock()
-        with (
-            patch.object(
-                readiness_service.enrollment_service,
-                "get_my_path_progress",
-                new=AsyncMock(return_value=_progress(42.0, formula_version=2)),
-            ),
-            patch.object(
-                readiness_service.enrollment_service,
-                "sync_enrollment_completion",
-                new=AsyncMock(return_value=False),
-            ),
-            patch.object(
-                readiness_service.student_queries,
-                "get_my_career_enrollment",
-                new=AsyncMock(return_value=SimpleNamespace(version_id=self._VERSION)),
-            ),
-            patch.object(readiness_service.readiness_queries, "insert_snapshot", new=insert),
-        ):
-            await readiness_service.snapshot_enrollment(
-                AsyncMock(), career_path_id=_PATH, student_id=_STUDENT
-            )
-        assert insert.await_args.kwargs["formula_version"] == 2
-        assert insert.await_args.kwargs["version_id"] == self._VERSION
-
 
 class TestOverview:
     async def test_overview_averages_latest_scores(self) -> None:
