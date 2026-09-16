@@ -894,6 +894,54 @@ async def test_start_attempt_idempotency_key_replays_same_attempt(
         await conn.execute(text("DELETE FROM auth_sessions WHERE id = :id"), {"id": student_sid})
 
 
+
+async def test_start_attempt_rejects_second_in_progress_attempt(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    scenario: dict[str, uuid.UUID],
+    engine: AsyncEngine,
+    seeded_users: SeededUsers,
+) -> None:
+    """A student can have only one live attempt for a quiz."""
+    quiz_id, _question_id, _option_ids = await _seed_published_quiz_with_question(
+        client, admin_bearer, engine, scenario, title="Single active attempt quiz"
+    )
+    student_sid = await _seed_session(engine, seeded_users.student_id)
+    token = create_access_token(user_id=seeded_users.student_id, session_id=student_sid)
+
+    first = await client.post(
+        f"/api/v1/quizzes/{quiz_id}/attempts",
+        json={"quiz_id": str(quiz_id), "idempotency_key": str(uuid.uuid4())},
+        headers=_auth(token),
+    )
+    assert first.status_code == 201, first.text
+    first_attempt_id = first.json()["attempt_id"]
+
+    second = await client.post(
+        f"/api/v1/quizzes/{quiz_id}/attempts",
+        json={"quiz_id": str(quiz_id), "idempotency_key": str(uuid.uuid4())},
+        headers=_auth(token),
+    )
+    assert second.status_code == 409, second.text
+    detail = second.json()["detail"]
+    assert detail["error"] == "quiz_attempt_already_in_progress"
+    assert detail["attempt_id"] == first_attempt_id
+
+    async with engine.begin() as conn:
+        count = (
+            await conn.execute(
+                text(
+                    "SELECT count(*) FROM quiz_attempts "
+                    "WHERE quiz_id = :quiz AND student_id = :student "
+                    "AND status = 'in_progress'"
+                ),
+                {"quiz": quiz_id, "student": seeded_users.student_id},
+            )
+        ).scalar_one()
+        assert count == 1
+        await conn.execute(text("DELETE FROM auth_sessions WHERE id = :id"), {"id": student_sid})
+
+
 def test_no_bare_get_current_user_on_quiz_authoring_endpoints() -> None:
     src = (
         Path(__file__).resolve().parent.parent.parent

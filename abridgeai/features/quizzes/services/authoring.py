@@ -81,6 +81,7 @@ register_conflict_mappings(
         "uq_quiz_question_options_position": "quiz_option_position_taken: another option already occupies this position",  # noqa: E501
         "uq_quiz_question_revisions_number": "quiz_revision_number_taken: this revision number already exists for the question",  # noqa: E501
         "uq_quiz_attempts_number": "quiz_attempt_number_taken: this attempt number already exists for the student",  # noqa: E501
+        "uq_quiz_attempts_active": "quiz_attempt_already_in_progress: this student already has an active attempt for this quiz",  # noqa: E501
         "uq_quiz_attempt_answers_question": "quiz_attempt_answer_already_recorded: this question has already been answered for this attempt",  # noqa: E501
         "quiz_attempts_idempotency_key_key": "quiz_attempt_idempotency_key_replayed: this idempotency key has already been used",  # noqa: E501
     }

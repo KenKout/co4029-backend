@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING
 from uuid import UUID
 
 from abridgeai.core.db.conflict_mapper import flush_or_conflict
-from abridgeai.core.exceptions import AppError, NotFoundError
+from abridgeai.core.exceptions import AppError, ConflictError, NotFoundError
 from abridgeai.core.observability import get_logger
 from abridgeai.core.security import CurrentUser, utcnow
 from abridgeai.features.quizzes.models import (
@@ -105,15 +105,23 @@ class AllCardsInCooldownError(AppError):
         self.cards_due_at = cards_due_at
 
 
-class AttemptNotInProgress(AppError):
+class AttemptNotInProgress(AppError):  # noqa: N818
     """The learner tried to mutate an attempt that is already closed."""
 
 
-class QuestionNotInAttempt(AppError):
+class ActiveAttemptExists(AppError):  # noqa: N818
+    """The student already has one in-progress attempt for this quiz."""
+
+    def __init__(self, attempt_id: UUID) -> None:
+        super().__init__(f"Quiz attempt {attempt_id} is already in progress")
+        self.attempt_id = attempt_id
+
+
+class QuestionNotInAttempt(AppError):  # noqa: N818
     """The submitted question was not part of this attempt's take snapshot."""
 
 
-class InvalidAnswerOption(AppError):
+class InvalidAnswerOption(AppError):  # noqa: N818
     """The selected option does not belong to the submitted question."""
 
 
@@ -165,6 +173,22 @@ async def _next_attempt_number(db: AsyncSession, quiz_id: UUID, student_id: UUID
         QuizAttempt.student_id == student_id,
     )
     return int((await db.execute(stmt)).scalar_one())
+
+
+async def _active_attempt_id(
+    db: AsyncSession, quiz_id: UUID, student_id: UUID
+) -> UUID | None:
+    from sqlalchemy import select  # noqa: PLC0415
+
+    return (
+        await db.execute(
+            select(QuizAttempt.id).where(
+                QuizAttempt.quiz_id == quiz_id,
+                QuizAttempt.student_id == student_id,
+                QuizAttempt.status == "in_progress",
+            )
+        )
+    ).scalar_one_or_none()
 
 
 async def _load_quiz_questions_for_taking(db: AsyncSession, quiz_id: UUID) -> list[QuizQuestion]:
@@ -419,6 +443,10 @@ async def start_attempt(
                 )
             return existing, progress
 
+    active_attempt_id = await _active_attempt_id(db, quiz_id, actor.user_id)
+    if active_attempt_id is not None:
+        raise ActiveAttemptExists(active_attempt_id)
+
     quiz = await published_queries.get_quiz_for_taking(
         db,
         quiz_id,
@@ -460,7 +488,13 @@ async def start_attempt(
         integrity_policy_snapshot=integrity_policy_snapshot_from_quiz(quiz),
     )
     db.add(attempt)
-    await flush_or_conflict(db)
+    try:
+        await flush_or_conflict(db)
+    except ConflictError:
+        active_attempt_id = await _active_attempt_id(db, quiz_id, actor.user_id)
+        if active_attempt_id is not None:
+            raise ActiveAttemptExists(active_attempt_id) from None
+        raise
     await db.refresh(attempt)
 
     attempt.cards_in_cooldown = [  # type: ignore[attr-defined]
@@ -833,6 +867,7 @@ async def _expire_attempt(
 
 
 __all__ = [
+    "ActiveAttemptExists",
     "AttemptNotInProgress",
     "AllCardsInCooldownError",
     "CooldownActive",

@@ -212,6 +212,18 @@ def test_quiz_source_lesson_preserved() -> None:
     assert pk_cols == {"quiz_id", "lesson_id"}
 
 
+def test_quiz_attempt_active_unique_partial_index() -> None:
+    active_index = next(
+        index
+        for index in QuizAttempt.__table__.indexes
+        if index.name == "uq_quiz_attempts_active"
+    )
+    assert active_index.unique is True
+    assert str(active_index.dialect_options["postgresql"]["where"]) == (
+        "status = 'in_progress'"
+    )
+
+
 def test_quiz_attempt_status_includes_graded() -> None:
     sqltext = _check_constraint_text(QuizAttempt, "ck_quiz_attempts_status")
     for value in ("in_progress", "submitted", "graded"):

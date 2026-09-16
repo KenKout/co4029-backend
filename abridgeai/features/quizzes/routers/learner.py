@@ -54,6 +54,7 @@ from abridgeai.features.quizzes.services import taking as taking_service
 # intentionally NOT re-imported from taking here (that was a redundant
 # redefinition — ruff F811).
 from abridgeai.features.quizzes.services.taking import (
+    ActiveAttemptExists,
     AllCardsInCooldownError,
     AttemptNotInProgress,
     CooldownActive,
@@ -355,6 +356,14 @@ async def start_attempt(  # noqa: C901 -- existing error mapping + session-claim
             detail={
                 "reason": "max_attempts_reached",
                 "max_attempts": exc.max_attempts,
+            },
+        ) from exc
+    except ActiveAttemptExists as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "error": "quiz_attempt_already_in_progress",
+                "attempt_id": str(exc.attempt_id),
             },
         ) from exc
     except AttemptNotInProgress as exc:

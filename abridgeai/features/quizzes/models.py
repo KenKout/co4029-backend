@@ -104,6 +104,7 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     Numeric,
     String,
@@ -452,6 +453,13 @@ class QuizAttempt(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "quiz_attempts"
     __table_args__ = (
         UniqueConstraint("quiz_id", "student_id", "attempt_number", name="uq_quiz_attempts_number"),
+        Index(
+            "uq_quiz_attempts_active",
+            "quiz_id",
+            "student_id",
+            unique=True,
+            postgresql_where=text("status = 'in_progress'"),
+        ),
         CheckConstraint(
             "status IN ('in_progress', 'submitted', 'graded', 'abandoned', 'expired')",
             name="ck_quiz_attempts_status",
@@ -482,14 +490,7 @@ class QuizAttempt(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     score_percent: Mapped[Decimal | None] = mapped_column(Numeric(5, 2))
     passed: Mapped[bool | None] = mapped_column(Boolean)
     idempotency_key: Mapped[uuid.UUID | None] = mapped_column(PGUUID(as_uuid=True), unique=True)
-    # Phase 6 (migration 0050): deterministic per-attempt question/option order
-    # (shuffle). NULL = natural order. Re-read verbatim on resume/review.
     layout: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
-    # ── Browser-integrity scoring (migration 0115) ───────────────────────────
-    # The snapshot freezes the weights + threshold in force when the attempt
-    # STARTED, so a teacher editing the quiz mid-cohort never re-scores an
-    # attempt taken under the older rules. Keys: tab_switch / focus_lost /
-    # fullscreen_exit / score_threshold.
     integrity_policy_snapshot: Mapped[dict[str, Any]] = mapped_column(
         JSONB, nullable=False, server_default=text("'{}'::jsonb")
     )
