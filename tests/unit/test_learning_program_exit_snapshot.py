@@ -13,7 +13,7 @@ from abridgeai.features.learning_programs import queries
 
 @pytest.mark.asyncio
 async def test_build_exit_snapshot_uses_stage_aware_progress_and_keeps_raw_counts() -> None:
-    """Two required + five optional (quota one) is 100% after 3 completions."""
+    """The query delegates its percentage to the stage-aware public API."""
     course_ids = [uuid4() for _ in range(7)]
     rows = [
         {"course_id": course_id, "completed": index < 3}
@@ -41,6 +41,7 @@ async def test_build_exit_snapshot_uses_stage_aware_progress_and_keeps_raw_count
         )
 
     assert snapshot["overall_percent"] == 100.0
+    assert "formula_version" not in snapshot
     assert snapshot["completed_courses"] == 3
     assert snapshot["total_courses"] == 7
     stage_progress.assert_awaited_once_with(

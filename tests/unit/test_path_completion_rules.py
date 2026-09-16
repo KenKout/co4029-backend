@@ -15,6 +15,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from abridgeai.features.career_paths.services.enrollment import is_path_complete
 from abridgeai.features.career_paths.services.stages import (
     StageEval,
     path_complete,
@@ -180,3 +181,17 @@ class TestCompletionAgreesWithProgress:
         assert path_progress_percent([done, pending]) < 100.0
         assert path_complete([done, done]) is True
         assert path_progress_percent([done, done]) == 100.0
+
+
+class TestIsPathComplete:
+    def test_one_outstanding_stage_blocks_completion(self) -> None:
+        progress = SimpleNamespace(
+            overall_percent=100.0,
+            stages=[SimpleNamespace(complete=True), SimpleNamespace(complete=False)],
+        )
+        assert is_path_complete(progress) is False
+
+    def test_a_path_with_no_stages_is_not_complete(self) -> None:
+        """An unmeasurable path is not a completed academic record."""
+        progress = SimpleNamespace(overall_percent=100.0, stages=[])
+        assert is_path_complete(progress) is False

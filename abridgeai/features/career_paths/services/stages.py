@@ -53,6 +53,7 @@ if TYPE_CHECKING:
 
     from abridgeai.features.career_paths.models import CareerPathStage
 
+
 @dataclass
 class StageEval:
     """One stage's evaluated state for one student."""
@@ -112,6 +113,7 @@ async def evaluate_stages(
     version_id: UUID,
     student_id: UUID,
     enrollment_id: UUID | None,
+    prefetched_stages: list[CareerPathStage] | None = None,
 ) -> list[StageEval]:
     """Evaluate every stage of ONE VERSION for one student, in position order.
 
@@ -122,7 +124,11 @@ async def evaluate_stages(
     enrollment to latch against — but unlock and completion still evaluate
     so the preview matches what a student would see.
     """
-    stages = await authoring_queries.list_stages_for_version(db, version_id)
+    stages = (
+        prefetched_stages
+        if prefetched_stages is not None
+        else await authoring_queries.list_stages_for_version(db, version_id)
+    )
     rows = await student_queries.get_path_course_progress(
         db, version_id=version_id, student_id=student_id
     )

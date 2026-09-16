@@ -22,15 +22,29 @@ async def test_roster_progress_uses_stage_aware_percentage() -> None:
         "avatar_bucket": None,
         "avatar_object_key": None,
         "overall_percent": 42.86,
-        "completed_courses": 3,
+        "completed_courses": 1,
         "course_count": 7,
     }
-    evals = object()
+    evals = [
+        SimpleNamespace(
+            courses=[
+                {"satisfied": index < 3}
+                for index in range(7)
+            ]
+        )
+    ]
+    stages = [SimpleNamespace(id=uuid4())]
+    db = AsyncMock()
     with (
         patch.object(
             enrollment.authoring_queries,
             "get_published_version",
             new=AsyncMock(return_value=SimpleNamespace(id=version_id)),
+        ),
+        patch.object(
+            enrollment.authoring_queries,
+            "list_stages_for_version",
+            new=AsyncMock(return_value=stages),
         ),
         patch.object(
             enrollment.student_queries,
@@ -41,14 +55,23 @@ async def test_roster_progress_uses_stage_aware_percentage() -> None:
             enrollment.stage_service,
             "evaluate_stages",
             new=AsyncMock(return_value=evals),
-        ),
+        ) as evaluate_stages,
         patch.object(
             enrollment.stage_service,
             "path_progress_percent",
             return_value=100.0,
         ) as progress_percent,
     ):
-        result = await enrollment.get_roster_progress(AsyncMock(), uuid4())
+        result = await enrollment.get_roster_progress(db, uuid4())
 
     assert result[0].overall_percent == 100.0
+    assert result[0].completed_courses == 3
+    assert result[0].course_count == 7
+    evaluate_stages.assert_awaited_once_with(
+        db,
+        version_id=version_id,
+        student_id=student_id,
+        enrollment_id=None,
+        prefetched_stages=stages,
+    )
     progress_percent.assert_called_once_with(evals)

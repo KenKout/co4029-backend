@@ -633,6 +633,8 @@ async def build_exit_snapshot(
     )
     completed = [str(row["course_id"]) for row in rows if row["completed"]]
     total = len(rows)
+    # The formula-version stamp was retired with migration 0126. Existing
+    # exit_snapshot blobs are frozen; new snapshots deliberately omit it.
     overall_percent = await career_paths_api.get_version_progress_percent_for_user(
         db,
         version_id=attempt.career_path_version_id,

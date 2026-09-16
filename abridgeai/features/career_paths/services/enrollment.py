@@ -38,6 +38,7 @@ if TYPE_CHECKING:
     from abridgeai.core.security import CurrentUser
     from abridgeai.features.career_paths.models import CareerPath
 
+
 class _RosterAvatarTarget:
     """Duck-typed storage target for :func:`create_stream_url` (bucket + key).
 
@@ -787,8 +788,9 @@ async def get_roster_progress(
     published = await authoring_queries.get_published_version(db, career_path_id)
     if published is None:
         return []
+    stages = await authoring_queries.list_stages_for_version(db, published.id)
     rows = await student_queries.get_roster_path_progress(
-        db, version_id=published.id, career_path_id=career_path_id
+        db, career_path_id=career_path_id
     )
     out: list[StudentPathProgressAuthoring] = []
     for row in rows:
@@ -797,8 +799,12 @@ async def get_roster_progress(
             version_id=published.id,
             student_id=row["student_id"],
             enrollment_id=None,
+            prefetched_stages=stages,
         )
+        courses = [course for ev in evals for course in ev.courses]
         overall_percent = stage_service.path_progress_percent(evals)
+        completed_courses = sum(1 for course in courses if course["satisfied"])
+        course_count = len(courses)
         avatar_url: str | None = None
         bucket = row.pop("avatar_bucket", None)
         object_key = row.pop("avatar_object_key", None)
@@ -818,8 +824,8 @@ async def get_roster_progress(
                     "student_display_name": row.get("display_name"),
                     "student_avatar_url": avatar_url,
                     "overall_percent": overall_percent,
-                    "completed_courses": int(row["completed_courses"]),
-                    "course_count": int(row["course_count"]),
+                    "completed_courses": completed_courses,
+                    "course_count": course_count,
                 }
             )
         )
