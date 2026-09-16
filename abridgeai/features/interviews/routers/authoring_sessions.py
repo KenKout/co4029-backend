@@ -34,6 +34,9 @@ from abridgeai.features.interviews.schemas import (
     SecuritySessionSummary,
     TeacherInterviewRecordingRead,
 )
+from abridgeai.features.interviews.services.evaluation_state import (
+    derive_evaluation_state,
+)
 
 router = APIRouter(prefix="/teacher", tags=["interviews-authoring"])
 
@@ -59,6 +62,7 @@ def _session_teacher_view(
         status=session.status,
         input_mode=session.input_mode,
         pass_verdict=session.pass_verdict,
+        evaluation_state=derive_evaluation_state(session),
         started_at=session.started_at,
         assessment_started_at=session.assessment_started_at,
         onboarding_stage=session.onboarding_stage,
@@ -151,6 +155,7 @@ async def list_config_sessions(
             status=s.status,
             input_mode=s.input_mode,
             pass_verdict=s.pass_verdict,
+            evaluation_state=derive_evaluation_state(s),
             started_at=s.started_at,
             ended_at=s.ended_at,
             security_summary=summaries[s.id],
@@ -188,11 +193,15 @@ async def get_session_authoring(
         input_mode=session.input_mode,
         attempt_number=session.attempt_number,
         started_at=session.started_at,
+        assessment_started_at=session.assessment_started_at,
+        onboarding_stage=session.onboarding_stage,
+        interview_language=session.interview_language,
         ended_at=session.ended_at,
         resume_deadline_at=session.resume_deadline_at,
         current_question_index=None,
         time_remaining_seconds=None,
         pass_verdict=session.pass_verdict,
+        evaluation_state=derive_evaluation_state(session),
     )
 
 

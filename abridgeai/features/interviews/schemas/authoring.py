@@ -59,6 +59,7 @@ from abridgeai.features.interviews.schemas.public import (
     QuestionTypeLiteral,
 )
 from abridgeai.features.interviews.schemas.session import (
+    EvaluationStateLiteral,
     InputModeLiteral,
     SessionStatusLiteral,
 )
@@ -615,6 +616,11 @@ class InterviewSessionSummary(BaseModel):
     status: SessionStatusLiteral
     input_mode: InputModeLiteral
     pass_verdict: bool | None = None
+    # Server-derived "is a verdict still coming?" — see
+    # ``services.evaluation_state.derive_evaluation_state``. Teacher lists must
+    # render THIS, not re-derive from ``status``: ``failed`` is not terminal
+    # while the recovery sweep can re-drive the row.
+    evaluation_state: EvaluationStateLiteral = "not_required"
     started_at: datetime
     ended_at: datetime | None = None
     security_summary: SecuritySessionSummary | None = None
@@ -641,6 +647,8 @@ class InterviewSessionTeacherRead(BaseModel):
     status: SessionStatusLiteral
     input_mode: InputModeLiteral
     pass_verdict: bool | None = None
+    # Same derived label as :class:`InterviewSessionSummary` — see above.
+    evaluation_state: EvaluationStateLiteral = "not_required"
     started_at: datetime
     ended_at: datetime | None = None
     security_summary: SecuritySessionSummary | None = None
