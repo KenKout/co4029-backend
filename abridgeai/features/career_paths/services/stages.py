@@ -24,9 +24,15 @@ latch wins forever after — see :class:`~..models.StudentStageProgress`.
   database, so that reordering a stage away from position 1 restores the
   manager's original intent.
 * ``always`` → ``True``
-* ``after_previous`` → previous stage complete
+* ``after_previous`` → previous stage complete AND itself unlocked
 * ``after_previous_required`` → previous stage's required courses all
-  satisfied (electives may still be outstanding)
+  satisfied (electives may still be outstanding) AND itself unlocked
+
+The ``AND itself unlocked`` chains the gate through the whole prefix.
+Completion is path-agnostic, so a stage can be finished by work done on
+another path without ever having been reachable on this one; without the
+chain, such a stage would unlock the stage after it. See
+:func:`_apply_unlock`.
 
 Progress::
 
@@ -172,9 +178,9 @@ def _apply_unlock(evals: list[StageEval]) -> None:
         if policy == "always":
             ev.unlocked = True
         elif policy == "after_previous":
-            ev.unlocked = previous.complete
+            ev.unlocked = previous.complete and previous.unlocked
         elif policy == "after_previous_required":
-            ev.unlocked = previous.all_required_satisfied
+            ev.unlocked = previous.all_required_satisfied and previous.unlocked
         else:  # unknown policy: fail CLOSED rather than silently opening
             ev.unlocked = False
 
