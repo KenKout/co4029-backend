@@ -32,9 +32,23 @@ from abridgeai.features.career_paths.services import enrollment as enrollment_se
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
+    from abridgeai.features.career_paths.schemas.public import (
+        CareerPathProgressRead,
+    )
+
 logger = get_logger(__name__)
 
 _TWO_PLACES = Decimal("0.01")
+
+
+def _score_from_progress(progress: CareerPathProgressRead) -> Decimal:
+    """The stored readiness score for an already-computed progress read.
+
+    Split out so a caller holding the progress can score it without paying
+    for the stage evaluation a second time.
+    """
+    score = Decimal(str(progress.overall_percent)).quantize(_TWO_PLACES, rounding=ROUND_HALF_UP)
+    return max(Decimal("0"), min(Decimal("100"), score))
 
 
 async def compute_readiness_score(
@@ -48,28 +62,18 @@ async def compute_readiness_score(
     progress = await enrollment_service.get_my_path_progress(
         db, career_path_id=career_path_id, student_id=student_id
     )
-    score = Decimal(str(progress.overall_percent)).quantize(_TWO_PLACES, rounding=ROUND_HALF_UP)
-    bounded = max(Decimal("0"), min(Decimal("100"), score))
-    return bounded, progress.formula_version
+    return _score_from_progress(progress), progress.formula_version
 
 
 async def snapshot_enrollment(
     db: AsyncSession, *, career_path_id: UUID, student_id: UUID
 ) -> Decimal:
-    """Compute + persist one snapshot; returns the stored score.
-
-    ``formula_version`` is written EXPLICITLY from the version that produced
-    the score, never left to the column default. The column defaults to 1 and
-    the setting starts at 1, but relying on that coupling is exactly the bug
-    that would mislabel every snapshot in the window between deploying
-    formula 2 and flipping the setting.
-
-    Also flips the enrollment to ``completed`` ("prepared") once the score
-    reaches 100 — a backstop to the synchronous writer, not the primary path.
-    """
-    score, formula_version = await compute_readiness_score(
+    """Compute + persist one snapshot; returns the stored score."""
+    progress = await enrollment_service.get_my_path_progress(
         db, career_path_id=career_path_id, student_id=student_id
     )
+    score = _score_from_progress(progress)
+    formula_version = progress.formula_version
     # Gap 3: the snapshot records which version produced the score — the
     # student's pin, or the latest published version when unenrolled.
     enrollment = await student_queries.get_my_career_enrollment(
@@ -95,7 +99,7 @@ async def snapshot_enrollment(
         db,
         career_path_id=career_path_id,
         student_id=student_id,
-        overall_percent=float(score),
+        progress=progress,
     )
     return score
 

@@ -566,7 +566,7 @@ async def test_completion_flips_to_prepared(engine, session_factory, seed) -> No
             db,
             career_path_id=seed["path_id"],
             student_id=seed["student"],
-            overall_percent=progress.overall_percent,
+            progress=progress,
         )
         await db.commit()
     assert flipped is True

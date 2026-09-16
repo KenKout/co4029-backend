@@ -61,16 +61,7 @@ async def get_published_path_detail(
     current_user: Annotated[CurrentUser, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> CareerPathDetailPublic:
-    """Published path plus its stage roadmap.
-
-    Separate from ``GET /{slug}`` so the catalog list and the plain detail
-    read keep their slim payload; this one is for the screen where a student
-    decides whether to commit to a path.
-
-    Registered BEFORE ``/{slug}`` would be irrelevant (different suffix), but
-    it must not be shadowed by it — FastAPI matches in declaration order and
-    ``/{slug}`` would happily swallow ``detail`` as a slug if it came first.
-    """
+    """Published path plus its stage roadmap."""
     result = await enrollment_service.get_published_path_detail_for_user(
         db, slug=slug, user_id=current_user.user_id
     )
@@ -112,20 +103,7 @@ async def get_my_career_path_progress(
     current_user: Annotated[CurrentUser, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> CareerPathProgressRead:
-    """Stage-aware progress for the calling student.
-
-    This GET has TWO write side-effects and must commit unconditionally:
-
-    * ``get_my_path_progress`` writes the append-only stage latch for any
-      stage that has just become complete;
-    * ``sync_enrollment_completion`` flips the enrollment to ``completed``
-      at 100%.
-
-    Committing only when the enrollment flipped (the original behaviour)
-    silently rolled the latch back on every other request, so a stage could
-    read complete in the response and still be unlatched in the database —
-    which then let a manager delete a stage students had actually finished.
-    """
+    """Stage-aware progress for the calling student."""
     progress = await enrollment_service.get_my_path_progress(
         db,
         career_path_id=career_path_id,
@@ -136,7 +114,7 @@ async def get_my_career_path_progress(
         db,
         career_path_id=career_path_id,
         student_id=current_user.user_id,
-        overall_percent=progress.overall_percent,
+        progress=progress,
     )
     await db.commit()
     return progress

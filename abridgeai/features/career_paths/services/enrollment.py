@@ -252,19 +252,23 @@ async def unenroll_student(
     return _to_authoring_enrollment(enrollment)
 
 
+def is_path_complete(progress: CareerPathProgressRead) -> bool:
+    """Has the student finished this path, under the stage-aware rules?"""
+    return bool(progress.stages) and all(stage.complete for stage in progress.stages)
+
+
 async def sync_enrollment_completion(
     db: AsyncSession,
     *,
     career_path_id: UUID,
     student_id: UUID,
-    overall_percent: float,
+    progress: CareerPathProgressRead,
 ) -> bool:
-    """Flip an ``active`` enrollment to ``completed`` once the path is 100%
-    done — the "prepared" milestone. Idempotent; returns ``True`` iff it
-    flipped on this call (so the caller knows whether to commit). Caller
-    owns the transaction.
-    """
-    if overall_percent < 100:
+    """Flip an ``active`` enrollment to ``completed`` once the path is done —
+    the "prepared" milestone. Idempotent; returns ``True`` iff it flipped on
+    this call (so the caller knows whether to commit). Caller owns the
+    transaction."""
+    if not is_path_complete(progress):
         return False
     from abridgeai.features.learning_programs.api import public as programs_api
 
@@ -298,11 +302,12 @@ async def list_my_career_enrollments(
             db, career_path_id=career_path_id, student_id=student_id
         )
         overall = progress.overall_percent
+        complete = is_path_complete(progress)
         flipped = await sync_enrollment_completion(
             db,
             career_path_id=career_path_id,
             student_id=student_id,
-            overall_percent=overall,
+            progress=progress,
         )
         result.append(
             MyCareerEnrollmentRead.model_validate(
@@ -311,7 +316,7 @@ async def list_my_career_enrollments(
                     "status": "completed" if flipped else row["status"],
                     "completed_at": datetime.now(tz=UTC) if flipped else row["completed_at"],
                     "overall_percent": overall,
-                    "is_prepared": overall >= 100,
+                    "is_prepared": complete,
                 }
             )
         )
@@ -831,6 +836,7 @@ __all__ = [
     "get_published_path_for_user",
     "get_published_path_with_courses",
     "get_roster_progress",
+    "is_path_complete",
     "list_my_career_enrollments",
     "list_published_paths",
     "list_published_paths_for_user",
