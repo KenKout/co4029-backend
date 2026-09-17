@@ -753,6 +753,157 @@ async def test_publish_course_widens_status(
         assert row.status == "published"
 
 
+async def _gradeable_only(engine: AsyncEngine, course_id: object) -> None:
+    """Satisfy ONLY the gradeable-unit gate.
+
+    The counterpart to :func:`_publish_ready`: one published lesson so the
+    course has something to grade, but no learning outcome and no staffed
+    teacher. A course in this state must be refused by BOTH publish doors.
+    """
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "UPDATE lessons SET status = 'published' WHERE id = ("
+                "  SELECT l.id FROM lessons l JOIN modules m ON m.id = l.module_id"
+                "  WHERE m.course_id = :cid LIMIT 1)"
+            ),
+            {"cid": course_id},
+        )
+
+
+async def test_patch_publish_applies_every_gate_the_dedicated_route_does(
+    client: httpx.AsyncClient,
+    manager_bearer: str,
+    scenario: dict[str, uuid.UUID | str],
+    engine: AsyncEngine,
+) -> None:
+    """The second door must refuse what the first door refuses.
+
+    PATCH used to apply the gradeable-unit gate ALONE, so a manager could
+    publish a course with no learning outcomes and no staffed teacher simply
+    by choosing the other endpoint. It now delegates to ``publish_course``,
+    so there is one set of gates rather than two that must be kept in step.
+    """
+    await _gradeable_only(engine, scenario["course_b"])
+    before = await _course_status(engine, scenario["course_b"])
+
+    response = await client.patch(
+        f"/api/v1/teacher/courses/{scenario['course_b']}",
+        json={"status": "published"},
+        headers={"Authorization": f"Bearer {manager_bearer}"},
+    )
+
+    assert response.status_code == 409, response.text
+    assert await _course_status(engine, scenario["course_b"]) == before
+
+
+async def test_patch_publish_is_all_or_nothing_when_a_gate_refuses(
+    client: httpx.AsyncClient,
+    manager_bearer: str,
+    scenario: dict[str, uuid.UUID | str],
+    engine: AsyncEngine,
+) -> None:
+    """A refused publish must not leave the rest of the payload applied."""
+    await _gradeable_only(engine, scenario["course_b"])
+
+    response = await client.patch(
+        f"/api/v1/teacher/courses/{scenario['course_b']}",
+        json={"description": "should not land", "status": "published"},
+        headers={"Authorization": f"Bearer {manager_bearer}"},
+    )
+
+    assert response.status_code == 409, response.text
+    async with engine.begin() as conn:
+        row = (
+            await conn.execute(
+                text("SELECT status, description FROM courses WHERE id = :id"),
+                {"id": scenario["course_b"]},
+            )
+        ).one()
+    assert row.status != "published"
+    assert row.description != "should not land"
+
+
+async def test_patch_publish_notifies_like_the_dedicated_route(
+    client: httpx.AsyncClient,
+    manager_bearer: str,
+    scenario: dict[str, uuid.UUID | str],
+    engine: AsyncEngine,
+) -> None:
+    """Publishing through PATCH announced the course to nobody.
+
+    Worse than a delay: ``publish_course`` notifies only on the transition
+    INTO published, so a later POST /publish on the same course saw it
+    already published and stayed silent too. The announcement was lost for
+    good, not deferred.
+    """
+    await _publish_ready(engine, scenario["course_b"])
+
+    response = await client.patch(
+        f"/api/v1/teacher/courses/{scenario['course_b']}",
+        json={"status": "published"},
+        headers={"Authorization": f"Bearer {manager_bearer}"},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "published"
+
+    async with engine.begin() as conn:
+        count = (
+            await conn.execute(
+                text(
+                    "SELECT COUNT(*) AS n FROM notifications "
+                    "WHERE entity_type = 'course' AND entity_id = :cid"
+                ),
+                {"cid": scenario["course_b"]},
+            )
+        ).one().n
+    assert count > 0, "publishing through PATCH notified nobody"
+
+
+async def test_patch_publish_also_applies_the_patched_fields(
+    client: httpx.AsyncClient,
+    manager_bearer: str,
+    scenario: dict[str, uuid.UUID | str],
+    engine: AsyncEngine,
+) -> None:
+    """A publish PATCH carrying other fields must land those too.
+
+    The status is withheld from the patch and written by the transition, so
+    this pins that withholding it does not drop its companions.
+    """
+    await _publish_ready(engine, scenario["course_b"])
+
+    response = await client.patch(
+        f"/api/v1/teacher/courses/{scenario['course_b']}",
+        json={"description": "live now", "status": "published"},
+        headers={"Authorization": f"Bearer {manager_bearer}"},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["status"] == "published"
+    assert body["description"] == "live now"
+
+
+def test_patch_publish_requires_the_publish_permission() -> None:
+    """Source-level guard, in the style of the FIX-SEC-1 grep test.
+
+    Both doors into ``published`` must demand ``course.publish``. No seeded
+    role holds ``course.delete`` without it, so the divergence is unreachable
+    today and cannot be exercised behaviourally — but a future role split
+    would open it silently, which is exactly what this asserts against.
+    """
+    src = (
+        Path(__file__).resolve().parent.parent.parent
+        / "abridgeai"
+        / "features"
+        / "courses"
+        / "routers"
+        / "authoring.py"
+    ).read_text(encoding="utf-8")
+    assert 'payload.status == "published"' in src
+    assert '"course.publish" not in course_perms' in src
+
+
 async def test_archive_course(
     client: httpx.AsyncClient,
     manager_bearer: str,
@@ -764,6 +915,158 @@ async def test_archive_course(
     )
     assert response.status_code == 200, response.text
     assert response.json()["status"] == "archived"
+
+
+async def test_patch_archive_honours_the_career_path_guard(
+    client: httpx.AsyncClient,
+    manager_bearer: str,
+    scenario: dict[str, uuid.UUID | str],
+    engine: AsyncEngine,
+    seeded_users: SeededUsers,
+) -> None:
+    """The archive door has the same two-entrance problem publishing had.
+
+    ``archive_course`` refuses while the course sits on a PUBLISHED career
+    path, because archiving it locks that stage — and every stage behind it —
+    for every enrolled student. PATCH wrote the column directly and walked
+    straight past the check, so the same course could be archived or not
+    depending only on which endpoint was called.
+    """
+    course_id = scenario["course_b"]
+    path_id = uuid.uuid4()
+    version_id = uuid.uuid4()
+    stage_id = uuid.uuid4()
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO career_paths (id, organization_id, slug, name, status) "
+                "VALUES (:id, :org, :slug, 'Guarded Path', 'published')"
+            ),
+            {
+                "id": path_id,
+                "org": seeded_users.organization_id,
+                "slug": f"guarded-{path_id.hex[:8]}",
+            },
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO career_path_versions (id, career_path_id, version_no, status) "
+                "VALUES (:id, :pid, 1, 'published')"
+            ),
+            {"id": version_id, "pid": path_id},
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO career_path_stages (id, version_id, position, title, "
+                "unlock_policy, enforcement) "
+                "VALUES (:id, :vid, 1, 'Stage 1', 'always', 'soft')"
+            ),
+            {"id": stage_id, "vid": version_id},
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO career_course_items (id, version_id, stage_id, course_id, "
+                "position, is_required) "
+                "VALUES (gen_random_uuid(), :vid, :sid, :cid, 1, true)"
+            ),
+            {"vid": version_id, "sid": stage_id, "cid": course_id},
+        )
+
+    before = await _course_status(engine, course_id)
+    try:
+        response = await client.patch(
+            f"/api/v1/teacher/courses/{course_id}",
+            json={"status": "archived"},
+            headers={"Authorization": f"Bearer {manager_bearer}"},
+        )
+
+        assert response.status_code == 400, response.text
+        assert "career path" in response.text
+        assert await _course_status(engine, course_id) == before
+    finally:
+        # These rows point AT course_b, whose teardown deletes the course
+        # row directly. A surviving career_course_items reference would trip
+        # that FK and, as the scenario fixture warns, poison every later test
+        # in the session — so the cleanup runs even when an assertion fails.
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("DELETE FROM career_course_items WHERE version_id = :vid"),
+                {"vid": version_id},
+            )
+            await conn.execute(
+                text("DELETE FROM career_path_stages WHERE version_id = :vid"),
+                {"vid": version_id},
+            )
+            await conn.execute(
+                text("DELETE FROM career_path_versions WHERE id = :vid"),
+                {"vid": version_id},
+            )
+            await conn.execute(
+                text("DELETE FROM career_paths WHERE id = :pid"), {"pid": path_id}
+            )
+
+
+async def test_delete_refuses_a_published_course(
+    client: httpx.AsyncClient,
+    manager_bearer: str,
+    scenario: dict[str, uuid.UUID | str],
+    engine: AsyncEngine,
+) -> None:
+    """Deletion is draft-only, for every actor.
+
+    A published course may have students inside it and path items pointing at
+    it that the cascade cannot reach — ``career_course_items`` carries no
+    ``deleted_at`` and no relationship back to the course — so the row would
+    survive, aimed at a course progress queries filter out. The stage quietly
+    loses a requirement and can complete, and unlock what follows, under
+    students mid-path. Archiving is the only way to end a published course.
+    """
+    await _publish_ready(engine, scenario["course_b"])
+    publish = await client.post(
+        f"/api/v1/teacher/courses/{scenario['course_b']}/publish",
+        headers={"Authorization": f"Bearer {manager_bearer}"},
+    )
+    assert publish.status_code == 200, publish.text
+
+    response = await client.delete(
+        f"/api/v1/teacher/courses/{scenario['course_b']}",
+        headers={"Authorization": f"Bearer {manager_bearer}"},
+    )
+
+    assert response.status_code == 400, response.text
+    assert "cannot_be_deleted" in response.text
+    assert await _course_status(engine, scenario["course_b"]) == "published"
+
+
+async def test_delete_still_allows_a_draft_course(
+    client: httpx.AsyncClient,
+    manager_bearer: str,
+    scenario: dict[str, uuid.UUID | str],
+) -> None:
+    """Nothing can depend on a draft: enrolment refuses an unpublished course,
+    and a published pathway cannot hold one."""
+    response = await client.delete(
+        f"/api/v1/teacher/courses/{scenario['course_b']}",
+        headers={"Authorization": f"Bearer {manager_bearer}"},
+    )
+    assert response.status_code == 204, response.text
+
+
+async def test_patch_archive_still_works_off_a_published_path(
+    client: httpx.AsyncClient,
+    manager_bearer: str,
+    scenario: dict[str, uuid.UUID | str],
+    engine: AsyncEngine,
+) -> None:
+    """Routing through ``archive_course`` must not break the ordinary case."""
+    response = await client.patch(
+        f"/api/v1/teacher/courses/{scenario['course_b']}",
+        json={"status": "archived"},
+        headers={"Authorization": f"Bearer {manager_bearer}"},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "archived"
+    assert await _course_status(engine, scenario["course_b"]) == "archived"
 
 
 async def test_post_lesson_auto_creates_module_item(

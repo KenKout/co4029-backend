@@ -15,8 +15,10 @@ WITH per_student AS (
         ce.student_id AS user_id,
         COALESCE(AVG(lp.completion_percent), 0) AS completion_percent
     FROM course_enrollments ce
-    LEFT JOIN modules m ON m.course_id = ce.course_id AND m.deleted_at IS NULL
-    LEFT JOIN lessons l ON l.module_id = m.id AND l.deleted_at IS NULL
+    LEFT JOIN modules m ON m.course_id = ce.course_id
+        AND m.deleted_at IS NULL AND m.status = 'published'
+    LEFT JOIN lessons l ON l.module_id = m.id
+        AND l.deleted_at IS NULL AND l.status = 'published'
     LEFT JOIN lesson_progress lp ON lp.lesson_id = l.id AND lp.user_id = ce.student_id
     WHERE ce.course_id = ANY(:course_ids)
       AND ce.status = 'active'

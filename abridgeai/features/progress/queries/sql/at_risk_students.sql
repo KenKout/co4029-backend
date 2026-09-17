@@ -72,8 +72,10 @@ WITH user_engagement AS (
               AND isx2.ended_at IS NOT NULL
         ) AS pending_interview_sessions
     FROM course_enrollments ce
-    LEFT JOIN modules m ON m.course_id = ce.course_id AND m.deleted_at IS NULL
-    LEFT JOIN lessons l ON l.module_id = m.id AND l.deleted_at IS NULL
+    LEFT JOIN modules m ON m.course_id = ce.course_id
+        AND m.deleted_at IS NULL AND m.status = 'published'
+    LEFT JOIN lessons l ON l.module_id = m.id
+        AND l.deleted_at IS NULL AND l.status = 'published'
     LEFT JOIN learning_materials lm ON lm.lesson_id = l.id AND lm.deleted_at IS NULL
     LEFT JOIN learning_material_versions lmv ON lmv.material_id = lm.id
         AND lmv.deleted_at IS NULL

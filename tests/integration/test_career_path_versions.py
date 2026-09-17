@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async
 from abridgeai.core.config import get_settings
 from abridgeai.core.db import get_db
 from abridgeai.core.security import create_access_token, generate_token, hash_secret
+from abridgeai.features.career_paths.queries import authoring as authoring_queries
 from abridgeai.features.career_paths.routers import (
     authoring_management_router,
 )
@@ -167,6 +168,82 @@ async def _seed_published_path(
             {"vid": version_id, "cid": course_id},
         )
     return path_id, version_id
+
+
+async def test_both_resolvers_agree_on_which_version_is_current(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker,
+    seeded_users: SeededUsers,
+) -> None:
+    """Two published versions coexist; both resolvers must pick the later one.
+
+    Publishing a career path does NOT retire the version before it — an
+    enrolment stays pinned to the one it started on — so "current" is decided
+    by ordering rather than by a constraint. That makes agreement between the
+    single-path and many-path resolvers a property worth pinning: they are
+    built on one ranked expression precisely so they cannot answer
+    differently.
+    """
+    path_id, v1 = await _seed_published_path(engine, seeded_users)
+    v2 = uuid.uuid4()
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO career_path_versions "
+                "(id, career_path_id, version_no, status, published_at) "
+                "VALUES (:id, :pid, 2, 'published', NOW())"
+            ),
+            {"id": v2, "pid": path_id},
+        )
+
+    async with session_factory() as db:
+        single = await authoring_queries.get_published_version(db, path_id)
+        batch = await authoring_queries.list_published_versions(
+            db,
+            organization_id=seeded_users.organization_id,
+            career_path_ids=[path_id],
+        )
+
+    assert single is not None
+    assert single.id == v2, "the single-path resolver must pick the latest published"
+    assert [row["version_id"] for row in batch] == [v2]
+    assert single.id != v1, "v1 is still published, but it is not current"
+
+
+async def test_batch_resolver_omits_a_path_with_no_published_version(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker,
+    seeded_users: SeededUsers,
+) -> None:
+    """Absence is how a caller detects an unpublishable path by length."""
+    draft_only = uuid.uuid4()
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO career_paths (id, organization_id, slug, name, status) "
+                "VALUES (:id, :org, :slug, 'Draft Only', 'draft')"
+            ),
+            {
+                "id": draft_only,
+                "org": seeded_users.organization_id,
+                "slug": f"draft-only-{draft_only.hex[:8]}",
+            },
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO career_path_versions (id, career_path_id, version_no, status) "
+                "VALUES (gen_random_uuid(), :pid, 1, 'draft')"
+            ),
+            {"pid": draft_only},
+        )
+
+    async with session_factory() as db:
+        rows = await authoring_queries.list_published_versions(
+            db,
+            organization_id=seeded_users.organization_id,
+            career_path_ids=[draft_only],
+        )
+    assert rows == []
 
 
 async def test_fork_clones_stages_and_items(

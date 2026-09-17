@@ -27,7 +27,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 from uuid import UUID, uuid4
 
 from abridgeai.core.config import get_settings
@@ -138,10 +138,19 @@ register_conflict_mappings(
 )
 
 
-def _apply_patch(model: object, payload: object) -> None:
+# Withheld from the PATCH mutation when that PATCH is a lifecycle
+# transition: the transition owns the status column.
+_STATUS_FIELD: frozenset[str] = frozenset({"status"})
+
+
+def _apply_patch(
+    model: object, payload: object, *, exclude: frozenset[str] | None = None
+) -> None:
     """Apply ``payload.model_dump(exclude_unset=True)`` onto ``model`` in place."""
     data = payload.model_dump(exclude_unset=True)  # type: ignore[attr-defined]
     for key, value in data.items():
+        if exclude is not None and key in exclude:
+            continue
         setattr(model, key, value)
 
 
@@ -187,26 +196,7 @@ async def create_course(
     *,
     arq_pool: object | None = None,
 ) -> CourseAuthoring:
-    """Create a new course owned by ``owner`` in their primary organization.
-
-    Both ``organization_id`` and ``owner_user_id`` are server-authoritative:
-    the org is resolved from the token via the access-control public surface,
-    and ownership always tracks the requesting principal. This prevents a
-    teacher in Org A from creating a course in Org B (or under another
-    teacher's name) by sending a forged payload.
-
-    A duplicate ``(organization_id, slug)`` is mapped to :class:`ConflictError`
-    (HTTP 409) instead of bubbling the raw ``IntegrityError`` up to a 500.
-
-    The creator is auto-assigned as a teacher ONLY when they actually hold the
-    teacher role. A teacher self-creating a course wants it in their authoring
-    list; a manager creating one on a teacher's behalf does not — assignment is
-    purely additive (``assign_teacher_to_course`` never removes anyone), so
-    auto-assigning the manager left them as a permanent co-teacher on every
-    course they ever created, cluttering their authoring list and the dept
-    teachers tab. The manager's real handle on the course is ownership plus
-    ``course.delete``/``course.publish``, none of which depend on a teacher row.
-    """
+    """Create a new course owned by ``owner`` in their primary organization."""
     org_id = await _resolve_owner_org(db, owner)
     data = payload.model_dump()
     data["faculty_id"] = await resolve_new_course_faculty(
@@ -241,16 +231,6 @@ async def create_course(
                 is_assistant=False,
                 granted_by=owner.user_id,
             )
-            # Notify on THIS path too, not just the explicit assign route.
-            # This branch writes a real teacher assignment, so skipping the
-            # notification made the outcome depend on how the row happened to
-            # be created: a manager assigning someone got a notification, a
-            # teacher creating their own course did not — same assignment,
-            # same inbox, different result, and nothing in the inbox to show
-            # the course was ever handed over.
-            #
-            # Best-effort inside `notify`, so a dispatch failure can never
-            # roll back the course that was just created.
             await _notify_teacher_assigned(
                 db,
                 teacher_user_id=owner.user_id,
@@ -367,7 +347,6 @@ async def update_course(
     payload: CourseUpdate,
     actor: CurrentUser,
 ) -> CourseAuthoring:
-    del actor
     course = await _require_course(db, course_id)
     # Publishing is a one-way door: a published course can never be reverted
     # to draft. Its learning outcomes double as the graded assessment scale,
@@ -382,14 +361,15 @@ async def update_course(
         and new_status == "draft"
     ):
         raise ConflictError(f"Course {course_id} is published and cannot be reverted to draft.")
-    # PATCH is the second door into `published`. `POST /publish` is the first.
-    # Both must apply the gradeable-unit gate or the gate is decorative — a
-    # manager could publish an empty course through whichever door is not
-    # guarded.
-    if new_status == "published" and course.status != "published":
-        await _require_gradeable_units(db, course_id)
-    _apply_patch(course, payload)
+    publishing = new_status == "published" and course.status != "published"
+    archiving = new_status == "archived" and course.status != "archived"
+    transitioning = publishing or archiving
+    _apply_patch(course, payload, exclude=_STATUS_FIELD if transitioning else None)
     await _flush_or_conflict(db)
+    if publishing:
+        return await publish_course(db, course_id, actor)
+    if archiving:
+        return await archive_course(db, course_id, actor)
     await db.refresh(course)
     return CourseAuthoring.model_validate(course)
 
@@ -401,14 +381,6 @@ async def _require_gradeable_units(db: AsyncSession, course_id: UUID) -> None:
     zero of them the completion writer can never promote an enrollment, so
     ``satisfied`` stays false forever: as a required course on a career path
     that locks its stage and every stage behind it permanently.
-
-    The same rule already guards career-path publication, but that fires only
-    once someone puts the course on a path — possibly weeks later, and with a
-    message pointing at the path rather than the course. Publishing the course
-    is the first moment the system can tell the manager, so it says it here.
-
-    Lazy import keeps the courses -> enrollments edge out of module import
-    time (same pattern as ``_notify_course_published``).
     """
     from abridgeai.features.enrollments.api import public as enrollments_api  # noqa: PLC0415
 
@@ -442,22 +414,7 @@ async def _require_course_teacher_minimum(db: AsyncSession, course: Course) -> N
 
 
 async def _require_learning_outcomes(db: AsyncSession, course_id: UUID) -> None:
-    """Refuse to publish a course that never states what it teaches.
-
-    Learning outcomes are what a student reads to decide whether to enrol and
-    what a manager maps onto a career path. Publishing without one ships a
-    course whose only description of itself is its title.
-
-    Deliberately a SEPARATE gate from :func:`_require_gradeable_units` rather
-    than one merged check: the two failures have different fixes and different
-    owners. Content is the teacher's job, outcomes are the manager's (see the
-    authoring ownership boundary), so a single blended message would send half
-    the readers to the wrong place.
-
-    Any outcome counts, at any depth. The hierarchy is an authoring
-    convenience, not a quality bar — demanding a top-level one would reject a
-    perfectly-stated course whose author happened to nest everything.
-    """
+    """Refuse to publish a course that never states what it teaches."""
     outcomes = await authoring_queries.count_course_outcomes(db, course_id)
     if outcomes == 0:
         raise ConflictError(
@@ -468,6 +425,12 @@ async def _require_learning_outcomes(db: AsyncSession, course_id: UUID) -> None:
 
 
 async def publish_course(db: AsyncSession, course_id: UUID, actor: CurrentUser) -> CourseAuthoring:
+    """Transition a course's status to ``published``.
+
+    THE transition. ``update_course`` routes a status patch through here
+    rather than repeating the gates, so a course cannot become published by a
+    route that checked less.
+    """
     del actor
     course = await _require_course(db, course_id)
     if course.status == "archived":
@@ -515,21 +478,46 @@ async def _notify_course_published(db: AsyncSession, course: Course) -> None:
     )
 
 
+async def _reachable_paths_holding(db: AsyncSession, course_id: UUID) -> set[str]:
+    """Names of pathways where withdrawing this course would hurt somebody.
+
+    Not "every pathway that mentions it". Publishing a pathway does not retire
+    the version before it, so a course attached once is recorded in that
+    version forever — and the old test, which asked only whether the PATH was
+    published, therefore blocked archival permanently. Detaching in a new
+    draft and republishing did not help: the earlier version still held the
+    row. A course could be taken out of a live curriculum and still never be
+    archivable, leaving an operator with soft-delete as the only exit, which
+    is the more destructive door.
+
+    A version is reachable if new enrolments would land on it, or if somebody
+    is still walking it — pinned either through a career enrolment or a
+    programme path attempt. Anything else is history.
+    """
+    from abridgeai.features.career_paths.api import public as career_paths_api  # noqa: PLC0415
+    from abridgeai.features.learning_programs.api import public as programs_api  # noqa: PLC0415
+
+    exposure = await career_paths_api.list_course_path_exposure(db, course_id=course_id)
+    if not exposure:
+        return set()
+    pinned = await programs_api.list_versions_with_active_attempts(
+        db, version_ids=[cast(UUID, row["version_id"]) for row in exposure]
+    )
+    return {
+        cast(str, row["career_path_name"])
+        for row in exposure
+        if (row["is_current_published"] and row["career_path_status"] == "published")
+        or row["active_enrollments"]
+        or row["version_id"] in pinned
+    }
+
+
 async def archive_course(db: AsyncSession, course_id: UUID, actor: CurrentUser) -> CourseAuthoring:
     del actor
     course = await _require_course(db, course_id)
-    # Archiving a course that sits on a PUBLISHED path would silently remove
-    # it from enrolled students' stages — the permanent stage lock the
-    # add-time published check (add_course_to_path) exists to prevent. The
-    # invariant is enforced on entry, so it must be maintained on exit:
-    # block the archive and name the affected paths.
-    live_paths = [
-        p
-        for p in await assignment_queries.list_career_paths_containing_course(db, course_id)
-        if p["career_path_status"] == "published"
-    ]
+    live_paths = await _reachable_paths_holding(db, course_id)
     if live_paths:
-        names = ", ".join(sorted({p["career_path_name"] for p in live_paths}))
+        names = ", ".join(sorted(live_paths))
         raise AppError(
             f"Course {course.title!r} is attached to published career path(s): {names}. "
             "Remove it from those paths before archiving — archiving it would lock "
@@ -542,16 +530,17 @@ async def archive_course(db: AsyncSession, course_id: UUID, actor: CurrentUser) 
 
 
 async def delete_course(db: AsyncSession, course_id: UUID, actor: CurrentUser) -> None:
-    """Soft-delete a course (manager-facing), cascading to its children.
+    """Soft-delete a DRAFT course, cascading to its children.
 
-    Reversible tombstone via :func:`soft_delete_cascade` — nothing is
-    physically removed, the row is stamped ``deleted_at`` / ``deleted_by`` and
-    filtered out of every non-admin ``Course`` SELECT. Mirrors the admin
-    delete but is scoped to the caller's ``course.delete`` permission on this
-    course. Raises ``NotFoundError`` when the course is missing or already
-    soft-deleted (``_require_course`` enforces the active-course guard).
+    Deletion is a draft-only operation, for every actor. Once a course is
+    published, archiving is the only way to end its life.
     """
     course = await _require_course(db, course_id)
+    if course.status != "draft":
+        raise AppError(
+            f"published_or_archived_course_cannot_be_deleted: course {course_id} is "
+            f"{course.status}. Archive it instead — deletion is for drafts only."
+        )
     await soft_delete_cascade(db, course, actor_id=actor.user_id)
 
 
@@ -607,11 +596,6 @@ async def add_lesson(
     module = await _require_module(db, module_id)
     data = payload.model_dump()
     data["module_id"] = module.id
-    # Auto-generate the URL slug from the title (unique per module over
-    # live rows; collisions get -1, -2, … incrementing from 1) — the same
-    # rule quiz/interview authoring uses for their slugs. An explicit
-    # client-supplied slug still wins verbatim (collisions surface as 409
-    # through the unique constraint, the pre-slug contract).
     if not data.get("slug"):
         from sqlalchemy import select as _sa_select  # noqa: PLC0415
 

@@ -120,6 +120,7 @@ class _Builder:
         draft_quizzes: int = 0,
         draft_interviews: int = 0,
         enroll: bool = True,
+        module_status: str = "published",
     ) -> dict:
         course, module = uuid.uuid4(), uuid.uuid4()
         await self._exec(
@@ -129,8 +130,8 @@ class _Builder:
         )
         await self._exec(
             "INSERT INTO modules (id, course_id, title, position, status) "
-            "VALUES (:i,:c,'M',1,'published')",
-            {"i": module, "c": course},
+            "VALUES (:i,:c,'M',1,:st)",
+            {"i": module, "c": course, "st": module_status},
         )
         pos = 0
         lesson_ids, quiz_ids, iv_ids = [], [], []
@@ -214,6 +215,30 @@ class _Builder:
             "grade_points, passed, grading_method, attempts_counted) "
             "VALUES (:i,:q,:s,90,9,TRUE,'highest',1)",
             {"i": uuid.uuid4(), "q": quiz_id, "s": self.student},
+        )
+
+    async def mark_latest_attempt_pending(self, quiz_id: uuid.UUID) -> None:
+        """Leave the student's last attempt awaiting a human marker.
+
+        ``fail_quiz`` records attempts but no answers, so the pending state
+        has to be built here: one question on the quiz, one answer row on the
+        latest attempt carrying ``needs_manual_grade``.
+        """
+        question = uuid.uuid4()
+        await self._exec(
+            "INSERT INTO quiz_questions (id, quiz_id, position, question_type, prompt_text) "
+            "VALUES (:i,:q,1,'short_answer','Explain.')",
+            {"i": question, "q": quiz_id},
+        )
+        await self._exec(
+            "INSERT INTO quiz_attempt_answers "
+            "(id, attempt_id, question_id, is_correct, hint_used, points_awarded, "
+            " needs_manual_grade) "
+            "SELECT gen_random_uuid(), a.id, :qq, FALSE, FALSE, 0, TRUE "
+            "  FROM quiz_attempts a "
+            " WHERE a.quiz_id = :q AND a.student_id = :s "
+            " ORDER BY a.attempt_number DESC LIMIT 1",
+            {"qq": question, "q": quiz_id, "s": self.student},
         )
 
     async def fail_quiz(self, quiz_id: uuid.UUID, *, attempts: int) -> None:
@@ -447,6 +472,103 @@ async def test_partial_percent_counts_every_kind(session_factory, builder) -> No
         tally = await get_course_unit_tally(db, course_id=fx["course"], student_id=builder.student)
     assert (tally.total, tally.done) == (4, 2)
     assert tally.percent == 50.0
+
+
+@pytest.mark.asyncio
+async def test_units_in_an_unpublished_module_are_not_counted(
+    session_factory, builder
+) -> None:
+    """A published item inside a DRAFT module must not enter the denominator.
+
+    The learner's content tree draws everything through a
+    ``published_modules`` CTE, so the student never sees this module or
+    anything in it. Counting its items made them unreachable work: the tally
+    could never reach total, the enrollment never promoted, and the
+    career-path stage behind it stayed locked for good.
+
+    The targets here are all published — it is the CONTAINER that is not.
+    """
+    fx = await builder.course(
+        slug="draftmod", lessons=2, quizzes=1, interviews=1, module_status="draft"
+    )
+
+    async with session_factory() as db:
+        tally = await get_course_unit_tally(
+            db, course_id=fx["course"], student_id=builder.student
+        )
+
+    assert (tally.lessons_total, tally.quizzes_total, tally.interviews_total) == (0, 0, 0)
+
+
+@pytest.mark.asyncio
+async def test_units_in_an_archived_module_are_not_counted(
+    session_factory, builder
+) -> None:
+    """Archiving a module is an ordinary operator action mid-course.
+
+    It must withdraw the module's work from the denominator rather than
+    stranding every enrolled student against items they can no longer open.
+    """
+    fx = await builder.course(
+        slug="archmod", lessons=2, quizzes=1, module_status="archived"
+    )
+
+    async with session_factory() as db:
+        tally = await get_course_unit_tally(
+            db, course_id=fx["course"], student_id=builder.student
+        )
+
+    assert (tally.lessons_total, tally.quizzes_total) == (0, 0)
+
+
+@pytest.mark.asyncio
+async def test_publish_gate_count_also_ignores_unpublished_modules(
+    session_factory, builder
+) -> None:
+    """The gate asks "could any student finish this?", so it needs the same
+    population. A course whose only gradeable units sit in a draft module has
+    nothing a student can reach, and must not pass as publishable."""
+    fx = await builder.course(
+        slug="gatemod", lessons=1, quizzes=1, module_status="draft"
+    )
+
+    async with session_factory() as db:
+        counts = await count_course_units(db, course_id=fx["course"])
+
+    assert counts.lessons == 0
+    assert counts.quizzes == 0
+
+
+@pytest.mark.asyncio
+async def test_a_quiz_awaiting_a_marker_is_not_a_finished_unit(
+    session_factory, builder
+) -> None:
+    """Exhausting attempts must not complete a quiz nobody has marked.
+
+    A submitted attempt whose answers still need a person is neither
+    ``in_progress`` nor finished. The aggregate counted it as a consumed
+    attempt and nothing else, so a student who used their last allowed
+    attempt on a quiz carrying an essay question completed the course — and
+    unlocked the career-path stage behind it — before the teacher had marked
+    anything.
+
+    ``learner_progress`` has always required ``pending_grading == 0``; this
+    pins the aggregate to the same rule.
+    """
+    fx = await builder.course(slug="pendmark", quizzes=1)
+    quiz_id = fx["quizzes"][0]
+    await builder.fail_quiz(quiz_id, attempts=2)  # attempts exhausted
+
+    await builder.mark_latest_attempt_pending(quiz_id)
+
+    async with session_factory() as db:
+        tally = await get_course_unit_tally(
+            db, course_id=fx["course"], student_id=builder.student
+        )
+
+    assert tally.quizzes_total == 1
+    assert tally.quizzes_done == 0, "an unmarked attempt is not a finished unit"
+    assert not tally.is_complete()
 
 
 # ------------------------------------------------------------------- parity

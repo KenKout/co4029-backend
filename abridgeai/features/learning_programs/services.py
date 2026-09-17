@@ -372,7 +372,7 @@ async def create_program(
     )
     if len(resolved) != len(set(payload.career_path_ids)):
         raise ConflictError("all_paths_must_be_published_and_belong_to_the_program_organization")
-    if any(path.status == "archived" for path, _version in resolved):
+    if any(row["career_path_status"] == "archived" for row in resolved):
         raise ConflictError("archived_path_cannot_be_added")
 
     db.add(probe)
@@ -390,15 +390,16 @@ async def create_program(
     await flush_or_conflict(db)
     default_career_path_id = payload.default_career_path_id
     if default_career_path_id is None and len(resolved) == 1:
-        default_career_path_id = resolved[0][0].id
-    for position, (path, path_version) in enumerate(resolved, start=1):
+        default_career_path_id = cast(UUID, resolved[0]["career_path_id"])
+    for position, row in enumerate(resolved, start=1):
+        path_id = cast(UUID, row["career_path_id"])
         db.add(
             LearningProgramVersionPath(
                 program_version_id=version.id,
-                career_path_id=path.id,
-                career_path_version_id=path_version.id,
+                career_path_id=path_id,
+                career_path_version_id=cast(UUID, row["version_id"]),
                 position=position,
-                is_default=path.id == default_career_path_id,
+                is_default=path_id == default_career_path_id,
             )
         )
     await flush_or_conflict(db)
@@ -574,7 +575,7 @@ async def _replace_draft_paths(
     )
     if len(resolved) != len(added_path_ids):
         raise ConflictError("all_paths_must_be_published_and_not_archived")
-    resolved_by_id = {path.id: (path, path_version) for path, path_version in resolved}
+    resolved_by_id = {cast(UUID, row["career_path_id"]): row for row in resolved}
 
     for position, path_id in enumerate(path_ids, start=1):
         existing = existing_by_id.get(path_id)
@@ -590,16 +591,16 @@ async def _replace_draft_paths(
             )
             continue
 
-        path, path_version = resolved_by_id[path_id]
-        if path.status == "archived":
+        row = resolved_by_id[path_id]
+        if row["career_path_status"] == "archived":
             raise ConflictError("archived_path_cannot_be_added")
         db.add(
             LearningProgramVersionPath(
                 program_version_id=version.id,
-                career_path_id=path.id,
-                career_path_version_id=path_version.id,
+                career_path_id=path_id,
+                career_path_version_id=cast(UUID, row["version_id"]),
                 position=position,
-                is_default=path.id == default_career_path_id,
+                is_default=path_id == default_career_path_id,
             )
         )
 

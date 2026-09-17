@@ -116,6 +116,35 @@ async def get_version_progress_percent_for_user(
     return stage_service.path_progress_percent(evals)
 
 
+async def resolve_published_versions(
+    db: AsyncSession,
+    *,
+    organization_id: UUID,
+    career_path_ids: list[UUID],
+) -> list[dict[str, object]]:
+    """Latest published version per path, org-scoped, in the order asked for."""
+    from abridgeai.features.career_paths.queries import authoring as authoring_queries
+
+    return await authoring_queries.list_published_versions(
+        db, organization_id=organization_id, career_path_ids=career_path_ids
+    )
+
+
+async def list_course_path_exposure(
+    db: AsyncSession, *, course_id: UUID
+) -> list[dict[str, object]]:
+    """Which pathway versions still hold this course, and whether any is live.
+
+    Rows carry ``career_path_id``, ``career_path_name``,
+    ``career_path_status``, ``version_id``, ``is_current_published`` and
+    ``active_enrollments``. A version that is neither current nor pinned by
+    anyone is history: the course is recorded in it and nothing reads it.
+    """
+    from abridgeai.features.career_paths.queries import authoring as authoring_queries
+
+    return await authoring_queries.list_course_path_exposure(db, course_id=course_id)
+
+
 async def ensure_program_path_access(
     db: AsyncSession,
     *,
@@ -177,6 +206,8 @@ __all__ = [
     "get_version_progress_percent_for_user",
     "is_version_complete_for_user",
     "ensure_program_path_access",
+    "list_course_path_exposure",
     "list_user_career_enrollments",
+    "resolve_published_versions",
     "release_program_path_access",
 ]

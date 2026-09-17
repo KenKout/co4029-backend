@@ -266,40 +266,17 @@ async def list_unpublishable_version_path_ids(
 
 async def resolve_published_path_versions(
     db: AsyncSession, *, organization_id: UUID, career_path_ids: list[UUID]
-) -> list[tuple[CareerPath, CareerPathVersion]]:
-    if not career_path_ids:
-        return []
-    ranked = (
-        select(
-            CareerPathVersion.id.label("version_id"),
-            CareerPathVersion.career_path_id,
-            func.row_number()
-            .over(
-                partition_by=CareerPathVersion.career_path_id,
-                order_by=CareerPathVersion.version_no.desc(),
-            )
-            .label("rank"),
-        )
-        .where(
-            CareerPathVersion.status == "published",
-            CareerPathVersion.deleted_at.is_(None),
-        )
-        .subquery()
+) -> list[dict[str, object]]:
+    """Latest published version per path, asked of the career_paths feature.
+
+    This used to rank the versions itself with its own window function. That
+    was a second spelling of a rule career_paths already owns — "published,
+    not deleted, highest version_no" — and one that nothing would have caught
+    drifting, because both spellings were individually correct.
+    """
+    return await career_paths_api.resolve_published_versions(
+        db, organization_id=organization_id, career_path_ids=career_path_ids
     )
-    stmt = (
-        select(CareerPath, CareerPathVersion)
-        .join(ranked, ranked.c.career_path_id == CareerPath.id)
-        .join(CareerPathVersion, CareerPathVersion.id == ranked.c.version_id)
-        .where(
-            CareerPath.id.in_(career_path_ids),
-            CareerPath.organization_id == organization_id,
-            CareerPath.deleted_at.is_(None),
-            ranked.c.rank == 1,
-        )
-    )
-    rows = list((await db.execute(stmt)).all())
-    by_id = {path.id: (path, version) for path, version in rows}
-    return [by_id[path_id] for path_id in career_path_ids if path_id in by_id]
 
 
 async def list_all_org_paths(db: AsyncSession, *, organization_id: UUID) -> list[CareerPath]:

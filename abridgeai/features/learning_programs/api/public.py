@@ -129,6 +129,25 @@ async def list_student_program_enrollments(
     return out
 
 
+async def list_versions_with_active_attempts(
+    db: AsyncSession, *, version_ids: list[UUID]
+) -> set[UUID]:
+    """Which of these career-path versions still have a student mid-path.
+
+    A programme path attempt pins its own ``career_path_version_id``, so a
+    version can be nobody's current one and still be the exact route somebody
+    is walking. Anything deciding whether a version is safe to disturb has to
+    ask here as well as asking career_paths.
+    """
+    if not version_ids:
+        return set()
+    stmt = select(ProgramPathAttempt.career_path_version_id).where(
+        ProgramPathAttempt.career_path_version_id.in_(version_ids),
+        ProgramPathAttempt.status == "active",
+    )
+    return set((await db.scalars(stmt)).all())
+
+
 async def complete_program_attempts(
     db: AsyncSession, *, student_id: UUID, career_path_id: UUID
 ) -> int:
@@ -249,6 +268,7 @@ async def grant_active_path_entitlement(
 
 __all__ = [
     "complete_program_attempts",
+    "list_versions_with_active_attempts",
     "list_program_governance_rows",
     "list_student_program_enrollments",
     "ensure_completion_award",

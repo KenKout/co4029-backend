@@ -1,3 +1,67 @@
+"""Course completion measured in graded UNITS, not lessons alone.
+
+Why this file exists
+--------------------
+Course completion used to be ``AVG(lesson_progress.completion_percent)`` over
+published lessons, and nothing else. A curriculum is built from three item
+kinds (``module_items.item_type IN ('lesson','quiz','interview')``), so that
+metric silently ignored two thirds of the vocabulary: on this database every
+course carrying quizzes was completable without answering a single one, and
+``course_enrollments.status`` — which career-path stage unlock reads as
+``satisfied`` (D2) — flipped to ``'completed'`` on lessons alone.
+
+Completion is therefore counted over units, one per curriculum item:
+
+=========  ==============================================================
+lesson     ``lesson_progress.status = 'completed'``
+quiz       nothing awaiting a marker, AND (passed the teacher's
+           milestone, OR failed with every allowed attempt consumed and
+           none still in flight)
+interview  at least one attempt with ``pass_verdict = TRUE``
+=========  ==============================================================
+
+The quiz and interview rules are NOT invented here. They are the rules the
+curriculum screen already renders (``quizzes.services.learner_progress``,
+``interviews.services.learner_progress``), restated in SQL so one aggregate
+query can answer "is this course done?" without a per-item Python round trip.
+Divergence between what the student sees ticked and what unlocks their next
+stage is the failure this shape exists to prevent — so the two docstrings
+cross-reference each other, and the parity tests assert they agree.
+
+The pending-grading term is part of that parity and was once missing. A
+submitted attempt awaiting a marker is not ``in_progress``, so it counted as
+a consumed attempt: a student who used their last allowed attempt on a quiz
+carrying an essay question completed the course, and unlocked the stage
+behind it, before a teacher had marked anything.
+
+One divergence remains, deliberately. ``eff_max`` here reads the quiz's own
+``allow_retakes``/``max_attempts``; the per-item rule resolves a student's
+``quiz_overrides`` first. An override granting extra attempts therefore
+leaves this query treating a quiz as terminal slightly early. Resolving the
+base/group/student precedence in SQL would duplicate
+``quizzes.services.overrides``; the authoritative per-item read stays
+``learner_progress``.
+
+Deliberate asymmetry, kept from the source rules
+------------------------------------------------
+A quiz completes when it is terminal (passed OR exhausted); an interview
+completes only when PASSED. Failing every interview attempt leaves the unit
+pending, because the curriculum tag there means *đạt/passed*, not merely
+*finished* (user decision 2026-08-06).
+
+Populations must match the curriculum exactly
+---------------------------------------------
+Every unit is gated on the same visibility rules ``courses.queries.published``
+applies: a live ``module_items`` row, a PUBLISHED non-deleted module, and a
+published, non-deleted target. The module's own status is load-bearing and
+was once missing here: the learner's content tree draws its items from a
+``published_modules`` CTE, so a published lesson inside a draft or archived
+module is invisible to the student while this aggregate still counted it in
+the denominator — unreachable work that no student could ever clear.
+
+A unit the student cannot see is a unit they cannot satisfy, and counting
+one locks the course — and every career-path stage behind it — forever.
+"""
 
 from __future__ import annotations
 
@@ -87,14 +151,15 @@ WITH lesson_units AS (
     LEFT JOIN lesson_progress lp
         ON lp.lesson_id = l.id AND lp.user_id = :student_id
     WHERE m.course_id = :course_id
-      AND m.deleted_at IS NULL
+      AND m.deleted_at IS NULL AND m.status = 'published'
 ),
 quiz_pop AS (
     SELECT
         q.id AS quiz_id,
         CASE WHEN q.allow_retakes THEN q.max_attempts ELSE 1 END AS eff_max
     FROM module_items mi
-    JOIN modules m ON m.id = mi.module_id AND m.deleted_at IS NULL
+    JOIN modules m ON m.id = mi.module_id
+        AND m.deleted_at IS NULL AND m.status = 'published'
     JOIN quizzes q ON q.id = mi.quiz_id
         AND q.deleted_at IS NULL
         AND q.status = 'published'
@@ -106,11 +171,14 @@ quiz_units AS (
     SELECT
         COUNT(*) AS total,
         COUNT(*) FILTER (
-            WHERE COALESCE(g.passed, FALSE)
-               OR (
-                    qp.eff_max IS NOT NULL
-                    AND COALESCE(a.used, 0) >= qp.eff_max
-                    AND COALESCE(a.in_flight, 0) = 0
+            WHERE COALESCE(a.pending_grading, 0) = 0
+              AND (
+                   COALESCE(g.passed, FALSE)
+                   OR (
+                        qp.eff_max IS NOT NULL
+                        AND COALESCE(a.used, 0) >= qp.eff_max
+                        AND COALESCE(a.in_flight, 0) = 0
+                      )
                   )
         ) AS done
     FROM quiz_pop qp
@@ -122,7 +190,15 @@ quiz_units AS (
     LEFT JOIN (
         SELECT quiz_id,
                COUNT(*) AS used,
-               COUNT(*) FILTER (WHERE status = 'in_progress') AS in_flight
+               COUNT(*) FILTER (WHERE status = 'in_progress') AS in_flight,
+               COUNT(*) FILTER (
+                   WHERE EXISTS (
+                       SELECT 1
+                       FROM quiz_attempt_answers qaa
+                       WHERE qaa.attempt_id = quiz_attempts.id
+                         AND qaa.needs_manual_grade = TRUE
+                   )
+               ) AS pending_grading
         FROM quiz_attempts
         WHERE student_id = :student_id
         GROUP BY quiz_id
@@ -133,7 +209,8 @@ interview_units AS (
         COUNT(*) AS total,
         COUNT(*) FILTER (WHERE COALESCE(s.passed, FALSE)) AS done
     FROM module_items mi
-    JOIN modules m ON m.id = mi.module_id AND m.deleted_at IS NULL
+    JOIN modules m ON m.id = mi.module_id
+        AND m.deleted_at IS NULL AND m.status = 'published'
     JOIN interview_configs ic ON ic.id = mi.interview_config_id
         AND ic.deleted_at IS NULL
         AND ic.status = 'published'
@@ -188,17 +265,20 @@ SELECT
        FROM modules m
        JOIN lessons l ON l.module_id = m.id
            AND l.deleted_at IS NULL AND l.status = 'published'
-      WHERE m.course_id = :course_id AND m.deleted_at IS NULL) AS lessons,
+      WHERE m.course_id = :course_id
+        AND m.deleted_at IS NULL AND m.status = 'published') AS lessons,
     (SELECT COUNT(*)
        FROM module_items mi
-       JOIN modules m ON m.id = mi.module_id AND m.deleted_at IS NULL
+       JOIN modules m ON m.id = mi.module_id
+        AND m.deleted_at IS NULL AND m.status = 'published'
        JOIN quizzes q ON q.id = mi.quiz_id
            AND q.deleted_at IS NULL AND q.status = 'published'
       WHERE m.course_id = :course_id
         AND mi.item_type = 'quiz' AND mi.deleted_at IS NULL) AS quizzes,
     (SELECT COUNT(*)
        FROM module_items mi
-       JOIN modules m ON m.id = mi.module_id AND m.deleted_at IS NULL
+       JOIN modules m ON m.id = mi.module_id
+        AND m.deleted_at IS NULL AND m.status = 'published'
        JOIN interview_configs ic ON ic.id = mi.interview_config_id
            AND ic.deleted_at IS NULL AND ic.status = 'published'
       WHERE m.course_id = :course_id

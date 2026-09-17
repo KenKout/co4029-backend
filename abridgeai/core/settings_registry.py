@@ -534,9 +534,12 @@ _SPECS: tuple[SettingSpec, ...] = (
     ),
     # -- courses (teacher staffing bounds; user decision 2026-08-18) -------
     # Defaults chosen to match the requested behaviour: at least 2 teachers
-    # (default min), of which exactly one is the Course Instructor and the
-    # rest Teacher Assistants, capped at the default max. The max is a hard
-    # reject on assigning past it; the min is a hard gate on FIRST publish
+    # (default min), at least one of them the Course Instructor, capped at
+    # the default max. NOT exactly one: `courses.services.assignment`
+    # enforces a floor, never a ceiling — the first teacher is forced to
+    # Instructor, and demoting or removing the last one is refused, but
+    # nothing stops a second. The max is a hard reject on assigning past
+    # it; the min is a hard gate on FIRST publish
     # (draft -> published) only — already-published courses are grandfathered
     # so raising the min later never makes a live course unpublishable.
     SettingSpec(
@@ -552,8 +555,9 @@ _SPECS: tuple[SettingSpec, ...] = (
             "Least number of teachers a course must have before its first "
             "publish. Applied only on the first publish of a draft — courses "
             "already published are never made unpublishable when this is "
-            "raised. Exactly one of the teachers must be the Course "
-            "Instructor; the rest are Teacher Assistants."
+            "raised. At least one of the teachers must be the Course "
+            "Instructor; any others may be Instructors or Teacher "
+            "Assistants."
         ),
     ),
     SettingSpec(

@@ -17,8 +17,10 @@ WITH progress AS (
         COALESCE(AVG(lp.completion_percent), 0) AS completion_percent,
         MAX(lp.last_activity_at) AS last_activity_at
     FROM course_enrollments ce
-    LEFT JOIN modules m ON m.course_id = ce.course_id AND m.deleted_at IS NULL
-    LEFT JOIN lessons l ON l.module_id = m.id AND l.deleted_at IS NULL
+    LEFT JOIN modules m ON m.course_id = ce.course_id
+        AND m.deleted_at IS NULL AND m.status = 'published'
+    LEFT JOIN lessons l ON l.module_id = m.id
+        AND l.deleted_at IS NULL AND l.status = 'published'
     LEFT JOIN lesson_progress lp ON lp.lesson_id = l.id AND lp.user_id = ce.student_id
     WHERE ce.course_id = :course_id
     GROUP BY ce.student_id

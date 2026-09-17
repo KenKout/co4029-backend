@@ -12,6 +12,7 @@ from abridgeai.features.career_paths.models import (
     CareerPathCourse,
     CareerPathStage,
     CareerPathVersion,
+    StudentCareerEnrollment,
     StudentStageProgress,
 )
 from abridgeai.features.courses.api import public as courses_api
@@ -105,21 +106,112 @@ async def get_current_authoring_version(
     return versions[0] if versions else None
 
 
+def _latest_published_ranked() -> Any:
+    """THE rule: per career path, the live published version with the highest
+    ``version_no``."""
+    return (
+        select(
+            CareerPathVersion.id.label("version_id"),
+            CareerPathVersion.career_path_id.label("career_path_id"),
+            func.row_number()
+            .over(
+                partition_by=CareerPathVersion.career_path_id,
+                order_by=CareerPathVersion.version_no.desc(),
+            )
+            .label("rank"),
+        )
+        .where(
+            CareerPathVersion.status == "published",
+            CareerPathVersion.deleted_at.is_(None),
+        )
+        .subquery()
+    )
+
+
 async def get_published_version(
     db: AsyncSession, career_path_id: UUID
 ) -> CareerPathVersion | None:
     """The latest PUBLISHED version of a path (what new enrollments pin to)."""
+    ranked = _latest_published_ranked()
     stmt = (
         select(CareerPathVersion)
-        .where(
-            CareerPathVersion.career_path_id == career_path_id,
-            CareerPathVersion.status == "published",
-            CareerPathVersion.deleted_at.is_(None),
-        )
-        .order_by(CareerPathVersion.version_no.desc())
-        .limit(1)
+        .join(ranked, ranked.c.version_id == CareerPathVersion.id)
+        .where(ranked.c.career_path_id == career_path_id, ranked.c.rank == 1)
     )
     return (await db.execute(stmt)).scalar_one_or_none()
+
+
+async def list_published_versions(
+    db: AsyncSession, *, organization_id: UUID, career_path_ids: Sequence[UUID]
+) -> list[dict[str, Any]]:
+    """The same resolution for many paths at once, org-scoped.
+
+    One statement rather than one per path, for callers validating a whole
+    set — attaching paths to a programme version, say. Rows come back in the
+    order asked for, and a path with no live published version is simply
+    absent, which is what lets a caller detect it by length.
+    """
+    if not career_path_ids:
+        return []
+    ranked = _latest_published_ranked()
+    stmt = (
+        select(
+            CareerPath.id.label("career_path_id"),
+            CareerPath.status.label("career_path_status"),
+            CareerPath.name.label("career_path_name"),
+            ranked.c.version_id.label("version_id"),
+        )
+        .join(ranked, ranked.c.career_path_id == CareerPath.id)
+        .where(
+            CareerPath.id.in_(list(career_path_ids)),
+            CareerPath.organization_id == organization_id,
+            CareerPath.deleted_at.is_(None),
+            ranked.c.rank == 1,
+        )
+    )
+    by_id = {row["career_path_id"]: dict(row) for row in (await db.execute(stmt)).mappings()}
+    return [by_id[path_id] for path_id in career_path_ids if path_id in by_id]
+
+
+async def list_course_path_exposure(
+    db: AsyncSession, *, course_id: UUID
+) -> list[dict[str, Any]]:
+    """Every (path, version) holding ``course_id``, flagged by REACHABILITY."""
+    ranked = _latest_published_ranked()
+    active_pins = (
+        select(func.count())
+        .select_from(StudentCareerEnrollment)
+        .where(
+            StudentCareerEnrollment.version_id == CareerPathVersion.id,
+            StudentCareerEnrollment.status == "active",
+            StudentCareerEnrollment.deleted_at.is_(None),
+        )
+        .correlate(CareerPathVersion)
+        .scalar_subquery()
+    )
+    stmt = (
+        select(
+            CareerPath.id.label("career_path_id"),
+            CareerPath.name.label("career_path_name"),
+            CareerPath.status.label("career_path_status"),
+            CareerPathVersion.id.label("version_id"),
+            (ranked.c.version_id.is_not(None)).label("is_current_published"),
+            active_pins.label("active_enrollments"),
+        )
+        .join(CareerPathVersion, CareerPathVersion.id == CareerPathCourse.version_id)
+        .join(CareerPath, CareerPath.id == CareerPathVersion.career_path_id)
+        .outerjoin(
+            ranked,
+            (ranked.c.version_id == CareerPathVersion.id) & (ranked.c.rank == 1),
+        )
+        .where(
+            CareerPathCourse.course_id == course_id,
+            CareerPath.deleted_at.is_(None),
+            CareerPathVersion.deleted_at.is_(None),
+        )
+        .order_by(CareerPath.name)
+    )
+    return [dict(row) for row in (await db.execute(stmt)).mappings()]
 
 
 async def get_version(db: AsyncSession, version_id: UUID) -> CareerPathVersion | None:
@@ -572,6 +664,8 @@ __all__ = [
     "get_current_authoring_version",
     "get_path_course_link",
     "get_published_version",
+    "list_course_path_exposure",
+    "list_published_versions",
     "get_stage",
     "get_version",
     "has_latched_stage_progress",

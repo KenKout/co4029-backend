@@ -147,26 +147,10 @@ _TEACHER_PATCHABLE_COURSE_FIELDS: frozenset[str] = frozenset(
     }
 )
 
-# Everything else on CourseUpdate is manager-owned (needs course.delete):
-# title, slug, status, faculty_id, thumbnail_object_id.
-# (`level`, `expected_completion_days` and `enrollment_cap` were removed from
-# the schema: level is now DERIVED from career-path placement, completion days
-# is gone, and enrollment is ALWAYS unlimited — so none of them is user-set
-# anymore.)
-#
-# DERIVED from the schema rather than hand-listed, so a field added to
-# CourseUpdate later defaults to manager-only instead of silently becoming
-# teacher-writable — fail closed, not open.
 _MANAGER_ONLY_COURSE_FIELDS: frozenset[str] = (
     frozenset(CourseUpdate.model_fields) - _TEACHER_PATCHABLE_COURSE_FIELDS
 )
-# Course deletion is manager-owned. ``allow_owner=False`` kills the ownership
-# short-circuit so a teacher who owns the course still cannot delete it —
-# ownership grants authoring access (course.update), NOT lifecycle control.
 _REQUIRE_COURSE_DELETE = require_course_permission("course_id", "course.delete", allow_owner=False)
-# Learning outcomes are manager-owned (§LO split): gate on learning_outcome.manage
-# and disable the owner short-circuit so a course-owning teacher (who holds
-# course.update but NOT learning_outcome.manage) cannot author LOs.
 _REQUIRE_OUTCOME_CREATE = require_course_permission(
     "course_id", "learning_outcome.manage", allow_owner=False
 )
@@ -216,12 +200,7 @@ async def create_course(
     db: Annotated[AsyncSession, Depends(get_db)],
     arq_pool: Annotated[object | None, Depends(get_arq_pool)] = None,
 ) -> CourseAuthoring:
-    """Create a new course owned by the requesting principal.
-
-    Global permission -- a teacher anywhere on the platform can create a
-    course; ownership / scope is enforced on subsequent edits via
-    :func:`require_course_permission`.
-    """
+    """Create a new course owned by the requesting principal."""
     try:
         course = await authoring_service.create_course(db, payload, current_user, arq_pool=arq_pool)
     except ConflictError as exc:
@@ -564,21 +543,6 @@ async def update_course(
     current_user: Annotated[CurrentUser, Depends(_REQUIRE_COURSE_UPDATE)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> CourseAuthoring:
-    # Field ownership (user decision 2026-08-06). `course.update` is the
-    # CONTENT permission a teacher holds on a course assigned to them; it must
-    # not carry course identity, lifecycle, or delivery policy with it.
-    #
-    # Teacher may patch only: description, estimated_minutes and the four
-    # contact_* fields (their own contact details).
-    #
-    # Everything else needs `course.delete` (manager/admin). `status` in
-    # particular: without it a teacher could PATCH {"status": "published"} and
-    # publish their own course, bypassing the manager publish gate entirely —
-    # the POST /publish ROUTE is gated on `course.publish`, but this PATCH was
-    # not, so the gate had a hole straight through it.
-    #
-    # Checked before the patch so a mixed payload either fully applies or
-    # fully rejects.
     manager_only = _MANAGER_ONLY_COURSE_FIELDS & payload.model_fields_set
     if manager_only:
         course_perms = await load_course_permissions(db, current_user.user_id, course_id)
@@ -586,17 +550,18 @@ async def update_course(
             raise _forbidden(
                 "Only managers may change " + ", ".join(sorted(manager_only)) + " on a course."
             )
+
+        if payload.status == "published" and "course.publish" not in course_perms:
+            raise _forbidden(
+                "Publishing a course requires course.publish; use POST "
+                "/teacher/courses/{course_id}/publish."
+            )
     try:
         course = await authoring_service.update_course(db, course_id, payload, current_user)
     except NotFoundError as exc:
         raise _not_found(str(exc)) from exc
-    # ConflictError subclasses AppError, so it MUST stay above the AppError arm
-    # or every 409 collapses into a 400.
     except ConflictError as exc:
         raise _conflict(str(exc)) from exc
-    # Needed since `faculty_id` became patchable: its tenancy check raises
-    # AppError, and without this arm a bad faculty_id surfaced as a 500 instead
-    # of a 400. Mirrors the create route.
     except AppError as exc:
         raise _bad_request(str(exc)) from exc
     await db.commit()
@@ -607,21 +572,10 @@ async def update_course(
 async def upload_course_thumbnail(
     course_id: UUID,
     request: Request,
-    # Manager-owned, matching `thumbnail_object_id` in the PATCH allow-list.
-    # Gating this on course.update would have left a side door: the teacher
-    # cannot set thumbnail_object_id via PATCH but could still replace the
-    # image by uploading through here.
     current_user: Annotated[CurrentUser, Depends(_REQUIRE_COURSE_DELETE)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> CourseAuthoring:
-    """Upload a course thumbnail image (JPEG/PNG/WebP/GIF, ≤ 5 MiB).
-
-    The raw image bytes are sent as the request body with the image's MIME
-    type in the ``Content-Type`` header (no multipart wrapper — matches the
-    avatar upload pattern). Stores the image in object storage and points the
-    course at it. Manager-owned: requires ``course.delete`` on the course,
-    the same gate as ``thumbnail_object_id`` in the PATCH allow-list.
-    """
+    """Upload a course thumbnail image (JPEG/PNG/WebP/GIF, ≤ 5 MiB)."""
     data = await request.body()
     content_type = request.headers.get("content-type", "application/octet-stream")
     content_type = content_type.split(";", 1)[0].strip().lower()
@@ -673,6 +627,13 @@ async def archive_course(
         course = await authoring_service.archive_course(db, course_id, current_user)
     except NotFoundError as exc:
         raise _not_found(str(exc)) from exc
+    # The career-path guard refuses through AppError. Without this arm it
+    # surfaced as a 500, so the one refusal an operator most needs to read
+    # arrived as an unexplained server error.
+    except ConflictError as exc:
+        raise _conflict(str(exc)) from exc
+    except AppError as exc:
+        raise _bad_request(str(exc)) from exc
     await db.commit()
     return course
 
@@ -683,17 +644,15 @@ async def delete_course(
     current_user: Annotated[CurrentUser, Depends(_REQUIRE_COURSE_DELETE)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> None:
-    """Soft-delete a course the caller can delete (reversible tombstone).
-
-    Cascades to the course's modules/lessons/items via
-    ``soft_delete_cascade``. Requires ``course.delete`` on the course.
-    Returns 204 on success; 404 when the course is missing or already
-    soft-deleted.
-    """
+    """Soft-delete a course the caller can delete (reversible tombstone)."""
     try:
         await authoring_service.delete_course(db, course_id, current_user)
     except NotFoundError as exc:
         raise _not_found(str(exc)) from exc
+    except ConflictError as exc:
+        raise _conflict(str(exc)) from exc
+    except AppError as exc:
+        raise _bad_request(str(exc)) from exc
     await db.commit()
 
 
