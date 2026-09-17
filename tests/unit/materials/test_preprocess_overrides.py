@@ -163,22 +163,24 @@ class TestTheOwnershipCheckOnAnOverride:
     """
 
     @pytest.fixture
-    def action(self, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    def world(self, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         stamp = AsyncMock(return_value=True)
         monkeypatch.setattr(_preprocess, "set_teacher_action", stamp)
         return {"stamp": stamp, "material_id": uuid4(), "user_id": uuid4()}
 
-    async def _apply(self, action: dict[str, Any], quarantine_id: UUID, **over: Any):
+    async def _apply(
+        self, world: dict[str, Any], quarantine_id: UUID, verdict: str = "restore"
+    ):
         return await _preprocess.apply_teacher_action(
             object(),
-            action["material_id"],
+            world["material_id"],
             quarantine_id,
-            action=over.get("action", "restore"),
-            user_id=action["user_id"],
+            action=verdict,
+            user_id=world["user_id"],
         )
 
     async def test_a_row_from_another_material_is_refused(
-        self, monkeypatch: pytest.MonkeyPatch, action: dict[str, Any]
+        self, monkeypatch: pytest.MonkeyPatch, world: dict[str, Any]
     ) -> None:
         """The row exists and the caller may touch their own material, so
         every other check in the chain passes. Only this one does not.
@@ -190,12 +192,12 @@ class TestTheOwnershipCheckOnAnOverride:
         )
 
         with pytest.raises(NotFoundError, match="not found for this material"):
-            await self._apply(action, uuid4())
+            await self._apply(world, uuid4())
 
-        action["stamp"].assert_not_awaited()
+        world["stamp"].assert_not_awaited()
 
     async def test_an_unknown_row_is_refused_the_same_way(
-        self, monkeypatch: pytest.MonkeyPatch, action: dict[str, Any]
+        self, monkeypatch: pytest.MonkeyPatch, world: dict[str, Any]
     ) -> None:
         """Identical message and error for "does not exist" and "is not
         yours": distinguishing them would let a caller enumerate which
@@ -204,27 +206,27 @@ class TestTheOwnershipCheckOnAnOverride:
         monkeypatch.setattr(_preprocess, "get_quarantine_row", AsyncMock(return_value=None))
 
         with pytest.raises(NotFoundError, match="not found for this material"):
-            await self._apply(action, uuid4())
+            await self._apply(world, uuid4())
 
     async def test_a_row_on_the_callers_own_material_is_stamped(
-        self, monkeypatch: pytest.MonkeyPatch, action: dict[str, Any]
+        self, monkeypatch: pytest.MonkeyPatch, world: dict[str, Any]
     ) -> None:
         monkeypatch.setattr(
             _preprocess,
             "get_quarantine_row",
-            AsyncMock(return_value={"material_id": action["material_id"]}),
+            AsyncMock(return_value={"material_id": world["material_id"]}),
         )
         quarantine_id = uuid4()
 
-        assert await self._apply(action, quarantine_id) is True
+        assert await self._apply(world, quarantine_id) is True
 
-        assert action["stamp"].await_args.args[1] == quarantine_id
-        assert action["stamp"].await_args.kwargs["action"] == "restore"
-        assert action["stamp"].await_args.kwargs["user_id"] == action["user_id"]
+        assert world["stamp"].await_args.args[1] == quarantine_id
+        assert world["stamp"].await_args.kwargs["action"] == "restore"
+        assert world["stamp"].await_args.kwargs["user_id"] == world["user_id"]
 
     @pytest.mark.parametrize("verdict", ["restore", "confirm"])
     async def test_both_verdicts_are_recorded_against_the_teacher(
-        self, monkeypatch: pytest.MonkeyPatch, action: dict[str, Any], verdict: str
+        self, monkeypatch: pytest.MonkeyPatch, world: dict[str, Any], verdict: str
     ) -> None:
         """``confirm`` matters as much as ``restore``: it is what feeds the
         precision audit, so a rule nobody ever confirms looks the same as
@@ -233,15 +235,15 @@ class TestTheOwnershipCheckOnAnOverride:
         monkeypatch.setattr(
             _preprocess,
             "get_quarantine_row",
-            AsyncMock(return_value={"material_id": action["material_id"]}),
+            AsyncMock(return_value={"material_id": world["material_id"]}),
         )
 
-        await self._apply(action, uuid4(), action=verdict)
+        await self._apply(world, uuid4(), verdict)
 
-        assert action["stamp"].await_args.kwargs["action"] == verdict
+        assert world["stamp"].await_args.kwargs["action"] == verdict
 
     async def test_a_row_that_vanished_between_read_and_write_reports_false(
-        self, monkeypatch: pytest.MonkeyPatch, action: dict[str, Any]
+        self, monkeypatch: pytest.MonkeyPatch, world: dict[str, Any]
     ) -> None:
         """The stamp is a separate statement, so the row can go in between.
 
@@ -251,11 +253,11 @@ class TestTheOwnershipCheckOnAnOverride:
         monkeypatch.setattr(
             _preprocess,
             "get_quarantine_row",
-            AsyncMock(return_value={"material_id": action["material_id"]}),
+            AsyncMock(return_value={"material_id": world["material_id"]}),
         )
-        action["stamp"].return_value = False
+        world["stamp"].return_value = False
 
-        assert await self._apply(action, uuid4()) is False
+        assert await self._apply(world, uuid4()) is False
 
 
 class TestTheModeSwitch:
