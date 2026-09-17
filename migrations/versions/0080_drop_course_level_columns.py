@@ -1,6 +1,6 @@
 """Drop the course \u201clevel\u201d and \u201cexpected_completion_days\u201d columns.
 
-User decision 2026-08-18: the course level is no longer user-defined — it is
+The course level is no longer user-defined — it is
 DERIVED from the course's career-path placement (shown on the student view as
 \u201cStage N \u2014 <title>\u201d). `expected_completion_days` was removed from the product
 entirely. Both columns (and the `level` CHECK constraint) are dropped, along

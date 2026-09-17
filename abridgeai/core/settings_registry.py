@@ -532,7 +532,6 @@ _SPECS: tuple[SettingSpec, ...] = (
             "unaffected. Set to 0 for no cap (serve the whole backlog)."
         ),
     ),
-    # -- courses (teacher staffing bounds; user decision 2026-08-18) -------
     # Defaults chosen to match the requested behaviour: at least 2 teachers
     # (default min), at least one of them the Course Instructor, capped at
     # the default max. NOT exactly one: `courses.services.assignment`

@@ -389,7 +389,6 @@ class UserRoleAssignment(
         DateTime(timezone=True), nullable=False, server_default=text("NOW()")
     )
     active_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    # Course-scoped TEACHER titles (user decision 2026-08-30): a course may
     # have multiple Course Instructors and multiple Teacher Assistants, and
     # one teacher may hold BOTH on the same course, so the single
     # ``course_role`` string was replaced with two independent flags.

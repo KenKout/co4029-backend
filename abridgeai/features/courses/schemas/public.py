@@ -65,11 +65,6 @@ class InstructorRead(_ORMModel):
     display_name: str
     avatar_url: str | None = None
     headline: str | None = None
-    # Course-scoped title flags (Course Instructor / Teacher Assistant),
-    # surfaced so the student page can label the instructors up front and the
-    # TAs behind. Both true = one teacher holding both titles (user decision
-    # 2026-08-30). Also set on the instructor block (`CoursePublic.instructor`
-    # is the longest-serving CI).
     is_instructor: bool = False
     is_assistant: bool = False
 

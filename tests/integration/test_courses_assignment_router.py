@@ -930,7 +930,7 @@ async def test_readiness_can_publish_matches_the_publish_gate(
         assert readiness.status_code == 200, readiness.text
         assert readiness.json()["gradeable_unit_count"] == 1
         assert readiness.json()["learning_outcome_count"] == 1
-        # Staffing gate (user decision 2026-08-18): a draft must meet the
+        # Staffing gate: a draft must meet the
         # default min (2) before it can publish, so course_a — which has NO
         # active teachers — must stay red even with content + outcomes.
         assert readiness.json()["teacher_count"] == 0
@@ -1436,7 +1436,7 @@ async def test_clone_course_rejects_missing_depth(
     assert resp.status_code == 422, resp.text
 
 
-# --- Course teacher titles + min/max staffing (user decision 2026-08-18) -----
+# --- Course teacher titles + min/max staffing -----
 
 
 @pytest_asyncio.fixture

@@ -135,7 +135,6 @@ _REQUIRE_COURSE_PUBLISH = require_course_permission("course_id", "course.publish
 
 # Fields on CourseUpdate a TEACHER (course.update) may patch: the course
 # description, the study-time estimate, and their own contact details.
-# User decision 2026-08-06.
 _TEACHER_PATCHABLE_COURSE_FIELDS: frozenset[str] = frozenset(
     {
         "description",

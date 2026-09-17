@@ -46,8 +46,7 @@ Deliberate asymmetry, kept from the source rules
 ------------------------------------------------
 A quiz completes when it is terminal (passed OR exhausted); an interview
 completes only when PASSED. Failing every interview attempt leaves the unit
-pending, because the curriculum tag there means *đạt/passed*, not merely
-*finished* (user decision 2026-08-06).
+pending, because the curriculum tag there means *đạt/passed*, not merely.
 
 Populations must match the curriculum exactly
 ---------------------------------------------

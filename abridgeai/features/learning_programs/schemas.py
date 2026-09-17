@@ -135,7 +135,7 @@ class ProgramRead(BaseModel):
     paths: list[ProgramPathRead] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
-    # Management-list card statistics (user decision 2026-08-31). Filled by
+    # Management-list card statistics. Filled by
     # ``list_programs`` in one batched pass; detail endpoints leave the
     # defaults. ``has_draft_version`` is what the eye-catching "draft exists"
     # badge on the card reads — a program with a published version plus an

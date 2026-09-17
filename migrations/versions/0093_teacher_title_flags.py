@@ -1,6 +1,6 @@
 """teacher title flags
 
-User decision 2026-08-30: a course may have MULTIPLE Course Instructors and
+A course may have MULTIPLE Course Instructors and
 multiple Teacher Assistants, and one teacher may hold BOTH titles on the
 same course. The single ``course_role`` column and the
 ``uq_course_teachers_one_instructor`` partial index (at most one CI) cannot
