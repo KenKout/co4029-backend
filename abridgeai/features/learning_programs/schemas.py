@@ -228,6 +228,12 @@ class ProgramEnrollmentRead(BaseModel):
     approved_switch_count: int = 0
     max_career_paths: int = 1
     selected_path_count: int = 0
+    # Student-wide, across every program: what the organization allows and
+    # what the student already holds. The per-program numbers above cannot
+    # express this, and without it the "Add this path" button cannot tell
+    # whether the backend will accept the click.
+    max_concurrent_paths_per_student: int = 10
+    student_active_path_count: int = 0
     current_progress_percent: float = 0
     current_completed_courses: int = 0
     current_total_courses: int = 0

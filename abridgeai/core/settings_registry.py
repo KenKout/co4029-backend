@@ -149,6 +149,22 @@ _SPECS: tuple[SettingSpec, ...] = (
         ),
     ),
     SettingSpec(
+        key="learning_program.max_concurrent_paths_per_student",
+        group="careerpath",
+        type="int",
+        default=10,
+        minimum=1,
+        maximum=100,
+        label="Concurrent career paths per student",
+        description=(
+            "Maximum career paths one student may have running at once across "
+            "ALL their learning programs. The per-program limit below is scoped "
+            "to a single enrolment, so a student in two programs can otherwise "
+            "hold the sum of both limits. Defaults to 10, which changes nothing "
+            "until it is lowered. Existing paths are grandfathered when lowered."
+        ),
+    ),
+    SettingSpec(
         key="learning_program.max_career_paths_per_enrollment",
         group="careerpath",
         type="int",

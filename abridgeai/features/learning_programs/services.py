@@ -914,6 +914,82 @@ async def enroll_students(
     return result
 
 
+async def _student_path_budget(
+    db: AsyncSession, *, organization_id: UUID, student_id: UUID
+) -> tuple[int, int]:
+    """``(paths running now, paths this organization allows)`` for one student."""
+    used = await queries.count_active_paths_for_student(
+        db, organization_id=organization_id, student_id=student_id
+    )
+    limit = int(
+        await resolve_setting(
+            db,
+            "learning_program.max_concurrent_paths_per_student",
+            organization_id=organization_id,
+        )
+    )
+    return used, limit
+
+
+async def _require_student_path_budget(
+    db: AsyncSession, *, organization_id: UUID, student_id: UUID
+) -> None:
+    """Refuse a path that would put the student over the organization ceiling.
+
+    ``max_career_paths_per_enrollment`` is scoped to one enrolment, so a
+    student's real ceiling was the SUM of their programs' limits: programs
+    capped at 1 and 2 allow three concurrent paths, with every program
+    individually inside its own limit the whole time. This is the only limit
+    that sees the total.
+
+    Applied solely where the count actually RISES -- choosing a path, and
+    auto-starting a program default. A path *change* is one out and one in,
+    so it leaves the total untouched and is deliberately not gated here.
+    Gating it would trap a student grandfathered above a lowered ceiling on
+    their current path, able to sit on it but never to switch away.
+    """
+    used, limit = await _student_path_budget(
+        db, organization_id=organization_id, student_id=student_id
+    )
+    if used < limit:
+        return
+    raise ProgramConflictError(
+        "student_path_limit_reached",
+        f"You already have {used} career path{'' if used == 1 else 's'} in "
+        f"progress, and this organization allows at most {limit} at a time. "
+        "Finish or drop one before taking another.",
+        limit=limit,
+        current=used,
+    )
+
+
+async def _require_path_not_active_elsewhere(
+    db: AsyncSession,
+    *,
+    student_id: UUID,
+    career_path_id: UUID,
+    enrollment_id: UUID,
+) -> None:
+    """Refuse a path this student is already running in a different program."""
+    other = await queries.find_active_path_attempt_elsewhere(
+        db,
+        student_id=student_id,
+        career_path_id=career_path_id,
+        excluding_enrollment_id=enrollment_id,
+    )
+    if other is None:
+        return
+    path_name = await _target_path_name(db, career_path_id)
+    raise ProgramConflictError(
+        "path_active_in_another_program",
+        f"You are already taking {path_name} in {other}. A career path can "
+        "run in only one learning program at a time -- finish or leave it "
+        "there first, or choose a different path here.",
+        career_path_id=str(career_path_id),
+        conflicting_program_name=other,
+    )
+
+
 async def _activate_default_path(
     db: AsyncSession,
     *,
@@ -929,6 +1005,27 @@ async def _activate_default_path(
     """
     if default_path is None:
         return False
+
+    if await queries.find_active_path_attempt_elsewhere(
+        db,
+        student_id=enrollment.student_id,
+        career_path_id=cast(UUID, default_path["career_path_id"]),
+        excluding_enrollment_id=enrollment.id,
+    ):
+        return False
+
+    # Same treatment when the student is already at the organization ceiling
+    # for concurrent paths: let the enrollment stand, but leave the default
+    # unstarted rather than pushing them over it.
+    program = await queries.get_program(db, enrollment.learning_program_id)
+    if program is not None:
+        used, limit = await _student_path_budget(
+            db,
+            organization_id=program.organization_id,
+            student_id=enrollment.student_id,
+        )
+        if used >= limit:
+            return False
 
     attempt = ProgramPathAttempt(
         program_enrollment_id=enrollment.id,
@@ -1023,6 +1120,9 @@ async def _enrollment_out(db: AsyncSession, enrollment: ProgramEnrollment) -> Pr
         raise NotFoundError("program_enrollment_parent_not_found")
     attempts = await queries.list_attempts(db, enrollment.id)
     pending = await queries.get_pending_request(db, enrollment.id)
+    student_paths_used, student_path_limit = await _student_path_budget(
+        db, organization_id=program.organization_id, student_id=enrollment.student_id
+    )
     selected_attempts = [row for row in attempts if row.status in ("active", "completed")]
     attempt_outputs: list[PathAttemptRead] = []
     completed_courses = 0
@@ -1067,6 +1167,8 @@ async def _enrollment_out(db: AsyncSession, enrollment: ProgramEnrollment) -> Pr
             "approved_switch_count": await queries.count_approved_switches(db, enrollment.id),
             "max_career_paths": version.max_career_paths_per_enrollment,
             "selected_path_count": len(selected_attempts),
+            "max_concurrent_paths_per_student": student_path_limit,
+            "student_active_path_count": student_paths_used,
             "current_progress_percent": round(
                 (completed_courses / total_courses * 100) if total_courses else 0, 2
             ),
@@ -1142,6 +1244,15 @@ async def select_path(
         raise ConflictError("path_is_not_in_the_pinned_program_version")
     if target["status"] == "archived":
         raise ConflictError("archived_path_cannot_be_selected")
+    await _require_path_not_active_elsewhere(
+        db,
+        student_id=student_id,
+        career_path_id=career_path_id,
+        enrollment_id=enrollment.id,
+    )
+    await _require_student_path_budget(
+        db, organization_id=program.organization_id, student_id=student_id
+    )
     attempt = ProgramPathAttempt(
         program_enrollment_id=enrollment.id,
         career_path_id=career_path_id,
@@ -1200,6 +1311,12 @@ async def request_path_change(
         raise ConflictError("path_already_selected")
     if attempt.career_path_id == target_path_id:
         raise ConflictError("target_path_must_differ_from_current_path")
+    await _require_path_not_active_elsewhere(
+        db,
+        student_id=student_id,
+        career_path_id=target_path_id,
+        enrollment_id=enrollment.id,
+    )
     if await queries.get_pending_request(db, enrollment.id) is not None:
         raise ConflictError("program_already_has_a_pending_path_change")
     version = await queries.get_version(db, enrollment.program_version_id)
@@ -1467,6 +1584,12 @@ async def decide_change_request(  # noqa: C901 - approval is one atomic invarian
         for row in selected_attempts
     ):
         raise ConflictError("path_already_selected")
+    await _require_path_not_active_elsewhere(
+        db,
+        student_id=enrollment.student_id,
+        career_path_id=cast(UUID, request.target_career_path_id),
+        enrollment_id=enrollment.id,
+    )
     version = await queries.get_version(db, enrollment.program_version_id)
     if version is None:
         raise NotFoundError("program_version_not_found")

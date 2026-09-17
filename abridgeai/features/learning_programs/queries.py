@@ -520,6 +520,72 @@ async def count_other_active_path_attempts(
     return int((await db.scalar(stmt)) or 0)
 
 
+async def count_active_paths_for_student(
+    db: AsyncSession, *, organization_id: UUID, student_id: UUID
+) -> int:
+    """Career paths this student has running right now, across every program.
+
+    Org-scoped exactly like ``count_concurrent_enrollments``, because the
+    limit it feeds is an organization setting. Counts attempts rather than
+    distinct paths: ``_require_path_not_active_elsewhere`` already makes one
+    path running twice impossible, so the two numbers are the same.
+    """
+    stmt = (
+        select(func.count())
+        .select_from(ProgramPathAttempt)
+        .join(ProgramEnrollment, ProgramEnrollment.id == ProgramPathAttempt.program_enrollment_id)
+        .join(LearningProgram, LearningProgram.id == ProgramEnrollment.learning_program_id)
+        .where(
+            LearningProgram.organization_id == organization_id,
+            ProgramEnrollment.student_id == student_id,
+            ProgramPathAttempt.status == "active",
+        )
+    )
+    return int((await db.scalar(stmt)) or 0)
+
+
+async def find_active_path_attempt_elsewhere(
+    db: AsyncSession,
+    *,
+    student_id: UUID,
+    career_path_id: UUID,
+    excluding_enrollment_id: UUID,
+) -> str | None:
+    """Name of another live program already running this path for this student.
+
+    Every other duplicate guard in this feature stops at the enrollment
+    boundary: ``uq_program_path_attempts_active_path`` is keyed on
+    ``(program_enrollment_id, career_path_id)``, and
+    ``max_career_paths_per_enrollment`` counts one enrollment's own attempts.
+    Neither can see a second program, so only a student-wide lookup catches
+    one path running twice.
+
+    Deliberately filtered on the ATTEMPT status alone, with no condition on
+    the owning program or enrollment -- exactly like
+    ``count_other_active_path_attempts``, which decides when path access is
+    released. The guard and the refcount have to agree: if the refcount still
+    believes the student holds this path, selecting it again is a duplicate.
+
+    Returns the program name rather than a count because "already active in
+    Data Engineering" is the part a student can act on.
+    """
+    stmt = (
+        select(LearningProgram.name)
+        .select_from(ProgramPathAttempt)
+        .join(ProgramEnrollment, ProgramEnrollment.id == ProgramPathAttempt.program_enrollment_id)
+        .join(LearningProgram, LearningProgram.id == ProgramEnrollment.learning_program_id)
+        .where(
+            ProgramEnrollment.student_id == student_id,
+            ProgramPathAttempt.career_path_id == career_path_id,
+            ProgramPathAttempt.status == "active",
+            ProgramPathAttempt.program_enrollment_id != excluding_enrollment_id,
+        )
+        .limit(1)
+    )
+    name = await db.scalar(stmt)
+    return str(name) if name is not None else None
+
+
 async def get_change_request(
     db: AsyncSession, request_id: UUID, *, lock: bool = False
 ) -> PathChangeRequest | None:
