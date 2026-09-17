@@ -2481,8 +2481,19 @@ async def test_manager_can_delete_course(
     engine: AsyncEngine,
 ) -> None:
     """A manager holding ``course.delete`` at org scope CAN soft-delete the
-    course via the teacher route (same permission gate, no owner needed)."""
+    course via the teacher route (same permission gate, no owner needed).
+
+    Deletion is draft-only, so the course is put back to draft first. That
+    is arrangement, not the subject: this test is about the PERMISSION axis
+    — a manager reaching a course they do not own — and the seeded course is
+    published only because most other tests need it that way.
+    """
     auth = {"Authorization": f"Bearer {manager_bearer}"}
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("UPDATE courses SET status = 'draft' WHERE id = :cid"),
+            {"cid": scenario["course_a"]},
+        )
     resp = await client.delete(f"/api/v1/teacher/courses/{scenario['course_a']}", headers=auth)
     assert resp.status_code == 204, resp.text
 
@@ -2496,10 +2507,14 @@ async def test_manager_can_delete_course(
         ).scalar_one()
     assert deleted_at is not None
 
-    # Restore for the rest of the suite (test isolation).
+    # Restore for the rest of the suite (test isolation) — the status too,
+    # since this test changed it to satisfy the draft-only rule.
     async with engine.begin() as conn:
         await conn.execute(
-            text("UPDATE courses SET deleted_at = NULL, deleted_by = NULL WHERE id = :cid"),
+            text(
+                "UPDATE courses SET deleted_at = NULL, deleted_by = NULL, "
+                "status = 'published' WHERE id = :cid"
+            ),
             {"cid": scenario["course_a"]},
         )
 
