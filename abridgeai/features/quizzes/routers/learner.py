@@ -1,20 +1,4 @@
-"""Quizzes learner router (T5.14).
-
-Six endpoints under split path roots ``/quizzes`` + ``/attempts`` +
-``/me`` (legacy parity — no single common prefix). Composes
-:mod:`features.quizzes.services.taking` for student attempt lifecycle
-and :mod:`features.quizzes.queries.published` for the published-quiz
-fetch.
-
-Security invariant (plan §5398, T5.2)
--------------------------------------
-Every learner-facing response serializes through
-:class:`QuizPublic` / :class:`QuizQuestionPublic` /
-:class:`QuizQuestionOptionPublic` which deliberately drop the
-``is_correct`` flag (and any other answer-correctness fields) so the
-client cannot peek at correctness during the take. The grading service
-is the only consumer of the authoring projection.
-"""
+"""Learner quiz endpoints that expose answer-safe public projections."""
 
 from __future__ import annotations
 

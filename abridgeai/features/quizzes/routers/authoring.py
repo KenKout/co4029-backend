@@ -1,34 +1,4 @@
-"""Quizzes authoring router (T5.14).
-
-Eleven endpoints under prefix ``/teacher`` covering quiz CRUD, manual
-question CRUD, soft-delete, and the ARQ-enqueue triggers for
-generation + per-question regeneration. Composes
-:mod:`features.quizzes.services.authoring` (routers→services boundary,
-T0.4 import-linter contract).
-
-Security perimeter (FIX-SEC-1, Reconciliation §A9 + §E4)
---------------------------------------------------------
-Every endpoint enforces a course-scoped permission check via the
-factories in :mod:`._deps`:
-
-* ``POST /teacher/courses/{course_id}/quizzes`` →
-  :func:`features.access_control.policies.require_course_permission`
-  on ``course.update`` (mirrors T3.7).
-* Endpoints with a ``quiz_id`` path parameter →
-  :func:`require_quiz_authoring_access` (walks
-  ``quiz_id → courses.id``).
-* Endpoints with a ``question_id`` path parameter →
-  :func:`require_question_authoring_access` (walks
-  ``question_id → quizzes → courses.id``; cross-checks any sibling
-  ``quiz_id`` to prevent existence leaks).
-
-No bare ``Depends(get_current_user)`` appears on any write endpoint
-(verified by the source-grep test
-``test_no_bare_get_current_user_on_quiz_authoring_endpoints``).
-
-Service-layer exceptions are mapped to HTTP errors locally — services
-stay HTTP-agnostic.
-"""
+"""Teacher quiz authoring endpoints with course-scoped authorization."""
 
 from __future__ import annotations
 
@@ -132,15 +102,7 @@ def _conflict(message: str) -> HTTPException:
 
 
 async def get_arq_pool() -> object | None:
-    """ARQ Redis pool dependency (overridable in tests).
-
-    Returns ``None`` until the app factory wires a real ``ArqRedis``
-    pool via ``app.dependency_overrides``. Mirrors
-    :func:`features.materials.routers.authoring.get_arq_pool`; the
-    service layer accepts ``None`` and skips the enqueue (useful for
-    tests that exercise DB writes without spinning up Redis +
-    ``ArqRedis``).
-    """
+    """Return the app-overridable ARQ Redis pool dependency."""
     return None
 
 
@@ -155,13 +117,7 @@ async def create_quiz_under_course(
     current_user: Annotated[CurrentUser, Depends(_REQUIRE_COURSE_UPDATE)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> QuizAuthoring:
-    """Create a draft quiz on a module under ``course_id``.
-
-    The legacy route was ``POST /modules/{module_id}/quizzes``; the
-    authoring perimeter uses ``course_id`` as the path-anchor (the
-    permission walks course-scoped). The body MUST carry ``module_id``
-    so the service can resolve the parent module under this course.
-    """
+    """Create a draft quiz on a module under ``course_id``."""
     module_id_raw = payload.get("module_id")
     if module_id_raw is None:
         raise _bad_request("module_id is required")
@@ -748,14 +704,7 @@ async def get_latest_quiz_generation_run(
     current_user: Annotated[CurrentUser, Depends(_REQUIRE_QUIZ)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> QuizGenerationRunRead | None:
-    """Return the most recent ``GenerationRun`` for this quiz, if any.
-
-    Lets the SPA reattach to an in-flight (or terminal) run on mount
-    without persisting handles in the browser — survives cross-device
-    sessions, tab closes, and lets a second teacher viewing the same
-    quiz see the in-flight run too. Returns ``null`` (HTTP 200) when
-    the quiz has never been generated.
-    """
+    """Return the most recent ``GenerationRun`` for this quiz, if any."""
     del current_user
     run = await authoring_service.get_latest_generation_run(db, quiz_id)
     if run is None:
@@ -944,14 +893,7 @@ async def list_question_bank(  # noqa: PLR0913 -- filters mirror service signatu
     limit: int = 50,
     cursor: str | None = None,
 ) -> QuestionBankPage:
-    """Browse authored questions across the course for cross-quiz reuse.
-
-    Defaults to ``review_status='approved'`` so only vetted questions
-    surface; pass ``review_status=`` (empty) to widen. ``exclude_quiz_id``
-    is convenient for the modal launched from a target quiz so its own
-    questions don't appear in the bank list. ``cursor`` is opaque and
-    round-trips through subsequent calls.
-    """
+    """Browse authored questions across the course for cross-quiz reuse."""
     del current_user  # permission already enforced by Depends
     try:
         page = await question_bank_service.list_bank_entries(
@@ -1011,19 +953,9 @@ async def import_questions_from_bank(
 
 
 class _AttrShim:
-    """Adapt a ``dict`` body into the ``model_dump`` / attr-access shape services expect.
+    """Adapt a dict to the model and attribute interface used by services."""
 
-    Kept private to this router. Service helpers were ported (T5.13) to
-    consume Pydantic models via ``model_dump`` + ``getattr``; until the
-    DTO surface lands in T5.x we accept loose ``dict`` bodies here and
-    project them through this shim so the service signatures stay
-    untouched.
-    """
-
-    #: Settings removed from the product that a cached client bundle may still
-    #: send. Dropped on arrival so a stale tab gets a clean no-op instead of a
-    #: phantom attribute on the model (or a spurious published-quiz freeze
-    #: rejection for a field that no longer exists).
+    # Ignore retired settings still sent by cached clients.
     _RETIRED_KEYS = frozenset({"browser_security"})
 
     def __init__(self, data: dict[str, Any]) -> None:
@@ -1064,8 +996,6 @@ def _generation_run_view(run: GenerationRun, quiz_id: UUID) -> QuizGenerationRun
         str(failure.get("message")) if isinstance(failure, dict) and "message" in failure else None
     )
     # Live-progress projection (migration 0035). ``progress_json`` is
-    # written incrementally by the pipeline checkpoint helper; validate it
-    # leniently so a malformed/partial checkpoint never 500s the poll.
     progress = None
     raw_progress = getattr(run, "progress_json", None)
     if isinstance(raw_progress, dict) and raw_progress:
@@ -1107,25 +1037,11 @@ async def _attach_question_options(db: AsyncSession, question: QuizQuestion) -> 
 async def _resolve_outcome_positions(
     db: AsyncSession, outcome_ids: set[UUID]
 ) -> dict[UUID, tuple[int, str]]:
-    """Batch-resolve ``{outcome_id: (position, dotted_code)}`` for display.
-
-    Read via raw SQL against ``course_learning_outcomes`` (rather than an ORM
-    relationship) so the quizzes feature does not import the courses ORM —
-    honours the T0.4 feature-independence contract, same pattern as
-    ``_resolve_student_names``. A recursive CTE rebuilds the dotted code
-    (``L.O.1.2.1``) by walking each row's parent chain; ``position`` is the
-    leaf's own sibling position (back-compat). Soft-deleted outcomes are
-    excluded, so a question pointing at a deleted outcome resolves to nothing
-    (→ the projection renders no prefix, i.e. "no outcome").
-    """
+    """Resolve outcome IDs to their sibling position and dotted code."""
     if not outcome_ids:
         return {}
     from sqlalchemy import text as _text  # noqa: PLC0415
 
-    # coded: walk root→node accumulating positions into a dotted code, then
-    # keep only the rows we were asked about. Restricting the recursion to a
-    # course would need the course_id; the id set is small and the CTE is
-    # course-agnostic, so we filter at the end instead.
     rows = (
         await db.execute(
             _text(
@@ -1153,12 +1069,7 @@ async def _resolve_outcome_positions(
 def _fill_outcome_positions(
     questions: list[QuizQuestion], positions: dict[UUID, tuple[int, str]]
 ) -> None:
-    """Stamp ``outcome_position`` + ``outcome_code`` from the resolved map.
-
-    Both are projection-only fields (not ORM columns), so setting them here
-    lets ``QuizQuestionAuthoring.model_validate`` pick them up via
-    ``from_attributes``. Questions with no / deleted outcome stay ``None``.
-    """
+    """Attach projection-only outcome positions and codes to questions."""
     for question in questions:
         lo_id = question.learning_outcome_id
         resolved = positions.get(lo_id) if lo_id is not None else None

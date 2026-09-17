@@ -443,10 +443,6 @@ async def start_attempt(
                 )
             return existing, progress
 
-    active_attempt_id = await _active_attempt_id(db, quiz_id, actor.user_id)
-    if active_attempt_id is not None:
-        raise ActiveAttemptExists(active_attempt_id)
-
     quiz = await published_queries.get_quiz_for_taking(
         db,
         quiz_id,
@@ -457,6 +453,10 @@ async def start_attempt(
     )
     if quiz is None:
         raise NotFoundError(f"Quiz {quiz_id} not found")
+
+    active_attempt_id = await _active_attempt_id(db, quiz_id, actor.user_id)
+    if active_attempt_id is not None:
+        raise ActiveAttemptExists(active_attempt_id)
 
     questions = await _load_quiz_questions_for_taking(db, quiz_id)
 

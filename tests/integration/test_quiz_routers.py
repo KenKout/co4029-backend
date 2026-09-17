@@ -262,7 +262,7 @@ async def test_teacher_quiz_attempts_endpoints(
         headers=_auth(admin_bearer),
     )
     assert course_resp.status_code == 200, course_resp.text
-    course_rows = course_resp.json()
+    course_rows = course_resp.json()["items"]
     assert len(course_rows) == 1
     row = course_rows[0]
     assert row["id"] == str(attempt_id)
