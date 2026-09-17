@@ -258,12 +258,6 @@ async def list_active_teacher_assignment_rows(
 
 
 async def count_course_instructors(db: AsyncSession, course_id: UUID) -> int:
-    """Number of active Course-Instructor flags on ``course_id`` (0..N).
-
-    Multiple instructors are legal (user decision 2026-08-30), so this is a
-    COUNT, not an existence probe — callers that used to ask "who is the one
-    instructor" now ask "how many are there".
-    """
     stmt = (
         select(func.count())
         .select_from(UserRoleAssignment)

@@ -1,17 +1,3 @@
-"""AI model pricing CRUD router — ``/admin/ai/pricing/*``.
-
-Deliberately a *separate* router from ``ai_costs.py`` (the read-only cost
-dashboard). That dashboard has a regression guard
-(``test_no_hard_block_endpoint_exists``) asserting it exposes no write
-endpoints, per an explicit user decision that admins inspect spend but the
-dashboard never blocks users on cost. Pricing configuration is an unrelated
-concern — it lets admins change how cost is *computed*, not enforce limits
-— so it gets its own prefix and permission-gated write routes.
-
-Authorization: reads require ``ai.processing.read`` or
-``system.administer``; writes require ``system.administer`` (mutates a
-value that feeds every future cost calculation).
-"""
 
 from __future__ import annotations
 

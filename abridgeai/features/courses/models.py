@@ -298,12 +298,6 @@ class CourseSyllabusImport(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
 
 class Module(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftDeleteMixin, Base):
-    """Group of related lessons / quizzes / interviews inside a course.
-
-    ``requires_all_lessons_unlocked`` defaults to FALSE per the locked
-    user decision (§3900) — loose semantics. When TRUE, the entire
-    module is gated behind every lesson within it being unlocked.
-    """
 
     __tablename__ = "modules"
     __table_args__ = (

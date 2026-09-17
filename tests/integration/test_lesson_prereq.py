@@ -1,19 +1,3 @@
-"""Integration test for the ``lesson_prerequisites`` self-FK table (T3.1).
-
-Per plan §3941-3947 / Reconciliation §A4 the lesson-after-lesson
-gating is a required user decision. This test exercises the full
-self-FK round-trip against the live docker postgres:
-
-* INSERT two lessons in the same module.
-* INSERT a ``lesson_prerequisites`` row linking lesson_2 → lesson_1.
-* SELECT the row back.
-* Verify the ``ck_lesson_prerequisites_not_self`` CHECK rejects a
-  self-prereq cycle.
-
-The fixture builds an isolated org / owner / course / module so the
-test does not interact with the seeded ``test_*`` rows from
-``conftest.py``.
-"""
 
 from __future__ import annotations
 

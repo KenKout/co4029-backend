@@ -162,22 +162,6 @@ async def get_published_course_by_id(db: AsyncSession, course_id: UUID) -> Cours
 
 
 async def get_course_instructor(db: AsyncSession, course_id: UUID) -> dict[str, Any] | None:
-    """Compose the primary instructor block for a course's public detail page.
-
-    With multiple Course Instructors legal (user decision 2026-08-30) the
-    "instructor" of record is the LONGEST-SERVING active Course Instructor
-    (earliest ``active_from``) — identical to the old single-CI semantics
-    when there is exactly one, and a stable pick when there are many. Joins
-    that teacher's profile and returns ``{user_id, display_name,
-    avatar_bucket, avatar_object_key, headline}`` shaped for the service
-    layer, which mints a presigned ``avatar_url``.
-
-    Returns ``None`` when the course is unpublished or has no active Course
-    Instructor. ``headline`` maps to ``user_profiles.bio`` (no dedicated
-    headline column). The avatar bucket/key are ``None`` when the teacher
-    has not uploaded an avatar; the service leaves ``avatar_url`` as
-    ``None`` and the SPA falls back to initials.
-    """
     stmt = (
         select(
             User.id.label("user_id"),

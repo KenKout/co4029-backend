@@ -570,10 +570,6 @@ async def test_recent_sorted_by_cost_desc(
 
 
 async def test_no_hard_block_endpoint_exists() -> None:
-    """Regression guard for the user decision: NO hard rate limit endpoint.
-
-    Observability only; admins inspect, they do not block users on cost.
-    """
     methods = {(r.path, tuple(sorted(r.methods))) for r in ai_costs_router.routes}  # type: ignore[attr-defined]
     expected = {
         ("/admin/ai/costs/summary", ("GET",)),

@@ -1,15 +1,3 @@
-"""AI cost dashboard service (T0.27) — admin observability ONLY.
-
-Composes :mod:`features.admin.queries.ai_costs`. Per the user decision
-recorded in ``backend-restructure.md`` T0.27, this service does **not**
-implement any hard rate limit / refusal — admins inspect spend; they do not
-block users on cost.
-
-A soft warning is emitted (log only, never blocks) when a user's daily spend
-crosses an optional threshold configured via
-``settings.ai_daily_user_spend_warn_usd``. The warning is best-effort and
-emitted only on the today-window path.
-"""
 
 from __future__ import annotations
 

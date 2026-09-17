@@ -163,19 +163,6 @@ async def _enroll_student_via_program(
     student_id: uuid.UUID,
     suffix: str,
 ) -> tuple[uuid.UUID, uuid.UUID]:
-    """Route a student onto a career path through its Learning Program.
-
-    Direct career-path enrollment is disabled (user decision: students reach
-    a path only via a Learning Program), so this is the supported route —
-    the same walk ``test_career_path_lifecycle`` uses: create a faculty unit,
-    create + publish the program pinned to the path, enroll the student,
-    then have the student select the path (which writes the
-    ``student_career_enrollments`` projection via
-    ``career_paths.api.public.ensure_program_path_access``).
-
-    Returns ``(faculty_org_unit_id, program_id)`` so teardown can remove
-    the rows this created.
-    """
     faculty_id = uuid.uuid4()
     org_id = await org_id_of(path_id, engine)
     async with engine.begin() as conn:

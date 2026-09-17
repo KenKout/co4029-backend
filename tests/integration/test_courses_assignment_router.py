@@ -1582,7 +1582,6 @@ async def test_assigning_beyond_max_is_rejected(
 async def test_a_second_instructor_can_be_promoted(
     client: httpx.AsyncClient, manager_bearer: str, staffing_course: dict[str, str]
 ) -> None:
-    """Multiple Course Instructors are legal (user decision 2026-08-30)."""
     headers = {"Authorization": f"Bearer {manager_bearer}"}
     cid = staffing_course["course_id"]
     for uid in (staffing_course["ci_id"], staffing_course["ta1_id"]):

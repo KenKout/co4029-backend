@@ -468,34 +468,6 @@ async def _require_learning_outcomes(db: AsyncSession, course_id: UUID) -> None:
 
 
 async def publish_course(db: AsyncSession, course_id: UUID, actor: CurrentUser) -> CourseAuthoring:
-    """Transition a course's status to ``published``.
-
-    Two gates, both skipped when re-publishing an already-published course
-    (that is a no-op, and retro-actively blocking it would strand courses
-    published before either rule existed):
-
-    * At least one gradeable unit — a published lesson, quiz or interview
-      config. A course with none can never be completed by anyone (the
-      completion writer refuses to promote an empty course), and as a required
-      course on a career path it would lock its stage permanently. See
-      :func:`_require_gradeable_units`.
-    * At least one learning outcome — otherwise the course never states what
-      it teaches. See :func:`_require_learning_outcomes`.
-
-    Checked in that order so the first 409 a manager sees is the one that
-    blocks students outright, not the one about documentation.
-
-    On an actual transition INTO ``published`` (not a re-publish), everyone
-    already attached to the course is notified with a deep-link: assigned
-    teachers and actively-enrolled students. Notification failures never roll
-    back the publish.
-
-    Teacher staffing minimum (admin config, user decision 2026-08-18): on the
-    FIRST publish (``draft`` -> ``published``) the course must have at least
-    ``courses.min_teachers_per_course`` active teachers. Re-publishing an
-    already-published course skips the gate, so raising the min later never
-    makes a live course unpublishable (old courses grandfathered).
-    """
     del actor
     course = await _require_course(db, course_id)
     if course.status == "archived":

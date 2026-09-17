@@ -1,31 +1,3 @@
-"""Service: per-interview learner progress for the course-learn screen.
-
-Answers "which interview items in this course are passed?" for the calling
-student. Interviews were already graded per attempt — ``pass_verdict`` is
-written by :func:`services.evaluation.evaluate_and_generate_report` — but that
-verdict never surfaced on the curriculum, so an interview item stayed
-"pending" forever and a module containing one could never auto-collapse.
-
-Completion rule (user decision, 2026-08-06): an interview item is COMPLETED
-when the student has **at least one non-practice attempt with
-``pass_verdict = TRUE``**.
-
-This is DELIBERATELY NOT the quiz rule. A quiz also completes on
-"failed with every attempt consumed", because a failed-but-exhausted quiz is
-terminal. The user chose the stricter rule here so the curriculum tag means
-*passed*, not merely *finished*: a student who has failed every interview
-attempt keeps the item pending. Two consequences worth stating out loud:
-
-* ``max_attempts`` is NULL (unlimited) on every interview config in this
-  deployment, so a "failed and exhausted" branch would essentially never fire
-  anyway — the strict rule costs almost nothing in practice.
-* Failing therefore leaves the item as the "next thing to do", which is the
-  intended reading: the interview is not done until it is passed.
-
-Layering: services -> queries. Owns its own DB reads, matching the quiz
-counterpart (``quizzes/services/learner_progress.py``) and the local
-precedent of ``services/taking.py``.
-"""
 
 from __future__ import annotations
 

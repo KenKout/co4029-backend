@@ -15,14 +15,6 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 class TeacherAssignmentRead(BaseModel):
-    """Authoring DTO for a teacher-on-course assignment.
-
-    ``primary_email`` / ``display_name`` are joined from ``users`` +
-    ``user_profiles``; ``active_until`` is non-null for soft-revoked
-    rows (audit trail). ``is_instructor`` / ``is_assistant`` are the
-    course-scoped title flags (both true = both titles, user decision
-    2026-08-30).
-    """
 
     user_id: UUID
     display_name: str
@@ -134,12 +126,6 @@ class CourseTeacherBulkRemoveResult(BaseModel):
 
 
 class CourseTeacherRoleRequest(BaseModel):
-    """Set an assigned teacher's course-scoped title flags.
-
-    Both true = both titles (user decision 2026-08-30); both false is
-    rejected by the service. Invariants enforced in
-    ``courses.services.assignment.set_teacher_titles``.
-    """
 
     is_instructor: bool
     is_assistant: bool

@@ -1,21 +1,3 @@
-"""Integration tests for the learner interview-progress endpoint (course-learn).
-
-``GET /api/v1/courses/{course_id}/interview-progress`` returns per-interview
-completion state for the calling student.
-
-Interviews were graded per attempt long before this endpoint existed
-(``interview_sessions.pass_verdict``, written by the ARQ evaluator), but the
-verdict never reached the curriculum, so an interview item stayed pending
-forever and a module holding one could never auto-collapse.
-
-Rule (user decision, 2026-08-06): completed <=> at least one NON-PRACTICE
-attempt has ``pass_verdict = TRUE``. Deliberately STRICTER than the quiz rule,
-which also completes on "failed with every attempt consumed" -- here the tag is
-meant to read as *passed*, so failing every attempt keeps the item pending.
-
-Fixture scaffolding is copied per-file from test_quiz_learner_progress.py, as
-the other integration tests in this directory do.
-"""
 
 from __future__ import annotations
 

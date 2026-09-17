@@ -507,7 +507,6 @@ async def test_teacher_may_patch_content_fields(
     field: str,
     value: object,
 ) -> None:
-    """The six fields a teacher owns (user decision 2026-08-06)."""
     response = await client.patch(
         f"/api/v1/teacher/courses/{scenario['course_a']}",
         json={field: value},

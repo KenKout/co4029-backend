@@ -643,8 +643,6 @@ async def test_it_admin_cannot_operate_academic_programs(
 async def test_program_list_cards_carry_dean_and_draft_stats(
     engine: AsyncEngine, seeded_users: SeededUsers
 ) -> None:
-    """The management list card payload: students, pending change requests,
-    and the draft-exists flag (user decision 2026-08-31)."""
     faculty_id, path_a, path_b = await _seed_program_context(engine, seeded_users)
     factory = async_sessionmaker(engine, expire_on_commit=False, autoflush=False)
     manager = CurrentUser(seeded_users.manager_id, uuid.uuid4())

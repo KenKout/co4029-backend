@@ -56,35 +56,6 @@ async def assign_teacher_to_course(
     is_assistant: bool = False,
     arq_pool: object | None = None,
 ) -> dict[str, Any]:
-    """Create (or no-op return) a ``role=teacher, scope=course`` assignment.
-
-    If an active assignment already exists for ``(course_id, user_id)`` the
-    existing row is returned unchanged. Otherwise a new row is INSERT-ed
-    with ``role_id`` resolved from the seeded T1.12 catalog,
-    ``scope_kind='course'``, and ``granted_by=actor.user_id``.
-
-    Staffing bounds (admin config, user decision 2026-08-18):
-
-    * **max** — assigning when the course is already at ``courses.max_teachers
-      per_course`` is rejected (hard). Existing over-cap courses are
-      grandfathered: no forced removal, just no growth.
-    * **titles (user decision 2026-08-30)** — a course may have MULTIPLE
-      Course Instructors and MULTIPLE Teacher Assistants, and one teacher
-      may hold both. A request that sends neither flag means "Teacher
-      Assistant" (the pre-flags default). Two server-side corrections keep
-      the "at least one instructor per staffed course" invariant (which the
-      DB CHECK cannot span rows to enforce):
-      - the FIRST teacher on a course is always a Course Instructor
-        (``is_instructor`` forced true);
-      - when the course already has teachers but NO instructor (edge case
-        after a bad backfill), the new teacher is forced to be an
-        instructor.
-
-    When the course is already **published**, the newly-assigned teacher is
-    notified (in-app + email) with a deep-link to the course. A no-op re-assign
-    does not re-notify. Draft courses do not notify here — the teacher is told
-    when the course publishes (see :func:`publish_course`).
-    """
     course = await authoring_queries.get_course_for_authoring(db, course_id)
     if course is None:
         raise NotFoundError(f"Course {course_id} not found")
@@ -206,20 +177,6 @@ async def set_teacher_titles(
     is_assistant: bool,
     actor: CurrentUser,
 ) -> dict[str, Any]:
-    """Set an assigned teacher's title set (Course Instructor / TA).
-
-    User decision 2026-08-30: titles are flags, so a teacher can hold both.
-    The two rules that remain are invariants, not limits:
-
-    * a course-scoped teacher must hold at least one title — clearing both is
-      rejected (409), because that row would then violate the DB CHECK;
-    * a staffed course must keep at least one Course Instructor — turning
-      off the LAST instructor is rejected (409), with the same message the
-      old single-CI code used so callers do not need to learn a new code.
-
-    Promoting additional instructors and demoting instructors who are not
-    the last one are both legal now.
-    """
     del actor
     assignment = await assignment_queries.get_active_teacher_assignment_row(
         db, course_id=course_id, user_id=user_id
@@ -494,12 +451,6 @@ async def _mint_avatar_url(bucket: str | None, object_key: str | None) -> str | 
 
 
 async def list_teachers_for_course(db: AsyncSession, course_id: UUID) -> list[InstructorRead]:
-    """Return ``InstructorRead`` rows for the active teachers of ``course_id``.
-
-    Ordered Course Instructor first, then Teacher Assistants, so the student
-    page shows the instructor up front with TAs behind (user decision
-    2026-08-18).
-    """
     rows = await assignment_queries.list_teachers_for_course(db, course_id)
     ordered = sorted(
         rows,
