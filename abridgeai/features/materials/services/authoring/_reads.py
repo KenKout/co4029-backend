@@ -316,7 +316,7 @@ async def link_existing_material(
     """
     from datetime import UTC, datetime  # noqa: PLC0415
 
-    material_type = payload.material_type or "other"
+    material_type = payload.material_type or "text"
 
     material = LearningMaterial(
         lesson_id=lesson_id,

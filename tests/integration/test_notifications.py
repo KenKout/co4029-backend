@@ -34,6 +34,7 @@ from abridgeai.features.notifications.models import (
 )
 from abridgeai.features.notifications.routers import learner_router
 from abridgeai.features.notifications.services import dispatch as dispatch_service
+from abridgeai.features.notifications.services import email as email_service
 from abridgeai.workers.arq_app import WorkerSettings
 
 
@@ -478,3 +479,160 @@ async def test_preference_toggle_endpoint(
         r["category"] == "lesson_unlock" and r["channel"] == "email" and r["enabled"] is False
         for r in rows
     )
+
+
+# ---------------------------------------------------------------------------
+# Email channel
+#
+# The transport is deliberately a stub (the requirements appendix defines
+# notifications as in-app only), but the delivery bookkeeping around it is
+# real and is what an admin reads off the row. These tests cover the
+# bookkeeping: which rows are eligible, what a delivery stamps, and what
+# happens when the same job runs twice.
+# ---------------------------------------------------------------------------
+
+
+async def _make_notification(
+    session: AsyncSession, user_id: UUID, *, delivery_status: str = "pending"
+) -> Notification:
+    row = Notification(
+        user_id=user_id,
+        category="course_announcement",
+        title="Email me",
+        body="Body",
+        delivery_status=delivery_status,
+    )
+    session.add(row)
+    await session.commit()
+    return row
+
+
+@pytest.mark.asyncio
+async def test_delivering_stamps_the_row_as_sent(
+    session_factory: async_sessionmaker[AsyncSession],
+    seeded_users: SeededUsers,
+    clean_notifications: None,
+) -> None:
+    """``delivery_status`` is the only record that the channel ran.
+
+    With the transport stubbed it is also the only thing an admin can look
+    at to tell whether an email would have gone out, so it has to be written
+    even though nothing is actually sent.
+    """
+    async with session_factory() as session:
+        notif = await _make_notification(session, seeded_users.student_id)
+
+    async with session_factory() as session:
+        assert await email_service.deliver_email_for_notification(
+            session, notification_id=notif.id
+        ) is True
+        await session.commit()
+
+    async with session_factory() as session:
+        row = await session.get(Notification, notif.id)
+    assert row is not None
+    assert row.delivery_status == "sent"
+    assert row.delivered_at is not None
+    assert row.delivered_at.tzinfo is not None
+
+
+@pytest.mark.asyncio
+async def test_the_caller_owns_the_commit(
+    session_factory: async_sessionmaker[AsyncSession],
+    seeded_users: SeededUsers,
+    clean_notifications: None,
+) -> None:
+    """The service flushes and stops there, as the feature's write discipline
+    requires. A commit inside would take the worker's whole transaction with
+    it, including anything the task had not finished.
+    """
+    async with session_factory() as session:
+        notif = await _make_notification(session, seeded_users.student_id)
+
+    async with session_factory() as session:
+        await email_service.deliver_email_for_notification(session, notification_id=notif.id)
+        await session.rollback()
+
+    async with session_factory() as session:
+        row = await session.get(Notification, notif.id)
+    assert row is not None
+    assert row.delivery_status == "pending", "the flush alone did not persist anything"
+
+
+@pytest.mark.asyncio
+async def test_a_missing_notification_declines_rather_than_raising(
+    session_factory: async_sessionmaker[AsyncSession],
+    clean_notifications: None,
+) -> None:
+    """A row can be dismissed and hard-deleted between enqueue and dequeue.
+
+    Raising would hand the job back to ARQ to retry against a row that is
+    never coming back, so the task would fail its way through every attempt.
+    """
+    async with session_factory() as session:
+        assert await email_service.deliver_email_for_notification(
+            session, notification_id=uuid.uuid4()
+        ) is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("terminal", ["sent", "cancelled", "failed"])
+async def test_a_terminal_row_is_not_delivered_again(
+    session_factory: async_sessionmaker[AsyncSession],
+    seeded_users: SeededUsers,
+    clean_notifications: None,
+    terminal: str,
+) -> None:
+    """ARQ retries, so the same job can arrive twice.
+
+    Re-delivering would mean a second email to the recipient and, for a
+    ``cancelled`` row, one that was explicitly called off. The guard is what
+    makes the task safe to retry.
+    """
+    async with session_factory() as session:
+        notif = await _make_notification(
+            session, seeded_users.student_id, delivery_status=terminal
+        )
+
+    async with session_factory() as session:
+        assert await email_service.deliver_email_for_notification(
+            session, notification_id=notif.id
+        ) is False
+        await session.commit()
+
+    async with session_factory() as session:
+        row = await session.get(Notification, notif.id)
+    assert row is not None
+    assert row.delivery_status == terminal, "the original outcome is left as it was"
+
+
+@pytest.mark.asyncio
+async def test_running_the_same_delivery_twice_stamps_it_once(
+    session_factory: async_sessionmaker[AsyncSession],
+    seeded_users: SeededUsers,
+    clean_notifications: None,
+) -> None:
+    """The end-to-end form of the guard above: the second run is a no-op and
+    leaves the first run's timestamp alone.
+    """
+    async with session_factory() as session:
+        notif = await _make_notification(session, seeded_users.student_id)
+
+    async with session_factory() as session:
+        await email_service.deliver_email_for_notification(session, notification_id=notif.id)
+        await session.commit()
+    async with session_factory() as session:
+        first = await session.get(Notification, notif.id)
+        assert first is not None
+        first_delivered_at = first.delivered_at
+
+    async with session_factory() as session:
+        assert await email_service.deliver_email_for_notification(
+            session, notification_id=notif.id
+        ) is False
+        await session.commit()
+
+    async with session_factory() as session:
+        second = await session.get(Notification, notif.id)
+    assert second is not None
+    assert second.delivered_at == first_delivered_at

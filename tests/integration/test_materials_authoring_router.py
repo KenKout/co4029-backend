@@ -777,6 +777,222 @@ async def test_orphan_cleanup_cron_skips_fresh_multiparts(
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Linking an already-uploaded object
+#
+# This endpoint is where the "pending forever" bug lived. It stamped every
+# new version `processing_status='pending'` but never created a
+# ProcessingJob or enqueued anything, so the material sat behind a spinner
+# with nothing scheduled that could ever move it, and no error anywhere.
+#
+# The fix splits on the teacher's AI toggle, and the two branches have to
+# stay honest about each other: "pending" is a promise that something is
+# coming, so it may only be written when a job really was queued.
+# ---------------------------------------------------------------------------
+
+
+async def _seed_storage_object(engine: AsyncEngine) -> uuid.UUID:
+    storage_id = uuid.uuid4()
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO storage_objects (id, bucket, object_key, mime_type) "
+                "VALUES (:id, :b, :key, 'application/pdf')"
+            ),
+            {"id": storage_id, "b": BUCKET, "key": f"link/{storage_id.hex}"},
+        )
+    return storage_id
+
+
+async def _read_version_of(engine: AsyncEngine, material_id: uuid.UUID) -> dict:
+    async with engine.connect() as conn:
+        row = (
+            await conn.execute(
+                text(
+                    "SELECT id, processing_status, is_current, version_no, uploaded_by "
+                    "FROM learning_material_versions WHERE material_id = :m"
+                ),
+                {"m": material_id},
+            )
+        ).mappings()
+        return dict(row.one())
+
+
+async def _count_jobs_for(engine: AsyncEngine, version_id: uuid.UUID) -> int:
+    async with engine.connect() as conn:
+        return (
+            await conn.execute(
+                text("SELECT count(*) FROM processing_jobs WHERE entity_id = :v"),
+                {"v": version_id},
+            )
+        ).scalar_one()
+
+
+async def test_linking_with_ai_enabled_queues_a_job_and_enqueues_it(
+    client: httpx.AsyncClient,
+    app: tuple[FastAPI, AsyncMock],
+    admin_bearer: str,
+    engine: AsyncEngine,
+    scenario: dict[str, uuid.UUID],
+) -> None:
+    """``pending`` is only written because a job is genuinely scheduled.
+
+    Both halves matter and neither implies the other: the row is what the
+    reaper later reconciles against, and the enqueue is what actually makes
+    a worker pick the document up.
+    """
+    _, arq_pool = app
+    storage_id = await _seed_storage_object(engine)
+
+    resp = await client.post(
+        f"/api/v1/teacher/lessons/{scenario['lesson_id']}/materials/link",
+        json={
+            "storage_object_id": str(storage_id),
+            "title": "Week 1 Slides",
+            "material_type": "pdf",
+            "ai_processing_enabled": True,
+        },
+        headers=_auth(admin_bearer),
+    )
+
+    assert resp.status_code == 201, resp.text
+    material_id = uuid.UUID(resp.json()["id"])
+
+    version = await _read_version_of(engine, material_id)
+    assert version["processing_status"] == "pending"
+    assert await _count_jobs_for(engine, version["id"]) == 1
+
+    enqueued = [
+        call for call in arq_pool.enqueue_job.await_args_list
+        if call.args and call.args[0] == "ingest_material_version_task"
+    ]
+    assert len(enqueued) == 1
+    assert enqueued[0].args[2] == version["id"], "the task is pointed at the new version"
+
+
+async def test_linking_with_ai_disabled_parks_the_version_terminally(
+    client: httpx.AsyncClient,
+    app: tuple[FastAPI, AsyncMock],
+    admin_bearer: str,
+    engine: AsyncEngine,
+    scenario: dict[str, uuid.UUID],
+) -> None:
+    """The teacher declined processing, so nothing is coming.
+
+    ``cancelled`` says that; ``pending`` would be the original bug -- a
+    spinner over work nobody scheduled. The distinction is the whole point
+    of the branch, and it is the state the AI Hub reads to offer "Enable
+    AI" later.
+    """
+    _, arq_pool = app
+    storage_id = await _seed_storage_object(engine)
+
+    resp = await client.post(
+        f"/api/v1/teacher/lessons/{scenario['lesson_id']}/materials/link",
+        json={
+            "storage_object_id": str(storage_id),
+            "title": "Reference Only",
+            "material_type": "pdf",
+            "ai_processing_enabled": False,
+        },
+        headers=_auth(admin_bearer),
+    )
+
+    assert resp.status_code == 201, resp.text
+    material_id = uuid.UUID(resp.json()["id"])
+
+    version = await _read_version_of(engine, material_id)
+    assert version["processing_status"] == "cancelled"
+    assert await _count_jobs_for(engine, version["id"]) == 0
+    assert not [
+        call for call in arq_pool.enqueue_job.await_args_list
+        if call.args and call.args[0] == "ingest_material_version_task"
+    ]
+
+
+async def test_ai_processing_is_off_unless_asked_for(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    engine: AsyncEngine,
+    scenario: dict[str, uuid.UUID],
+) -> None:
+    """Linking is also used for plain lesson resources that want no
+    pipeline at all, so the default must not spend an ingest on every
+    attachment."""
+    storage_id = await _seed_storage_object(engine)
+
+    resp = await client.post(
+        f"/api/v1/teacher/lessons/{scenario['lesson_id']}/materials/link",
+        json={"storage_object_id": str(storage_id), "title": "Handout"},
+        headers=_auth(admin_bearer),
+    )
+
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    assert body["ai_processing_enabled"] is False
+    assert body["visible_to_students"] is False, "hidden until the teacher publishes it"
+    assert body["material_type"] == "text", (
+        "the fallback has to be one of the nine values the CHECK constraint "
+        "allows, or omitting the field fails the flush instead of creating "
+        "the material"
+    )
+
+    version = await _read_version_of(engine, uuid.UUID(body["id"]))
+    assert version["processing_status"] == "cancelled"
+
+
+async def test_the_linked_version_is_current_and_attributed(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    engine: AsyncEngine,
+    seeded_users: SeededUsers,
+    scenario: dict[str, uuid.UUID],
+) -> None:
+    """The material points at the version and the version knows who
+    uploaded it -- the reaper reads that field to decide who to notify when
+    it gives up, and to attribute the recovered ingest's audit rows.
+    """
+    storage_id = await _seed_storage_object(engine)
+
+    resp = await client.post(
+        f"/api/v1/teacher/lessons/{scenario['lesson_id']}/materials/link",
+        json={
+            "storage_object_id": str(storage_id),
+            "title": "Attributed",
+            "ai_processing_enabled": True,
+        },
+        headers=_auth(admin_bearer),
+    )
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+
+    version = await _read_version_of(engine, uuid.UUID(body["id"]))
+    assert version["version_no"] == 1
+    assert version["is_current"] is True
+    assert version["uploaded_by"] == seeded_users.admin_id
+    assert body["latest_version"] is not None
+    assert body["version_count"] == 1
+
+
+async def test_a_student_cannot_link_a_material(
+    client: httpx.AsyncClient,
+    student_bearer: str,
+    engine: AsyncEngine,
+    scenario: dict[str, uuid.UUID],
+) -> None:
+    """The endpoint writes to the course's curriculum, so it sits behind
+    the same lesson-scoped perimeter as the rest of the router."""
+    storage_id = await _seed_storage_object(engine)
+
+    resp = await client.post(
+        f"/api/v1/teacher/lessons/{scenario['lesson_id']}/materials/link",
+        json={"storage_object_id": str(storage_id), "title": "Nope"},
+        headers=_auth(student_bearer),
+    )
+
+    assert resp.status_code == 403
+
+
 def test_no_bare_get_current_user_on_authoring_endpoints() -> None:
     src = (
         Path(__file__).resolve().parent.parent.parent
