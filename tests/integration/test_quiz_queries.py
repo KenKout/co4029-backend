@@ -639,14 +639,57 @@ async def test_options_are_grouped_under_their_own_question(
             )
 
 
-async def test_a_quiz_with_no_approved_questions_returns_nothing(
+async def test_a_quiz_whose_questions_are_all_unapproved_serves_nothing(
+    engine: AsyncEngine,
     session_factory: async_sessionmaker[AsyncSession],
     fixture_data: dict,
 ) -> None:
-    """The empty case short-circuits before the options query runs."""
+    """The empty case short-circuits before the options query runs.
+
+    It is a real state, not a defensive one: a freshly generated quiz holds
+    nothing but pending drafts until a teacher signs one off, and until then
+    it must serve nothing at all rather than its drafts.
+    """
+    quiz = fixture_data["quiz_draft"]
+    pending = uuid.uuid4()
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text(
+                    "INSERT INTO quiz_questions "
+                    "(id, quiz_id, position, question_type, prompt_text, review_status) "
+                    "VALUES (:p, :q, 1, 'multiple_choice', 'Awaiting review?', 'pending')"
+                ),
+                {"p": pending, "q": quiz},
+            )
+
+        async with session_factory() as session:
+            rows = await list_quiz_questions_with_options(session, quiz)
+        assert rows == []
+    finally:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("DELETE FROM quiz_questions WHERE id = :p"), {"p": pending}
+            )
+
+
+async def test_an_approved_question_with_no_options_is_still_served(
+    session_factory: async_sessionmaker[AsyncSession],
+    fixture_data: dict,
+) -> None:
+    """Options are joined in a second query, so a question with none must
+    still come back -- paired with an empty list.
+
+    Open-response types carry no option rows at all, so dropping the
+    unmatched ones would silently remove every short-answer question from
+    the quiz a student is served.
+    """
     async with session_factory() as session:
         rows = await list_quiz_questions_with_options(session, fixture_data["quiz_module_b"])
-    assert rows == []
+
+    assert [(question.id, options) for question, options in rows] == [
+        (fixture_data["q_dup_b"], [])
+    ]
 
 
 async def test_a_quiz_resolves_by_its_slug(
