@@ -282,10 +282,18 @@ async def test_patch_status_published_applies_the_same_gate(
     assert await _status(engine, seed["course_id"]) == "draft"
 
 
-async def test_patch_status_published_succeeds_once_a_unit_exists(
+async def test_patch_status_published_applies_every_gate_the_route_does(
     session_factory, seed, engine
 ) -> None:
+    """PATCH no longer re-implements the transition; it delegates to it.
+
+    So a unit alone is necessary but not sufficient any more: the outcome
+    gate applies through this door exactly as it does through
+    ``POST /publish``. Before the delegation, PATCH checked the unit gate
+    and nothing else, and this test passed with no outcomes at all.
+    """
     await _add_published_lesson(engine, seed)
+    await _add_outcome(engine, seed)
     async with session_factory() as db:
         course = await authoring_service.update_course(
             db,

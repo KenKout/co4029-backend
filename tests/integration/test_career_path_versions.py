@@ -170,6 +170,52 @@ async def _seed_published_path(
     return path_id, version_id
 
 
+async def _drop_seeded_path(engine: AsyncEngine, path_id: uuid.UUID) -> None:
+    """Remove a path and the course chain seeded with it, children first.
+
+    Self-contained rather than pattern-matching on the ``ver-%`` slug the
+    other teardowns use, so it cannot reach into a sibling test's rows.
+
+    The ordering matters: a surviving ``career_course_items`` row references
+    a course, and the neighbouring teardowns delete ``ver-%`` courses
+    wholesale — so leaving one behind fails THEIR cleanup with a foreign-key
+    violation and poisons the rest of the session.
+    """
+    async with engine.begin() as conn:
+        course_ids = list(
+            (
+                await conn.execute(
+                    text(
+                        "SELECT DISTINCT course_id FROM career_course_items "
+                        "WHERE version_id IN (SELECT id FROM career_path_versions "
+                        "WHERE career_path_id = :pid)"
+                    ),
+                    {"pid": path_id},
+                )
+            ).scalars()
+        )
+        for stmt in (
+            "DELETE FROM career_course_items WHERE version_id IN "
+            "(SELECT id FROM career_path_versions WHERE career_path_id = :pid)",
+            "DELETE FROM career_path_stages WHERE version_id IN "
+            "(SELECT id FROM career_path_versions WHERE career_path_id = :pid)",
+            "DELETE FROM career_path_versions WHERE career_path_id = :pid",
+            "DELETE FROM career_paths WHERE id = :pid",
+        ):
+            await conn.execute(text(stmt), {"pid": path_id})
+        if not course_ids:
+            return
+        for stmt in (
+            "DELETE FROM module_items WHERE module_id IN "
+            "(SELECT id FROM modules WHERE course_id = ANY(:cids))",
+            "DELETE FROM lessons WHERE module_id IN "
+            "(SELECT id FROM modules WHERE course_id = ANY(:cids))",
+            "DELETE FROM modules WHERE course_id = ANY(:cids)",
+            "DELETE FROM courses WHERE id = ANY(:cids)",
+        ):
+            await conn.execute(text(stmt), {"cids": course_ids})
+
+
 async def test_both_resolvers_agree_on_which_version_is_current(
     engine: AsyncEngine,
     session_factory: async_sessionmaker,
@@ -186,28 +232,31 @@ async def test_both_resolvers_agree_on_which_version_is_current(
     """
     path_id, v1 = await _seed_published_path(engine, seeded_users)
     v2 = uuid.uuid4()
-    async with engine.begin() as conn:
-        await conn.execute(
-            text(
-                "INSERT INTO career_path_versions "
-                "(id, career_path_id, version_no, status, published_at) "
-                "VALUES (:id, :pid, 2, 'published', NOW())"
-            ),
-            {"id": v2, "pid": path_id},
-        )
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text(
+                    "INSERT INTO career_path_versions "
+                    "(id, career_path_id, version_no, status, published_at) "
+                    "VALUES (:id, :pid, 2, 'published', NOW())"
+                ),
+                {"id": v2, "pid": path_id},
+            )
 
-    async with session_factory() as db:
-        single = await authoring_queries.get_published_version(db, path_id)
-        batch = await authoring_queries.list_published_versions(
-            db,
-            organization_id=seeded_users.organization_id,
-            career_path_ids=[path_id],
-        )
+        async with session_factory() as db:
+            single = await authoring_queries.get_published_version(db, path_id)
+            batch = await authoring_queries.list_published_versions(
+                db,
+                organization_id=seeded_users.organization_id,
+                career_path_ids=[path_id],
+            )
 
-    assert single is not None
-    assert single.id == v2, "the single-path resolver must pick the latest published"
-    assert [row["version_id"] for row in batch] == [v2]
-    assert single.id != v1, "v1 is still published, but it is not current"
+        assert single is not None
+        assert single.id == v2, "the single-path resolver must pick the latest published"
+        assert [row["version_id"] for row in batch] == [v2]
+        assert single.id != v1, "v1 is still published, but it is not current"
+    finally:
+        await _drop_seeded_path(engine, path_id)
 
 
 async def test_batch_resolver_omits_a_path_with_no_published_version(
@@ -237,13 +286,16 @@ async def test_batch_resolver_omits_a_path_with_no_published_version(
             {"pid": draft_only},
         )
 
-    async with session_factory() as db:
-        rows = await authoring_queries.list_published_versions(
-            db,
-            organization_id=seeded_users.organization_id,
-            career_path_ids=[draft_only],
-        )
-    assert rows == []
+    try:
+        async with session_factory() as db:
+            rows = await authoring_queries.list_published_versions(
+                db,
+                organization_id=seeded_users.organization_id,
+                career_path_ids=[draft_only],
+            )
+        assert rows == []
+    finally:
+        await _drop_seeded_path(engine, draft_only)
 
 
 async def test_fork_clones_stages_and_items(

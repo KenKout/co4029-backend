@@ -198,6 +198,7 @@ async def list_course_path_exposure(
             (ranked.c.version_id.is_not(None)).label("is_current_published"),
             active_pins.label("active_enrollments"),
         )
+        .select_from(CareerPathCourse)
         .join(CareerPathVersion, CareerPathVersion.id == CareerPathCourse.version_id)
         .join(CareerPath, CareerPath.id == CareerPathVersion.career_path_id)
         .outerjoin(

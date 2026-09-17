@@ -280,6 +280,13 @@ async def builder(engine: AsyncEngine) -> AsyncIterator[_Builder]:
     yield b
     async with engine.begin() as conn:
         await conn.execute(text("DELETE FROM lesson_progress WHERE user_id=:s"), {"s": b.student})
+        await conn.execute(
+            text(
+                "DELETE FROM quiz_attempt_answers WHERE attempt_id IN "
+                "(SELECT id FROM quiz_attempts WHERE student_id=:s)"
+            ),
+            {"s": b.student},
+        )
         await conn.execute(text("DELETE FROM quiz_attempts WHERE student_id=:s"), {"s": b.student})
         await conn.execute(text("DELETE FROM quiz_grades WHERE student_id=:s"), {"s": b.student})
         await conn.execute(
@@ -300,6 +307,13 @@ async def builder(engine: AsyncEngine) -> AsyncIterator[_Builder]:
                 {"c": cid},
             )
             await conn.execute(text("DELETE FROM interview_configs WHERE course_id=:c"), {"c": cid})
+            await conn.execute(
+                text(
+                    "DELETE FROM quiz_questions WHERE quiz_id IN "
+                    "(SELECT id FROM quizzes WHERE course_id=:c)"
+                ),
+                {"c": cid},
+            )
             await conn.execute(text("DELETE FROM quizzes WHERE course_id=:c"), {"c": cid})
             await conn.execute(
                 text(

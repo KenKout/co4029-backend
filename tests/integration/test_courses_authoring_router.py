@@ -708,6 +708,13 @@ async def _publish_ready(engine: AsyncEngine, course_id: object) -> None:
             ),
             {"owner": owner_id, "org": org_id, "cid": course_id},
         )
+        # A unit is only reachable when its CONTAINER is on the curriculum
+        # screen too. The scenario fixture seeds DRAFT modules, so publishing
+        # the lesson alone leaves nothing a student could ever open.
+        await conn.execute(
+            text("UPDATE modules SET status = 'published' WHERE course_id = :cid"),
+            {"cid": course_id},
+        )
         await conn.execute(
             text(
                 "UPDATE lessons SET status = 'published' WHERE id = ("
@@ -761,6 +768,13 @@ async def _gradeable_only(engine: AsyncEngine, course_id: object) -> None:
     teacher. A course in this state must be refused by BOTH publish doors.
     """
     async with engine.begin() as conn:
+        # A unit is only reachable when its CONTAINER is on the curriculum
+        # screen too. The scenario fixture seeds DRAFT modules, so publishing
+        # the lesson alone leaves nothing a student could ever open.
+        await conn.execute(
+            text("UPDATE modules SET status = 'published' WHERE course_id = :cid"),
+            {"cid": course_id},
+        )
         await conn.execute(
             text(
                 "UPDATE lessons SET status = 'published' WHERE id = ("
@@ -965,9 +979,10 @@ async def test_patch_archive_honours_the_career_path_guard(
         )
         await conn.execute(
             text(
-                "INSERT INTO career_course_items (id, version_id, stage_id, course_id, "
-                "position, is_required) "
-                "VALUES (gen_random_uuid(), :vid, :sid, :cid, 1, true)"
+                # PK is (version_id, course_id); the table has no id column.
+                "INSERT INTO career_course_items "
+                "(version_id, stage_id, course_id, position, is_required) "
+                "VALUES (:vid, :sid, :cid, 1, true)"
             ),
             {"vid": version_id, "sid": stage_id, "cid": course_id},
         )
