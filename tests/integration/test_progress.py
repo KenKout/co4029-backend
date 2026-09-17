@@ -336,6 +336,58 @@ async def test_engagement_to_progress(
 
 
 @pytest.mark.asyncio
+async def test_partial_engagement_does_not_auto_complete(
+    client: httpx.AsyncClient,
+    scenario: dict[str, uuid.UUID],
+    student_bearer: str,
+) -> None:
+    for _ in range(4):
+        response = await client.post(
+            "/api/v1/me/progress/material-engagement",
+            json=_engagement_payload(scenario["version_id"], seconds=240),
+            headers=_auth(student_bearer),
+        )
+        assert response.status_code == 201, response.text
+
+    progress = await client.get(
+        f"/api/v1/me/progress/lessons/{scenario['lesson_id']}",
+        headers=_auth(student_bearer),
+    )
+    assert progress.status_code == 200, progress.text
+    body = progress.json()
+    assert body["status"] == "in_progress", body
+    assert float(body["completion_percent"]) == 80.0, body
+
+
+@pytest.mark.asyncio
+async def test_engagement_beyond_the_estimate_is_clamped_to_full(
+    client: httpx.AsyncClient,
+    scenario: dict[str, uuid.UUID],
+    student_bearer: str,
+) -> None:
+    """Overshooting must read 100%, not 125%.
+
+    The threshold is now the estimate itself, so the clamp is what stops a
+    student who lingered from seeing a progress bar past full.
+    """
+    for _ in range(6):  # 24 minutes of a 20-minute lesson
+        response = await client.post(
+            "/api/v1/me/progress/material-engagement",
+            json=_engagement_payload(scenario["version_id"], seconds=240),
+            headers=_auth(student_bearer),
+        )
+        assert response.status_code == 201, response.text
+
+    progress = await client.get(
+        f"/api/v1/me/progress/lessons/{scenario['lesson_id']}",
+        headers=_auth(student_bearer),
+    )
+    body = progress.json()
+    assert body["status"] == "completed", body
+    assert float(body["completion_percent"]) == 100.0, body
+
+
+@pytest.mark.asyncio
 async def test_cross_user_progress_blocked(
     client: httpx.AsyncClient,
     scenario: dict[str, uuid.UUID],
@@ -494,7 +546,7 @@ async def test_uncomplete_flips_back_even_when_engagement_would_auto_complete(
     student_bearer: str,
 ) -> None:
     """Regression: uncomplete used to recompute from engagement, and the
-    auto-complete threshold (≥80%) re-asserted ``completed`` — a student who
+    auto-complete threshold re-asserted ``completed`` — a student who
     had watched enough could never un-tick the lesson (the button sent the
     request, the server silently kept ``completed``, UI showed no change).
     The manual toggle must win: status goes back to ``in_progress``."""

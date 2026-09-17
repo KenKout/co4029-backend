@@ -27,7 +27,7 @@ if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
 
-_AUTO_COMPLETION_THRESHOLD = Decimal("80")
+_AUTO_COMPLETION_THRESHOLD = Decimal("100")
 _DEFAULT_ESTIMATED_SECONDS = 600
 
 logger = get_logger(__name__)
