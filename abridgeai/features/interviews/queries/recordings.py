@@ -352,7 +352,7 @@ async def get_storage_object_details(
         await db.execute(
             text(
                 "SELECT bucket, object_key, mime_type, size_bytes, original_filename "
-                "FROM storage_objects WHERE id = :id"
+                "FROM storage_objects WHERE id = :id AND deleted_at IS NULL"
             ),
             {"id": str(storage_object_id)},
         )
@@ -368,9 +368,16 @@ async def upsert_storage_object(
     mime_type: str,
     size_bytes: int,
 ) -> UUID:
+    # Tombstones are excluded so a key whose object was soft-deleted can be
+    # re-uploaded as a fresh row (the partial unique index on
+    # ``(bucket, object_key) WHERE deleted_at IS NULL`` permits exactly that);
+    # matching a tombstone here would revive a dead object's id.
     existing = (
         await db.execute(
-            text("SELECT id FROM storage_objects WHERE bucket = :b AND object_key = :k"),
+            text(
+                "SELECT id FROM storage_objects "
+                "WHERE bucket = :b AND object_key = :k AND deleted_at IS NULL"
+            ),
             {"b": bucket, "k": object_key},
         )
     ).first()

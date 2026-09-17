@@ -49,12 +49,19 @@ _GRANDFATHERED: dict[str, int] = {
     # These columns have exactly one legal home — the tables this file owns —
     # so they cannot be split into a sibling module; the ratchet tracks the
     # columns + their contract comments.
-    "models.py": 951,
-    # Repinned 2026-09-10 (757 -> 870): the integrity ingest endpoint grew into
-    # the server-side scoring + one-shot warning contract. Splitting the route
-    # would scatter one transactional flow across files; the growth is the
-    # scoring loop and its evidence row.
-    "routers/learner_sessions.py": 870,
+    # Repinned 2026-09-17 (951 -> 1051) for the consented-audio-recording
+    # feature (migration 0123/0124): the InterviewRecording table + the
+    # recording-consent columns on InterviewSession. A schema column has
+    # exactly one legal home — the tables this file owns — so they cannot be
+    # split into a sibling module; the ratchet tracks the columns + table, not
+    # relaxed logic. Orchestration lives in NEW files (services/recording.py,
+    # queries/recordings.py, services/_recording_egress.py).
+    "models.py": 1051,
+    # Repinned 2026-09-17 (870 -> 946): the consented-audio-recording feature
+    # added the POST /recording-consent endpoint plus recording bookkeeping in
+    # the realtime-token flow — one transactional learner path, same precedent
+    # as the 2026-09-10 integrity pin above.
+    "routers/learner_sessions.py": 946,
     # Repinned 2026-09-05 (877 -> 890) for the evaluation-claim columns
     # (migration 0107). A schema column has exactly one legal home, so a table
     # this file already owns cannot be split out to stay under the old pin; the

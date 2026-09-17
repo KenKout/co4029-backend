@@ -71,9 +71,20 @@ def test_taking_payload_cannot_serialize_outcome_or_bank_metadata() -> None:
     )
     # outcome_count is a SAFE count-only signal (how many criteria this
     # interview assesses) — it carries no outcome text / weight / threshold, so
-    # it's an allowed field. The contract still forbids the raw bank/outcomes.
-    assert set(payload) == {"config", "first_question", "outcome_count"}
+    # it's an allowed field. recording_consent_required / _policy_version are
+    # the learner-facing consent disclosure (bd6e50e): a feature flag plus a
+    # policy-version string — no bank/outcome/provider data. The contract still
+    # forbids the raw bank/outcomes.
+    assert set(payload) == {
+        "config",
+        "first_question",
+        "outcome_count",
+        "recording_consent_required",
+        "recording_policy_version",
+    }
     assert isinstance(payload["outcome_count"], int)
+    assert isinstance(payload["recording_consent_required"], bool)
+    assert payload["recording_policy_version"] is None
     assert "questions" not in payload
     assert "outcomes" not in payload
     assert not (_HIDDEN_FIELDS & set(payload["config"]))

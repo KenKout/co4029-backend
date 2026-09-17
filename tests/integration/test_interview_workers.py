@@ -28,6 +28,7 @@ from abridgeai.features.interviews.workers import (
     EVALUATION_MAX_TRIES,
     JOBS,
     evaluate_interview_session_task,
+    reconcile_interview_recordings_task,
     reconcile_turn_analysis_task,
     run_interview_generation_task,
 )
@@ -55,11 +56,12 @@ class _FakeSessionmaker:
 
 
 def test_jobs_export() -> None:
-    # Was 4 before commit 4a3fffd removed the practice-mode job alongside the
-    # 0072 feature drop; 3 tasks remain (generation, evaluation, turn-reconcile).
-    assert len(JOBS) == 3
+    # 4 tasks: generation, evaluation, turn-reconcile, and (since bd6e50e)
+    # the consented-audio-recording reconcile sweep.
+    assert len(JOBS) == 4
     assert reconcile_turn_analysis_task in JOBS
     assert run_interview_generation_task in JOBS
+    assert reconcile_interview_recordings_task in JOBS
     evaluation_job = next(job for job in JOBS if getattr(job, "coroutine", None))
     assert evaluation_job.coroutine is evaluate_interview_session_task
     assert evaluation_job.max_tries == EVALUATION_MAX_TRIES

@@ -1906,7 +1906,12 @@ async def test_teacher_course_and_student_session_list_endpoints(
             headers=_auth(admin_bearer),
         )
         assert course_resp.status_code == 200, course_resp.text
-        course_rows = course_resp.json()
+        # Paginated since 2ab4637: the course-wide endpoint returns a
+        # CursorPage ({items, next_cursor}); the per-student endpoint below
+        # still returns a plain list.
+        page = course_resp.json()
+        course_rows = page["items"]
+        assert page["next_cursor"] is None
         assert len(course_rows) == 1
         row = course_rows[0]
         assert row["session_id"] == session_id

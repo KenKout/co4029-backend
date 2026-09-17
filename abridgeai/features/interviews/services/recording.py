@@ -31,7 +31,6 @@ from __future__ import annotations
 import logging
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from urllib.parse import urlsplit
 from uuid import UUID
 
 from livekit import api as lk_api
@@ -43,6 +42,14 @@ from abridgeai.core.db import AsyncSession  # type: ignore[attr-defined]
 from abridgeai.features.interviews.models import InterviewSession
 from abridgeai.features.interviews.queries import recordings as recordings_queries
 from abridgeai.features.interviews.queries import sessions as sessions_queries
+from abridgeai.features.interviews.services._recording_egress import (
+    RecordingUnavailableError,
+    _fetch_egress_info,
+    _normalize_reported_key,
+    _start_audio_egress,
+    _stop_egress_quietly,
+    recording_bucket,
+)
 from abridgeai.infrastructure import s3
 
 logger = logging.getLogger(__name__)
@@ -63,8 +70,6 @@ _EXTENSION_BY_FORMAT = {"mp3": "mp3", "ogg": "ogg"}
 _MIN_AUDIO_BYTES = 1024
 
 
-class RecordingUnavailableError(Exception):
-    """Raised (internally) when recording cannot start — never escapes the module."""
 
 
 def build_destination_file(
@@ -86,9 +91,6 @@ def build_destination_file(
     return f"{prefix}/{session_id}/{recording_id}/audio.{ext}"
 
 
-def recording_bucket(settings: Settings) -> str:
-    """Bucket recordings land in — the same S3/Garage bucket, recording prefix."""
-    return settings.s3_bucket_name
 
 
 async def persist_recording_consent(
@@ -544,127 +546,6 @@ async def get_playback_url(
         "mime_type": recording.mime_type,
         "recorded_at": recording.completed_at or recording.created_at,
     }
-
-
-# ── Provider internals ────────────────────────────────────────────────────────
-
-
-async def _start_audio_egress(*, room_name: str, destination: str, settings: Settings) -> str:
-    """Start a room-composite AUDIO-ONLY Egress to the private prefix.
-
-    Raises on any provider error; the caller owns the failure semantics.
-    """
-    if not (settings.livekit_ws_url and settings.livekit_api_key and settings.livekit_api_secret):
-        raise RecordingUnavailableError("LiveKit credentials are not configured")
-    bucket = recording_bucket(settings)
-    lkapi = lk_api.LiveKitAPI(
-        url=settings.livekit_ws_url,
-        api_key=settings.livekit_api_key.get_secret_value(),
-        api_secret=settings.livekit_api_secret.get_secret_value(),
-    )
-    try:
-        request = lk_api.RoomCompositeEgressRequest(
-            room_name=room_name,
-            audio_only=True,
-            file_outputs=[
-                lk_api.EncodedFileOutput(
-                    filepath=destination,
-                    file_type=lk_api.EncodedFileType.MP3
-                    if settings.interview_recording_format == "mp3"
-                    else lk_api.EncodedFileType.OGG,
-                    s3=lk_api.S3Upload(
-                        bucket=bucket,
-                        region=settings.aws_region,
-                        endpoint=settings.aws_endpoint_url,
-                        access_key=settings.aws_access_key_id.get_secret_value()
-                        if settings.aws_access_key_id
-                        else "",
-                        secret=settings.aws_secret_access_key.get_secret_value()
-                        if settings.aws_secret_access_key
-                        else "",
-                        force_path_style=bool(settings.aws_endpoint_url),
-                    ),
-                )
-            ],
-        )
-        info = await lkapi.egress.start_room_composite_egress(request)
-    finally:
-        await lkapi.aclose()
-    egress_id = info.egress_id
-    if not egress_id:
-        raise RecordingUnavailableError("LiveKit returned no egress id")
-    return egress_id
-
-
-async def _stop_egress_quietly(egress_id: str, settings: Settings) -> bool:
-    """Stop an Egress job; return False so reconciliation can retry failures."""
-    if not (
-        settings.livekit_ws_url
-        and settings.livekit_api_key
-        and settings.livekit_api_secret
-    ):
-        return False
-    lkapi = lk_api.LiveKitAPI(
-        url=settings.livekit_ws_url,
-        api_key=settings.livekit_api_key.get_secret_value(),
-        api_secret=settings.livekit_api_secret.get_secret_value(),
-    )
-    try:
-        await lkapi.egress.stop_egress(lk_api.StopEgressRequest(egress_id=egress_id))
-    except Exception:  # noqa: BLE001 -- reconciliation retries the stop
-        logger.info("interview.recording.stop_egress_deferred", extra={"egress_id": egress_id})
-        return False
-    finally:
-        await lkapi.aclose()
-    return True
-
-
-async def _fetch_egress_info(
-    egress_id: str, settings: Settings
-) -> tuple[bool, EgressInfo | None]:
-    """Return ``(provider_reachable, egress_info_or_none)``."""
-    if not (
-        settings.livekit_ws_url
-        and settings.livekit_api_key
-        and settings.livekit_api_secret
-    ):
-        return False, None
-    lkapi = lk_api.LiveKitAPI(
-        url=settings.livekit_ws_url,
-        api_key=settings.livekit_api_key.get_secret_value(),
-        api_secret=settings.livekit_api_secret.get_secret_value(),
-    )
-    try:
-        response = await lkapi.egress.list_egress(
-            lk_api.ListEgressRequest(egress_id=egress_id)
-        )
-    except Exception:  # noqa: BLE001 -- provider down: unknown, not dead
-        return False, None
-    finally:
-        await lkapi.aclose()
-    for item in response.items:
-        if item.egress_id == egress_id:
-            return True, item
-    return True, None
-
-
-def _normalize_reported_key(reported_location: str, *, expected_bucket: str) -> str:
-    """Convert LiveKit's filename/location into an S3 key and reject foreign URI hosts.
-
-    LiveKit versions have returned either a bare key or ``s3://bucket/key``
-    for file output metadata. The exact bucket is checked before the key is
-    used with ``head_object``; callers then enforce the session-specific prefix.
-    """
-    value = reported_location.strip()
-    if value.startswith("s3://"):
-        parsed = urlsplit(value)
-        if parsed.netloc != expected_bucket:
-            return ""
-        return parsed.path.lstrip("/")
-    bucket_prefix = expected_bucket.strip("/") + "/"
-    if value.startswith(bucket_prefix):
-        return value[len(bucket_prefix) :]
-    return value.lstrip("/")
 
 
 async def _attach_completed_output(db: AsyncSession, *, egress_id: str, info: EgressInfo) -> bool:
