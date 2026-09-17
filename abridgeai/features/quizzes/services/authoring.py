@@ -52,6 +52,10 @@ from abridgeai.features.quizzes.services.generation_runs import (  # noqa: F401
     regenerate_question,
     start_generation_run,
 )
+from abridgeai.features.quizzes.services.integrity import (
+    DEFAULT_INTEGRITY_RESPONSE_POLICY,
+    INTEGRITY_RESPONSE_POLICIES,
+)
 from abridgeai.features.quizzes.services.publish_gate import (
     QuizPublishValidationError,
     assert_all_questions_approved,
@@ -104,6 +108,19 @@ _INTEGRITY_PATCH_BOUNDS: dict[str, tuple[int, int]] = {
 }
 
 
+def _validated_response_policy(value: object) -> object:
+    """One of the two integrity response policies, or a named error.
+
+    Checked here rather than left to the database CHECK so a bad value reads
+    as "that is not a policy" at the API boundary, instead of surfacing as an
+    opaque integrity error after the rest of the patch has already applied.
+    """
+    if value not in INTEGRITY_RESPONSE_POLICIES:
+        allowed = ", ".join(INTEGRITY_RESPONSE_POLICIES)
+        raise AppError(f"integrity_response_policy must be one of: {allowed}")
+    return value
+
+
 def _coerce_patch_value(key: str, value: object) -> object:
     """Coerce known datetime-typed PATCH keys from ISO strings to datetime.
 
@@ -128,6 +145,8 @@ def _coerce_patch_value(key: str, value: object) -> object:
     # 1..20). Range-check here so a bad value is a 400 naming the field rather
     # than a 500 from the constraint, and so one stray knob cannot fail the
     # whole settings save opaquely.
+    if key == "integrity_response_policy":
+        return _validated_response_policy(value)
     if key in _INTEGRITY_PATCH_BOUNDS:
         low, high = _INTEGRITY_PATCH_BOUNDS[key]
         try:
@@ -492,6 +511,9 @@ async def create_quiz(
         shuffle_options=data.get("shuffle_options", False),
         show_hints=data.get("show_hints", True),
         require_camera=data.get("require_camera", False),
+        integrity_response_policy=data.get(
+            "integrity_response_policy", DEFAULT_INTEGRITY_RESPONSE_POLICY
+        ),
         initial_ef=data.get("initial_ef"),
         min_ef_for_unlock=data.get("min_ef_for_unlock"),
         coverage_threshold=data.get("coverage_threshold"),

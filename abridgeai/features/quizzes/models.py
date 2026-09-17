@@ -137,6 +137,10 @@ class Quiz(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftDeleteMixin,
             "grading_method IN ('highest', 'average', 'first', 'last')",
             name="ck_quizzes_grading_method",
         ),
+        CheckConstraint(
+            "integrity_response_policy IN ('continue_and_log', 'warn_and_continue')",
+            name="ck_quizzes_integrity_response_policy",
+        ),
     )
 
     course_id: Mapped[uuid.UUID] = mapped_column(
@@ -234,6 +238,9 @@ class Quiz(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftDeleteMixin,
     # Weighted score at which the attempt is flagged for the teacher.
     integrity_score_threshold: Mapped[int] = mapped_column(
         Integer, nullable=False, server_default=text("3")
+    )
+    integrity_response_policy: Mapped[str] = mapped_column(
+        String(32), nullable=False, server_default=text("'warn_and_continue'")
     )
     questions: Mapped[list[QuizQuestion]] = relationship(
         back_populates="quiz",

@@ -490,6 +490,7 @@ async def record_quiz_integrity_events(
     from abridgeai.features.quizzes.models import Quiz, QuizAttempt  # noqa: PLC0415
     from abridgeai.features.quizzes.services.integrity import (  # noqa: PLC0415
         integrity_policy_snapshot_from_quiz,
+        warns_the_learner,
     )
 
     attempt = await db.get(QuizAttempt, attempt_id)
@@ -554,11 +555,9 @@ async def record_quiz_integrity_events(
 
     warning_issued = False
     if not warned_already:
-        warning_issued = warn_once_and_score(score_after, threshold).reaches_threshold
-        if warning_issued:
-            # Server-generated evidence row. A client may post `warning_issued`
-            # itself, but that copy never scores and never sets the flag, so
-            # this row is the only authoritative one on the timeline.
+        crossed = warn_once_and_score(score_after, threshold).reaches_threshold
+        warning_issued = crossed and warns_the_learner(policy)
+        if crossed:
             db.add(
                 AssessmentIntegrityEvent(
                     assessment_kind="quiz",

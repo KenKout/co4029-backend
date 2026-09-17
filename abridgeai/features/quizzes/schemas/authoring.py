@@ -57,6 +57,8 @@ from abridgeai.features.quizzes.schemas.public import (
     QuizQuestionPublic,
 )
 
+IntegrityResponsePolicyLiteral = Literal["continue_and_log", "warn_and_continue"]
+
 
 class QuizQuestionOptionAuthoring(QuizQuestionOptionPublic):
     """Authoring projection of one ``QuizQuestionOption`` row.
@@ -135,17 +137,12 @@ class QuizAuthoring(QuizPublic):
     status: Literal["draft", "published", "archived"]  # type: ignore[assignment]
     course_id: UUID
     module_id: UUID
-    # Proctoring sensitivity (migration 0115). Authoring-only: the student's
-    # public projection must not carry the weights, or a take could tell the
-    # learner exactly how many tab switches it can afford.
     integrity_weight_tab_switch: int = 3
     integrity_weight_focus_lost: int = 1
     integrity_weight_fullscreen_exit: int = 2
     integrity_score_threshold: int = 3
     require_camera: bool = False
-    # Moodle-style headline-score policy (migration 0033). Patchable via
-    # PATCH /teacher/quizzes/{id}; surfaced so the Settings tab can edit it
-    # and the results dashboard can label the headline column.
+    integrity_response_policy: IntegrityResponsePolicyLiteral = "warn_and_continue"
     grading_method: Literal["highest", "average", "first", "last"] = "highest"
     shuffle_questions: bool = False
     shuffle_options: bool = False

@@ -25,7 +25,24 @@ _DEFAULTS = {
     "focus_lost": 1,
     "fullscreen_exit": 2,
     "score_threshold": 3,
+    "response_policy": "warn_and_continue",
 }
+
+INTEGRITY_RESPONSE_POLICIES: tuple[str, ...] = ("continue_and_log", "warn_and_continue")
+DEFAULT_INTEGRITY_RESPONSE_POLICY = "warn_and_continue"
+
+
+def warns_the_learner(policy: dict[str, Any] | None) -> bool:
+    """Does this frozen policy disclose a threshold crossing to the learner?
+
+    A snapshot written before the column existed has no ``response_policy``
+    key; those attempts ran under the hardcoded warn and must keep being
+    judged that way, so the default is to warn. Only an explicit
+    ``continue_and_log`` silences the learner-facing message — the score, the
+    event row and the teacher-facing flag are unaffected either way.
+    """
+    chosen = str((policy or {}).get("response_policy") or DEFAULT_INTEGRITY_RESPONSE_POLICY)
+    return chosen != "continue_and_log"
 
 
 def integrity_policy_snapshot_from_quiz(quiz: Any) -> dict[str, Any]:  # noqa: ANN401 -- ORM row
@@ -59,7 +76,16 @@ def integrity_policy_snapshot_from_quiz(quiz: Any) -> dict[str, Any]:  # noqa: A
             or _DEFAULTS["score_threshold"]
         ),
         "require_camera": bool(getattr(quiz, "require_camera", False)),
+        "response_policy": str(
+            getattr(quiz, "integrity_response_policy", _DEFAULTS["response_policy"])
+            or _DEFAULTS["response_policy"]
+        ),
     }
 
 
-__all__ = ["integrity_policy_snapshot_from_quiz"]
+__all__ = [
+    "DEFAULT_INTEGRITY_RESPONSE_POLICY",
+    "INTEGRITY_RESPONSE_POLICIES",
+    "integrity_policy_snapshot_from_quiz",
+    "warns_the_learner",
+]
