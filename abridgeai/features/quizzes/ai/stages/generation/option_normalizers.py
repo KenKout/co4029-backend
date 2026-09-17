@@ -31,6 +31,9 @@ def normalize_options(
     return []
 
 
+_MAX_BANK_ENTRIES = 99
+
+
 def coerce_fill_blank_answer(raw: Any) -> list[str]:  # noqa: ANN401 -- raw LLM JSON
     """Return a list of blank strings, accepting list / semicolon /
     comma-separated string."""
@@ -95,7 +98,14 @@ def _normalize_fill_blank_options(
         seen.add(answer.lower())
         bank.insert(0, answer)
 
-    bank = bank[:99]
+    if len(bank) > _MAX_BANK_ENTRIES:
+        keep = {index for index, text in enumerate(bank) if text.lower() in correct_lookup}
+        keep = set(sorted(keep)[:_MAX_BANK_ENTRIES])
+        for index in range(len(bank)):
+            if len(keep) >= _MAX_BANK_ENTRIES:
+                break
+            keep.add(index)
+        bank = [text for index, text in enumerate(bank) if index in keep]
     return [
         {
             "option_key": f"O{position:02d}",

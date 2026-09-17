@@ -46,6 +46,10 @@ from abridgeai.features.quizzes.queries import (
     quiz_completion_rate,
     top_missed_questions,
 )
+from abridgeai.features.quizzes.queries.published import (
+    get_in_progress_attempt,
+    list_quiz_questions_with_options,
+)
 
 
 def _async_url(database_url: str) -> str:
@@ -496,3 +500,288 @@ def test_no_mechanism_split() -> None:
     assert subdirs == {"sql"}, (
         f"Locked decision: queries/ must contain only sql/ as subdir, got {subdirs}"
     )
+
+
+# ---------------------------------------------------------------- visibility
+#
+# Three rules that each fail quietly if they break: an unapproved question must
+# never reach a student, an ambiguous slug must resolve to nothing rather than
+# to a guess, and an attempt may be resumed only by its owner and only while it
+# is open.
+#
+# Rows a test adds are removed in a ``finally`` so a failure cannot strand the
+# shared fixture's teardown behind a foreign key.
+
+
+async def _slug_of(engine: AsyncEngine, quiz_id: uuid.UUID) -> str:
+    async with engine.begin() as conn:
+        return (
+            await conn.execute(
+                text("SELECT slug FROM quizzes WHERE id = :id"), {"id": quiz_id}
+            )
+        ).scalar_one()
+
+
+async def _new_attempt(
+    engine: AsyncEngine, quiz: uuid.UUID, student: uuid.UUID, status: str
+) -> uuid.UUID:
+    attempt_id = uuid.uuid4()
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO quiz_attempts (id, quiz_id, student_id, attempt_number, status) "
+                "VALUES (:id, :q, :s, "
+                " (SELECT COALESCE(MAX(attempt_number), 0) + 1 FROM quiz_attempts "
+                "  WHERE quiz_id = :q AND student_id = :s), :st)"
+            ),
+            {"id": attempt_id, "q": quiz, "s": student, "st": status},
+        )
+    return attempt_id
+
+
+async def _drop_attempt(engine: AsyncEngine, attempt_id: uuid.UUID) -> None:
+    async with engine.begin() as conn:
+        await conn.execute(text("DELETE FROM quiz_attempts WHERE id = :id"), {"id": attempt_id})
+
+
+async def test_unapproved_questions_are_never_served(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    fixture_data: dict,
+) -> None:
+    """Review is the gate between drafted text and a graded item.
+
+    A pending question surfacing here would be put to a student and marked
+    without anyone having read it.
+    """
+    quiz = fixture_data["quiz_pub"]
+    pending, rejected = uuid.uuid4(), uuid.uuid4()
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text(
+                    "INSERT INTO quiz_questions "
+                    "(id, quiz_id, position, question_type, prompt_text, review_status) "
+                    "VALUES (:p, :q, 90, 'multiple_choice', 'Pending Q?', 'pending'), "
+                    "(:r, :q, 91, 'multiple_choice', 'Rejected Q?', 'rejected')"
+                ),
+                {"p": pending, "r": rejected, "q": quiz},
+            )
+
+        async with session_factory() as session:
+            rows = await list_quiz_questions_with_options(session, quiz)
+
+        served = {question.id for question, _options in rows}
+        assert pending not in served
+        assert rejected not in served
+        assert fixture_data["q_easy"] in served, "approved questions still appear"
+    finally:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("DELETE FROM quiz_questions WHERE id = ANY(:ids)"),
+                {"ids": [pending, rejected]},
+            )
+
+
+async def test_questions_come_back_in_position_order(
+    session_factory: async_sessionmaker[AsyncSession],
+    fixture_data: dict,
+) -> None:
+    async with session_factory() as session:
+        rows = await list_quiz_questions_with_options(session, fixture_data["quiz_pub"])
+    positions = [question.position for question, _options in rows]
+    assert positions == sorted(positions)
+
+
+async def test_options_are_grouped_under_their_own_question(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    fixture_data: dict,
+) -> None:
+    """Options are fetched in one sweep and then bucketed by question.
+
+    A bucketing slip would show one question's options under another — a
+    defect that reads as a content error rather than a query one.
+    """
+    easy, hard = fixture_data["q_easy"], fixture_data["q_hard"]
+    created: list[uuid.UUID] = []
+    try:
+        async with engine.begin() as conn:
+            for question_id, key, label in (
+                (easy, "A", "easy-A"),
+                (easy, "B", "easy-B"),
+                (hard, "A", "hard-A"),
+            ):
+                option_id = uuid.uuid4()
+                created.append(option_id)
+                await conn.execute(
+                    text(
+                        "INSERT INTO quiz_question_options "
+                        "(id, question_id, option_key, option_text, is_correct, position) "
+                        "VALUES (:id, :qid, :k, :t, false, "
+                        " (SELECT COALESCE(MAX(position), 0) + 1 "
+                        "  FROM quiz_question_options WHERE question_id = :qid))"
+                    ),
+                    {"id": option_id, "qid": question_id, "k": key, "t": label},
+                )
+
+        async with session_factory() as session:
+            rows = await list_quiz_questions_with_options(session, fixture_data["quiz_pub"])
+
+        by_question = {question.id: options for question, options in rows}
+        assert {o.option_text for o in by_question[easy]} >= {"easy-A", "easy-B"}
+        assert "easy-A" not in {o.option_text for o in by_question[hard]}
+    finally:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("DELETE FROM quiz_question_options WHERE id = ANY(:ids)"),
+                {"ids": created},
+            )
+
+
+async def test_a_quiz_with_no_approved_questions_returns_nothing(
+    session_factory: async_sessionmaker[AsyncSession],
+    fixture_data: dict,
+) -> None:
+    """The empty case short-circuits before the options query runs."""
+    async with session_factory() as session:
+        rows = await list_quiz_questions_with_options(session, fixture_data["quiz_module_b"])
+    assert rows == []
+
+
+async def test_a_quiz_resolves_by_its_slug(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    fixture_data: dict,
+) -> None:
+    slug = await _slug_of(engine, fixture_data["quiz_pub"])
+    async with session_factory() as session:
+        found = await get_published_quiz(session, slug)
+    assert found is not None
+    assert found.id == fixture_data["quiz_pub"]
+
+
+async def test_an_unknown_slug_resolves_to_nothing(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_factory() as session:
+        assert await get_published_quiz(session, "no-such-quiz-slug") is None
+
+
+async def test_a_draft_quiz_is_not_reachable_by_slug_either(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    fixture_data: dict,
+) -> None:
+    """The slug path must apply the same visibility rule as the id path.
+
+    Otherwise a draft stays private by id and public by URL slug.
+    """
+    slug = await _slug_of(engine, fixture_data["quiz_draft"])
+    async with session_factory() as session:
+        assert await get_published_quiz(session, slug) is None
+
+
+async def test_an_ambiguous_slug_resolves_to_nothing(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    fixture_data: dict,
+) -> None:
+    """Slugs are unique per module, not per course.
+
+    Two published quizzes sharing a slug across modules is reachable, and
+    picking either would serve a student the wrong quiz under a URL that looks
+    right. The query refuses instead of guessing.
+    """
+    slug = await _slug_of(engine, fixture_data["quiz_pub"])
+    twin = uuid.uuid4()
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text(
+                    "INSERT INTO quizzes (id, course_id, module_id, title, status, slug) "
+                    "VALUES (:id, :c, :m, 'Twin Quiz', 'published', :slug)"
+                ),
+                {
+                    "id": twin,
+                    "c": fixture_data["course"],
+                    "m": fixture_data["module_b"],
+                    "slug": slug,
+                },
+            )
+
+        async with session_factory() as session:
+            assert await get_published_quiz(session, slug) is None
+    finally:
+        async with engine.begin() as conn:
+            await conn.execute(text("DELETE FROM quizzes WHERE id = :id"), {"id": twin})
+
+
+async def test_an_open_attempt_is_returned_to_its_owner(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    fixture_data: dict,
+) -> None:
+    attempt = await _new_attempt(
+        engine, fixture_data["quiz_pub"], fixture_data["fresh_student"], "in_progress"
+    )
+    try:
+        async with session_factory() as session:
+            found = await get_in_progress_attempt(
+                session, attempt_id=attempt, user_id=fixture_data["fresh_student"]
+            )
+        assert found is not None
+        assert found.id == attempt
+        assert found.answers == [], "answers are eagerly loaded, not lazy"
+    finally:
+        await _drop_attempt(engine, attempt)
+
+
+async def test_another_student_cannot_resume_an_attempt(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    fixture_data: dict,
+) -> None:
+    """Ownership is part of the lookup, not a check layered above it."""
+    attempt = await _new_attempt(
+        engine, fixture_data["quiz_pub"], fixture_data["fresh_student"], "in_progress"
+    )
+    try:
+        async with session_factory() as session:
+            found = await get_in_progress_attempt(
+                session, attempt_id=attempt, user_id=fixture_data["student"]
+            )
+        assert found is None
+    finally:
+        await _drop_attempt(engine, attempt)
+
+
+@pytest.mark.parametrize("status", ["submitted", "graded", "abandoned"])
+async def test_a_finished_attempt_has_nothing_to_resume(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    fixture_data: dict,
+    status: str,
+) -> None:
+    attempt = await _new_attempt(
+        engine, fixture_data["quiz_pub"], fixture_data["fresh_student"], status
+    )
+    try:
+        async with session_factory() as session:
+            found = await get_in_progress_attempt(
+                session, attempt_id=attempt, user_id=fixture_data["fresh_student"]
+            )
+        assert found is None
+    finally:
+        await _drop_attempt(engine, attempt)
+
+
+async def test_an_unknown_attempt_is_not_an_error(
+    session_factory: async_sessionmaker[AsyncSession],
+    fixture_data: dict,
+) -> None:
+    async with session_factory() as session:
+        found = await get_in_progress_attempt(
+            session, attempt_id=uuid.uuid4(), user_id=fixture_data["student"]
+        )
+    assert found is None

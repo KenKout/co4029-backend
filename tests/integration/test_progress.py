@@ -336,6 +336,101 @@ async def test_engagement_to_progress(
 
 
 @pytest.mark.asyncio
+async def test_course_summary_counts_a_lesson_never_opened(
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict[str, uuid.UUID],
+    seeded_users: SeededUsers,
+) -> None:
+    """A lesson with no progress row still belongs to the course.
+
+    The summary drives the learner's course page, and the denominator comes
+    from the curriculum rather than from the rows that happen to exist. A
+    lesson counted only once a student touches it would show every course as
+    complete on its first finished lesson.
+    """
+    from abridgeai.features.progress.services.reporting import (
+        get_my_course_progress_summary,
+    )
+
+    async with session_factory() as session:
+        summary = await get_my_course_progress_summary(
+            session,
+            user_id=seeded_users.student_id,
+            course_id=scenario["course_id"],
+        )
+
+    assert summary.total_lessons >= 1
+    assert summary.total_lessons == (
+        summary.completed_lessons + summary.in_progress_lessons + summary.not_started_lessons
+    ), "every lesson falls into exactly one bucket"
+    lesson_ids = {row.lesson_id for row in summary.lessons}
+    assert scenario["lesson_id"] in lesson_ids
+    untouched = next(row for row in summary.lessons if row.lesson_id == scenario["lesson_id"])
+    assert untouched.status == "not_started"
+    assert float(untouched.completion_percent) == 0.0
+    assert untouched.total_time_seconds == 0
+    assert untouched.last_activity_at is None
+
+
+@pytest.mark.asyncio
+async def test_course_summary_reflects_a_completed_lesson(
+    client: httpx.AsyncClient,
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict[str, uuid.UUID],
+    seeded_users: SeededUsers,
+    student_bearer: str,
+) -> None:
+    """Marking a lesson complete moves it between buckets, not just its own row."""
+    from abridgeai.features.progress.services.reporting import (
+        get_my_course_progress_summary,
+    )
+
+    mark = await client.post(
+        f"/api/v1/me/progress/lessons/{scenario['lesson_id']}/complete",
+        json={},
+        headers=_auth(student_bearer),
+    )
+    assert mark.status_code == 200, mark.text
+
+    async with session_factory() as session:
+        summary = await get_my_course_progress_summary(
+            session,
+            user_id=seeded_users.student_id,
+            course_id=scenario["course_id"],
+        )
+
+    assert summary.completed_lessons >= 1
+    assert summary.total_lessons == (
+        summary.completed_lessons + summary.in_progress_lessons + summary.not_started_lessons
+    )
+    assert summary.last_activity_at is not None, "the completion set an activity timestamp"
+    done = next(row for row in summary.lessons if row.lesson_id == scenario["lesson_id"])
+    assert done.status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_lesson_view_is_none_before_any_progress_exists(
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict[str, uuid.UUID],
+    seeded_users: SeededUsers,
+) -> None:
+    """No row means no view — the router turns this into a 404.
+
+    Inventing an empty view here would make a lesson the student has never
+    opened indistinguishable from one they started and abandoned.
+    """
+    from abridgeai.features.progress.services.reporting import (
+        get_my_lesson_progress_view,
+    )
+
+    async with session_factory() as session:
+        view = await get_my_lesson_progress_view(
+            session, user_id=seeded_users.student_id, lesson_id=scenario["lesson_id"]
+        )
+    assert view is None
+
+
+@pytest.mark.asyncio
 async def test_partial_engagement_does_not_auto_complete(
     client: httpx.AsyncClient,
     scenario: dict[str, uuid.UUID],

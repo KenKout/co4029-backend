@@ -26,10 +26,16 @@ if TYPE_CHECKING:
 _DEFAULT_BLOOM_ORDER = ("remember", "understand", "apply", "analyze", "evaluate", "create")
 
 
-def _default_bloom_distribution(count: int) -> dict[str, int]:  # noqa: C901 -- verbatim port of legacy heuristic (FR-7)
-    """Spread ``count`` questions across Bloom levels (FR-7).
+def _default_bloom_distribution(count: int) -> dict[str, int]:
+    """Spread ``count`` questions across Bloom levels (FR-7)."""
+    return {level: n for level, n in _bloom_tiers(count).items() if n > 0}
 
-    Verbatim port from ``backend/app/ai/haystack/prompts/quiz.py:253``.
+
+def _bloom_tiers(count: int) -> dict[str, int]:  # noqa: C901 -- verbatim port of legacy heuristic (FR-7)
+    """The tier table itself.
+
+    Verbatim port from ``backend/app/ai/haystack/prompts/quiz.py:253``,
+    kept intact so it stays comparable with the original.
     """
     count = max(1, int(count))
     if count == 1:
