@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 import httpx
 import pytest
@@ -28,7 +28,7 @@ from pydantic import SecretStr
 
 from abridgeai.core.config import Settings
 from abridgeai.infrastructure import s3 as s3_module
-from abridgeai.infrastructure.errors import S3NotConfiguredError
+from abridgeai.infrastructure.errors import S3NotConfiguredError, S3NotFoundError
 from abridgeai.infrastructure.s3 import (
     CompletedPart,
     abort_multipart_upload,
@@ -39,6 +39,7 @@ from abridgeai.infrastructure.s3 import (
     delete_object,
     download_to_temp,
     head_object,
+    put_object_bytes,
 )
 
 BUCKET = "abridgeai-test"
@@ -275,3 +276,181 @@ async def test_no_creds_raises_s3_not_configured() -> None:
         await delete_object(obj, settings=settings)
     with pytest.raises(S3NotConfiguredError):
         await create_multipart_upload(obj, settings=settings)
+
+
+async def test_server_side_put_stores_bytes_and_content_type(
+    moto_server: ThreadedMotoServer,
+) -> None:
+    """The one upload path that does NOT go through a presigned URL.
+
+    Avatars and thumbnails are small and server-validated, so the backend
+    writes them directly rather than issuing a URL and waiting for the
+    browser. It is the only writer that must use the INTERNAL endpoint: the
+    bytes never leave the cluster.
+    """
+    settings = _settings(moto_server)
+    await _ensure_bucket(settings)
+    obj = _Obj(bucket=BUCKET, object_key="avatars/server-side.png")
+
+    await put_object_bytes(obj, b"PNG-bytes", content_type="image/png", settings=settings)
+
+    meta = await head_object(obj, settings=settings)
+    assert meta is not None
+    assert meta.size == len(b"PNG-bytes")
+    assert meta.content_type == "image/png"
+
+
+async def test_server_side_put_uses_the_internal_endpoint(
+    moto_server: ThreadedMotoServer,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    public = _endpoint(moto_server)
+    settings = _settings(
+        moto_server,
+        public_endpoint=public.replace("http://", "http://public-"),
+        internal_endpoint=public,
+    )
+    await _ensure_bucket(_settings(moto_server))
+
+    captured: dict[str, object] = {}
+    real_kwargs = s3_module._client_kwargs
+
+    def spy(s: Settings, endpoint: str | None) -> dict:
+        captured["endpoint"] = endpoint
+        return real_kwargs(s, endpoint)
+
+    monkeypatch.setattr(s3_module, "_client_kwargs", spy)
+
+    await put_object_bytes(
+        _Obj(bucket=BUCKET, object_key="avatars/internal.png"), b"x", settings=settings
+    )
+    assert captured["endpoint"] == settings.aws_endpoint_url
+
+
+async def test_stream_url_forwards_only_the_three_supported_headers(
+    moto_server: ThreadedMotoServer,
+) -> None:
+    """These control how the browser treats the streamed object.
+
+    ``Content-Disposition`` is what makes a material download under its real
+    filename instead of opening inline under an opaque object key, so it is
+    signed into the URL rather than sent as a request header (a presigned GET
+    is opened by the browser, which sends no headers of ours). Anything
+    outside the supported three is dropped: an unsigned response header S3
+    does not recognise invalidates the signature.
+    """
+    settings = _settings(moto_server)
+    await _ensure_bucket(settings)
+    obj = _Obj(bucket=BUCKET, object_key="materials/report.pdf")
+
+    url, _ = await create_stream_url(
+        obj,
+        response_headers={
+            "Content-Disposition": 'attachment; filename="Week 1.pdf"',
+            "Content-Type": "application/pdf",
+            "Cache-Control": "private, max-age=60",
+            "X-Unsupported": "dropped",
+        },
+        settings=settings,
+    )
+
+    query = parse_qs(urlparse(url).query)
+    assert query["response-content-disposition"] == ['attachment; filename="Week 1.pdf"']
+    assert query["response-content-type"] == ["application/pdf"]
+    assert query["response-cache-control"] == ["private, max-age=60"]
+    assert not [key for key in query if "unsupported" in key.lower()]
+
+
+async def test_stream_url_without_headers_signs_no_response_overrides(
+    moto_server: ThreadedMotoServer,
+) -> None:
+    settings = _settings(moto_server)
+    await _ensure_bucket(settings)
+
+    url, _ = await create_stream_url(
+        _Obj(bucket=BUCKET, object_key="materials/plain.bin"), settings=settings
+    )
+
+    query = parse_qs(urlparse(url).query)
+    assert not [key for key in query if key.startswith("response-")]
+
+
+async def test_download_of_a_missing_object_is_not_found_not_a_generic_failure(
+    moto_server: ThreadedMotoServer,
+    tmp_path: Path,
+) -> None:
+    """A worker distinguishes "the file is gone" from "S3 is unwell".
+
+    The first means the job can never succeed and should be abandoned; the
+    second is worth retrying. Collapsing them into one error would have the
+    worker retry a deleted material until it exhausted its attempts.
+    """
+    settings = _settings(moto_server)
+    await _ensure_bucket(settings)
+
+    with pytest.raises(S3NotFoundError):
+        await download_to_temp(
+            _Obj(bucket=BUCKET, object_key="materials/never-uploaded.bin"),
+            tmp_path,
+            settings=settings,
+        )
+
+
+async def test_download_creates_the_destination_directory(
+    moto_server: ThreadedMotoServer,
+    tmp_path: Path,
+) -> None:
+    """Workers hand in a per-job temp directory that does not exist yet."""
+    settings = _settings(moto_server)
+    await _ensure_bucket(settings)
+    obj = _Obj(bucket=BUCKET, object_key="materials/nested-dest.bin")
+    await put_object_bytes(obj, b"payload", settings=settings)
+
+    dest = tmp_path / "job" / "artifacts"
+    out = await download_to_temp(obj, dest, settings=settings)
+
+    assert out.parent == dest
+    assert out.name == "nested-dest.bin", "the object key's basename, not the whole key"
+    assert out.read_bytes() == b"payload"
+
+
+async def test_multipart_argument_guards_refuse_before_touching_s3() -> None:
+    """Both are caller mistakes, and both are cheaper to catch locally.
+
+    A zero-part upload would initialise a multipart upload and presign
+    nothing, leaving an orphaned upload S3 bills for until a lifecycle rule
+    reaps it. An empty completion would close an upload with no parts.
+    """
+    settings = _settings(None, creds=False)
+    obj = _Obj(bucket=BUCKET, object_key="materials/guard.bin")
+
+    with pytest.raises(ValueError, match="part_count"):
+        await create_multipart_upload(obj, part_count=0, settings=settings)
+    with pytest.raises(ValueError, match="at least one part"):
+        await complete_multipart_upload(obj, "upload-id", [], settings=settings)
+
+
+async def test_abort_of_an_unknown_upload_is_silent(
+    moto_server: ThreadedMotoServer,
+) -> None:
+    """Abort is the cleanup path, often reached from an error handler.
+
+    Raising here would mask the failure that prompted the cleanup with a
+    second failure about the cleanup itself.
+    """
+    settings = _settings(moto_server)
+    await _ensure_bucket(settings)
+
+    await abort_multipart_upload(
+        _Obj(bucket=BUCKET, object_key="materials/no-such-upload.bin"),
+        "not-a-real-upload-id",
+        settings=settings,
+    )
+
+
+async def test_put_object_bytes_refuses_without_credentials() -> None:
+    settings = _settings(None, creds=False)
+    with pytest.raises(S3NotConfiguredError):
+        await put_object_bytes(
+            _Obj(bucket=BUCKET, object_key="materials/never.bin"), b"x", settings=settings
+        )

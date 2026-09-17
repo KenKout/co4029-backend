@@ -1,7 +1,15 @@
 """Integration tests for ``features.quizzes.services.authoring`` (T5.13).
 
-Covers the create-quiz happy path + start_generation_run enqueue
-contract.
+Covers the create-quiz happy path, the start_generation_run enqueue
+contract, and the authoring write paths that decide a quiz's answer key
+and when it may still be changed: question creation and its revision
+trail, option synchronisation, and the freeze a published quiz imposes.
+
+The payloads are built with the router's own ``_AttrShim`` rather than a
+local stand-in. That shim is what production hands these services, and
+the service carries code (``_as_plain_json``) whose only reason to exist
+is unwrapping it -- a plainer test payload would exercise a shape no
+caller sends.
 """
 
 from __future__ import annotations
@@ -36,8 +44,10 @@ import abridgeai.features.interviews.models  # noqa: F401  -- T6.1 registers int
 from abridgeai.ai.models import GenerationRun
 from abridgeai.core.config import get_settings
 from abridgeai.core.db import Base
+from abridgeai.core.exceptions import AppError, ConflictError
 from abridgeai.core.security import CurrentUser
 from abridgeai.features.quizzes.models import Quiz
+from abridgeai.features.quizzes.routers.authoring import _AttrShim
 from abridgeai.features.quizzes.schemas import (
     CoverageOptions,
     QuizGenerationRequest,
@@ -143,6 +153,31 @@ async def scenario(engine: AsyncEngine) -> AsyncIterator[dict]:
         await conn.execute(
             text(
                 "DELETE FROM quiz_source_lessons WHERE quiz_id IN "
+                "(SELECT id FROM quizzes WHERE module_id = :m)"
+            ),
+            {"m": module_id},
+        )
+        # Question rows FK back to quizzes, so they have to go first or the
+        # quiz delete below fails for any test that authored a question.
+        await conn.execute(
+            text(
+                "DELETE FROM quiz_question_revisions WHERE question_id IN "
+                "(SELECT id FROM quiz_questions WHERE quiz_id IN "
+                "(SELECT id FROM quizzes WHERE module_id = :m))"
+            ),
+            {"m": module_id},
+        )
+        await conn.execute(
+            text(
+                "DELETE FROM quiz_question_options WHERE question_id IN "
+                "(SELECT id FROM quiz_questions WHERE quiz_id IN "
+                "(SELECT id FROM quizzes WHERE module_id = :m))"
+            ),
+            {"m": module_id},
+        )
+        await conn.execute(
+            text(
+                "DELETE FROM quiz_questions WHERE quiz_id IN "
                 "(SELECT id FROM quizzes WHERE module_id = :m)"
             ),
             {"m": module_id},
@@ -327,3 +362,539 @@ async def test_start_generation_run_no_arq_skips_enqueue(
 
     assert run.status == "pending"
     assert run.config_json["quiz_id"]
+
+
+def _question_payload(**fields: object) -> _AttrShim:
+    """A question body as the router would deliver it."""
+    body: dict = {
+        "prompt_text": "Which pigment absorbs light?",
+        "question_type": "multiple_choice",
+    }
+    body.update(fields)
+    return _AttrShim(body)
+
+
+def _options(*triples: tuple[str, str, bool]) -> list[dict]:
+    return [
+        {"option_key": key, "option_text": body, "is_correct": correct}
+        for key, body, correct in triples
+    ]
+
+
+_MCQ_OPTIONS = _options(("A", "Chlorophyll", True), ("B", "Keratin", False))
+
+
+async def _make_quiz(session: AsyncSession, scenario: dict, title: str = "Draft Quiz") -> Quiz:
+    return await authoring_service.create_quiz(
+        session,
+        scenario["module_id"],
+        _AttrShim({"title": title}),
+        _actor(scenario["owner_id"]),
+    )
+
+
+async def _approved_question(
+    session: AsyncSession, quiz_id: uuid.UUID, actor: CurrentUser
+) -> object:
+    """A question that satisfies both publish gates: approved and timed."""
+    return await authoring_service.create_question(
+        session,
+        quiz_id,
+        _question_payload(
+            options=_MCQ_OPTIONS,
+            review_status="approved",
+            expected_response_time_ms=30000,
+        ),
+        actor,
+    )
+
+
+async def _option_rows(session: AsyncSession, question_id: uuid.UUID) -> list[dict]:
+    rows = (
+        (
+            await session.execute(
+                text(
+                    "SELECT option_key, option_text, is_correct, position "
+                    "FROM quiz_question_options WHERE question_id = :q ORDER BY position"
+                ),
+                {"q": question_id},
+            )
+        )
+        .mappings()
+        .all()
+    )
+    return [dict(row) for row in rows]
+
+
+@pytest.mark.asyncio
+async def test_question_creation_numbers_positions_and_opens_a_revision_trail(
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict,
+) -> None:
+    """Every question is born at the end of the quiz with revision 1.
+
+    The revision row is the audit trail for AI-drafted content: it records
+    what the teacher accepted, which is the only evidence of what a question
+    looked like before a later edit.
+    """
+    async with session_factory() as session, session.begin():
+        quiz = await _make_quiz(session, scenario)
+        first = await authoring_service.create_question(
+            session,
+            quiz.id,
+            _question_payload(options=_MCQ_OPTIONS),
+            _actor(scenario["owner_id"]),
+        )
+        second = await authoring_service.create_question(
+            session,
+            quiz.id,
+            _question_payload(prompt_text="And which does not?", options=_MCQ_OPTIONS),
+            _actor(scenario["owner_id"]),
+        )
+
+    assert [first.position, second.position] == [1, 2]
+    assert first.review_status == "pending", "a manually authored question still awaits sign-off"
+    assert first.reviewed_by is None
+
+    async with session_factory() as session:
+        options = await _option_rows(session, first.id)
+        revisions = (
+            (
+                await session.execute(
+                    text(
+                        "SELECT revision_no, source_kind FROM quiz_question_revisions "
+                        "WHERE question_id = :q ORDER BY revision_no"
+                    ),
+                    {"q": first.id},
+                )
+            )
+            .mappings()
+            .all()
+        )
+
+    assert [(o["option_key"], o["position"]) for o in options] == [("A", 1), ("B", 2)]
+    assert [o["is_correct"] for o in options] == [True, False]
+    assert [(r["revision_no"], r["source_kind"]) for r in revisions] == [(1, "teacher")]
+
+
+@pytest.mark.asyncio
+async def test_approving_on_create_stamps_the_reviewer(
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict,
+) -> None:
+    """A teacher writing a question themselves may sign it off in one step.
+
+    The sign-off still has to be attributed: ``approved`` with nobody named
+    would leave the publish gate unable to say who vouched for it.
+    """
+    async with session_factory() as session, session.begin():
+        quiz = await _make_quiz(session, scenario)
+        question = await authoring_service.create_question(
+            session,
+            quiz.id,
+            _question_payload(options=_MCQ_OPTIONS, review_status="approved"),
+            _actor(scenario["owner_id"]),
+        )
+
+    assert question.review_status == "approved"
+    assert question.reviewed_by == scenario["owner_id"]
+    assert question.reviewed_at is not None
+
+
+@pytest.mark.asyncio
+async def test_an_option_edit_cannot_leave_two_correct_answers(
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict,
+) -> None:
+    """The single-answer invariant is re-checked on every option edit.
+
+    A single-answer question with two keys marked correct is not a harder
+    question -- it is one the grader scores inconsistently, since only one of
+    the two can be the key a student is credited for.
+    """
+    async with session_factory() as session, session.begin():
+        quiz = await _make_quiz(session, scenario)
+        question = await authoring_service.create_question(
+            session,
+            quiz.id,
+            _question_payload(options=_MCQ_OPTIONS),
+            _actor(scenario["owner_id"]),
+        )
+
+    async with session_factory() as session:
+        with pytest.raises(AppError, match="exactly one correct option"):
+            await authoring_service.update_question(
+                session,
+                question.id,
+                _AttrShim(
+                    {"options": _options(("A", "Chlorophyll", True), ("B", "Keratin", True))}
+                ),
+                _actor(scenario["owner_id"]),
+            )
+
+    async with session_factory() as session:
+        stored = await _option_rows(session, question.id)
+    assert [o["is_correct"] for o in stored] == [True, False], "the refusal left nothing behind"
+
+
+@pytest.mark.asyncio
+async def test_an_option_key_the_question_does_not_have_is_refused(
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict,
+) -> None:
+    """Option edits address existing rows by id or key; they do not insert.
+
+    Silently ignoring an unknown key would accept the teacher's edit and
+    leave the old answer key in place -- the question would read as corrected
+    in the editor and grade as it did before.
+    """
+    async with session_factory() as session, session.begin():
+        quiz = await _make_quiz(session, scenario)
+        question = await authoring_service.create_question(
+            session,
+            quiz.id,
+            _question_payload(options=_MCQ_OPTIONS),
+            _actor(scenario["owner_id"]),
+        )
+
+    async with session_factory() as session:
+        with pytest.raises(AppError, match="option not found"):
+            await authoring_service.update_question(
+                session,
+                question.id,
+                _AttrShim({"options": _options(("A", "Chlorophyll", False), ("Z", "New", True))}),
+                _actor(scenario["owner_id"]),
+            )
+
+
+@pytest.mark.asyncio
+async def test_an_option_edit_moves_the_answer_key_and_appends_a_revision(
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict,
+) -> None:
+    async with session_factory() as session, session.begin():
+        quiz = await _make_quiz(session, scenario)
+        question = await authoring_service.create_question(
+            session,
+            quiz.id,
+            _question_payload(options=_MCQ_OPTIONS),
+            _actor(scenario["owner_id"]),
+        )
+
+    async with session_factory() as session, session.begin():
+        await authoring_service.update_question(
+            session,
+            question.id,
+            _AttrShim({"options": _options(("A", "Chlorophyll", False), ("B", "Keratin", True))}),
+            _actor(scenario["owner_id"]),
+        )
+
+    async with session_factory() as session:
+        options = await _option_rows(session, question.id)
+        revisions = (
+            await session.execute(
+                text("SELECT count(*) FROM quiz_question_revisions WHERE question_id = :q"),
+                {"q": question.id},
+            )
+        ).scalar_one()
+
+    assert [(o["option_key"], o["is_correct"]) for o in options] == [("A", False), ("B", True)]
+    assert revisions == 2, "the edit is recorded beside the original"
+
+
+@pytest.mark.asyncio
+async def test_the_fill_blank_word_bank_is_replaced_wholesale(
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict,
+) -> None:
+    """Unlike multiple choice, a word bank is swapped rather than patched.
+
+    Bank entries are addressed by their text, never by id -- the grader reads
+    the stored answer and the learner drags the words -- so a teacher may add
+    and remove distractors freely, and the positions must come out dense.
+    """
+    bank = _options(
+        ("O01", "photosynthesis", True),
+        ("O02", "respiration", False),
+        ("O03", "osmosis", False),
+    )
+    async with session_factory() as session, session.begin():
+        quiz = await _make_quiz(session, scenario)
+        question = await authoring_service.create_question(
+            session,
+            quiz.id,
+            _question_payload(question_type="fill_blank", options=bank),
+            _actor(scenario["owner_id"]),
+        )
+
+    async with session_factory() as session, session.begin():
+        await authoring_service.update_question(
+            session,
+            question.id,
+            _AttrShim(
+                {
+                    "options": [
+                        {"option_text": "photosynthesis", "is_correct": True},
+                        {"option_text": "diffusion", "is_correct": False},
+                    ]
+                }
+            ),
+            _actor(scenario["owner_id"]),
+        )
+
+    async with session_factory() as session:
+        options = await _option_rows(session, question.id)
+
+    assert [o["option_text"] for o in options] == ["photosynthesis", "diffusion"]
+    assert [o["position"] for o in options] == [1, 2], "no gap where the dropped entry sat"
+    assert [o["option_key"] for o in options] == ["O01", "O02"], (
+        "the replacement path derives keys from position when the payload omits them"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_word_bank_without_a_distractor_is_refused(
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict,
+) -> None:
+    """A bank holding only the answers is not an exercise."""
+    async with session_factory() as session:
+        quiz = await _make_quiz(session, scenario)
+        with pytest.raises(AppError, match="distractor"):
+            await authoring_service.create_question(
+                session,
+                quiz.id,
+                _question_payload(
+                    question_type="fill_blank",
+                    options=_options(("O01", "photosynthesis", True)),
+                ),
+                _actor(scenario["owner_id"]),
+            )
+
+
+@pytest.mark.asyncio
+async def test_publishing_freezes_every_content_path(
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict,
+) -> None:
+    """Students can see and attempt a published quiz, so its questions are
+    fully frozen -- adding, editing, approving or removing one would change
+    what an attempt in flight is being graded against.
+    """
+    actor = _actor(scenario["owner_id"])
+    async with session_factory() as session, session.begin():
+        quiz = await _make_quiz(session, scenario)
+        question = await _approved_question(session, quiz.id, actor)
+        await authoring_service.publish_quiz(session, quiz.id, actor)
+
+    async with session_factory() as session:
+        with pytest.raises(ConflictError, match="quiz_published_readonly"):
+            await authoring_service.create_question(
+                session, quiz.id, _question_payload(options=_MCQ_OPTIONS), actor
+            )
+    async with session_factory() as session:
+        with pytest.raises(ConflictError, match="quiz_published_readonly"):
+            await authoring_service.update_question(
+                session, question.id, _AttrShim({"prompt_text": "Reworded"}), actor
+            )
+    async with session_factory() as session:
+        with pytest.raises(ConflictError, match="quiz_published_readonly"):
+            await authoring_service.delete_question(session, question.id, actor)
+    async with session_factory() as session:
+        with pytest.raises(ConflictError, match="quiz_published_readonly"):
+            await authoring_service.bulk_approve_questions(session, quiz.id, [question.id], actor)
+
+
+@pytest.mark.asyncio
+async def test_archiving_reopens_a_published_quiz_for_editing(
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict,
+) -> None:
+    """The freeze message tells the teacher to archive first, so that has to
+    be a real way out -- archiving withdraws the quiz from students, which is
+    what made the freeze necessary.
+    """
+    actor = _actor(scenario["owner_id"])
+    async with session_factory() as session, session.begin():
+        quiz = await _make_quiz(session, scenario)
+        await _approved_question(session, quiz.id, actor)
+        await authoring_service.publish_quiz(session, quiz.id, actor)
+
+    async with session_factory() as session, session.begin():
+        archived = await authoring_service.archive_quiz(session, quiz.id, actor)
+        assert archived.status == "archived"
+        added = await authoring_service.create_question(
+            session, quiz.id, _question_payload(options=_MCQ_OPTIONS), actor
+        )
+
+    assert added.position == 2
+
+
+@pytest.mark.asyncio
+async def test_an_archived_quiz_cannot_be_published_again(
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict,
+) -> None:
+    """Archive ends the quiz's life; re-publishing would resurrect it under
+    students who were told it had closed.
+    """
+    actor = _actor(scenario["owner_id"])
+    async with session_factory() as session, session.begin():
+        quiz = await _make_quiz(session, scenario)
+        await authoring_service.archive_quiz(session, quiz.id, actor)
+
+    async with session_factory() as session:
+        with pytest.raises(AppError, match="Cannot publish archived quiz"):
+            await authoring_service.publish_quiz(session, quiz.id, actor)
+
+
+@pytest.mark.asyncio
+async def test_the_settings_freeze_is_field_aware_on_a_published_quiz(
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict,
+) -> None:
+    """Renaming a live quiz or extending its deadline is safe; changing what
+    a mark is worth is not. The whitelist is what separates them, and it is
+    applied per PATCH: one frozen field in an otherwise safe body refuses the
+    whole request rather than saving the rest.
+    """
+    actor = _actor(scenario["owner_id"])
+    async with session_factory() as session, session.begin():
+        quiz = await _make_quiz(session, scenario)
+        await _approved_question(session, quiz.id, actor)
+        await authoring_service.publish_quiz(session, quiz.id, actor)
+
+    async with session_factory() as session, session.begin():
+        renamed = await authoring_service.update_quiz(
+            session,
+            quiz.id,
+            _AttrShim({"title": "Photosynthesis (Week 2)", "due_at": "2026-10-01T09:00:00Z"}),
+            actor,
+        )
+    assert renamed.title == "Photosynthesis (Week 2)"
+    assert renamed.due_at is not None
+    assert renamed.due_at.tzinfo is not None, "the ISO string carried a zone and must keep it"
+
+    async with session_factory() as session:
+        with pytest.raises(ConflictError, match="passing_score_percent"):
+            await authoring_service.update_quiz(
+                session, quiz.id, _AttrShim({"passing_score_percent": 40}), actor
+            )
+
+    async with session_factory() as session:
+        with pytest.raises(ConflictError, match="quiz_published_setting_locked"):
+            await authoring_service.update_quiz(
+                session,
+                quiz.id,
+                _AttrShim({"title": "Also renamed", "shuffle_questions": True}),
+                actor,
+            )
+
+
+@pytest.mark.asyncio
+async def test_quiz_slugs_are_numbered_within_their_module(
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict,
+) -> None:
+    """Two quizzes may share a title; their URLs may not.
+
+    Uniqueness is scoped to the module and backed by a unique index, so a
+    collision that reached the flush would surface to the teacher as a 500
+    rather than as a second quiz.
+    """
+    async with session_factory() as session, session.begin():
+        first = await _make_quiz(session, scenario, title="Week 1 Check")
+        second = await _make_quiz(session, scenario, title="Week 1 Check")
+        third = await _make_quiz(session, scenario, title="Week 1 Check")
+
+    assert first.slug == "week-1-check"
+    assert second.slug == "week-1-check-1"
+    assert third.slug == "week-1-check-2", "the suffix counts up rather than restarting"
+
+
+@pytest.mark.asyncio
+async def test_publishing_does_not_add_a_second_module_item(
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict,
+) -> None:
+    """Both create and publish ensure the curriculum entry exists.
+
+    The second call has to be a no-op: a duplicate item would show the same
+    quiz twice in the course content tree, and a student finishing one copy
+    would leave the other outstanding.
+    """
+    actor = _actor(scenario["owner_id"])
+    async with session_factory() as session, session.begin():
+        quiz = await _make_quiz(session, scenario)
+        await _approved_question(session, quiz.id, actor)
+        await authoring_service.publish_quiz(session, quiz.id, actor)
+
+    async with session_factory() as session:
+        count = (
+            await session.execute(
+                text(
+                    "SELECT count(*) FROM module_items "
+                    "WHERE quiz_id = :q AND deleted_at IS NULL"
+                ),
+                {"q": quiz.id},
+            )
+        ).scalar_one()
+    assert count == 1
+
+
+@pytest.mark.asyncio
+async def test_bulk_approve_only_touches_questions_of_the_named_quiz(
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict,
+) -> None:
+    """The ids arrive in the request body while the quiz comes from the URL.
+
+    Approving by id alone would let a request authorised against one quiz
+    approve a question belonging to another -- past a reviewer who never saw
+    it, and into a publish gate that only counts approvals.
+    """
+    actor = _actor(scenario["owner_id"])
+    async with session_factory() as session, session.begin():
+        quiz = await _make_quiz(session, scenario, title="Reviewed Quiz")
+        other = await _make_quiz(session, scenario, title="Another Quiz")
+        mine = await authoring_service.create_question(
+            session, quiz.id, _question_payload(options=_MCQ_OPTIONS), actor
+        )
+        theirs = await authoring_service.create_question(
+            session, other.id, _question_payload(options=_MCQ_OPTIONS), actor
+        )
+
+    async with session_factory() as session, session.begin():
+        updated = await authoring_service.bulk_approve_questions(
+            session, quiz.id, [mine.id, theirs.id, uuid.uuid4()], actor
+        )
+
+    assert updated == 1, "the foreign question and the unknown id are both skipped"
+
+    async with session_factory() as session:
+        rows = dict(
+            (
+                await session.execute(
+                    text("SELECT id, review_status FROM quiz_questions WHERE id = ANY(:ids)"),
+                    {"ids": [mine.id, theirs.id]},
+                )
+            ).all()
+        )
+    assert rows[mine.id] == "approved"
+    assert rows[theirs.id] == "pending"
+
+
+@pytest.mark.asyncio
+async def test_bulk_approve_with_no_ids_is_a_no_op(
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict,
+) -> None:
+    """The client sends an empty selection whenever a teacher clicks through
+    the review screen without ticking anything.
+    """
+    async with session_factory() as session, session.begin():
+        quiz = await _make_quiz(session, scenario)
+        updated = await authoring_service.bulk_approve_questions(
+            session, quiz.id, [], _actor(scenario["owner_id"])
+        )
+    assert updated == 0
