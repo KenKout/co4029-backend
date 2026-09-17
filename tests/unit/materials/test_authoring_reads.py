@@ -41,7 +41,7 @@ def _material(material_id: UUID, version_id: UUID | None) -> SimpleNamespace:
     return SimpleNamespace(id=material_id, current_version_id=version_id)
 
 
-def _version(version_id: UUID, *, status: str = "processing", error: str | None = None):
+def _version(version_id: UUID, *, status: str = "chunking", error: str | None = None):
     return SimpleNamespace(id=version_id, processing_status=status, processing_error=error)
 
 
@@ -86,7 +86,7 @@ class TestWhichProgressSourceWins:
 
         assert progress is not None
         assert progress.progress_percent == 40
-        assert progress.processing_status == "processing"
+        assert progress.processing_status == "chunking"
         assert progress.latest_log_line is None
 
     async def test_a_live_snapshot_overrides_a_higher_database_percent(
@@ -104,7 +104,10 @@ class TestWhichProgressSourceWins:
             "get_latest_processing_job",
             AsyncMock(return_value=SimpleNamespace(progress_percent=100)),
         )
-        _live(monkeypatch, {"status": "processing", "percent": 30, "stage_label": "chunking"})
+        _live(
+            monkeypatch,
+            {"status": "embedding", "percent": 30, "stage_label": "Embedding chunks"},
+        )
 
         progress = await _reads.get_processing_progress(
             progress_world["db"], progress_world["material_id"]
@@ -112,7 +115,7 @@ class TestWhichProgressSourceWins:
 
         assert progress is not None
         assert progress.progress_percent == 30
-        assert progress.processing_status == "processing", "not the stale 'ready'"
+        assert progress.processing_status == "embedding", "not the stale 'ready'"
 
     async def test_a_live_snapshot_missing_a_status_falls_back_to_the_row(
         self, monkeypatch: pytest.MonkeyPatch, progress_world: dict[str, Any]
@@ -125,12 +128,12 @@ class TestWhichProgressSourceWins:
 
         assert progress is not None
         assert progress.progress_percent == 55
-        assert progress.processing_status == "processing"
+        assert progress.processing_status == "chunking"
 
     async def test_a_live_snapshot_missing_a_percent_falls_back_to_the_row(
         self, monkeypatch: pytest.MonkeyPatch, progress_world: dict[str, Any]
     ) -> None:
-        _live(monkeypatch, {"status": "processing"})
+        _live(monkeypatch, {"status": "chunking"})
 
         progress = await _reads.get_processing_progress(
             progress_world["db"], progress_world["material_id"]
@@ -152,7 +155,7 @@ class TestWhichProgressSourceWins:
         this protects the response schema from a key written by an older
         build of the worker.
         """
-        _live(monkeypatch, {"status": "processing", "percent": given})
+        _live(monkeypatch, {"status": "chunking", "percent": given})
 
         progress = await _reads.get_processing_progress(
             progress_world["db"], progress_world["material_id"]
@@ -189,7 +192,7 @@ class TestTheLiveStageLine:
         _live(
             monkeypatch,
             {
-                "status": "processing",
+                "status": "chunking",
                 "percent": 80,
                 "stage_label": "Building knowledge graph",
                 "detail": "42/85",
@@ -219,7 +222,7 @@ class TestTheLiveStageLine:
         expected: str | None,
     ) -> None:
         """A dangling "·" would read as a truncated message."""
-        _live(monkeypatch, {"status": "processing", "percent": 50, **snapshot})
+        _live(monkeypatch, {"status": "chunking", "percent": 50, **snapshot})
 
         progress = await _reads.get_processing_progress(
             progress_world["db"], progress_world["material_id"]

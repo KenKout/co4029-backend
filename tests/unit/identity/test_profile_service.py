@@ -530,7 +530,9 @@ class TestPatchSemanticsOnTheProfile:
         await profile_service.update_profile(
             SimpleNamespace(add=added.append, commit=AsyncMock(), refresh=AsyncMock()),
             user,
-            SimpleNamespace(model_dump=lambda exclude_unset=False: {}),
+            # ``display_name`` is read directly off the payload on this branch,
+            # before the dump is applied, so the stand-in has to carry it.
+            SimpleNamespace(display_name=None, model_dump=lambda exclude_unset=False: {}),
         )
 
         assert len(added) == 1

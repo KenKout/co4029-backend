@@ -628,8 +628,17 @@ class TestTheAdminInvite:
         grant = AsyncMock()
         monkeypatch.setattr(admin_service.access_control_api, "grant_org_role_access", grant)
         added: list[Any] = []
+
+        async def _flush() -> None:
+            # The real flush is what gives the new user its primary key, and
+            # the profile row that follows is built from it -- so a stub that
+            # only counts calls leaves a profile whose ``user_id`` is NULL.
+            for row in added:
+                if getattr(row, "id", None) is None and hasattr(row, "primary_email"):
+                    row.id = uuid4()
+
         return {
-            "db": SimpleNamespace(add=added.append, flush=AsyncMock()),
+            "db": SimpleNamespace(add=added.append, flush=_flush),
             "added": added,
             "grant": grant,
             "actor_id": uuid4(),
