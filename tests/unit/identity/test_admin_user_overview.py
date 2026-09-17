@@ -630,12 +630,12 @@ class TestTheAdminInvite:
         added: list[Any] = []
 
         async def _flush() -> None:
-            # The real flush is what gives the new user its primary key, and
-            # the profile row that follows is built from it -- so a stub that
-            # only counts calls leaves a profile whose ``user_id`` is NULL.
             for row in added:
-                if getattr(row, "id", None) is None and hasattr(row, "primary_email"):
+                if hasattr(row, "id") and getattr(row, "id", None) is None:
                     row.id = uuid4()
+                for stamp in ("created_at", "updated_at"):
+                    if hasattr(row, stamp) and getattr(row, stamp) is None:
+                        setattr(row, stamp, _NOW)
 
         return {
             "db": SimpleNamespace(add=added.append, flush=_flush),

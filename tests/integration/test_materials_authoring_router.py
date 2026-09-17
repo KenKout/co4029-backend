@@ -993,6 +993,416 @@ async def test_a_student_cannot_link_a_material(
     assert resp.status_code == 403
 
 
+# ---------------------------------------------------------------------------
+# Preprocessing report + overrides
+#
+# The noise cascade drops headers, footers and page numbers between
+# extraction and chunking, and records every decision in
+# `material_preprocess_quarantine`. These endpoints are the teacher's
+# window into that and their lever to overturn it.
+#
+# Exercised end to end because the query layer here is raw SQL: the
+# ownership join, the `include_confirmed` filter and the per-reason
+# aggregate are all statements no mock can validate.
+# ---------------------------------------------------------------------------
+
+
+async def _seed_material_with_quarantine(
+    engine: AsyncEngine,
+    scenario: dict[str, uuid.UUID],
+    *,
+    rows: list[dict] | None = None,
+) -> tuple[uuid.UUID, uuid.UUID, list[uuid.UUID]]:
+    """A material + current version carrying quarantined units."""
+    storage_id, material_id, version_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    quarantine_ids: list[uuid.UUID] = []
+
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO storage_objects (id, bucket, object_key, mime_type) "
+                "VALUES (:id, :b, :key, 'application/pdf')"
+            ),
+            {"id": storage_id, "b": BUCKET, "key": f"pp/{storage_id.hex}"},
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO learning_materials "
+                "(id, lesson_id, title, material_type, preprocess_mode) "
+                "VALUES (:id, :l, 'Preprocessed Material', 'pdf', 'full')"
+            ),
+            {"id": material_id, "l": scenario["lesson_id"]},
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO learning_material_versions "
+                "(id, material_id, storage_object_id, version_no, processing_status, "
+                " is_current, extracted_metadata) "
+                "VALUES (:id, :m, :so, 1, 'ready', TRUE, "
+                " CAST(:meta AS jsonb))"
+            ),
+            {
+                "id": version_id,
+                "m": material_id,
+                "so": storage_id,
+                "meta": '{"preprocess": {"lines_removed": 118, "pages_scanned": 24}}',
+            },
+        )
+        await conn.execute(
+            text("UPDATE learning_materials SET current_version_id = :v WHERE id = :m"),
+            {"v": version_id, "m": material_id},
+        )
+
+        for ordinal, row in enumerate(rows or [], start=1):
+            quarantine_id = uuid.uuid4()
+            quarantine_ids.append(quarantine_id)
+            await conn.execute(
+                text(
+                    "INSERT INTO material_preprocess_quarantine "
+                    "(id, material_version_id, course_id, unit_kind, page_number, ordinal, "
+                    " content, occurrences, rule_name, reason_code, action, rule_score, "
+                    " detector_stage, teacher_action) "
+                    "VALUES (:id, :v, :c, :kind, :page, :ord, :content, :occ, :rule, "
+                    " :reason, 'drop', 0.9, 'rule', :teacher)"
+                ),
+                {
+                    "id": quarantine_id,
+                    "v": version_id,
+                    "c": scenario["course_id"],
+                    "kind": row.get("unit_kind", "line"),
+                    "page": row.get("page_number", 1),
+                    "ord": ordinal,
+                    "content": row.get("content", "Faculty of CSE"),
+                    "occ": row.get("occurrences", 1),
+                    "rule": row.get("rule_name", "repeated_header"),
+                    "reason": row.get("reason_code", "repeated_across_pages"),
+                    "teacher": row.get("teacher_action"),
+                },
+            )
+
+    return material_id, version_id, quarantine_ids
+
+
+async def _cleanup_quarantine(engine: AsyncEngine, material_id: uuid.UUID) -> None:
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "DELETE FROM material_preprocess_quarantine WHERE material_version_id IN "
+                "(SELECT id FROM learning_material_versions WHERE material_id = :m)"
+            ),
+            {"m": material_id},
+        )
+
+
+async def test_the_report_shows_what_the_filter_removed(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    engine: AsyncEngine,
+    scenario: dict[str, uuid.UUID],
+) -> None:
+    """A teacher cannot sensibly override what they cannot see.
+
+    The response carries the exact removed text, its page and how many
+    times it occurred -- the counts alone would say a rule fired without
+    saying on what.
+    """
+    material_id, version_id, _ids = await _seed_material_with_quarantine(
+        engine,
+        scenario,
+        rows=[
+            {"content": "Faculty of CSE", "occurrences": 42, "page_number": 3},
+            {"content": "Page 7 of 120", "occurrences": 120, "reason_code": "page_number"},
+        ],
+    )
+    try:
+        resp = await client.get(
+            f"/api/v1/teacher/materials/{material_id}/preprocess/report",
+            headers=_auth(admin_bearer),
+        )
+
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["material_version_id"] == str(version_id)
+        assert body["preprocess_mode"] == "full"
+        assert body["summary"] == {"lines_removed": 118, "pages_scanned": 24}
+        assert body["requires_reprocess"] is True, (
+            "an override never edits chunks in place, so the UI must offer the button"
+        )
+        contents = {u["content"] for u in body["units"]}
+        assert contents == {"Faculty of CSE", "Page 7 of 120"}
+    finally:
+        await _cleanup_quarantine(engine, material_id)
+
+
+async def test_the_report_orders_units_by_page(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    engine: AsyncEngine,
+    scenario: dict[str, uuid.UUID],
+) -> None:
+    """The teacher reads this beside the document, so it has to follow it."""
+    material_id, _v, _ids = await _seed_material_with_quarantine(
+        engine,
+        scenario,
+        rows=[
+            {"content": "third", "page_number": 9},
+            {"content": "first", "page_number": 1},
+            {"content": "second", "page_number": 4},
+        ],
+    )
+    try:
+        resp = await client.get(
+            f"/api/v1/teacher/materials/{material_id}/preprocess/report",
+            headers=_auth(admin_bearer),
+        )
+
+        assert resp.status_code == 200, resp.text
+        assert [u["content"] for u in resp.json()["units"]] == ["first", "second", "third"]
+    finally:
+        await _cleanup_quarantine(engine, material_id)
+
+
+async def test_a_material_with_no_version_has_no_report(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    engine: AsyncEngine,
+    scenario: dict[str, uuid.UUID],
+) -> None:
+    material_id = uuid.uuid4()
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO learning_materials (id, lesson_id, title, material_type) "
+                "VALUES (:id, :l, 'No Version', 'pdf')"
+            ),
+            {"id": material_id, "l": scenario["lesson_id"]},
+        )
+
+    resp = await client.get(
+        f"/api/v1/teacher/materials/{material_id}/preprocess/report",
+        headers=_auth(admin_bearer),
+    )
+
+    assert resp.status_code == 404
+    assert resp.json()["detail"]["resource"] == "material"
+
+
+async def test_restoring_a_unit_records_the_teacher_and_the_verdict(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    engine: AsyncEngine,
+    seeded_users: SeededUsers,
+    scenario: dict[str, uuid.UUID],
+) -> None:
+    """The decision is persisted, never applied in place.
+
+    Rewriting already-embedded chunks live is the re-index this whole
+    design exists to avoid, so the row is stamped and the cascade reads it
+    on the next reprocess.
+    """
+    material_id, _v, ids = await _seed_material_with_quarantine(
+        engine, scenario, rows=[{"content": "A real paragraph", "unit_kind": "page"}]
+    )
+    try:
+        resp = await client.post(
+            f"/api/v1/teacher/materials/{material_id}/preprocess/quarantine/{ids[0]}/action",
+            json={"action": "restore"},
+            headers=_auth(admin_bearer),
+        )
+
+        assert resp.status_code == 200, resp.text
+        async with engine.connect() as conn:
+            row = (
+                await conn.execute(
+                    text(
+                        "SELECT teacher_action, teacher_action_by, teacher_action_at "
+                        "FROM material_preprocess_quarantine WHERE id = :id"
+                    ),
+                    {"id": ids[0]},
+                )
+            ).mappings().one()
+        assert row["teacher_action"] == "restore"
+        assert row["teacher_action_by"] == seeded_users.admin_id
+        assert row["teacher_action_at"] is not None
+    finally:
+        await _cleanup_quarantine(engine, material_id)
+
+
+async def test_a_quarantine_id_from_another_material_is_refused(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    engine: AsyncEngine,
+    scenario: dict[str, uuid.UUID],
+) -> None:
+    """The permission dependency guards the MATERIAL in the path.
+
+    The quarantine id beside it is just a number, so without the ownership
+    re-check a caller could act on another material's rows through a URL
+    the permission check approved. Both materials here belong to the same
+    course, so the only thing refusing this is that re-check.
+    """
+    mine, _v1, _ids = await _seed_material_with_quarantine(
+        engine, scenario, rows=[{"content": "mine"}]
+    )
+    theirs, _v2, their_ids = await _seed_material_with_quarantine(
+        engine, scenario, rows=[{"content": "theirs"}]
+    )
+    try:
+        resp = await client.post(
+            f"/api/v1/teacher/materials/{mine}/preprocess/quarantine/{their_ids[0]}/action",
+            json={"action": "restore"},
+            headers=_auth(admin_bearer),
+        )
+
+        assert resp.status_code == 404
+        assert resp.json()["detail"]["resource"] == "quarantine_unit"
+
+        async with engine.connect() as conn:
+            untouched = (
+                await conn.execute(
+                    text(
+                        "SELECT teacher_action FROM material_preprocess_quarantine "
+                        "WHERE id = :id"
+                    ),
+                    {"id": their_ids[0]},
+                )
+            ).scalar_one()
+        assert untouched is None, "the other material's row was not written"
+    finally:
+        await _cleanup_quarantine(engine, mine)
+        await _cleanup_quarantine(engine, theirs)
+
+
+async def test_an_unknown_quarantine_id_is_refused_the_same_way(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    engine: AsyncEngine,
+    scenario: dict[str, uuid.UUID],
+) -> None:
+    """Same status and shape as a foreign id: distinguishing them would let
+    a caller enumerate which quarantine ids exist."""
+    material_id, _v, _ids = await _seed_material_with_quarantine(engine, scenario, rows=[])
+    try:
+        resp = await client.post(
+            f"/api/v1/teacher/materials/{material_id}/preprocess/quarantine/"
+            f"{uuid.uuid4()}/action",
+            json={"action": "confirm"},
+            headers=_auth(admin_bearer),
+        )
+        assert resp.status_code == 404
+        assert resp.json()["detail"]["resource"] == "quarantine_unit"
+    finally:
+        await _cleanup_quarantine(engine, material_id)
+
+
+async def test_the_mode_switch_takes_effect_on_the_material(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    engine: AsyncEngine,
+    scenario: dict[str, uuid.UUID],
+) -> None:
+    """``normalize_only`` keeps the never-destructive fixes while disabling
+    every filter -- the right setting for a document the rules misread."""
+    material_id, _v, _ids = await _seed_material_with_quarantine(engine, scenario, rows=[])
+    try:
+        resp = await client.patch(
+            f"/api/v1/teacher/materials/{material_id}/preprocess/mode",
+            json={"mode": "normalize_only"},
+            headers=_auth(admin_bearer),
+        )
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["mode"] == "normalize_only"
+
+        async with engine.connect() as conn:
+            stored = (
+                await conn.execute(
+                    text("SELECT preprocess_mode FROM learning_materials WHERE id = :m"),
+                    {"m": material_id},
+                )
+            ).scalar_one()
+        assert stored == "normalize_only"
+    finally:
+        await _cleanup_quarantine(engine, material_id)
+
+
+async def test_setting_the_mode_on_an_unknown_material_is_a_404(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    scenario: dict[str, uuid.UUID],
+) -> None:
+    resp = await client.patch(
+        f"/api/v1/teacher/materials/{uuid.uuid4()}/preprocess/mode",
+        json={"mode": "off"},
+        headers=_auth(admin_bearer),
+    )
+    assert resp.status_code == 404
+
+
+async def test_the_course_audit_counts_units_and_occurrences_per_reason(
+    client: httpx.AsyncClient,
+    admin_bearer: str,
+    engine: AsyncEngine,
+    scenario: dict[str, uuid.UUID],
+) -> None:
+    """The precision audit: a reason code with many restores is a rule
+    eating real content and needs its threshold revisited.
+
+    Units and occurrences are counted separately because one repeated
+    header is a single decision affecting a hundred pages -- reporting only
+    one of the two makes the rule look either trivial or catastrophic.
+    """
+    material_id, _v, _ids = await _seed_material_with_quarantine(
+        engine,
+        scenario,
+        rows=[
+            {"reason_code": "repeated_across_pages", "occurrences": 40},
+            {"reason_code": "repeated_across_pages", "occurrences": 60,
+             "teacher_action": "restore"},
+            {"reason_code": "page_number", "occurrences": 5, "teacher_action": "confirm"},
+        ],
+    )
+    try:
+        resp = await client.get(
+            f"/api/v1/teacher/courses/{scenario['course_id']}/preprocess/summary",
+            headers=_auth(admin_bearer),
+        )
+
+        assert resp.status_code == 200, resp.text
+        by_reason = {row["reason_code"]: row for row in resp.json()}
+
+        repeated = by_reason["repeated_across_pages"]
+        assert repeated["unit_count"] == 2
+        assert repeated["occurrence_count"] == 100
+        assert repeated["restored"] == 1
+        assert repeated["confirmed"] == 0
+
+        page_number = by_reason["page_number"]
+        assert page_number["unit_count"] == 1
+        assert page_number["confirmed"] == 1
+    finally:
+        await _cleanup_quarantine(engine, material_id)
+
+
+async def test_a_student_cannot_read_the_preprocessing_report(
+    client: httpx.AsyncClient,
+    student_bearer: str,
+    engine: AsyncEngine,
+    scenario: dict[str, uuid.UUID],
+) -> None:
+    """The report carries the removed source text verbatim, so it sits
+    behind the same authoring perimeter as the rest of the router."""
+    material_id, _v, _ids = await _seed_material_with_quarantine(engine, scenario, rows=[])
+    try:
+        resp = await client.get(
+            f"/api/v1/teacher/materials/{material_id}/preprocess/report",
+            headers=_auth(student_bearer),
+        )
+        assert resp.status_code == 403
+    finally:
+        await _cleanup_quarantine(engine, material_id)
+
+
 def test_no_bare_get_current_user_on_authoring_endpoints() -> None:
     src = (
         Path(__file__).resolve().parent.parent.parent
