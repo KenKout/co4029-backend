@@ -534,6 +534,45 @@ _SPECS: tuple[SettingSpec, ...] = (
             "unaffected. Set to 0 for no cap (serve the whole backlog)."
         ),
     ),
+    SettingSpec(
+        key="spaced_repetition.max_interval_days",
+        group="spaced_repetition",
+        type="int",
+        default=36500,
+        minimum=1,
+        maximum=36500,
+        env_var="SR_MAX_INTERVAL_DAYS",
+        label="Maximum review interval (days)",
+        description=(
+            "Longest a card may wait before it is shown again. SM-2 grows "
+            "intervals by multiplying the last one by EF, without limit, so a "
+            "well-known card can fall years past the end of the course it "
+            "belongs to. The default of 36500 (100 years) is Anki's own "
+            "default and caps nothing in practice; lowering it guarantees a "
+            "card returns at least this often. NOTE the direction: a lower cap "
+            "means MORE review, not less. To make the cap a stopping point "
+            "instead, see the retirement setting below."
+        ),
+    ),
+    SettingSpec(
+        key="spaced_repetition.retire_beyond_max_interval",
+        group="spaced_repetition",
+        type="bool",
+        default=False,
+        env_var="SR_RETIRE_BEYOND_MAX_INTERVAL",
+        label="Retire cards past the maximum interval",
+        description=(
+            "Turns the maximum interval from a ceiling into a finish line. When "
+            "a review earns an interval longer than the cap, the card stops "
+            "being scheduled rather than being held at the cap. It leaves the "
+            "review queue, its history is kept, and a later failure elsewhere "
+            "cannot bring it back. Off by default: SM-2 has no terminal state, "
+            "and neither does Anki, whose only automatic removal (leech "
+            "suspension) fires on repeated FAILURE. A retirement point is an "
+            "institutional choice about workload over a finite course, not a "
+            "claim that the item can no longer be forgotten."
+        ),
+    ),
     # Defaults chosen to match the requested behaviour: at least 2 teachers
     # (default min), at least one of them the Course Instructor, capped at
     # the default max. NOT exactly one: `courses.services.assignment`

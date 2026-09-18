@@ -41,7 +41,9 @@ from abridgeai.features.quizzes.api.public import (
     get_t_exp_for_question,
 )
 from abridgeai.features.spaced_repetition.models import CardReview, StudentCardState
+from abridgeai.core.runtime_settings import resolve_setting
 from abridgeai.features.spaced_repetition.sm2 import (
+    apply_interval_ceiling,
     apply_jitter,
     derive_q,
     next_interval_days,
@@ -73,7 +75,9 @@ class CardReviewResult:
     interval_before: int
     interval_after: int
     repetition_count_after: int
-    due_at: datetime
+    #: ``None`` when the card retired on this review -- see
+    #: ``spaced_repetition.retire_beyond_max_interval``.
+    due_at: datetime | None
     last_q: int
     passing: bool
     retry_available_at: datetime | None
@@ -235,13 +239,32 @@ async def record_card_review(
     now = datetime.now(tz=UTC)
     passing = q >= 3
     retry_available_at: datetime | None
+    due_at: datetime | None
+    # A card that has already retired stays retired. Re-answering it in a
+    # quiz still records the review and moves EF -- the retrieval happened --
+    # but it does not re-enter the review queue, or "retired" would mean only
+    # "not due at the moment".
+    already_retired = state.due_at is None
     if passing:
         n_after = n_before + 1
         base_interval = next_interval_days(
             ef=ef_after, n=n_before, q=q, prev_interval=interval_before
         )
         interval_after = apply_jitter(base_interval, fraction=0.1)
-        due_at = now + timedelta(days=interval_after)
+        # Applied after jitter so the bound is a true ceiling: jitter is up to
+        # +10% and would otherwise carry the stored interval past it.
+        interval_after, retired = apply_interval_ceiling(
+            interval_after,
+            max_interval_days=int(
+                await resolve_setting(db, "spaced_repetition.max_interval_days")
+            ),
+            retire_beyond=bool(
+                await resolve_setting(
+                    db, "spaced_repetition.retire_beyond_max_interval"
+                )
+            ),
+        )
+        due_at = None if (retired or already_retired) else now + timedelta(days=interval_after)
         retry_available_at = None
     else:
         n_after = 0
@@ -253,7 +276,10 @@ async def record_card_review(
                 _DEFAULT_FAILURE_COOLDOWN_SECONDS,
             )
         )
-        due_at = now + timedelta(seconds=cooldown_seconds)
+        # A failure never retires a card, and never revives one: the reset
+        # is what a card needs when it is still being learned, and a retired
+        # card is no longer in that conversation.
+        due_at = None if already_retired else now + timedelta(seconds=cooldown_seconds)
         retry_available_at = due_at
 
     rho = (Decimal(t_actual_ms) / Decimal(t_exp_ms) if t_exp_ms > 0 else Decimal(0)).quantize(

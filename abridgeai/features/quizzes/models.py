@@ -189,6 +189,22 @@ class Quiz(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftDeleteMixin,
     reminders_enabled: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=text("FALSE")
     )
+    #: Whether answering here may OPEN a spaced-repetition card.
+    #:
+    #: A final assessment is not practice. Left on, every question in it
+    #: becomes a permanent card, a wrong answer under exam conditions drives
+    #: EF down into daily repeats, and -- because ``min_ef_for_unlock`` and
+    #: ``coverage_threshold`` read SM-2 state -- exam performance can decide
+    #: lesson unlock eligibility.
+    #:
+    #: Off means this quiz never CREATES a card. It does not mean answers are
+    #: invisible to SM-2: a question the student already holds a card for
+    #: (met in a practice quiz, or imported from the same bank item) is still
+    #: graded normally. Suppressing that too would let an exam silently
+    #: protect a card from the evidence of having been failed.
+    feeds_spaced_repetition: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("TRUE")
+    )
     generation_instructions: Mapped[str | None] = mapped_column(Text)
     passing_score_percent: Mapped[Decimal] = mapped_column(
         Numeric(5, 2), nullable=False, server_default=text("70.00")

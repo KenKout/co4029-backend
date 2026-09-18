@@ -64,6 +64,7 @@ from abridgeai.features.quizzes.services.integrity import (
 )
 from abridgeai.features.spaced_repetition.api.public import (
     CardReviewResult,
+    get_card_state,
     record_card_review,
 )
 
@@ -679,23 +680,41 @@ async def answer_attempt(
     # the SR scheduler is left untouched on edits.
     review_result: CardReviewResult | None = None
     if is_first_answer:
-        try:
-            review_result = await record_card_review(
-                db,
-                student_id=attempt.student_id,
-                question_id=answer.question_id,
-                quiz_attempt_id=attempt.id,
-                t_actual_ms=answer.t_actual_ms,
-                correct=answer.is_correct,
-                hint_used=answer.hint_used,
+        # An assessment quiz opens no cards of its own, but still grades one
+        # the student already holds -- met in a practice quiz, or imported
+        # from the same bank item. Shielding those too would let an exam hide
+        # a card from the evidence of having been failed.
+        #
+        # One scalar, not the whole row. ``None`` cannot occur (NOT NULL
+        # behind a FK); treating only an explicit False as "off" keeps an
+        # impossible read from switching scheduling off for everyone.
+        feeds_sr = await db.scalar(
+            select(Quiz.feeds_spaced_repetition).where(Quiz.id == attempt.quiz_id)
+        )
+        schedules = feeds_sr is not False or (
+            await get_card_state(
+                db, student_id=attempt.student_id, question_id=answer.question_id
             )
-        except (NotFoundError, ValueError) as exc:
-            _logger.warning(
-                "sm2_review_skipped",
-                attempt_id=str(attempt.id),
-                question_id=str(answer.question_id),
-                reason=str(exc),
-            )
+            is not None
+        )
+        if schedules:
+            try:
+                review_result = await record_card_review(
+                    db,
+                    student_id=attempt.student_id,
+                    question_id=answer.question_id,
+                    quiz_attempt_id=attempt.id,
+                    t_actual_ms=answer.t_actual_ms,
+                    correct=answer.is_correct,
+                    hint_used=answer.hint_used,
+                )
+            except (NotFoundError, ValueError) as exc:
+                _logger.warning(
+                    "sm2_review_skipped",
+                    attempt_id=str(attempt.id),
+                    question_id=str(answer.question_id),
+                    reason=str(exc),
+                )
     return answer, review_result
 
 

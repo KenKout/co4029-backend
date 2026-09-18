@@ -518,6 +518,7 @@ async def create_quiz(
         min_ef_for_unlock=data.get("min_ef_for_unlock"),
         coverage_threshold=data.get("coverage_threshold"),
         reminders_enabled=data.get("reminders_enabled", False),
+        feeds_spaced_repetition=data.get("feeds_spaced_repetition", True),
         generation_instructions=data.get("generation_instructions"),
         created_by=actor.user_id,
     )

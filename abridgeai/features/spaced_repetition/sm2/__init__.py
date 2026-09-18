@@ -6,6 +6,7 @@ from abridgeai.features.spaced_repetition.sm2.lesson_unlock import (
 )
 from abridgeai.features.spaced_repetition.sm2.q_derivation import derive_q
 from abridgeai.features.spaced_repetition.sm2.scheduler import (
+    apply_interval_ceiling,
     apply_jitter,
     next_due_at,
     next_interval_days,
@@ -16,6 +17,7 @@ __all__ = [
     "EF_MIN",
     "BlockingCardInfo",
     "LessonUnlockStatus",
+    "apply_interval_ceiling",
     "apply_jitter",
     "check_lesson_unlock",
     "derive_q",

@@ -33,6 +33,38 @@ def next_interval_days(*, ef: float, n: int, q: int, prev_interval: int) -> int:
     return max(1, round(prev_interval * ef))
 
 
+def apply_interval_ceiling(
+    interval_days: int, *, max_interval_days: int, retire_beyond: bool
+) -> tuple[int, bool]:
+    """Bound an interval, and optionally treat the bound as a finish line.
+
+    Returns ``(interval_days, retired)``.
+
+    SM-2 grows intervals by ``prev * EF`` with no upper limit, so a card a
+    student keeps getting right recedes indefinitely -- often well past the
+    end of the course it belongs to. Two different things can be wanted about
+    that, and they pull in opposite directions:
+
+    * **A ceiling** (``retire_beyond=False``) is Anki's ``Maximum Interval``.
+      The card still comes due, never later than the bound. Lowering it
+      therefore means MORE review, not less -- it buys retention by refusing
+      to let an item drift out of sight.
+    * **A finish line** (``retire_beyond=True``) stops scheduling instead.
+      That is not an SM-2 idea and not an Anki one: Anki's only automatic
+      removal is leech suspension, which fires on repeated failure. It is an
+      institutional judgement that a course-scoped system should stop asking
+      eventually, closer to WaniKani's "burned" than to anything in SM-2.
+
+    Retirement needs the interval to genuinely EXCEED the bound, not merely
+    reach it. At the default bound of 36500 days those are the same in
+    practice, but an installation that sets the bound to the exact interval
+    it wants cards to settle at should get that interval, not a retirement.
+    """
+    if interval_days <= max_interval_days:
+        return interval_days, False
+    return max_interval_days, retire_beyond
+
+
 def apply_jitter(
     interval_days: int,
     *,

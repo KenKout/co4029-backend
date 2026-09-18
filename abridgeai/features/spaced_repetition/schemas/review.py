@@ -77,8 +77,9 @@ class ReviewSubmitResult(BaseModel):
     q: int
     #: True when q >= 3 (card advances); False resets it to a 1-day interval.
     passing: bool
-    #: New review timestamp the card was rescheduled to.
-    due_at: datetime
+    #: New review timestamp the card was rescheduled to, or ``None`` when
+    #: this review retired the card and there is no next one.
+    due_at: datetime | None
     #: Days until the next review (post-jitter).
     interval_days: int
     #: How many cards remain due AFTER this submission (drives the counter).

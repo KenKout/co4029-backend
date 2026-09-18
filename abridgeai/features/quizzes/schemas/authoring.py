@@ -150,6 +150,10 @@ class QuizAuthoring(QuizPublic):
     min_ef_for_unlock: Decimal | None = None
     coverage_threshold: Decimal | None = None
     reminders_enabled: bool = False
+    #: False for an assessment that should not open review cards. See
+    #: ``Quiz.feeds_spaced_repetition`` -- it never suppresses grading of
+    #: a card the student already has.
+    feeds_spaced_repetition: bool = True
     generation_instructions: str | None = None
     generation_run_id: UUID | None = None
     published_at: datetime | None = None

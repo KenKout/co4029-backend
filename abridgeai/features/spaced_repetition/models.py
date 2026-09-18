@@ -70,8 +70,14 @@ class StudentCardState(TimestampMixin, Base):
     ef: Mapped[Decimal] = mapped_column(Numeric(4, 3), nullable=False, server_default=text("2.5"))
     interval_days: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
     repetition_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
-    due_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=text("NOW()")
+    #: When this card is next owed. ``NULL`` means retired: the card has
+    #: passed the configured maximum interval with
+    #: ``spaced_repetition.retire_beyond_max_interval`` on, and is no longer
+    #: scheduled. Every "due" read already filters ``due_at IS NOT NULL``, so
+    #: a retired card leaves the queue without leaving the table -- its EF,
+    #: interval and review history stay readable.
+    due_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, server_default=text("NOW()")
     )
     last_q: Mapped[int | None] = mapped_column(Integer, nullable=True)
     last_reviewed_at: Mapped[datetime | None] = mapped_column(

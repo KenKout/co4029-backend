@@ -31,7 +31,8 @@ class CardStateDTO(_DTOBase):
     ef: Decimal
     interval_days: int
     repetition_count: int
-    due_at: datetime
+    #: ``None`` when the card has retired past the maximum interval.
+    due_at: datetime | None
     last_q: int | None
     last_reviewed_at: datetime | None
     calibration_active: bool
