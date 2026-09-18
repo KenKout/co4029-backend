@@ -55,8 +55,17 @@ async def _require_embedded_chunks(db: AsyncSession, lesson_ids: list[UUID]) -> 
     row = (
         await db.execute(
             sa_text(
-                "SELECT count(*) FROM document_chunks "
-                "WHERE lesson_id = ANY(CAST(:lesson_ids AS uuid[]))"
+                """
+                SELECT count(*)
+                FROM document_chunks dc
+                WHERE dc.lesson_id = ANY(CAST(:lesson_ids AS uuid[]))
+                   OR dc.material_version_id IN (
+                       SELECT lm.current_version_id
+                       FROM lessons l
+                       JOIN learning_materials lm ON lm.id = l.primary_material_id
+                       WHERE l.id = ANY(CAST(:lesson_ids AS uuid[]))
+                   )
+                """
             ),
             {"lesson_ids": [str(x) for x in lesson_ids]},
         )

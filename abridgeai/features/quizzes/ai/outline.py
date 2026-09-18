@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from abridgeai.features.materials.models import DocumentChunk
@@ -114,19 +114,43 @@ async def build_lesson_outline(
     if not lesson_ids:
         return []
 
+    shared_version_rows = (
+        await db.execute(
+            text(
+                """
+                SELECT lm.current_version_id
+                FROM lessons l
+                JOIN learning_materials lm ON lm.id = l.primary_material_id
+                WHERE l.id = ANY(CAST(:lesson_ids AS uuid[]))
+                  AND lm.current_version_id IS NOT NULL
+                """
+            ),
+            {"lesson_ids": [str(lesson_id) for lesson_id in lesson_ids]},
+        )
+    ).scalars().all()
     result = await db.execute(
         select(DocumentChunk)
-        .where(DocumentChunk.lesson_id.in_(lesson_ids))
+        .where(
+            DocumentChunk.lesson_id.in_(lesson_ids)
+            | DocumentChunk.material_version_id.in_(shared_version_rows)
+        )
         .order_by(DocumentChunk.lesson_id, DocumentChunk.chunk_index)
     )
     rows: list[DocumentChunk] = list(result.scalars().all())
     if not rows:
         return []
 
-    # Group rows by lesson_id while preserving order within each lesson.
+    shared_versions = set(shared_version_rows)
+    # Group rows by lesson_id while preserving order within each lesson. A
+    # course clone reuses its source material/version, so project those shared
+    # chunks onto the cloned lesson id as well.
     by_lesson: dict[UUID, list[DocumentChunk]] = {}
     for chunk in rows:
-        by_lesson.setdefault(chunk.lesson_id, []).append(chunk)
+        if chunk.lesson_id in lesson_ids:
+            by_lesson.setdefault(chunk.lesson_id, []).append(chunk)
+        elif chunk.material_version_id in shared_versions:
+            for lesson_id in lesson_ids:
+                by_lesson.setdefault(lesson_id, []).append(chunk)
 
     outlines: list[LessonOutline] = []
     for lesson_id in lesson_ids:

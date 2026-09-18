@@ -23,6 +23,7 @@ from abridgeai.ai.knowledge_graph.builder import (
 from abridgeai.ai.knowledge_graph.retrieval import (
     MAX_CONCEPTS,
     MAX_RELATIONSHIPS,
+    clone_lesson_material_link,
     lesson_concept_graph,
     lesson_concept_graph_preview,
     lesson_concepts,
@@ -48,6 +49,7 @@ __all__ = [
     "KGContext",
     "KGSummary",
     "build_knowledge_graph_for_material_version",
+    "clone_lesson_material_link",
     "lesson_concept_graph",
     "lesson_concept_graph_preview",
     "lesson_concepts",

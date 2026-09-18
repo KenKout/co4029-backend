@@ -59,7 +59,28 @@ async def list_all_materials(
         )
         stmt = stmt.where(~cancelled_subq)
     stmt = stmt.order_by(LearningMaterial.created_at)
-    return list((await db.execute(stmt)).scalars().all())
+    materials = list((await db.execute(stmt)).scalars().all())
+    if materials:
+        return materials
+
+    # Course clones intentionally reuse the source lesson's material row and
+    # point the cloned lesson's ``primary_material_id`` at it. Surface that
+    # shared material in the clone's authoring view instead of making the lesson
+    # appear empty.
+    primary_material_id = await db.scalar(
+        text("SELECT primary_material_id FROM lessons WHERE id = :lesson_id"),
+        {"lesson_id": lesson_id},
+    )
+    if primary_material_id is None:
+        return []
+    material = await db.get(LearningMaterial, primary_material_id)
+    if material is None:
+        return []
+    if not include_archived:
+        current = await db.get(LearningMaterialVersion, material.current_version_id)
+        if current is not None and current.processing_status == "cancelled":
+            return []
+    return [material]
 
 
 async def get_material_for_authoring(

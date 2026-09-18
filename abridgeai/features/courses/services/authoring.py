@@ -91,6 +91,7 @@ from abridgeai.features.courses.schemas import (
 from abridgeai.features.identity.api import public as identity_api
 from abridgeai.features.identity.models import StorageObject
 from abridgeai.features.interviews.api import public as interviews_public
+from abridgeai.features.materials.api import public as materials_public
 from abridgeai.features.progress.api import public as progress_api
 from abridgeai.features.quizzes.api import public as quizzes_public
 from abridgeai.infrastructure.s3 import create_stream_url, put_object_bytes
@@ -816,6 +817,18 @@ async def _deep_clone_lesson(
             )
         )
     await _flush_or_conflict(db)
+    await materials_public.clone_lesson_curated_kg(
+        db,
+        source_lesson_id=source_lesson.id,
+        target_lesson_id=lesson_clone.id,
+    )
+    from abridgeai.ai.knowledge_graph import clone_lesson_material_link  # noqa: PLC0415
+
+    await clone_lesson_material_link(
+        source_lesson_id=source_lesson.id,
+        target_lesson_id=lesson_clone.id,
+        target_title=lesson_clone.title,
+    )
     return lesson_clone.id
 
 

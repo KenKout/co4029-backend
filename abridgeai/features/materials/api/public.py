@@ -60,7 +60,7 @@ from collections.abc import Iterable
 from uuid import UUID
 
 from sqlalchemy import bindparam, select, text
-from sqlalchemy.dialects.postgresql import ARRAY
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -330,6 +330,53 @@ async def get_processing_job_status(db: AsyncSession, job_id: UUID) -> Processin
     )
 
 
+async def clone_lesson_curated_kg(
+    db: AsyncSession, *, source_lesson_id: UUID, target_lesson_id: UUID
+) -> bool:
+    """Copy a teacher-curated graph to a cloned lesson, if one exists."""
+    row = (
+        await db.execute(
+            text(
+                """
+                SELECT draft_json, primary_node_id, published_json,
+                       published_primary_node_id, published_at
+                FROM lesson_knowledge_graphs
+                WHERE lesson_id = :source_lesson_id
+                  AND deleted_at IS NULL
+                """
+            ),
+            {"source_lesson_id": source_lesson_id},
+        )
+    ).mappings().one_or_none()
+    if row is None:
+        return False
+    await db.execute(
+        text(
+            """
+            INSERT INTO lesson_knowledge_graphs (
+                lesson_id, draft_json, primary_node_id, published_json,
+                published_primary_node_id, published_at
+            ) VALUES (
+                :target_lesson_id, :draft_json, :primary_node_id, :published_json,
+                :published_primary_node_id, :published_at
+            )
+            """
+        ).bindparams(
+            bindparam("draft_json", type_=JSONB),
+            bindparam("published_json", type_=JSONB),
+        ),
+        {
+            "target_lesson_id": target_lesson_id,
+            "draft_json": row["draft_json"],
+            "primary_node_id": row["primary_node_id"],
+            "published_json": row["published_json"],
+            "published_primary_node_id": row["published_primary_node_id"],
+            "published_at": row["published_at"],
+        },
+    )
+    return True
+
+
 def _as_uuid(value: object) -> UUID:
     """Coerce ``str | UUID`` from raw-SQL row mappings to ``UUID``.
 
@@ -352,6 +399,7 @@ __all__ = [
     "get_document_chunks_by_material",
     "get_material_with_lesson_context",
     "get_processing_job_status",
+    "clone_lesson_curated_kg",
     "get_storage_blob_for_version",
     "get_storage_size_and_key",
     "resolve_chunks_to_materials",
