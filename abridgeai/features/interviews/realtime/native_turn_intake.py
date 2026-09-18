@@ -117,13 +117,21 @@ class TurnIntake:
         # Set while nothing is in flight, so `drain` on an idle session is free.
         self._idle = asyncio.Event()
         self._idle.set()
-        # One-shot echo suppression marker (see `arm_echo` / `consume_echo`).
-        self._echo: tuple[str, str] | None = None
+
         # Closing gate + generation: a finalizer closes intake and remembers its
         # generation; a retry/reopen that belongs to a NEW finalizer bumps the
         # generation, so a stale finalizer cannot reopen the intake.
         self._closed = False
         self._generation = 0
+        # Serialises DISTINCT keys through the receipt→fold→settle pipeline
+        # (audit #13): K2's fold must see the state K1's fold committed, and
+        # the one-shot echo slot of K1 must survive K2's arm_echo. Held from
+        # just after the synchronous claim until the turn's processing scope
+        # exits.
+        self._pipeline = asyncio.Lock()
+        # Per-key echo suppression slots (a singleton marker let a later key
+        # overwrite an earlier one's marker before the SDK delivered its echo).
+        self._echo_slots: dict[str, str] = {}
 
     def seed(self, turn_key: str | None) -> None:
         self._ledger.seed(turn_key)
@@ -203,33 +211,40 @@ class TurnIntake:
             raise TypedTurnIntakeError()
         return _ProcessingScope(self)
 
+    @property
+    def pipeline_mutex(self) -> asyncio.Lock:
+        """The per-session lock spanning receipt→fold→settle for one turn.
+
+        Distinct keys WAIT here instead of interleaving their folds; the same
+        key never reaches this point twice (the ledger refuses before it).
+        """
+        return self._pipeline
+
     # ── echo suppression ────────────────────────────────────────────────────
     def arm_echo(self, *, turn_key: str, text: str) -> None:
         """Arm a ONE-SHOT marker for the SDK's echo of this typed answer.
 
         A typed answer is persisted DIRECTLY as its durable receipt, so the
         ``conversation_item_added`` copy of the same text must not be recorded
-        again — two identical transcript rows for one answer. The marker holds
-        the normalized text so a candidate typing the same sentence twice (two
-        keys, two legitimate answers) is NOT swallowed: only the turn whose key
-        and text both match is suppressed, and only once.
+        again — two identical transcript rows for one answer. Markers are PER
+        KEY: a candidate typing the same sentence twice (two keys, two
+        legitimate answers) is not swallowed, and a concurrent distinct key
+        cannot overwrite an earlier turn's marker before the SDK delivers its
+        echo (audit #13).
         """
-        self._echo = (turn_key, " ".join(text.split()))
+        self._echo_slots[turn_key] = " ".join(text.split())
 
     def consume_echo(self, *, turn_key: str, text: str) -> bool:
-        """Consume the armed marker when THIS turn's echo arrives.
+        """Consume THIS turn's marker when its echo arrives.
 
         True means "this conversation item is the SDK echo of an already
         persisted typed receipt — do not record it". A voice turn (no key
         armed, different text) never matches, so hybrid mode is untouched.
         """
-        marker = self._echo
-        if marker is None:
+        expected_text = self._echo_slots.get(turn_key)
+        if expected_text is None or expected_text != " ".join(text.split()):
             return False
-        expected_key, expected_text = marker
-        if expected_key != turn_key or expected_text != " ".join(text.split()):
-            return False
-        self._echo = None
+        del self._echo_slots[turn_key]
         return True
 
     async def drain(self, *, timeout_seconds: float = DRAIN_TIMEOUT_S) -> bool:

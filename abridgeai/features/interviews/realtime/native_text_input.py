@@ -164,9 +164,16 @@ def make_text_input_cb(
                 await publisher.ack(turn_key=turn.turn_key, turn_action=turn.turn_action)
                 await _reply(sess, turn, publisher)
                 return
-            should_reply = await _process_answer_turn(
-                sess, turn, publisher, turn_intake, receipts
-            )
+            # SINGLE-FLIGHT across distinct keys (audit #13): the whole
+            # receipt→claim→fold→settle pipeline holds the per-session mutex,
+            # so a concurrent K2 waits here instead of folding against the
+            # question K1 is about to advance. The model REPLY below runs
+            # outside the lock on purpose — it is slow and touches no fold
+            # state; K2's fold must not wait behind K1's LLM call.
+            async with turn_intake.pipeline_mutex:
+                should_reply = await _process_answer_turn(
+                    sess, turn, publisher, turn_intake, receipts
+                )
             if should_reply:
                 await _reply(sess, turn, publisher)
 

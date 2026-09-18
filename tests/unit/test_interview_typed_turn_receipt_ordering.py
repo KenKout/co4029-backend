@@ -17,8 +17,8 @@ from uuid import uuid4
 
 import pytest
 
-from abridgeai.features.interviews.realtime import text_protocol as tp
 from abridgeai.features.interviews.realtime import native_typed_turn as ntt
+from abridgeai.features.interviews.realtime import text_protocol as tp
 from abridgeai.features.interviews.realtime.native_text_input import make_text_input_cb
 from abridgeai.features.interviews.realtime.native_turn_intake import TurnIntake
 
@@ -277,16 +277,20 @@ async def test_a_voice_turn_is_never_treated_as_an_echo() -> None:
 
 @_asyncio
 async def test_the_marker_does_not_shadow_a_later_turn() -> None:
-    """Echo arrives AFTER the next answer started: only the right one matches."""
+    """Echo arrives AFTER the next answer started: only the right one matches.
+
+    Markers are PER KEY (audit #13): arming a second turn never erases the
+    first's slot — each key's echo consumes only its own marker, one-shot.
+    """
     intake = TurnIntake()
     intake.arm_echo(turn_key="tk-first0001", text="first answer")
     intake.arm_echo(turn_key="tk-second002", text="second answer")
 
-    # The second arm replaced the first — the first echo already ran through the
-    # receipt path while its marker was live; the current marker is the only one
-    # the transcript handler can consume.
-    assert intake.consume_echo(turn_key="tk-first0001", text="first answer") is False
+    assert intake.consume_echo(turn_key="tk-first0001", text="first answer") is True
     assert intake.consume_echo(turn_key="tk-second002", text="second answer") is True
+    # Wrong key/text pairs never match.
+    assert intake.consume_echo(turn_key="tk-first0001", text="second answer") is False
+    assert intake.consume_echo(turn_key="tk-second002", text="first answer") is False
 
 
 # ─────────────── double-submit through the receipt path ───────────────
@@ -427,11 +431,11 @@ async def test_a_spoken_style_fold_without_store_stays_best_effort() -> None:
 @_asyncio
 async def test_the_acknowledged_snapshot_confirms_the_turn_key() -> None:
     """The client may only clear its sent-draft on an EXPLICIT confirmation."""
+    from abridgeai.features.interviews.realtime.agent_userdata import InterviewUserdata
     from abridgeai.features.interviews.realtime.native_control import (
         ControlPublisher,
         build_snapshot,
     )
-    from abridgeai.features.interviews.realtime.agent_userdata import InterviewUserdata
 
     userdata = InterviewUserdata(interview_session_id=uuid4(), student_id=uuid4())
     userdata.state = None
@@ -467,11 +471,11 @@ async def test_the_acknowledged_snapshot_confirms_the_turn_key() -> None:
 @_asyncio
 async def test_an_ordinary_snapshot_carries_no_confirmation() -> None:
     """Only an explicit acknowledge confirms a turn — never a routine snapshot."""
+    from abridgeai.features.interviews.realtime.agent_userdata import InterviewUserdata
     from abridgeai.features.interviews.realtime.native_control import (
         ControlPublisher,
         build_snapshot,
     )
-    from abridgeai.features.interviews.realtime.agent_userdata import InterviewUserdata
 
     userdata = InterviewUserdata(interview_session_id=uuid4(), student_id=uuid4())
     userdata.state = None
