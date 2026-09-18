@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import uuid
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -894,3 +895,98 @@ async def test_student_must_keep_at_least_one_active_path(
                 actor=dean,
             )
         await db.rollback()
+
+
+@pytest.mark.asyncio
+async def test_two_programs_cannot_race_the_same_path_onto_one_student(
+    engine: AsyncEngine,
+    seeded_users: SeededUsers,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The cross-program duplicate guard under genuine concurrency.
+
+    ``_require_path_not_active_elsewhere`` reads before it writes, so two
+    requests in DIFFERENT enrollments can both find a clean state and both
+    insert: neither transaction sees the other's uncommitted row. The
+    per-enrollment index cannot help — it is keyed on
+    ``(program_enrollment_id, career_path_id)`` and these are two different
+    enrollments.
+
+    What stops it is the student-scoped partial unique index added in
+    ``0131``. This test fails without it, and it is the only one in the suite
+    that does: every other duplicate test runs the two attempts in sequence,
+    where the service check catches them first.
+    """
+    faculty_id, path_a, path_b = await _seed_program_context(engine, seeded_users)
+    factory = async_sessionmaker(engine, expire_on_commit=False, autoflush=False)
+    manager = CurrentUser(seeded_users.manager_id, uuid.uuid4())
+    student = seeded_users.student_id
+
+    async def generous(*args: object, **kwargs: object) -> int:
+        # Both the concurrent-enrollment cap and the student-wide path cap
+        # would otherwise refuse this setup for the wrong reason.
+        return 10
+
+    async def no_auto_start(*args: object, **kwargs: object) -> bool:
+        # The default path would be claimed at enrollment, and both programs
+        # would race on THAT instead of on the path under test.
+        return False
+
+    monkeypatch.setattr(services, "resolve_setting", generous)
+    monkeypatch.setattr(services, "_activate_default_path", no_auto_start)
+
+    enrollment_ids: list[uuid.UUID] = []
+    async with factory() as db:
+        for label in ("race-one", "race-two"):
+            program = await services.create_program(
+                db,
+                ProgramCreate(
+                    faculty_id=faculty_id,
+                    slug=f"{label}-{uuid.uuid4().hex[:8]}",
+                    name=f"Race {label}",
+                    career_path_ids=[path_a, path_b],
+                    default_career_path_id=path_b,
+                ),
+                manager,
+            )
+            await services.publish_program(db, program_id=program.id, actor=manager)
+            enrolled = await services.enroll_students(
+                db, program_id=program.id, student_ids=[student], actor=manager
+            )
+            enrollment_ids.append(enrolled[0].id)
+        await db.commit()
+
+    async def claim(enrollment_id: uuid.UUID) -> str:
+        """One student's attempt to take ``path_a``, in its own transaction."""
+        async with factory() as db:
+            try:
+                await services.select_path(
+                    db,
+                    enrollment_id=enrollment_id,
+                    career_path_id=path_a,
+                    student_id=student,
+                )
+                await db.commit()
+            except Exception as exc:  # noqa: BLE001 - the refusal is the result
+                await db.rollback()
+                return type(exc).__name__
+            return "ok"
+
+    outcomes = await asyncio.gather(
+        claim(enrollment_ids[0]), claim(enrollment_ids[1]), return_exceptions=True
+    )
+
+    # Exactly one claim may win. WHICH one is a race and not worth pinning;
+    # that there is exactly one is the entire point.
+    assert outcomes.count("ok") == 1, outcomes
+
+    async with engine.begin() as conn:
+        active = await conn.scalar(
+            text(
+                "SELECT COUNT(*) FROM program_path_attempts "
+                "WHERE student_id = :student AND career_path_id = :path "
+                "AND status = 'active'"
+            ),
+            {"student": student, "path": path_a},
+        )
+    assert active == 1, "the database, not the service check, is the backstop here"

@@ -51,6 +51,11 @@ register_conflict_mappings(
         "uq_learning_programs_org_slug": "learning_program_slug_taken",
         "uq_program_enrollments_program_student": "student_already_enrolled_in_program",
         "uq_program_path_attempts_active_path": "path_already_selected",
+        # Fires only when two requests race past the service-level check in
+        # different enrollments. Deliberately not worded "in another program":
+        # both indexes can be violated at once and Postgres picks which to
+        # report, so this sentence has to hold either way.
+        "uq_program_path_attempts_active_student_path": "path_already_active",
         "uq_path_change_requests_one_pending": "program_already_has_a_pending_path_change",
     }
 )
@@ -998,6 +1003,7 @@ async def _activate_default_path(
 
     attempt = ProgramPathAttempt(
         program_enrollment_id=enrollment.id,
+        student_id=enrollment.student_id,
         career_path_id=cast(UUID, default_path["career_path_id"]),
         career_path_version_id=cast(UUID, default_path["career_path_version_id"]),
         status="active",
@@ -1228,6 +1234,7 @@ async def select_path(
     )
     attempt = ProgramPathAttempt(
         program_enrollment_id=enrollment.id,
+        student_id=enrollment.student_id,
         career_path_id=career_path_id,
         career_path_version_id=target["career_path_version_id"],
         status="active",
@@ -1589,6 +1596,7 @@ async def decide_change_request(  # noqa: C901 - approval is one atomic invarian
     attempt.updated_by = actor.user_id
     new_attempt = ProgramPathAttempt(
         program_enrollment_id=enrollment.id,
+        student_id=enrollment.student_id,
         career_path_id=request.target_career_path_id,
         career_path_version_id=request.target_career_path_version_id,
         previous_attempt_id=attempt.id,

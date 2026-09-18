@@ -9,6 +9,8 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
+    ForeignKeyConstraint,
+    Index,
     Integer,
     String,
     Text,
@@ -173,6 +175,11 @@ class ProgramEnrollment(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, Bas
         UniqueConstraint(
             "learning_program_id", "student_id", name="uq_program_enrollments_program_student"
         ),
+        # Redundant against the primary key, and required anyway: Postgres
+        # will only accept a foreign key that references a UNIQUE pair, and
+        # ``ProgramPathAttempt`` references (id, student_id) to keep its
+        # denormalized student honest.
+        UniqueConstraint("id", "student_id", name="uq_program_enrollments_id_student"),
         CheckConstraint(
             "status IN ('awaiting_path','active','completed','withdrawn','cancelled')",
             name="ck_program_enrollments_status",
@@ -208,11 +215,48 @@ class ProgramPathAttempt(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, Ba
             "selection_source IN ('student','program_default','path_change')",
             name="ck_program_path_attempts_selection_source",
         ),
+        # One active attempt per student and career path, across EVERY
+        # program. The older index below it is per-enrollment and cannot see
+        # a second program, so the rule it was meant to enforce survived only
+        # as a service-code check -- which two concurrent requests in
+        # different enrollments can both pass.
+        Index(
+            "uq_program_path_attempts_active_student_path",
+            "student_id",
+            "career_path_id",
+            unique=True,
+            postgresql_where=text("status = 'active'"),
+        ),
+        # Kept alongside it. Logically subsumed, but it is registered to a
+        # narrower message ("you already selected this path here") that stays
+        # more useful than the cross-program one when both would apply.
+        Index(
+            "uq_program_path_attempts_active_path",
+            "program_enrollment_id",
+            "career_path_id",
+            unique=True,
+            postgresql_where=text("status = 'active'"),
+        ),
+        # The denormalized ``student_id`` is not trusted to stay in step by
+        # convention: this ties the pair back to the enrollment it was copied
+        # from, so an attempt whose student disagrees with its enrollment's
+        # cannot be inserted at all.
+        ForeignKeyConstraint(
+            ["program_enrollment_id", "student_id"],
+            ["program_enrollments.id", "program_enrollments.student_id"],
+            name="fk_program_path_attempts_enrollment_student",
+            ondelete="NO ACTION",
+        ),
     )
 
     program_enrollment_id: Mapped[uuid.UUID] = mapped_column(
         PGUUID(as_uuid=True), ForeignKey("program_enrollments.id", ondelete="NO ACTION"), index=True
     )
+    #: Copied from the owning enrollment, and held there by the composite
+    #: foreign key above. It exists so the cross-program uniqueness rule can
+    #: be an index: ``student_id`` is otherwise one table away, and a
+    #: constraint cannot reach it.
+    student_id: Mapped[uuid.UUID] = mapped_column(PGUUID(as_uuid=True), nullable=False)
     career_path_id: Mapped[uuid.UUID] = mapped_column(
         PGUUID(as_uuid=True), ForeignKey("career_paths.id", ondelete="NO ACTION")
     )
