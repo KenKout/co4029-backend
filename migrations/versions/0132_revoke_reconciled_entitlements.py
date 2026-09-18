@@ -32,7 +32,7 @@ to it: a migration cannot await an AsyncSession, and pinning the statements
 here is correct anyway — a migration must keep doing what it did when it ran,
 even after that function changes.
 
-Revision ID: 0132_revoke_reconciled_entitlements
+Revision ID: 0132_revoke_reconciled
 Revises: 0131_student_scoped_active_path
 """
 
@@ -41,7 +41,7 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
-revision = "0132_revoke_reconciled_entitlements"
+revision = "0132_revoke_reconciled"
 down_revision = "0131_student_scoped_active_path"
 branch_labels = None
 depends_on = None

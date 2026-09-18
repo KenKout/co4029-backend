@@ -86,6 +86,11 @@ def world(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     monkeypatch.setattr(services.queries, "get_enrollment", AsyncMock(return_value=enrollment))
     monkeypatch.setattr(services.queries, "get_program", AsyncMock(return_value=program))
     monkeypatch.setattr(services.queries, "get_attempt", AsyncMock(return_value=attempt))
+    monkeypatch.setattr(
+        services.queries,
+        "find_active_path_attempt_elsewhere",
+        AsyncMock(return_value=None),
+    )
     monkeypatch.setattr(services.queries, "list_attempts", AsyncMock(return_value=[attempt]))
 
     return {

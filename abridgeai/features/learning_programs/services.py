@@ -1256,7 +1256,7 @@ async def select_path(
     return await _enrollment_out(db, enrollment)
 
 
-async def request_path_change(
+async def request_path_change(  # noqa: C901 - validates one atomic request invariant set
     db: AsyncSession,
     *,
     enrollment_id: UUID,

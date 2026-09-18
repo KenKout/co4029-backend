@@ -265,7 +265,7 @@ async def test_a_platform_admin_keeps_the_global_view(
     """
     token = await _bearer(engine, world.platform)
     resp = await client.get(
-        "/api/v1/admin/organizations", params={"limit": 200}, headers=_auth(token)
+        "/api/v1/admin/organizations", params={"limit": 500}, headers=_auth(token)
     )
     assert resp.status_code == 200, resp.text
 
