@@ -96,6 +96,12 @@ from abridgeai.features.interviews.services.ceremony import (
     normalize_language,
     onboarding_ceremony_kind,
 )
+from abridgeai.features.interviews.services.lifecycle import (
+    evaluation_job_id as _evaluation_job_id,
+)
+from abridgeai.features.interviews.services.lifecycle import (
+    record_missing_dispatch as _record_missing_dispatch,
+)
 from abridgeai.features.interviews.services.retake import (
     InterviewCooldownActive,  # noqa: F401  -- re-exported: routers catch taking_service.InterviewCooldownActive
     InterviewMaxAttemptsReached,  # noqa: F401  -- re-exported: routers catch taking_service.InterviewMaxAttemptsReached
@@ -2066,6 +2072,40 @@ async def submit_session(
     _assert_owns_session(session, actor)
     language = getattr(session, "interview_language", language)
     if session.status != "in_progress":
+        # Already terminal: an idempotent re-finish. This is ALSO the dispatch
+        # redrive path — a first finish whose enqueue failed (durable
+        # ``missing`` record, or no record at all when even that write failed)
+        # used to be un-retryable, because the client retry only ever saw the
+        # terminal row and nothing re-enqueued. Attempt the dispatch again;
+        # the evaluator dedupes on the published verdict, so at worst this is
+        # one redundant attempt.
+        if arq_pool is not None:
+            _retry_job_id = _evaluation_job_id(session.id)
+            try:
+                await arq_pool.enqueue_job(  # type: ignore[attr-defined]
+                    _EVALUATE_INTERVIEW_SESSION_TASK,
+                    actor.user_id,
+                    session.id,
+                    _job_id=_retry_job_id,
+                )
+            except Exception:  # noqa: BLE001 -- retry stays idempotent, recovery sweep still owns the row
+                logger.exception(
+                    "evaluation redrive on terminal re-finish failed (session=%s)",
+                    session.id,
+                )
+            else:
+                # The redrive reached Redis: move a durable ``missing`` record
+                # to ``queued`` so the sweep does not redrive it a second time.
+                # Scoped to THIS job id, a no-op when no record exists.
+                await sessions_queries.transition_evaluation_recovery_phase(
+                    db,
+                    session.id,
+                    job_id=_retry_job_id,
+                    from_phase="missing",
+                    to_phase="queued",
+                    extra={"redrived_at": utcnow().isoformat()},
+                )
+                await db.commit()
         return session
 
     config = await db.get(InterviewConfig, session.interview_config_id)
@@ -2137,12 +2177,30 @@ async def submit_session(
     # (unanswered questions score zero).
     has_content = not never_reached_assessment and (user_message_count > 0 or reason != "timed_out")
     if arq_pool is not None and has_content:
-        await arq_pool.enqueue_job(  # type: ignore[attr-defined]
-            _EVALUATE_INTERVIEW_SESSION_TASK,
-            actor.user_id,
-            session.id,
-            _job_id=f"interview-evaluation:{session.id}",
-        )
+        # The terminal commit above is durable: if the dispatch fails here the
+        # exception used to propagate as a 500 while the client's retry only
+        # saw a terminal session and never re-enqueued — the evaluation waited
+        # out the recovery sweep's grace window (or longer). Instead, catch the
+        # failure and stamp a durable ``missing`` dispatch record: the session
+        # stays terminal, the caller gets an honest completion response, and
+        # the recovery sweep redrives ``missing`` rows immediately (no grace
+        # wait). A retry of the finish itself re-enqueues through the same
+        # early-return path below.
+        job_id = _evaluation_job_id(session.id)
+        try:
+            await arq_pool.enqueue_job(  # type: ignore[attr-defined]
+                _EVALUATE_INTERVIEW_SESSION_TASK,
+                actor.user_id,
+                session.id,
+                _job_id=job_id,
+            )
+        except Exception:  # noqa: BLE001 -- dispatch failure must not 500 a committed terminal state
+            logger.exception(
+                "evaluation dispatch failed after terminal commit (session=%s, job_id=%s)",
+                session.id,
+                job_id,
+            )
+            await _record_missing_dispatch(db, session_id=session.id, job_id=job_id)
     return session
 
 

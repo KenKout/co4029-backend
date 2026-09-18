@@ -41,7 +41,7 @@ logger = logging.getLogger(__name__)
 _EVALUATE_INTERVIEW_SESSION_TASK = "evaluate_interview_session_task"
 
 
-def _evaluation_job_id(session_id: UUID, *, attempt: int = 0) -> str:
+def evaluation_job_id(session_id: UUID, *, attempt: int = 0) -> str:
     """Deterministic ARQ job ID for one session's evaluation.
 
     ``attempt=0`` (the default) keeps the original session-scoped ID used by the
@@ -110,7 +110,7 @@ async def sweep_expired_interview_sessions(
                 _EVALUATE_INTERVIEW_SESSION_TASK,
                 session.student_id,
                 session.id,
-                _job_id=_evaluation_job_id(session.id),
+                _job_id=evaluation_job_id(session.id),
             )
         logger.info(
             "swept expired interview session %s → %s",
@@ -119,6 +119,56 @@ async def sweep_expired_interview_sessions(
         )
 
     return finalised
+
+
+async def record_missing_dispatch(
+    db: AsyncSession,
+    *,
+    session_id: UUID,
+    job_id: str,
+) -> None:
+    """Durable ``phase='missing'`` marker for a dispatch that never reached Redis.
+
+    Called from the terminal paths when ``enqueue_job`` raises (Redis down,
+    transport error) AFTER the terminal commit: the session stays terminal,
+    the caller returns an honest completion response instead of a 500, and
+    ``recover_stalled_evaluations`` redrives the row immediately — a missing
+    job needs no grace window because there is nothing to wait for. Owns its
+    commit: the terminal state it annotates is already durable, and a failure
+    here must never mask the completion response (the sweep remains the
+    safety net either way).
+
+    Mirrors the recovery record shape so ``_ACTIVE_PHASES_SQL`` does not count
+    ``missing`` as active (it is terminal) while the redrive CAS still finds it.
+    """
+    from sqlalchemy import text  # noqa: PLC0415
+
+    now = utcnow().isoformat()
+    sql = text(
+        "UPDATE interview_sessions "
+        "   SET internal_summary_json = jsonb_set("
+        "         COALESCE(internal_summary_json, '{}'::jsonb), "
+        "         '{evaluation_recovery}', "
+        "         COALESCE(internal_summary_json -> 'evaluation_recovery', '{}'::jsonb) "
+        "           || jsonb_build_object("
+        "                'current', jsonb_build_object("
+        "                  'job_id', CAST(:job_id AS text), "
+        "                  'phase', 'missing', "
+        "                  'dispatched_at', CAST(:now AS text))), "
+        "         true) "
+        " WHERE id = :session_id "
+        "RETURNING id"
+    )
+    try:
+        await db.execute(
+            sql, {"session_id": session_id, "job_id": job_id, "now": now}
+        )
+        await db.commit()
+    except Exception:  # noqa: BLE001 -- bookkeeping only; the sweep is the safety net
+        await db.rollback()
+        logger.exception(
+            "recording missing dispatch failed (session=%s)", session_id
+        )
 
 
 async def recover_stalled_evaluations(
@@ -295,7 +345,7 @@ async def _redrive_one_evaluation(
     # A live claim / active durable job re-checked at stamp time (the candidate
     # list may be stale) refuses the charge — including a claim that appeared
     # after the query ran.
-    job_id = _evaluation_job_id(session_id, attempt=1)
+    job_id = evaluation_job_id(session_id, attempt=1)
     # The attempt number is only known after the stamp (it returns the NEW
     # count), but the stamp builds the deterministic job id itself, so pass the
     # caller-chosen id shape: we must know the id BEFORE dispatch to CAS the
@@ -326,7 +376,7 @@ async def _redrive_one_evaluation(
         )
         return False
 
-    job_id = _evaluation_job_id(session_id, attempt=attempt)
+    job_id = evaluation_job_id(session_id, attempt=attempt)
     job: object | None = None
     dispatch_error: Exception | None = None
     try:
@@ -378,6 +428,8 @@ async def _redrive_one_evaluation(
 
 
 __all__ = [
+    "evaluation_job_id",
+    "record_missing_dispatch",
     "recover_stalled_evaluations",
     "sweep_expired_interview_sessions",
 ]
