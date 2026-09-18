@@ -76,6 +76,11 @@ def default_path_world(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     monkeypatch.setattr(
         services.queries, "count_active_paths_for_student", AsyncMock(return_value=0)
     )
+    monkeypatch.setattr(
+        services.career_paths_api,
+        "is_version_complete_for_user",
+        AsyncMock(return_value=False),
+    )
     monkeypatch.setattr(services, "resolve_setting", AsyncMock(return_value=10))
     return {
         "db": _recording_db(),

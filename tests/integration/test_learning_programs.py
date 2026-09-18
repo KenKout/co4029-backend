@@ -38,8 +38,14 @@ async def test_multiple_paths_complete_the_program_only_when_all_are_complete(
     async def two_path_limit(*args: object, **kwargs: object) -> int:
         return 2
 
+    completion_checks = 0
+
     async def path_is_complete(*args: object, **kwargs: object) -> bool:
-        return True
+        nonlocal completion_checks
+        completion_checks += 1
+        # The default path must start first; both later completion checks
+        # should report that their pinned path is complete.
+        return completion_checks > 1
 
     monkeypatch.setattr(services, "resolve_setting", two_path_limit)
     monkeypatch.setattr(
@@ -75,9 +81,8 @@ async def test_multiple_paths_complete_the_program_only_when_all_are_complete(
             db, enrollment_id=enrollment.id, career_path_id=path_b, student_id=student
         )
 
-        assert enrollment.selected_path_count == 1
-        assert enrollment.attempts[0].selection_source == "program_default"
         assert second.selected_path_count == 2
+        assert second.attempts[0].selection_source == "program_default"
         assert len([attempt for attempt in second.attempts if attempt.status == "active"]) == 2
 
         assert (
