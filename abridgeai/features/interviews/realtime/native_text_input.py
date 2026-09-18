@@ -222,7 +222,7 @@ async def _duplicate_receipt_outcome(
     return "handled"
 
 
-async def _process_answer_turn(
+async def _process_answer_turn(  # noqa: C901 - typed-door coordinator: receipt states + claim + fold + settle
     sess: Any,  # noqa: ANN401 - see _on_text_input
     turn: tp.InboundTurn,
     publisher: ControlPublisher,
@@ -237,6 +237,7 @@ async def _process_answer_turn(
     draft whose fold never landed, or lock a composer behind a dead fold.
     """
     receipt_row = None
+    _created = False
     if receipts is not None:
         try:
             receipt_row, _created = await receipts.persist(
@@ -265,6 +266,32 @@ async def _process_answer_turn(
                 rejection=tp.TurnRejection.SERVER_ERROR,
             )
             return False
+
+    # OWNERSHIP before fold: a PRE-EXISTING received receipt (this caller's
+    # own fresh one needs no claim — its token was minted here) must be
+    # claimed lease-aware first. A live lease elsewhere → re-ack, stand down;
+    # an expired lease transfers to THIS caller and locks the dead owner out.
+    if (
+        receipt_row is not None
+        and not _created
+        and native_typed_turn.receipt_state(receipt_row) == "received"
+        and turn.turn_key
+    ):
+        claimed, fresh_token = await receipts.claim_received(
+            session_id=sess.userdata.interview_session_id,
+            turn_key=turn.turn_key,
+        )
+        if not claimed:
+            obs.emit(
+                obs.EV_TEXT_TURN_DUPLICATE,
+                session_id=_session_id(sess),
+                turn_action=turn.turn_action,
+            )
+            await publisher.ack(turn_key=turn.turn_key, turn_action=turn.turn_action)
+            return False
+        if fresh_token is not None:
+            receipt_row.metadata_json = dict(receipt_row.metadata_json or {})
+            receipt_row.metadata_json["processing_token"] = str(fresh_token)
 
     # A FAILED receipt from an earlier fold attempt: reclaim it under a fresh
     # token so THIS caller owns the retry. Reclaim refused (another caller won)

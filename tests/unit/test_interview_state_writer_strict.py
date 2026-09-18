@@ -25,6 +25,30 @@ class _Loaded:
         self.data = data
 
 
+class _SyncTarget:
+    """Minimal shared-state stand-in: remembers synced fields.
+
+    ``__getattr__`` answers every name so ``_sync_from_winner``'s
+    ``hasattr`` gate passes for arbitrary winner keys — a real
+    ``InterviewRuntimeStateData`` carries those fields; this fake is generic.
+    """
+
+    merged: dict[str, Any]
+
+    def __init__(self) -> None:
+        object.__setattr__(self, "merged", {})
+
+    def __getattr__(self, name: str) -> Any:
+        # only called for MISSING attributes -> report None so hasattr passes
+        return None
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if name == "merged":
+            object.__setattr__(self, name, value)
+        else:
+            self.merged[name] = value
+
+
 class _FakeRepo:
     """In-memory stand-in for state_repo (load_or_init / save).
 
@@ -39,8 +63,13 @@ class _FakeRepo:
         self.saved: list[int] = []
         self.row: dict[str, Any] = {}
         self.fail_next_save = False
+        # Optional FIFO of (version, data) returned by successive load_or_init
+        # calls; when empty, falls back to (self.version, None).
+        self.load_results: list[_Loaded] = []
 
     async def load_or_init(self, db: Any, session_id: Any) -> _Loaded:
+        if self.load_results:
+            return self.load_results.pop(0)
         return _Loaded(self.version, None)
 
     async def save(
@@ -136,6 +165,33 @@ class TestStrictTypedPath:
         await w.save(strict=True, turn_key="tk-2")
 
         assert fake_repo.row["turn_key"] == "tk-2"
+
+    async def test_strict_stale_sync_uses_reloaded_winner_not_stale_snapshot(
+        self, fake_repo: _FakeRepo, committed: list[bool]
+    ) -> None:
+        """The V0-snapshot bug: after a CAS loss, the winner must be RELOADED.
+
+        Interleaving: the writer loads V0; a reconcile worker persists V1; the
+        writer's CAS fails; the strict path re-syncs the shared state. If it
+        syncs from the PRE-CAS ``loaded`` (V0) instead of re-reading, the
+        foreign writer's fields are clobbered with stale ones on the retry.
+        """
+        fake_repo.load_results = [
+            _Loaded(0, {"coverage": "v0", "foreign_field": "stale"}),  # pre-save load
+            _Loaded(1, {"coverage": "v1", "foreign_field": "winner"}),  # post-CAS reload
+        ]
+        fake_repo.fail_next_save = True
+        state = _SyncTarget()
+        w = nb.StateWriter(uuid4(), state)
+        w.adopt_version(0)
+
+        with pytest.raises(state_repo_module.StaleStateError):
+            await w.save(strict=True, turn_key="tk-stale")
+
+        assert state.merged.get("foreign_field") == "winner", (
+            "the strict stale path must re-sync from the RELOADED winner, "
+            "not the pre-CAS V0 snapshot"
+        )
 
     async def test_load_time_difference_is_resynced_then_saved_against_current(
         self, fake_repo: _FakeRepo, committed: list[bool]

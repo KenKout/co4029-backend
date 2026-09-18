@@ -180,6 +180,63 @@ def receipt_state(row: Any) -> str | None:  # noqa: ANN401 - ORM row or store di
     return state if isinstance(state, str) else None
 
 
+async def claim_received_receipt(
+    db: AsyncSession,
+    row: Any,  # noqa: ANN401 - ORM row from load_receipt_by_key
+    *,
+    current_token: UUID | None,
+) -> tuple[bool, UUID | None]:
+    """Atomically claim a RECEIVED receipt for folding; (won, fresh_token).
+
+    The claim is lease-aware: a LIVE lease refuses every re-claim (even the
+    same token — the owner is presumed alive and will settle via its own
+    token-checked CAS; a same-owner retry that lost its in-process
+    bookkeeping waits out the lease), while an EXPIRED or missing lease
+    transfers ownership to the caller under a fresh token + extended lease:
+    a restarted agent resumes the fold and the dead owner's token can never
+    settle the receipt. The row is refreshed in place on success so the
+    caller's subsequent CAS uses the new token.
+    """
+    import uuid as uuid_mod  # noqa: PLC0415
+
+    from sqlalchemy import update  # noqa: PLC0415
+
+    from abridgeai.features.interviews.models import (  # noqa: PLC0415
+        InterviewSessionMessage,
+    )
+
+    meta = getattr(row, "metadata_json", None) or {}
+    if not isinstance(meta, dict) or meta.get("turn_state") != _RECEIVED:
+        return False, None
+    if receipt_is_owned_by_current_caller(row, None):
+        # Lease still live: whoever holds it (maybe this very process, mid
+        # fold) owns the receipt. Never fold twice.
+        return False, None
+
+    fresh = uuid_mod.uuid4()
+    new_meta = dict(meta)
+    new_meta["processing_token"] = str(fresh)
+    new_meta["processing_expires_at"] = (
+        utcnow() + timedelta(seconds=PROCESSING_LEASE_SECONDS)
+    ).isoformat()
+    old_token = str(meta.get("processing_token") or "")
+    result = await db.execute(
+        update(InterviewSessionMessage)
+        .where(
+            InterviewSessionMessage.id == row.id,
+            InterviewSessionMessage.metadata_json["turn_state"].as_string() == _RECEIVED,
+            InterviewSessionMessage.metadata_json["processing_token"].as_string() == old_token,
+        )
+        .values(metadata_json=new_meta)
+    )
+    await db.commit()
+    rowcount: Any = getattr(result, "rowcount", 0)
+    if not rowcount:
+        return False, None
+    row.metadata_json = new_meta
+    return True, fresh
+
+
 def receipt_is_owned_by_current_caller(
     row: Any, token: UUID | None  # noqa: ANN401 - ORM row from the caller's session
 ) -> bool:
@@ -419,6 +476,15 @@ class TypedTurnStore(Protocol):
         turn_key: str,
     ) -> Any | None:  # noqa: ANN401 - the row type is the implementation's own
         """The durable receipt for a turn key, or None. Read-only."""
+        ...
+
+    async def claim_received(
+        self,
+        *,
+        session_id: UUID,
+        turn_key: str,
+    ) -> tuple[bool, UUID | None]:
+        """Claim a pre-existing RECEIVED receipt (lease-aware); (won, fresh_token)."""
         ...
 
     async def reclaim(

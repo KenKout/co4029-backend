@@ -653,6 +653,22 @@ def _make_receipt_store(
                     db, session_id=session_id, turn_key=turn_key
                 )
 
+        async def claim_received(
+            self,
+            *,
+            session_id: UUID,
+            turn_key: str,
+        ) -> tuple[bool, UUID | None]:
+            from abridgeai.core.db import get_sessionmaker  # noqa: PLC0415
+
+            async with get_sessionmaker()() as db:
+                row = await native_typed_turn.load_receipt_by_key(
+                    db, session_id=session_id, turn_key=turn_key
+                )
+                if row is None:
+                    return False, None
+                return await native_typed_turn.claim_received_receipt(db, row, current_token=None)
+
     return _PgStore()
 
 

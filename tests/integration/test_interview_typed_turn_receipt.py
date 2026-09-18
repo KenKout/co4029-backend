@@ -21,6 +21,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
+from uuid import UUID
 
 import pytest
 import pytest_asyncio
@@ -321,6 +322,120 @@ async def test_concurrent_resolution_of_the_same_bank_question_converges(
     assert set(linked_banks) == {bank_question_id}, (
         "a racing receipt's session-question row points at the WRONG bank question"
     )
+
+
+async def test_a_live_received_lease_blocks_a_second_folder(
+    receipt_probe: dict[str, Any],
+    test_engine: AsyncEngine,
+) -> None:
+    """Agent A persists a receipt, pauses before folding; agent B (restart or
+    second instance) receives the duplicate within A's lease.
+
+    B must NOT fold: the receipt stays A's until A's lease expires, B settles
+    nothing, and no second answer row appears. Before the claim the only
+    guard was the terminal CAS — both copies folded and both advanced state.
+    """
+    session_id = receipt_probe["session_id"]
+    maker = _maker(test_engine)
+    turn_key = f"lease-block-{uuid.uuid4().hex[:12]}"
+    created_token: UUID | None = None
+
+    # Agent A: persist (commits), then "pause" — no fold.
+    async with maker() as db:
+        row, created = await ntt.persist_receipt(
+            db,
+            session_id=session_id,
+            session_question_id=None,
+            bank_question_id=None,
+            text="agent A answer",
+            turn_key=turn_key,
+        )
+        assert created is True
+        created_token = UUID(row.metadata_json["processing_token"])
+
+    # Agent B: a fresh session/instance sees the live receipt...
+    async with maker() as db:
+        seen = await ntt.load_receipt_by_key(
+            db, session_id=session_id, turn_key=turn_key
+        )
+        assert seen is not None
+        assert ntt.receipt_state(seen) == "received"
+        # ...and its lease is live: helper must agree.
+        assert ntt.receipt_is_owned_by_current_caller(seen, None) is True
+        # The CLAIM is the new primitive: B loses (lease live, token differs),
+        # so B must fold nothing.
+        claimed, token = await ntt.claim_received_receipt(
+            db,
+            seen,
+            current_token=UUID(seen.metadata_json["processing_token"]),
+        )
+        assert claimed is False
+        assert ntt.receipt_state(seen) == "received"
+
+    # Exactly one answer row: B did not fold/insert a second copy.
+    assert await _count_rows(test_engine, session_id) == 1
+    assert created_token is not None
+
+
+async def test_an_expired_received_lease_is_reclaimable(
+    receipt_probe: dict[str, Any],
+    test_engine: AsyncEngine,
+) -> None:
+    """The restart story: A persisted then died; the lease expired.
+
+    B's claim wins, transfers ownership (fresh token + extended lease), and
+    B is the one folder — the stale-token fold of A can no longer settle the
+    receipt applied.
+    """
+    session_id = receipt_probe["session_id"]
+    maker = _maker(test_engine)
+    turn_key = f"lease-reclaim-{uuid.uuid4().hex[:12]}"
+
+    async with maker() as db:
+        row, created = await ntt.persist_receipt(
+            db,
+            session_id=session_id,
+            session_question_id=None,
+            bank_question_id=None,
+            text="agent A answer",
+            turn_key=turn_key,
+        )
+        assert created is True
+        stale_token = UUID(row.metadata_json["processing_token"])
+    # A died before folding; the lease lapses.
+    async with test_engine.begin() as conn:
+        await conn.execute(
+            text(
+                "UPDATE interview_session_messages "
+                "SET metadata_json = jsonb_set(metadata_json, '{processing_expires_at}', "
+                "to_jsonb(to_char(now() - interval '1 minute', 'YYYY-MM-DD\"T\"HH24:MI:SSOF'))) "
+                "WHERE session_id = :s AND metadata_json->>'turn_key' = :k"
+            ),
+            {"s": session_id, "k": turn_key[:128]},
+        )
+
+    async with maker() as db:
+        seen = await ntt.load_receipt_by_key(
+            db, session_id=session_id, turn_key=turn_key
+        )
+        assert seen is not None
+        assert ntt.receipt_is_owned_by_current_caller(seen, None) is False
+        claimed, new_token = await ntt.claim_received_receipt(
+            db, seen, current_token=stale_token
+        )
+        assert claimed is True
+        # Ownership transferred: the fresh token + extended lease are durable.
+        async with maker() as db:
+            reloaded = await ntt.load_receipt_by_key(
+                db, session_id=session_id, turn_key=turn_key
+            )
+            assert reloaded is not None
+            assert UUID(reloaded.metadata_json["processing_token"]) == new_token
+            assert ntt.receipt_is_owned_by_current_caller(reloaded, None) is True
+        # A's stale fold can no longer settle the receipt.
+        assert await ntt.mark_receipt_applied(
+            db, seen, processing_token=str(stale_token)
+        ) is False
 
 
 async def test_the_received_to_applied_cas_is_one_shot(

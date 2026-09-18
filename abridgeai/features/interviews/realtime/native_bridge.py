@@ -286,8 +286,12 @@ class StateWriter:
                     # Re-sync the shared object to the persisted winner before
                     # raising, so the typed caller's retry folds onto the
                     # winner's state (never double-awarding coverage/counters
-                    # that the winner already recorded).
-                    self._sync_from_winner(loaded.data)
+                    # that the winner already recorded). The winner is
+                    # RELOADED here — the earlier ``loaded`` in this method is
+                    # the PRE-CAS snapshot (V0), and syncing from it would
+                    # clobber the foreign writer's fields with stale ones.
+                    winner = await state_repo.load_or_init(db, self._session_id)
+                    self._sync_from_winner(winner.data)
                     self._version = None
                     raise
                 logger.warning(
