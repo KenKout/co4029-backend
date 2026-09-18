@@ -573,8 +573,37 @@ async def archive_quiz(db: AsyncSession, quiz_id: UUID, actor: CurrentUser) -> Q
     return quiz
 
 
+async def _assert_quiz_deletable(db: AsyncSession, quiz: Quiz) -> None:
+    """Reject deletion once a quiz has been exposed through live parents.
+
+    A quiz can be published while its course or module is still a draft. In
+    that state no learner can reach it, so deleting it remains a safe authoring
+    operation. Once both parents are published, however, a published quiz may
+    own attempts, grades, review evidence and course-completion history. Keep
+    that record even after the quiz itself is archived: ``published_at`` is the
+    durable exposure marker and prevents archive-then-delete from bypassing
+    this guard while the parent curriculum remains live.
+    """
+    course = await courses_api.get_course_by_id(db, quiz.course_id)
+    module = await courses_api.get_module_by_id(db, quiz.module_id)
+    parents_are_live = (
+        course is not None
+        and module is not None
+        and course.status == "published"
+        and module.status == "published"
+    )
+    quiz_has_been_published = quiz.status == "published" or quiz.published_at is not None
+    if parents_are_live and quiz_has_been_published:
+        raise ConflictError("learner_exposed_quiz_cannot_be_deleted")
+
+
 async def delete_quiz(db: AsyncSession, quiz_id: UUID, actor: CurrentUser) -> None:
-    """Soft-delete the quiz + cascade to questions / options / revisions.
+    """Soft-delete a quiz that has not reached learners.
+
+    A published quiz is still deletable while either its course or module is
+    not published, because the learner content tree cannot expose it. Once all
+    three levels are live, deletion is blocked and archive becomes the terminal
+    lifecycle action; historical attempts and completion evidence must remain.
 
     Also soft-deletes the ``module_items`` row that points at this quiz.
     ``soft_delete_cascade`` walks ONETOMANY relationships only, and
@@ -584,6 +613,7 @@ async def delete_quiz(db: AsyncSession, quiz_id: UUID, actor: CurrentUser) -> No
     pointing at a deleted quiz — the UI rendered it, and clicking it 404'd.
     """
     quiz = await _require_quiz(db, quiz_id)
+    await _assert_quiz_deletable(db, quiz)
 
     # Collect this quiz's question ids BEFORE the cascade so we can purge their
     # SM-2 card state. student_card_state is keyed on question_id and, being

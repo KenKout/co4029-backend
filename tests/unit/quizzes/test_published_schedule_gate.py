@@ -11,22 +11,28 @@ means. Both bounds accept a naive datetime and read it as UTC; a naive value
 misread as local time would open or close a quiz hours off, and every bound
 in this system is stored UTC.
 
-Pure functions over datetimes — the gate needs no database.
+The file also pins the related deletion exposure gate: publication at the Quiz
+level is not enough to reach a learner until both its Course and Module are
+published. Those service checks use mocked parent lookups and no database.
 """
 
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 from uuid import UUID, uuid4
 
 import pytest
 
+from abridgeai.core.exceptions import ConflictError
 from abridgeai.features.quizzes.queries.published import (
     QuizClosed,
     QuizNotYetOpen,
     _assert_within_schedule_window_values,
     _looks_like_uuid,
 )
+from abridgeai.features.quizzes.services import authoring
 
 
 @pytest.fixture
@@ -131,3 +137,68 @@ class TestSlugOrIdentifier:
     def test_a_non_string_does_not_raise(self) -> None:
         """The value arrives from a URL path, so it must fail closed."""
         assert _looks_like_uuid(None) is False  # type: ignore[arg-type]
+
+
+class TestDeletionExposureGate:
+    """A quiz is deletable until the full curriculum can expose it."""
+
+    @staticmethod
+    def _quiz(*, status: str, published_at: datetime | None) -> SimpleNamespace:
+        return SimpleNamespace(
+            status=status,
+            published_at=published_at,
+            course_id=uuid4(),
+            module_id=uuid4(),
+        )
+
+    @staticmethod
+    def _set_parent_statuses(
+        monkeypatch: pytest.MonkeyPatch, course_status: str, module_status: str
+    ) -> None:
+        monkeypatch.setattr(
+            authoring.courses_api,
+            "get_course_by_id",
+            AsyncMock(return_value=SimpleNamespace(status=course_status)),
+        )
+        monkeypatch.setattr(
+            authoring.courses_api,
+            "get_module_by_id",
+            AsyncMock(return_value=SimpleNamespace(status=module_status)),
+        )
+
+    @pytest.mark.asyncio
+    async def test_blocks_a_previously_published_quiz_under_live_parents(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        quiz = self._quiz(status="archived", published_at=datetime.now(UTC))
+        self._set_parent_statuses(monkeypatch, "published", "published")
+
+        with pytest.raises(
+            ConflictError, match="learner_exposed_quiz_cannot_be_deleted"
+        ):
+            await authoring._assert_quiz_deletable(object(), quiz)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("course_status", "module_status"),
+        [("draft", "published"), ("published", "draft"), ("draft", "draft")],
+    )
+    async def test_allows_a_published_quiz_when_either_parent_is_not_live(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        course_status: str,
+        module_status: str,
+    ) -> None:
+        quiz = self._quiz(status="published", published_at=datetime.now(UTC))
+        self._set_parent_statuses(monkeypatch, course_status, module_status)
+
+        await authoring._assert_quiz_deletable(object(), quiz)
+
+    @pytest.mark.asyncio
+    async def test_allows_a_draft_quiz_under_live_parents(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        quiz = self._quiz(status="draft", published_at=None)
+        self._set_parent_statuses(monkeypatch, "published", "published")
+
+        await authoring._assert_quiz_deletable(object(), quiz)
