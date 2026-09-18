@@ -618,19 +618,22 @@ async def record_integrity_events(
     response only. The interview continues either way — browser signals are
     review/deterrence evidence, never a termination trigger, and never
     tamper-proof proof of misconduct.
-    """
-    from sqlalchemy import select  # noqa: PLC0415
 
+    Concurrency: two batches may overlap. The read-add-commit shape this
+    endpoint used before lost updates (both read the same base score; the
+    later commit decided) and surfaced duplicate ``client_event_id`` retries
+    as unique-violation 500s. Now ``queries.integrity_events.record_batch``
+    bulk-inserts with ``ON CONFLICT DO NOTHING RETURNING``, applies the score
+    ADDITIVELY in SQL from the rows this request actually inserted, and fires
+    the one-shot warning through a conditional UPDATE whose WHERE only one
+    racing request can match.
+    """
     from abridgeai.features.interviews.models import (  # noqa: PLC0415
-        AssessmentIntegrityEvent,
         InterviewConfig,
         InterviewSession,
     )
-    from abridgeai.features.interviews.schemas.integrity import (  # noqa: PLC0415
-        add_weighted_score,
-        coerce_client_event_id,
-        is_scored_event,
-        warn_once_and_score,
+    from abridgeai.features.interviews.queries import (  # noqa: PLC0415
+        integrity_events as integrity_queries,
     )
     from abridgeai.features.interviews.services.ceremony import (  # noqa: PLC0415
         integrity_policy_snapshot_from_config,
@@ -653,89 +656,28 @@ async def record_integrity_events(
         config = await db.get(InterviewConfig, session.interview_config_id)
         policy = integrity_policy_snapshot_from_config(config)
 
-    score_before = int(session.integrity_score or 0)
-    warned_already = bool(session.integrity_warning_issued)
-    score_after = score_before
+    score_after, warning_issued, threshold = await integrity_queries.record_batch(
+        db,
+        session_id=session_id,
+        student_id=current_user.user_id,
+        policy=policy,
+        events=list(payload.events),
+        warned_already=bool(session.integrity_warning_issued),
+    )
 
-    for item in payload.events:
-        if not is_scored_event(item.event_type):
-            # reconnect / disconnect: recorded for the teacher timeline, never
-            # scored (a network blip is not an integrity signal).
-            db.add(
-                AssessmentIntegrityEvent(
-                    assessment_kind="interview",
-                    interview_session_id=session_id,
-                    student_id=current_user.user_id,
-                    event_type=item.event_type,
-                    severity=item.severity,
-                    metadata_json=dict(item.metadata),
-                )
-            )
-            continue
-        client_event_id = coerce_client_event_id(item.metadata.get("client_event_id"))
-        existing = None
-        if client_event_id is not None:
-            existing = (
-                await db.execute(
-                    select(AssessmentIntegrityEvent.id).where(
-                        AssessmentIntegrityEvent.interview_session_id == session_id,
-                        AssessmentIntegrityEvent.client_event_id == client_event_id,
-                    )
-                )
-            ).scalar_one_or_none()
-        if existing is not None:
-            # Idempotent retry: the batch was already persisted (and scored).
-            continue
-        score_after = add_weighted_score(score_after, item.event_type, policy)
-        db.add(
-            AssessmentIntegrityEvent(
-                assessment_kind="interview",
-                interview_session_id=session_id,
-                student_id=current_user.user_id,
-                event_type=item.event_type,
-                severity=item.severity,
-                client_event_id=client_event_id,
-                metadata_json=dict(item.metadata),
-            )
-        )
-
-    warning_issued = False
-    if not warned_already:
-        decision = warn_once_and_score(score_after, int(policy.get("score_threshold", 0) or 0))
-        warning_issued = decision.reaches_threshold
-        if decision.reaches_threshold:
-            # Server-generated evidence row: the client cannot write this event
-            # type into the timeline (its own warning_issued posts are recorded
-            # but never score and never set the flag).
-            db.add(
-                AssessmentIntegrityEvent(
-                    assessment_kind="interview",
-                    interview_session_id=session_id,
-                    student_id=current_user.user_id,
-                    event_type="warning_issued",
-                    severity="warning",
-                    metadata_json={
-                        "integrity_score_after": score_after,
-                        "integrity_score_threshold": int(policy.get("score_threshold", 0) or 0),
-                        "integrity_weight_tab_switch": int(policy.get("tab_switch", 0) or 0),
-                        "integrity_weight_focus_lost": int(policy.get("focus_lost", 0) or 0),
-                        "integrity_weight_fullscreen_exit": int(
-                            policy.get("fullscreen_exit", 0) or 0
-                        ),
-                    },
-                )
-            )
+    if score_after != int(session.integrity_score or 0) or warning_issued:
+        # Keep the ORM identity map honest for the commit; the truth lives in
+        # the conditional UPDATEs inside record_batch.
+        session.integrity_score = score_after
+        if warning_issued:
             session.integrity_warning_issued = True
             session.session_security_flagged = True
             session.integrity_threshold_flagged_at = utcnow()
-
-    if score_after != score_before or warning_issued:
-        session.integrity_score = score_after
     await db.commit()
     return IntegrityEventBatchResponse(
         accepted=len(payload.events),
         integrity_score=score_after,
-        integrity_score_threshold=int(policy.get("score_threshold", 0) or 0),
+        integrity_score_threshold=threshold,
         warning_issued=warning_issued,
     )
 
@@ -786,6 +728,28 @@ def _resolve_language(accept_language: str | None) -> str:
     return "en"
 
 
+async def _current_session_question_snapshot(
+    db: AsyncSession, session_id: UUID, user_id: UUID
+) -> UUID | None:
+    """The CURRENT session-question id for a 409 stale-turn snapshot, or None."""
+    from sqlalchemy import select  # noqa: PLC0415
+
+    from abridgeai.features.interviews.models import (  # noqa: PLC0415
+        InterviewSessionQuestion,
+    )
+
+    fresh = await taking_service.get_session_for_user(db, session_id, user_id)
+    if fresh is None:
+        return None
+    snapshot_q = await db.execute(
+        select(InterviewSessionQuestion.id)
+        .where(InterviewSessionQuestion.session_id == session_id)
+        .order_by(InterviewSessionQuestion.sequence_no.desc())
+        .limit(1)
+    )
+    return snapshot_q.scalar_one_or_none()
+
+
 @router.post(
     "/interview-sessions/{session_id}/respond",
     response_model=InterviewSubmitAnswerResponse,
@@ -812,6 +776,7 @@ async def respond_to_session(
             turn_key=payload.turn_key,
             language=_resolve_language(accept_language),
             turn_action=payload.turn_action or "answer",
+            session_question_id=payload.session_question_id,
         )
     except NotFoundError as exc:
         raise _not_found("interview_session", session_id) from exc
@@ -819,6 +784,24 @@ async def respond_to_session(
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail={"error": "forbidden", "message": str(exc)},
+        ) from exc
+    except taking_service.StaleSessionQuestionError as exc:
+        # A two-tab client (or a retry after a lost response) submitted for a
+        # question the session has advanced past. Nothing was written; hand
+        # back the CURRENT binding so the client can re-render and retry.
+        await db.rollback()
+        current_sq_id = await _current_session_question_snapshot(
+            db, session_id, current_user.user_id
+        )
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "error": "stale_session_question",
+                "message": str(exc),
+                "current_session_question_id": (
+                    str(current_sq_id) if current_sq_id is not None else None
+                ),
+            },
         ) from exc
     except AppError as exc:
         raise _bad_request(str(exc)) from exc

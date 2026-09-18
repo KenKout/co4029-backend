@@ -1139,6 +1139,134 @@ async def test_submit_session_marks_completed_and_enqueues_eval(
     assert invocation.args[2] == started.id
 
 
+async def test_submit_session_dispatch_failure_keeps_terminal_and_records_missing(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict[str, Any],
+) -> None:
+    """An enqueue failure after terminalization must NOT 500 or strand the row.
+
+    The terminal commit lands BEFORE the enqueue, so a Redis/ARQ failure used
+    to bubble out of ``submit_session`` as a 500 while the session was already
+    ``completed``: the client's retry saw a terminal session and never
+    re-enqueued, stranding the evaluation until the recovery sweep's grace
+    window (15 minutes) elapsed. Now the failure is caught, a durable
+    ``phase='missing'`` record is written (the recovery sweep redrives it
+    immediately — no grace wait), and the completion state returns normally.
+    """
+    seeded = await _create_published_config(
+        engine,
+        course_id=scenario["course_id"],
+        module_id=scenario["module_id"],
+        teacher_id=scenario["teacher_id"],
+    )
+    payload = _CreatePayload(input_mode="text")
+    async with session_factory() as session, session.begin():
+        started = await taking_service.start_session(
+            session, seeded["config_id"], payload, _actor(scenario["student_id"])
+        )
+    await _complete_onboarding(engine, started.id)
+
+    class _ExplodingPool:
+        async def enqueue_job(self, *_args: object, **_kwargs: object) -> object:
+            raise RuntimeError("simulated redis outage")
+
+    async with session_factory() as session:
+        finished = await taking_service.submit_session(
+            session,
+            started.id,
+            _actor(scenario["student_id"]),
+            arq_pool=_ExplodingPool(),  # type: ignore[arg-type]
+        )
+
+    assert finished.status == "completed"
+    assert finished.ended_at is not None
+
+    # The durable record marks the dispatch as missing so recovery can redrive
+    # it without waiting out the grace window.
+    async with engine.begin() as conn:
+        row = (
+            await conn.execute(
+                text(
+                    "SELECT internal_summary_json #> '{evaluation_recovery,current}' "
+                    "FROM interview_sessions WHERE id = :id"
+                ),
+                {"id": str(started.id)},
+            )
+        ).scalar_one()
+    import json as _json
+
+    current = _json.loads(_json.dumps(row))
+    assert current["phase"] == "missing"
+    assert current["job_id"].startswith("interview-evaluation:")
+
+
+async def test_submit_session_retry_after_enqueue_failure_redrives_immediately(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict[str, Any],
+) -> None:
+    """A client retry on an already-terminal session re-enqueues at once.
+
+    The finish endpoint idempotently returns the terminal session; with the
+    dispatch-gap fix that path also attempts the enqueue again, so a candidate
+    whose first finish lost the dispatch does not wait for the recovery sweep.
+    No double grading: the evaluation task itself dedupes on the verdict.
+    """
+    seeded = await _create_published_config(
+        engine,
+        course_id=scenario["course_id"],
+        module_id=scenario["module_id"],
+        teacher_id=scenario["teacher_id"],
+    )
+    payload = _CreatePayload(input_mode="text")
+    async with session_factory() as session, session.begin():
+        started = await taking_service.start_session(
+            session, seeded["config_id"], payload, _actor(scenario["student_id"])
+        )
+    await _complete_onboarding(engine, started.id)
+
+    class _ExplodingPool:
+        async def enqueue_job(self, *_args: object, **_kwargs: object) -> object:
+            raise RuntimeError("simulated redis outage")
+
+    async with session_factory() as session:
+        await taking_service.submit_session(
+            session,
+            started.id,
+            _actor(scenario["student_id"]),
+            arq_pool=_ExplodingPool(),  # type: ignore[arg-type]
+        )
+
+    # The candidate (or the router) retries the finish; this time Redis works.
+    retry_pool = SimpleNamespace(enqueue_job=AsyncMock(return_value=object()))
+    async with session_factory() as session:
+        finished = await taking_service.submit_session(
+            session,
+            started.id,
+            _actor(scenario["student_id"]),
+            arq_pool=retry_pool,
+        )
+
+    assert finished.status == "completed"
+    retry_pool.enqueue_job.assert_awaited_once()
+    invocation = retry_pool.enqueue_job.await_args
+    assert invocation.args[2] == started.id
+
+    # The retry cleared the missing record (phase advanced to queued).
+    async with engine.begin() as conn:
+        phase = (
+            await conn.execute(
+                text(
+                    "SELECT internal_summary_json #>> '{evaluation_recovery,current,phase}' "
+                    "FROM interview_sessions WHERE id = :id"
+                ),
+                {"id": str(started.id)},
+            )
+        ).scalar_one()
+    assert phase == "queued"
+
+
 @pytest.mark.asyncio
 async def test_submit_enqueues_eval(
     engine: AsyncEngine,

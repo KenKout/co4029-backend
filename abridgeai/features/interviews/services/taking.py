@@ -31,7 +31,12 @@ from sqlalchemy.exc import IntegrityError
 
 from abridgeai.core.config import get_settings
 from abridgeai.core.db.conflict_mapper import flush_or_conflict
-from abridgeai.core.exceptions import AppError, ForbiddenError, NotFoundError
+from abridgeai.core.exceptions import (
+    AppError,
+    ConflictError,
+    ForbiddenError,
+    NotFoundError,
+)
 from abridgeai.core.security import CurrentUser, utcnow
 from abridgeai.features.interviews.ai.stages.followup import maybe_generate_followup
 from abridgeai.features.interviews.models import (
@@ -90,6 +95,12 @@ from abridgeai.features.interviews.services.ceremony import (
     integrity_policy_snapshot_from_config,
     normalize_language,
     onboarding_ceremony_kind,
+)
+from abridgeai.features.interviews.services.lifecycle import (
+    dispatch_evaluation_or_record_missing as _dispatch_evaluation_or_record_missing,
+)
+from abridgeai.features.interviews.services.lifecycle import (
+    redrive_missing_dispatch_on_refinish as _redrive_missing_dispatch_on_refinish,
 )
 from abridgeai.features.interviews.services.retake import (
     InterviewCooldownActive,  # noqa: F401  -- re-exported: routers catch taking_service.InterviewCooldownActive
@@ -347,6 +358,24 @@ async def _ensure_first_question_attached(
     await flush_or_conflict(db)
 
 
+class StaleSessionQuestionError(ConflictError):
+    """A REST turn named a session question the session has advanced past.
+
+    Two tabs can render the same question; when tab A's answer advances the
+    session, tab B's submit for the OLD binding must not land on the new
+    question (it would mis-attribute the transcript and skip a question).
+    Carries the CURRENT session-question id so the client can re-render and
+    retry against the live binding (HTTP 409 + snapshot in the router).
+    """
+
+    def __init__(self, current_session_question_id: UUID) -> None:
+        self.current_session_question_id = current_session_question_id
+        super().__init__(
+            "stale_session_question: this turn names a question the session "
+            "has already advanced past — reload and answer the current question"
+        )
+
+
 async def take_session_step(  # noqa: C901 - shared legacy/adaptive turn coordinator
     db: AsyncSession,
     session_id: UUID,
@@ -357,6 +386,7 @@ async def take_session_step(  # noqa: C901 - shared legacy/adaptive turn coordin
     turn_key: str | None = None,
     language: str = "en",
     turn_action: str = "answer",
+    session_question_id: UUID | None = None,
 ) -> dict[str, Any]:
     """Record the student's answer + advance the session.
 
@@ -366,6 +396,12 @@ async def take_session_step(  # noqa: C901 - shared legacy/adaptive turn coordin
     is text/hybrid AND the pipeline succeeds), extra structured keys (``action``,
     ``reason_code``, ``ai_turn_text``, ``state_version``, …) are added and the
     canonical mapper guarantees the legacy + structured views never contradict.
+
+    ``session_question_id`` binds the turn to the question the client actually
+    SAW. When supplied and the session has already advanced past it, the turn
+    is rejected with :class:`StaleSessionQuestionError` and nothing is written.
+    Callers that omit it keep the legacy resolve-current behaviour (existing
+    unit tests, diagnostic paths).
 
     Adaptive is HARD-GATED to text/hybrid using the authoritative backend
     ``session.input_mode`` — voice sessions always run the exact legacy path
@@ -385,6 +421,11 @@ async def take_session_step(  # noqa: C901 - shared legacy/adaptive turn coordin
     current_session_question = await _current_session_question(db, session_id)
     if current_session_question is None:
         raise AppError("Session has no current question to answer")
+    if (
+        session_question_id is not None
+        and session_question_id != current_session_question.id
+    ):
+        raise StaleSessionQuestionError(current_session_question.id)
 
     current_question: InterviewQuestion | None = None
     if current_session_question.interview_question_id is not None:
@@ -2031,6 +2072,16 @@ async def submit_session(
     _assert_owns_session(session, actor)
     language = getattr(session, "interview_language", language)
     if session.status != "in_progress":
+        # Already terminal: an idempotent re-finish, and the dispatch redrive
+        # path. Fires ONLY on a durable ``missing`` record — a winner whose
+        # dispatch succeeded leaves none, so a finish-race loser never
+        # enqueues twice.
+        await _redrive_missing_dispatch_on_refinish(
+            db,
+            session_id=session.id,
+            student_id=actor.user_id,
+            arq_pool=arq_pool,
+        )
         return session
 
     config = await db.get(InterviewConfig, session.interview_config_id)
@@ -2102,11 +2153,13 @@ async def submit_session(
     # (unanswered questions score zero).
     has_content = not never_reached_assessment and (user_message_count > 0 or reason != "timed_out")
     if arq_pool is not None and has_content:
-        await arq_pool.enqueue_job(  # type: ignore[attr-defined]
-            _EVALUATE_INTERVIEW_SESSION_TASK,
-            actor.user_id,
-            session.id,
-            _job_id=f"interview-evaluation:{session.id}",
+        # A dispatch failure must not 500 a committed terminal state: it is
+        # stamped ``missing``; the sweep (or a finish retry) redrives it.
+        await _dispatch_evaluation_or_record_missing(
+            db,
+            session_id=session.id,
+            student_id=actor.user_id,
+            arq_pool=arq_pool,
         )
     return session
 

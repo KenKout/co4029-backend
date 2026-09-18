@@ -20,8 +20,10 @@ on the shared seeded course — see the fixture comments for why.
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from collections.abc import AsyncIterator
+from typing import Any
 from unittest.mock import AsyncMock
 
 import httpx
@@ -251,6 +253,288 @@ async def student_token(
     yield create_access_token(user_id=seeded_users.student_id, session_id=sid)
     async with engine.begin() as conn:
         await conn.execute(text("DELETE FROM auth_sessions WHERE id = :id"), {"id": sid})
+
+
+# ── Concurrency harness ──────────────────────────────────────────────────────
+# A parked request is one whose FIRST dedupe SELECT has completed but whose
+# writes have not happened: the park fires AFTER ``await session.execute``
+# returns for a statement against ``assessment_integrity_events``. A second
+# request is then driven to completion inline before the parked one resumes —
+# exactly the interleaving that loses a score update (both batches read the
+# same base score; the later commit decides) and that turns a duplicate
+# ``client_event_id`` into a unique-violation 500. ``asyncio.gather`` is
+# useless here: it lets the first coroutine commit before the second reads.
+def _make_integrity_app(
+    session_factory: async_sessionmaker[AsyncSession],
+    parking: dict | None = None,
+) -> FastAPI:
+    from fastapi import FastAPI
+
+    from abridgeai.core.db import get_db
+
+    async def _override_get_db() -> AsyncIterator[AsyncSession]:
+        ctx = parking
+        async with session_factory() as session:
+            if ctx is None:
+                yield session
+                return
+            original_execute = session.execute
+
+            async def _parking_execute(stmt: Any, *args: Any, **kwargs: Any) -> Any:
+                result = await original_execute(stmt, *args, **kwargs)
+                statement_text = str(stmt)
+                if (
+                    ctx["armed"]
+                    and not ctx["fired"]
+                    and "assessment_integrity_events" in statement_text
+                    and "client_event_id" in statement_text
+                ):
+                    ctx["fired"] = True
+                    ctx["go"].set()
+                    await ctx["continue"].wait()
+                return result
+
+            session.execute = _parking_execute  # type: ignore[method-assign]
+            yield session
+
+    fastapi_app = FastAPI()
+    fastapi_app.include_router(learner_router, prefix="/api/v1")
+    fastapi_app.include_router(learner_sessions_router, prefix="/api/v1")
+    fastapi_app.dependency_overrides[get_db] = _override_get_db
+    return fastapi_app
+
+
+def _parking_client(fastapi_app: FastAPI) -> httpx.AsyncClient:
+    transport = httpx.ASGITransport(app=fastapi_app)
+    return httpx.AsyncClient(transport=transport, base_url="http://testserver")
+
+
+def _event(event_type: str, client_event_id: uuid.UUID) -> dict:
+    return {
+        "event_type": event_type,
+        "severity": "warning",
+        "metadata": {"client_event_id": str(client_event_id)},
+    }
+
+
+async def test_concurrent_batches_do_not_lose_score_or_double_warn(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    integrity_scenario: dict,
+    student_token: str,
+) -> None:
+    """Two overlapping batches: the later commit must not erase the earlier one.
+
+    Request A parks right after its dedupe SELECT (it has read base score 0);
+    request B then runs to completion (fullscreen_exit, weight 2, score 2 < 3,
+    no warning); A resumes and commits tab_switch (weight 3). The merged total
+    must be 5, not whichever batch wrote last, and exactly one ``warning_issued``
+    evidence row may exist (A crosses the threshold; B never did).
+    """
+    config_id = integrity_scenario["config_id"]
+    base_app = _make_integrity_app(session_factory)
+    async with _parking_client(base_app) as base_client:
+        session_id, _ = await _start_session(base_client, config_id, student_token)
+
+    parking = {
+        "armed": True,
+        "fired": False,
+        "go": asyncio.Event(),
+        "continue": asyncio.Event(),
+    }
+    parked_app = _make_integrity_app(session_factory, parking)
+    event_a = _event("tab_switch", uuid.uuid4())
+    event_b = _event("fullscreen_exit", uuid.uuid4())
+
+    async with _parking_client(parked_app) as parked_client, _parking_client(base_app) as other_client:
+        task_a = asyncio.create_task(
+            _post_batch(parked_client, session_id, student_token, [event_a])
+        )
+        await parking["go"].wait()
+
+        resp_b = await _post_batch(other_client, session_id, student_token, [event_b])
+        assert resp_b.status_code == 202, resp_b.text
+        assert resp_b.json()["warning_issued"] is False
+
+        parking["continue"].set()
+        resp_a = await task_a
+
+    assert resp_a.status_code == 202, resp_a.text
+    assert resp_a.json()["integrity_score"] == 5
+    assert resp_a.json()["warning_issued"] is True
+
+    async with engine.begin() as conn:
+        score = (
+            await conn.execute(
+                text("SELECT integrity_score FROM interview_sessions WHERE id = :id"),
+                {"id": str(session_id)},
+            )
+        ).scalar_one()
+        flagged = (
+            await conn.execute(
+                text("SELECT integrity_warning_issued FROM interview_sessions WHERE id = :id"),
+                {"id": str(session_id)},
+            )
+        ).scalar_one()
+        warning_rows = (
+            await conn.execute(
+                text(
+                    "SELECT count(*) FROM assessment_integrity_events "
+                    "WHERE interview_session_id = :id AND event_type = 'warning_issued'"
+                ),
+                {"id": str(session_id)},
+            )
+        ).scalar_one()
+        scored_rows = (
+            await conn.execute(
+                text(
+                    "SELECT count(*) FROM assessment_integrity_events "
+                    "WHERE interview_session_id = :id "
+                    "  AND event_type IN ('tab_switch', 'fullscreen_exit')"
+                ),
+                {"id": str(session_id)},
+            )
+        ).scalar_one()
+
+    assert scored_rows == 2
+    assert score == 5
+    assert flagged is True
+    assert warning_rows == 1
+
+
+async def test_concurrent_duplicate_client_event_id_is_retry_idempotent(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    integrity_scenario: dict,
+    student_token: str,
+) -> None:
+    """Same ``client_event_id`` from two overlapping batches: both get 202.
+
+    Request A parks after its dedupe SELECT (it saw no row); request B commits
+    the same id; A resumes. A must not 500 on the unique index and must not
+    double-score — exactly one event row, one score contribution, one warning.
+    """
+    config_id = integrity_scenario["config_id"]
+    base_app = _make_integrity_app(session_factory)
+    async with _parking_client(base_app) as base_client:
+        session_id, _ = await _start_session(base_client, config_id, student_token)
+
+    parking = {
+        "armed": True,
+        "fired": False,
+        "go": asyncio.Event(),
+        "continue": asyncio.Event(),
+    }
+    parked_app = _make_integrity_app(session_factory, parking)
+    shared_id = uuid.uuid4()
+
+    async with _parking_client(parked_app) as parked_client, _parking_client(base_app) as other_client:
+        task_a = asyncio.create_task(
+            _post_batch(parked_client, session_id, student_token, [_event("tab_switch", shared_id)])
+        )
+        await parking["go"].wait()
+
+        resp_b = await _post_batch(
+            other_client, session_id, student_token, [_event("tab_switch", shared_id)]
+        )
+        assert resp_b.status_code == 202, resp_b.text
+        assert resp_b.json()["warning_issued"] is True
+
+        parking["continue"].set()
+        resp_a = await task_a
+
+    assert resp_a.status_code == 202, resp_a.text
+    assert resp_a.json()["integrity_score"] == 3
+    assert resp_a.json()["warning_issued"] is False
+
+    async with engine.begin() as conn:
+        score = (
+            await conn.execute(
+                text("SELECT integrity_score FROM interview_sessions WHERE id = :id"),
+                {"id": str(session_id)},
+            )
+        ).scalar_one()
+        scored_rows = (
+            await conn.execute(
+                text(
+                    "SELECT count(*) FROM assessment_integrity_events "
+                    "WHERE interview_session_id = :id AND event_type = 'tab_switch'"
+                ),
+                {"id": str(session_id)},
+            )
+        ).scalar_one()
+        warning_rows = (
+            await conn.execute(
+                text(
+                    "SELECT count(*) FROM assessment_integrity_events "
+                    "WHERE interview_session_id = :id AND event_type = 'warning_issued'"
+                ),
+                {"id": str(session_id)},
+            )
+        ).scalar_one()
+
+    assert scored_rows == 1
+    assert score == 3
+    assert warning_rows == 1
+
+
+async def test_batch_with_mixed_scored_unscored_and_in_batch_duplicate(
+    app: tuple[FastAPI, AsyncMock],
+    session_factory: async_sessionmaker[AsyncSession],
+    engine: AsyncEngine,
+    integrity_scenario: dict,
+    student_token: str,
+) -> None:
+    """One batch carrying an unscored event, a scored event, and a repeated id.
+
+    The in-batch duplicate must not double-score (ON CONFLICT skips it), the
+    unscored reconnect row must persist without scoring, and the response must
+    stay 202 with the merged score.
+    """
+    config_id = integrity_scenario["config_id"]
+    fastapi_app, _ = app
+    async with _parking_client(_make_integrity_app(session_factory)) as start_client:
+        session_id, _ = await _start_session(start_client, config_id, student_token)
+
+    shared_id = uuid.uuid4()
+    batch = [
+        _event("tab_switch", shared_id),
+        _event("tab_switch", shared_id),  # duplicate within the same batch
+        {
+            "event_type": "reconnect",
+            "severity": "info",
+            "metadata": {"client_event_id": str(uuid.uuid4())},
+        },
+    ]
+    async with _parking_client(fastapi_app) as post_client:
+        resp = await _post_batch(post_client, session_id, student_token, batch)
+    assert resp.status_code == 202, resp.text
+    body = resp.json()
+    assert body["integrity_score"] == 3
+    assert body["warning_issued"] is True
+
+    async with engine.begin() as conn:
+        scored_rows = (
+            await conn.execute(
+                text(
+                    "SELECT count(*) FROM assessment_integrity_events "
+                    "WHERE interview_session_id = :id AND event_type = 'tab_switch'"
+                ),
+                {"id": str(session_id)},
+            )
+        ).scalar_one()
+        reconnect_rows = (
+            await conn.execute(
+                text(
+                    "SELECT count(*) FROM assessment_integrity_events "
+                    "WHERE interview_session_id = :id AND event_type = 'reconnect'"
+                ),
+                {"id": str(session_id)},
+            )
+        ).scalar_one()
+
+    assert scored_rows == 1
+    assert reconnect_rows == 1
 
 
 async def test_tab_switch_weight_three_crosses_default_threshold(

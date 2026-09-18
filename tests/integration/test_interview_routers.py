@@ -502,6 +502,189 @@ async def test_other_user_session_403(
 # ---------------------------------------------------------------------------
 
 
+async def _current_session_question_id(
+    engine: AsyncEngine, session_id: uuid.UUID
+) -> uuid.UUID:
+    """The session question row the server currently expects answers for."""
+    async with engine.begin() as conn:
+        row = (
+            await conn.execute(
+                text(
+                    "SELECT id FROM interview_session_questions "
+                    "WHERE session_id = :s ORDER BY sequence_no DESC LIMIT 1"
+                ),
+                {"s": session_id},
+            )
+        ).first()
+    assert row is not None, "session has no attached question"
+    return uuid.UUID(str(row[0]))
+
+
+async def _seed_second_question(
+    engine: AsyncEngine, config_id: uuid.UUID, actor_id: uuid.UUID
+) -> uuid.UUID:
+    """A second approved bank question so answering Q1 can advance to Q2.
+
+    The base seed carries a single question; after tab A answers it the
+    session has no next question to attach, which would mask the stale-binding
+    bug this test exercises (the stale turn must land on Q2, not nowhere).
+    """
+    question_id = uuid.uuid4()
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO interview_questions "
+                "(id, interview_config_id, position, question_type, prompt_text, "
+                " review_status, ai_generated, source_refs_json, created_by) "
+                "VALUES (:id, :cfg, 2, 'conceptual', 'What is a closure?', "
+                "        'approved', false, '[]'::jsonb, :u)"
+            ),
+            {"id": question_id, "cfg": config_id, "u": actor_id},
+        )
+    return question_id
+
+
+async def test_respond_rejects_stale_session_question(
+    client: httpx.AsyncClient,
+    engine: AsyncEngine,
+    scenario: dict[str, uuid.UUID],
+    seeded_users: SeededUsers,
+    monkeypatch: object,
+) -> None:
+    """A turn naming a STALE session question must be rejected without effects.
+
+    Two tabs render Q1. Tab A submits (the server advances to Q2); tab B
+    submits its answer to Q1. Before the bind check the service resolved the
+    CURRENT session question itself, so B's answer landed on Q2 and the
+    session advanced again — a skipped question and a mis-attributed
+    transcript. The stale turn now 409s with the current question id and
+    writes nothing.
+    """
+    from abridgeai.features.interviews.services import taking as taking_service  # noqa: PLC0415
+
+    async def _no_followup(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(taking_service, "maybe_generate_followup", _no_followup)  # type: ignore[attr-defined]
+
+    config_id = await _seed_published_config(
+        engine,
+        course_id=scenario["course_id"],
+        module_id=scenario["module_id"],
+        actor_id=seeded_users.admin_id,
+    )
+    q2_bank_id = await _seed_second_question(engine, config_id, seeded_users.admin_id)
+    student_sid = await _seed_session(engine, seeded_users.student_id)
+    try:
+        student_token = create_access_token(user_id=seeded_users.student_id, session_id=student_sid)
+        start_resp = await client.post(
+            f"/api/v1/interview-configs/{config_id}/sessions",
+            json={"input_mode": "text"},
+            headers=_auth(student_token),
+        )
+        assert start_resp.status_code == 201, start_resp.text
+        session_id = uuid.UUID(start_resp.json()["session_id"])
+        await _complete_onboarding(engine, session_id)
+        q1_id = await _current_session_question_id(engine, session_id)
+
+        # Simulate the session advancing past Q1 (what tab A's accepted answer
+        # does in production): Q2 becomes the attached current question. Doing
+        # it directly keeps the test deterministic — whether the pipeline
+        # advances on a given answer is LM-judged, but the BINDING contract
+        # this test pins only needs "current != what the client names".
+        async with engine.begin() as conn:
+            await conn.execute(
+                text(
+                    "INSERT INTO interview_session_questions "
+                    "(session_id, interview_question_id, sequence_no) "
+                    "VALUES (:s, :q, 2)"
+                ),
+                {"s": session_id, "q": q2_bank_id},
+            )
+        current_id = await _current_session_question_id(engine, session_id)
+        assert current_id != q1_id
+
+        # Tab B submits for the STALE Q1 binding.
+        stale_resp = await client.post(
+            f"/api/v1/interview-sessions/{session_id}/respond",
+            json={
+                "session_id": str(session_id),
+                "session_question_id": str(q1_id),
+                "answer_text": "tab B late answer",
+            },
+            headers=_auth(student_token),
+        )
+        assert stale_resp.status_code == 409, stale_resp.text
+        detail = stale_resp.json()["detail"]
+        assert detail["error"] == "stale_session_question"
+        assert detail["current_session_question_id"] == str(current_id)
+
+        # Nothing from the stale turn persisted: no user message at all.
+        async with engine.begin() as conn:
+            count = (
+                await conn.execute(
+                    text(
+                        "SELECT count(*) FROM interview_session_messages "
+                        "WHERE session_id = :s AND role = 'user'"
+                    ),
+                    {"s": session_id},
+                )
+            ).scalar_one()
+        assert count == 0
+    finally:
+        async with engine.begin() as conn:
+            await conn.execute(text("DELETE FROM auth_sessions WHERE id = :id"), {"id": student_sid})
+
+
+async def test_respond_with_matching_session_question_succeeds(
+    client: httpx.AsyncClient,
+    engine: AsyncEngine,
+    scenario: dict[str, uuid.UUID],
+    seeded_users: SeededUsers,
+    monkeypatch: object,
+) -> None:
+    """The happy path is unchanged: a turn naming the CURRENT question passes."""
+    from abridgeai.features.interviews.services import taking as taking_service  # noqa: PLC0415
+
+    async def _no_followup(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(taking_service, "maybe_generate_followup", _no_followup)  # type: ignore[attr-defined]
+
+    config_id = await _seed_published_config(
+        engine,
+        course_id=scenario["course_id"],
+        module_id=scenario["module_id"],
+        actor_id=seeded_users.admin_id,
+    )
+    student_sid = await _seed_session(engine, seeded_users.student_id)
+    try:
+        student_token = create_access_token(user_id=seeded_users.student_id, session_id=student_sid)
+        start_resp = await client.post(
+            f"/api/v1/interview-configs/{config_id}/sessions",
+            json={"input_mode": "text"},
+            headers=_auth(student_token),
+        )
+        assert start_resp.status_code == 201, start_resp.text
+        session_id = uuid.UUID(start_resp.json()["session_id"])
+        await _complete_onboarding(engine, session_id)
+        current_q = await _current_session_question_id(engine, session_id)
+
+        resp = await client.post(
+            f"/api/v1/interview-sessions/{session_id}/respond",
+            json={
+                "session_id": str(session_id),
+                "session_question_id": str(current_q),
+                "answer_text": "fresh answer",
+            },
+            headers=_auth(student_token),
+        )
+        assert resp.status_code == 200, resp.text
+    finally:
+        async with engine.begin() as conn:
+            await conn.execute(text("DELETE FROM auth_sessions WHERE id = :id"), {"id": student_sid})
+
+
 async def test_audio_storage_object_id_accepted_but_not_transcribed(
     client: httpx.AsyncClient,
     engine: AsyncEngine,
@@ -533,6 +716,10 @@ async def test_audio_storage_object_id_accepted_but_not_transcribed(
     assert start_resp.status_code == 201, start_resp.text
     session_id = uuid.UUID(start_resp.json()["session_id"])
     await _complete_onboarding(engine, session_id)
+    # The contract binds every turn to the question the client actually saw;
+    # pass the real current session-question id instead of the placeholder an
+    # earlier draft of this test used.
+    current_q = await _current_session_question_id(engine, session_id)
 
     audio_id = uuid.uuid4()
     async with engine.begin() as conn:
@@ -547,7 +734,7 @@ async def test_audio_storage_object_id_accepted_but_not_transcribed(
         f"/api/v1/interview-sessions/{session_id}/respond",
         json={
             "session_id": str(session_id),
-            "session_question_id": str(uuid.uuid4()),
+            "session_question_id": str(current_q),
             "answer_text": "spoken answer transcript",
             "audio_object_id": str(audio_id),
         },
@@ -1316,15 +1503,16 @@ async def test_respond_surfaces_unhandled_error_with_class_and_message(
         session_id = body["session_id"]
         # Answering requires completed onboarding; this test targets the
         # unhandled-error path in take_session_step, so fast-forward past setup.
-        # session_question_id is required by the schema but the service resolves
-        # the current question from session_id, so a placeholder uuid is fine.
+        # session_question_id must name the CURRENT session question — the
+        # contract now binds every turn to the binding the client saw.
         await _complete_onboarding(engine, uuid.UUID(session_id))
+        current_q = await _current_session_question_id(engine, uuid.UUID(session_id))
 
         respond_resp = await client.post(
             f"/api/v1/interview-sessions/{session_id}/respond",
             json={
                 "session_id": session_id,
-                "session_question_id": str(uuid.uuid4()),
+                "session_question_id": str(current_q),
                 "answer_text": "an answer",
             },
             headers=_auth(student_token),
@@ -1397,15 +1585,15 @@ async def test_respond_succeeds_when_followup_stage_raises(
         session_id = body["session_id"]
         # Answering requires completed onboarding; this test targets the
         # gateway-failure degradation path, so fast-forward past setup. The
-        # service resolves the current question from session_id, so a
-        # placeholder session_question_id satisfies the schema.
+        # turn must name the CURRENT session question (the binding contract).
         await _complete_onboarding(engine, uuid.UUID(session_id))
+        current_q = await _current_session_question_id(engine, uuid.UUID(session_id))
 
         respond_resp = await client.post(
             f"/api/v1/interview-sessions/{session_id}/respond",
             json={
                 "session_id": session_id,
-                "session_question_id": str(uuid.uuid4()),
+                "session_question_id": str(current_q),
                 "answer_text": "Recursion is when a function calls itself.",
             },
             headers=_auth(student_token),
@@ -1640,8 +1828,10 @@ async def test_teacher_transcript_returns_turns_and_blocks_student(
         respond = await client.post(
             f"/api/v1/interview-sessions/{session_id}/respond",
             json={
-                "session_id": session_id,
-                "session_question_id": str(uuid.uuid4()),
+                "session_id": str(session_id),
+                "session_question_id": str(
+                    await _current_session_question_id(engine, uuid.UUID(session_id))
+                ),
                 "answer_text": "Recursion calls itself with a smaller input until a base case.",
             },
             headers=_auth(student_token),

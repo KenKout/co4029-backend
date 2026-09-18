@@ -41,7 +41,7 @@ logger = logging.getLogger(__name__)
 _EVALUATE_INTERVIEW_SESSION_TASK = "evaluate_interview_session_task"
 
 
-def _evaluation_job_id(session_id: UUID, *, attempt: int = 0) -> str:
+def evaluation_job_id(session_id: UUID, *, attempt: int = 0) -> str:
     """Deterministic ARQ job ID for one session's evaluation.
 
     ``attempt=0`` (the default) keeps the original session-scoped ID used by the
@@ -110,7 +110,7 @@ async def sweep_expired_interview_sessions(
                 _EVALUATE_INTERVIEW_SESSION_TASK,
                 session.student_id,
                 session.id,
-                _job_id=_evaluation_job_id(session.id),
+                _job_id=evaluation_job_id(session.id),
             )
         logger.info(
             "swept expired interview session %s → %s",
@@ -119,6 +119,138 @@ async def sweep_expired_interview_sessions(
         )
 
     return finalised
+
+
+async def record_missing_dispatch(
+    db: AsyncSession,
+    *,
+    session_id: UUID,
+    job_id: str,
+) -> None:
+    """Durable ``phase='missing'`` marker for a dispatch that never reached Redis.
+
+    Called from the terminal paths when ``enqueue_job`` raises (Redis down,
+    transport error) AFTER the terminal commit: the session stays terminal,
+    the caller returns an honest completion response instead of a 500, and
+    ``recover_stalled_evaluations`` redrives the row immediately — a missing
+    job needs no grace window because there is nothing to wait for. Owns its
+    commit: the terminal state it annotates is already durable, and a failure
+    here must never mask the completion response (the sweep remains the
+    safety net either way).
+
+    Mirrors the recovery record shape so ``_ACTIVE_PHASES_SQL`` does not count
+    ``missing`` as active (it is terminal) while the redrive CAS still finds it.
+    """
+    from sqlalchemy import text  # noqa: PLC0415
+
+    now = utcnow().isoformat()
+    sql = text(
+        "UPDATE interview_sessions "
+        "   SET internal_summary_json = jsonb_set("
+        "         COALESCE(internal_summary_json, '{}'::jsonb), "
+        "         '{evaluation_recovery}', "
+        "         COALESCE(internal_summary_json -> 'evaluation_recovery', '{}'::jsonb) "
+        "           || jsonb_build_object("
+        "                'current', jsonb_build_object("
+        "                  'job_id', CAST(:job_id AS text), "
+        "                  'phase', 'missing', "
+        "                  'dispatched_at', CAST(:now AS text))), "
+        "         true) "
+        " WHERE id = :session_id "
+        "RETURNING id"
+    )
+    try:
+        await db.execute(
+            sql, {"session_id": session_id, "job_id": job_id, "now": now}
+        )
+        await db.commit()
+    except Exception:  # noqa: BLE001 -- bookkeeping only; the sweep is the safety net
+        await db.rollback()
+        logger.exception(
+            "recording missing dispatch failed (session=%s)", session_id
+        )
+
+
+async def dispatch_evaluation_or_record_missing(
+    db: AsyncSession,
+    *,
+    session_id: UUID,
+    student_id: UUID,
+    arq_pool: object,
+) -> bool:
+    """Enqueue evaluation; on failure stamp a durable ``missing`` record.
+
+    The terminal commit lands BEFORE this call, so an enqueue exception must
+    not propagate: the caller's retry would only see the terminal row and
+    never re-enqueue. Instead the failure stamps ``phase='missing'`` (own
+    commit — the annotated terminal state is already durable) and the sweep
+    redrives it immediately. True when a job actually reached Redis.
+    """
+    job_id = evaluation_job_id(session_id)
+    try:
+        job = await arq_pool.enqueue_job(  # type: ignore[attr-defined]
+            _EVALUATE_INTERVIEW_SESSION_TASK,
+            student_id,
+            session_id,
+            _job_id=job_id,
+        )
+    except Exception:  # noqa: BLE001 -- dispatch failure must not 500 a committed terminal state
+        logger.exception(
+            "evaluation dispatch failed after terminal commit (session=%s, job_id=%s)",
+            session_id,
+            job_id,
+        )
+        await record_missing_dispatch(db, session_id=session_id, job_id=job_id)
+        return False
+    return job is not None
+
+
+async def redrive_missing_dispatch_on_refinish(
+    db: AsyncSession,
+    *,
+    session_id: UUID,
+    student_id: UUID,
+    arq_pool: object,
+) -> None:
+    """Re-attempt a dispatch the first finish lost, on a terminal re-finish.
+
+    Fires ONLY when the durable record says ``phase='missing'``: a winner whose
+    dispatch succeeded leaves no recovery record, so an ordinary re-finish
+    race loser does not enqueue a second time (the finish-race contract). On a
+    successful re-dispatch the record CASes ``missing`` → ``queued`` scoped to
+    this job id, so the sweep does not redrive it again.
+    """
+    from sqlalchemy import text  # noqa: PLC0415
+
+    from abridgeai.features.interviews.queries import (  # noqa: PLC0415
+        sessions as sessions_queries,
+    )
+
+    phase = (
+        await db.execute(
+            text(
+                "SELECT internal_summary_json #>> "
+                "'{evaluation_recovery,current,phase}' "
+                "FROM interview_sessions WHERE id = :id"
+            ),
+            {"id": session_id},
+        )
+    ).scalar_one_or_none()
+    if phase != "missing":
+        return
+    if await dispatch_evaluation_or_record_missing(
+        db, session_id=session_id, student_id=student_id, arq_pool=arq_pool
+    ):
+        job_id = evaluation_job_id(session_id)
+        await sessions_queries.transition_evaluation_recovery_phase(
+            db,
+            session_id,
+            job_id=job_id,
+            from_phase="missing",
+            to_phase="queued",
+            extra={"redrived_at": utcnow().isoformat()},
+        )
+        await db.commit()
 
 
 async def recover_stalled_evaluations(
@@ -295,7 +427,7 @@ async def _redrive_one_evaluation(
     # A live claim / active durable job re-checked at stamp time (the candidate
     # list may be stale) refuses the charge — including a claim that appeared
     # after the query ran.
-    job_id = _evaluation_job_id(session_id, attempt=1)
+    job_id = evaluation_job_id(session_id, attempt=1)
     # The attempt number is only known after the stamp (it returns the NEW
     # count), but the stamp builds the deterministic job id itself, so pass the
     # caller-chosen id shape: we must know the id BEFORE dispatch to CAS the
@@ -326,7 +458,7 @@ async def _redrive_one_evaluation(
         )
         return False
 
-    job_id = _evaluation_job_id(session_id, attempt=attempt)
+    job_id = evaluation_job_id(session_id, attempt=attempt)
     job: object | None = None
     dispatch_error: Exception | None = None
     try:
@@ -378,6 +510,10 @@ async def _redrive_one_evaluation(
 
 
 __all__ = [
+    "dispatch_evaluation_or_record_missing",
+    "evaluation_job_id",
+    "record_missing_dispatch",
+    "redrive_missing_dispatch_on_refinish",
     "recover_stalled_evaluations",
     "sweep_expired_interview_sessions",
 ]

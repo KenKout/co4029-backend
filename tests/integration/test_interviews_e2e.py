@@ -1075,10 +1075,23 @@ async def test_full_interview_lifecycle_generate_take_submit_evaluate(
     session_id = UUID(start_resp.json()["session_id"])
     # Answering requires completed onboarding; the start response only reveals
     # first_question once onboarding is done. This lifecycle test targets the
-    # answer→submit→evaluate path, so fast-forward past setup. The service
-    # resolves the current question from session_id, so the placeholder
-    # session_question_id below satisfies the schema.
+    # answer→submit→evaluate path, so fast-forward past setup. Each turn must
+    # name the CURRENT session question (the binding contract).
     await _complete_onboarding(engine, session_id)
+
+    async def _current_sq_id() -> str:
+        async with engine.begin() as conn:
+            row = (
+                await conn.execute(
+                    text(
+                        "SELECT id FROM interview_session_questions "
+                        "WHERE session_id = :s ORDER BY sequence_no DESC LIMIT 1"
+                    ),
+                    {"s": session_id},
+                )
+            ).first()
+        assert row is not None
+        return str(row[0])
 
     # 10. Student answers all three questions.
     for i in range(3):
@@ -1086,9 +1099,7 @@ async def test_full_interview_lifecycle_generate_take_submit_evaluate(
             f"/api/v1/interview-sessions/{session_id}/respond",
             json={
                 "session_id": str(session_id),
-                "session_question_id": str(
-                    uuid.uuid4()
-                ),  # required by schema; service uses session_id
+                "session_question_id": await _current_sq_id(),
                 "answer_text": (
                     f"Recursion uses a base case to terminate (turn {i + 1}). "
                     "The recursive step shrinks the input until the base case is hit."
@@ -1254,8 +1265,21 @@ async def test_audio_object_id_persisted_without_transcription(
     assert start_resp.status_code == 201, start_resp.text
     session_id = UUID(start_resp.json()["session_id"])
     # Answering requires completed onboarding; this test targets the audio
-    # persistence path, so fast-forward past setup.
+    # persistence path, so fast-forward past setup. The turn must name the
+    # CURRENT session question (the binding contract).
     await _complete_onboarding(engine, session_id)
+    async with engine.begin() as conn:
+        _sq_row = (
+            await conn.execute(
+                text(
+                    "SELECT id FROM interview_session_questions "
+                    "WHERE session_id = :s ORDER BY sequence_no DESC LIMIT 1"
+                ),
+                {"s": session_id},
+            )
+        ).first()
+    assert _sq_row is not None
+    current_sq_id = str(_sq_row[0])
 
     # Seed a fake storage_objects row — the FK target.
     audio_id = uuid.uuid4()
@@ -1277,7 +1301,7 @@ async def test_audio_object_id_persisted_without_transcription(
         f"/api/v1/interview-sessions/{session_id}/respond",
         json={
             "session_id": str(session_id),
-            "session_question_id": str(uuid.uuid4()),
+            "session_question_id": current_sq_id,
             "answer_text": "spoken answer transcript placeholder",
             "audio_object_id": str(audio_id),
         },

@@ -345,9 +345,21 @@ async def list_documents(
         roles = await access_api.get_roles_by_codes(db, role_codes)
         role_ids = [r.id for r in roles.values()]
 
-    rows = await policy_queries.published_documents(
-        db, language=language, role_ids=role_ids
-    )
+    rows = await policy_queries.published_documents(db, language=language, role_ids=role_ids)
+    if language != DEFAULT_LANGUAGE:
+        # Match read_document: a missing translation must remain readable, so
+        # use the published English version for only the policies that lack the
+        # requested language. A translated version always wins.
+        fallback_rows = await policy_queries.published_documents(
+            db, language=DEFAULT_LANGUAGE, role_ids=role_ids
+        )
+        translated_policy_ids = {policy.id for policy, _ in rows}
+        rows.extend(
+            (policy, version)
+            for policy, version in fallback_rows
+            if policy.id not in translated_policy_ids
+        )
+        rows.sort(key=lambda item: (item[0].category, item[0].slug))
     out: list[PolicySummary] = []
     for policy, version in rows:
         out.append(
