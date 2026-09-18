@@ -20,7 +20,7 @@ would widen live programs without anyone asking — a manager can clear the fiel
 when they mean to. Only the default for FUTURE rows changes.
 
 Revision ID: 0130_nullable_career_path_limit
-Revises: 0129_drop_career_path_ceiling_setting
+Revises: 0129_drop_path_ceiling_setting
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision = "0130_nullable_career_path_limit"
-down_revision = "0129_drop_career_path_ceiling_setting"
+down_revision = "0129_drop_path_ceiling_setting"
 branch_labels = None
 depends_on = None
 

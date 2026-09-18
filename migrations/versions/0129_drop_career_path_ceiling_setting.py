@@ -22,7 +22,7 @@ invisible and unremovable from the admin UI.
 Nothing is dropped from ``learning_program_versions`` — the per-program limit
 column and its CHECK constraint stay exactly as they were.
 
-Revision ID: 0129_drop_career_path_ceiling_setting
+Revision ID: 0129_drop_path_ceiling_setting
 Revises: 0128_integrity_response_policy
 """
 
@@ -31,7 +31,7 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
-revision = "0129_drop_career_path_ceiling_setting"
+revision = "0129_drop_path_ceiling_setting"
 down_revision = "0128_integrity_response_policy"
 branch_labels = None
 depends_on = None
