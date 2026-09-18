@@ -58,6 +58,38 @@ def test_reported_s3_uri_must_use_expected_bucket() -> None:
     ) == ""
 
 
+def test_reported_http_location_url_is_normalized(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Egress v1.13 reports the file as a full S3-endpoint URL, not a key.
+
+    Regression: the URL shape fell through the bare-key/s3-URI normalizer, so
+    the prefix check failed and every recording was marked failed even though
+    the object sat in the right bucket.
+    """
+    from abridgeai.core.config import get_settings
+
+    monkeypatch.setenv("AWS_ENDPOINT_URL", "http://localhost:3900")
+    get_settings.cache_clear()
+    try:
+        bucket = "recordings"
+        key = "interviews/recordings/s/r/audio.mp3"
+        normalize = lambda raw: recording._normalize_reported_key(  # noqa: SLF001, E731
+            raw, expected_bucket=bucket
+        )
+        # Same-endpoint URL -> key.
+        assert (
+            normalize(f"http://localhost:3900/{bucket}/{key}") == key
+        )
+        # Foreign endpoint host -> rejected.
+        assert normalize(f"https://evil.example/{bucket}/{key}") == ""
+        # Same host, foreign bucket -> rejected.
+        assert normalize(f"http://localhost:3900/other/{key}") == ""
+        # Bare key and bucket-prefixed key still work.
+        assert normalize(key) == key
+        assert normalize(f"{bucket}/{key}") == key
+    finally:
+        get_settings.cache_clear()
+
+
 @pytest.mark.asyncio
 async def test_start_is_noop_without_affirmative_consent(monkeypatch: pytest.MonkeyPatch) -> None:
     claim = AsyncMock()

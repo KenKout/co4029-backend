@@ -50,6 +50,17 @@ async def _start_audio_egress(*, room_name: str, destination: str, settings: Set
         api_secret=settings.livekit_api_secret.get_secret_value(),
     )
     try:
+        # RoomCompositeEgress REJECTS a room that has never been created
+        # (twirp 404 "requested room does not exist"). The recording starts
+        # with the token mint — BEFORE any client has joined — so create the
+        # room here (idempotent) with a generous empty timeout; the egress
+        # keeps the room alive as a hidden participant until recording ends.
+        await lkapi.room.create_room(
+            lk_api.CreateRoomRequest(
+                name=room_name,
+                empty_timeout=settings.interview_recording_empty_timeout_seconds,
+            )
+        )
         request = lk_api.RoomCompositeEgressRequest(
             room_name=room_name,
             audio_only=True,
@@ -138,9 +149,12 @@ async def _fetch_egress_info(
 def _normalize_reported_key(reported_location: str, *, expected_bucket: str) -> str:
     """Convert LiveKit's filename/location into an S3 key and reject foreign URI hosts.
 
-    LiveKit versions have returned either a bare key or ``s3://bucket/key``
-    for file output metadata. The exact bucket is checked before the key is
-    used with ``head_object``; callers then enforce the session-specific prefix.
+    LiveKit versions have returned a bare key, ``s3://bucket/key``, or a full
+    HTTP URL (the S3 endpoint + bucket + key — observed with the Garage
+    endpoint on egress v1.13). Handle all three: the URL form is only
+    accepted when its host matches the configured S3 endpoint host AND its
+    first path segment is the expected bucket, so a foreign bucket is still
+    rejected; the key is what remains of the path after the bucket.
     """
     value = reported_location.strip()
     if value.startswith("s3://"):
@@ -151,6 +165,20 @@ def _normalize_reported_key(reported_location: str, *, expected_bucket: str) -> 
     bucket_prefix = expected_bucket.strip("/") + "/"
     if value.startswith(bucket_prefix):
         return value[len(bucket_prefix) :]
+    if "://" in value:
+        parsed = urlsplit(value)
+        segments = [seg for seg in parsed.path.split("/") if seg]
+        endpoint_host = ""
+        from abridgeai.core.config import get_settings
+
+        endpoint = get_settings().aws_endpoint_url or ""
+        if endpoint:
+            endpoint_host = urlsplit(endpoint).netloc
+        host_ok = bool(endpoint_host) and parsed.netloc == endpoint_host
+        bucket_ok = bool(segments) and segments[0] == expected_bucket
+        if host_ok and bucket_ok:
+            return "/".join(segments[1:])
+        return ""
     return value.lstrip("/")
 
 

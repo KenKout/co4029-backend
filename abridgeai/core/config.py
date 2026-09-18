@@ -326,6 +326,13 @@ class Settings(BaseSettings):
     # recording permanently failed. Attempts are charged per sweep pass over
     # an unresolved row, so attempts × cadence ≈ the total repair window.
     interview_recording_reconcile_max_attempts: int = Field(default=12, ge=1, le=100)
+    # How long a recording room may sit empty before LiveKit closes it. The
+    # egress joins immediately after creation, so this only fires if the
+    # candidate never shows up; it bounds the abandoned-room window instead
+    # of leaking rooms forever when a consented start never sees a joiner.
+    interview_recording_empty_timeout_seconds: int = Field(
+        default=300, ge=30, le=3600
+    )
 
     # Machine-CPU fraction above which the agent worker reports itself
     # unavailable, and LiveKit stops dispatching interviews to it. Every such

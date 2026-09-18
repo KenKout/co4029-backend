@@ -638,7 +638,7 @@ async def _attach_completed_output(db: AsyncSession, *, egress_id: str, info: Eg
         storage_object_id=storage_object_id,
         mime_type=mime,
         size_bytes=meta.size,
-        duration_seconds=float(result.duration) if result.duration else None,
+        duration_seconds=(result.duration / 1e9) if result.duration else None,
         retention_delete_at=retention,
     )
     if not attached:
