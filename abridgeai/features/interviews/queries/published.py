@@ -29,14 +29,13 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from sqlalchemy import func, select, text
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from abridgeai.features.interviews.models import (
     InterviewConfig,
     InterviewOutcome,
     InterviewQuestion,
-    InterviewSession,
 )
 
 
@@ -180,11 +179,18 @@ async def get_interview_for_taking(
         return None
 
     if config.max_attempts is not None and config.max_attempts > 0:
-        attempts_stmt = select(func.count(InterviewSession.id)).where(
-            InterviewSession.interview_config_id == config_id,
-            InterviewSession.student_id == user_id,
+        # Same FR-5.3 statuses the start policy consumes (not every row — a
+        # live or failed session is resumable/retryable, not consuming).
+        from abridgeai.features.interviews.queries.sessions import (  # noqa: PLC0415
+            count_terminal_sessions,
         )
-        used = (await db.execute(attempts_stmt)).scalar_one()
+        from abridgeai.features.interviews.services.retake import (  # noqa: PLC0415
+            _RETAKE_CONSUMING_SESSION_STATUSES,
+        )
+
+        used = await count_terminal_sessions(
+            db, user_id, config_id, _RETAKE_CONSUMING_SESSION_STATUSES
+        )
         if used >= config.max_attempts:
             return None
 

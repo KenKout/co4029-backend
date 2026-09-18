@@ -36,6 +36,7 @@ from abridgeai.core.config import get_settings
 from abridgeai.core.db import get_db
 from abridgeai.core.security import CurrentUser, get_current_user
 from abridgeai.features.courses.api.public import can_view_course_content
+from abridgeai.features.interviews.queries import sessions as sessions_queries
 from abridgeai.features.interviews.routers._deps import require_session_owner_access
 from abridgeai.features.interviews.schemas import (
     GapReportRead,
@@ -49,6 +50,7 @@ from abridgeai.features.interviews.schemas import (
 from abridgeai.features.interviews.services import (
     learner_progress as learner_progress_service,
 )
+from abridgeai.features.interviews.services import retake as retake
 from abridgeai.features.interviews.services import taking as taking_service
 from abridgeai.features.interviews.services.evaluation_state import derive_evaluation_state
 
@@ -146,7 +148,6 @@ async def get_interview_for_taking(
         InterviewConfig,
         InterviewOutcome,
         InterviewQuestion,
-        InterviewSession,
     )
 
     config = None
@@ -173,14 +174,16 @@ async def get_interview_for_taking(
         raise _not_found("interview_config", config_id)
     await _ensure_config_course_enrolled(db, current_user, config)
     if config.max_attempts is not None and config.max_attempts > 0:
-        used = (
-            await db.execute(
-                select(func.count(InterviewSession.id)).where(
-                    InterviewSession.interview_config_id == config.id,
-                    InterviewSession.student_id == current_user.user_id,
-                )
-            )
-        ).scalar_one()
+        # FR-5.3 agreement: the route gate must consume the SAME statuses as
+        # the start policy (completed/timed_out/abandoned) — counting every
+        # row here 404'd a candidate holding a live session, so they could
+        # never resume from the UI.
+        used = await sessions_queries.count_terminal_sessions(
+            db,
+            current_user.user_id,
+            config.id,
+            retake._RETAKE_CONSUMING_SESSION_STATUSES,
+        )
         if used >= config.max_attempts:
             raise _not_found("interview_config", config_id)
 
