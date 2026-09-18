@@ -48,6 +48,9 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from abridgeai.features.interviews.schemas.public import InterviewQuestionPublic
 
+# Product budget for one typed answer (see InterviewSubmitAnswerRequest).
+MAX_ANSWER_CHARS = 20_000
+
 InputModeLiteral = Literal["voice", "text", "hybrid"]
 SessionStatusLiteral = Literal[
     "in_progress",
@@ -266,7 +269,12 @@ class InterviewSubmitAnswerRequest(BaseModel):
 
     session_id: UUID
     session_question_id: UUID
-    answer_text: str | None = None
+    # Product budget (audit P1 #6): an answer is one spoken/typed response,
+    # not a document dump. 20,000 chars covers the longest legitimate dictation
+    # (~15 min of speech) with headroom; anything larger is rejected 422
+    # BEFORE the security classifier / adaptive pipeline / transcript storage
+    # pay for it. The typed realtime door applies the same constant.
+    answer_text: str | None = Field(default=None, max_length=MAX_ANSWER_CHARS)
     audio_object_id: UUID | None = None
     # Optional explicit UI intent. Older clients omit this and retain the
     # existing answer-classification behavior.

@@ -34,6 +34,7 @@ from abridgeai.features.interviews.realtime.native_turn_intake import (
     TypedTurnIntakeError,
 )
 from abridgeai.features.interviews.realtime.native_typed_turn import TypedTurnStore
+from abridgeai.features.interviews.schemas.session import MAX_ANSWER_CHARS
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -113,6 +114,16 @@ def make_text_input_cb(
         # Begin BEFORE any await: the closing gate and the single-flight
         # reservation must be decided synchronously, or a finish racing the
         # reserve could slip between the reserve and the receipt.
+        # Same product budget as the REST schema (audit P1 #6): a turn longer
+        # than MAX_ANSWER_CHARS is rejected at the door — no receipt, no fold.
+        if turn.text is not None and len(turn.text) > MAX_ANSWER_CHARS:
+            await publisher.reject(
+                turn_key=turn.turn_key,
+                turn_action=turn.turn_action,
+                rejection=tp.TurnRejection.TEXT_TOO_LONG,
+            )
+            return
+
         try:
             reserved = turn_intake.begin()
         except TypedTurnIntakeError:
