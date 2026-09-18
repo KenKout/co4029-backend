@@ -451,6 +451,19 @@ async def test_empty_audience_is_the_only_everyone(db: AsyncSession) -> None:
 
 
 @pytest.mark.asyncio
+async def test_index_falls_back_to_english_when_requested_language_is_missing(
+    db: AsyncSession,
+) -> None:
+    """A missing translation keeps the policy index readable."""
+    slug = _slug("language-fallback")
+    await _published_policy(db, slug=slug)
+
+    rows = await policy_service.list_documents(db, language="vi")
+    fallback = next(row for row in rows if row.slug == slug)
+    assert fallback.language == "en"
+
+
+@pytest.mark.asyncio
 async def test_a_scoped_policy_still_opens_by_its_own_url(db: AsyncSession) -> None:
     """The audience scopes the INDEX. A shared or bookmarked link must open.
 
