@@ -84,6 +84,22 @@ class LearningProgram(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftD
     status: Mapped[str] = mapped_column(String(20), server_default=text("'draft'"))
 
 
+#: Upper bound for a program version's own career-path limit, when it sets one.
+#:
+#: The limit itself is NULLABLE, and null is the interesting value: it means
+#: the program imposes no cap of its own and the student is bounded by the
+#: organization's ``learning_program.max_concurrent_paths_per_student`` --
+#: and, implicitly, by how many paths the program actually offers.
+#:
+#: An organization-level ceiling on this number used to exist as a runtime
+#: setting. Its default equalled this bound, so out of the box it constrained
+#: nothing while adding a second place the same number could be refused.
+#:
+#: Exported so the authoring API can hand the manager's picker the same bound
+#: the CHECK constraint enforces, instead of the SPA hardcoding a 10.
+MAX_CAREER_PATHS_PER_ENROLLMENT = 10
+
+
 class LearningProgramVersion(
     UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftDeleteMixin, Base
 ):
@@ -98,7 +114,7 @@ class LearningProgramVersion(
         CheckConstraint("version_no > 0", name="ck_learning_program_versions_no"),
         CheckConstraint("max_path_switches >= 0", name="ck_learning_program_versions_switches"),
         CheckConstraint(
-            "max_career_paths_per_enrollment BETWEEN 1 AND 10",
+            f"max_career_paths_per_enrollment BETWEEN 1 AND {MAX_CAREER_PATHS_PER_ENROLLMENT}",
             name="ck_learning_program_versions_career_path_limit",
         ),
     )
@@ -109,8 +125,15 @@ class LearningProgramVersion(
     version_no: Mapped[int] = mapped_column(Integer)
     status: Mapped[str] = mapped_column(String(20), server_default=text("'draft'"))
     max_path_switches: Mapped[int] = mapped_column(Integer, server_default=text("3"))
-    max_career_paths_per_enrollment: Mapped[int] = mapped_column(
-        Integer, server_default=text("1")
+    #: Paths a student may hold in THIS program, or NULL for "no cap of its
+    #: own". Nullable rather than a sentinel like 0 or the bound itself,
+    #: because "the manager did not cap this" and "the manager capped it at
+    #: the maximum" are different intentions -- and the second silently stops
+    #: meaning what it meant if the bound ever moves.
+    #:
+    #: No server default: a row that does not name a limit does not have one.
+    max_career_paths_per_enrollment: Mapped[int | None] = mapped_column(
+        Integer, nullable=True
     )
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
@@ -331,6 +354,7 @@ class CourseEnrollmentEntitlement(UUIDPrimaryKeyMixin, Base):
 
 
 __all__ = [
+    "MAX_CAREER_PATHS_PER_ENROLLMENT",
     "PATH_CHANGE_OPEN_STATUSES",
     "PATH_CHANGE_REJECTION_REASON_CODES",
     "PATH_REQUEST_KINDS",

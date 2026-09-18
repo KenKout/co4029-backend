@@ -13,6 +13,7 @@ from abridgeai.features.career_paths.api import public as career_paths_api
 from abridgeai.features.identity.api import public as identity_api
 from abridgeai.features.learning_programs import notify, queries
 from abridgeai.features.learning_programs.models import (
+    MAX_CAREER_PATHS_PER_ENROLLMENT,
     PATH_CHANGE_OPEN_STATUSES,
     PATH_CHANGE_REJECTION_REASON_CODES,
     LearningProgram,
@@ -182,32 +183,6 @@ async def _target_path_name(db: AsyncSession, career_path_id: UUID) -> str:
     return await queries.get_career_path_name(db, career_path_id) or "the requested path"
 
 
-async def _career_path_limit_ceiling(db: AsyncSession, organization_id: UUID) -> int:
-    """Organization guardrail for manager-owned per-program path limits."""
-    return int(
-        await resolve_setting(
-            db,
-            "learning_program.max_career_paths_per_enrollment",
-            organization_id=organization_id,
-        )
-    )
-
-
-async def _require_path_limit_within_ceiling(
-    db: AsyncSession, *, organization_id: UUID, requested: int
-) -> int:
-    ceiling = await _career_path_limit_ceiling(db, organization_id)
-    if requested > ceiling:
-        raise ProgramConflictError(
-            "career_path_limit_exceeds_organization_ceiling",
-            f"This organization allows at most {ceiling} career path"
-            f"{'s' if ceiling != 1 else ''} per learning program.",
-            requested=requested,
-            ceiling=ceiling,
-        )
-    return ceiling
-
-
 async def _program_out(
     db: AsyncSession, program: LearningProgram, version: LearningProgramVersion | None = None
 ) -> ProgramRead:
@@ -279,7 +254,7 @@ async def get_authoring_options(db: AsyncSession, actor: CurrentUser) -> Program
         faculties=[ProgramOptionRead(id=row.id, name=row.name) for row in allowed_faculties],
         career_paths=career_path_options,
         default_faculty_id=default_faculty_id,
-        max_career_paths_per_program=await _career_path_limit_ceiling(db, primary_org.id),
+        max_career_paths_per_program=MAX_CAREER_PATHS_PER_ENROLLMENT,
     )
 
 
@@ -347,11 +322,6 @@ async def create_program(
     if primary_org is None:
         raise ForbiddenError("primary_organization_required")
     organization_id = primary_org.id
-    await _require_path_limit_within_ceiling(
-        db,
-        organization_id=organization_id,
-        requested=payload.max_career_paths_per_enrollment,
-    )
     if not await queries.faculty_is_valid(db, payload.faculty_id, organization_id):
         raise ConflictError("faculty_must_belong_to_organization")
     probe = LearningProgram(
@@ -470,12 +440,6 @@ async def update_program(
     current = await queries.get_current_version(db, program.id)
     if current is None:
         raise NotFoundError("learning_program_version_not_found")
-    if payload.max_career_paths_per_enrollment is not None:
-        await _require_path_limit_within_ceiling(
-            db,
-            organization_id=program.organization_id,
-            requested=payload.max_career_paths_per_enrollment,
-        )
     if current.status == "published":
         source_paths = await queries.list_version_paths(db, current.id)
         draft = LearningProgramVersion(
@@ -485,9 +449,14 @@ async def update_program(
             max_path_switches=payload.max_path_switches
             if payload.max_path_switches is not None
             else current.max_path_switches,
+            # ``None`` is a real value here -- "this program sets no cap of
+            # its own" -- so an omitted field and an explicit null are told
+            # apart by what the client actually sent. Reading it the old way
+            # would make removing a cap indistinguishable from not mentioning
+            # it, and silently carry the old number into the new version.
             max_career_paths_per_enrollment=(
                 payload.max_career_paths_per_enrollment
-                if payload.max_career_paths_per_enrollment is not None
+                if "max_career_paths_per_enrollment" in payload.model_fields_set
                 else current.max_career_paths_per_enrollment
             ),
             created_by=actor.user_id,
@@ -517,7 +486,9 @@ async def update_program(
     else:
         if payload.max_path_switches is not None:
             current.max_path_switches = payload.max_path_switches
-        if payload.max_career_paths_per_enrollment is not None:
+        if "max_career_paths_per_enrollment" in payload.model_fields_set:
+            # Same reason as the copy-on-write branch above: null clears the
+            # cap, absence leaves it alone.
             current.max_career_paths_per_enrollment = (
                 payload.max_career_paths_per_enrollment
             )
@@ -644,7 +615,10 @@ async def publish_program(db: AsyncSession, *, program_id: UUID, actor: CurrentU
     paths = await queries.list_version_paths(db, version.id)
     if not paths:
         raise ConflictError("program_requires_at_least_one_path")
-    if version.max_career_paths_per_enrollment > len(paths):
+    if (
+        version.max_career_paths_per_enrollment is not None
+        and version.max_career_paths_per_enrollment > len(paths)
+    ):
         raise ProgramConflictError(
             "career_path_limit_exceeds_program_paths",
             "The student path limit cannot exceed the number of Career Paths "
@@ -652,11 +626,6 @@ async def publish_program(db: AsyncSession, *, program_id: UUID, actor: CurrentU
             requested=version.max_career_paths_per_enrollment,
             path_count=len(paths),
         )
-    await _require_path_limit_within_ceiling(
-        db,
-        organization_id=program.organization_id,
-        requested=version.max_career_paths_per_enrollment,
-    )
     if sum(bool(path["is_default"]) for path in paths) != 1:
         raise ConflictError("program_requires_exactly_one_default_path")
     invalid_path_ids = await queries.list_unpublishable_version_path_ids(
@@ -1230,8 +1199,12 @@ async def select_path(
     ]
     if any(attempt.career_path_id == career_path_id for attempt in selected):
         raise ConflictError("path_already_selected")
+    # A program that sets no cap of its own defers entirely to the
+    # organization-wide concurrent-path limit checked below, plus the
+    # implicit bound that a student can only pick paths this program
+    # actually offers. ``None`` is therefore a skip, never a zero.
     limit = version.max_career_paths_per_enrollment
-    if len(selected) >= limit:
+    if limit is not None and len(selected) >= limit:
         raise ProgramConflictError(
             "career_path_selection_limit_reached",
             f"This learning program allows at most {limit} selected career path"

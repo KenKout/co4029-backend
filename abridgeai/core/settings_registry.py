@@ -165,20 +165,6 @@ _SPECS: tuple[SettingSpec, ...] = (
         ),
     ),
     SettingSpec(
-        key="learning_program.max_career_paths_per_enrollment",
-        group="careerpath",
-        type="int",
-        default=10,
-        minimum=1,
-        maximum=10,
-        label="Career paths per program ceiling",
-        description=(
-            "Organization ceiling for the per-program limit set by managers. "
-            "Published program versions and existing selections are grandfathered "
-            "when this ceiling is lowered."
-        ),
-    ),
-    SettingSpec(
         key="ai.llm_timeout_seconds",
         group="ai",
         type="float",

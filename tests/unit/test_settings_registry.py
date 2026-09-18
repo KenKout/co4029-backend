@@ -17,12 +17,25 @@ from abridgeai.core.settings_registry import (
 
 
 class TestRegistryShape:
-    def test_multi_path_ceiling_allows_manager_configuration_by_default(self) -> None:
-        spec = SETTINGS_REGISTRY["learning_program.max_career_paths_per_enrollment"]
+    def test_the_student_wide_path_limit_is_the_one_that_is_configurable(self) -> None:
+        """The per-program limit is a manager's curriculum decision, stored on
+        the program version and bounded by its CHECK constraint. This is the
+        only path limit an org operator sets, and it is the only one that
+        counts across programs -- the per-program limits summed, so a student
+        in two programs capped at 1 and 2 could hold three paths.
+
+        There WAS a third setting, an org ceiling on what a manager could type
+        into a program. Its default equalled the CHECK bound, so it constrained
+        nothing until someone lowered it, while adding a second place the same
+        number could be refused. Asserting its absence keeps it from drifting
+        back in beside the limit that replaced it.
+        """
+        spec = SETTINGS_REGISTRY["learning_program.max_concurrent_paths_per_student"]
 
         assert spec.default == 10
         assert spec.minimum == 1
-        assert spec.maximum == 10
+
+        assert "learning_program.max_career_paths_per_enrollment" not in SETTINGS_REGISTRY
 
     def test_every_spec_key_matches_its_map_key(self) -> None:
         for key, spec in SETTINGS_REGISTRY.items():

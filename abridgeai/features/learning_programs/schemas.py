@@ -31,7 +31,10 @@ class ProgramCreate(BaseModel):
     name: str = Field(min_length=1, max_length=255)
     description: str | None = None
     max_path_switches: int = Field(default=3, ge=0, le=100)
-    max_career_paths_per_enrollment: int = Field(default=1, ge=1, le=10)
+    #: 1..10, or omitted/null for "no cap of its own" -- the student is then
+    #: bounded by the organization-wide concurrent-path limit. Omitting this
+    #: used to mean a single path; it now means no per-program cap.
+    max_career_paths_per_enrollment: int | None = Field(default=None, ge=1, le=10)
     career_path_ids: list[UUID] = Field(default_factory=list)
     default_career_path_id: UUID | None = None
 
@@ -52,6 +55,9 @@ class ProgramUpdate(BaseModel):
     )
     description: str | None = None
     max_path_switches: int | None = Field(default=None, ge=0, le=100)
+    #: ``None`` here is a real value ("remove the cap"), not an absence, so
+    #: the service distinguishes the two through ``model_fields_set``. Every
+    #: other optional field on this model means "leave it alone".
     max_career_paths_per_enrollment: int | None = Field(default=None, ge=1, le=10)
     career_path_ids: list[UUID] | None = None
     default_career_path_id: UUID | None = None
@@ -74,7 +80,8 @@ class ProgramVersionRead(BaseModel):
     version_no: int
     status: str
     max_path_switches: int
-    max_career_paths_per_enrollment: int
+    #: ``None`` means the program sets no cap of its own.
+    max_career_paths_per_enrollment: int | None
     published_at: datetime | None
     published_by: UUID | None = None
     published_by_name: str | None = None
@@ -105,6 +112,16 @@ class ProgramAuthoringOptions(BaseModel):
     faculties: list[ProgramOptionRead] = Field(default_factory=list)
     career_paths: list[CareerPathOptionRead] = Field(default_factory=list)
     default_faculty_id: UUID | None = None
+    #: Upper bound for the manager's per-program path limit, so the picker
+    #: cannot offer a number the CHECK constraint would reject. A platform
+    #: bound, not a tenant setting -- the org-level ceiling that used to feed
+    #: this was removed because its default already equalled that constraint.
+    #:
+    #: The literal duplicates ``models.MAX_CAREER_PATHS_PER_ENROLLMENT``
+    #: rather than importing it, because this module imports nothing from the
+    #: feature. It is only a fallback: every response that carries real
+    #: options is built with the constant, and the one path that takes this
+    #: default returns empty lists anyway (no primary org, nothing to author).
     max_career_paths_per_program: int = 10
 
 
@@ -226,7 +243,10 @@ class ProgramEnrollmentRead(BaseModel):
     program_version_no: int
     max_path_switches: int
     approved_switch_count: int = 0
-    max_career_paths: int = 1
+    #: The program's own cap, or ``None`` when it sets none. A client must
+    #: treat null as "room available" and fall back to the student-wide
+    #: numbers below, not as zero.
+    max_career_paths: int | None = None
     selected_path_count: int = 0
     # Student-wide, across every program: what the organization allows and
     # what the student already holds. The per-program numbers above cannot

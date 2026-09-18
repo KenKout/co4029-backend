@@ -377,7 +377,6 @@ class TestPublishingAProgram:
             updated_by=None,
         )
         monkeypatch.setattr(services, "_require_operator", AsyncMock())
-        monkeypatch.setattr(services, "_require_path_limit_within_ceiling", AsyncMock())
         monkeypatch.setattr(services, "flush_or_conflict", AsyncMock())
         monkeypatch.setattr(services, "_program_out", AsyncMock(return_value="published"))
         monkeypatch.setattr(services.queries, "get_program", AsyncMock(return_value=program))
