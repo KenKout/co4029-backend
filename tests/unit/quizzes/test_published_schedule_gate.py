@@ -202,3 +202,16 @@ class TestDeletionExposureGate:
         self._set_parent_statuses(monkeypatch, "published", "published")
 
         await authoring._assert_quiz_deletable(object(), quiz)
+
+
+@pytest.mark.parametrize("status", ["published", "archived"])
+def test_question_authoring_is_draft_only(status: str) -> None:
+    with pytest.raises(ConflictError, match="cannot be edited.*draft"):
+        authoring._assert_quiz_editable(SimpleNamespace(status=status))
+
+
+def test_archived_settings_are_fully_read_only() -> None:
+    with pytest.raises(ConflictError, match="archived quiz cannot be edited"):
+        authoring._assert_quiz_settings_editable(
+            SimpleNamespace(status="archived"), {"title"}
+        )

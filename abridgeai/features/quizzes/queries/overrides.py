@@ -40,8 +40,13 @@ async def list_overrides(db: AsyncSession, quiz_id: uuid.UUID) -> list[QuizOverr
     return list(result.scalars().all())
 
 
-async def get_override(db: AsyncSession, override_id: uuid.UUID) -> QuizOverride | None:
-    return await db.get(QuizOverride, override_id)
+async def get_override(
+    db: AsyncSession, override_id: uuid.UUID, *, quiz_id: uuid.UUID | None = None
+) -> QuizOverride | None:
+    row = await db.get(QuizOverride, override_id)
+    if row is not None and quiz_id is not None and row.quiz_id != quiz_id:
+        return None
+    return row
 
 
 async def create_override(db: AsyncSession, quiz_id: uuid.UUID, data: dict) -> QuizOverride:
@@ -51,9 +56,13 @@ async def create_override(db: AsyncSession, quiz_id: uuid.UUID, data: dict) -> Q
 
 
 async def update_override(
-    db: AsyncSession, override_id: uuid.UUID, data: dict
+    db: AsyncSession,
+    override_id: uuid.UUID,
+    data: dict,
+    *,
+    quiz_id: uuid.UUID | None = None,
 ) -> QuizOverride | None:
-    row = await db.get(QuizOverride, override_id)
+    row = await get_override(db, override_id, quiz_id=quiz_id)
     if row is None:
         return None
     for k in _OVERRIDE_FIELDS:
@@ -62,8 +71,10 @@ async def update_override(
     return row
 
 
-async def delete_override(db: AsyncSession, override_id: uuid.UUID) -> bool:
-    row = await db.get(QuizOverride, override_id)
+async def delete_override(
+    db: AsyncSession, override_id: uuid.UUID, *, quiz_id: uuid.UUID | None = None
+) -> bool:
+    row = await get_override(db, override_id, quiz_id=quiz_id)
     if row is None:
         return False
     await db.delete(row)  # app-code delete, ondelete=NO ACTION convention

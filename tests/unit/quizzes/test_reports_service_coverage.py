@@ -73,6 +73,34 @@ def test_answer_text_helpers_cover_supported_fallbacks():
     )
 
 
+def test_revision_snapshots_fold_legacy_patches_without_mutating_earlier_versions():
+    question_id = uuid4()
+    first_id = uuid4()
+    second_id = uuid4()
+    revisions = [
+        SimpleNamespace(
+            id=first_id,
+            question_id=question_id,
+            revision_no=1,
+            payload_json={"prompt_text": "Original", "question_type": "short_answer"},
+        ),
+        SimpleNamespace(
+            id=second_id,
+            question_id=question_id,
+            revision_no=2,
+            payload_json={"prompt_text": "Edited"},
+        ),
+    ]
+
+    snapshots = reports._revision_snapshots(revisions)
+
+    assert snapshots[first_id]["prompt_text"] == "Original"
+    assert snapshots[second_id] == {
+        "prompt_text": "Edited",
+        "question_type": "short_answer",
+    }
+
+
 @pytest.mark.asyncio
 async def test_require_quiz_raises_for_missing_quiz():
     db = SimpleNamespace(execute=AsyncMock(return_value=_Result([], scalar=None)))

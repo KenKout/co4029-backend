@@ -243,9 +243,27 @@ async def test_average_headline_and_aggregates(
     assert result["unique_students"] == 2
     assert result["mean_score"] == pytest.approx(70.0)
     assert result["median_score"] == pytest.approx(70.0)
-    assert result["pass_rate"] == pytest.approx(1.0)  # bool_or → both students have a pass
+    assert result["pass_rate"] == pytest.approx(1.0)  # both 70 averages clear the pass mark
     assert len(result["histogram"]) == 11
     assert sum(b["count"] for b in result["histogram"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_average_pass_rate_uses_average_score_not_any_passing_attempt(
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict[str, uuid.UUID],
+) -> None:
+    """A high attempt cannot make a below-threshold average count as passed."""
+    async with session_factory() as db:
+        await db.execute(
+            text("UPDATE quizzes SET passing_score_percent = 75 WHERE id = :quiz_id"),
+            {"quiz_id": scenario["quiz_id"]},
+        )
+        result = await quiz_results_summary(db, scenario["quiz_id"], "average")
+        await db.rollback()
+
+    assert result["mean_score"] == pytest.approx(70.0)
+    assert result["pass_rate"] == pytest.approx(0.0)
 
 
 async def test_first_headline(

@@ -105,12 +105,13 @@ _HEADLINE_SQL_BY_METHOD: dict[str, str] = {
         "FROM completed "
         "ORDER BY student_id, attempt_number ASC"
     ),
-    # Per student, the mean across all completed attempts. bool_or so a
-    # student who passed on any counted attempt is treated as a pass.
+    # Per student, the mean across all completed attempts. Passing is derived
+    # from that same mean; bool_or(passed) would mix the "highest" rule into
+    # the average method and can report a pass for a failing average.
     "average": (
         "SELECT student_id, "
-        "  AVG(score_percent) AS score_percent, "
-        "  bool_or(passed) AS passed, "
+        "  ROUND(AVG(score_percent), 2) AS score_percent, "
+        "  ROUND(AVG(score_percent), 2) >= MAX(passing_score_percent) AS passed, "
         "  AVG(time_taken_seconds) AS time_taken_seconds "
         "FROM completed "
         "GROUP BY student_id"
@@ -185,12 +186,13 @@ async def quiz_results_summary(
     headline_sql = _HEADLINE_SQL_BY_METHOD[grading_method]
     sql = (
         "WITH completed AS ("  # noqa: S608  -- headline_sql keyed by validated enum, quiz_id bound
-        "  SELECT student_id, score_percent, passed, "
-        "         time_taken_seconds, attempt_number "
-        "  FROM quiz_attempts "
-        "  WHERE quiz_id = :quiz_id "
-        "    AND status IN ('submitted', 'graded') "
-        "    AND score_percent IS NOT NULL"
+        "  SELECT a.student_id, a.score_percent, a.passed, "
+        "         a.time_taken_seconds, a.attempt_number, q.passing_score_percent "
+        "  FROM quiz_attempts a "
+        "  JOIN quizzes q ON q.id = a.quiz_id "
+        "  WHERE a.quiz_id = :quiz_id "
+        "    AND a.status IN ('submitted', 'graded') "
+        "    AND a.score_percent IS NOT NULL"
         "), headline AS ("
         f"  {headline_sql}"
         ") "
@@ -428,7 +430,9 @@ async def list_attempts_for_student_in_course(
     return list((await db.execute(stmt)).all())
 
 
-async def quiz_per_student_rollup(db: AsyncSession, quiz_id: UUID) -> list[dict[str, Any]]:
+async def quiz_per_student_rollup(
+    db: AsyncSession, quiz_id: UUID, grading_method: str
+) -> list[dict[str, Any]]:
     """Per-student rollup over COMPLETED attempts for a single quiz.
 
     For every student with at least one COMPLETED attempt
@@ -439,24 +443,34 @@ async def quiz_per_student_rollup(db: AsyncSession, quiz_id: UUID) -> list[dict[
     * ``latest_score_percent`` — ``score_percent`` of the attempt with the
       highest ``attempt_number`` (most recent).
     * ``attempts_count`` — count of completed attempts.
-    * ``passed`` — ``bool_or(passed)`` (a student who passed on any counted
-      attempt is treated as a pass; ``None`` if all NULL).
+    * ``passed`` — pass/fail under the quiz's configured grading method.
     * ``last_attempt_at`` — MAX of ``COALESCE(submitted_at, started_at)``.
 
     Names are resolved by the router (batched) — this stays name-agnostic to
     mirror :func:`list_attempts_for_course`.
     """
+    if grading_method not in _HEADLINE_SQL_BY_METHOD:
+        raise ValueError(f"invalid grading_method {grading_method!r}")
+    headline_sql = _HEADLINE_SQL_BY_METHOD[grading_method]
     sql = text(
-        "SELECT student_id, "
-        "  max(score_percent) AS best_score_percent, "
-        "  (array_agg(score_percent ORDER BY attempt_number DESC))[1] AS latest_score_percent, "
-        "  count(*) AS attempts_count, "
-        "  bool_or(passed) AS passed, "
-        "  max(COALESCE(submitted_at, started_at)) AS last_attempt_at "
-        "FROM quiz_attempts "
-        "WHERE quiz_id = :quiz_id "
-        "  AND status IN ('submitted', 'graded') "
-        "GROUP BY student_id"
+        "WITH completed AS ("  # noqa: S608 -- fragment selected from validated enum
+        "  SELECT a.student_id, a.score_percent, a.passed, a.time_taken_seconds, "
+        "         a.attempt_number, a.submitted_at, a.started_at, q.passing_score_percent "
+        "  FROM quiz_attempts a JOIN quizzes q ON q.id = a.quiz_id "
+        "  WHERE a.quiz_id = :quiz_id "
+        "    AND a.status IN ('submitted', 'graded') "
+        "    AND a.score_percent IS NOT NULL"
+        "), headline AS ("
+        f"  {headline_sql}"
+        "), aggregate AS ("
+        "  SELECT student_id, max(score_percent) AS best_score_percent, "
+        "    (array_agg(score_percent ORDER BY attempt_number DESC))[1] AS latest_score_percent, "
+        "    count(*) AS attempts_count, "
+        "    max(COALESCE(submitted_at, started_at)) AS last_attempt_at "
+        "  FROM completed GROUP BY student_id"
+        ") SELECT a.student_id, a.best_score_percent, a.latest_score_percent, "
+        "  a.attempts_count, h.passed, a.last_attempt_at "
+        "FROM aggregate a JOIN headline h ON h.student_id = a.student_id"
     )
     rows = (await db.execute(sql, {"quiz_id": quiz_id})).all()
     return [

@@ -110,14 +110,9 @@ async def sync_course_completion(
     no work. The career-path publish gate rejects such a course precisely
     because this writer refuses it.
 
-    Per-student quiz overrides (``quiz_overrides``, resolved by
-    ``quizzes.services.overrides``) are not applied by the aggregate query: it
-    reads the quiz's own ``allow_retakes``/``max_attempts``. That only affects
-    the "failed and exhausted" branch — a PASSED quiz counts identically
-    either way — so an override that grants extra attempts can leave this
-    writer treating a quiz as terminal slightly early. Tracked as a known
-    narrowing rather than duplicating the override resolver in SQL; the
-    authoritative per-item read stays ``learner_progress``.
+    User-scoped quiz overrides are applied to the effective retake ceiling, so
+    this aggregate agrees with the per-item learner-progress result for the
+    currently supported override scopes.
     """
     enrollment = await find_enrollment(db, course_id, student_id)
     if enrollment is None:

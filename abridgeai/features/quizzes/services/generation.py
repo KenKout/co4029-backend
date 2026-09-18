@@ -51,7 +51,7 @@ from uuid import UUID
 
 from abridgeai.ai.knowledge_graph.schemas import KGContext
 from abridgeai.ai.models import GenerationRun
-from abridgeai.core.exceptions import NotFoundError
+from abridgeai.core.exceptions import ConflictError, NotFoundError
 from abridgeai.core.security import utcnow
 from abridgeai.features.quizzes.ai.outline import (
     allocate_question_budget,
@@ -276,6 +276,14 @@ async def run_quiz_generation(
     await db.commit()
 
     try:
+        # Re-check in the worker: a run may have been queued while the quiz was
+        # a draft and execute only after it was published or archived.
+        await db.refresh(quiz)
+        if quiz.status != "draft":
+            raise ConflictError(
+                "quiz_readonly: queued generation was cancelled because the quiz "
+                "is no longer a draft"
+            )
         config = dict(run.config_json or {})
         if question is not None:
             await regenerate_pipeline.run_question_regeneration(

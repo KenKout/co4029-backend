@@ -241,18 +241,17 @@ def _as_plain_json(value: Any) -> Any:  # noqa: ANN401  -- mirrors arbitrary JSO
 
 
 def _assert_quiz_editable(quiz: Quiz) -> None:
-    """Reject ALL authoring edits on a published quiz (content paths).
+    """Allow content authoring only while a quiz is a draft.
 
-    Used by the question CRUD + bulk-approve paths: a published quiz's
-    questions/options are fully frozen, since students can already see and
-    attempt them and editing would corrupt grading. Raised as
+    Used by the question CRUD + bulk-approve paths: published and archived
+    quizzes are fully frozen, since editing would corrupt learner evidence or
+    create changes that can never be republished. Raised as
     :class:`ConflictError` so the router maps to HTTP 409. Quiz-settings
     edits use the field-aware :func:`_assert_quiz_settings_editable` instead.
     """
-    if quiz.status == "published":
+    if quiz.status != "draft":
         raise ConflictError(
-            "quiz_published_readonly: a published quiz's questions cannot be "
-            "edited; archive it first to make changes"
+            "quiz_readonly: quiz questions cannot be edited unless the quiz is a draft"
         )
 
 
@@ -266,6 +265,8 @@ def _assert_quiz_settings_editable(quiz: Quiz, changed_fields: set[str]) -> None
     who is taking or has finished the quiz — is rejected with HTTP 409.
     Draft quizzes are unrestricted.
     """
+    if quiz.status == "archived":
+        raise ConflictError("quiz_archived_readonly: an archived quiz cannot be edited")
     if quiz.status != "published":
         return
     frozen = changed_fields - _PUBLISHED_EDITABLE_FIELDS
@@ -273,8 +274,7 @@ def _assert_quiz_settings_editable(quiz: Quiz, changed_fields: set[str]) -> None
         raise ConflictError(
             "quiz_published_setting_locked: these settings are frozen on a "
             "published quiz and would affect students mid-attempt or after "
-            f"finishing: {', '.join(sorted(frozen))}. Archive the quiz first "
-            "to change them."
+            f"finishing: {', '.join(sorted(frozen))}."
         )
 
 
@@ -550,16 +550,23 @@ async def update_quiz(
 
 
 async def publish_quiz(db: AsyncSession, quiz_id: UUID, actor: CurrentUser) -> Quiz:
-    del actor
     quiz = await _require_quiz(db, quiz_id)
-    if quiz.status == "archived":
-        raise AppError(f"Cannot publish archived quiz {quiz_id}")
+    if quiz.status != "draft":
+        raise ConflictError("quiz_readonly: only a draft quiz can be published")
     await assert_t_exp_set_for_all_questions(db, quiz_id)
     await assert_all_questions_approved(db, quiz_id)
     quiz.status = "published"
     quiz.published_at = utcnow()
     await _ensure_module_item(db, module_id=quiz.module_id, quiz_id=quiz.id)
     await flush_or_conflict(db)
+    from abridgeai.features.quizzes.services.audit import record_event  # noqa: PLC0415
+
+    await record_event(
+        db,
+        event_name="quiz_published",
+        quiz_id=quiz.id,
+        actor_user_id=actor.user_id,
+    )
     await db.refresh(quiz)
     return quiz
 
@@ -813,6 +820,16 @@ async def update_question(
     question.reviewed_by = actor.user_id
     question.reviewed_at = utcnow()
     await flush_or_conflict(db)
+    from abridgeai.features.quizzes.services.audit import record_event  # noqa: PLC0415
+
+    await record_event(
+        db,
+        event_name="question_edited",
+        quiz_id=quiz.id,
+        actor_user_id=actor.user_id,
+        subject_question_id=question.id,
+        payload={"changed_fields": sorted(payload_json)},
+    )
     await db.refresh(question)
     return question
 

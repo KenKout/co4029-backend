@@ -387,10 +387,14 @@ class TestOverrides:
 
     async def test_a_successful_delete_commits(self, monkeypatch: pytest.MonkeyPatch) -> None:
         import abridgeai.features.quizzes.queries.overrides as overrides_queries
+        import abridgeai.features.quizzes.services.audit as quiz_audit
 
         monkeypatch.setattr(overrides_queries, "delete_override", AsyncMock(return_value=True))
+        audit = AsyncMock()
+        monkeypatch.setattr(quiz_audit, "record_event", audit)
         db = _db()
         await authoring.delete_quiz_override(uuid4(), uuid4(), object(), db)
+        audit.assert_awaited_once()
         db.commit.assert_awaited_once_with()
 
 

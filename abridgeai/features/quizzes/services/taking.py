@@ -465,7 +465,7 @@ async def start_attempt(
     # cooldown. A quiz with no ``cooldown_hours`` must not inherit the SR
     # failure cooldown as a hidden default — the student can retry immediately.
     cooldown_map: dict[UUID, datetime] = {}
-    if quiz.cooldown_hours:
+    if effective.cooldown_hours:
         cooldown_map = await _load_cooldown_map(
             db, actor.user_id, [question.id for question in questions]
         )

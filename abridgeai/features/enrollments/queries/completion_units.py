@@ -34,13 +34,10 @@ a consumed attempt: a student who used their last allowed attempt on a quiz
 carrying an essay question completed the course, and unlocked the stage
 behind it, before a teacher had marked anything.
 
-One divergence remains, deliberately. ``eff_max`` here reads the quiz's own
-``allow_retakes``/``max_attempts``; the per-item rule resolves a student's
-``quiz_overrides`` first. An override granting extra attempts therefore
-leaves this query treating a quiz as terminal slightly early. Resolving the
-base/group/student precedence in SQL would duplicate
-``quizzes.services.overrides``; the authoritative per-item read stays
-``learner_progress``.
+Per-student quiz overrides are applied to the terminal-attempt ceiling here as
+well as in the per-item learner-progress service. Group overrides are currently
+inert across the application because no group-membership source exists; when
+that source lands, both readers must be extended together.
 
 Deliberate asymmetry, kept from the source rules
 ------------------------------------------------
@@ -121,10 +118,8 @@ class CourseUnitTally(NamedTuple):
 #
 # ``effective_max_attempts`` reproduces the quiz start-attempt gate:
 # ``allow_retakes = FALSE`` clamps the ceiling to 1 whatever ``max_attempts``
-# says. Per-student overrides (``quiz_overrides``) are resolved in Python by
-# ``quizzes.services.overrides`` and are NOT visible here — see the caller
-# note in ``services/completion.py``: this query is the aggregate fast path,
-# and the authoritative per-item read stays the learner_progress services.
+# says. The user-scoped override has the same field-by-field precedence as
+# ``quizzes.services.overrides``: a NULL exception falls through to the quiz.
 _UNIT_TALLY_SQL = text(
     """
 WITH lesson_units AS (
@@ -155,13 +150,21 @@ WITH lesson_units AS (
 quiz_pop AS (
     SELECT
         q.id AS quiz_id,
-        CASE WHEN q.allow_retakes THEN q.max_attempts ELSE 1 END AS eff_max
+        CASE
+            WHEN COALESCE(qo.allow_retakes, q.allow_retakes)
+            THEN COALESCE(qo.max_attempts, q.max_attempts)
+            ELSE 1
+        END AS eff_max
     FROM module_items mi
     JOIN modules m ON m.id = mi.module_id
         AND m.deleted_at IS NULL AND m.status = 'published'
     JOIN quizzes q ON q.id = mi.quiz_id
         AND q.deleted_at IS NULL
         AND q.status = 'published'
+    LEFT JOIN quiz_overrides qo
+        ON qo.quiz_id = q.id
+       AND qo.scope = 'user'
+       AND qo.user_id = :student_id
     WHERE m.course_id = :course_id
       AND mi.item_type = 'quiz'
       AND mi.deleted_at IS NULL

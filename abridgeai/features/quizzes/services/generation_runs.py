@@ -24,7 +24,7 @@ from abridgeai.core.security import CurrentUser
 from abridgeai.core.slug import slugify, unique_slug
 from abridgeai.features.quizzes.models import (
     Quiz,
-    QuizAttemptAnswer,
+    QuizAttempt,
     QuizQuestion,
     QuizQuestionOption,
     QuizQuestionRevision,
@@ -118,6 +118,8 @@ async def start_generation_run(
         quiz = await _require_quiz(db, payload.quiz_id)
         if quiz.module_id != module_id:
             raise AppError("Quiz must belong to this module")
+        if quiz.status != "draft":
+            raise ConflictError("quiz_readonly: generation is only allowed for a draft quiz")
         if await _quiz_has_in_flight_run(db, quiz.id):
             raise ConflictError("quiz_generation_in_progress")
         # Preflight (coverage mode only): coverage generation needs the source
@@ -132,19 +134,43 @@ async def start_generation_run(
             await _require_embedded_chunks(db, payload.source_lesson_ids)
         if not payload.append:
             from sqlalchemy import delete as sa_delete  # noqa: PLC0415
+            from sqlalchemy import exists as sa_exists  # noqa: PLC0415
             from sqlalchemy import select as sa_select  # noqa: PLC0415
             from sqlalchemy import text as sa_text  # noqa: PLC0415
 
-            # Regenerating with append=false wipes the quiz's existing
-            # questions. A bare DELETE on quiz_questions bypasses the ORM
-            # relationships (no delete cascade) and trips the child tables'
-            # foreign keys, which are ondelete=NO ACTION (options, revisions,
-            # attempt_answers, student_quiz_card_state). The raw IntegrityError
-            # is not UNIQUE, so flush_or_conflict re-raises it and the router
-            # turns it into a 500. This bit any teacher regenerating a quiz
-            # that already had questions (and, once students had answered,
-            # would trip on the attempt/card-state rows too). Delete children
-            # first, in FK order, then the questions.
+            # Replacement is safe only before any learner evidence exists.
+            # Attempts retain a layout that references question ids even when
+            # no answer was submitted, so an attempt alone is sufficient to
+            # make destructive regeneration invalid.
+            has_attempt = (
+                await db.execute(
+                    sa_select(sa_exists().where(QuizAttempt.quiz_id == quiz.id))
+                )
+            ).scalar_one()
+            has_card_state = (
+                await db.execute(
+                    sa_text(
+                        "SELECT EXISTS ("
+                        "  SELECT 1 FROM student_card_state s "
+                        "  JOIN quiz_questions q ON q.id = s.question_id "
+                        "  WHERE q.quiz_id = :quiz_id "
+                        "  UNION ALL "
+                        "  SELECT 1 FROM student_quiz_card_state legacy "
+                        "  JOIN quiz_questions q ON q.id = legacy.question_id "
+                        "  WHERE q.quiz_id = :quiz_id"
+                        ")"
+                    ),
+                    {"quiz_id": str(quiz.id)},
+                )
+            ).scalar_one()
+            if has_attempt or has_card_state:
+                raise ConflictError(
+                    "quiz_generation_evidence_exists: existing learner evidence "
+                    "prevents replacing quiz questions"
+                )
+
+            # With no learner evidence, delete authoring-only children in FK
+            # order. Never delete attempt answers or spaced-repetition state.
             question_id_subq = sa_select(QuizQuestion.id).where(QuizQuestion.quiz_id == quiz.id)
             await db.execute(
                 sa_delete(QuizQuestionOption).where(
@@ -155,22 +181,6 @@ async def start_generation_run(
                 sa_delete(QuizQuestionRevision).where(
                     QuizQuestionRevision.question_id.in_(question_id_subq)
                 )
-            )
-            await db.execute(
-                sa_delete(QuizAttemptAnswer).where(
-                    QuizAttemptAnswer.question_id.in_(question_id_subq)
-                )
-            )
-            # student_quiz_card_state has no ORM model in this feature (ported
-            # separately with the SR scheduler) and its question_id FK is
-            # NO ACTION on the live schema, so clear it via raw SQL.
-            await db.execute(
-                sa_text(
-                    "DELETE FROM student_quiz_card_state "
-                    "WHERE question_id IN (SELECT id FROM quiz_questions "
-                    "WHERE quiz_id = :quiz_id)"
-                ),
-                {"quiz_id": str(quiz.id)},
             )
             await db.execute(sa_delete(QuizQuestion).where(QuizQuestion.quiz_id == quiz.id))
             await flush_or_conflict(db)
@@ -269,6 +279,8 @@ async def regenerate_question(
 
     question = await _require_question(db, question_id)
     quiz = await _require_quiz(db, question.quiz_id)
+    if quiz.status != "draft":
+        raise ConflictError("quiz_readonly: regeneration is only allowed for a draft quiz")
     run = GenerationRun(
         generation_type="quiz",
         source_scope_kind="module",

@@ -358,7 +358,7 @@ async def get_quiz_for_taking(
         last_submit = (await db.execute(last_submit_stmt)).scalar_one_or_none()
         if last_submit is not None:
             now = datetime.now(UTC)
-            retry_after = last_submit + timedelta(hours=quiz.cooldown_hours)
+            retry_after = last_submit + timedelta(hours=eff_cooldown_hours)
             # ``submitted_at`` is stored TZ-aware (DateTime(timezone=True)),
             # but defensive — coerce naive → UTC for the comparison.
             if retry_after.tzinfo is None:

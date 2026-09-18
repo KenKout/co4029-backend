@@ -256,6 +256,19 @@ class _Builder:
                 {"i": uuid.uuid4(), "q": quiz_id, "s": self.student, "n": n + 1},
             )
 
+    async def grant_quiz_attempts(self, quiz_id: uuid.UUID, *, max_attempts: int) -> None:
+        await self._exec(
+            "INSERT INTO quiz_overrides "
+            "(id, quiz_id, scope, user_id, max_attempts, allow_retakes) "
+            "VALUES (:id, :quiz, 'user', :student, :max_attempts, TRUE)",
+            {
+                "id": uuid.uuid4(),
+                "quiz": quiz_id,
+                "student": self.student,
+                "max_attempts": max_attempts,
+            },
+        )
+
     async def interview_attempt(
         self, config_id: uuid.UUID, *, passed: bool | None, num: int = 1
     ) -> None:
@@ -289,6 +302,7 @@ async def builder(engine: AsyncEngine) -> AsyncIterator[_Builder]:
         )
         await conn.execute(text("DELETE FROM quiz_attempts WHERE student_id=:s"), {"s": b.student})
         await conn.execute(text("DELETE FROM quiz_grades WHERE student_id=:s"), {"s": b.student})
+        await conn.execute(text("DELETE FROM quiz_overrides WHERE user_id=:s"), {"s": b.student})
         await conn.execute(
             text("DELETE FROM interview_sessions WHERE student_id=:s"), {"s": b.student}
         )
@@ -402,6 +416,25 @@ async def test_failed_interview_blocks_but_exhausted_quiz_does_not(
 
     assert tally.quizzes_done == 1, "failed-but-exhausted quiz is terminal ⇒ done"
     assert tally.interviews_done == 0, "failed interview stays pending — must be PASSED"
+    assert not tally.is_complete()
+
+
+@pytest.mark.asyncio
+async def test_user_override_extra_attempt_keeps_failed_quiz_incomplete(
+    session_factory, builder
+) -> None:
+    """Course completion must use the same effective ceiling as quiz taking."""
+    fx = await builder.course(slug="override-attempts", quizzes=1)
+    quiz_id = fx["quizzes"][0]
+    await builder.fail_quiz(quiz_id, attempts=2)  # base ceiling is exhausted
+    await builder.grant_quiz_attempts(quiz_id, max_attempts=3)
+
+    async with session_factory() as db:
+        tally = await get_course_unit_tally(
+            db, course_id=fx["course"], student_id=builder.student
+        )
+
+    assert tally.quizzes_done == 0
     assert not tally.is_complete()
 
 

@@ -468,7 +468,7 @@ async def get_quiz_results(
 
     summary_dict = await _analytics_q.quiz_results_summary(db, quiz_id, quiz.grading_method)
     per_question_list = await _analytics_q.quiz_question_breakdown(db, quiz_id)
-    rollup = await _analytics_q.quiz_per_student_rollup(db, quiz_id)
+    rollup = await _analytics_q.quiz_per_student_rollup(db, quiz_id, quiz.grading_method)
 
     names = await _resolve_student_names(db, {row["student_id"] for row in rollup})
 
@@ -564,6 +564,8 @@ async def publish_quiz(
                 "pending_question_ids": [str(q) for q in exc.pending_question_ids],
             },
         ) from exc
+    except ConflictError as exc:
+        raise _conflict(str(exc)) from exc
     except AppError as exc:
         raise _bad_request(str(exc)) from exc
     await db.commit()
@@ -1255,7 +1257,6 @@ async def list_quiz_overrides(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> list[QuizOverrideRead]:
     """List all user/group overrides for a quiz (Phase 5)."""
-    del current_user
     from abridgeai.features.quizzes.queries import overrides as _ov_q  # noqa: PLC0415
 
     rows = await _ov_q.list_overrides(db, quiz_id)
@@ -1274,7 +1275,6 @@ async def create_quiz_override(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> QuizOverrideRead:
     """Create a per-user or per-group override for a quiz's timing/retake policy."""
-    del current_user
     from abridgeai.features.quizzes.queries import overrides as _ov_q  # noqa: PLC0415
 
     try:
@@ -1290,6 +1290,7 @@ async def create_quiz_override(
         db,
         event_name="override_created",
         quiz_id=quiz_id,
+        actor_user_id=current_user.user_id,
         subject_user_id=body.user_id,
         payload={"scope": body.scope, "override_id": str(row.id)},
     )
@@ -1310,12 +1311,23 @@ async def update_quiz_override(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> QuizOverrideRead:
     """Update an existing override row."""
-    del current_user
     from abridgeai.features.quizzes.queries import overrides as _ov_q  # noqa: PLC0415
 
-    row = await _ov_q.update_override(db, override_id, body.model_dump())
+    row = await _ov_q.update_override(
+        db, override_id, body.model_dump(), quiz_id=quiz_id
+    )
     if row is None:
         raise _not_found("override", override_id)
+    from abridgeai.features.quizzes.services import audit as _audit  # noqa: PLC0415
+
+    await _audit.record_event(
+        db,
+        event_name="override_updated",
+        quiz_id=quiz_id,
+        actor_user_id=current_user.user_id,
+        subject_user_id=row.user_id,
+        payload={"scope": row.scope, "override_id": str(row.id)},
+    )
     await db.commit()
     await db.refresh(row)
     return QuizOverrideRead.model_validate(row)
@@ -1332,12 +1344,20 @@ async def delete_quiz_override(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> None:
     """Delete an override row (app-code delete, ondelete=NO ACTION convention)."""
-    del current_user
     from abridgeai.features.quizzes.queries import overrides as _ov_q  # noqa: PLC0415
 
-    deleted = await _ov_q.delete_override(db, override_id)
+    deleted = await _ov_q.delete_override(db, override_id, quiz_id=quiz_id)
     if not deleted:
         raise _not_found("override", override_id)
+    from abridgeai.features.quizzes.services import audit as _audit  # noqa: PLC0415
+
+    await _audit.record_event(
+        db,
+        event_name="override_deleted",
+        quiz_id=quiz_id,
+        actor_user_id=getattr(current_user, "user_id", None),
+        payload={"override_id": str(override_id)},
+    )
     await db.commit()
 
 

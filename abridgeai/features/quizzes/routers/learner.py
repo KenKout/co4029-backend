@@ -386,6 +386,17 @@ async def start_attempt(  # noqa: C901 -- existing error mapping + session-claim
             headers={"Retry-After": str(retry_after_seconds)},
         ) from exc
     await _claim_new_attempt(db, attempt, current_user)
+    from abridgeai.features.quizzes.services.audit import record_event  # noqa: PLC0415
+
+    await record_event(
+        db,
+        event_name="attempt_started",
+        quiz_id=attempt.quiz_id,
+        actor_user_id=current_user.user_id,
+        subject_attempt_id=attempt.id,
+        subject_user_id=current_user.user_id,
+        payload={"attempt_number": attempt.attempt_number},
+    )
     await db.commit()
     return take_payload
 
@@ -608,6 +619,23 @@ async def submit_attempt(
             status_code=status.HTTP_409_CONFLICT,
             detail={"reason": "attempt_not_in_progress"},
         ) from exc
+    from abridgeai.features.quizzes.services.audit import record_event  # noqa: PLC0415
+
+    await record_event(
+        db,
+        event_name="attempt_submitted",
+        quiz_id=attempt.quiz_id,
+        actor_user_id=current_user.user_id,
+        subject_attempt_id=attempt.id,
+        subject_user_id=current_user.user_id,
+        payload={
+            "attempt_number": attempt.attempt_number,
+            "score_percent": (
+                str(attempt.score_percent) if attempt.score_percent is not None else None
+            ),
+            "passed": attempt.passed,
+        },
+    )
     await db.commit()
     try:
         await session_guard.release(attempt_id, current_user.session_id)
