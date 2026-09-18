@@ -100,6 +100,9 @@ from abridgeai.features.interviews.services.lifecycle import (
     dispatch_evaluation_or_record_missing as _dispatch_evaluation_or_record_missing,
 )
 from abridgeai.features.interviews.services.lifecycle import (
+    enforce_assessment_deadline,
+)
+from abridgeai.features.interviews.services.lifecycle import (
     redrive_missing_dispatch_on_refinish as _redrive_missing_dispatch_on_refinish,
 )
 from abridgeai.features.interviews.services.retake import (
@@ -368,6 +371,7 @@ async def take_session_step(  # noqa: C901 - shared legacy/adaptive turn coordin
     language: str = "en",
     turn_action: str = "answer",
     session_question_id: UUID | None = None,
+    arq_pool: object | None = None,
 ) -> dict[str, Any]:
     """Record the student's answer + advance the session.
 
@@ -398,6 +402,13 @@ async def take_session_step(  # noqa: C901 - shared legacy/adaptive turn coordin
         raise AppError("Complete interview onboarding before answering questions")
     if session.status != "in_progress":
         raise AppError(f"Cannot record answer on session with status={session.status}")
+
+    # Server-authoritative time limit (audit P1): refuse turns once the
+    # assessment deadline has passed, even before the sweep catches it.
+    if session.assessment_started_at is not None:
+        await enforce_assessment_deadline(
+            db, session_id, session.assessment_started_at, arq_pool=arq_pool
+        )
 
     current_session_question = await _current_session_question(db, session_id)
     if current_session_question is None:

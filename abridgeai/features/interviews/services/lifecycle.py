@@ -23,7 +23,7 @@ satisfied without a new ignore entry.
 from __future__ import annotations
 
 import logging
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
@@ -174,6 +174,48 @@ async def record_missing_dispatch(
         logger.exception(
             "recording missing dispatch failed (session=%s)", session_id
         )
+
+
+async def enforce_assessment_deadline(
+    db: AsyncSession,
+    session_id: UUID,
+    assessment_started_at: datetime,
+    *,
+    arq_pool: object | None,
+) -> None:
+    """Refuse work on a timed session whose deadline has passed (audit P1).
+
+    Between the deadline and the next sweep the session still reads
+    ``in_progress``; this terminalizes it with the SAME conditional helper the
+    sweep uses (a concurrent natural submit wins; the closing reason and the
+    evaluation dispatch stay identical) and raises. Called before any turn
+    write in ``take_session_step``.
+    """
+    from abridgeai.core.exceptions import AppError  # noqa: PLC0415
+
+    time_limit_minutes = await sessions_queries.get_session_time_limit_minutes(
+        db, session_id
+    )
+    if time_limit_minutes is None:
+        return
+    if utcnow() < assessment_started_at + timedelta(minutes=time_limit_minutes):
+        return
+    terminal_status = await sessions_queries.finalize_expired_in_progress_session(
+        db,
+        session_id,
+        ended_at=utcnow(),
+    )
+    await db.commit()
+    if terminal_status == "timed_out" and arq_pool is not None:
+        session = await sessions_queries.get_session(db, session_id)
+        if session is not None:
+            await dispatch_evaluation_or_record_missing(
+                db,
+                session_id=session_id,
+                student_id=session.student_id,
+                arq_pool=arq_pool,
+            )
+    raise AppError("The interview time limit has elapsed")
 
 
 async def dispatch_evaluation_or_record_missing(
@@ -516,6 +558,7 @@ async def _redrive_one_evaluation(
 
 __all__ = [
     "dispatch_evaluation_or_record_missing",
+    "enforce_assessment_deadline",
     "evaluation_job_id",
     "record_missing_dispatch",
     "redrive_missing_dispatch_on_refinish",

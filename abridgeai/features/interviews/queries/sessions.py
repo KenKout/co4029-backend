@@ -458,6 +458,14 @@ async def list_session_messages(
     return list((await db.execute(stmt)).scalars().all())
 
 
+async def get_session_time_limit_minutes(db: AsyncSession, session_id: UUID) -> int | None:
+    """The config's ``time_limit_minutes`` for a session (None = untimed)."""
+    stmt = select(InterviewConfig.time_limit_minutes).join(
+        InterviewSession, InterviewConfig.id == InterviewSession.interview_config_id
+    ).where(InterviewSession.id == session_id)
+    return (await db.execute(stmt)).scalar_one_or_none()
+
+
 async def list_in_progress_sessions_with_time_limit(
     db: AsyncSession,
 ) -> list[tuple[InterviewSession, int]]:
@@ -776,6 +784,7 @@ __all__ = [
     "get_outcome_evaluations",
     "get_session",
     "get_session_attempt_number",
+    "get_session_time_limit_minutes",
     "get_session_by_idempotency_key",
     "get_session_with_responses",
     "get_user_interview_sessions",

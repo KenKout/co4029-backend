@@ -759,6 +759,7 @@ async def respond_to_session(
     payload: InterviewSubmitAnswerRequest,
     current_user: Annotated[CurrentUser, Depends(_REQUIRE_SESSION_OWNER)],
     db: Annotated[AsyncSession, Depends(get_db)],
+    arq_pool: Annotated[object | None, Depends(get_arq_pool)],
     accept_language: Annotated[str | None, Header()] = None,
 ) -> InterviewSubmitAnswerResponse:
     if payload.session_id != session_id:
@@ -777,6 +778,7 @@ async def respond_to_session(
             language=_resolve_language(accept_language),
             turn_action=payload.turn_action or "answer",
             session_question_id=payload.session_question_id,
+            arq_pool=arq_pool,
         )
     except NotFoundError as exc:
         raise _not_found("interview_session", session_id) from exc
