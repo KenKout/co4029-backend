@@ -23,7 +23,9 @@ from abridgeai.core.pagination import (
 )
 from abridgeai.features.access_control.api import public as access_control_api
 from abridgeai.features.admin.queries import users as user_queries
+from abridgeai.features.identity.models import StorageObject
 from abridgeai.features.identity.services.auth_events import record_auth_event
+from abridgeai.infrastructure.s3 import create_stream_url
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -139,6 +141,14 @@ async def user_detail(db: AsyncSession, *, user_id: UUID) -> dict[str, Any]:
     base_dict = dict(base)
     profile_keys = ("display_name", "given_name", "family_name", "bio", "avatar_object_id")
     profile = {k: base_dict.pop(k) for k in profile_keys}
+    profile["avatar_url"] = None
+    if profile["avatar_object_id"] is not None:
+        storage = await db.get(StorageObject, profile["avatar_object_id"])
+        if storage is not None:
+            try:
+                profile["avatar_url"], _ = await create_stream_url(storage)
+            except Exception:  # noqa: BLE001 — a storage blip must not break user detail
+                profile["avatar_url"] = None
     user_payload = dict(base_dict)
     user_payload["profile"] = profile if profile.get("display_name") is not None else None
     membership_codes = await access_control_api.get_user_membership_codes(db, user_id)
