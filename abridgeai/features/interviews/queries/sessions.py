@@ -323,6 +323,27 @@ async def get_active_session(
     return (await db.execute(stmt)).scalar_one_or_none()
 
 
+async def get_session_by_idempotency_key(
+    db: AsyncSession,
+    user_id: UUID,
+    config_id: UUID,
+    idempotency_key: UUID,
+) -> InterviewSession | None:
+    """The session this client start key already created, if any.
+
+    Scoped to (student, config) so a key is only ever an idempotency handle
+    for the start request that carried it — a colliding key from another
+    config cannot hijack the lookup. The UNIQUE index (migration 0135) is the
+    insert-time authority; this read is the fast path.
+    """
+    stmt = select(InterviewSession).where(
+        InterviewSession.student_id == user_id,
+        InterviewSession.interview_config_id == config_id,
+        InterviewSession.idempotency_key == idempotency_key,
+    )
+    return (await db.execute(stmt)).scalar_one_or_none()
+
+
 async def get_session_attempt_number(
     db: AsyncSession,
     user_id: UUID,
@@ -745,29 +766,6 @@ async def finalize_expired_in_progress_session(
     return result.scalar_one_or_none()
 
 
-async def list_integrity_events_for_session(db: AsyncSession, session_id: UUID) -> list[Any]:
-    """Return FR-5.8 proctoring events for one interview session, oldest first.
-
-    Projection source for the teacher gap-report integrity timeline. Scoped to
-    ``assessment_kind='interview'``. Empty list when none were recorded (the
-    common case for an honest take). Mirrors the quiz-side
-    ``list_integrity_events_for_attempt``.
-    """
-    from abridgeai.features.interviews.models import (  # noqa: PLC0415
-        AssessmentIntegrityEvent,
-    )
-
-    stmt = (
-        select(AssessmentIntegrityEvent)
-        .where(
-            AssessmentIntegrityEvent.assessment_kind == "interview",
-            AssessmentIntegrityEvent.interview_session_id == session_id,
-        )
-        .order_by(AssessmentIntegrityEvent.created_at.asc())
-    )
-    return list((await db.execute(stmt)).scalars().all())
-
-
 __all__ = [
     "count_terminal_sessions",
     "count_user_messages",
@@ -778,10 +776,10 @@ __all__ = [
     "get_outcome_evaluations",
     "get_session",
     "get_session_attempt_number",
+    "get_session_by_idempotency_key",
     "get_session_with_responses",
     "get_user_interview_sessions",
     "list_in_progress_sessions_with_time_limit",
-    "list_integrity_events_for_session",
     "list_pending_evaluation_sessions",
     "list_session_messages",
     "list_sessions_for_config",

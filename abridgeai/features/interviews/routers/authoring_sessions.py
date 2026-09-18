@@ -272,9 +272,11 @@ async def get_session_integrity_events(
     Teacher-only (course-scoped authoring access); never exposed to students.
     """
     del current_user
-    from abridgeai.features.interviews.queries import sessions as _sessions_q  # noqa: PLC0415
+    from abridgeai.features.interviews.queries import (
+        integrity_events as _integrity_q,  # noqa: PLC0415
+    )
 
-    rows = await _sessions_q.list_integrity_events_for_session(db, session_id)
+    rows = await _integrity_q.list_integrity_events_for_session(db, session_id)
     return InterviewIntegrityRead(
         session_id=session_id,
         events=[InterviewIntegrityEvent.model_validate(ev) for ev in rows],

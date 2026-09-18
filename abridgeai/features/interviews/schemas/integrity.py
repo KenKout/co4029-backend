@@ -139,6 +139,21 @@ def warn_once_and_score(score_after: int, threshold: int) -> ThresholdDecision:
     return ThresholdDecision(reaches_threshold=bool(threshold > 0) and score_after >= threshold)
 
 
+def coerce_start_idempotency_key(raw: object) -> UUID | None:
+    """Parse a client start-session idempotency key, or None when absent/invalid.
+
+    Anything that is not a well-formed UUID becomes None (keyless start) rather
+    than raising — a broken client must not 500 the lobby. Mirrors
+    :func:`coerce_client_event_id`.
+    """
+    if not isinstance(raw, (str, UUID)):
+        return None
+    try:
+        return raw if isinstance(raw, UUID) else UUID(raw)
+    except ValueError:
+        return None
+
+
 def coerce_client_event_id(raw: object) -> UUID | None:
     """Parse a client-supplied retry key, or None when absent/invalid.
 

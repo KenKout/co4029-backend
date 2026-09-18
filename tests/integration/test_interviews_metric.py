@@ -56,7 +56,11 @@ _GRANDFATHERED: dict[str, int] = {
     # split into a sibling module; the ratchet tracks the columns + table, not
     # relaxed logic. Orchestration lives in NEW files (services/recording.py,
     # queries/recordings.py, services/_recording_egress.py).
-    "models.py": 1051,
+    # Repinned 2026-09-18 (1051 -> 1057) for the start-session idempotency key
+    # (migration 0135). A schema column has exactly one legal home — the table
+    # this file owns — so it cannot be split into a sibling module; the ratchet
+    # tracks the column + contract comment, not relaxed logic.
+    "models.py": 1057,
     # Repinned 2026-09-17 (870 -> 946): the consented-audio-recording feature
     # added the POST /recording-consent endpoint plus recording bookkeeping in
     # the realtime-token flow — one transactional learner path, same precedent

@@ -91,6 +91,17 @@ register_conflict_mappings(
         # lock — without the mapping a lost race surfaces as IntegrityError
         # (HTTP 500) instead of a clean 409.
         "uq_iq_bank_live_group_angle": "logical_question_angle_already_present",
+        # Postgres truncates the declarative name: two racing starts that both
+        # passed the active-session check collide on this index at insert, and
+        # taking.start_session's ConflictError backstop reloads the winner.
+        "interview_sessions_interview_config_id_student_id_attempt_n_key": (
+            "interview_session_attempt_taken: this attempt was just created by "
+            "another request — use the returned session"
+        ),
+        "uq_interview_sessions_number": (
+            "interview_session_attempt_taken: this attempt was just created by "
+            "another request — use the returned session"
+        ),
     }
 )
 

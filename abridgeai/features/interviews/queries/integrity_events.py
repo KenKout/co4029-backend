@@ -279,3 +279,25 @@ async def add_integrity_score(db: AsyncSession, session_id: UUID, delta: int) ->
         .returning(InterviewSession.integrity_score)
     )
     return int(result.scalar_one())
+
+
+async def list_integrity_events_for_session(db: AsyncSession, session_id: UUID) -> list[Any]:
+    """Return FR-5.8 proctoring events for one interview session, oldest first.
+
+    Projection source for the teacher gap-report integrity timeline. Scoped to
+    ``assessment_kind='interview'``. Empty list when none were recorded (the
+    common case for an honest take). Mirrors the quiz-side
+    ``list_integrity_events_for_attempt``.
+    """
+    stmt = (
+        select(AssessmentIntegrityEvent)
+        .where(
+            AssessmentIntegrityEvent.assessment_kind == "interview",
+            AssessmentIntegrityEvent.interview_session_id == session_id,
+        )
+        .order_by(AssessmentIntegrityEvent.created_at.asc())
+    )
+    return list((await db.execute(stmt)).scalars().all())
+
+
+__all__ = ["list_integrity_events_for_session"]

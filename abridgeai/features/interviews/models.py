@@ -494,6 +494,12 @@ class InterviewSession(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         index=True,
     )
     attempt_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    # Client-supplied start idempotency (UNIQUE where not null, migration
+    # 0135). A retried POST resolves to the ORIGINAL session even after it
+    # terminalized — never a fresh attempt; see ``taking.start_session``.
+    idempotency_key: Mapped[uuid.UUID | None] = mapped_column(
+        PGUUID(as_uuid=True), nullable=True, unique=True
+    )
     status: Mapped[str] = mapped_column(
         String(20), nullable=False, server_default=text("'in_progress'")
     )

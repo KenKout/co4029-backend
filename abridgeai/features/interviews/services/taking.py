@@ -88,13 +88,13 @@ from abridgeai.features.interviews.orchestrator.variant_selection import (
 from abridgeai.features.interviews.queries import authoring as authoring_queries
 from abridgeai.features.interviews.queries import sessions as sessions_queries
 from abridgeai.features.interviews.realtime import observability as security_obs
+from abridgeai.features.interviews.schemas.integrity import coerce_start_idempotency_key
 from abridgeai.features.interviews.services import security as security_service
 from abridgeai.features.interviews.services.ceremony import (
     FinishReason,
     ensure_ceremony_message,
     integrity_policy_snapshot_from_config,
     normalize_language,
-    onboarding_ceremony_kind,
 )
 from abridgeai.features.interviews.services.lifecycle import (
     dispatch_evaluation_or_record_missing as _dispatch_evaluation_or_record_missing,
@@ -108,6 +108,9 @@ from abridgeai.features.interviews.services.retake import (
     RetakeStatus,
     _enforce_retake_policy,
     compute_retake_status,
+)
+from abridgeai.features.interviews.services.session_entry import (
+    _restore_session_entry_view,
 )
 
 if TYPE_CHECKING:
@@ -236,7 +239,7 @@ async def start_session(
     still carry ``input_mode`` for older clients; it is ignored.
     """
     data = payload.model_dump(exclude_unset=True) if payload is not None else {}
-    del data  # accepted-and-ignored (see docstring); no field is read
+    idempotency_key = coerce_start_idempotency_key(data.pop("idempotency_key", None))
 
     # Thesis §4.3: the pass/fail verdict is judged per learning outcome. Starting
     # an interview whose config has no outcomes guarantees an automatic fail with
@@ -245,21 +248,20 @@ async def start_session(
     if not outcomes:
         raise AppError("interview_no_outcomes: this interview has no learning outcomes configured")
 
+    # Idempotency PRE-CHECK before attempt allocation: the same key resolves
+    # to the ORIGINAL session even after it terminalized (a lost response) —
+    # the QuizAttempt.idempotency_key contract.
+    if idempotency_key is not None:
+        keyed = await sessions_queries.get_session_by_idempotency_key(
+            db, actor.user_id, config_id, idempotency_key
+        )
+        if keyed is not None:
+            await _restore_session_entry_view(db, keyed, config_id)
+            return keyed
+
     existing = await sessions_queries.get_active_session(db, actor.user_id, config_id)
     if existing is not None:
-        await _ensure_first_question_attached(db, existing.id, config_id)
-        # A live session created before the mode unification may be recorded
-        # "text"/"voice"; it now runs as the unified hybrid room too, so align
-        # the row once (analytics read it, nothing branches on it any more).
-        if existing.input_mode != "hybrid":
-            existing.input_mode = "hybrid"
-            await flush_or_conflict(db)
-        await ensure_ceremony_message(
-            db,
-            session=existing,
-            kind=onboarding_ceremony_kind(existing.onboarding_stage),
-            language=existing.interview_language,
-        )
+        await _restore_session_entry_view(db, existing, config_id)
         return existing
 
     # FR-5.3 retake policy — gate a *new* attempt on the config's
@@ -277,6 +279,7 @@ async def start_session(
         interview_config_id=config_id,
         student_id=actor.user_id,
         attempt_number=attempt_number,
+        idempotency_key=idempotency_key,
         status="in_progress",
         input_mode="hybrid",
         onboarding_stage="identity_check",
@@ -301,7 +304,16 @@ async def start_session(
         output_guard_version=OUTPUT_GUARD_VERSION,
     )
     db.add(session)
-    await flush_or_conflict(db)
+    try:
+        await flush_or_conflict(db)
+    except ConflictError:
+        # A concurrent same-(config, student) start won the attempt-number
+        # unique at insert: reload the winner, return it to BOTH callers.
+        active = await sessions_queries.get_active_session(db, actor.user_id, config_id)
+        if active is None:
+            raise
+        await _restore_session_entry_view(db, active, config_id)
+        return active
 
     first_question = await _first_published_question(db, config_id, session_seed=str(session.id))
     if first_question is not None:
@@ -324,40 +336,6 @@ async def start_session(
     return session
 
 
-async def _ensure_first_question_attached(
-    db: AsyncSession, session_id: UUID, config_id: UUID
-) -> None:
-    """Attach question #1 to ``session_id`` if it has none yet.
-
-    Closes the gap where ``start_session`` short-circuited on a stale
-    ``in_progress`` row created before any question reached
-    ``review_status='approved'``. Without this, approving questions
-    after the fact never reaches the learner's existing session.
-    """
-    from sqlalchemy import func, select  # noqa: PLC0415
-
-    count = (
-        await db.execute(
-            select(func.count(InterviewSessionQuestion.id)).where(
-                InterviewSessionQuestion.session_id == session_id
-            )
-        )
-    ).scalar_one()
-    if int(count) > 0:
-        return
-    first_question = await _first_published_question(db, config_id, session_seed=str(session_id))
-    if first_question is None:
-        return
-    db.add(
-        InterviewSessionQuestion(
-            session_id=session_id,
-            interview_question_id=first_question.id,
-            sequence_no=1,
-        )
-    )
-    await flush_or_conflict(db)
-
-
 class StaleSessionQuestionError(ConflictError):
     """A REST turn named a session question the session has advanced past.
 
@@ -374,6 +352,9 @@ class StaleSessionQuestionError(ConflictError):
             "stale_session_question: this turn names a question the session "
             "has already advanced past — reload and answer the current question"
         )
+
+
+
 
 
 async def take_session_step(  # noqa: C901 - shared legacy/adaptive turn coordinator

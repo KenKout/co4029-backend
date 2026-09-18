@@ -1267,6 +1267,129 @@ async def test_submit_session_retry_after_enqueue_failure_redrives_immediately(
     assert phase == "queued"
 
 
+async def test_start_session_idempotency_key_returns_same_session(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict[str, Any],
+) -> None:
+    """The same idempotency key resolves to the SAME session, every retry.
+
+    Case A (both copies see a live session) and Case B (the retry arrives
+    after the first session already terminalized — a lost response). Before
+    the contract was honoured the key was accepted-and-ignored, so every
+    retry allocated a fresh attempt.
+    """
+    seeded = await _create_published_config(
+        engine,
+        course_id=scenario["course_id"],
+        module_id=scenario["module_id"],
+        teacher_id=scenario["teacher_id"],
+    )
+    payload = _CreatePayload(input_mode="text", idempotency_key=uuid.uuid4())
+    async with session_factory() as session, session.begin():
+        first = await taking_service.start_session(
+            session, seeded["config_id"], payload, _actor(scenario["student_id"])
+        )
+    async with session_factory() as session, session.begin():
+        second = await taking_service.start_session(
+            session, seeded["config_id"], payload, _actor(scenario["student_id"])
+        )
+    assert second.id == first.id
+
+    # Case B: terminalize the session, then retry with the SAME key. The key
+    # must still resolve to the original row — never allocate a new attempt.
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "UPDATE interview_sessions SET status = 'completed', "
+                "ended_at = NOW(), pass_verdict = true WHERE id = :id"
+            ),
+            {"id": str(first.id)},
+        )
+    async with session_factory() as session, session.begin():
+        retry = await taking_service.start_session(
+            session, seeded["config_id"], payload, _actor(scenario["student_id"])
+        )
+    assert retry.id == first.id
+
+
+async def test_start_session_insert_race_returns_winner_not_500(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A racing start that loses the attempt-number unique must not 500.
+
+    Two POSTs pass the active-session check before either commits (the real
+    race); the loser's INSERT violates ``uq_interview_sessions_number`` at
+    flush. The loser reloads the winner and returns the SAME session the
+    winner got, so both clients land in one shared live attempt. Simulated by
+    blanking the active-session lookup once (both "requests" saw no session)
+    while a committed winner row already holds attempt_number 1.
+    """
+    seeded = await _create_published_config(
+        engine,
+        course_id=scenario["course_id"],
+        module_id=scenario["module_id"],
+        teacher_id=scenario["teacher_id"],
+    )
+    # The committed winner of the race: a live attempt_number 1 row. The
+    # explicit past started_at keeps it behind nothing — get_active_session
+    # orders by started_at DESC and a NULL starts the sort last in practice.
+    winner_id = uuid.uuid4()
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO interview_sessions (id, interview_config_id, student_id, "
+                "attempt_number, status, input_mode, onboarding_stage, interview_language, started_at) "
+                "VALUES (:id, :cfg, :stu, 1, 'in_progress', 'hybrid', 'identity_check', 'en', "
+                "NOW() - INTERVAL '1 minute')"
+            ),
+            {"id": str(winner_id), "cfg": seeded["config_id"], "stu": scenario["student_id"]},
+        )
+
+    from abridgeai.features.interviews.queries import sessions as sessions_queries
+
+    real_get_active = sessions_queries.get_active_session
+    real_attempt_number = sessions_queries.get_session_attempt_number
+    calls = {"n": 0}
+
+    async def _blind_first(db: AsyncSession, *args: Any, **kwargs: Any) -> object | None:
+        # First call = the loser's pre-insert active check inside the race
+        # window: it must see NOTHING (the winner's insert is uncommitted).
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return None
+        return await real_get_active(db, *args, **kwargs)
+
+    async def _stale_attempt_number(db: AsyncSession, *args: Any, **kwargs: Any) -> int:
+        # In the real race the winner's insert is UNCOMMITTED, so MAX
+        # (attempt_number) still reads 0 and the loser allocates 1 — the
+        # collision. The committed winner row would make the real MAX return
+        # 2, so pin the race-window read to what the loser would have seen.
+        calls["n"] += 1
+        if calls["n"] == 2:
+            return 1
+        return await real_attempt_number(db, *args, **kwargs)
+
+    monkeypatch.setattr(sessions_queries, "get_active_session", _blind_first)  # type: ignore[attr-defined]
+    monkeypatch.setattr(sessions_queries, "get_session_attempt_number", _stale_attempt_number)  # type: ignore[attr-defined]
+
+    payload = _CreatePayload(input_mode="text")
+    # No explicit session.begin(): the ConflictError backstop ROLLS BACK the
+    # poisoned transaction (flush_or_conflict) and then re-reads the winner in
+    # a fresh one — impossible inside an explicit begin() block, and the
+    # production get_db flow uses implicit autobegin. Commit mirrors the
+    # router, which owns the commit after start_session returns.
+    async with session_factory() as session:
+        loser = await taking_service.start_session(
+            session, seeded["config_id"], payload, _actor(scenario["student_id"])
+        )
+        await session.commit()
+    assert loser.id == winner_id
+
+
 @pytest.mark.asyncio
 async def test_submit_enqueues_eval(
     engine: AsyncEngine,
