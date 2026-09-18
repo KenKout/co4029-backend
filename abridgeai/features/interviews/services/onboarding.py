@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -149,6 +150,7 @@ async def respond(  # noqa: C901 - explicit persisted state machine
     action: str | None,
     language: str | None,
     turn_key: str,
+    _before_stage_write: Callable[[], Awaitable[None]] | None = None,
 ) -> OnboardingResult:
     """Advance setup exactly once; onboarding turns are never question-linked."""
     session = await db.get(InterviewSession, session_id)
@@ -276,6 +278,11 @@ async def respond(  # noqa: C901 - explicit persisted state machine
             "preparation": "readiness",
         }.get(stage)
     if next_stage is not None:
+        # Race hook (tests only): parks this caller AFTER its stage check but
+        # BEFORE the transition write, so a second caller can slip through the
+        # stale stage check. Production callers never pass it.
+        if _before_stage_write is not None:
+            await _before_stage_write()
         session.onboarding_stage = next_stage
         # When the candidate just set their name, the acknowledgement already
         # carries the audio-check question, so it BECOMES the audio-check
