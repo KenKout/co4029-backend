@@ -21,6 +21,7 @@ from abridgeai.features.courses.queries import (
 from abridgeai.features.courses.queries import (
     administration as admin_queries,
 )
+from abridgeai.features.courses.services import assignment as assignment_service
 from abridgeai.features.courses.schemas import CourseAuthoring
 
 if TYPE_CHECKING:
@@ -42,8 +43,10 @@ async def list_all_courses_admin(
     page = await admin_queries.list_all_courses_admin(
         db, include_deleted=include_deleted, limit=limit, cursor=cursor
     )
+    dtos = [CourseAuthoring.model_validate(course) for course in page.items]
+    await assignment_service._attach_health_projections(db, page.items, dtos)
     return CursorPage(
-        items=[CourseAuthoring.model_validate(course) for course in page.items],
+        items=dtos,
         next_cursor=page.next_cursor,
     )
 
@@ -72,8 +75,10 @@ async def search_all_courses_admin(
         page=page,
         page_size=page_size,
     )
+    dtos = [CourseAuthoring.model_validate(course) for course in result.items]
+    await assignment_service._attach_health_projections(db, result.items, dtos)
     return Page(
-        items=[CourseAuthoring.model_validate(c) for c in result.items],
+        items=dtos,
         total=result.total,
         page=result.page,
         page_size=result.page_size,
