@@ -728,6 +728,28 @@ def _resolve_language(accept_language: str | None) -> str:
     return "en"
 
 
+async def _current_session_question_snapshot(
+    db: AsyncSession, session_id: UUID, user_id: UUID
+) -> UUID | None:
+    """The CURRENT session-question id for a 409 stale-turn snapshot, or None."""
+    from sqlalchemy import select  # noqa: PLC0415
+
+    from abridgeai.features.interviews.models import (  # noqa: PLC0415
+        InterviewSessionQuestion,
+    )
+
+    fresh = await taking_service.get_session_for_user(db, session_id, user_id)
+    if fresh is None:
+        return None
+    snapshot_q = await db.execute(
+        select(InterviewSessionQuestion.id)
+        .where(InterviewSessionQuestion.session_id == session_id)
+        .order_by(InterviewSessionQuestion.sequence_no.desc())
+        .limit(1)
+    )
+    return snapshot_q.scalar_one_or_none()
+
+
 @router.post(
     "/interview-sessions/{session_id}/respond",
     response_model=InterviewSubmitAnswerResponse,
@@ -754,6 +776,7 @@ async def respond_to_session(
             turn_key=payload.turn_key,
             language=_resolve_language(accept_language),
             turn_action=payload.turn_action or "answer",
+            session_question_id=payload.session_question_id,
         )
     except NotFoundError as exc:
         raise _not_found("interview_session", session_id) from exc
@@ -761,6 +784,24 @@ async def respond_to_session(
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail={"error": "forbidden", "message": str(exc)},
+        ) from exc
+    except taking_service.StaleSessionQuestionError as exc:
+        # A two-tab client (or a retry after a lost response) submitted for a
+        # question the session has advanced past. Nothing was written; hand
+        # back the CURRENT binding so the client can re-render and retry.
+        await db.rollback()
+        current_sq_id = await _current_session_question_snapshot(
+            db, session_id, current_user.user_id
+        )
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "error": "stale_session_question",
+                "message": str(exc),
+                "current_session_question_id": (
+                    str(current_sq_id) if current_sq_id is not None else None
+                ),
+            },
         ) from exc
     except AppError as exc:
         raise _bad_request(str(exc)) from exc
