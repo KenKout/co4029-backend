@@ -171,6 +171,88 @@ async def record_missing_dispatch(
         )
 
 
+async def dispatch_evaluation_or_record_missing(
+    db: AsyncSession,
+    *,
+    session_id: UUID,
+    student_id: UUID,
+    arq_pool: object,
+) -> bool:
+    """Enqueue evaluation; on failure stamp a durable ``missing`` record.
+
+    The terminal commit lands BEFORE this call, so an enqueue exception must
+    not propagate: the caller's retry would only see the terminal row and
+    never re-enqueue. Instead the failure stamps ``phase='missing'`` (own
+    commit — the annotated terminal state is already durable) and the sweep
+    redrives it immediately. True when a job actually reached Redis.
+    """
+    job_id = evaluation_job_id(session_id)
+    try:
+        job = await arq_pool.enqueue_job(  # type: ignore[attr-defined]
+            _EVALUATE_INTERVIEW_SESSION_TASK,
+            student_id,
+            session_id,
+            _job_id=job_id,
+        )
+    except Exception:  # noqa: BLE001 -- dispatch failure must not 500 a committed terminal state
+        logger.exception(
+            "evaluation dispatch failed after terminal commit (session=%s, job_id=%s)",
+            session_id,
+            job_id,
+        )
+        await record_missing_dispatch(db, session_id=session_id, job_id=job_id)
+        return False
+    return job is not None
+
+
+async def redrive_missing_dispatch_on_refinish(
+    db: AsyncSession,
+    *,
+    session_id: UUID,
+    student_id: UUID,
+    arq_pool: object,
+) -> None:
+    """Re-attempt a dispatch the first finish lost, on a terminal re-finish.
+
+    Fires ONLY when the durable record says ``phase='missing'``: a winner whose
+    dispatch succeeded leaves no recovery record, so an ordinary re-finish
+    race loser does not enqueue a second time (the finish-race contract). On a
+    successful re-dispatch the record CASes ``missing`` → ``queued`` scoped to
+    this job id, so the sweep does not redrive it again.
+    """
+    from sqlalchemy import text  # noqa: PLC0415
+
+    from abridgeai.features.interviews.queries import (  # noqa: PLC0415
+        sessions as sessions_queries,
+    )
+
+    phase = (
+        await db.execute(
+            text(
+                "SELECT internal_summary_json #>> "
+                "'{evaluation_recovery,current,phase}' "
+                "FROM interview_sessions WHERE id = :id"
+            ),
+            {"id": session_id},
+        )
+    ).scalar_one_or_none()
+    if phase != "missing":
+        return
+    if await dispatch_evaluation_or_record_missing(
+        db, session_id=session_id, student_id=student_id, arq_pool=arq_pool
+    ):
+        job_id = evaluation_job_id(session_id)
+        await sessions_queries.transition_evaluation_recovery_phase(
+            db,
+            session_id,
+            job_id=job_id,
+            from_phase="missing",
+            to_phase="queued",
+            extra={"redrived_at": utcnow().isoformat()},
+        )
+        await db.commit()
+
+
 async def recover_stalled_evaluations(
     db: AsyncSession,
     arq_pool: object | None = None,
@@ -428,8 +510,10 @@ async def _redrive_one_evaluation(
 
 
 __all__ = [
+    "dispatch_evaluation_or_record_missing",
     "evaluation_job_id",
     "record_missing_dispatch",
+    "redrive_missing_dispatch_on_refinish",
     "recover_stalled_evaluations",
     "sweep_expired_interview_sessions",
 ]
