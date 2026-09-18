@@ -68,7 +68,10 @@ async def list_all_materials(
     # shared material in the clone's authoring view instead of making the lesson
     # appear empty.
     primary_material_id = await db.scalar(
-        text("SELECT primary_material_id FROM lessons WHERE id = :lesson_id"),
+        text(
+            "SELECT primary_material_id FROM lessons "
+            "WHERE id = :lesson_id AND deleted_at IS NULL"
+        ),
         {"lesson_id": lesson_id},
     )
     if primary_material_id is None:

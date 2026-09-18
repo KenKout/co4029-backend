@@ -241,17 +241,19 @@ def _as_plain_json(value: Any) -> Any:  # noqa: ANN401  -- mirrors arbitrary JSO
 
 
 def _assert_quiz_editable(quiz: Quiz) -> None:
-    """Allow content authoring only while a quiz is a draft.
+    """Reject content authoring only while a quiz is published.
 
-    Used by the question CRUD + bulk-approve paths: published and archived
-    quizzes are fully frozen, since editing would corrupt learner evidence or
-    create changes that can never be republished. Raised as
+    Used by the question CRUD + bulk-approve paths: published quizzes are
+    frozen, since editing would corrupt learner evidence. Archived quizzes
+    are withdrawn from students and may be edited before a new publication.
+    Raised as
     :class:`ConflictError` so the router maps to HTTP 409. Quiz-settings
     edits use the field-aware :func:`_assert_quiz_settings_editable` instead.
     """
-    if quiz.status != "draft":
+    if quiz.status == "published":
         raise ConflictError(
-            "quiz_readonly: quiz questions cannot be edited unless the quiz is a draft"
+            "quiz_published_readonly: a published quiz's questions cannot be "
+            "edited; archive it first to make changes"
         )
 
 
@@ -265,8 +267,6 @@ def _assert_quiz_settings_editable(quiz: Quiz, changed_fields: set[str]) -> None
     who is taking or has finished the quiz — is rejected with HTTP 409.
     Draft quizzes are unrestricted.
     """
-    if quiz.status == "archived":
-        raise ConflictError("quiz_archived_readonly: an archived quiz cannot be edited")
     if quiz.status != "published":
         return
     frozen = changed_fields - _PUBLISHED_EDITABLE_FIELDS
@@ -551,8 +551,10 @@ async def update_quiz(
 
 async def publish_quiz(db: AsyncSession, quiz_id: UUID, actor: CurrentUser) -> Quiz:
     quiz = await _require_quiz(db, quiz_id)
-    if quiz.status != "draft":
-        raise ConflictError("quiz_readonly: only a draft quiz can be published")
+    if quiz.status == "published":
+        return quiz
+    if quiz.status == "archived":
+        raise AppError(f"Cannot publish archived quiz {quiz_id}")
     await assert_t_exp_set_for_all_questions(db, quiz_id)
     await assert_all_questions_approved(db, quiz_id)
     quiz.status = "published"

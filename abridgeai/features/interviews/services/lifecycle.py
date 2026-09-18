@@ -58,6 +58,11 @@ def evaluation_job_id(session_id: UUID, *, attempt: int = 0) -> str:
     return f"interview-evaluation:{session_id}"
 
 
+def _evaluation_job_id(session_id: UUID, *, attempt: int = 0) -> str:
+    """Backward-compatible alias for the deterministic job-id helper."""
+    return evaluation_job_id(session_id, attempt=attempt)
+
+
 async def sweep_expired_interview_sessions(
     db: AsyncSession,
     arq_pool: object | None = None,

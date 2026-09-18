@@ -28,6 +28,7 @@ import abridgeai.features.access_control.models  # noqa: F401  -- register users
 import abridgeai.features.courses.models  # noqa: F401  -- register courses/modules/lessons FK targets
 import abridgeai.features.identity.models  # noqa: F401  -- register users FK target
 import abridgeai.features.interviews.models  # noqa: F401  -- T6.1 registers interview_* tables
+from abridgeai.core.audit import audit_maintenance
 from abridgeai.core.config import get_settings
 from abridgeai.core.db import Base
 from abridgeai.core.security import CurrentUser
@@ -135,6 +136,8 @@ async def scenario(engine: AsyncEngine) -> AsyncIterator[dict]:
     }
 
     async with engine.begin() as conn:
+        await audit_maintenance(conn)
+        await conn.execute(text("DELETE FROM quiz_audit_events WHERE quiz_id = :q"), {"q": quiz_id})
         await conn.execute(
             text(
                 "DELETE FROM quiz_question_revisions WHERE question_id IN "

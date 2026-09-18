@@ -49,6 +49,7 @@ import abridgeai.features.identity.models  # noqa: F401  -- register users FK ta
 import abridgeai.features.interviews.models  # noqa: F401  -- T6.1 registers interview_* tables
 import abridgeai.features.quizzes.models  # noqa: F401  -- register quiz tables
 import abridgeai.features.spaced_repetition.models  # noqa: F401  -- register student_card_state
+from abridgeai.core.audit import audit_maintenance
 from abridgeai.core.config import get_settings
 from abridgeai.core.db import Base, get_db
 from abridgeai.core.security import (
@@ -205,6 +206,15 @@ async def quiz_with_questions(engine: AsyncEngine) -> AsyncIterator[dict]:
     }
 
     async with engine.begin() as conn:
+        await audit_maintenance(conn)
+        await conn.execute(
+            text(
+                "DELETE FROM assessment_integrity_events WHERE quiz_attempt_id IN "
+                "(SELECT id FROM quiz_attempts WHERE quiz_id = :q)"
+            ),
+            {"q": quiz_id},
+        )
+        await conn.execute(text("DELETE FROM quiz_audit_events WHERE quiz_id = :q"), {"q": quiz_id})
         await conn.execute(
             text("DELETE FROM card_reviews WHERE question_id = ANY(CAST(:qids AS uuid[]))"),
             {"qids": [str(q) for q in question_ids]},

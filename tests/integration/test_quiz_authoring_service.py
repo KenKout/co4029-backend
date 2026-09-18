@@ -42,6 +42,7 @@ import abridgeai.features.courses.models  # noqa: F401  -- register courses/modu
 import abridgeai.features.identity.models  # noqa: F401  -- register users FK target
 import abridgeai.features.interviews.models  # noqa: F401  -- T6.1 registers interview_* tables
 from abridgeai.ai.models import GenerationRun
+from abridgeai.core.audit import audit_maintenance
 from abridgeai.core.config import get_settings
 from abridgeai.core.db import Base
 from abridgeai.core.exceptions import AppError, ConflictError
@@ -142,6 +143,14 @@ async def scenario(engine: AsyncEngine) -> AsyncIterator[dict]:
     }
 
     async with engine.begin() as conn:
+        await audit_maintenance(conn)
+        await conn.execute(
+            text(
+                "DELETE FROM quiz_audit_events WHERE quiz_id IN "
+                "(SELECT id FROM quizzes WHERE module_id = :m)"
+            ),
+            {"m": module_id},
+        )
         await conn.execute(
             text("DELETE FROM generation_runs WHERE module_id = :m"),
             {"m": module_id},

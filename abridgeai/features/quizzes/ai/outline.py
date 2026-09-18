@@ -122,6 +122,8 @@ async def build_lesson_outline(
                 FROM lessons l
                 JOIN learning_materials lm ON lm.id = l.primary_material_id
                 WHERE l.id = ANY(CAST(:lesson_ids AS uuid[]))
+                  AND l.deleted_at IS NULL
+                  AND lm.deleted_at IS NULL
                   AND lm.current_version_id IS NOT NULL
                 """
             ),

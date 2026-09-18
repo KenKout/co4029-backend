@@ -174,10 +174,12 @@ async def _lock_question_append(db: AsyncSession, quiz_id: UUID) -> None:
 
 
 def _assert_target_editable(quiz: Quiz) -> None:
-    if quiz.status != "draft":
+    if quiz.status == "published":
         raise ConflictError(
-            "quiz_readonly: only a draft quiz can accept imported questions"
+            "quiz_published_readonly: a published quiz cannot accept imported questions"
         )
+    if quiz.status != "draft":
+        raise ConflictError("quiz_readonly: only a draft quiz can accept imported questions")
 
 
 async def _clone_question_into_quiz(

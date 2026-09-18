@@ -62,14 +62,13 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
-from tests.support.db_graph import hard_delete_graph
-
 import abridgeai.features.access_control.models  # noqa: F401  -- register FK targets
 import abridgeai.features.courses.models  # noqa: F401  -- register modules / lessons
 import abridgeai.features.identity.models  # noqa: F401  -- register users
 import abridgeai.features.quizzes.models  # noqa: F401  -- register quiz tables
 from abridgeai.ai.llm.audit import write_ai_model_call
 from abridgeai.ai.llm.roles import LLMRole
+from abridgeai.core.audit import audit_maintenance
 from abridgeai.core.config import get_settings
 from abridgeai.core.db import Base, get_db
 from abridgeai.core.security import create_access_token, generate_token, hash_secret
@@ -81,6 +80,7 @@ from abridgeai.features.quizzes.routers import (
 )
 from abridgeai.features.quizzes.routers.authoring import get_arq_pool
 from abridgeai.features.quizzes.services import generation as generation_service
+from tests.support.db_graph import hard_delete_graph
 
 EMBEDDING_DIM = 3072
 
@@ -293,6 +293,22 @@ async def scenario(
     }
 
     async with engine.begin() as conn:
+        await audit_maintenance(conn)
+        await conn.execute(
+            text(
+                "DELETE FROM assessment_integrity_events WHERE quiz_attempt_id IN "
+                "(SELECT id FROM quiz_attempts WHERE quiz_id IN "
+                "(SELECT id FROM quizzes WHERE module_id = :m))"
+            ),
+            {"m": module_id},
+        )
+        await conn.execute(
+            text(
+                "DELETE FROM quiz_audit_events WHERE quiz_id IN "
+                "(SELECT id FROM quizzes WHERE module_id = :m)"
+            ),
+            {"m": module_id},
+        )
         await conn.execute(
             text(
                 "DELETE FROM ai_model_calls WHERE generation_run_id IN "

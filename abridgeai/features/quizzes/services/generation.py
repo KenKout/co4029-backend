@@ -270,6 +270,8 @@ async def run_quiz_generation(
         quiz = await db.get(Quiz, quiz_id)
     if quiz is None:
         raise NotFoundError("Quiz not found for generation run")
+    run_quiz_id = quiz.id
+    run_quiz_title = quiz.title
 
     run.status = "running"
     run.started_at = utcnow()
@@ -332,9 +334,9 @@ async def run_quiz_generation(
         await notify_quiz_generation_outcome(
             db,
             recipient_user_id=run_requested_by,
-            quiz_id=quiz.id,
+            quiz_id=run_quiz_id,
             course_id=run_course_id,
-            quiz_title=quiz.title,
+            quiz_title=run_quiz_title,
             succeeded=True,
             arq_pool=arq_pool,
         )
@@ -364,9 +366,9 @@ async def run_quiz_generation(
         await notify_quiz_generation_outcome(
             db,
             recipient_user_id=run_requested_by,
-            quiz_id=quiz.id,
+            quiz_id=run_quiz_id,
             course_id=run_course_id,
-            quiz_title=quiz.title,
+            quiz_title=run_quiz_title,
             succeeded=False,
             error_message=str(exc),
             arq_pool=arq_pool,
