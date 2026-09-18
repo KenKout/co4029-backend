@@ -214,6 +214,13 @@ def default_world(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     )
     monkeypatch.setattr(services, "flush_or_conflict", AsyncMock())
     monkeypatch.setattr(services.career_paths_api, "ensure_program_path_access", AsyncMock())
+    # Default: the student has NOT already finished this path. The guard that
+    # reads this is exercised in its own section below.
+    monkeypatch.setattr(
+        services.career_paths_api,
+        "is_version_complete_for_user",
+        AsyncMock(return_value=False),
+    )
     monkeypatch.setattr(services.queries, "get_program", AsyncMock(return_value=program))
     monkeypatch.setattr(
         services.queries,
@@ -274,6 +281,118 @@ async def test_default_path_starts_when_the_ceiling_has_room(
     assert len(world["db"].added) == 1
     assert world["enrollment"].status == "active"
 
+
+
+# --------------------------------------------------------------------------
+# a default path the student has already completed
+# --------------------------------------------------------------------------
+#
+# Auto-starting one is how a program completes itself the moment a student
+# joins it. Nothing fails at enrollment -- completion is event-driven, so the
+# enrollment looks active until the next progress read calls
+# ``complete_program_attempts``. That finds the inherited-complete attempt,
+# completes it, sees no remaining active attempt, and flips the enrollment to
+# ``completed``. ``select_path`` then refuses with
+# ``paths_can_only_be_added_to_an_open_program``, so the student can never
+# pick any of that program's OTHER paths.
+
+
+def _already_completed(world: dict[str, Any], complete: bool) -> AsyncMock:
+    check = AsyncMock(return_value=complete)
+    world["monkeypatch"].setattr(
+        services.career_paths_api, "is_version_complete_for_user", check
+    )
+    return check
+
+
+async def test_a_default_path_the_student_already_finished_is_left_unstarted(
+    default_world: dict[str, Any],
+) -> None:
+    """The enrollment stands and waits, exactly as at the path ceiling."""
+    world = default_world
+    _budget(world, used=0, limit=10)
+    _already_completed(world, True)
+
+    started = await services._activate_default_path(
+        world["db"],
+        enrollment=world["enrollment"],
+        actor_id=world["actor_id"],
+        default_path=world["default_path"],
+    )
+
+    assert started is False
+    assert world["db"].added == []
+    assert world["enrollment"].status == "awaiting_path"
+
+
+async def test_a_default_path_still_starts_when_it_is_not_finished(
+    default_world: dict[str, Any],
+) -> None:
+    """The guard must not cost every student their default path."""
+    world = default_world
+    _budget(world, used=0, limit=10)
+    _already_completed(world, False)
+
+    started = await services._activate_default_path(
+        world["db"],
+        enrollment=world["enrollment"],
+        actor_id=world["actor_id"],
+        default_path=world["default_path"],
+    )
+
+    assert started is True
+    assert world["enrollment"].status == "active"
+
+
+async def test_completion_is_judged_on_the_version_this_program_pinned(
+    default_world: dict[str, Any],
+) -> None:
+    """Not on the career path as a whole.
+
+    Two programs can pin different versions of one path, and finishing v1
+    does not finish v2 -- ``complete_program_attempts`` says so explicitly.
+    This guard has to ask the same question of the same version, or it
+    refuses a default the sweep would never have completed.
+    """
+    world = default_world
+    _budget(world, used=0, limit=10)
+    check = _already_completed(world, False)
+
+    await services._activate_default_path(
+        world["db"],
+        enrollment=world["enrollment"],
+        actor_id=world["actor_id"],
+        default_path=world["default_path"],
+    )
+
+    assert (
+        check.await_args.kwargs["version_id"]
+        == world["default_path"]["career_path_version_id"]
+    )
+    assert check.await_args.kwargs["student_id"] == world["enrollment"].student_id
+
+
+async def test_a_skipped_default_grants_no_course_access(
+    default_world: dict[str, Any],
+) -> None:
+    """No attempt, no entitlements. Granting access to a path the student was
+    not enrolled onto would leave courses open that nothing accounts for."""
+    world = default_world
+    _budget(world, used=0, limit=10)
+    _already_completed(world, True)
+    grant = AsyncMock()
+    world["monkeypatch"].setattr(
+        services.career_paths_api, "ensure_program_path_access", grant
+    )
+
+    await services._activate_default_path(
+        world["db"],
+        enrollment=world["enrollment"],
+        actor_id=world["actor_id"],
+        default_path=world["default_path"],
+    )
+
+    grant.assert_not_awaited()
 
 # --------------------------------------------------------------------------
 # what the budget deliberately does NOT gate

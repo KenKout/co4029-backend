@@ -577,6 +577,43 @@ def syllabus_import_failed_body(*, reason: str, locale: str | None) -> str:
     return f"No course was created from the syllabus file. Reason: {reason}"
 
 
+def path_reconciled_title(*, path_name: str, locale: str | None) -> str:
+    """Title: a duplicate enrolment on one career path was closed."""
+    lang = _norm(locale)
+    if lang == "vi":
+        return f"Đã hợp nhất lộ trình trùng lặp: {path_name}"[:255]
+    return f"Duplicate career path merged: {path_name}"[:255]
+
+
+def path_reconciled_body(
+    *, path_name: str, kept_program_name: str, closed_program_name: str, locale: str | None
+) -> str:
+    """Body: what was closed, what was kept, and what the student still has.
+
+    Written to answer the question a student actually asks when a record
+    changes without them touching it: did I lose anything? They did not —
+    the same path stays open in the other program and every completed
+    course is untouched. Naming both programs is what makes that checkable
+    rather than something they have to take on trust.
+    """
+    lang = _norm(locale)
+    if lang == "vi":
+        return (
+            f"Lộ trình {path_name} trước đây được mở trong cả hai chương trình "
+            f"{kept_program_name} và {closed_program_name}. Một lộ trình chỉ có thể "
+            f"hoạt động trong một chương trình, nên bản trong {closed_program_name} "
+            f"đã được đóng lại. Lộ trình của bạn trong "
+            f"{kept_program_name} vẫn tiếp tục, và toàn bộ khoá học đã "
+            "hoàn thành được giữ nguyên."
+        )
+    return (
+        f"{path_name} was open in both {kept_program_name} and "
+        f"{closed_program_name}. A career path can only run in one program at a "
+        f"time, so the copy in {closed_program_name} has been closed. Your path in "
+        f"{kept_program_name} continues, and every course you completed is kept."
+    )
+
+
 __all__ = [
     "Locale",
     "course_enrolled_body",
@@ -595,6 +632,8 @@ __all__ = [
     "path_change_in_progress_title",
     "path_change_rejected_body",
     "path_change_rejected_title",
+    "path_reconciled_body",
+    "path_reconciled_title",
     "remediation_body",
     "remediation_title",
 ]

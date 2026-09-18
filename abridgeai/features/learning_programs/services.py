@@ -988,6 +988,13 @@ async def _activate_default_path(
     ):
         return False
 
+    if await career_paths_api.is_version_complete_for_user(
+        db,
+        version_id=cast(UUID, default_path["career_path_version_id"]),
+        student_id=enrollment.student_id,
+    ):
+        return False
+
     # Same treatment when the student is already at the organization ceiling
     # for concurrent paths: let the enrollment stand, but leave the default
     # unstarted rather than pushing them over it.
