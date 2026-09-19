@@ -188,7 +188,12 @@ def _looks_like_uuid(value: str) -> bool:
     return True
 
 
-async def get_published_quiz(db: AsyncSession, quiz_id: UUID | str) -> Quiz | None:
+async def get_published_quiz(
+    db: AsyncSession,
+    quiz_id: UUID | str,
+    *,
+    for_update: bool = False,
+) -> Quiz | None:
     """Single learner-visible quiz by id OR slug, or ``None`` (router maps to 404).
 
     Every level of the publication chain must be live: course, module and
@@ -223,6 +228,12 @@ async def get_published_quiz(db: AsyncSession, quiz_id: UUID | str) -> Quiz | No
             .order_by(Quiz.created_at)
             .limit(2)
         )
+        if for_update:
+            # Serialize attempt creation with quiz/module/course withdrawal.
+            # The winner decides the boundary: either the attempt is persisted
+            # first and is grandfathered, or withdrawal commits first and this
+            # lookup returns no live quiz.
+            stmt = stmt.with_for_update()
         rows = list((await db.execute(stmt)).scalars().all())
         if len(rows) != 1:
             # 0 = unknown slug; >1 = ambiguous across courses → both 404.
@@ -244,6 +255,8 @@ async def get_published_quiz(db: AsyncSession, quiz_id: UUID | str) -> Quiz | No
             Course.deleted_at.is_(None),
         )
     )
+    if for_update:
+        stmt = stmt.with_for_update()
     return (await db.execute(stmt)).scalar_one_or_none()
 
 
@@ -346,7 +359,7 @@ async def get_quiz_for_taking(
     creation does NOT normalise the columns, and enforcing at read
     time covers pre-existing rows without a data migration).
     """
-    quiz = await get_published_quiz(db, quiz_id)
+    quiz = await get_published_quiz(db, quiz_id, for_update=True)
     if quiz is None:
         return None
 

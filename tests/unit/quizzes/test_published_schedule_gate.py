@@ -20,7 +20,6 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
 from uuid import UUID, uuid4
 
 import pytest
@@ -140,7 +139,7 @@ class TestSlugOrIdentifier:
 
 
 class TestDeletionExposureGate:
-    """A quiz is deletable until the full curriculum can expose it."""
+    """Publication is a durable boundary even if a parent is later hidden."""
 
     @staticmethod
     def _quiz(*, status: str, published_at: datetime | None) -> SimpleNamespace:
@@ -151,27 +150,12 @@ class TestDeletionExposureGate:
             module_id=uuid4(),
         )
 
-    @staticmethod
-    def _set_parent_statuses(
-        monkeypatch: pytest.MonkeyPatch, course_status: str, module_status: str
-    ) -> None:
-        monkeypatch.setattr(
-            authoring.courses_api,
-            "get_course_by_id",
-            AsyncMock(return_value=SimpleNamespace(status=course_status)),
-        )
-        monkeypatch.setattr(
-            authoring.courses_api,
-            "get_module_by_id",
-            AsyncMock(return_value=SimpleNamespace(status=module_status)),
-        )
-
     @pytest.mark.asyncio
     async def test_blocks_a_previously_published_quiz_under_live_parents(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        del monkeypatch
         quiz = self._quiz(status="archived", published_at=datetime.now(UTC))
-        self._set_parent_statuses(monkeypatch, "published", "published")
 
         with pytest.raises(
             ConflictError, match="learner_exposed_quiz_cannot_be_deleted"
@@ -183,23 +167,25 @@ class TestDeletionExposureGate:
         ("course_status", "module_status"),
         [("draft", "published"), ("published", "draft"), ("draft", "draft")],
     )
-    async def test_allows_a_published_quiz_when_either_parent_is_not_live(
+    async def test_blocks_a_published_quiz_when_either_parent_is_not_live(
         self,
         monkeypatch: pytest.MonkeyPatch,
         course_status: str,
         module_status: str,
     ) -> None:
+        del monkeypatch, course_status, module_status
         quiz = self._quiz(status="published", published_at=datetime.now(UTC))
-        self._set_parent_statuses(monkeypatch, course_status, module_status)
-
-        await authoring._assert_quiz_deletable(object(), quiz)
+        with pytest.raises(
+            ConflictError, match="learner_exposed_quiz_cannot_be_deleted"
+        ):
+            await authoring._assert_quiz_deletable(object(), quiz)
 
     @pytest.mark.asyncio
     async def test_allows_a_draft_quiz_under_live_parents(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        del monkeypatch
         quiz = self._quiz(status="draft", published_at=None)
-        self._set_parent_statuses(monkeypatch, "published", "published")
 
         await authoring._assert_quiz_deletable(object(), quiz)
 

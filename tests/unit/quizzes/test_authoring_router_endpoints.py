@@ -222,6 +222,37 @@ class TestPublishing:
         db.commit.assert_awaited_once_with()
 
 
+class TestArchiving:
+    async def test_a_successful_archive_commits(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        archive = AsyncMock(return_value=_quiz())
+        monkeypatch.setattr(authoring.authoring_service, "archive_quiz", archive)
+        db = _db()
+        quiz_id = uuid4()
+        actor = object()
+
+        await authoring.archive_quiz(quiz_id, actor, db)
+
+        archive.assert_awaited_once_with(db, quiz_id, actor)
+        db.commit.assert_awaited_once_with()
+
+    async def test_a_failed_archive_does_not_commit(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            authoring.authoring_service,
+            "archive_quiz",
+            AsyncMock(side_effect=NotFoundError("gone")),
+        )
+        db = _db()
+        with pytest.raises(HTTPException) as raised:
+            await authoring.archive_quiz(uuid4(), object(), db)
+
+        assert raised.value.status_code == 404
+        db.commit.assert_not_awaited()
+
+
 class TestQuestionWrites:
     """A frozen quiz must answer 409, not 400.
 

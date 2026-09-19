@@ -592,36 +592,25 @@ async def archive_quiz(db: AsyncSession, quiz_id: UUID, actor: CurrentUser) -> Q
 
 
 async def _assert_quiz_deletable(db: AsyncSession, quiz: Quiz) -> None:
-    """Reject deletion once a quiz has been exposed through live parents.
+    """Reject deletion of any quiz that has crossed the publish boundary.
 
-    A quiz can be published while its course or module is still a draft. In
-    that state no learner can reach it, so deleting it remains a safe authoring
-    operation. Once both parents are published, however, a published quiz may
-    own attempts, grades, review evidence and course-completion history. Keep
-    that record even after the quiz itself is archived: ``published_at`` is the
-    durable exposure marker and prevents archive-then-delete from bypassing
-    this guard while the parent curriculum remains live.
+    Parent status is deliberately irrelevant.  Otherwise archiving a module
+    first would make an exposed quiz deletable and erase attempts, grades and
+    review evidence.  Draft-only quizzes remain disposable authoring work;
+    published quizzes end through archive.
     """
-    course = await courses_api.get_course_by_id(db, quiz.course_id)
-    module = await courses_api.get_module_by_id(db, quiz.module_id)
-    parents_are_live = (
-        course is not None
-        and module is not None
-        and course.status == "published"
-        and module.status == "published"
-    )
+    del db
     quiz_has_been_published = quiz.status == "published" or quiz.published_at is not None
-    if parents_are_live and quiz_has_been_published:
+    if quiz_has_been_published:
         raise ConflictError("learner_exposed_quiz_cannot_be_deleted")
 
 
 async def delete_quiz(db: AsyncSession, quiz_id: UUID, actor: CurrentUser) -> None:
     """Soft-delete a quiz that has not reached learners.
 
-    A published quiz is still deletable while either its course or module is
-    not published, because the learner content tree cannot expose it. Once all
-    three levels are live, deletion is blocked and archive becomes the terminal
-    lifecycle action; historical attempts and completion evidence must remain.
+    Only a quiz that has never been published is deletable. Archive is the
+    terminal lifecycle action after publication so historical attempts and
+    completion evidence always remain.
 
     Also soft-deletes the ``module_items`` row that points at this quiz.
     ``soft_delete_cascade`` walks ONETOMANY relationships only, and
