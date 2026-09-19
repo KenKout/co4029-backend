@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Annotated, Any
 from uuid import UUID
@@ -66,6 +67,7 @@ from abridgeai.features.quizzes.services import (
 )
 from abridgeai.features.quizzes.services.authoring import QuizPublishValidationError
 from abridgeai.features.quizzes.services.publish_gate import QuizApprovalRequiredError
+from abridgeai.infrastructure.s3 import create_stream_url
 
 router = APIRouter(prefix="/teacher", tags=["quizzes-authoring"])
 router.include_router(curated_question_bank_router)
@@ -78,6 +80,12 @@ _REQUIRE_QUESTION = require_question_authoring_access()
 # passed through to SQL: an unrecognised value would otherwise match nothing
 # and read to the teacher as "no attempts" rather than as a bad request.
 _QUIZ_RESULT_PATTERN = r"^(in_progress|passed|not_passed|grading)$"
+
+
+@dataclass(frozen=True)
+class _StudentAvatarTarget:
+    bucket: str
+    object_key: str
 
 
 def _not_found(resource: str, resource_id: UUID) -> HTTPException:
@@ -205,14 +213,17 @@ async def _resolve_student_names(db: AsyncSession, student_ids: set[UUID]) -> di
     contacts = await _resolve_student_contacts(db, student_ids)
     return {
         student_id: display_name or email or str(student_id)
-        for student_id, (display_name, email) in contacts.items()
+        for student_id, (display_name, email, _avatar_url) in contacts.items()
     }
 
 
 async def _resolve_student_contacts(
-    db: AsyncSession, student_ids: set[UUID]
-) -> dict[UUID, tuple[str | None, str | None]]:
-    """Batch-resolve display names and emails for result-table identities."""
+    db: AsyncSession,
+    student_ids: set[UUID],
+    *,
+    include_avatar: bool = False,
+) -> dict[UUID, tuple[str | None, str | None, str | None]]:
+    """Batch-resolve result identities and optionally mint avatar URLs."""
     if not student_ids:
         return {}
     from sqlalchemy import text as _text  # noqa: PLC0415
@@ -220,15 +231,31 @@ async def _resolve_student_contacts(
     rows = (
         await db.execute(
             _text(
-                "SELECT u.id, p.display_name, u.primary_email "
+                "SELECT u.id, p.display_name, u.primary_email, so.bucket, so.object_key "
                 "FROM users u "
                 "LEFT JOIN user_profiles p ON p.user_id = u.id "
+                "LEFT JOIN storage_objects so ON so.id = p.avatar_object_id "
                 "WHERE u.id = ANY(:ids)"
             ),
             {"ids": list(student_ids)},
         )
     ).all()
-    return {row[0]: (row[1], row[2]) for row in rows}
+    contacts: dict[UUID, tuple[str | None, str | None, str | None]] = {
+        row[0]: (row[1], row[2], None) for row in rows
+    }
+    if include_avatar:
+        for row in rows:
+            if not row[3] or not row[4]:
+                continue
+            try:
+                avatar_url, _ = await create_stream_url(
+                    _StudentAvatarTarget(bucket=row[3], object_key=row[4])  # type: ignore[arg-type]
+                )
+            except Exception:  # noqa: BLE001 -- avatar storage is optional
+                avatar_url = None
+            if avatar_url:
+                contacts[row[0]] = (row[1], row[2], avatar_url)
+    return contacts
 
 
 def _attempt_teacher_view(
@@ -481,7 +508,9 @@ async def get_quiz_results(
     per_question_list = await _analytics_q.quiz_question_breakdown(db, quiz_id)
     rollup = await _analytics_q.quiz_per_student_rollup(db, quiz_id, quiz.grading_method)
 
-    contacts = await _resolve_student_contacts(db, {row["student_id"] for row in rollup})
+    contacts = await _resolve_student_contacts(
+        db, {row["student_id"] for row in rollup}, include_avatar=True
+    )
 
     summary = QuizResultsSummary(
         total_attempts=summary_dict["total_attempts"],
@@ -498,10 +527,11 @@ async def get_quiz_results(
         QuizPerStudentRow(
             student_id=row["student_id"],
             student_name=(
-                contacts.get(row["student_id"], (None, None))[0]
-                or contacts.get(row["student_id"], (None, None))[1]
+                contacts.get(row["student_id"], (None, None, None))[0]
+                or contacts.get(row["student_id"], (None, None, None))[1]
             ),
-            student_email=contacts.get(row["student_id"], (None, None))[1],
+            student_email=contacts.get(row["student_id"], (None, None, None))[1],
+            student_avatar_url=contacts.get(row["student_id"], (None, None, None))[2],
             best_score_percent=row["best_score_percent"],
             latest_score_percent=row["latest_score_percent"],
             attempts_count=row["attempts_count"],
@@ -1460,15 +1490,18 @@ async def get_quiz_gradebook(
     from abridgeai.features.quizzes.services import gradebook as _gb  # noqa: PLC0415
 
     rows = await _gb.list_quiz_grades(db, quiz_id)
-    contacts = await _resolve_student_contacts(db, {row.student_id for row in rows})
+    contacts = await _resolve_student_contacts(
+        db, {row.student_id for row in rows}, include_avatar=True
+    )
     return [
         QuizGradeRow(
             student_id=row.student_id,
             student_name=(
-                contacts.get(row.student_id, (None, None))[0]
-                or contacts.get(row.student_id, (None, None))[1]
+                contacts.get(row.student_id, (None, None, None))[0]
+                or contacts.get(row.student_id, (None, None, None))[1]
             ),
-            student_email=contacts.get(row.student_id, (None, None))[1],
+            student_email=contacts.get(row.student_id, (None, None, None))[1],
+            student_avatar_url=contacts.get(row.student_id, (None, None, None))[2],
             grade_percent=row.grade_percent,
             grade_points=row.grade_points,
             passed=row.passed,
@@ -1498,10 +1531,10 @@ async def export_quiz_gradebook(
     headers = ["Student", "Email", "Grade %", "Status", "Method", "Attempts"]
     table = [
         [
-            contacts.get(row.student_id, (None, None))[0]
-            or contacts.get(row.student_id, (None, None))[1]
+            contacts.get(row.student_id, (None, None, None))[0]
+            or contacts.get(row.student_id, (None, None, None))[1]
             or str(row.student_id),
-            contacts.get(row.student_id, (None, None))[1] or "",
+            contacts.get(row.student_id, (None, None, None))[1] or "",
             row.grade_percent,
             "Passed" if row.passed else "Failed",
             row.grading_method,
@@ -1559,13 +1592,16 @@ async def get_responses_report(
         report = await _rep.build_responses_report(db, quiz_id)
     except NotFoundError as exc:
         raise _not_found("quiz", quiz_id) from exc
-    contacts = await _resolve_student_contacts(db, {row.student_id for row in report.rows})
+    contacts = await _resolve_student_contacts(
+        db, {row.student_id for row in report.rows}, include_avatar=True
+    )
     report = report.model_copy(
         update={
             "rows": [
                 row.model_copy(
                     update={
-                        "student_email": contacts.get(row.student_id, (None, None))[1],
+                        "student_email": contacts.get(row.student_id, (None, None, None))[1],
+                        "student_avatar_url": contacts.get(row.student_id, (None, None, None))[2],
                     }
                 )
                 for row in report.rows

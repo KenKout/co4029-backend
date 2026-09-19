@@ -66,6 +66,7 @@ class QuizGradeRow(BaseModel):
     student_id: UUID
     student_name: str | None = None
     student_email: str | None = None
+    student_avatar_url: str | None = None
     grade_percent: Decimal
     grade_points: Decimal
     passed: bool

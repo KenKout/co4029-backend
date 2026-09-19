@@ -15,6 +15,7 @@ class ResponsesReportRow(BaseModel):
     student_id: UUID
     student_name: str | None = None
     student_email: str | None = None
+    student_avatar_url: str | None = None
     attempt_number: int
     question_id: UUID
     question_position: int
