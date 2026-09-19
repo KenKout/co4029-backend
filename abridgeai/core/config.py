@@ -98,6 +98,9 @@ class Settings(BaseSettings):
 
     llm_base_url: str = "https://api.openai.com/v1"
     llm_api_key: str | None = None
+    # Admin-only /healthz/deep may issue a cheap provider capabilities request
+    # so the operations dashboard reports a measured state instead of skipped.
+    llm_health_ping: bool = False
     llm_default_tier: Literal["small", "standard", "large"] = "standard"
     llm_model_small: str = "gpt-4o-mini"
     llm_model_standard: str = "gpt-4o-mini"

@@ -289,6 +289,7 @@ async def test_readyz_no_auth_required(
 class _FakeSettings:
     llm_base_url = "https://llm.example.test/v1"
     llm_api_key = "k-test"
+    llm_health_ping = True
 
 
 class _FakeResp:
@@ -315,8 +316,14 @@ class _FakeAsyncClient:
 
 
 async def test_llm_probe_skipped_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Without LLM_HEALTH_PING the probe is a no-op — never calls the network."""
-    monkeypatch.delenv("LLM_HEALTH_PING", raising=False)
+    """A disabled configured probe is a no-op — never calls the network."""
+
+    class _Disabled:
+        llm_base_url = "https://llm.example.test/v1"
+        llm_api_key = "k-test"
+        llm_health_ping = False
+
+    monkeypatch.setattr(healthz_module, "get_settings", lambda: _Disabled())
 
     status = await healthz_module._check_llm_provider()
 
@@ -333,6 +340,7 @@ async def test_llm_probe_skipped_when_api_key_missing(
     class _NoKey:
         llm_base_url = "https://llm.example.test/v1"
         llm_api_key = None
+        llm_health_ping = True
 
     monkeypatch.setattr(healthz_module, "get_settings", lambda: _NoKey())
 

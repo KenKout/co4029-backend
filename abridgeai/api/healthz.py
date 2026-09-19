@@ -231,7 +231,7 @@ async def _check_llm_provider() -> CheckStatus:
     the check ``skipped`` with a warning instead of failing.
     """
     settings = get_settings()
-    if not os.environ.get("LLM_HEALTH_PING") or not settings.llm_api_key:
+    if not settings.llm_health_ping or not settings.llm_api_key:
         return CheckStatus(status="skipped", latency_ms=None)
     started = time.perf_counter()
     try:
