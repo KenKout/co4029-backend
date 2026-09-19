@@ -26,6 +26,7 @@ from abridgeai.ai.llm.errors import ProviderError
 from abridgeai.core.audit import current_actor_var
 from abridgeai.features.interviews.workers import (
     EVALUATION_MAX_TRIES,
+    GENERATION_MAX_TRIES,
     JOBS,
     evaluate_interview_session_task,
     reconcile_interview_recordings_task,
@@ -60,15 +61,29 @@ def test_jobs_export() -> None:
     # the consented-audio-recording reconcile sweep.
     assert len(JOBS) == 4
     assert reconcile_turn_analysis_task in JOBS
-    assert run_interview_generation_task in JOBS
+    generation_job = next(
+        job
+        for job in JOBS
+        if getattr(job, "coroutine", None) is run_interview_generation_task
+    )
+    assert getattr(generation_job, "max_tries", None) == GENERATION_MAX_TRIES
     assert reconcile_interview_recordings_task in JOBS
-    evaluation_job = next(job for job in JOBS if getattr(job, "coroutine", None))
+    evaluation_job = next(
+        job
+        for job in JOBS
+        if getattr(job, "coroutine", None) is evaluate_interview_session_task
+    )
     assert evaluation_job.coroutine is evaluate_interview_session_task
     assert evaluation_job.max_tries == EVALUATION_MAX_TRIES
 
 
 def test_arq_app_includes_interview_jobs() -> None:
-    assert run_interview_generation_task in WorkerSettings.functions
+    generation_job = next(
+        job
+        for job in WorkerSettings.functions
+        if getattr(job, "coroutine", None) is run_interview_generation_task
+    )
+    assert getattr(generation_job, "max_tries", None) == GENERATION_MAX_TRIES
     evaluation_job = next(
         job
         for job in WorkerSettings.functions

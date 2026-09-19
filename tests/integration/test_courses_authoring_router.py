@@ -2683,6 +2683,8 @@ async def _fresh_draft_course(
     and delete it in ``finally``.
     """
     course_id = uuid.uuid4()
+    module_id = uuid.uuid4()
+    lesson_id = uuid.uuid4()
     async with engine.begin() as conn:
         await conn.execute(
             text(
@@ -2694,6 +2696,24 @@ async def _fresh_draft_course(
                 "org": seeded_users.organization_id,
                 "owner": seeded_users.admin_id,
                 "slug": f"lo-out-{course_id.hex[:8]}",
+            },
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO modules (id, course_id, title, position, status) "
+                "VALUES (:id, :course, 'LO publish module', 1, 'draft')"
+            ),
+            {"id": module_id, "course": course_id},
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO lessons (id, module_id, slug, title, status) "
+                "VALUES (:id, :module, :slug, 'LO publish lesson', 'draft')"
+            ),
+            {
+                "id": lesson_id,
+                "module": module_id,
+                "slug": f"lo-publish-{lesson_id.hex[:8]}",
             },
         )
     return str(course_id), f"/api/v1/teacher/courses/{course_id}/outcomes"
@@ -2709,6 +2729,14 @@ async def _delete_course_hard(engine: AsyncEngine, course_id: str) -> None:
             text("DELETE FROM user_role_assignments WHERE course_id = :cid"),
             {"cid": course_id},
         )
+        await conn.execute(
+            text(
+                "DELETE FROM lessons WHERE module_id IN "
+                "(SELECT id FROM modules WHERE course_id = :cid)"
+            ),
+            {"cid": course_id},
+        )
+        await conn.execute(text("DELETE FROM modules WHERE course_id = :cid"), {"cid": course_id})
         await conn.execute(text("DELETE FROM courses WHERE id = :cid"), {"cid": course_id})
 
 
@@ -2889,7 +2917,7 @@ async def test_course_outcome_question_count_surfaces_mappings(
             await conn.execute(
                 text(
                     "INSERT INTO modules (id, course_id, title, position, status) "
-                    "VALUES (:id, :cid, 'M', 1, 'published')"
+                    "VALUES (:id, :cid, 'M', 2, 'published')"
                 ),
                 {"id": module_id, "cid": course_id},
             )

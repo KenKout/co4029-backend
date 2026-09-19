@@ -156,9 +156,13 @@ async def scenario(
     module_id = uuid.uuid4()
     async with engine.begin() as conn:
         await conn.execute(
+            text("UPDATE courses SET status = 'published' WHERE id = :c"),
+            {"c": seeded_users.course_id},
+        )
+        await conn.execute(
             text(
                 "INSERT INTO modules (id, course_id, title, position, status) "
-                "VALUES (:m, :c, 'Quiz Test Module', 1, 'draft')"
+                "VALUES (:m, :c, 'Quiz Test Module', 1, 'published')"
             ),
             {"m": module_id, "c": seeded_users.course_id},
         )
@@ -607,7 +611,6 @@ async def _seed_published_quiz_with_question(
         headers=_auth(admin_bearer),
     )
     assert pub_resp.status_code == 200, pub_resp.text
-
     return quiz_id, question_id, option_ids
 
 
