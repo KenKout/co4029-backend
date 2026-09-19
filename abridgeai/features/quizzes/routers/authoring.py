@@ -17,6 +17,7 @@ from abridgeai.core.db import get_db
 from abridgeai.core.exceptions import AppError, ConflictError, NotFoundError
 from abridgeai.core.security import CurrentUser
 from abridgeai.features.access_control.policies import require_course_permission
+from abridgeai.features.courses.api import public as courses_api
 from abridgeai.features.quizzes.models import Quiz, QuizQuestion
 from abridgeai.features.quizzes.routers._deps import (
     require_question_authoring_access,
@@ -504,6 +505,8 @@ async def get_quiz_results(
     if quiz is None:
         raise _not_found("quiz", quiz_id)
 
+    module = await courses_api.get_module_by_id(db, quiz.module_id)
+
     summary_dict = await _analytics_q.quiz_results_summary(db, quiz_id, quiz.grading_method)
     per_question_list = await _analytics_q.quiz_question_breakdown(db, quiz_id)
     rollup = await _analytics_q.quiz_per_student_rollup(db, quiz_id, quiz.grading_method)
@@ -554,6 +557,8 @@ async def get_quiz_results(
     return QuizResultsRead(
         quiz_id=quiz.id,
         quiz_title=quiz.title,
+        module_id=quiz.module_id,
+        module_title=module.title if module else None,
         passing_score_percent=quiz.passing_score_percent,
         grading_method=quiz.grading_method,
         summary=summary,

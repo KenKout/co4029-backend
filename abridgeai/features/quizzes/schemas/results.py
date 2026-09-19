@@ -89,6 +89,8 @@ class QuizResultsRead(BaseModel):
 
     quiz_id: UUID
     quiz_title: str
+    module_id: UUID
+    module_title: str | None = None
     passing_score_percent: Decimal
     grading_method: Literal["highest", "average", "first", "last"]
     summary: QuizResultsSummary
