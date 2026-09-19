@@ -693,6 +693,24 @@ async def update_module(
     return module
 
 
+@router.delete("/modules/{module_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_module(
+    module_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_MODULE)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> None:
+    """Soft-delete a draft module and its owned authoring descendants."""
+    try:
+        await authoring_service.delete_module(db, module_id, current_user)
+    except NotFoundError as exc:
+        raise _not_found(str(exc)) from exc
+    except ConflictError as exc:
+        raise _conflict(str(exc)) from exc
+    except AppError as exc:
+        raise _bad_request(str(exc)) from exc
+    await db.commit()
+
+
 @router.post(
     "/modules/{module_id}/duplicate",
     response_model=ModuleAuthoring,

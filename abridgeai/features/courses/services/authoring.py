@@ -562,6 +562,23 @@ async def add_module(
     return ModuleAuthoring.model_validate(module)
 
 
+async def delete_module(db: AsyncSession, module_id: UUID, actor: CurrentUser) -> None:
+    """Soft-delete a draft module and its owned module/lesson descendants.
+
+    Published and archived modules are lifecycle records, not disposable
+    authoring scratch space. Polymorphic item targets are intentionally kept:
+    a ``ModuleItem`` is only a curriculum pin and its lesson/quiz/interview may
+    be referenced by another pin or source link.
+    """
+    module = await _require_module(db, module_id)
+    if module.status != "draft":
+        raise AppError(
+            "only_draft_modules_can_be_deleted: publish or archive lifecycle "
+            "records instead"
+        )
+    await soft_delete_cascade(db, module, actor_id=actor.user_id)
+
+
 async def update_module(
     db: AsyncSession,
     module_id: UUID,
@@ -2605,6 +2622,7 @@ __all__ = [
     "create_course",
     "delete_course_outcome",
     "delete_lesson_resource",
+    "delete_module",
     "duplicate_course_outcome",
     "delete_module_item",
     "get_authoring_content",

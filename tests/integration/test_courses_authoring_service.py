@@ -354,6 +354,55 @@ async def test_add_lesson_auto_creates_module_item(
     assert row["position"] == 1
 
 
+async def test_delete_draft_module_soft_deletes_owned_descendants(
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict,
+) -> None:
+    """Draft-module deletion removes the curriculum subtree, not polymorphic targets."""
+    async with session_factory() as session:
+        owner = _actor(scenario["owner_id"])
+        lesson = await authoring_service.add_lesson(
+            session,
+            scenario["module_id"],
+            LessonCreate(module_id=scenario["module_id"], slug="delete-me", title="Delete me"),
+            owner,
+        )
+        await session.commit()
+
+        await authoring_service.delete_module(session, scenario["module_id"], owner)
+        await session.commit()
+
+        rows = (
+            (
+                await session.execute(
+                    text(
+                        "SELECT m.deleted_at AS module_deleted, l.deleted_at AS lesson_deleted, "
+                        "mi.deleted_at AS item_deleted "
+                        "FROM modules m "
+                        "LEFT JOIN lessons l ON l.module_id = m.id "
+                        "LEFT JOIN module_items mi ON mi.module_id = m.id "
+                        "WHERE m.id = :m"
+                    ),
+                    {"m": scenario["module_id"]},
+                )
+            )
+            .mappings()
+            .all()
+        )
+        assert len(rows) == 1
+        assert rows[0]["module_deleted"] is not None
+        assert rows[0]["lesson_deleted"] is not None
+        assert rows[0]["item_deleted"] is not None
+
+        target = (
+            await session.execute(
+                text("SELECT deleted_at FROM lessons WHERE id = :id"),
+                {"id": lesson.id},
+            )
+        ).scalar_one()
+        assert target is not None
+
+
 async def test_add_lesson_auto_generates_slug_from_title_with_collision_suffix(
     session_factory: async_sessionmaker[AsyncSession],
     scenario: dict,
