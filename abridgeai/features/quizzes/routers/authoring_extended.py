@@ -437,4 +437,6 @@ async def get_generation_run(
     config_quiz_raw = (run.config_json or {}).get("quiz_id")
     if config_quiz_raw is None or str(config_quiz_raw) != str(quiz_id):
         raise _not_found("generation_run", run_id)
-    return _generation_run_view(run, quiz_id)
+    from . import authoring as authoring_router  # noqa: PLC0415
+
+    return authoring_router._generation_run_view(run, quiz_id)

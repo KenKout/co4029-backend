@@ -22,8 +22,9 @@ from abridgeai.features.quizzes.routers._deps import (
 from abridgeai.features.quizzes.routers.curated_question_bank import (
     router as curated_question_bank_router,
 )
-from abridgeai.features.quizzes.schemas import (
+from abridgeai.features.quizzes.schemas import (  # noqa: F401
     CourseAssessmentSummaryRead,
+    ManualGradeIn,
     QuizAttemptIntegrityEvent,
     QuizAttemptReviewOption,
     QuizAttemptReviewQuestion,
@@ -32,6 +33,7 @@ from abridgeai.features.quizzes.schemas import (
     QuizAttemptTeacherReview,
     QuizAuthoring,
     QuizForAuthoringPublic,
+    QuizOverrideIn,
     QuizQuestionAuthoring,
 )
 from abridgeai.features.quizzes.services import (
@@ -455,9 +457,65 @@ async def get_course_quiz_attempt_detail(
 from . import authoring_questions as _authoring_questions  # noqa: E402, F401, I001
 from . import authoring_extended as _authoring_extended  # noqa: E402, F401, I001
 from . import authoring_admin as _authoring_admin  # noqa: E402, F401, I001
-from .authoring_questions import (  # noqa: E402, I001
+from .authoring_questions import (  # noqa: E402, F401, I001
     _AttrShim as _AttrShim,
     _fill_outcome_positions as _fill_outcome_positions,
     _generation_run_view as _generation_run_view,
     _resolve_outcome_positions as _resolve_outcome_positions,
 )
+
+# Compatibility exports: callers historically imported the route handlers and
+# request models directly from this module. Keep that public surface while the
+# implementations live in the split modules.
+from .authoring_questions import (  # noqa: E402, F401, I001
+    create_question,
+    delete_question,
+    duplicate_question,
+    import_questions_from_bank,
+    list_question_bank,
+    regenerate_question,
+    update_question,
+)
+from .authoring_extended import (  # noqa: E402, F401, I001
+    BulkApproveRequest,
+    BulkApproveResponse,
+    BulkSetExpectedTimeRequest,
+    BulkSetExpectedTimeResponse,
+    BulkSetItem,
+    archive_quiz,
+    bulk_approve_questions,
+    bulk_set_expected_time,
+    delete_quiz,
+    get_generation_run,
+    get_latest_quiz_generation_run,
+    get_quiz_results,
+    publish_quiz,
+    start_generation,
+    update_quiz,
+)
+from .authoring_admin import (  # noqa: E402, F401, I001
+    _AuditEventRow as _AuditEventRow,
+    _FeedbackBandsBody as _FeedbackBandsBody,
+    _ImportBody as _ImportBody,
+    _report_download as _report_download,
+    _serialize_regrade_run as _serialize_regrade_run,
+    commit_regrade_run,
+    create_quiz_override,
+    delete_quiz_override,
+    export_quiz_gradebook,
+    export_quiz_questions,
+    get_quiz_gradebook,
+    get_regrade_run,
+    get_responses_report,
+    get_statistics_report,
+    grade_answer_manually,
+    import_questions_from_file,
+    list_feedback_bands,
+    list_needs_grading,
+    list_quiz_audit_events,
+    list_quiz_overrides,
+    regrade_dry_run,
+    set_feedback_bands,
+    update_quiz_override,
+)
+from .authoring_questions import question_bank_service as question_bank_service  # noqa: E402, F401, I001

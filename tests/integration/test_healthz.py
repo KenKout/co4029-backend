@@ -126,10 +126,14 @@ def _patch_all_checks_ok(monkeypatch: pytest.MonkeyPatch) -> None:
     async def _disabled_s3() -> CheckStatus:
         return CheckStatus(status="disabled", latency_ms=None)
 
+    async def _skipped_llm() -> CheckStatus:
+        return CheckStatus(status="skipped", latency_ms=None)
+
     monkeypatch.setattr(healthz_module, "_check_postgres", _ok_pg)
     monkeypatch.setattr(healthz_module, "_check_redis", _ok_redis)
     monkeypatch.setattr(healthz_module, "_check_neo4j", _disabled_neo4j)
     monkeypatch.setattr(healthz_module, "_check_garage_s3", _disabled_s3)
+    monkeypatch.setattr(healthz_module, "_check_llm_provider", _skipped_llm)
 
 
 async def test_healthz_simple_returns_200_fast(client: httpx.AsyncClient) -> None:
@@ -355,7 +359,7 @@ class _FakeHttpx:
     def __init__(self, client: _FakeAsyncClient) -> None:
         self._client = client
 
-    def AsyncClient(self, *args: object, **kwargs: object) -> _FakeAsyncClient:
+    def AsyncClient(self, *args: object, **kwargs: object) -> _FakeAsyncClient:  # noqa: N802
         return self._client
 
     class HTTPError(Exception):
