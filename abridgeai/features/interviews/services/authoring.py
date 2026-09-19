@@ -362,11 +362,41 @@ async def publish_interview_config(
     return config
 
 
+async def _assert_no_live_sessions(db: AsyncSession, config_id: UUID) -> None:
+    """Refuse destructive lifecycle transitions while sessions are live.
+
+    Audit P1 (config lifecycle): the realtime runtime and the evaluator read
+    the LIVE config/outcomes/questions — unpublish/archive/soft-delete mid-
+    interview can re-point or remove the data an in-flight candidate (or a
+    pending evaluation recovery) is still using, stranding the attempt.
+    ``in_progress`` is the only live status: terminal sessions keep reading
+    by id and are never re-graded against new content. Unarchive/re-publish
+    are non-destructive (they only restore visibility) and stay unguarded.
+    """
+    from sqlalchemy import func, select  # noqa: PLC0415
+
+    from abridgeai.features.interviews.models import InterviewSession  # noqa: PLC0415
+
+    live = await db.scalar(
+        select(func.count(InterviewSession.id)).where(
+            InterviewSession.interview_config_id == config_id,
+            InterviewSession.status == "in_progress",
+        )
+    )
+    if live:
+        raise AppError(
+            f"Cannot change interview config {config_id} lifecycle while "
+            f"{live} session(s) are in progress — wait for them to finish "
+            "or ask candidates to leave, then retry"
+        )
+
+
 async def archive_interview_config(
     db: AsyncSession, config_id: UUID, actor: CurrentUser
 ) -> InterviewConfig:
     del actor
     config = await _require_config(db, config_id)
+    await _assert_no_live_sessions(db, config.id)
     config.status = "archived"
     await flush_or_conflict(db)
     await db.refresh(config)
@@ -399,6 +429,7 @@ async def unpublish_interview_config(
             f"Cannot unpublish interview config {config_id} — "
             f"status is '{config.status}', expected 'published'"
         )
+    await _assert_no_live_sessions(db, config.id)
     config.status = "draft"
     config.published_at = None
     await flush_or_conflict(db)
@@ -409,6 +440,7 @@ async def unpublish_interview_config(
 async def delete_interview_config(db: AsyncSession, config_id: UUID, actor: CurrentUser) -> None:
     """Soft-delete the config + cascade to outcomes / questions."""
     config = await _require_config(db, config_id)
+    await _assert_no_live_sessions(db, config.id)
     await soft_delete_cascade(db, config, actor_id=actor.user_id)
 
 
