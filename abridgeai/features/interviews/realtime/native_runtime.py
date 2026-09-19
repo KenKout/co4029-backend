@@ -766,6 +766,10 @@ def _record_conversation(
         if str(role) == "assistant":
             kind = userdata.pending_assistant_kind or "question"
             userdata.pending_assistant_kind = None
+        elif getattr(userdata, "pending_user_action", None) is not None:
+            # Assistance request: never a gradeable answer (audit P1 #11).
+            kind = "assistance"
+            userdata.pending_user_action = None
         else:
             kind = "answer"
         # A TYPED answer is persisted directly as its durable receipt; the SDK's

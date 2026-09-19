@@ -128,6 +128,10 @@ class InterviewUserdata:
     # kind="question", so after a reload every hint in the history rendered as a
     # FOLLOW-UP. None means the next utterance is ordinary interview speech.
     pending_assistant_kind: str | None = None
+    # The turn_action of an in-flight assistance request (hint/repeat/clarify):
+    # the conversation recorder consumes it to badge the matching USER item as
+    # kind="assistance" instead of "answer" (audit P1 #11), then clears it.
+    pending_user_action: str | None = None
 
     # Injected by the runtime. `select_next` runs the deterministic scorer
     # (selection.py) and returns the chosen question, or None when the bank is

@@ -357,6 +357,10 @@ def _is_candidate_answer(message: InterviewSessionMessage) -> bool:
     if getattr(message, "role", None) != "user":
         return False
     metadata = getattr(message, "metadata_json", None) or {}
+    if isinstance(metadata, dict) and metadata.get("kind") == "assistance":
+        # Audit P1: a hint/repeat/clarify request is conversation UX, never
+        # rubric evidence — even when the recorder linked it to a question.
+        return False
     if not isinstance(metadata, dict) or metadata.get("source") != "native_agent":
         return True  # ordinary REST / voice user row
     return metadata.get("turn_state") == "applied"

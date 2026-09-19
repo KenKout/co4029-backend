@@ -578,6 +578,10 @@ async def _reply(
         if userdata is not None and turn.turn_action in _ASSISTANCE_KINDS:
             userdata.pending_assistant_kind = _ASSISTANCE_KINDS[turn.turn_action]
             await publisher.agent_action(kind=turn.turn_action)
+    if turn.turn_action != tp.DEFAULT_TURN_ACTION and userdata is not None:
+        # Badge the SDK echo of this assistance text so the recorder files it
+        # as kind="assistance", not a gradeable answer (audit P1 #11).
+        userdata.pending_user_action = turn.turn_action
 
     async with sess._claim_user_turn():  # noqa: SLF001 - the SDK's own default callback does this
         # force=True: the opening and the rejoin re-read deliberately run
