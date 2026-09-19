@@ -496,35 +496,33 @@ async def list_pending_evaluation_sessions(
 ) -> list[InterviewSession]:
     """Terminal sessions whose async evaluation appears to be stranded.
 
-    The grace cutoff keeps an actively running evaluation job out of the
-    recovery scan.
-
-    ``status='failed'`` IS included. That status only means "ARQ exhausted its
-    retry budget", which is an infrastructure outcome, not a judgement about the
-    student: the session still holds real answers and ``_ungradeable_reason``
-    still permits grading it. Excluding it stranded 14 sessions that a student
-    had actually sat, with no re-drive path anywhere in the codebase. It is
-    bounded by ``max_recovery_attempts`` so a genuinely unprocessable session
-    cannot be retried forever.
-
-    ``abandoned`` stays excluded on the merits: that status is only reached when
-    the session has no gradeable answer at all.
+    The grace cutoff keeps an actively running evaluation job out of the scan.
+    ``failed`` IS included — an ARQ retry-budget exhaustion is infrastructure,
+    not judgement — bounded by ``max_recovery_attempts``. ``abandoned`` stays
+    excluded: it only holds sessions with no gradeable answer at all.
     """
     recovery_attempts = InterviewSession.internal_summary_json[
         "evaluation_recovery"
     ]["attempts"].as_integer()
-    # The candidate list is a best-effort pre-filter taken up to a grace window
-    # before the sweep charges anything. The AUTHORITATIVE guards (verdict,
-    # live claim, durable active job) are re-checked inside the stamp's UPDATE,
-    # because a session can change between here and there. Excluding live
-    # claims and active jobs HERE too keeps the common case off the sweep's
-    # work list entirely instead of logging a refusal per row.
+    # Best-effort pre-filter; the AUTHORITATIVE guards are re-checked inside
+    # the stamp's UPDATE. Excluding live claims / active jobs here keeps the
+    # common case off the sweep's work list entirely.
     current_phase = InterviewSession.internal_summary_json[
         "evaluation_recovery"
     ]["current"]["phase"].as_string()
+    # Audit P1: a verdict predating an applied receipt is stale — recoverable
+    # even WITH a verdict (same ceiling). Shared predicate, see the writer.
+    from abridgeai.features.interviews.queries.evaluation_recovery import (  # noqa: PLC0415
+        stale_verdict_exists,
+    )
+
+    stale_verdict = stale_verdict_exists()
     stmt = select(InterviewSession).where(
         InterviewSession.status.in_(("completed", "timed_out", "failed")),
-        InterviewSession.pass_verdict.is_(None),
+        or_(
+            InterviewSession.pass_verdict.is_(None),
+            stale_verdict,
+        ),
         InterviewSession.ended_at.is_not(None),
         InterviewSession.ended_at <= ended_before,
         # NULL (never recovered) or under the ceiling. func.coalesce keeps the
@@ -551,6 +549,7 @@ async def list_pending_evaluation_sessions(
 # The recovery-lifecycle writers live in evaluation_recovery.py (LOC gate);
 # re-exported here so existing import sites keep working.
 from abridgeai.features.interviews.queries.evaluation_recovery import (  # noqa: E402,F401
+    invalidate_stale_verdict,
     refund_evaluation_recovery_attempt,
     stamp_evaluation_recovery_attempt,
     transition_evaluation_recovery_phase,

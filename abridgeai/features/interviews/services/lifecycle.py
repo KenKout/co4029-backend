@@ -471,6 +471,15 @@ async def _redrive_one_evaluation(
     and refunds the attempt whenever no job actually reached Redis.
     """
     session_id = session.id  # type: ignore[attr-defined]
+    # Audit P1 (hard-stop drain timeout): a candidate that qualified via a
+    # STALE verdict (a receipt applied after ``evaluated_at``) must have that
+    # verdict retired before enqueueing — the claim refuses any session with a
+    # verdict, so the re-driven job would no-op and the late answer would stay
+    # ungraded forever. The invalidation re-checks the same predicate
+    # atomically; a verdict retired by nobody else stays retired only when the
+    # staleness still holds.
+    if getattr(session, "pass_verdict", None) is not None:
+        await sessions_queries.invalidate_stale_verdict(db, session_id)
     # A live claim / active durable job re-checked at stamp time (the candidate
     # list may be stale) refuses the charge — including a claim that appeared
     # after the query ran.

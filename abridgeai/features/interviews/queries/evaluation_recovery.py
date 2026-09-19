@@ -19,11 +19,16 @@ arbiter. See services/lifecycle.py for the driver.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
+
+if TYPE_CHECKING:
+    from sqlalchemy.sql.selectable import Exists
+
+from abridgeai.core.security import utcnow
 
 _RECOVERY_ATTEMPTS_PATH = "'{evaluation_recovery,attempts}'"
 # A legacy / hand-edited row could hold a non-numeric there. Mirror the Python
@@ -261,3 +266,74 @@ __all__ = [
     "stamp_evaluation_recovery_attempt",
     "transition_evaluation_recovery_phase",
 ]
+
+
+def stale_verdict_exists() -> Exists:
+    """ORM EXISTS clause: an applied receipt postdating ``evaluated_at``.
+
+    Shared by the recovery candidate query (sessions.list_pending_) and the
+    conditional invalidation writer (invalidate_stale_verdict) so the two can
+    never disagree about what "stale" means.
+    """
+    from sqlalchemy import DateTime, cast, exists, select  # noqa: PLC0415
+
+    from abridgeai.features.interviews.models import (  # noqa: PLC0415
+        InterviewSession,
+        InterviewSessionMessage,
+    )
+
+    receipt = InterviewSessionMessage.metadata_json
+    return exists(
+        select(1).where(
+            InterviewSessionMessage.session_id == InterviewSession.id,
+            receipt["turn_state"].as_string() == "applied",
+            cast(receipt["applied_at"].as_string(), DateTime(timezone=True))
+            > cast(
+                InterviewSession.internal_summary_json["evaluated_at"].as_string(),
+                DateTime(timezone=True),
+            ),
+        )
+    )
+
+
+_INVALIDATE_STALE_VERDICT_SQL = """
+    UPDATE interview_sessions SET
+        pass_verdict = NULL,
+        internal_summary_json = internal_summary_json
+            || jsonb_build_object(
+                'evaluation_recovery',
+                COALESCE(internal_summary_json->'evaluation_recovery', '{}'::jsonb)
+                    || jsonb_build_object('superseded_verdict', to_jsonb(:retired_at))
+            )
+    WHERE id = :sid AND __STALE__
+"""
+
+
+async def invalidate_stale_verdict(db: AsyncSession, session_id: UUID) -> bool:
+    """Clear a verdict that a late-applied receipt postdates (audit P1).
+
+    ``claim_session_evaluation`` rightly refuses any session with a verdict,
+    so a stale-verdict re-drive must first retire the old verdict. The UPDATE
+    is conditional on the SAME stale-verdict predicate the sweep used — if no
+    receipt postdates ``evaluated_at`` any more (a concurrent grader finished
+    between the query and now), nothing changes and the caller's enqueue is
+    refused by the claim, exactly as designed. The retired verdict's original
+    evaluation stamp stays in ``evaluated_at`` history via
+    ``superseded_verdict`` for auditability.
+    """
+    stale = """
+        EXISTS (
+            SELECT 1 FROM interview_session_messages m
+            WHERE m.session_id = interview_sessions.id
+              AND m.metadata_json->>'turn_state' = 'applied'
+              AND CAST(m.metadata_json->>'applied_at' AS timestamptz)
+                  > CAST(interview_sessions.internal_summary_json->>'evaluated_at'
+                         AS timestamptz)
+        )
+    """
+    result = await db.execute(
+        text(_INVALIDATE_STALE_VERDICT_SQL.replace("__STALE__", stale)),
+        {"sid": session_id, "retired_at": utcnow()},
+    )
+    await db.commit()
+    return bool(getattr(result, "rowcount", 0))
