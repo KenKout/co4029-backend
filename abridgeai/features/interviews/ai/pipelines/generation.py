@@ -82,6 +82,7 @@ async def run_interview_generation(  # noqa: C901 -- pipeline stages stay audita
     generation_run_id: UUID,
     *,
     arq_pool: object | None = None,
+    retry_eligible: bool = False,
 ) -> None:
     """Drive retrieval → generation (with backfill) → validation → persistence.
 
@@ -263,9 +264,34 @@ async def run_interview_generation(  # noqa: C901 -- pipeline stages stay audita
         await db.rollback()
         raise
     except Exception as exc:
+        from abridgeai.features.interviews.services.generation_retry import (  # noqa: PLC0415
+            is_transient_generation_failure,
+        )
+
         await db.rollback()
         fresh = await quizzes_public.get_generation_run(db, generation_run_id)
         if fresh is None:
+            raise
+        # P2 (generation retry): a TRANSIENT failure with retry budget left
+        # goes back to ``pending`` so the next delivery can re-claim it — it
+        # is NOT terminal, no failure email, no finished_at. The worker
+        # translates the re-raised exception into arq's Retry.
+        if retry_eligible and is_transient_generation_failure(exc):
+            transient_config = dict(fresh.config_json or {}) | {
+                "failure": {"message": str(exc), "transient": True},
+            }
+            await _update_run(
+                db,
+                fresh.id,
+                status="pending",
+                config_json=transient_config,
+            )
+            await db.commit()
+            logger.warning(
+                "interview_generation_transient_retry",
+                generation_run_id=str(state.id),
+                error=str(exc),
+            )
             raise
         failure_config = dict(fresh.config_json or {}) | {
             "failure": {"message": str(exc)},

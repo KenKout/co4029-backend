@@ -473,6 +473,103 @@ async def test_pipeline_run_status_failed_on_exception(
 
 
 @pytest.mark.asyncio
+async def test_pipeline_transient_failure_requeues_run_when_retry_eligible(
+    session_factory: async_sessionmaker[AsyncSession],
+    fixture_data: dict[str, UUID],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """P2: transient + budget remaining → run returns to ``pending`` (the
+    next delivery re-claims it), no terminal failed stamp, no finished_at."""
+    from abridgeai.ai.llm.errors import ProviderError
+
+    _install_stage_mocks(monkeypatch)
+    monkeypatch.setattr(
+        generation_backfill,
+        "generate_interview_questions",
+        AsyncMock(
+            side_effect=ProviderError(
+                "HTTP error calling https://gw: ConnectError: boom"
+            )
+        ),
+    )
+
+    async with session_factory() as session:
+        with pytest.raises(ProviderError):
+            await run_interview_generation(
+                session, fixture_data["run_id"], retry_eligible=True
+            )
+
+    async with session_factory() as session:
+        run = await session.get(GenerationRun, fixture_data["run_id"])
+
+    assert run is not None
+    assert run.status == "pending"
+    assert run.finished_at is None
+    failure = (run.config_json or {}).get("failure")
+    assert isinstance(failure, dict)
+    assert failure["transient"] is True
+
+
+@pytest.mark.asyncio
+async def test_pipeline_transient_failure_terminal_without_budget(
+    session_factory: async_sessionmaker[AsyncSession],
+    fixture_data: dict[str, UUID],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """P2: transient on the FINAL attempt → terminal failed, as before."""
+    from abridgeai.ai.llm.errors import ProviderError
+
+    _install_stage_mocks(monkeypatch)
+    monkeypatch.setattr(
+        generation_backfill,
+        "generate_interview_questions",
+        AsyncMock(
+            side_effect=ProviderError("/chat/completions returned HTTP 503: busy")
+        ),
+    )
+
+    async with session_factory() as session:
+        with pytest.raises(ProviderError):
+            await run_interview_generation(
+                session, fixture_data["run_id"], retry_eligible=False
+            )
+
+    async with session_factory() as session:
+        run = await session.get(GenerationRun, fixture_data["run_id"])
+
+    assert run is not None
+    assert run.status == "failed"
+    assert run.finished_at is not None
+
+
+@pytest.mark.asyncio
+async def test_pipeline_permanent_failure_never_requeues(
+    session_factory: async_sessionmaker[AsyncSession],
+    fixture_data: dict[str, UUID],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """P2: permanent (validation) failure → terminal failed even with budget."""
+    _install_stage_mocks(monkeypatch)
+    monkeypatch.setattr(
+        generation_backfill,
+        "generate_interview_questions",
+        AsyncMock(side_effect=RuntimeError("targeted generation resolved no interview outcomes")),
+    )
+
+    async with session_factory() as session:
+        with pytest.raises(RuntimeError):
+            await run_interview_generation(
+                session, fixture_data["run_id"], retry_eligible=True
+            )
+
+    async with session_factory() as session:
+        run = await session.get(GenerationRun, fixture_data["run_id"])
+
+    assert run is not None
+    assert run.status == "failed"
+
+
+@pytest.mark.asyncio
 async def test_pipeline_threads_run_id_to_stages(
     session_factory: async_sessionmaker[AsyncSession],
     fixture_data: dict[str, UUID],

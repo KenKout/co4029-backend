@@ -29,6 +29,7 @@ async def run_interview_generation(
     generation_run_id: UUID,
     *,
     arq_pool: object | None = None,
+    retry_eligible: bool = False,
 ) -> None:
     """ARQ entrypoint: delegate to the T6.10 pipeline.
 
@@ -36,7 +37,9 @@ async def run_interview_generation(
     the completion/failure notification can enqueue an email; ``None`` in
     sync/test paths simply skips the email fan-out.
     """
-    await _run_interview_generation_pipeline(db, generation_run_id, arq_pool=arq_pool)
+    await _run_interview_generation_pipeline(
+        db, generation_run_id, arq_pool=arq_pool, retry_eligible=retry_eligible
+    )
 
 
 __all__ = ["run_interview_generation"]

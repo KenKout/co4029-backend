@@ -25,6 +25,8 @@ from __future__ import annotations
 from typing import Any
 from uuid import UUID
 
+from arq import Retry
+
 from abridgeai.core.audit import current_actor_var
 from abridgeai.core.db import get_sessionmaker
 from abridgeai.core.observability import (
@@ -36,6 +38,8 @@ from abridgeai.features.interviews.services import generation as generation_serv
 from abridgeai.workers.actor import set_worker_actor
 
 _logger = get_logger(__name__)
+
+GENERATION_MAX_TRIES = 3
 
 
 async def run_interview_generation_task(
@@ -63,16 +67,43 @@ async def run_interview_generation_task(
         generation_run_id=str(generation_run_id),
         actor_id=str(actor_id),
     )
+    # P2 (generation retry): transient provider/transport failures get a
+    # bounded retry budget (mirror of the evaluation worker's semantics) —
+    # the pipeline returns a retryable run to ``pending``; here the same
+    # predicate decides whether arq should re-enqueue or record the failure.
+    job_try_raw = ctx.get("job_try")
+    job_try = job_try_raw if isinstance(job_try_raw, int) else 1
+    is_final_attempt = job_try >= GENERATION_MAX_TRIES
     sessionmaker = get_sessionmaker()
     try:
         async with sessionmaker() as db:
             try:
                 await generation_service.run_interview_generation(
-                    db, generation_run_id, arq_pool=ctx.get("redis")
+                    db,
+                    generation_run_id,
+                    arq_pool=ctx.get("redis"),
+                    retry_eligible=not is_final_attempt,
                 )
             except (KeyboardInterrupt, SystemExit):
                 raise
-            except Exception:
+            except Retry:
+                raise
+            except Exception as exc:
+                from abridgeai.features.interviews.services.generation_retry import (  # noqa: PLC0415
+                    is_transient_generation_failure,
+                )
+
+                if not is_final_attempt and is_transient_generation_failure(exc):
+                    defer = 30 * (2 ** (job_try - 1))
+                    _logger.warning(
+                        "interview_generation_task_retry",
+                        generation_run_id=str(generation_run_id),
+                        job_try=job_try,
+                        max_tries=GENERATION_MAX_TRIES,
+                        defer_seconds=defer,
+                        error=str(exc),
+                    )
+                    raise Retry(defer=defer) from exc
                 _logger.exception(
                     "interview_generation_task_failed",
                     generation_run_id=str(generation_run_id),
@@ -83,4 +114,4 @@ async def run_interview_generation_task(
         clear_request_context()
 
 
-__all__ = ["run_interview_generation_task"]
+__all__ = ["GENERATION_MAX_TRIES", "run_interview_generation_task"]
