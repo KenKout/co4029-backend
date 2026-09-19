@@ -227,7 +227,7 @@ async def test_highest_headline_and_aggregates(
     assert result["pass_rate"] == pytest.approx(1.0)  # both headline attempts passed
     assert result["mean_time_seconds"] == pytest.approx(350.0)  # A#2=200, B#2=500 → 350
 
-    assert len(result["histogram"]) == 11
+    assert len(result["histogram"]) == 10
     assert sum(b["count"] for b in result["histogram"]) == 2
 
 
@@ -244,7 +244,7 @@ async def test_average_headline_and_aggregates(
     assert result["mean_score"] == pytest.approx(70.0)
     assert result["median_score"] == pytest.approx(70.0)
     assert result["pass_rate"] == pytest.approx(1.0)  # both 70 averages clear the pass mark
-    assert len(result["histogram"]) == 11
+    assert len(result["histogram"]) == 10
     assert sum(b["count"] for b in result["histogram"]) == 2
 
 
@@ -312,7 +312,7 @@ async def test_zero_attempts(
     assert result["p75"] is None
     assert result["pass_rate"] is None
     assert result["mean_time_seconds"] is None
-    assert len(result["histogram"]) == 11
+    assert len(result["histogram"]) == 10
     assert sum(b["count"] for b in result["histogram"]) == 0
 
 

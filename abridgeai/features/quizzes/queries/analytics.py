@@ -120,29 +120,28 @@ _HEADLINE_SQL_BY_METHOD: dict[str, str] = {
 
 
 def _empty_histogram() -> list[dict[str, Any]]:
-    """Eleven score buckets, all zero.
+    """Ten score buckets, all zero.
 
-    Bucket ``i`` (0..9) spans ``[10*i, 10*i+9]``; the eleventh bucket
-    (``i == 10``) is the ``90..100``-inclusive top band and captures a
-    perfect ``100``. Bucketing lives in Python (not SQL) so the shape is
-    portable and unit-testable.
+    Buckets ``0..8`` span ``[10*i, 10*i+9]``; the final bucket is the
+    ``90..100``-inclusive top band and captures a perfect ``100``. Bucketing
+    lives in Python (not SQL) so the shape is portable and unit-testable.
     """
     buckets: list[dict[str, Any]] = []
-    for i in range(11):
+    for i in range(10):
         lower = i * 10
-        upper = 100 if i == 10 else i * 10 + 9
-        label = "90–100" if i == 10 else f"{lower}–{upper}"
+        upper = 100 if i == 9 else i * 10 + 9
+        label = "90–100" if i == 9 else f"{lower}–{upper}"
         buckets.append({"label": label, "lower": lower, "upper": upper, "count": 0})
     return buckets
 
 
 def _score_histogram(scores: list[float]) -> list[dict[str, Any]]:
-    """Bucket ``scores`` (0..100) into the eleven bands from
+    """Bucket ``scores`` (0..100) into the ten bands from
     :func:`_empty_histogram`. ``sum(counts)`` equals ``len(scores)``."""
     buckets = _empty_histogram()
     for score in scores:
         idx = int(score // 10)
-        idx = min(max(idx, 0), 10)
+        idx = min(max(idx, 0), 9)
         buckets[idx]["count"] += 1
     return buckets
 
@@ -170,11 +169,11 @@ async def quiz_results_summary(
     * ``median_score`` / ``p25`` / ``p75`` — ``percentile_cont`` over headline.
     * ``pass_rate`` — fraction of headline rows with ``passed`` truthy (0..1).
     * ``mean_time_seconds`` — AVG ``time_taken_seconds`` over headline.
-    * ``histogram`` — 11 score buckets over the headline set (see
+    * ``histogram`` — 10 score buckets over the headline set (see
       :func:`_score_histogram`); ``sum`` of counts equals ``unique_students``.
 
     Zero completed attempts yields zeroed counts, ``None`` stats and an
-    all-zero 11-bucket histogram — never an error.
+    all-zero 10-bucket histogram — never an error.
     """
     if grading_method not in _HEADLINE_SQL_BY_METHOD:
         allowed = ", ".join(sorted(_HEADLINE_SQL_BY_METHOD))
