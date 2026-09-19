@@ -58,6 +58,7 @@ from abridgeai.features.courses.schemas import (
     LessonCreate,
     LessonResourceCreate,
     LessonUpdate,
+    ModuleUpdate,
 )
 from abridgeai.features.courses.services import authoring as authoring_service
 from tests.support.db_graph import hard_delete_graph
@@ -258,6 +259,64 @@ async def scenario(engine: AsyncEngine) -> AsyncIterator[dict]:
 
 def _actor(user_id: uuid.UUID) -> CurrentUser:
     return CurrentUser(user_id=user_id, session_id=uuid.uuid4())
+
+
+@pytest.mark.asyncio
+async def test_live_course_module_cannot_return_to_draft_but_can_archive(
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict,
+) -> None:
+    """Once learner-visible, withdrawal preserves history via archive."""
+    actor = _actor(scenario["owner_id"])
+    async with session_factory() as session, session.begin():
+        await session.execute(
+            text("UPDATE courses SET status = 'published' WHERE id = :id"),
+            {"id": scenario["course_id"]},
+        )
+        await session.execute(
+            text("UPDATE modules SET status = 'published' WHERE id = :id"),
+            {"id": scenario["module_id"]},
+        )
+
+    async with session_factory() as session:
+        with pytest.raises(ConflictError, match="published_module_cannot_return_to_draft"):
+            await authoring_service.update_module(
+                session,
+                scenario["module_id"],
+                ModuleUpdate(status="draft"),
+                actor,
+            )
+
+    async with session_factory() as session, session.begin():
+        archived = await authoring_service.update_module(
+            session,
+            scenario["module_id"],
+            ModuleUpdate(status="archived"),
+            actor,
+        )
+        assert archived.status == "archived"
+
+
+@pytest.mark.asyncio
+async def test_archived_module_status_is_terminal(
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict,
+) -> None:
+    actor = _actor(scenario["owner_id"])
+    async with session_factory() as session, session.begin():
+        await session.execute(
+            text("UPDATE modules SET status = 'archived' WHERE id = :id"),
+            {"id": scenario["module_id"]},
+        )
+
+    async with session_factory() as session:
+        with pytest.raises(ConflictError, match="archived_module_is_terminal"):
+            await authoring_service.update_module(
+                session,
+                scenario["module_id"],
+                ModuleUpdate(status="published"),
+                actor,
+            )
 
 
 async def test_add_lesson_auto_creates_module_item(

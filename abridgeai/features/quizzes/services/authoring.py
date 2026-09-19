@@ -574,10 +574,19 @@ async def publish_quiz(db: AsyncSession, quiz_id: UUID, actor: CurrentUser) -> Q
 
 
 async def archive_quiz(db: AsyncSession, quiz_id: UUID, actor: CurrentUser) -> Quiz:
-    del actor
     quiz = await _require_quiz(db, quiz_id)
+    if quiz.status == "archived":
+        return quiz
     quiz.status = "archived"
     await flush_or_conflict(db)
+    from abridgeai.features.quizzes.services.audit import record_event  # noqa: PLC0415
+
+    await record_event(
+        db,
+        event_name="quiz_archived",
+        quiz_id=quiz.id,
+        actor_user_id=actor.user_id,
+    )
     await db.refresh(quiz)
     return quiz
 

@@ -570,6 +570,34 @@ async def update_module(
 ) -> ModuleAuthoring:
     del actor
     module = await _require_module(db, module_id)
+    data = payload.model_dump(exclude_unset=True)
+    requested_status = data.get("status")
+
+    # A module that has already been exposed inside a live course must not be
+    # turned back into a draft.  ``draft`` means unpublished authoring work;
+    # reusing it as a withdrawal state makes historical curriculum silently
+    # mutable and changes the completion denominator for enrolled learners.
+    # The terminal ``archived`` state is the explicit withdrawal path.
+    if module.status == "published" and requested_status == "draft":
+        course = await _require_course(db, module.course_id)
+        if course.status == "published":
+            raise ConflictError(
+                "published_module_cannot_return_to_draft: archive the module "
+                "to withdraw it from students while preserving history"
+            )
+
+    # Archive is a one-way lifecycle transition.  Resurrecting the same row
+    # would put changed content back under students who already have progress
+    # against its former publication; create a new draft instead.
+    if (
+        module.status == "archived"
+        and requested_status is not None
+        and requested_status != "archived"
+    ):
+        raise ConflictError(
+            "archived_module_is_terminal: duplicate the module to create a new draft"
+        )
+
     _apply_patch(module, payload)
     await _flush_or_conflict(db)
     await db.refresh(module)

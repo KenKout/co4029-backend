@@ -189,10 +189,12 @@ def _looks_like_uuid(value: str) -> bool:
 
 
 async def get_published_quiz(db: AsyncSession, quiz_id: UUID | str) -> Quiz | None:
-    """Single published quiz by id OR slug, or ``None`` (router maps to 404).
+    """Single learner-visible quiz by id OR slug, or ``None`` (router maps to 404).
 
-    Excludes drafts, archived, and soft-deleted quizzes. Existence is
-    not leaked — service treats ``None`` uniformly as 404.
+    Every level of the publication chain must be live: course, module and
+    quiz.  Checking only the quiz let a retained direct URL bypass a module
+    withdrawal and even start a new attempt after the teacher hid the module.
+    Existence is not leaked — service treats every failed gate as 404.
 
     Slug addressing supports the breadcrumb student URLs
     (``/courses/<course-slug>/learn/<item-slug>``): a non-UUID path
@@ -203,16 +205,20 @@ async def get_published_quiz(db: AsyncSession, quiz_id: UUID | str) -> Quiz | No
     """
     if isinstance(quiz_id, str) and not _looks_like_uuid(quiz_id):
         # Lazy import to avoid breaking import-linter's cross-feature contract.
-        from abridgeai.features.courses.models import Module  # noqa: PLC0415
+        from abridgeai.features.courses.models import Course, Module  # noqa: PLC0415
 
         stmt = (
             select(Quiz)
             .join(Module, Module.id == Quiz.module_id)
+            .join(Course, Course.id == Module.course_id)
             .where(
                 Quiz.slug == quiz_id,
                 *_published_clause(),
                 Quiz.deleted_at.is_(None),
+                Module.status == "published",
                 Module.deleted_at.is_(None),
+                Course.status == "published",
+                Course.deleted_at.is_(None),
             )
             .order_by(Quiz.created_at)
             .limit(2)
@@ -222,8 +228,56 @@ async def get_published_quiz(db: AsyncSession, quiz_id: UUID | str) -> Quiz | No
             # 0 = unknown slug; >1 = ambiguous across courses → both 404.
             return None
         return rows[0]
-    stmt = select(Quiz).where(Quiz.id == quiz_id, *_published_clause())
+    from abridgeai.features.courses.models import Course, Module  # noqa: PLC0415
+
+    stmt = (
+        select(Quiz)
+        .join(Module, Module.id == Quiz.module_id)
+        .join(Course, Course.id == Module.course_id)
+        .where(
+            Quiz.id == quiz_id,
+            *_published_clause(),
+            Quiz.deleted_at.is_(None),
+            Module.status == "published",
+            Module.deleted_at.is_(None),
+            Course.status == "published",
+            Course.deleted_at.is_(None),
+        )
+    )
     return (await db.execute(stmt)).scalar_one_or_none()
+
+
+async def get_quiz_for_in_progress_learner(
+    db: AsyncSession,
+    quiz_id: UUID | str,
+    user_id: UUID,
+) -> Quiz | None:
+    """Return a withdrawn quiz only to the owner of an active attempt.
+
+    The normal learner detail endpoint is parent-publication gated.  This
+    narrow fallback lets a student reload the workspace after a teacher
+    archives the quiz or its module, without reopening the quiz to anyone who
+    has not already started.  Starting a new attempt never calls this query.
+    """
+    identity_clause = (
+        Quiz.id == UUID(str(quiz_id))
+        if _looks_like_uuid(str(quiz_id))
+        else Quiz.slug == str(quiz_id)
+    )
+    stmt = (
+        select(Quiz)
+        .join(QuizAttempt, QuizAttempt.quiz_id == Quiz.id)
+        .where(
+            identity_clause,
+            Quiz.deleted_at.is_(None),
+            QuizAttempt.student_id == user_id,
+            QuizAttempt.status == "in_progress",
+        )
+        .order_by(Quiz.created_at)
+        .limit(2)
+    )
+    rows = list((await db.execute(stmt)).scalars().all())
+    return rows[0] if len(rows) == 1 else None
 
 
 async def list_published_quizzes_for_module(db: AsyncSession, module_id: UUID) -> list[Quiz]:
@@ -475,6 +529,7 @@ __all__ = [
     "QuizNotYetOpen",
     "get_attempt_for_review",
     "get_published_quiz",
+    "get_quiz_for_in_progress_learner",
     "get_quiz_for_taking",
     "list_published_quizzes_for_module",
     "list_quiz_questions_with_options",

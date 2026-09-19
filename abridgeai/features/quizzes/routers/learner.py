@@ -207,7 +207,9 @@ async def get_published_quiz(
     by id, which would leak question counts (and, via the attempt flow,
     the questions themselves) across tenants.
     """
-    quiz = await taking_service.get_published_quiz(db, quiz_id)
+    quiz = await taking_service.get_quiz_for_learner_view(
+        db, quiz_id, current_user.user_id
+    )
     if quiz is None:
         raise _not_found("quiz", quiz_id)
     if not await can_view_course_content(

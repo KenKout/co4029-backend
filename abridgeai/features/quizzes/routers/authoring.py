@@ -572,6 +572,30 @@ async def publish_quiz(
     return QuizAuthoring.model_validate(quiz)
 
 
+@router.post("/quizzes/{quiz_id}/archive", response_model=QuizAuthoring)
+async def archive_quiz(
+    quiz_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_QUIZ)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> QuizAuthoring:
+    """Withdraw a quiz from new learner access without deleting evidence.
+
+    Existing in-progress attempts remain resumable and submittable through the
+    attempt endpoints, which intentionally load their persisted attempt
+    snapshot rather than requiring the quiz to remain published.
+    """
+    try:
+        quiz = await authoring_service.archive_quiz(db, quiz_id, current_user)
+    except NotFoundError as exc:
+        raise _not_found("quiz", quiz_id) from exc
+    except ConflictError as exc:
+        raise _conflict(str(exc)) from exc
+    except AppError as exc:
+        raise _bad_request(str(exc)) from exc
+    await db.commit()
+    return QuizAuthoring.model_validate(quiz)
+
+
 class BulkSetItem(BaseModel):
     question_id: UUID
     expected_response_time_ms: int = Field(gt=0)

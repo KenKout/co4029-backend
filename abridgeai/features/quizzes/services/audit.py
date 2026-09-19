@@ -35,6 +35,7 @@ QUIZ_AUDIT_EVENTS = frozenset(
         "override_deleted",
         "question_edited",
         "quiz_published",
+        "quiz_archived",
     }
 )
 

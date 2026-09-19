@@ -136,6 +136,20 @@ async def get_published_quiz(db: AsyncSession, quiz_id: UUID | str) -> Quiz | No
     return await published_queries.get_published_quiz(db, quiz_id)
 
 
+async def get_quiz_for_learner_view(
+    db: AsyncSession,
+    quiz_id: UUID | str,
+    user_id: UUID,
+) -> Quiz | None:
+    """Learner detail projection with an active-attempt withdrawal fallback."""
+    quiz = await published_queries.get_published_quiz(db, quiz_id)
+    if quiz is not None:
+        return quiz
+    return await published_queries.get_quiz_for_in_progress_learner(
+        db, quiz_id, user_id
+    )
+
+
 async def _require_quiz(db: AsyncSession, quiz_id: UUID) -> Quiz:
     quiz = await authoring_queries.get_quiz_for_authoring(db, quiz_id)
     if quiz is None:
@@ -904,6 +918,7 @@ __all__ = [
     "get_attempt_review",
     "project_attempt_summary",
     "get_published_quiz",
+    "get_quiz_for_learner_view",
     "start_attempt",
     "submit_attempt",
 ]

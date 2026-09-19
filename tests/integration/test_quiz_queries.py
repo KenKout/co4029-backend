@@ -48,6 +48,7 @@ from abridgeai.features.quizzes.queries import (
 )
 from abridgeai.features.quizzes.queries.published import (
     get_in_progress_attempt,
+    get_quiz_for_in_progress_learner,
     list_quiz_questions_with_options,
 )
 
@@ -366,6 +367,70 @@ async def test_get_published_quiz_excludes_drafts(
     assert pub.status == "published"
     assert draft is None
     assert archived is None
+
+
+async def test_get_published_quiz_requires_live_course_and_module(
+    session_factory: async_sessionmaker[AsyncSession],
+    fixture_data: dict,
+) -> None:
+    """A retained quiz URL cannot bypass a withdrawn parent module."""
+    async with session_factory() as session, session.begin():
+        await session.execute(
+            text("UPDATE modules SET status = 'archived' WHERE id = :id"),
+            {"id": fixture_data["module_a"]},
+        )
+    async with session_factory() as session:
+        assert await get_published_quiz(session, fixture_data["quiz_pub"]) is None
+
+    async with session_factory() as session, session.begin():
+        await session.execute(
+            text("UPDATE modules SET status = 'published' WHERE id = :id"),
+            {"id": fixture_data["module_a"]},
+        )
+        await session.execute(
+            text("UPDATE courses SET status = 'archived' WHERE id = :id"),
+            {"id": fixture_data["course"]},
+        )
+    async with session_factory() as session:
+        assert await get_published_quiz(session, fixture_data["quiz_pub"]) is None
+
+
+async def test_withdrawn_quiz_is_visible_only_to_owner_of_in_progress_attempt(
+    session_factory: async_sessionmaker[AsyncSession],
+    fixture_data: dict,
+) -> None:
+    attempt_id = uuid.uuid4()
+    async with session_factory() as session, session.begin():
+        await session.execute(
+            text(
+                "INSERT INTO quiz_attempts "
+                "(id, quiz_id, student_id, attempt_number, status, started_at) "
+                "VALUES (:id, :quiz, :student, 1, 'in_progress', NOW())"
+            ),
+            {
+                "id": attempt_id,
+                "quiz": fixture_data["quiz_module_b"],
+                "student": fixture_data["student"],
+            },
+        )
+        await session.execute(
+            text("UPDATE modules SET status = 'archived' WHERE id = :id"),
+            {"id": fixture_data["module_b"]},
+        )
+
+    async with session_factory() as session:
+        owner_view = await get_quiz_for_in_progress_learner(
+            session,
+            fixture_data["quiz_module_b"],
+            fixture_data["student"],
+        )
+        other_view = await get_quiz_for_in_progress_learner(
+            session,
+            fixture_data["quiz_module_b"],
+            fixture_data["fresh_student"],
+        )
+    assert owner_view is not None
+    assert other_view is None
 
 
 async def test_list_published_quizzes_for_module_filters_status(
