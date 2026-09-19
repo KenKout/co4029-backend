@@ -175,6 +175,7 @@ class ModulePublic(_ORMModel):
     course_id: UUID
     title: str
     position: int
+    estimated_minutes: int | None = None
     items: list[ModuleItemPublic] = []
 
 
