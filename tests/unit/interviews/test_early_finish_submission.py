@@ -67,6 +67,11 @@ async def _submit(session, db, arq, *, reason: str, terminalized: bool = True):
         patch.object(taking_service, "_assert_owns_session"),
         patch.object(taking_service, "ensure_ceremony_message", AsyncMock()),
         patch.object(
+            taking_service.ceremony_service,
+            "ensure_status_derived_closing",
+            AsyncMock(),
+        ),
+        patch.object(
             taking_service.sessions_queries,
             "terminalize_in_progress_session",
             AsyncMock(side_effect=_terminalize),

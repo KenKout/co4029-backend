@@ -89,6 +89,7 @@ from abridgeai.features.interviews.queries import authoring as authoring_queries
 from abridgeai.features.interviews.queries import sessions as sessions_queries
 from abridgeai.features.interviews.realtime import observability as security_obs
 from abridgeai.features.interviews.schemas.integrity import coerce_start_idempotency_key
+from abridgeai.features.interviews.services import ceremony as ceremony_service
 from abridgeai.features.interviews.services import security as security_service
 from abridgeai.features.interviews.services.ceremony import (
     FinishReason,
@@ -2053,12 +2054,10 @@ async def submit_session(
     questions score zero, because reaching the assessment and skipping questions
     still counts as having been assessed.
 
-    A run that never left onboarding (identity / audio check / readiness) has
-    nothing to grade — grading one fabricated verdicts from onboarding chatter and
-    burned an attempt. Those terminalize as ``abandoned`` and are never enqueued,
-    matching the stale-session sweep. A deadline completion is ``timed_out`` when
-    answers exist, ``abandoned`` otherwise. Commits inline so the worker sees
-    terminal state before dequeueing.
+    A run that never left onboarding has nothing to grade — it terminalizes as
+    ``abandoned``, never enqueued, like the stale-session sweep. A deadline
+    completion is ``timed_out`` when answers exist, ``abandoned`` otherwise.
+    Commits inline so the worker sees terminal state before dequeueing.
     """
     session = await _require_session(db, session_id)
     _assert_owns_session(session, actor)
@@ -2074,6 +2073,10 @@ async def submit_session(
             student_id=actor.user_id,
             arq_pool=arq_pool,
         )
+        # Audit P1 finish race: one closing, matching the persisted status.
+        await ceremony_service.ensure_status_derived_closing(db, session=session, language=language)
+        await db.commit()
+        await db.refresh(session)
         return session
 
     config = await db.get(InterviewConfig, session.interview_config_id)
@@ -2102,13 +2105,6 @@ async def submit_session(
             )
         ).scalar_one()
     )
-    await ensure_ceremony_message(
-        db,
-        session=session,
-        kind="closing",
-        language=language,
-        reason=reason,
-    )
     # A run that never reached the assessment has no gradeable transcript, no
     # matter HOW it ended (previously only the timed_out branch checked, so an
     # onboarding quit + submit was marked ``completed`` and graded: 14 production
@@ -2134,9 +2130,21 @@ async def submit_session(
     if not await sessions_queries.terminalize_in_progress_session(
         db, session.id, status=terminal_status, ended_at=ended_at
     ):
-        await db.commit()  # the ceremony message above is still ours to keep
+        # Lost the race: THEIR status-derived closing is canonical.
+        await db.commit()
         await db.refresh(session)
+        await ceremony_service.ensure_status_derived_closing(
+            db, session=session, language=language
+        )
+        await db.commit()
         return session
+    await ensure_ceremony_message(
+        db,
+        session=session,
+        kind="closing",
+        language=language,
+        reason=ceremony_service.STATUS_DERIVED_CLOSING_REASON.get(terminal_status, reason),
+    )
     await db.commit()
     await db.refresh(session)
 

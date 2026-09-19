@@ -458,6 +458,38 @@ async def _existing_message(
     return None
 
 
+# Closing wording derives from the status that actually WON the terminal
+# transition — a sweep's ``timed_out``/``abandoned`` must never be narrated as
+# a natural conclusion (audit P1 finish race).
+STATUS_DERIVED_CLOSING_REASON: dict[str, FinishReason] = {
+    "completed": "natural",
+    "timed_out": "timed_out",
+    "abandoned": "ended_early",
+}
+
+
+async def ensure_status_derived_closing(
+    db: object,
+    *,
+    session: InterviewSession,
+    language: str | None,
+) -> InterviewSessionMessage:
+    """Idempotently persist THE closing whose reason matches session.status.
+
+    Called on every submit path that did not itself win the terminal
+    transition (already-terminal refinishes, finish-race losers): the winner's
+    closing already exists and is returned; a sweep terminalization — which
+    inserts no ceremony — gets its status-accurate closing here exactly once.
+    """
+    return await ensure_ceremony_message(
+        db,
+        session=session,
+        kind="closing",
+        language=language,
+        reason=STATUS_DERIVED_CLOSING_REASON.get(str(session.status), "natural"),
+    )
+
+
 async def ensure_ceremony_message(
     db: object,
     *,
@@ -551,6 +583,7 @@ __all__ = [
     "briefing_text",
     "candidate_first_name",
     "closing_text",
+    "ensure_status_derived_closing",
     "preferred_name_ack_text",
     "session_address_name",
     "ensure_ceremony_message",
