@@ -70,9 +70,7 @@ def _student_answer_text(
     return answer.answer_text or "(no answer)"
 
 
-def _live_snapshot(
-    question: QuizQuestion, options: list[QuizQuestionOption]
-) -> dict[str, object]:
+def _live_snapshot(question: QuizQuestion, options: list[QuizQuestionOption]) -> dict[str, object]:
     """Portable fallback for legacy answers that pre-date revision pinning."""
     return {
         "prompt_text": question.prompt_text,
@@ -169,15 +167,19 @@ async def build_responses_report(db: AsyncSession, quiz_id: UUID) -> ResponsesRe
         .all()
     )
     q_ids = [q.id for q in questions]
-    options = list(
-        (
-            await db.execute(
-                select(QuizQuestionOption).where(QuizQuestionOption.question_id.in_(q_ids))
+    options = (
+        list(
+            (
+                await db.execute(
+                    select(QuizQuestionOption).where(QuizQuestionOption.question_id.in_(q_ids))
+                )
             )
+            .scalars()
+            .all()
         )
-        .scalars()
-        .all()
-    ) if q_ids else []
+        if q_ids
+        else []
+    )
     options_by_q: dict[UUID, list[QuizQuestionOption]] = {}
     options_by_id: dict[UUID, QuizQuestionOption] = {}
     for o in options:
@@ -199,17 +201,19 @@ async def build_responses_report(db: AsyncSession, quiz_id: UUID) -> ResponsesRe
         .all()
     )
     attempt_ids = [a.id for a in attempts]
-    answers = list(
-        (
-            await db.execute(
-                select(QuizAttemptAnswer).where(
-                    QuizAttemptAnswer.attempt_id.in_(attempt_ids)
+    answers = (
+        list(
+            (
+                await db.execute(
+                    select(QuizAttemptAnswer).where(QuizAttemptAnswer.attempt_id.in_(attempt_ids))
                 )
             )
+            .scalars()
+            .all()
         )
-        .scalars()
-        .all()
-    ) if attempt_ids else []
+        if attempt_ids
+        else []
+    )
     answers_by_key: dict[tuple[UUID, UUID], QuizAttemptAnswer] = {
         (a.attempt_id, a.question_id): a for a in answers
     }
@@ -225,17 +229,21 @@ async def build_responses_report(db: AsyncSession, quiz_id: UUID) -> ResponsesRe
         for answer in answers
         if getattr(answer, "graded_revision_id", None) is not None
     }
-    revisions = list(
-        (
-            await db.execute(
-                select(QuizQuestionRevision)
-                .where(QuizQuestionRevision.question_id.in_(revision_question_ids))
-                .order_by(QuizQuestionRevision.question_id, QuizQuestionRevision.revision_no)
+    revisions = (
+        list(
+            (
+                await db.execute(
+                    select(QuizQuestionRevision)
+                    .where(QuizQuestionRevision.question_id.in_(revision_question_ids))
+                    .order_by(QuizQuestionRevision.question_id, QuizQuestionRevision.revision_no)
+                )
             )
+            .scalars()
+            .all()
         )
-        .scalars()
-        .all()
-    ) if revision_ids else []
+        if revision_ids
+        else []
+    )
     snapshots_by_revision = _revision_snapshots(revisions)
     questions_by_id = {question.id: question for question in questions}
 
@@ -317,33 +325,41 @@ async def build_statistics_report(db: AsyncSession, quiz_id: UUID) -> Statistics
     total_by_attempt: dict[UUID, float] = {
         a.id: float(a.score_points) if a.score_points is not None else 0.0 for a in attempts
     }
-    answers = list(
-        (
-            await db.execute(
-                select(QuizAttemptAnswer).where(
-                    QuizAttemptAnswer.attempt_id.in_(attempt_ids)
+    answers = (
+        list(
+            (
+                await db.execute(
+                    select(QuizAttemptAnswer).where(QuizAttemptAnswer.attempt_id.in_(attempt_ids))
                 )
             )
+            .scalars()
+            .all()
         )
-        .scalars()
-        .all()
-    ) if attempt_ids else []
+        if attempt_ids
+        else []
+    )
     graded_revision_ids = {
         revision_id
         for answer in answers
         if (revision_id := getattr(answer, "graded_revision_id", None)) is not None
     }
-    revisions = list(
-        (
-            await db.execute(
-                select(QuizQuestionRevision).where(
-                    QuizQuestionRevision.question_id.in_({answer.question_id for answer in answers})
+    revisions = (
+        list(
+            (
+                await db.execute(
+                    select(QuizQuestionRevision).where(
+                        QuizQuestionRevision.question_id.in_(
+                            {answer.question_id for answer in answers}
+                        )
+                    )
                 )
             )
+            .scalars()
+            .all()
         )
-        .scalars()
-        .all()
-    ) if graded_revision_ids else []
+        if graded_revision_ids
+        else []
+    )
     snapshots = _revision_snapshots(revisions)
     # question_id -> {attempt_id: is_correct}
     by_question: dict[UUID, dict[UUID, bool]] = {}
@@ -380,9 +396,7 @@ async def build_statistics_report(db: AsyncSession, quiz_id: UUID) -> Statistics
                 discrimination_note=note,
             )
         )
-    return StatisticsReportRead(
-        quiz_id=quiz.id, attempts_analyzed=len(attempts), rows=rows
-    )
+    return StatisticsReportRead(quiz_id=quiz.id, attempts_analyzed=len(attempts), rows=rows)
 
 
 __all__ = ["build_responses_report", "build_statistics_report"]

@@ -1559,6 +1559,19 @@ async def get_responses_report(
         report = await _rep.build_responses_report(db, quiz_id)
     except NotFoundError as exc:
         raise _not_found("quiz", quiz_id) from exc
+    contacts = await _resolve_student_contacts(db, {row.student_id for row in report.rows})
+    report = report.model_copy(
+        update={
+            "rows": [
+                row.model_copy(
+                    update={
+                        "student_email": contacts.get(row.student_id, (None, None))[1],
+                    }
+                )
+                for row in report.rows
+            ]
+        }
+    )
     if format in ("csv", "xlsx"):
         headers, rows = _exp.responses_to_table(report)
         return _report_download(headers, rows, format, filename_stem=f"quiz-{quiz_id}-responses")
