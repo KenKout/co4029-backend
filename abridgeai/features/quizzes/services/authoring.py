@@ -241,32 +241,32 @@ def _as_plain_json(value: Any) -> Any:  # noqa: ANN401  -- mirrors arbitrary JSO
 
 
 def _assert_quiz_editable(quiz: Quiz) -> None:
-    """Reject content authoring only while a quiz is published.
+    """Allow question authoring only while a quiz is a draft.
 
-    Used by the question CRUD + bulk-approve paths: published quizzes are
-    frozen, since editing would corrupt learner evidence. Archived quizzes
-    are withdrawn from students and may be edited before a new publication.
-    Raised as
-    :class:`ConflictError` so the router maps to HTTP 409. Quiz-settings
-    edits use the field-aware :func:`_assert_quiz_settings_editable` instead.
+    Published and archived quizzes are both immutable on the authoring
+    surface. Reopening an archived quiz would allow content to diverge from
+    the historical publication, so a new draft must be created instead.
+    Quiz-settings edits use the field-aware
+    :func:`_assert_quiz_settings_editable` instead.
     """
-    if quiz.status == "published":
+    if quiz.status != "draft":
         raise ConflictError(
-            "quiz_published_readonly: a published quiz's questions cannot be "
-            "edited; archive it first to make changes"
+            "quiz_published_readonly: quiz questions cannot be edited unless the quiz is a draft"
         )
 
 
 def _assert_quiz_settings_editable(quiz: Quiz, changed_fields: set[str]) -> None:
-    """Field-aware freeze for quiz-settings PATCH on a published quiz.
+    """Field-aware freeze for quiz-settings PATCH on a live quiz.
 
     Student-safe settings (see :data:`_PUBLISHED_EDITABLE_FIELDS`) stay
     editable so teachers can still rename, tweak reminders, or extend the
     schedule window on a live quiz. Touching any other setting — anything
     that would change scoring/timing/attempts/presentation under a student
     who is taking or has finished the quiz — is rejected with HTTP 409.
-    Draft quizzes are unrestricted.
+    Draft quizzes are unrestricted. Archived quizzes are fully read-only.
     """
+    if quiz.status == "archived":
+        raise ConflictError("quiz_readonly: archived quiz cannot be edited")
     if quiz.status != "published":
         return
     frozen = changed_fields - _PUBLISHED_EDITABLE_FIELDS

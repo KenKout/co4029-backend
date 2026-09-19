@@ -719,10 +719,7 @@ async def test_archiving_reopens_a_published_quiz_for_editing(
     session_factory: async_sessionmaker[AsyncSession],
     scenario: dict,
 ) -> None:
-    """The freeze message tells the teacher to archive first, so that has to
-    be a real way out -- archiving withdraws the quiz from students, which is
-    what made the freeze necessary.
-    """
+    """Archived quizzes are immutable and cannot be edited or republished."""
     actor = _actor(scenario["owner_id"])
     async with session_factory() as session, session.begin():
         quiz = await _make_quiz(session, scenario)
@@ -732,11 +729,10 @@ async def test_archiving_reopens_a_published_quiz_for_editing(
     async with session_factory() as session, session.begin():
         archived = await authoring_service.archive_quiz(session, quiz.id, actor)
         assert archived.status == "archived"
-        added = await authoring_service.create_question(
-            session, quiz.id, _question_payload(options=_MCQ_OPTIONS), actor
-        )
-
-    assert added.position == 2
+        with pytest.raises(ConflictError, match="quiz.*cannot be edited"):
+            await authoring_service.create_question(
+                session, quiz.id, _question_payload(options=_MCQ_OPTIONS), actor
+            )
 
 
 @pytest.mark.asyncio
