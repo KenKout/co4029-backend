@@ -64,6 +64,8 @@ class QuizGradeRow(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     student_id: UUID
+    student_name: str | None = None
+    student_email: str | None = None
     grade_percent: Decimal
     grade_points: Decimal
     passed: bool

@@ -202,6 +202,17 @@ async def _resolve_student_names(db: AsyncSession, student_ids: set[UUID]) -> di
     single ``users LEFT JOIN user_profiles`` round-trip regardless of how
     many distinct students are in the result set.
     """
+    contacts = await _resolve_student_contacts(db, student_ids)
+    return {
+        student_id: display_name or email or str(student_id)
+        for student_id, (display_name, email) in contacts.items()
+    }
+
+
+async def _resolve_student_contacts(
+    db: AsyncSession, student_ids: set[UUID]
+) -> dict[UUID, tuple[str | None, str | None]]:
+    """Batch-resolve display names and emails for result-table identities."""
     if not student_ids:
         return {}
     from sqlalchemy import text as _text  # noqa: PLC0415
@@ -209,7 +220,7 @@ async def _resolve_student_names(db: AsyncSession, student_ids: set[UUID]) -> di
     rows = (
         await db.execute(
             _text(
-                "SELECT u.id, COALESCE(p.display_name, u.primary_email) AS name "
+                "SELECT u.id, p.display_name, u.primary_email "
                 "FROM users u "
                 "LEFT JOIN user_profiles p ON p.user_id = u.id "
                 "WHERE u.id = ANY(:ids)"
@@ -217,7 +228,7 @@ async def _resolve_student_names(db: AsyncSession, student_ids: set[UUID]) -> di
             {"ids": list(student_ids)},
         )
     ).all()
-    return {row[0]: row[1] for row in rows}
+    return {row[0]: (row[1], row[2]) for row in rows}
 
 
 def _attempt_teacher_view(
@@ -470,7 +481,7 @@ async def get_quiz_results(
     per_question_list = await _analytics_q.quiz_question_breakdown(db, quiz_id)
     rollup = await _analytics_q.quiz_per_student_rollup(db, quiz_id, quiz.grading_method)
 
-    names = await _resolve_student_names(db, {row["student_id"] for row in rollup})
+    contacts = await _resolve_student_contacts(db, {row["student_id"] for row in rollup})
 
     summary = QuizResultsSummary(
         total_attempts=summary_dict["total_attempts"],
@@ -486,7 +497,11 @@ async def get_quiz_results(
     per_student = [
         QuizPerStudentRow(
             student_id=row["student_id"],
-            student_name=names.get(row["student_id"]),
+            student_name=(
+                contacts.get(row["student_id"], (None, None))[0]
+                or contacts.get(row["student_id"], (None, None))[1]
+            ),
+            student_email=contacts.get(row["student_id"], (None, None))[1],
             best_score_percent=row["best_score_percent"],
             latest_score_percent=row["latest_score_percent"],
             attempts_count=row["attempts_count"],
@@ -1337,9 +1352,7 @@ async def update_quiz_override(
     """Update an existing override row."""
     from abridgeai.features.quizzes.queries import overrides as _ov_q  # noqa: PLC0415
 
-    row = await _ov_q.update_override(
-        db, override_id, body.model_dump(), quiz_id=quiz_id
-    )
+    row = await _ov_q.update_override(db, override_id, body.model_dump(), quiz_id=quiz_id)
     if row is None:
         raise _not_found("override", override_id)
     from abridgeai.features.quizzes.services import audit as _audit  # noqa: PLC0415
@@ -1447,7 +1460,56 @@ async def get_quiz_gradebook(
     from abridgeai.features.quizzes.services import gradebook as _gb  # noqa: PLC0415
 
     rows = await _gb.list_quiz_grades(db, quiz_id)
-    return [QuizGradeRow.model_validate(r) for r in rows]
+    contacts = await _resolve_student_contacts(db, {row.student_id for row in rows})
+    return [
+        QuizGradeRow(
+            student_id=row.student_id,
+            student_name=(
+                contacts.get(row.student_id, (None, None))[0]
+                or contacts.get(row.student_id, (None, None))[1]
+            ),
+            student_email=contacts.get(row.student_id, (None, None))[1],
+            grade_percent=row.grade_percent,
+            grade_points=row.grade_points,
+            passed=row.passed,
+            grading_method=row.grading_method,
+            based_on_attempt_id=row.based_on_attempt_id,
+            attempts_counted=row.attempts_counted,
+        )
+        for row in rows
+    ]
+
+
+@router.get("/quizzes/{quiz_id}/gradebook/export")
+async def export_quiz_gradebook(
+    quiz_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_QUIZ)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    format: str = "csv",
+) -> Response:
+    """Export the complete gradebook from the backend dataset."""
+    del current_user
+    if format not in ("csv", "xlsx"):
+        raise _bad_request("format must be 'csv' or 'xlsx'")
+    from abridgeai.features.quizzes.services import gradebook as _gb  # noqa: PLC0415
+
+    rows = await _gb.list_quiz_grades(db, quiz_id)
+    contacts = await _resolve_student_contacts(db, {row.student_id for row in rows})
+    headers = ["Student", "Email", "Grade %", "Status", "Method", "Attempts"]
+    table = [
+        [
+            contacts.get(row.student_id, (None, None))[0]
+            or contacts.get(row.student_id, (None, None))[1]
+            or str(row.student_id),
+            contacts.get(row.student_id, (None, None))[1] or "",
+            row.grade_percent,
+            "Passed" if row.passed else "Failed",
+            row.grading_method,
+            row.attempts_counted,
+        ]
+        for row in rows
+    ]
+    return _report_download(headers, table, format, filename_stem=f"quiz-{quiz_id}-gradebook")
 
 
 def _report_download(

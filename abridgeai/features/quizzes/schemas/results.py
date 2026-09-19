@@ -54,6 +54,7 @@ class QuizPerStudentRow(BaseModel):
 
     student_id: UUID
     student_name: str | None
+    student_email: str | None = None
     best_score_percent: Decimal | None
     latest_score_percent: Decimal | None
     attempts_count: int
