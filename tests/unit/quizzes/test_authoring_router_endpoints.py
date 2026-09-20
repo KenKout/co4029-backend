@@ -520,14 +520,14 @@ class TestManualGrading:
             AsyncMock(return_value=[(answer, question, attempt)]),
         )
 
-        rows = await authoring.list_needs_grading(uuid4(), object(), _db())
+        page = await authoring.list_needs_grading(uuid4(), object(), _db())
 
-        assert len(rows) == 1
-        assert rows[0].answer_id == answer.id
-        assert rows[0].question_id == question.id
-        assert rows[0].attempt_id == attempt.id
-        assert rows[0].student_id == attempt.student_id
-        assert rows[0].answer_text == "Because of the light"
+        assert len(page.items) == 1
+        assert page.items[0].answer_id == answer.id
+        assert page.items[0].question_id == question.id
+        assert page.items[0].attempt_id == attempt.id
+        assert page.items[0].student_id == attempt.student_id
+        assert page.items[0].answer_text == "Because of the light"
 
     async def test_an_empty_queue_is_an_empty_list(
         self, monkeypatch: pytest.MonkeyPatch
@@ -535,7 +535,9 @@ class TestManualGrading:
         import abridgeai.features.quizzes.services.manual_grading as manual_grading
 
         monkeypatch.setattr(manual_grading, "list_needs_grading", AsyncMock(return_value=[]))
-        assert await authoring.list_needs_grading(uuid4(), object(), _db()) == []
+        page = await authoring.list_needs_grading(uuid4(), object(), _db())
+        assert page.items == []
+        assert page.total == 0
 
     async def test_the_grader_is_taken_from_the_session_not_the_body(
         self, monkeypatch: pytest.MonkeyPatch
