@@ -13,7 +13,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from abridgeai.core.db import get_db
 from abridgeai.core.pagination import PageResponse, paginate_sequence
 from abridgeai.core.security import CurrentUser
-from abridgeai.features.quizzes.routers.authoring import _REQUIRE_QUIZ, router
+from abridgeai.features.quizzes.routers.authoring import (
+    _REQUIRE_QUIZ,
+    _resolve_student_contacts,
+    router,
+)
 
 
 class _AuditEventRow(BaseModel):
@@ -23,6 +27,8 @@ class _AuditEventRow(BaseModel):
     event_name: str
     quiz_id: UUID
     actor_user_id: UUID | None = None
+    actor_name: str | None = None
+    actor_email: str | None = None
     subject_attempt_id: UUID | None = None
     subject_question_id: UUID | None = None
     subject_user_id: UUID | None = None
@@ -49,16 +55,25 @@ async def list_quiz_audit_events(
     del current_user
     from abridgeai.features.quizzes.services import audit as _audit  # noqa: PLC0415
 
-    rows = [
-        _AuditEventRow.model_validate(r)
-        for r in await _audit.list_events_for_quiz(db, quiz_id, limit=None)
-    ]
+    events = await _audit.list_events_for_quiz(db, quiz_id, limit=None)
+    actor_contacts = await _resolve_student_contacts(
+        db, {event.actor_user_id for event in events if event.actor_user_id is not None}
+    )
+    rows = []
+    for event in events:
+        row = _AuditEventRow.model_validate(event)
+        if event.actor_user_id is not None:
+            actor_name, actor_email, _ = actor_contacts.get(event.actor_user_id, (None, None, None))
+            row = row.model_copy(update={"actor_name": actor_name, "actor_email": actor_email})
+        rows.append(row)
     result = paginate_sequence(
         rows,
         page=page,
         page_size=page_size,
         search=search,
-        search_text=lambda row: f"{row.event_name} {row.payload_json}",
+        search_text=lambda row: (
+            f"{row.event_name} {row.actor_name or ''} {row.actor_email or ''} {row.payload_json}"
+        ),
         predicate=lambda row: event_name is None or row.event_name == event_name,
         sort=sort,
         sort_dir=sort_dir,

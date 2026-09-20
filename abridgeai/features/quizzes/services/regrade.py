@@ -278,14 +278,13 @@ async def get_regrade_run(
     to the quiz."""
     from sqlalchemy.orm import selectinload  # noqa: PLC0415
 
-    run = (
+    return (
         await db.execute(
             select(QuizRegradeRun)
             .where(QuizRegradeRun.id == run_id, QuizRegradeRun.quiz_id == quiz_id)
             .options(selectinload(QuizRegradeRun.items))
         )
     ).scalar_one_or_none()
-    return run
 
 
 async def commit_regrade(
@@ -294,6 +293,7 @@ async def commit_regrade(
     quiz_id: UUID,
     run_id: UUID,
     reconcile_sr: bool = False,
+    actor_user_id: UUID | None = None,
 ) -> QuizRegradeRun:
     """Apply a dry run's deltas, recompute affected attempt scores, mark committed.
 
@@ -440,6 +440,7 @@ async def commit_regrade(
         db,
         event_name="attempt_regraded",
         quiz_id=quiz_id,
+        actor_user_id=actor_user_id,
         payload={
             "run_id": str(run.id),
             "answers_changed": run.answers_changed,

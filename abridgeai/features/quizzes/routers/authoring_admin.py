@@ -166,11 +166,15 @@ async def commit_regrade_run(
 ) -> RegradeRunRead:
     """Commit a dry run: apply deltas to answers, recompute affected attempt
     scores, mark the run committed. A committed run cannot be re-committed (409)."""
-    del current_user
     from abridgeai.features.quizzes.services import regrade as _regrade  # noqa: PLC0415
 
     try:
-        await _regrade.commit_regrade(db, quiz_id=quiz_id, run_id=run_id)
+        await _regrade.commit_regrade(
+            db,
+            quiz_id=quiz_id,
+            run_id=run_id,
+            actor_user_id=getattr(current_user, "user_id", None),
+        )
     except NotFoundError as exc:
         raise _not_found("regrade run", run_id) from exc
     except AppError as exc:
