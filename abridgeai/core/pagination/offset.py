@@ -24,7 +24,7 @@ Usage from a service::
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -121,4 +121,43 @@ async def paginate(
     )
 
 
-__all__ = ["Page", "PageResponse", "paginate"]
+def paginate_sequence[T](
+    items: Sequence[T],
+    *,
+    page: int,
+    page_size: int,
+    search: str | None = None,
+    search_text: Callable[[T], str] | None = None,
+    sort: str | None = None,
+    sort_dir: str = "asc",
+    sortable: Mapping[str, Callable[[T], Any]] | None = None,
+    predicate: Callable[[T], bool] | None = None,
+) -> Page[T]:
+    """Apply the offset-table contract to computed analytics rows."""
+    page = max(0, page)
+    page_size = _clamp(page_size, 1, _MAX_PAGE_SIZE)
+    rows = list(items)
+    if predicate is not None:
+        rows = [item for item in rows if predicate(item)]
+    term = (search or "").strip().casefold()
+    if term and search_text is not None:
+        rows = [item for item in rows if term in search_text(item).casefold()]
+    sort_key = (sortable or {}).get(sort or "")
+    if sort_key is not None:
+        valued = [(item, sort_key(item)) for item in rows]
+        present = [(item, value) for item, value in valued if value is not None]
+        missing = [item for item, value in valued if value is None]
+        present.sort(key=lambda pair: pair[1], reverse=sort_dir == "desc")
+        rows = [item for item, _ in present] + missing
+    total = len(rows)
+    start = page * page_size
+    return Page(
+        items=rows[start : start + page_size],
+        total=total,
+        page=page,
+        page_size=page_size,
+        total_pages=(total + page_size - 1) // page_size,
+    )
+
+
+__all__ = ["Page", "PageResponse", "paginate", "paginate_sequence"]

@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from abridgeai.ai.models import GenerationRun
 from abridgeai.core.db import get_db
 from abridgeai.core.exceptions import AppError, ConflictError, NotFoundError
+from abridgeai.core.pagination import PageResponse, paginate_sequence
 from abridgeai.core.security import CurrentUser
 from abridgeai.features.courses.api import public as courses_api
 from abridgeai.features.quizzes.models import Quiz, QuizQuestion
@@ -121,6 +122,7 @@ async def get_quiz_results(
     quiz_id: UUID,
     current_user: Annotated[CurrentUser, Depends(_REQUIRE_QUIZ)],
     db: Annotated[AsyncSession, Depends(get_db)],
+    include_breakdowns: bool = True,
 ) -> QuizResultsRead:
     """Assemble the full teacher-facing results analytics payload for a quiz.
 
@@ -139,8 +141,14 @@ async def get_quiz_results(
     module = await courses_api.get_module_by_id(db, quiz.module_id)
 
     summary_dict = await _analytics_q.quiz_results_summary(db, quiz_id, quiz.grading_method)
-    per_question_list = await _analytics_q.quiz_question_breakdown(db, quiz_id)
-    rollup = await _analytics_q.quiz_per_student_rollup(db, quiz_id, quiz.grading_method)
+    per_question_list = (
+        await _analytics_q.quiz_question_breakdown(db, quiz_id) if include_breakdowns else []
+    )
+    rollup = (
+        await _analytics_q.quiz_per_student_rollup(db, quiz_id, quiz.grading_method)
+        if include_breakdowns
+        else []
+    )
 
     contacts = await _resolve_student_contacts(
         db, {row["student_id"] for row in rollup}, include_avatar=True
@@ -196,6 +204,127 @@ async def get_quiz_results(
         per_student=per_student,
         per_question=per_question,
     )
+
+
+@router.get(
+    "/quizzes/{quiz_id}/results/students",
+    response_model=PageResponse[QuizPerStudentRow],
+)
+async def get_quiz_results_students(
+    quiz_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_QUIZ)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    search: Annotated[str | None, Query(max_length=200)] = None,
+    status_filter: Annotated[
+        str | None, Query(alias="status", pattern="^(passed|failed|ungraded)$")
+    ] = None,
+    score_mode: Annotated[str, Query(pattern="^(best|latest)$")] = "best",
+    sort: str | None = None,
+    sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
+    page: Annotated[int, Query(ge=0)] = 0,
+    page_size: Annotated[int, Query(ge=1, le=200)] = 25,
+) -> PageResponse[QuizPerStudentRow]:
+    del current_user
+    from abridgeai.features.quizzes.queries import analytics as _analytics_q  # noqa: PLC0415
+
+    quiz = await db.get(Quiz, quiz_id)
+    if quiz is None:
+        raise _not_found("quiz", quiz_id)
+    rows = await _analytics_q.quiz_per_student_rollup(db, quiz_id, quiz.grading_method)
+    contacts = await _resolve_student_contacts(
+        db, {row["student_id"] for row in rows}, include_avatar=True
+    )
+    projected = [
+        QuizPerStudentRow(
+            student_id=row["student_id"],
+            student_name=(
+                contacts.get(row["student_id"], (None, None, None))[0]
+                or contacts.get(row["student_id"], (None, None, None))[1]
+            ),
+            student_email=contacts.get(row["student_id"], (None, None, None))[1],
+            student_avatar_url=contacts.get(row["student_id"], (None, None, None))[2],
+            best_score_percent=row["best_score_percent"],
+            latest_score_percent=row["latest_score_percent"],
+            attempts_count=row["attempts_count"],
+            passed=row["passed"],
+            last_attempt_at=row["last_attempt_at"],
+        )
+        for row in rows
+    ]
+    score = lambda row: row.best_score_percent if score_mode == "best" else row.latest_score_percent
+    result = paginate_sequence(
+        projected,
+        page=page,
+        page_size=page_size,
+        search=search,
+        search_text=lambda row: (
+            f"{row.student_name or ''} {row.student_email or ''} {row.student_id}"
+        ),
+        predicate=lambda row: (
+            status_filter is None
+            or (status_filter == "passed" and row.passed is True)
+            or (status_filter == "failed" and row.passed is False)
+            or (status_filter == "ungraded" and row.passed is None)
+        ),
+        sort=sort,
+        sort_dir=sort_dir,
+        sortable={
+            "student": lambda row: row.student_name or row.student_email or str(row.student_id),
+            "score": score,
+            "attempts": lambda row: row.attempts_count,
+            "last_attempt": lambda row: row.last_attempt_at,
+        },
+    )
+    return PageResponse[QuizPerStudentRow](**result.__dict__)
+
+
+@router.get(
+    "/quizzes/{quiz_id}/results/questions",
+    response_model=PageResponse[QuizQuestionBreakdown],
+)
+async def get_quiz_results_questions(
+    quiz_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(_REQUIRE_QUIZ)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    search: Annotated[str | None, Query(max_length=200)] = None,
+    difficulty: Annotated[str | None, Query(pattern="^(hard|medium|easy|unanswered)$")] = None,
+    sort: str | None = None,
+    sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
+    page: Annotated[int, Query(ge=0)] = 0,
+    page_size: Annotated[int, Query(ge=1, le=200)] = 25,
+) -> PageResponse[QuizQuestionBreakdown]:
+    del current_user
+    from abridgeai.features.quizzes.queries import analytics as _analytics_q  # noqa: PLC0415
+
+    raw = await _analytics_q.quiz_question_breakdown(db, quiz_id)
+    rows = [QuizQuestionBreakdown(**row) for row in raw]
+
+    def matches(row: QuizQuestionBreakdown) -> bool:
+        rate = row.correctness_rate
+        return (
+            difficulty is None
+            or (difficulty == "unanswered" and rate is None)
+            or (difficulty == "hard" and rate is not None and rate < 0.5)
+            or (difficulty == "medium" and rate is not None and 0.5 <= rate < 0.8)
+            or (difficulty == "easy" and rate is not None and rate >= 0.8)
+        )
+
+    result = paginate_sequence(
+        rows,
+        page=page,
+        page_size=page_size,
+        search=search,
+        search_text=lambda row: row.prompt,
+        predicate=matches,
+        sort=sort,
+        sort_dir=sort_dir,
+        sortable={
+            "question": lambda row: row.prompt,
+            "answered": lambda row: row.answered_count,
+            "correct": lambda row: row.correctness_rate,
+        },
+    )
+    return PageResponse[QuizQuestionBreakdown](**result.__dict__)
 
 
 @router.patch("/quizzes/{quiz_id}", response_model=QuizAuthoring)

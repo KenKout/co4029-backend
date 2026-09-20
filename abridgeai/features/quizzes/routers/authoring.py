@@ -452,7 +452,6 @@ async def get_course_quiz_attempt_detail(
     )
 
 
-
 # Keep the historical router module as the single public import surface.
 from . import authoring_questions as _authoring_questions  # noqa: E402, F401, I001
 from . import authoring_extended as _authoring_extended  # noqa: E402, F401, I001
@@ -489,6 +488,8 @@ from .authoring_extended import (  # noqa: E402, F401, I001
     get_generation_run,
     get_latest_quiz_generation_run,
     get_quiz_results,
+    get_quiz_results_questions,
+    get_quiz_results_students,
     publish_quiz,
     start_generation,
     update_quiz,

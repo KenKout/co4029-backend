@@ -9,6 +9,7 @@ from abridgeai.core.pagination.offset import (
     Page,
     PageResponse,
     paginate,
+    paginate_sequence,
 )
 
 __all__ = [
@@ -20,4 +21,5 @@ __all__ = [
     "encode_composite_cursor",
     "encode_cursor",
     "paginate",
+    "paginate_sequence",
 ]

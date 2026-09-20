@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from abridgeai.ai.models import GenerationRun
 from abridgeai.core.db import get_db
 from abridgeai.core.exceptions import AppError, ConflictError, NotFoundError
+from abridgeai.core.pagination import PageResponse, paginate_sequence
 from abridgeai.core.security import CurrentUser
 from abridgeai.features.quizzes.models import Quiz, QuizQuestion
 from abridgeai.features.quizzes.schemas import (
@@ -53,6 +54,8 @@ from abridgeai.features.quizzes.schemas import (
     QuizScoreBucket,
     RegradeRunRead,
     RegradeScopeIn,
+    ResponsesReportRow,
+    StatisticsReportRow,
 )
 from abridgeai.features.quizzes.routers.authoring import *  # noqa: F403
 from abridgeai.features.quizzes.routers.authoring import (
@@ -73,6 +76,7 @@ from abridgeai.features.quizzes.services import question_bank as question_bank_s
 from abridgeai.features.quizzes.services.authoring import QuizPublishValidationError
 from abridgeai.features.quizzes.services.publish_gate import QuizApprovalRequiredError
 from abridgeai.infrastructure.s3 import create_stream_url
+
 
 def _serialize_regrade_run(run: Any) -> RegradeRunRead:  # noqa: ANN401 -- ORM projection
     """Project a QuizRegradeRun (+ loaded items) to the API DTO."""
@@ -177,13 +181,18 @@ async def commit_regrade_run(
 
 @router.get(
     "/quizzes/{quiz_id}/needs-grading",
-    response_model=list[NeedsGradingRow],
+    response_model=PageResponse[NeedsGradingRow],
 )
 async def list_needs_grading(
     quiz_id: UUID,
     current_user: Annotated[CurrentUser, Depends(_REQUIRE_QUIZ)],
     db: Annotated[AsyncSession, Depends(get_db)],
-) -> list[NeedsGradingRow]:
+    search: Annotated[str | None, Query(max_length=200)] = None,
+    sort: str | None = None,
+    sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
+    page: Annotated[int, Query(ge=0)] = 0,
+    page_size: Annotated[int, Query(ge=1, le=200)] = 25,
+) -> PageResponse[NeedsGradingRow]:
     """Teacher grading queue: open-response answers awaiting a human mark."""
     del current_user
     from abridgeai.features.quizzes.services import (  # noqa: PLC0415
@@ -191,7 +200,7 @@ async def list_needs_grading(
     )
 
     rows = await _manual.list_needs_grading(db, quiz_id=quiz_id)
-    return [
+    projected = [
         NeedsGradingRow(
             answer_id=answer.id,
             attempt_id=attempt.id,
@@ -204,6 +213,23 @@ async def list_needs_grading(
         )
         for answer, question, attempt in rows
     ]
+    result = paginate_sequence(
+        projected,
+        page=page,
+        page_size=page_size,
+        search=search,
+        search_text=lambda row: (
+            f"{row.prompt_text} {row.answer_text or ''} {row.question_type} {row.student_id}"
+        ),
+        sort=sort,
+        sort_dir=sort_dir,
+        sortable={
+            "type": lambda row: row.question_type,
+            "question": lambda row: row.prompt_text,
+            "submitted": lambda row: row.submitted_at,
+        },
+    )
+    return PageResponse[NeedsGradingRow](**result.__dict__)
 
 
 @router.patch(
@@ -404,13 +430,19 @@ async def set_feedback_bands(
 
 @router.get(
     "/quizzes/{quiz_id}/gradebook",
-    response_model=list[QuizGradeRow],
+    response_model=PageResponse[QuizGradeRow],
 )
 async def get_quiz_gradebook(
     quiz_id: UUID,
     current_user: Annotated[CurrentUser, Depends(_REQUIRE_QUIZ)],
     db: Annotated[AsyncSession, Depends(get_db)],
-) -> list[QuizGradeRow]:
+    search: Annotated[str | None, Query(max_length=200)] = None,
+    grade_status: Annotated[str | None, Query(alias="status", pattern="^(passed|failed)$")] = None,
+    sort: str | None = None,
+    sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
+    page: Annotated[int, Query(ge=0)] = 0,
+    page_size: Annotated[int, Query(ge=1, le=200)] = 25,
+) -> PageResponse[QuizGradeRow]:
     """List every student's materialised grade-of-record for a quiz (Phase 9)."""
     del current_user
     from abridgeai.features.quizzes.services import gradebook as _gb  # noqa: PLC0415
@@ -419,7 +451,7 @@ async def get_quiz_gradebook(
     contacts = await _resolve_student_contacts(
         db, {row.student_id for row in rows}, include_avatar=True
     )
-    return [
+    projected = [
         QuizGradeRow(
             student_id=row.student_id,
             student_name=(
@@ -437,6 +469,28 @@ async def get_quiz_gradebook(
         )
         for row in rows
     ]
+    result = paginate_sequence(
+        projected,
+        page=page,
+        page_size=page_size,
+        search=search,
+        search_text=lambda row: (
+            f"{row.student_name or ''} {row.student_email or ''} {row.student_id}"
+        ),
+        predicate=lambda row: (
+            grade_status is None
+            or (grade_status == "passed" and row.passed)
+            or (grade_status == "failed" and not row.passed)
+        ),
+        sort=sort,
+        sort_dir=sort_dir,
+        sortable={
+            "student": lambda row: row.student_name or row.student_email or str(row.student_id),
+            "grade": lambda row: row.grade_percent,
+            "attempts": lambda row: row.attempts_counted,
+        },
+    )
+    return PageResponse[QuizGradeRow](**result.__dict__)
 
 
 @router.get("/quizzes/{quiz_id}/gradebook/export")
@@ -506,6 +560,14 @@ async def get_responses_report(
     current_user: Annotated[CurrentUser, Depends(_REQUIRE_QUIZ)],
     db: Annotated[AsyncSession, Depends(get_db)],
     format: str = "json",
+    search: Annotated[str | None, Query(max_length=200)] = None,
+    result_filter: Annotated[
+        str | None, Query(alias="result", pattern="^(correct|incorrect)$")
+    ] = None,
+    sort: str | None = None,
+    sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
+    page: Annotated[int, Query(ge=0)] = 0,
+    page_size: Annotated[int, Query(ge=1, le=200)] = 25,
 ) -> object:
     """Per-student, per-question responses report (Phase 10). ?format=json|csv|xlsx."""
     del current_user
@@ -537,7 +599,29 @@ async def get_responses_report(
     if format in ("csv", "xlsx"):
         headers, rows = _exp.responses_to_table(report)
         return _report_download(headers, rows, format, filename_stem=f"quiz-{quiz_id}-responses")
-    return report
+    result = paginate_sequence(
+        report.rows,
+        page=page,
+        page_size=page_size,
+        search=search,
+        search_text=lambda row: (
+            f"{row.student_name or ''} {row.student_email or ''} {row.student_id} {row.prompt_text} {row.student_answer} {row.correct_answer}"
+        ),
+        predicate=lambda row: (
+            result_filter is None
+            or (result_filter == "correct" and row.is_correct)
+            or (result_filter == "incorrect" and not row.is_correct)
+        ),
+        sort=sort,
+        sort_dir=sort_dir,
+        sortable={
+            "student": lambda row: row.student_name or row.student_email or str(row.student_id),
+            "question": lambda row: row.question_position,
+            "result": lambda row: row.is_correct,
+            "points": lambda row: row.points_awarded,
+        },
+    )
+    return PageResponse[ResponsesReportRow](**result.__dict__)
 
 
 @router.get("/quizzes/{quiz_id}/reports/statistics")
@@ -546,6 +630,12 @@ async def get_statistics_report(
     current_user: Annotated[CurrentUser, Depends(_REQUIRE_QUIZ)],
     db: Annotated[AsyncSession, Depends(get_db)],
     format: str = "json",
+    search: Annotated[str | None, Query(max_length=200)] = None,
+    quality: Annotated[str | None, Query(pattern="^(strong|weak|unavailable)$")] = None,
+    sort: str | None = None,
+    sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "asc",
+    page: Annotated[int, Query(ge=0)] = 0,
+    page_size: Annotated[int, Query(ge=1, le=200)] = 25,
 ) -> object:
     """Per-question facility + discrimination statistics (Phase 10). ?format=json|csv|xlsx."""
     del current_user
@@ -561,7 +651,35 @@ async def get_statistics_report(
     if format in ("csv", "xlsx"):
         headers, rows = _exp.statistics_to_table(report)
         return _report_download(headers, rows, format, filename_stem=f"quiz-{quiz_id}-statistics")
-    return report
+    result = paginate_sequence(
+        report.rows,
+        page=page,
+        page_size=page_size,
+        search=search,
+        search_text=lambda row: row.prompt_text,
+        predicate=lambda row: (
+            quality is None
+            or (
+                quality == "strong"
+                and row.discrimination_index is not None
+                and row.discrimination_index >= 0.3
+            )
+            or (
+                quality == "weak"
+                and row.discrimination_index is not None
+                and row.discrimination_index < 0.3
+            )
+            or (quality == "unavailable" and row.discrimination_index is None)
+        ),
+        sort=sort,
+        sort_dir=sort_dir,
+        sortable={
+            "question": lambda row: row.question_position,
+            "facility": lambda row: row.facility_index,
+            "discrimination": lambda row: row.discrimination_index,
+        },
+    )
+    return PageResponse[StatisticsReportRow](**result.__dict__)
 
 
 class _AuditEventRow(BaseModel):
@@ -579,20 +697,39 @@ class _AuditEventRow(BaseModel):
 
 @router.get(
     "/quizzes/{quiz_id}/audit-events",
-    response_model=list[_AuditEventRow],
+    response_model=PageResponse[_AuditEventRow],
 )
 async def list_quiz_audit_events(
     quiz_id: UUID,
     current_user: Annotated[CurrentUser, Depends(_REQUIRE_QUIZ)],
     db: Annotated[AsyncSession, Depends(get_db)],
-    limit: int = 100,
-) -> list[_AuditEventRow]:
+    search: Annotated[str | None, Query(max_length=200)] = None,
+    event_name: str | None = None,
+    sort: str | None = None,
+    sort_dir: Annotated[str, Query(pattern="^(asc|desc)$")] = "desc",
+    page: Annotated[int, Query(ge=0)] = 0,
+    page_size: Annotated[int, Query(ge=1, le=200)] = 25,
+) -> PageResponse[_AuditEventRow]:
     """Most-recent-first append-only audit trail for a quiz (Phase 13)."""
     del current_user
     from abridgeai.features.quizzes.services import audit as _audit  # noqa: PLC0415
 
-    rows = await _audit.list_events_for_quiz(db, quiz_id, limit=limit)
-    return [_AuditEventRow.model_validate(r) for r in rows]
+    rows = [
+        _AuditEventRow.model_validate(r)
+        for r in await _audit.list_events_for_quiz(db, quiz_id, limit=None)
+    ]
+    result = paginate_sequence(
+        rows,
+        page=page,
+        page_size=page_size,
+        search=search,
+        search_text=lambda row: f"{row.event_name} {row.payload_json}",
+        predicate=lambda row: event_name is None or row.event_name == event_name,
+        sort=sort,
+        sort_dir=sort_dir,
+        sortable={"event": lambda row: row.event_name, "when": lambda row: row.occurred_at},
+    )
+    return PageResponse[_AuditEventRow](**result.__dict__)
 
 
 class _ImportBody(BaseModel):

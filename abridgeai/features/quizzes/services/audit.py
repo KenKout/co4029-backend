@@ -74,17 +74,17 @@ async def record_event(
 
 
 async def list_events_for_quiz(
-    db: AsyncSession, quiz_id: UUID, *, limit: int = 100
+    db: AsyncSession, quiz_id: UUID, *, limit: int | None = 100
 ) -> list[QuizAuditEvent]:
     """Most-recent-first audit trail for a quiz (teacher-facing)."""
-    rows = (
-        await db.execute(
-            select(QuizAuditEvent)
-            .where(QuizAuditEvent.quiz_id == quiz_id)
-            .order_by(QuizAuditEvent.occurred_at.desc())
-            .limit(limit)
-        )
-    ).scalars().all()
+    stmt = (
+        select(QuizAuditEvent)
+        .where(QuizAuditEvent.quiz_id == quiz_id)
+        .order_by(QuizAuditEvent.occurred_at.desc())
+    )
+    if limit is not None:
+        stmt = stmt.limit(limit)
+    rows = (await db.execute(stmt)).scalars().all()
     return list(rows)
 
 
