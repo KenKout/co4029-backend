@@ -29,6 +29,9 @@ from abridgeai.features.courses.models import (  # noqa: E402
     Module,
     ModuleItem,
 )
+from abridgeai.features.courses.queries.administration import (  # noqa: E402
+    restore_soft_deleted_course,
+)
 
 
 def _async_url(database_url: str) -> str:
@@ -206,6 +209,45 @@ async def test_nested_cascade_4_levels(
         )
         assert len(rows) == 2
         assert all(r.deleted_at is not None for r in rows)
+
+
+async def test_restore_course_restores_same_cascade_descendants(
+    session_factory: async_sessionmaker[AsyncSession], org_owner
+) -> None:
+    org_id, owner_id = org_owner
+    async with session_factory() as session:
+        ids = await _seed_full_chain(session, org_id, owner_id, resource_count=2)
+        course = await session.get(Course, ids["course_id"])
+        assert course is not None
+        await soft_delete_cascade(session, course, actor_id=owner_id)
+        await session.commit()
+
+    async with session_factory() as session:
+        restored = await restore_soft_deleted_course(session, ids["course_id"])
+        await session.commit()
+        assert restored is True
+
+    async with session_factory() as session:
+        for model, row_ids in (
+            (Course, [ids["course_id"]]),
+            (Module, [ids["module_id"]]),
+            (Lesson, [ids["lesson_id"]]),
+            (ModuleItem, [ids["module_item_id"]]),
+            (LessonResource, ids["resource_ids"]),
+        ):
+            rows = (
+                (
+                    await session.execute(
+                        select(model)
+                        .where(model.id.in_(row_ids))
+                        .execution_options(include_deleted=True)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            assert len(rows) == len(row_ids)
+            assert all(row.deleted_at is None and row.deleted_by is None for row in rows)
 
 
 async def test_partial_cascade_does_not_cross_siblings(

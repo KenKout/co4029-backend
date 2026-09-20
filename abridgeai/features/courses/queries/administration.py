@@ -19,15 +19,17 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.elements import ColumnElement
 
 from abridgeai.ai.models import AIModelCall, GenerationRun, ProcessingJob
+from abridgeai.core.db.mixins import SoftDeleteMixin
 from abridgeai.core.pagination import Page, paginate
 from abridgeai.core.pagination.cursor import (
     CursorPage,
 )
-from abridgeai.features.courses.models import Course
+from abridgeai.features.courses.models import Course, Lesson, LessonResource, Module, ModuleItem
 
 _DEFAULT_LIMIT = 20
 _MAX_LIMIT = 100
@@ -133,7 +135,12 @@ async def get_course_including_deleted(db: AsyncSession, course_id: UUID) -> Cou
 
 
 async def restore_soft_deleted_course(db: AsyncSession, course_id: UUID) -> bool:
-    """Clear ``deleted_at`` / ``deleted_by`` on the course row."""
+    """Restore a course and descendants deleted by the same cascade.
+
+    Matching both tombstone timestamp and actor prevents this operation from
+    reviving a module or lesson that had already been deleted independently
+    before the course was removed.
+    """
     stmt = (
         select(Course)
         .where(Course.id == course_id, Course.deleted_at.is_not(None))
@@ -142,8 +149,44 @@ async def restore_soft_deleted_course(db: AsyncSession, course_id: UUID) -> bool
     course = (await db.execute(stmt)).scalar_one_or_none()
     if course is None:
         return False
-    course.deleted_at = None
-    course.deleted_by = None
+
+    tombstone = course.deleted_at
+    actor_id = course.deleted_by
+    module_ids = select(Module.id).where(Module.course_id == course_id)
+    lesson_ids = select(Lesson.id).where(Lesson.module_id.in_(module_ids))
+
+    def same_cascade(model: type[SoftDeleteMixin]) -> ColumnElement[bool]:
+        return and_(
+            model.deleted_at == tombstone,
+            model.deleted_by.is_not_distinct_from(actor_id),
+        )
+
+    # Restore bottom-up so every visible child always has a visible parent.
+    await db.execute(
+        update(LessonResource)
+        .where(LessonResource.lesson_id.in_(lesson_ids), same_cascade(LessonResource))
+        .values(deleted_at=None, deleted_by=None)
+    )
+    await db.execute(
+        update(ModuleItem)
+        .where(ModuleItem.module_id.in_(module_ids), same_cascade(ModuleItem))
+        .values(deleted_at=None, deleted_by=None)
+    )
+    await db.execute(
+        update(Lesson)
+        .where(Lesson.module_id.in_(module_ids), same_cascade(Lesson))
+        .values(deleted_at=None, deleted_by=None)
+    )
+    await db.execute(
+        update(Module)
+        .where(Module.course_id == course_id, same_cascade(Module))
+        .values(deleted_at=None, deleted_by=None)
+    )
+    await db.execute(
+        update(Course)
+        .where(Course.id == course_id, same_cascade(Course))
+        .values(deleted_at=None, deleted_by=None)
+    )
     await db.flush()
     return True
 

@@ -21,8 +21,8 @@ from abridgeai.features.courses.queries import (
 from abridgeai.features.courses.queries import (
     administration as admin_queries,
 )
-from abridgeai.features.courses.services import assignment as assignment_service
 from abridgeai.features.courses.schemas import CourseAuthoring
+from abridgeai.features.courses.services import assignment as assignment_service
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -89,10 +89,9 @@ async def search_all_courses_admin(
 async def restore_soft_deleted_course(
     db: AsyncSession, course_id: UUID, actor: CurrentUser
 ) -> CourseAuthoring:
-    """Clear ``deleted_at`` / ``deleted_by`` on a soft-deleted course.
+    """Restore a course and children tombstoned by its delete cascade.
 
-    Children (modules, lessons, ...) keep their current state — see the
-    administration query module's docstring for the rationale.
+    Descendants deleted independently before the course remain deleted.
     """
     restored = await admin_queries.restore_soft_deleted_course(db, course_id)
     if not restored:

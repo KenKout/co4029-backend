@@ -431,9 +431,7 @@ async def test_delete_soft_deletes_course_and_children(
     async with engine.begin() as conn:
         row = (
             await conn.execute(
-                text(
-                    "SELECT deleted_at, deleted_by FROM courses WHERE id = :id"
-                ),
+                text("SELECT deleted_at, deleted_by FROM courses WHERE id = :id"),
                 {"id": scenario["active_course"]},
             )
         ).one()
@@ -473,9 +471,7 @@ async def test_delete_then_restore_roundtrip(
     assert deleted_at is None
 
 
-async def test_delete_404_on_unknown_course(
-    client: httpx.AsyncClient, admin_bearer: str
-) -> None:
+async def test_delete_404_on_unknown_course(client: httpx.AsyncClient, admin_bearer: str) -> None:
     response = await client.request(
         "DELETE",
         f"/api/v1/admin/courses/{uuid.uuid4()}",
@@ -571,17 +567,13 @@ async def test_stats_returns_counts_by_status(
     assert isinstance(body["top_draft_owners"], list)
 
 
-async def test_restore_does_not_cascade_to_children(
+async def test_restore_does_not_revive_independently_deleted_children(
     client: httpx.AsyncClient,
     admin_bearer: str,
     engine: AsyncEngine,
     scenario: dict[str, uuid.UUID],
 ) -> None:
-    """Plan / T3.5 docstring: restore is leaf-only.
-
-    Children stay tombstoned so admins must explicitly restore each
-    subtree level (matches services.administration documented behaviour).
-    """
+    """Children with a different tombstone are not part of this restore."""
     response = await client.post(
         f"/api/v1/admin/courses/{scenario['soft_deleted_course']}/restore",
         headers={"Authorization": f"Bearer {admin_bearer}"},
