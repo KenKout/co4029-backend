@@ -334,7 +334,9 @@ def test_multi_select_parses_from_letter_array() -> None:
     q = _parse_one(_mcq(["A", "C"], single_answer=False))
     assert q is not None
     assert q.single_answer is False
-    assert sorted(o.option_key for o in q.options if o.is_correct) == ["A", "C"]
+    assert sorted(o.option_key for o in q.options if o.is_correct) == sorted(
+        q.original_generated_payload["correct_answer"]
+    )
 
 
 def test_multi_select_inferred_from_multiple_correct_letters() -> None:
@@ -347,7 +349,9 @@ def test_multi_select_inferred_from_multiple_correct_letters() -> None:
 def test_multi_select_accepts_comma_separated_letters() -> None:
     q = _parse_one(_mcq("A, C", single_answer=False))
     assert q is not None
-    assert sorted(o.option_key for o in q.options if o.is_correct) == ["A", "C"]
+    assert sorted(o.option_key for o in q.options if o.is_correct) == sorted(
+        q.original_generated_payload["correct_answer"]
+    )
 
 
 def test_single_answer_mcq_still_requires_exactly_one() -> None:
@@ -400,7 +404,9 @@ def test_review_projection_renders_ordering_sequence() -> None:
 def test_review_projection_lists_all_multi_select_letters() -> None:
     q = _parse_one(_mcq(["A", "C"], single_answer=False))
     assert q is not None
-    assert question_for_review(q)["correct_answer"] == "A, C"
+    assert question_for_review(q)["correct_answer"] == ", ".join(
+        sorted(q.original_generated_payload["correct_answer"])
+    )
 
 
 def test_validation_stage_projection_matches_parser_projection() -> None:

@@ -12,6 +12,10 @@ from __future__ import annotations
 
 from typing import Any
 
+from abridgeai.features.quizzes.ai.stages.generation.option_shuffle import (
+    randomize_mcq_options,
+)
+
 
 def normalize_options(
     options_raw: Any,  # noqa: ANN401 -- raw LLM JSON
@@ -243,4 +247,4 @@ def _coerce_true_false_correct(
     return None
 
 
-__all__ = ["coerce_fill_blank_answer", "normalize_options"]
+__all__ = ["coerce_fill_blank_answer", "normalize_options", "randomize_mcq_options"]

@@ -29,6 +29,7 @@ from abridgeai.features.quizzes.ai.stages.generation.coercions import (
 from abridgeai.features.quizzes.ai.stages.generation.option_normalizers import (
     coerce_fill_blank_answer,
     normalize_options,
+    randomize_mcq_options,
 )
 
 
@@ -54,6 +55,16 @@ def _prepare_question(entry: Any, *, default_position: int) -> dict[str, Any] | 
 
     canonical_payload = dict(entry)
     canonical_payload["question_type"] = question_type
+    if question_type == "multiple_choice" and len(options) == 4:
+        options, remapped_correct = randomize_mcq_options(options)
+        canonical_payload["options"] = {
+            option["option_key"]: option["option_text"] for option in options
+        }
+        canonical_payload["correct_answer"] = (
+            remapped_correct[0]
+            if len(remapped_correct) == 1
+            else remapped_correct
+        )
     if question_type == "fill_blank":
         canonical_payload["correct_answer"] = coerce_fill_blank_answer(correct_raw)
     elif question_type == "short_answer":

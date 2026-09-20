@@ -15,6 +15,8 @@ Pure functions over plain dicts — no database, no gateway, no fixtures.
 
 from __future__ import annotations
 
+import random
+
 import pytest
 
 from abridgeai.features.quizzes.ai.stages.generation.option_normalizers import (
@@ -23,6 +25,7 @@ from abridgeai.features.quizzes.ai.stages.generation.option_normalizers import (
     _normalize_fill_blank_options,
     coerce_fill_blank_answer,
     normalize_options,
+    randomize_mcq_options,
 )
 
 
@@ -147,6 +150,20 @@ class TestAnswerCoercion:
 
 
 class TestMultipleChoice:
+    def test_mcq_choices_are_rekeyed_after_a_shuffle(self) -> None:
+        rows = normalize_options(
+            {"A": "correct", "B": "wrong one", "C": "wrong two", "D": "wrong three"},
+            "A",
+            "multiple_choice",
+        )
+        shuffled, correct_keys = randomize_mcq_options(rows, rng=random.Random(0))  # noqa: S311
+
+        assert [row["option_key"] for row in shuffled] == ["A", "B", "C", "D"]
+        assert len(correct_keys) == 1
+        correct = next(row for row in shuffled if row["is_correct"])
+        assert correct["option_text"] == "correct"
+        assert correct["option_key"] == correct_keys[0]
+
     def test_the_dict_form_marks_correctness_from_the_answer_key(self) -> None:
         rows = normalize_options({"A": "ay", "B": "bee"}, "A", "multiple_choice")
         assert _correct(rows) == ["ay"]

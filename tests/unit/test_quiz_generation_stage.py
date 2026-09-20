@@ -189,7 +189,11 @@ def test_parser_handles_malformed_options() -> None:
     assert parsed[0].prompt_text == "Good MCQ"
     correct = [opt for opt in parsed[0].options if opt.is_correct]
     assert len(correct) == 1
-    assert correct[0].option_key == "B"
+    assert correct[0].option_key == parsed[0].original_generated_payload["correct_answer"]
+    assert (
+        parsed[0].original_generated_payload["options"][correct[0].option_key]
+        == correct[0].option_text
+    )
 
 
 def test_parser_emits_word_bank_for_fill_blank() -> None:

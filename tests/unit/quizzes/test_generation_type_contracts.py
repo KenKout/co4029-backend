@@ -67,9 +67,11 @@ def test_multiple_choice_contract_accepted() -> None:
     assert q is not None
     assert len(q.options) == 4
     assert sum(1 for o in q.options if o.is_correct) == 1
-    # correct_answer is the LETTER, so option A must be the correct one
+    # The parser may remap the answer position; the persisted snapshot must
+    # still point at the same option text.
     correct = next(o for o in q.options if o.is_correct)
-    assert correct.option_key == "A"
+    assert q.original_generated_payload["correct_answer"] == correct.option_key
+    assert q.original_generated_payload["options"][correct.option_key] == correct.option_text
 
 
 def test_true_false_contract_accepted_without_options() -> None:
