@@ -715,7 +715,7 @@ async def list_published_paths(
 ) -> CursorPage[CareerPathPublic]:
     """Cursor-paginated published career paths ordered by ``(created_at DESC, id DESC)``."""
     from abridgeai.features.career_paths.queries import (
-        list_published_career_path_courses,
+        list_published_career_path_courses_by_versions,
         list_published_career_paths,
     )
 
@@ -736,15 +736,20 @@ async def list_published_paths(
         after_id=after_id,
         restrict_to_ids=restrict_to_ids,
     )
+    path_ids = [path.id for path in paths]
+    published_versions = await authoring_queries.list_published_versions(
+        db, organization_id=organization_id, career_path_ids=path_ids
+    )
+    version_ids = [row["version_id"] for row in published_versions]
+    courses_by_version = await list_published_career_path_courses_by_versions(db, version_ids)
+    version_by_path = {row["career_path_id"]: row["version_id"] for row in published_versions}
     results: list[CareerPathPublic] = []
     thumbnail_urls = await _thumbnail_urls(db, [path.id for path in paths])
     for path in paths:
-        published = await authoring_queries.get_published_version(db, path.id)
-        if published is None:
-            published = await authoring_queries.get_current_authoring_version(db, path.id)
-        if published is None:
+        version_id = version_by_path.get(path.id)
+        if version_id is None:
             continue
-        courses = await list_published_career_path_courses(db, published.id)
+        courses = courses_by_version.get(version_id, [])
         results.append(
             _to_path_public(
                 path, courses, thumbnail_url=thumbnail_urls.get(path.id)

@@ -87,6 +87,41 @@ async def list_published_career_path_courses(
     return [dict(row) for row in rows]
 
 
+async def list_published_career_path_courses_by_versions(
+    db: AsyncSession, version_ids: list[UUID]
+) -> dict[UUID, list[dict[str, Any]]]:
+    """Load published course rows for many path versions in one query."""
+    if not version_ids:
+        return {}
+    rows = (
+        await db.execute(
+            text(
+                """
+                SELECT cci.version_id, cci.course_id, c.slug AS course_slug,
+                       c.title AS course_title, cci.position, cci.is_required,
+                       cci.stage_id
+                FROM career_course_items cci
+                JOIN career_path_stages s ON s.id = cci.stage_id
+                    AND s.deleted_at IS NULL
+                JOIN courses c ON c.id = cci.course_id
+                WHERE cci.version_id = ANY(CAST(:version_ids AS uuid[]))
+                  AND c.status = 'published'
+                  AND c.deleted_at IS NULL
+                ORDER BY cci.version_id, s.position, cci.position
+                """
+            ),
+            {"version_ids": [str(version_id) for version_id in version_ids]},
+        )
+    ).mappings()
+    grouped: dict[UUID, list[dict[str, Any]]] = {version_id: [] for version_id in version_ids}
+    for row in rows:
+        version_id = row["version_id"]
+        grouped[version_id].append(
+            {key: value for key, value in row.items() if key != "version_id"}
+        )
+    return grouped
+
+
 async def get_user_primary_organization_id(db: AsyncSession, user_id: UUID) -> UUID | None:
     """Resolve the requesting user's primary organization for catalog scoping.
 
@@ -105,5 +140,6 @@ __all__ = [
     "get_published_career_path_by_slug",
     "get_user_primary_organization_id",
     "list_published_career_path_courses",
+    "list_published_career_path_courses_by_versions",
     "list_published_career_paths",
 ]

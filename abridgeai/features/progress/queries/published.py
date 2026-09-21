@@ -50,6 +50,45 @@ async def list_lesson_ids_for_course(db: AsyncSession, course_id: UUID) -> list[
     return [row[0] for row in rows.all()]
 
 
+async def list_lesson_ids_for_courses(
+    db: AsyncSession, course_ids: list[UUID]
+) -> dict[UUID, list[UUID]]:
+    """Load lesson ids grouped by course in one query."""
+    if not course_ids:
+        return {}
+    rows = await db.execute(
+        text(
+            """
+            SELECT m.course_id, l.id
+            FROM lessons l
+            JOIN modules m ON m.id = l.module_id
+            WHERE m.course_id = ANY(CAST(:course_ids AS uuid[]))
+              AND l.deleted_at IS NULL
+              AND m.deleted_at IS NULL
+            ORDER BY m.course_id, l.id
+            """
+        ),
+        {"course_ids": [str(course_id) for course_id in course_ids]},
+    )
+    grouped: dict[UUID, list[UUID]] = {course_id: [] for course_id in course_ids}
+    for course_id, lesson_id in rows.all():
+        grouped[course_id].append(lesson_id)
+    return grouped
+
+
+async def list_lesson_progress_for_users(
+    db: AsyncSession, *, user_ids: list[UUID], lesson_ids: list[UUID]
+) -> list[LessonProgress]:
+    """Load progress for many users and lessons in one query."""
+    if not user_ids or not lesson_ids:
+        return []
+    stmt = select(LessonProgress).where(
+        LessonProgress.user_id.in_(user_ids),
+        LessonProgress.lesson_id.in_(lesson_ids),
+    )
+    return list((await db.execute(stmt)).scalars().all())
+
+
 async def list_my_engagement_for_lesson(
     db: AsyncSession, *, user_id: UUID, lesson_id: UUID
 ) -> list[MaterialEngagement]:

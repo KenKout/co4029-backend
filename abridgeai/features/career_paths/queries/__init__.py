@@ -13,6 +13,7 @@ from abridgeai.features.career_paths.queries.published import (
     get_published_career_path_by_slug,
     get_user_primary_organization_id,
     list_published_career_path_courses,
+    list_published_career_path_courses_by_versions,
     list_published_career_paths,
 )
 from abridgeai.features.career_paths.queries.student import (
@@ -40,6 +41,7 @@ __all__ = [
     "list_my_program_career_path_ids",
     "list_path_course_links",
     "list_published_career_path_courses",
+    "list_published_career_path_courses_by_versions",
     "list_published_career_paths",
     "next_path_course_position",
 ]

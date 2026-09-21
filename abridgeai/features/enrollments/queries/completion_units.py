@@ -309,6 +309,65 @@ async def count_course_units(db: AsyncSession, *, course_id: UUID) -> CourseUnit
     )
 
 
+_COURSE_UNIT_COUNTS_SQL = text(
+    """
+    SELECT course_id,
+           COUNT(*) FILTER (WHERE unit_kind = 'lesson') AS lessons,
+           COUNT(*) FILTER (WHERE unit_kind = 'quiz') AS quizzes,
+           COUNT(*) FILTER (WHERE unit_kind = 'interview') AS interviews
+    FROM (
+        SELECT m.course_id, 'lesson' AS unit_kind
+        FROM modules m
+        JOIN lessons l ON l.module_id = m.id
+            AND l.deleted_at IS NULL AND l.status = 'published'
+        WHERE m.course_id = ANY(CAST(:course_ids AS uuid[]))
+          AND m.deleted_at IS NULL AND m.status = 'published'
+        UNION ALL
+        SELECT m.course_id, 'quiz' AS unit_kind
+        FROM module_items mi
+        JOIN modules m ON m.id = mi.module_id
+            AND m.deleted_at IS NULL AND m.status = 'published'
+        JOIN quizzes q ON q.id = mi.quiz_id
+            AND q.deleted_at IS NULL AND q.status = 'published'
+        WHERE m.course_id = ANY(CAST(:course_ids AS uuid[]))
+          AND mi.item_type = 'quiz' AND mi.deleted_at IS NULL
+        UNION ALL
+        SELECT m.course_id, 'interview' AS unit_kind
+        FROM module_items mi
+        JOIN modules m ON m.id = mi.module_id
+            AND m.deleted_at IS NULL AND m.status = 'published'
+        JOIN interview_configs ic ON ic.id = mi.interview_config_id
+            AND ic.deleted_at IS NULL AND ic.status = 'published'
+        WHERE m.course_id = ANY(CAST(:course_ids AS uuid[]))
+          AND mi.item_type = 'interview' AND mi.deleted_at IS NULL
+    ) units
+    GROUP BY course_id
+    """
+)
+
+
+async def count_course_units_for_courses(
+    db: AsyncSession, course_ids: list[UUID]
+) -> dict[UUID, CourseUnitCounts]:
+    """Count gradeable units for many courses in one query."""
+    if not course_ids:
+        return {}
+    rows = (
+        await db.execute(
+            _COURSE_UNIT_COUNTS_SQL,
+            {"course_ids": [str(course_id) for course_id in course_ids]},
+        )
+    ).all()
+    return {
+        row.course_id: CourseUnitCounts(
+            lessons=int(row.lessons),
+            quizzes=int(row.quizzes),
+            interviews=int(row.interviews),
+        )
+        for row in rows
+    }
+
+
 _ACTIVE_OR_COMPLETED_PAIRS_SQL = text(
     """
 SELECT ce.course_id, ce.student_id
@@ -339,6 +398,7 @@ async def list_completion_candidate_pairs(db: AsyncSession) -> list[tuple[UUID, 
 
 __all__ = [
     "count_course_units",
+    "count_course_units_for_courses",
     "get_course_unit_tally",
     "list_completion_candidate_pairs",
     "CourseUnitCounts",

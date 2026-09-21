@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
-from sqlalchemy import func, select, text
+from sqlalchemy import case, func, select, text
 
 from abridgeai.features.career_paths.models import (
     CareerPath,
@@ -338,17 +338,38 @@ async def list_career_paths_for_org(
     return list((await db.execute(stmt.order_by(CareerPath.created_at.desc()))).scalars().all())
 
 
+async def list_current_authoring_versions(
+    db: AsyncSession, career_path_ids: Sequence[UUID]
+) -> dict[UUID, CareerPathVersion]:
+    """Resolve current authoring versions for many paths in one query."""
+    if not career_path_ids:
+        return {}
+    stmt = (
+        select(CareerPathVersion)
+        .where(
+            CareerPathVersion.career_path_id.in_(career_path_ids),
+            CareerPathVersion.deleted_at.is_(None),
+        )
+        .order_by(
+            CareerPathVersion.career_path_id,
+            case((CareerPathVersion.status == "draft", 0), else_=1),
+            CareerPathVersion.version_no.desc(),
+        )
+    )
+    versions: dict[UUID, CareerPathVersion] = {}
+    for version in (await db.execute(stmt)).scalars().all():
+        versions.setdefault(version.career_path_id, version)
+    return versions
+
+
 async def list_path_stage_counts(
     db: AsyncSession, career_path_ids: Sequence[UUID]
 ) -> dict[UUID, int]:
     """Live (non-deleted) stage count per path's authoring version."""
     if not career_path_ids:
         return {}
-    version_ids: dict[UUID, UUID] = {}
-    for path_id in career_path_ids:
-        version = await get_current_authoring_version(db, path_id)
-        if version is not None:
-            version_ids[path_id] = version.id
+    current_versions = await list_current_authoring_versions(db, career_path_ids)
+    version_ids = {path_id: version.id for path_id, version in current_versions.items()}
     if not version_ids:
         return {}
     rows = await db.execute(
@@ -425,11 +446,8 @@ async def list_path_course_counts(
     """Attached-course count per path (its authoring version's items)."""
     if not career_path_ids:
         return {}
-    version_ids: dict[UUID, UUID] = {}
-    for path_id in career_path_ids:
-        version = await get_current_authoring_version(db, path_id)
-        if version is not None:
-            version_ids[path_id] = version.id
+    current_versions = await list_current_authoring_versions(db, career_path_ids)
+    version_ids = {path_id: version.id for path_id, version in current_versions.items()}
     if not version_ids:
         return {}
     rows = await db.execute(
@@ -466,9 +484,10 @@ async def list_authoring_career_path_courses(
         .order_by(CareerPathCourse.stage_id, CareerPathCourse.position)
     )
     links = (await db.execute(link_stmt)).scalars().all()
+    courses = await courses_api.get_courses_by_ids(db, [link.course_id for link in links])
     rows: list[dict[str, Any]] = []
     for link in links:
-        course = await courses_api.get_course_by_id(db, link.course_id)
+        course = courses.get(link.course_id)
         if course is None:
             continue
         rows.append(
@@ -531,6 +550,23 @@ async def list_stage_course_links(db: AsyncSession, stage_id: UUID) -> list[Care
         .order_by(CareerPathCourse.position)
     )
     return list((await db.execute(stmt)).scalars().all())
+
+
+async def list_stage_course_links_for_stages(
+    db: AsyncSession, stage_ids: Sequence[UUID]
+) -> dict[UUID, list[CareerPathCourse]]:
+    """Load course links for many stages in one query."""
+    if not stage_ids:
+        return {}
+    stmt = (
+        select(CareerPathCourse)
+        .where(CareerPathCourse.stage_id.in_(stage_ids))
+        .order_by(CareerPathCourse.stage_id, CareerPathCourse.position)
+    )
+    grouped: dict[UUID, list[CareerPathCourse]] = {stage_id: [] for stage_id in stage_ids}
+    for link in (await db.execute(stmt)).scalars().all():
+        grouped[link.stage_id].append(link)
+    return grouped
 
 
 async def list_stages_for_version(
@@ -673,9 +709,11 @@ __all__ = [
     "list_authoring_career_path_courses",
     "list_career_paths_for_org",
     "list_items_for_version",
+    "list_current_authoring_versions",
     "list_path_course_links",
     "list_path_stages",
     "list_stage_course_links",
+    "list_stage_course_links_for_stages",
     "list_stages_for_version",
     "list_versions",
     "next_path_course_position",

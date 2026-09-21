@@ -28,6 +28,16 @@ async def get_course(db: AsyncSession, course_id: UUID) -> Course | None:
     return await db.get(Course, course_id)
 
 
+async def get_courses_by_ids(
+    db: AsyncSession, course_ids: Sequence[UUID]
+) -> dict[UUID, Course]:
+    """Fetch course rows for many cross-feature callers in one query."""
+    if not course_ids:
+        return {}
+    stmt = select(Course).where(Course.id.in_(course_ids))
+    return {course.id: course for course in (await db.execute(stmt)).scalars().all()}
+
+
 async def list_courses_for_teacher(
     db: AsyncSession, teacher_id: UUID
 ) -> list[Course]:

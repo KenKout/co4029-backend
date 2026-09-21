@@ -110,9 +110,25 @@ def overview(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         enrollments_api, "list_user_course_enrollments", AsyncMock(return_value=[])
     )
     monkeypatch.setattr(courses_api, "get_course_by_id", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        courses_api,
+        "get_courses_by_ids",
+        AsyncMock(side_effect=lambda _db, ids: {course_id: _course(course_id) for course_id in ids}),
+    )
     monkeypatch.setattr(courses_api, "list_courses_for_teacher", AsyncMock(return_value=[]))
     monkeypatch.setattr(
         progress_api, "get_course_progress_for_user", AsyncMock(return_value=_progress())
+    )
+    monkeypatch.setattr(
+        progress_api,
+        "get_course_progress_for_users",
+        AsyncMock(
+            side_effect=lambda _db, *, user_ids, course_ids: {
+                (user_id, course_id): _progress()
+                for user_id in user_ids
+                for course_id in course_ids
+            }
+        ),
     )
     monkeypatch.setattr(
         career_paths_api, "list_user_career_enrollments", AsyncMock(return_value=[])
@@ -304,7 +320,7 @@ class TestTheStudentsCourseList:
             AsyncMock(return_value=[_enrollment(uuid4())]),
         )
         monkeypatch.setattr(
-            overview["courses_api"], "get_course_by_id", AsyncMock(return_value=None)
+            overview["courses_api"], "get_courses_by_ids", AsyncMock(return_value={})
         )
 
         result = await admin_service.get_user_overview(
@@ -329,11 +345,13 @@ class TestTheStudentsCourseList:
         )
         monkeypatch.setattr(
             overview["progress_api"],
-            "get_course_progress_for_user",
+            "get_course_progress_for_users",
             AsyncMock(
-                return_value=_progress(
-                    completion_percent=62.5, completed_lessons=5, total_lessons=8
-                )
+                return_value={
+                    (overview["user_id"], course_id): _progress(
+                        completion_percent=62.5, completed_lessons=5, total_lessons=8
+                    )
+                }
             ),
         )
 
@@ -360,7 +378,9 @@ class TestTheStudentsCourseList:
             overview["courses_api"], "get_course_by_id", AsyncMock(return_value=_course(course_id))
         )
         monkeypatch.setattr(
-            overview["progress_api"], "get_course_progress_for_user", AsyncMock(return_value={})
+            overview["progress_api"],
+            "get_course_progress_for_users",
+            AsyncMock(return_value={(overview["user_id"], course_id): {}}),
         )
 
         result = await admin_service.get_user_overview(
@@ -398,8 +418,12 @@ class TestWhenTheStudentWasLastActive:
         )
         monkeypatch.setattr(
             overview["progress_api"],
-            "get_course_progress_for_user",
-            AsyncMock(return_value=_progress(last_activity_at=worked_at)),
+            "get_course_progress_for_users",
+            AsyncMock(
+                return_value={
+                    (overview["user_id"], course_id): _progress(last_activity_at=worked_at)
+                }
+            ),
         )
 
         result = await admin_service.get_user_overview(
@@ -431,8 +455,12 @@ class TestWhenTheStudentWasLastActive:
         )
         monkeypatch.setattr(
             overview["progress_api"],
-            "get_course_progress_for_user",
-            AsyncMock(return_value=_progress(last_activity_at=_NOW)),
+            "get_course_progress_for_users",
+            AsyncMock(
+                return_value={
+                    (overview["user_id"], course_id): _progress(last_activity_at=_NOW)
+                }
+            ),
         )
 
         result = await admin_service.get_user_overview(
@@ -458,8 +486,12 @@ class TestWhenTheStudentWasLastActive:
         )
         monkeypatch.setattr(
             overview["progress_api"],
-            "get_course_progress_for_user",
-            AsyncMock(return_value=_progress(last_activity_at=worked_at)),
+            "get_course_progress_for_users",
+            AsyncMock(
+                return_value={
+                    (overview["user_id"], course_id): _progress(last_activity_at=worked_at)
+                }
+            ),
         )
 
         result = await admin_service.get_user_overview(
@@ -484,8 +516,14 @@ class TestWhenTheStudentWasLastActive:
         )
         monkeypatch.setattr(
             overview["progress_api"],
-            "get_course_progress_for_user",
-            AsyncMock(return_value=_progress(last_activity_at="2026-10-05T09:00:00+00:00")),
+            "get_course_progress_for_users",
+            AsyncMock(
+                return_value={
+                    (overview["user_id"], course_id): _progress(
+                        last_activity_at="2026-10-05T09:00:00+00:00"
+                    )
+                }
+            ),
         )
 
         result = await admin_service.get_user_overview(

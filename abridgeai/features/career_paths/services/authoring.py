@@ -1006,8 +1006,21 @@ async def validate_path_for_publish(db: AsyncSession, career_path_id: UUID) -> l
 
     warnings: list[str] = []
     path = await _require_path(db, career_path_id)
+    links_by_stage = await authoring_queries.list_stage_course_links_for_stages(
+        db, [stage.id for stage in stages]
+    )
+    all_links = [link for links in links_by_stage.values() for link in links]
+    courses = await courses_api.get_courses_by_ids(db, [link.course_id for link in all_links])
+    published_course_ids = {
+        course_id
+        for course_id, course in courses.items()
+        if course.organization_id == path.organization_id and course.status == "published"
+    }
+    gradeable_counts = await enrollments_api.count_course_gradeable_units_for_courses(
+        db, list(courses)
+    )
     for stage in stages:
-        links = await authoring_queries.list_stage_course_links(db, stage.id)
+        links = links_by_stage.get(stage.id, [])
         if not links:
             raise AppError(
                 f"stage_has_no_courses: stage at position {stage.position} is empty — "
@@ -1015,9 +1028,7 @@ async def validate_path_for_publish(db: AsyncSession, career_path_id: UUID) -> l
             )
         required = [link for link in links if link.is_required]
         for link in links:
-            if not await authoring_queries.course_is_published_in_org(
-                db, link.course_id, path.organization_id
-            ):
+            if link.course_id not in published_course_ids:
                 raise AppError(
                     f"stage_course_not_published: course {link.course_id} in stage "
                     f"position {stage.position} is not a published course of this organization"
@@ -1029,7 +1040,7 @@ async def validate_path_for_publish(db: AsyncSession, career_path_id: UUID) -> l
             # be counted toward `min_optional_to_complete` and make the quota
             # unreachable. Publishing is the last point where a manager can be
             # told before a student is stuck, so both are hard failures.
-            units = await enrollments_api.count_course_gradeable_units(db, course_id=link.course_id)
+            units = gradeable_counts.get(link.course_id, 0)
             if units == 0:
                 raise AppError(
                     f"stage_course_has_no_gradeable_units: course {link.course_id} in "

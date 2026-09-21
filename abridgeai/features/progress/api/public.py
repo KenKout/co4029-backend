@@ -172,6 +172,15 @@ async def get_course_progress_for_user(
     return summary.model_dump()
 
 
+async def get_course_progress_for_users(
+    db: AsyncSession, *, user_ids: list[UUID], course_ids: list[UUID]
+) -> dict[tuple[UUID, UUID], dict[str, object]]:
+    summaries = await reporting.get_course_progress_for_users(
+        db, user_ids=user_ids, course_ids=course_ids
+    )
+    return {key: summary.model_dump() for key, summary in summaries.items()}
+
+
 __all__ = [
     "AtRiskStudentDTO",
     "CourseHealthSignalsDTO",
@@ -181,6 +190,7 @@ __all__ = [
     "get_at_risk_students",
     "get_course_health_signals",
     "get_course_progress_for_user",
+    "get_course_progress_for_users",
     "get_lesson_progress",
     "list_students_needing_attention",
 ]

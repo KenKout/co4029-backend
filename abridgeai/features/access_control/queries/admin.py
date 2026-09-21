@@ -69,6 +69,27 @@ async def get_role_permission_codes(db: AsyncSession, role_id: UUID) -> list[str
     return [row[0] for row in result.all()]
 
 
+async def list_role_permission_codes(
+    db: AsyncSession, role_ids: list[UUID]
+) -> dict[UUID, list[str]]:
+    """Return permission codes for all ``role_ids`` in one query."""
+    if not role_ids:
+        return {}
+    result = await db.execute(
+        select(RolePermission.role_id, Permission.code)
+        .join(Permission, RolePermission.permission_id == Permission.id)
+        .where(
+            RolePermission.role_id.in_(role_ids),
+            Permission.deleted_at.is_(None),
+        )
+        .order_by(RolePermission.role_id, Permission.code)
+    )
+    codes: dict[UUID, list[str]] = {role_id: [] for role_id in role_ids}
+    for role_id, code in result.all():
+        codes[role_id].append(code)
+    return codes
+
+
 async def list_assignments_for_user(db: AsyncSession, user_id: UUID) -> list[UserRoleAssignment]:
     result = await db.execute(
         select(UserRoleAssignment)

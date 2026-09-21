@@ -284,6 +284,14 @@ async def _attach_student_sections(
     active_at: datetime | None = overview.user.last_login_at
 
     enrollments = await enrollments_api.list_user_course_enrollments(db, user_id=student_id)
+    courses_by_id = await courses_api.get_courses_by_ids(
+        db, [enrollment.course_id for enrollment in enrollments]
+    )
+    progress_by_course = await progress_api.get_course_progress_for_users(
+        db,
+        user_ids=[student_id],
+        course_ids=[enrollment.course_id for enrollment in enrollments],
+    )
     courses: list[CourseProgressRead] = []
     for enrollment in enrollments:
         # Dropped enrolments are KEPT. They were skipped, which meant a
@@ -291,12 +299,15 @@ async def _attach_student_sections(
         # manager had no way to see it ever happened. `enrollment_status`
         # already distinguishes them and the SPA renders a muted "dropped"
         # badge, so showing the row costs nothing and restores the history.
-        course = await courses_api.get_course_by_id(db, enrollment.course_id)
+        course = courses_by_id.get(enrollment.course_id)
         if course is None:
             continue
-        progress = await progress_api.get_course_progress_for_user(
-            db, user_id=student_id, course_id=enrollment.course_id
-        )
+        progress = progress_by_course.get((student_id, enrollment.course_id), {
+            "completion_percent": 0,
+            "last_activity_at": None,
+            "completed_lessons": 0,
+            "total_lessons": 0,
+        })
         completion = float(progress.get("completion_percent") or 0)
         last = progress.get("last_activity_at")
         if last is not None:

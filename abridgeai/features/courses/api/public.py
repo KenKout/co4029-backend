@@ -17,6 +17,7 @@ without crossing into ``courses.routers._deps`` directly.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -41,6 +42,13 @@ from ._dto import (
 async def get_course_by_id(db: AsyncSession, course_id: UUID) -> CourseDTO | None:
     course = await queries.get_course(db, course_id)
     return CourseDTO.model_validate(course) if course else None
+
+
+async def get_courses_by_ids(
+    db: AsyncSession, course_ids: Sequence[UUID]
+) -> dict[UUID, CourseDTO]:
+    courses = await queries.get_courses_by_ids(db, course_ids)
+    return {course_id: CourseDTO.model_validate(course) for course_id, course in courses.items()}
 
 
 async def get_course_thumbnail_urls(
@@ -256,6 +264,7 @@ __all__ = [
     "OrgDTO",
     "find_module_items",
     "get_course_by_id",
+    "get_courses_by_ids",
     "get_course_thumbnail_urls",
     "get_course_slug",
     "get_lesson_by_id",

@@ -286,13 +286,16 @@ async def list_program_versions(
     if program is None:
         raise NotFoundError("learning_program_not_found")
     await _require_operator(db, actor_id=actor.user_id, program=program)
+    versions = await queries.list_versions(db, program_id)
+    publisher_ids = [
+        version.updated_by
+        for version in versions
+        if version.published_at is not None and version.updated_by is not None
+    ]
+    publishers = await identity_api.get_users_by_ids(db, publisher_ids)
     result: list[ProgramVersionRead] = []
-    for version in await queries.list_versions(db, program_id):
-        publisher = (
-            await identity_api.get_user_by_id(db, version.updated_by)
-            if version.published_at is not None and version.updated_by is not None
-            else None
-        )
+    for version in versions:
+        publisher = publishers.get(version.updated_by) if version.updated_by is not None else None
         result.append(
             ProgramVersionRead.model_validate(
                 {

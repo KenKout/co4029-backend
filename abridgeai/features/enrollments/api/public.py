@@ -194,6 +194,13 @@ async def count_course_gradeable_units(db: AsyncSession, *, course_id: UUID) -> 
     return counts.total
 
 
+async def count_course_gradeable_units_for_courses(
+    db: AsyncSession, course_ids: list[UUID]
+) -> dict[UUID, int]:
+    counts = await completion_unit_queries.count_course_units_for_courses(db, course_ids)
+    return {course_id: tally.total for course_id, tally in counts.items()}
+
+
 async def resync_stale_course_completions(db: AsyncSession) -> tuple[int, int]:
     """Drift backstop for the D2 writer. Returns ``(scanned, fixed)``.
 
@@ -231,6 +238,7 @@ __all__ = [
     "EnrollmentDTO",
     "count_active_enrollments_in_courses",
     "count_course_gradeable_units",
+    "count_course_gradeable_units_for_courses",
     "ensure_course_enrollment",
     "get_course_enrollment",
     "has_active_or_completed_enrollment",

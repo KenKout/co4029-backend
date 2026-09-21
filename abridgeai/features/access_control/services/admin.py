@@ -108,11 +108,8 @@ async def list_role_catalog(
 ) -> list[tuple[object, list[str]]]:
     """Return ``[(role, [permission_code, ...]), ...]`` for the catalog endpoint."""
     roles = await admin_queries.list_roles(db)
-    out: list[tuple[object, list[str]]] = []
-    for role in roles:
-        codes = await admin_queries.get_role_permission_codes(db, role.id)
-        out.append((role, codes))
-    return out
+    code_map = await admin_queries.list_role_permission_codes(db, [role.id for role in roles])
+    return [(role, code_map.get(role.id, [])) for role in roles]
 
 
 async def list_user_assignments(

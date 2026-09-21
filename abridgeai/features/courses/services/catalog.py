@@ -197,9 +197,10 @@ async def list_published_courses_for_user(
         db, organization_id=organization_id, limit=limit, cursor=cursor
     )
     items = []
+    thumbnail_urls = await get_course_thumbnail_urls(db, [course.id for course in page.items])
     for course in page.items:
         dto = CoursePublic.model_validate(course)
-        dto.thumbnail_url = await _mint_course_thumbnail_url(db, dto.id)
+        dto.thumbnail_url = thumbnail_urls.get(dto.id)
         items.append(dto)
     return CursorPage(
         items=items,
@@ -217,9 +218,10 @@ async def list_enrolled_courses_for_user(
     """Active enrollments → published courses for the requesting student."""
     page = await list_enrolled_courses(db, user_id, limit=limit, cursor=cursor)
     items = []
+    thumbnail_urls = await get_course_thumbnail_urls(db, [course.id for course in page.items])
     for course in page.items:
         dto = CoursePublic.model_validate(course)
-        dto.thumbnail_url = await _mint_course_thumbnail_url(db, dto.id)
+        dto.thumbnail_url = thumbnail_urls.get(dto.id)
         items.append(dto)
     return CursorPage(
         items=items,
