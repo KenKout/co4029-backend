@@ -45,6 +45,7 @@ from collections.abc import Iterable
 from typing import Final
 
 from sqlalchemy import column, event, select, table
+from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, UOWTransaction
 
@@ -74,7 +75,11 @@ _VIA_MODULE: Final[frozenset[str]] = frozenset({"lessons", "module_items"})
 
 #: Lightweight Core table — avoids importing the courses feature's ORM models
 #: into ``core`` (which ``core.db`` imports at module load: a cycle).
-_modules_table: Final = table("modules", column("id"), column("course_id"))
+_modules_table: Final = table(
+    "modules",
+    column("id", UUID(as_uuid=True)),
+    column("course_id", UUID(as_uuid=True)),
+)
 
 
 def _tablename(instance: object) -> str | None:
