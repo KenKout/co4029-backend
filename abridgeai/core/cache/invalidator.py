@@ -266,12 +266,28 @@ def _schedule_invalidation(keys: set[str], user_ids: set[str], glob_patterns: se
     task.add_done_callback(_pending_tasks.discard)
 
 
+def schedule_key_deletion(keys: set[str]) -> None:
+    """Delete ``keys`` from Redis in the background (best-effort).
+
+    The commit-scoped invalidators call this once their transaction has
+    landed; failures are logged and left to TTL expiry.
+    """
+    _schedule_invalidation(keys, set(), set())
+
+
 def register_cache_invalidator() -> None:
     """Wire the global SQLAlchemy `after_flush` cache hook (idempotent)."""
     global _registered
     if _registered:
         return
     _registered = True
+
+    # Course content is invalidated after COMMIT, not after flush — see
+    # `course_content` for why a shared, expensive key cannot afford the
+    # pre-commit repopulation window. Imported here to break the cycle.
+    from .course_content import register_course_content_invalidation  # noqa: PLC0415
+
+    register_course_content_invalidation()
 
     @event.listens_for(Session, "after_flush")
     def _cache_after_flush(  # noqa: ARG001 — SQLAlchemy event signature
@@ -288,4 +304,5 @@ __all__ = [
     "USER_SESSION_CASCADE_MODELS",
     "drain_invalidations",
     "register_cache_invalidator",
+    "schedule_key_deletion",
 ]

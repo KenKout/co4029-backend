@@ -7,7 +7,9 @@ from .invalidator import (
     USER_SESSION_CASCADE_MODELS,
     drain_invalidations,
     register_cache_invalidator,
+    schedule_key_deletion,
 )
+from .json_store import get_json, set_json
 from .keys import (
     CARDS_DUE,
     COMPLIANCE,
@@ -47,6 +49,9 @@ __all__ = [
     "close_cache",
     "drain_invalidations",
     "get_cache",
+    "get_json",
     "read_session_cache",
     "register_cache_invalidator",
+    "schedule_key_deletion",
+    "set_json",
 ]

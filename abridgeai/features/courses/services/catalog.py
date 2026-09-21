@@ -13,9 +13,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from time import perf_counter
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
+from pydantic import ValidationError
+
+from abridgeai.core.cache import COURSE_CONTENT_PUBLISHED, get_json, set_json
+from abridgeai.core.config import get_settings
+from abridgeai.core.observability import get_logger
 from abridgeai.features.courses.queries import (
     CursorPage,
     build_outcome_code_map,
@@ -58,6 +64,8 @@ from abridgeai.infrastructure.s3 import create_stream_url
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
+
+logger = get_logger(__name__)
 
 
 @dataclass
@@ -364,10 +372,81 @@ async def get_published_course_detail(
     return await _course_with_instructor(db, course)
 
 
+def _course_content_cache_ttl() -> int:
+    """TTL for the published-tree cache, clamped below the presigned-URL life.
+
+    The serialised tree carries presigned thumbnail and avatar URLs minted at
+    build time. Serving a cached copy for longer than those URLs live would
+    hand learners dead image links, so the cache expires at (at most) half the
+    configured S3 URL TTL — the second half is the reader's own viewing time.
+    """
+    url_ttl = get_settings().s3_url_ttl_seconds
+    return max(1, min(COURSE_CONTENT_PUBLISHED.ttl_seconds, url_ttl // 2))
+
+
 async def get_published_course_content_for_learner(
     db: AsyncSession, course_id: UUID
 ) -> CourseContentPublic | None:
-    """Full published content tree (course + modules + items + lessons + quizzes).
+    """Full published content tree, read through the shared Redis cache.
+
+    The tree is identical for every learner on the course — it carries no
+    progress, unlock state or attempt data (see :class:`CourseContentPublic`)
+    — so one cached copy serves all of them. Access is NOT part of that
+    decision: the router checks org tenancy and enrolment BEFORE calling here,
+    and a cache hit skips the rebuild, never the gate.
+
+    Cache misses, decode failures and a dead Redis all fall through to
+    :func:`_build_published_course_content` and return normally; a failed
+    cache write is logged, not raised. ``None`` (missing / unpublished /
+    soft-deleted) is deliberately not cached, so publishing a course takes
+    effect on the next read rather than after the TTL.
+
+    One round-trip quirk: ``QuizSummaryPublic`` and ``InterviewSummaryPublic``
+    have identical field sets, so an interview target rehydrates from JSON as
+    the former. The rendered response is byte-identical either way (``id`` /
+    ``title`` / ``slug``), and consumers discriminate on the sibling
+    ``item_type`` field, which is unaffected.
+    """
+    key = COURSE_CONTENT_PUBLISHED.format(course_id=course_id)
+    namespace = COURSE_CONTENT_PUBLISHED.pattern
+
+    payload = await get_json(key, namespace=namespace)
+    if payload is not None:
+        try:
+            return CourseContentPublic.model_validate(payload)
+        except ValidationError as exc:
+            # A payload written by an older DTO shape (rolling deploy, schema
+            # change). Treat it as a miss and overwrite it below.
+            logger.warning(
+                "cache_decode_failed",
+                namespace=namespace,
+                key=key,
+                err=repr(exc),
+            )
+
+    started = perf_counter()
+    tree = await _build_published_course_content(db, course_id)
+    logger.debug(
+        "cache_source_read",
+        namespace=namespace,
+        key=key,
+        duration_ms=round((perf_counter() - started) * 1000, 2),
+        found=tree is not None,
+    )
+    if tree is not None:
+        await set_json(
+            key,
+            tree.model_dump(mode="json"),
+            ttl=_course_content_cache_ttl(),
+            namespace=namespace,
+        )
+    return tree
+
+
+async def _build_published_course_content(
+    db: AsyncSession, course_id: UUID
+) -> CourseContentPublic | None:
+    """Assemble the published tree from PostgreSQL (the cache's source read).
 
     Mirror of :func:`get_published_course_content` — returns ``None``
     when the course is missing / unpublished / soft-deleted.
