@@ -41,10 +41,11 @@ adding or removing a teacher is invalidated immediately.
 from __future__ import annotations
 
 import logging
+import uuid
 from collections.abc import Iterable
-from typing import Final
+from typing import Any, Final
 
-from sqlalchemy import column, event, select, table
+from sqlalchemy import String, column, event, select, table
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, UOWTransaction
@@ -110,6 +111,17 @@ def _direct_course_ids(instances: Iterable[object]) -> tuple[set[str], set[str]]
     return course_ids, module_ids
 
 
+def _module_lookup(session: Session, module_ids: set[str]) -> tuple[Any, list[Any]]:
+    """Return dialect-compatible columns and bind values for module ids."""
+    dialect_name = session.get_bind().dialect.name
+    if dialect_name == "postgresql":
+        return _modules_table, [uuid.UUID(module_id) for module_id in sorted(module_ids)]
+    return (
+        table("modules", column("id", String()), column("course_id", String())),
+        sorted(module_ids),
+    )
+
+
 def _courses_for_modules(session: Session, module_ids: set[str]) -> set[str]:
     """Resolve ``module_ids`` to their course ids with one batched SELECT.
 
@@ -119,7 +131,8 @@ def _courses_for_modules(session: Session, module_ids: set[str]) -> set[str]:
     """
     if not module_ids:
         return set()
-    stmt = select(_modules_table.c.course_id).where(_modules_table.c.id.in_(sorted(module_ids)))
+    modules_table, lookup_ids = _module_lookup(session, module_ids)
+    stmt = select(modules_table.c.course_id).where(modules_table.c.id.in_(lookup_ids))
     try:
         with session.no_autoflush:
             rows = session.execute(stmt).scalars().all()
