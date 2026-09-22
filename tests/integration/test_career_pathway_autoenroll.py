@@ -557,6 +557,8 @@ async def test_completion_flips_to_prepared(engine, session_factory, seed) -> No
             )
         await db.commit()
 
+    # The completion writer already runs the path sync when the final course
+    # changes to completed. A second explicit sync is intentionally idempotent.
     async with session_factory() as db:
         progress = await enrollment_service.get_my_path_progress(
             db, career_path_id=seed["path_id"], student_id=seed["student"]
@@ -569,7 +571,7 @@ async def test_completion_flips_to_prepared(engine, session_factory, seed) -> No
             progress=progress,
         )
         await db.commit()
-    assert flipped is True
+    assert flipped is False
 
     async with session_factory() as db:
         rows = await enrollment_service.list_my_career_enrollments(db, seed["student"])
