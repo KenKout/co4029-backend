@@ -91,6 +91,19 @@ class MyCareerEnrollmentRead(BaseModel):
     completed_at: datetime | None = None
     overall_percent: float = 0.0
     is_prepared: bool = False
+    """The "prepared" milestone: every stage complete, counting the latch.
+
+    Historical by design. A stage that ever completed stays complete, so this
+    does not go back to false when a student un-marks a lesson or an author
+    raises an elective quota -- see the append-only latch in
+    ``student_stage_progress``."""
+    is_currently_complete: bool = False
+    """Whether every stage satisfies its rule right now, ignoring the latch.
+
+    Paired with ``is_prepared`` so a client can tell the two apart. They
+    differ exactly when work that once counted no longer does, which is also
+    when ``overall_percent`` drops below 100 under a "prepared" badge -- a
+    combination that reads as a bug unless the interface can name it."""
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -136,6 +149,13 @@ class StageProgressRead(BaseModel):
     """True when latched in ``student_stage_progress`` OR the live rule
     holds. Latched wins: a stage that ever completed stays complete."""
     latched: bool
+    live_complete: bool = False
+    """Whether the rule holds RIGHT NOW, ignoring the latch.
+
+    ``complete`` and ``latched`` together cannot answer this: a latched stage
+    reads ``complete=True, latched=True`` whether or not it still satisfies
+    the rule. So a client showing a completed badge beside a progress figure
+    that has since fallen has no way to explain the pair without this."""
     required_count: int
     satisfied_required: int
     optional_count: int

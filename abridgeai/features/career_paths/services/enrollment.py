@@ -305,6 +305,10 @@ async def list_my_career_enrollments(
         )
         overall = progress.overall_percent
         complete = is_path_complete(progress)
+        # Live standing, for the case where it disagrees with the milestone.
+        currently = bool(progress.stages) and all(
+            stage.live_complete for stage in progress.stages
+        )
         result.append(
             MyCareerEnrollmentRead.model_validate(
                 {
@@ -313,6 +317,7 @@ async def list_my_career_enrollments(
                     "completed_at": row["completed_at"],
                     "overall_percent": overall,
                     "is_prepared": complete,
+                    "is_currently_complete": currently,
                 }
             )
         )
@@ -467,6 +472,7 @@ def _to_stage_read(ev: stage_service.StageEval) -> StageProgressRead:
         unlocked=ev.unlocked,
         complete=ev.complete,
         latched=ev.latched,
+        live_complete=ev.live_complete,
         required_count=len(ev.required),
         satisfied_required=ev.satisfied_required,
         optional_count=len(ev.optional),
