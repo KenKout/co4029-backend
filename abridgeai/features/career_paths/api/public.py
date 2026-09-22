@@ -17,6 +17,7 @@ from abridgeai.core.db.conflict_mapper import flush_or_conflict
 from abridgeai.features.access_control.models import StudentCareerEnrollment
 from abridgeai.features.career_paths.queries import student as student_queries
 from abridgeai.features.career_paths.services import authoring as authoring_service
+from abridgeai.features.career_paths.services import enrollment as enrollment_service
 from abridgeai.features.career_paths.services import stages as stage_service
 
 
@@ -38,6 +39,21 @@ async def list_user_career_enrollments(
     user-detail "career path + progress" section.
     """
     return await student_queries.list_my_career_enrollments(db, student_id)
+
+
+async def sync_paths_after_course_completion(
+    db: AsyncSession, *, student_id: UUID
+) -> int:
+    """Latch newly complete stages and flip finished pathways for one student.
+
+    The authorised entrypoint for the course-completion writer in
+    ``enrollments``, which cannot import this feature's services directly.
+    Returns the number of career enrollments that flipped to ``completed``.
+    Runs in the caller's transaction; no commit here.
+    """
+    return await enrollment_service.sync_paths_after_course_completion(
+        db, student_id=student_id
+    )
 
 
 async def get_path_course_progress_for_user(

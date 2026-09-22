@@ -137,6 +137,21 @@ async def sync_course_completion(
             course_id=course_id,
             source_enrollment_id=enrollment.id,
         )
+        # Finishing a course is the only thing that can newly satisfy a stage,
+        # so it is where the latch belongs. It used to be written lazily by two
+        # GET endpoints, which made a prefetch or a retry able to complete a
+        # career enrollment -- and, through it, a whole learning programme.
+        #
+        # Promotion only. The demotion branch below must not reach the latch:
+        # ``student_stage_progress`` is append-only precisely so that
+        # un-marking a lesson cannot un-complete a student.
+        from abridgeai.features.career_paths.api import (  # noqa: PLC0415
+            public as career_paths_api,
+        )
+
+        await career_paths_api.sync_paths_after_course_completion(
+            db, student_id=student_id
+        )
         return "completed"
 
     if not should_be_complete and enrollment.status == "completed":

@@ -65,8 +65,11 @@ async def snapshot_enrollment(
     db: AsyncSession, *, career_path_id: UUID, student_id: UUID
 ) -> Decimal:
     """Compute + persist one snapshot; returns the stored score."""
+    # A write path already (it inserts the snapshot), so it keeps the latch the
+    # GET endpoints used to perform lazily. ``compute_readiness_score`` above
+    # is a pure read and deliberately does not.
     progress = await enrollment_service.get_my_path_progress(
-        db, career_path_id=career_path_id, student_id=student_id
+        db, career_path_id=career_path_id, student_id=student_id, latch=True
     )
     score = _score_from_progress(progress)
     # Gap 3: the snapshot records the student's pinned path version.

@@ -290,8 +290,11 @@ async def list_my_career_enrollments(
     db: AsyncSession, student_id: UUID
 ) -> list[MyCareerEnrollmentRead]:
     """Enrollments enriched with derived pathway completion + the "prepared"
-    flag. Also lazily flips completed enrollments (see
-    :func:`sync_enrollment_completion`) — the router commits.
+    flag.
+
+    A pure read. The flip to ``completed`` and the stage latch it depends on
+    are driven from course completion (:func:`sync_paths_after_course_completion`)
+    and swept nightly, so nothing here writes and the router does not commit.
     """
     rows = await student_queries.list_my_career_enrollments(db, student_id)
     result: list[MyCareerEnrollmentRead] = []
@@ -302,18 +305,12 @@ async def list_my_career_enrollments(
         )
         overall = progress.overall_percent
         complete = is_path_complete(progress)
-        flipped = await sync_enrollment_completion(
-            db,
-            career_path_id=career_path_id,
-            student_id=student_id,
-            progress=progress,
-        )
         result.append(
             MyCareerEnrollmentRead.model_validate(
                 {
                     **row,
-                    "status": "completed" if flipped else row["status"],
-                    "completed_at": datetime.now(tz=UTC) if flipped else row["completed_at"],
+                    "status": row["status"],
+                    "completed_at": row["completed_at"],
                     "overall_percent": overall,
                     "is_prepared": complete,
                 }
@@ -322,16 +319,61 @@ async def list_my_career_enrollments(
     return result
 
 
+async def sync_paths_after_course_completion(
+    db: AsyncSession, *, student_id: UUID
+) -> int:
+    """Re-evaluate every pathway this student is still working, and write.
+
+    Called from the course-completion writer, which is the event that can make
+    a stage complete. Returns how many career enrollments flipped to
+    ``completed``, so the caller knows whether anything changed.
+
+    Every live enrollment is re-evaluated rather than only those containing the
+    finished course. Resolving course to pathways would need a second mapping
+    query, and a student holds at most a handful of paths (bounded by the
+    organisation's concurrent-path limit), so the superset is cheaper than the
+    lookup and cannot miss a path the mapping would have.
+
+    Already-``completed`` enrollments are skipped: their stages are latched and
+    there is no flip left to make.
+
+    Caller owns the transaction.
+    """
+    rows = await student_queries.list_my_career_enrollments(db, student_id)
+    flipped = 0
+    for row in rows:
+        if row["status"] != "active":
+            continue
+        career_path_id = row["career_path_id"]
+        progress = await get_my_path_progress(
+            db, career_path_id=career_path_id, student_id=student_id, latch=True
+        )
+        if await sync_enrollment_completion(
+            db,
+            career_path_id=career_path_id,
+            student_id=student_id,
+            progress=progress,
+        ):
+            flipped += 1
+    return flipped
+
+
 async def get_my_path_progress(
-    db: AsyncSession, *, career_path_id: UUID, student_id: UUID
+    db: AsyncSession, *, career_path_id: UUID, student_id: UUID, latch: bool = False
 ) -> CareerPathProgressRead:
     """Stage-aware pathway progress for one student.
 
-    Also writes the stage latch for any stage that has just become complete
-    (append-only; see :class:`~..models.StudentStageProgress`). The caller
-    owns the transaction — the router commits.
-
     ``overall_percent`` is produced by the stage-aware formula.
+
+    Reads nothing back into the database by default. ``latch=True`` additionally
+    writes the stage latch for any stage that has just become complete
+    (append-only; see :class:`~..models.StudentStageProgress`), and the caller
+    then owns the commit.
+
+    The default is off because this function backs two GET endpoints, and a GET
+    that writes is a GET that a prefetch, a retry or a crawler can fire. The
+    latch is driven instead from the write that causes it — see
+    :func:`sync_paths_after_course_completion`.
     """
     enrollment = await student_queries.get_my_career_enrollment(
         db, student_id=student_id, career_path_id=career_path_id
@@ -356,7 +398,7 @@ async def get_my_path_progress(
         student_id=student_id,
         enrollment_id=enrollment.id if enrollment is not None else None,
     )
-    if enrollment is not None:
+    if latch and enrollment is not None:
         await stage_service.latch_completed_stages(db, enrollment_id=enrollment.id, evals=evals)
 
     courses = [_to_course_summary(row) for row in rows]
@@ -849,5 +891,6 @@ __all__ = [
     "list_published_paths_for_user",
     "start_course_in_path",
     "sync_enrollment_completion",
+    "sync_paths_after_course_completion",
     "unenroll_student",
 ]

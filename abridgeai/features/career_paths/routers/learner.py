@@ -89,9 +89,9 @@ async def list_my_career_enrollments(
     current_user: Annotated[CurrentUser, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> list[MyCareerEnrollmentRead]:
-    result = await enrollment_service.list_my_career_enrollments(db, current_user.user_id)
-    await db.commit()
-    return result
+    # No commit: this endpoint reads. The completion flip it used to perform
+    # lazily now rides on the course-completion write that causes it.
+    return await enrollment_service.list_my_career_enrollments(db, current_user.user_id)
 
 
 @me_router.get(
@@ -103,21 +103,12 @@ async def get_my_career_path_progress(
     current_user: Annotated[CurrentUser, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> CareerPathProgressRead:
-    """Stage-aware progress for the calling student."""
-    progress = await enrollment_service.get_my_path_progress(
+    """Stage-aware progress for the calling student. Pure read."""
+    return await enrollment_service.get_my_path_progress(
         db,
         career_path_id=career_path_id,
         student_id=current_user.user_id,
     )
-    # "Prepared" milestone: mark the enrollment completed once fully done.
-    await enrollment_service.sync_enrollment_completion(
-        db,
-        career_path_id=career_path_id,
-        student_id=current_user.user_id,
-        progress=progress,
-    )
-    await db.commit()
-    return progress
 
 
 @me_router.get(

@@ -92,8 +92,10 @@ async def _sync_course_completion(
     The D2 writer (``enrollments.services.completion``), called on **every**
     lesson-progress write point so ``course_enrollments.status`` — the
     definition of "satisfied" for career-path stage unlock — is maintained
-    synchronously. The lazy read on the career-path progress endpoint and the
-    nightly readiness cron remain only as a drift backstop.
+    synchronously. Promotion here also latches any career-path stage this
+    completion has just satisfied, so the stage latch rides on the write that
+    causes it rather than on a later read. The nightly readiness cron remains
+    as the drift backstop.
 
     This also carries the DEMOTION path: ``unmark_lesson_complete`` can drop a
     course below 100%, and the writer flips ``'completed' → 'active'`` so
