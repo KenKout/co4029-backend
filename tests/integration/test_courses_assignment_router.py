@@ -1667,7 +1667,10 @@ async def test_publish_below_min_teachers_is_rejected(
 
     async with session_factory() as db:
         # publish_course ignores the actor's identity, so a throwaway actor is fine.
-        with pytest.raises(ConflictError, match="course_teacher_min_not_met"):
+        with pytest.raises(
+            ConflictError,
+            match=r"course_teacher_min_not_met: Staffing Course needs at least 2 teacher",
+        ):
             await authoring_service.publish_course(db, cid, _service_actor(uuid.uuid4()))
         await db.rollback()
 

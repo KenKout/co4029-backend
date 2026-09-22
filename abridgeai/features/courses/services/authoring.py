@@ -408,7 +408,7 @@ async def _require_course_teacher_minimum(db: AsyncSession, course: Course) -> N
     count = await assignment_queries.count_active_course_teachers(db, course.id)
     if count < min_teachers:
         raise ConflictError(
-            f"course_teacher_min_not_met: course {course.id} needs at least "
+            f"course_teacher_min_not_met: {course.title} needs at least "
             f"{min_teachers} teacher(s) to publish, but has {count}. Assign more "
             "teachers first."
         )
