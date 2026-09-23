@@ -38,6 +38,8 @@ class CoursePathPlacement(BaseModel):
     career_path_id: UUID
     career_path_name: str
     career_path_status: str
+    career_path_version_id: UUID
+    career_path_version_no: int
     stage_id: UUID
     stage_title: str | None = None
     stage_position: int

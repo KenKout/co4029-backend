@@ -50,6 +50,8 @@ async def list_career_paths_containing_course(
             CareerPath.id.label("career_path_id"),
             CareerPath.name.label("career_path_name"),
             CareerPath.status.label("career_path_status"),
+            CareerPathVersion.id.label("career_path_version_id"),
+            CareerPathVersion.version_no.label("career_path_version_no"),
             CareerPathStage.id.label("stage_id"),
             CareerPathStage.title.label("stage_title"),
             CareerPathStage.position.label("stage_position"),
