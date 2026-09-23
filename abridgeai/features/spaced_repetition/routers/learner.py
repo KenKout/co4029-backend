@@ -81,50 +81,95 @@ _MATURE_KR_THRESHOLD = 0.85
 _LEARNING_KR_THRESHOLD = 0.1
 
 
+# A card is a QUESTION, but the lesson it is labelled with comes through
+# ``quiz_source_lessons``, which is many-to-many: PK (quiz_id, lesson_id), and
+# ``_add_quiz_source_lessons`` takes a list. A quiz citing two lessons would
+# therefore join out to two rows for the SAME due card — the student sees the
+# question twice in the queue, it counts twice against the daily cap, and the
+# dashboard total is inflated by a number nobody can explain. ``DISTINCT ON``
+# in an inner query collapses that back to one row per card; the tie-break on
+# ``qsl.lesson_id`` makes the label deterministic rather than planner-dependent
+# (when the request scopes by lesson or course, only matching rows survive the
+# WHERE, so the surviving label is the one the student asked for anyway).
+#
+# The DISTINCT ON has to sit in a subquery: Postgres requires the leftmost
+# ORDER BY terms to match the DISTINCT ON expressions, which would displace the
+# (due_at, question_id) ordering the keyset cursor depends on. LIMIT moves out
+# with it — applied inside, it would cap rows BEFORE de-duplication and hand
+# back a short page. The cost of that move is losing the LIMIT pushdown: the
+# inner query now resolves the student's whole due set per page rather than
+# stopping at :limit. The set is per-student and bounded by their backlog, so
+# this is a sort of hundreds, not a scan of the table — but if a page read ever
+# shows up in slow queries, this is the line that explains it.
 _CARDS_DUE_SQL = text(
     """
     SELECT
-        scs.question_id,
-        qq.quiz_id,
-        qsl.lesson_id,
-        l.slug AS lesson_slug,
-        l.title AS lesson_title,
-        c.slug AS course_slug,
-        c.title AS course_title,
-        scs.due_at,
-        scs.last_q,
-        scs.ef
-    FROM student_card_state scs
-    JOIN quiz_questions qq ON qq.id = scs.question_id
-    JOIN quizzes q ON q.id = qq.quiz_id
-    JOIN quiz_source_lessons qsl ON qsl.quiz_id = q.id
-    JOIN lessons l ON l.id = qsl.lesson_id
-    JOIN modules m ON m.id = l.module_id
-    JOIN courses c ON c.id = m.course_id
-    WHERE scs.student_id = CAST(:student_id AS uuid)
-      AND scs.due_at IS NOT NULL
-      AND scs.due_at <= NOW()
-      AND qq.deleted_at IS NULL
-      AND q.deleted_at IS NULL
-      AND l.deleted_at IS NULL
-      AND qq.review_status = 'approved'
-      AND (CAST(:lesson_id AS uuid) IS NULL OR qsl.lesson_id = CAST(:lesson_id AS uuid))
-      -- Lesson slugs are unique per MODULE (uq_lessons_module_slug), not per
-      -- course, so this filter can match two lessons in the same course when
-      -- both are titled e.g. "Introduction". That is deliberate: pulling the
-      -- cards of both beats silently picking one of them, which is what a
-      -- client-side `.find()` on the slug would do.
-      AND (CAST(:lesson_slug AS text) IS NULL OR l.slug = CAST(:lesson_slug AS text))
-      AND (CAST(:course_slug AS text) IS NULL OR c.slug = CAST(:course_slug AS text))
-      AND (
-            CAST(:after_due AS timestamptz) IS NULL
-            OR scs.due_at > CAST(:after_due AS timestamptz)
-            OR (
-                scs.due_at = CAST(:after_due AS timestamptz)
-                AND scs.question_id > CAST(:after_qid AS uuid)
-            )
-      )
-    ORDER BY scs.due_at ASC, scs.question_id ASC
+        card.question_id,
+        card.quiz_id,
+        card.lesson_id,
+        card.lesson_slug,
+        card.lesson_title,
+        card.course_slug,
+        card.course_title,
+        card.due_at,
+        card.last_q,
+        card.ef
+    FROM (
+        SELECT DISTINCT ON (scs.question_id)
+            scs.question_id,
+            qq.quiz_id,
+            qsl.lesson_id,
+            l.slug AS lesson_slug,
+            l.title AS lesson_title,
+            c.slug AS course_slug,
+            c.title AS course_title,
+            scs.due_at,
+            scs.last_q,
+            scs.ef
+        FROM student_card_state scs
+        JOIN quiz_questions qq ON qq.id = scs.question_id
+        JOIN quizzes q ON q.id = qq.quiz_id
+        JOIN quiz_source_lessons qsl ON qsl.quiz_id = q.id
+        JOIN lessons l ON l.id = qsl.lesson_id
+        JOIN modules m ON m.id = l.module_id
+        JOIN courses c ON c.id = m.course_id
+        WHERE scs.student_id = CAST(:student_id AS uuid)
+          AND scs.due_at IS NOT NULL
+          AND scs.due_at <= NOW()
+          AND qq.deleted_at IS NULL
+          AND q.deleted_at IS NULL
+          AND l.deleted_at IS NULL
+          AND qq.review_status = 'approved'
+          -- Schedulable, not merely servable: `record_card_review` refuses a
+          -- question with no expected_response_time_ms, so without this a card
+          -- whose T_exp was cleared after publish would sit in the queue and
+          -- reject every answer, staying due forever. Excluded here it is
+          -- simply not offered; the teacher-facing
+          -- `list_published_quizzes_missing_texp_for_courses` report is where
+          -- it surfaces for repair. NULL fails this comparison too (SQL
+          -- three-valued logic), which is exactly the wanted behaviour, and
+          -- `> 0` matches the publish gate's `IS NULL OR <= 0` rejection.
+          AND qq.expected_response_time_ms > 0
+          AND (CAST(:lesson_id AS uuid) IS NULL OR qsl.lesson_id = CAST(:lesson_id AS uuid))
+          -- Lesson slugs are unique per MODULE (uq_lessons_module_slug), not
+          -- per course, so this filter can match two lessons in the same
+          -- course when both are titled e.g. "Introduction". That is
+          -- deliberate: pulling the cards of both beats silently picking one
+          -- of them, which is what a client-side `.find()` on the slug would
+          -- do.
+          AND (CAST(:lesson_slug AS text) IS NULL OR l.slug = CAST(:lesson_slug AS text))
+          AND (CAST(:course_slug AS text) IS NULL OR c.slug = CAST(:course_slug AS text))
+          AND (
+                CAST(:after_due AS timestamptz) IS NULL
+                OR scs.due_at > CAST(:after_due AS timestamptz)
+                OR (
+                    scs.due_at = CAST(:after_due AS timestamptz)
+                    AND scs.question_id > CAST(:after_qid AS uuid)
+                )
+          )
+        ORDER BY scs.question_id, qsl.lesson_id
+    ) AS card
+    ORDER BY card.due_at ASC, card.question_id ASC
     LIMIT :limit
     """
 )
@@ -448,7 +493,16 @@ async def submit_review(
                 question_id=event.question_id,
                 quiz_attempt_id=event.quiz_attempt_id,
             )
+            # The dispatcher only flushes — `send_notification` leaves the
+            # transaction to its caller. Without this commit the notification
+            # row is rolled back when `get_db` closes the session, so the
+            # student is never told. One commit per event: each remediation is
+            # its own unit of work, and a later failure cannot undo an earlier
+            # notification that was already correct.
+            await db.commit()
         except Exception:  # noqa: BLE001 — side-effect must not fail the review
+            # Leave no half-written transaction behind for the next event.
+            await db.rollback()
             logger.exception(
                 "review_remediation_dispatch_failed",
                 extra={"question_id": str(question_id)},

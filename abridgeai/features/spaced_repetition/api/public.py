@@ -71,17 +71,24 @@ async def get_due_card_count(db: AsyncSession, student_id: UUID) -> int:
 
     "Reviewable" is the crux: a card is only counted if its question still
     resolves to an approved, non-deleted payload the review loop can actually
-    serve. This must match the reviewability predicate in the cards-due /
-    review-queue SQL (``routers/learner.py:_CARDS_DUE_SQL``) exactly —
-    otherwise ``total_due`` counts cards whose question is ``pending`` / draft /
-    soft-deleted and the student sees "21 due" but Start Review serves fewer,
-    with a course row that has nothing behind it. A raw join (rather than the
-    bare ``student_card_state`` count) is required because ``review_status`` and
-    the soft-delete flags live on the quizzes-side tables.
+    serve AND schedule. This must match the reviewability predicate in the
+    cards-due / review-queue SQL (``routers/learner.py:_CARDS_DUE_SQL``)
+    exactly — otherwise ``total_due`` counts cards whose question is
+    ``pending`` / draft / soft-deleted / missing ``expected_response_time_ms``
+    and the student sees "21 due" but Start Review serves fewer, with a course
+    row that has nothing behind it. A raw join (rather than the bare
+    ``student_card_state`` count) is required because ``review_status``,
+    ``expected_response_time_ms`` and the soft-delete flags live on the
+    quizzes-side tables.
+
+    ``count(DISTINCT ...)``, not ``count(*)``: ``quiz_source_lessons`` is
+    many-to-many, so a quiz citing two lessons joins one due card out into two
+    rows. The queue de-duplicates with ``DISTINCT ON``; this has to match or
+    the two disagree again in the other direction.
     """
     stmt = text(
         """
-        SELECT count(*)
+        SELECT count(DISTINCT scs.question_id)
         FROM student_card_state scs
         JOIN quiz_questions qq ON qq.id = scs.question_id
         JOIN quizzes q ON q.id = qq.quiz_id
@@ -94,6 +101,7 @@ async def get_due_card_count(db: AsyncSession, student_id: UUID) -> int:
           AND q.deleted_at IS NULL
           AND l.deleted_at IS NULL
           AND qq.review_status = 'approved'
+          AND qq.expected_response_time_ms > 0
         """
     )
     return int((await db.execute(stmt, {"student_id": str(student_id)})).scalar_one())

@@ -452,7 +452,16 @@ async def record_answer(
                 question_id=event.question_id,
                 quiz_attempt_id=event.quiz_attempt_id,
             )
+            # The dispatcher only flushes — `send_notification` leaves the
+            # transaction to its caller. Without this commit the notification
+            # row is rolled back when `get_db` closes the session, so the
+            # student is never told. One commit per event: each remediation is
+            # its own unit of work, and a later failure cannot undo an earlier
+            # notification that was already correct.
+            await db.commit()
         except Exception:  # noqa: BLE001 — side-effect must not fail the answer
+            # Leave no half-written transaction behind for the next event.
+            await db.rollback()
             _logger.exception(
                 "remediation_dispatch_failed",
                 question_id=str(event.question_id),

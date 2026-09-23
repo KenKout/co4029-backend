@@ -617,6 +617,167 @@ async def test_cards_due_excludes_unapproved_questions(
             )
 
 
+async def _purge_course_graph(engine: AsyncEngine, *, course_id: UUID, student_id: UUID) -> None:
+    """Drop the cards, quizzes, modules and enrolment a test seeded."""
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("DELETE FROM student_card_state WHERE student_id = :s"),
+            {"s": student_id},
+        )
+        quiz_ids = [
+            str(v)
+            for v in (
+                await conn.execute(
+                    text("SELECT id FROM quizzes WHERE course_id = :c"),
+                    {"c": course_id},
+                )
+            ).scalars()
+        ]
+        if quiz_ids:
+            await hard_delete_graph(conn, "quizzes", quiz_ids)
+        module_ids = [
+            str(v)
+            for v in (
+                await conn.execute(
+                    text("SELECT id FROM modules WHERE course_id = :c"),
+                    {"c": course_id},
+                )
+            ).scalars()
+        ]
+        if module_ids:
+            await hard_delete_graph(conn, "modules", module_ids)
+        await conn.execute(
+            text("DELETE FROM course_enrollments WHERE course_id = :c"),
+            {"c": course_id},
+        )
+
+
+async def test_a_quiz_on_two_lessons_does_not_duplicate_its_cards(
+    client: httpx.AsyncClient,
+    engine: AsyncEngine,
+    student_bearer: str,
+    seeded_users: SeededUsers,
+) -> None:
+    """One card is one card, however many lessons its quiz cites.
+
+    ``quiz_source_lessons`` is many-to-many — PK (quiz_id, lesson_id), and the
+    authoring service takes a list of lesson ids — so the join that labels a
+    card with its lesson fans a single due card out into one row per source
+    lesson. The student saw the same question twice in the queue, answered it
+    twice against the daily cap, and read an inflated number on the dashboard.
+    """
+    course_id = seeded_users.course_id
+    student_id = seeded_users.student_id
+    await _enroll(engine, course_id=course_id, student_id=student_id)
+    _, _lesson_a, quiz_id, qids = await _seed_lesson(
+        engine, course_id=course_id, n_questions=2, lesson_title="Shared quiz"
+    )
+    # A second lesson in the same course, then cite the FIRST quiz from it too.
+    _, lesson_b, _quiz_b, _qids_b = await _seed_lesson(
+        engine, course_id=course_id, n_questions=0, lesson_title="Second source"
+    )
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("INSERT INTO quiz_source_lessons (quiz_id, lesson_id) VALUES (:q, :l)"),
+            {"q": quiz_id, "l": lesson_b},
+        )
+    past = datetime.now(tz=UTC) - timedelta(hours=1)
+    for qid in qids:
+        await _set_card_state(
+            engine,
+            student_id=student_id,
+            question_id=qid,
+            ef=Decimal("2.5"),
+            due_at=past,
+            last_q=4,
+        )
+    try:
+        headers = {"Authorization": f"Bearer {student_bearer}"}
+        cards = await client.get("/api/v1/me/cards-due?limit=100", headers=headers)
+        assert cards.status_code == 200, cards.text
+        listed = [i["question_id"] for i in cards.json()["items"]]
+
+        # Two cards, each listed once -- not four rows, and no repeats.
+        assert sorted(listed) == sorted(str(q) for q in qids)
+
+        queue = await client.get("/api/v1/me/review/queue", headers=headers)
+        assert queue.status_code == 200, queue.text
+        qbody = queue.json()
+        assert qbody["total_due"] == 2
+        queued = [c["question_id"] for c in qbody["items"]]
+        assert sorted(queued) == sorted(str(q) for q in qids)
+    finally:
+        await _purge_course_graph(engine, course_id=course_id, student_id=student_id)
+
+
+async def test_cards_due_excludes_questions_with_no_expected_time(
+    client: httpx.AsyncClient,
+    engine: AsyncEngine,
+    student_bearer: str,
+    seeded_users: SeededUsers,
+) -> None:
+    """A card the scheduler would refuse is never offered for review.
+
+    ``record_card_review`` raises without ``expected_response_time_ms``, and the
+    review endpoint turns that into a 404. The publish gate only checks T_exp at
+    publish time, so clearing it afterwards left an approved, live, due card
+    that the queue happily served and every answer bounced off -- a card stuck
+    due forever, which is precisely what the review loop exists to prevent. The
+    teacher still sees it, through the published-quizzes-missing-T_exp report.
+    """
+    course_id = seeded_users.course_id
+    student_id = seeded_users.student_id
+    await _enroll(engine, course_id=course_id, student_id=student_id)
+    _, _lesson, _quiz, qids = await _seed_lesson(
+        engine, course_id=course_id, n_questions=3, lesson_title="Uncalibrated"
+    )
+    past = datetime.now(tz=UTC) - timedelta(hours=1)
+    for qid in qids:
+        await _set_card_state(
+            engine,
+            student_id=student_id,
+            question_id=qid,
+            ef=Decimal("2.5"),
+            due_at=past,
+            last_q=4,
+        )
+    # One loses its T_exp entirely, one is set non-positive: the publish gate
+    # rejects both shapes, so both must be treated the same here.
+    cleared_qid, zeroed_qid = qids[0], qids[1]
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("UPDATE quiz_questions SET expected_response_time_ms = NULL WHERE id = :id"),
+            {"id": cleared_qid},
+        )
+        await conn.execute(
+            text("UPDATE quiz_questions SET expected_response_time_ms = 0 WHERE id = :id"),
+            {"id": zeroed_qid},
+        )
+    try:
+        headers = {"Authorization": f"Bearer {student_bearer}"}
+        cards = await client.get("/api/v1/me/cards-due?limit=100", headers=headers)
+        assert cards.status_code == 200, cards.text
+        listed = {i["question_id"] for i in cards.json()["items"]}
+        assert listed == {str(qids[2])}
+
+        queue = await client.get("/api/v1/me/review/queue", headers=headers)
+        assert queue.status_code == 200, queue.text
+        qbody = queue.json()
+        assert qbody["total_due"] == 1
+        assert [c["question_id"] for c in qbody["items"]] == [str(qids[2])]
+
+        # Submitting one directly is still refused -- the queue no longer
+        # offers it, so this is now only reachable by a stale client.
+        submitted = await client.post(
+            f"/api/v1/me/review/{cleared_qid}",
+            json={"answer_text": "anything"},
+            headers=headers,
+        )
+        assert submitted.status_code == 404, submitted.text
+    finally:
+        await _purge_course_graph(engine, course_id=course_id, student_id=student_id)
+
+
 async def test_dashboard_summary_agrees_with_cards_due(
     client: httpx.AsyncClient,
     student_bearer: str,

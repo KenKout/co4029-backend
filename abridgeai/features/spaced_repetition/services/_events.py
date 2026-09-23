@@ -20,6 +20,12 @@ The fix is the **caller-dispatches-after-commit** pattern:
   ``await db.commit()`` first and then iterate over ``pending_events``
   to dispatch
   :func:`abridgeai.features.spaced_repetition.services.remediation.dispatch_remediation_for_card_failure`.
+* The caller then commits **again**. The dispatcher only flushes, because
+  :func:`~abridgeai.features.notifications.services.dispatch.send_notification`
+  leaves the transaction to its caller — and the request-scoped session from
+  ``get_db`` is closed, not committed, so an uncommitted notification row is
+  silently rolled back. Commit per event rather than once after the loop: a
+  dispatch that raises must not undo the notifications that already succeeded.
 
 If the caller never commits (or commits and then crashes before
 dispatching), the worst case is a missed notification, which is strictly
