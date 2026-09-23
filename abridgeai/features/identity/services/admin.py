@@ -243,7 +243,14 @@ async def get_user_overview(db: AsyncSession, *, user_id: UUID) -> UserOverviewR
     role_map = await access_control_api.get_role_codes_for_users(db, [user_id])
     org_map = await access_control_api.get_primary_orgs_for_users(db, [user_id])
     org = org_map.get(user_id)
-    user_read = await _serialize_search_row(user, profile, {}, role_map, org)
+    user_read = await serialize_user_async(db, user, profile)
+    user_read = user_read.model_copy(
+        update={
+            "roles": role_map.get(user_id, []),
+            "organization_id": org.id if org else None,
+            "organization_name": org.name if org else None,
+        }
+    )
     membership_codes = await access_control_api.get_user_membership_codes(db, user_id)
     if membership_codes is not None:
         user_read = user_read.model_copy(

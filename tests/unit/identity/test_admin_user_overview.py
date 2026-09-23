@@ -41,7 +41,21 @@ from abridgeai.features.identity.services import admin as admin_service
 _NOW = datetime(2026, 9, 1, tzinfo=UTC)
 
 
-def _user_read(user_id: UUID, *, last_login_at: datetime | None = None) -> UserRead:
+def _user_read(
+    user_id: UUID,
+    *,
+    last_login_at: datetime | None = None,
+    avatar_url: str | None = None,
+) -> UserRead:
+    profile = (
+        None
+        if avatar_url is None
+        else {
+            "user_id": user_id,
+            "display_name": "student@test.local",
+            "avatar_url": avatar_url,
+        }
+    )
     return UserRead.model_validate(
         {
             "id": user_id,
@@ -50,7 +64,7 @@ def _user_read(user_id: UUID, *, last_login_at: datetime | None = None) -> UserR
             "last_login_at": last_login_at,
             "created_at": _NOW,
             "updated_at": _NOW,
-            "profile": None,
+            "profile": profile,
         }
     )
 
@@ -97,7 +111,7 @@ def overview(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         AsyncMock(return_value=None),
     )
     monkeypatch.setattr(
-        admin_service, "_serialize_search_row", AsyncMock(return_value=_user_read(user_id))
+        admin_service, "serialize_user_async", AsyncMock(return_value=_user_read(user_id))
     )
 
     import abridgeai.features.career_paths.api.public as career_paths_api
@@ -161,6 +175,24 @@ class TestWhichSectionsAreAssembled:
         with pytest.raises(NotFoundError):
             await admin_service.get_user_overview(overview["db"], user_id=uuid4())
 
+    async def test_detail_preserves_avatar_url_from_avatar_aware_serializer(
+        self, monkeypatch: pytest.MonkeyPatch, overview: dict[str, Any]
+    ) -> None:
+        avatar_url = "https://storage.test/avatar.png"
+        monkeypatch.setattr(
+            admin_service,
+            "serialize_user_async",
+            AsyncMock(
+                return_value=_user_read(overview["user_id"], avatar_url=avatar_url)
+            ),
+        )
+
+        result = await admin_service.get_user_overview(
+            overview["db"], user_id=overview["user_id"]
+        )
+
+        assert result.user.profile is not None
+        assert result.user.profile.avatar_url == avatar_url
     @pytest.mark.parametrize("role", ["manager", "hod", "admin"])
     async def test_a_non_learner_gets_identity_only(
         self, monkeypatch: pytest.MonkeyPatch, overview: dict[str, Any], role: str
@@ -405,7 +437,7 @@ class TestWhenTheStudentWasLastActive:
         worked_at = _NOW + timedelta(days=20)
         monkeypatch.setattr(
             admin_service,
-            "_serialize_search_row",
+            "serialize_user_async",
             AsyncMock(return_value=_user_read(overview["user_id"], last_login_at=_NOW)),
         )
         monkeypatch.setattr(
@@ -440,7 +472,7 @@ class TestWhenTheStudentWasLastActive:
         recent_login = _NOW + timedelta(days=30)
         monkeypatch.setattr(
             admin_service,
-            "_serialize_search_row",
+            "serialize_user_async",
             AsyncMock(
                 return_value=_user_read(overview["user_id"], last_login_at=recent_login)
             ),
