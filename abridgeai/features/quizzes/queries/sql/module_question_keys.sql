@@ -19,3 +19,7 @@ SELECT
 FROM quiz_questions qq
 JOIN siblings s ON s.quiz_id = qq.quiz_id
 WHERE qq.deleted_at IS NULL
+  AND (
+      CAST(:exclude_quiz_id AS uuid) IS NULL
+      OR qq.quiz_id <> CAST(:exclude_quiz_id AS uuid)
+  )

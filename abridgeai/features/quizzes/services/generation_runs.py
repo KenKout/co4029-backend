@@ -26,8 +26,6 @@ from abridgeai.features.quizzes.models import (
     Quiz,
     QuizAttempt,
     QuizQuestion,
-    QuizQuestionOption,
-    QuizQuestionRevision,
 )
 from abridgeai.features.quizzes.schemas import QuizGenerationRequest
 
@@ -114,6 +112,7 @@ async def start_generation_run(
     course_id = await _resolve_module_course(db, module_id)
 
     quiz: Quiz | None = None
+    replace_question_ids: list[UUID] = []
     if payload.quiz_id is not None:
         quiz = await _require_quiz(db, payload.quiz_id)
         if quiz.module_id != module_id:
@@ -126,14 +125,12 @@ async def start_generation_run(
         # lessons' materials to already be embedded into document_chunks. If a
         # lesson was never processed (or embedding failed upstream), the worker
         # dies deep in the pipeline with a cryptic "no document chunks found"
-        # and — worse, pre-fix — only AFTER wiping the quiz's existing
-        # questions. Reject early with a clear, actionable message and BEFORE
-        # the wipe, so the teacher keeps their current questions and knows to
-        # reprocess the lesson (or switch to topic mode).
+        # and — before the staging fix — only AFTER wiping the quiz's existing
+        # questions. Reject early with a clear, actionable message. Replacement
+        # now keeps the old graph until a successful worker swap.
         if str(payload.generation_mode or "topic").strip().lower() == "coverage":
             await _require_embedded_chunks(db, payload.source_lesson_ids)
         if not payload.append:
-            from sqlalchemy import delete as sa_delete  # noqa: PLC0415
             from sqlalchemy import exists as sa_exists  # noqa: PLC0415
             from sqlalchemy import select as sa_select  # noqa: PLC0415
             from sqlalchemy import text as sa_text  # noqa: PLC0415
@@ -169,21 +166,16 @@ async def start_generation_run(
                     "prevents replacing quiz questions"
                 )
 
-            # With no learner evidence, delete authoring-only children in FK
-            # order. Never delete attempt answers or spaced-repetition state.
-            question_id_subq = sa_select(QuizQuestion.id).where(QuizQuestion.quiz_id == quiz.id)
-            await db.execute(
-                sa_delete(QuizQuestionOption).where(
-                    QuizQuestionOption.question_id.in_(question_id_subq)
-                )
+            # Keep the existing authoring graph until the worker has produced
+            # and validated the replacement. The worker performs the final
+            # delete-and-swap in its success transaction.
+            replace_question_ids = list(
+                (
+                    await db.scalars(
+                        sa_select(QuizQuestion.id).where(QuizQuestion.quiz_id == quiz.id)
+                    )
+                ).all()
             )
-            await db.execute(
-                sa_delete(QuizQuestionRevision).where(
-                    QuizQuestionRevision.question_id.in_(question_id_subq)
-                )
-            )
-            await db.execute(sa_delete(QuizQuestion).where(QuizQuestion.quiz_id == quiz.id))
-            await flush_or_conflict(db)
 
     base_config = dict(payload.config_json)
     coverage_dump: dict[str, object] | None = (
@@ -205,6 +197,7 @@ async def start_generation_run(
         "avoid_topics": list(payload.avoid_topics),
         "extra_instructions": payload.extra_instructions,
         "append": payload.append,
+        "replace_question_ids": [str(question_id) for question_id in replace_question_ids],
         "coverage_options": coverage_dump,
         "target_outcome_ids": [str(x) for x in payload.target_outcome_ids],
     }

@@ -27,6 +27,7 @@ from alembic.config import Config
 from sqlalchemy import (
     Column,
     Table,
+    select,
     text,
 )
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
@@ -47,7 +48,7 @@ from abridgeai.core.config import get_settings
 from abridgeai.core.db import Base
 from abridgeai.core.exceptions import AppError, ConflictError
 from abridgeai.core.security import CurrentUser
-from abridgeai.features.quizzes.models import Quiz
+from abridgeai.features.quizzes.models import Quiz, QuizQuestion
 from abridgeai.features.quizzes.routers.authoring import _AttrShim
 from abridgeai.features.quizzes.schemas import (
     CoverageOptions,
@@ -250,6 +251,168 @@ async def test_create_quiz_inserts_row_and_links_module_item(
     assert rows[0]["item_type"] == "quiz"
     assert rows[0]["quiz_id"] == quiz.id
 
+
+@pytest.mark.asyncio
+async def test_replace_enqueue_failure_preserves_existing_questions(
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict,
+) -> None:
+    """Replace mode must not wipe the draft before ARQ accepts the run."""
+    async with session_factory() as session:
+        quiz = await _make_quiz(session, scenario, title="Replace Safety Quiz")
+        question = await _approved_question(session, quiz.id, _actor(scenario["owner_id"]))
+        await session.commit()
+        question_id = question.id
+        quiz_id = quiz.id
+
+    payload = QuizGenerationRequest(
+        title="Replace Safety Quiz",
+        quiz_id=quiz_id,
+        append=False,
+        generation_mode="topic",
+    )
+    arq_pool = SimpleNamespace(
+        enqueue_job=AsyncMock(side_effect=ConnectionError("redis unavailable"))
+    )
+
+    with pytest.raises(ConnectionError):
+        async with session_factory() as session:
+            await authoring_service.start_generation_run(
+                session,
+                scenario["module_id"],
+                payload,
+                _actor(scenario["owner_id"]),
+                arq_pool=arq_pool,
+            )
+
+    async with session_factory() as session:
+        remaining = await session.get(QuizQuestion, question_id)
+        assert remaining is not None
+        assert remaining.quiz_id == quiz_id
+
+
+@pytest.mark.asyncio
+async def test_replace_generation_failure_preserves_existing_questions(
+    monkeypatch: pytest.MonkeyPatch,
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict,
+) -> None:
+    """A worker/LLM failure must roll back the staged replacement."""
+    from abridgeai.features.quizzes.services import generation as generation_service
+
+    async with session_factory() as session:
+        quiz = await _make_quiz(session, scenario, title="AI Failure Safety Quiz")
+        question = await _approved_question(session, quiz.id, _actor(scenario["owner_id"]))
+        await session.commit()
+        question_id = question.id
+        quiz_id = quiz.id
+
+    payload = QuizGenerationRequest(
+        title="AI Failure Safety Quiz",
+        quiz_id=quiz_id,
+        append=False,
+        generation_mode="topic",
+    )
+    async with session_factory() as session:
+        run = await authoring_service.start_generation_run(
+            session,
+            scenario["module_id"],
+            payload,
+            _actor(scenario["owner_id"]),
+            arq_pool=None,
+        )
+        run_id = run.id
+
+    async def _fail_pipeline(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise RuntimeError("LLM generation failed")
+
+    monkeypatch.setattr(generation_service.full_pipeline, "run_full_pipeline", _fail_pipeline)
+    with pytest.raises(RuntimeError, match="LLM generation failed"):
+        async with session_factory() as session:
+            await generation_service.run_quiz_generation(session, run_id)
+
+    async with session_factory() as session:
+        remaining = await session.get(QuizQuestion, question_id)
+        assert remaining is not None
+        assert remaining.quiz_id == quiz_id
+
+@pytest.mark.asyncio
+async def test_replace_success_swaps_questions_after_generation(
+    monkeypatch: pytest.MonkeyPatch,
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict,
+) -> None:
+    """Successful Replace commits only the new question graph."""
+    from abridgeai.features.quizzes.ai.stages.persistence import persist_questions
+    from abridgeai.features.quizzes.services import generation as generation_service
+
+    async with session_factory() as session:
+        quiz = await _make_quiz(session, scenario, title="Replace Success Quiz")
+        old_question = await _approved_question(session, quiz.id, _actor(scenario["owner_id"]))
+        await session.commit()
+        old_question_id = old_question.id
+        quiz_id = quiz.id
+
+    payload = QuizGenerationRequest(
+        title="Replace Success Quiz",
+        quiz_id=quiz_id,
+        append=False,
+        generation_mode="topic",
+    )
+    async with session_factory() as session:
+        run = await authoring_service.start_generation_run(
+            session,
+            scenario["module_id"],
+            payload,
+            _actor(scenario["owner_id"]),
+            arq_pool=None,
+        )
+        run_id = run.id
+
+    async def _success_pipeline(
+        db: AsyncSession,
+        run: GenerationRun,
+        quiz: Quiz,
+        **kwargs: object,
+    ) -> list[QuizQuestion]:
+        del kwargs
+        return await persist_questions(
+            db,
+            run,
+            quiz,
+            [],
+            [
+                {
+                    "question_type": "multiple_choice",
+                    "prompt_text": "New generated question",
+                    "expected_response_time_ms": 30_000,
+                    "source_refs": [],
+                    "options": [],
+                    "original_generated_payload": {},
+                }
+            ],
+        )
+
+    monkeypatch.setattr(generation_service.full_pipeline, "run_full_pipeline", _success_pipeline)
+    async with session_factory() as session:
+        await generation_service.run_quiz_generation(session, run_id)
+
+    async with session_factory() as session:
+        old = await session.get(QuizQuestion, old_question_id)
+        rows = list(
+            (
+                await session.scalars(
+                    select(QuizQuestion)
+                    .where(QuizQuestion.quiz_id == quiz_id)
+                    .order_by(QuizQuestion.position)
+                )
+            ).all()
+        )
+        assert old is None
+        assert len(rows) == 1
+        assert rows[0].prompt_text == "New generated question"
+        assert rows[0].position == 1
 
 @pytest.mark.asyncio
 async def test_start_generation_run_creates_run_quiz_and_enqueues_job(

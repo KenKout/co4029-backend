@@ -144,6 +144,8 @@ async def discard_duplicates(
     db: AsyncSession,
     quiz: Quiz,
     questions: list[dict[str, Any]],
+    *,
+    ignore_current_quiz: bool = False,
 ) -> tuple[list[dict[str, Any]], list[QuestionDrop]]:
     """Strip duplicate questions out of a freshly-generated batch.
 
@@ -183,7 +185,11 @@ async def discard_duplicates(
     if not questions:
         return [], []
 
-    existing_keys = await list_existing_module_question_keys(db, quiz.id)
+    existing_keys = await list_existing_module_question_keys(
+        db,
+        quiz.id,
+        exclude_quiz_id=quiz.id if ignore_current_quiz else None,
+    )
 
     candidates: list[tuple[str, list[Any]]] = []
     structural_drops: list[QuestionDrop] = []

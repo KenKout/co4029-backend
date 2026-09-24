@@ -51,7 +51,12 @@ async def list_quizzes_for_course(db: AsyncSession, course_id: UUID) -> list[Qui
     return list((await db.execute(stmt)).scalars().all())
 
 
-async def list_existing_module_question_keys(db: AsyncSession, quiz_id: UUID) -> set[str]:
+async def list_existing_module_question_keys(
+    db: AsyncSession,
+    quiz_id: UUID,
+    *,
+    exclude_quiz_id: UUID | None = None,
+) -> set[str]:
     """Return the dedup-key set for every question in ``quiz_id``'s module.
 
     Each key is a sha256 hash of ``prompt_text`` plus an md5 of the
@@ -66,7 +71,12 @@ async def list_existing_module_question_keys(db: AsyncSession, quiz_id: UUID) ->
     flat ``set[str]`` since the chunk-clash layer 3 is being moved to
     the AI pipeline (T5.4) where it can use richer fixture data.
     """
-    rows = (await db.execute(_MODULE_QUESTION_KEYS_SQL, {"quiz_id": quiz_id})).all()
+    rows = (
+        await db.execute(
+            _MODULE_QUESTION_KEYS_SQL,
+            {"quiz_id": quiz_id, "exclude_quiz_id": exclude_quiz_id},
+        )
+    ).all()
     return {row.question_key for row in rows}
 
 

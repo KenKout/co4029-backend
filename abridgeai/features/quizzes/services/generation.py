@@ -49,6 +49,8 @@ import contextlib
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
+from sqlalchemy import delete, select
+
 from abridgeai.ai.knowledge_graph.schemas import KGContext
 from abridgeai.ai.models import GenerationRun
 from abridgeai.core.exceptions import ConflictError, NotFoundError
@@ -66,13 +68,58 @@ from abridgeai.features.quizzes.ai.pipelines import (
 from abridgeai.features.quizzes.ai.pipelines import (
     regenerate as regenerate_pipeline,
 )
-from abridgeai.features.quizzes.models import Quiz, QuizQuestion
+from abridgeai.features.quizzes.models import (
+    Quiz,
+    QuizQuestion,
+    QuizQuestionOption,
+    QuizQuestionRevision,
+)
 from abridgeai.features.quizzes.services.completion_notify import (
     notify_quiz_generation_outcome,
 )
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
+
+
+async def _finalize_replace(
+    db: AsyncSession,
+    quiz_id: UUID,
+    old_question_ids: list[UUID],
+) -> None:
+    """Atomically swap generated questions for the old draft content.
+
+    The old graph is intentionally retained while the worker performs all LLM
+    work. This final step runs before the success commit; any exception rolls
+    back both the swap and the newly persisted questions.
+    """
+    if not old_question_ids:
+        return
+    await db.execute(
+        delete(QuizQuestionOption).where(
+            QuizQuestionOption.question_id.in_(old_question_ids)
+        )
+    )
+    await db.execute(
+        delete(QuizQuestionRevision).where(
+            QuizQuestionRevision.question_id.in_(old_question_ids)
+        )
+    )
+    await db.execute(
+        delete(QuizQuestion).where(QuizQuestion.id.in_(old_question_ids))
+    )
+    new_questions = list(
+        (
+            await db.scalars(
+                select(QuizQuestion)
+                .where(QuizQuestion.quiz_id == quiz_id)
+                .order_by(QuizQuestion.position, QuizQuestion.id)
+            )
+        ).all()
+    )
+    for position, question in enumerate(new_questions, start=1):
+        question.position = position
+    await db.flush()
 
 
 def _config_uuid(config: dict[str, Any] | None, key: str) -> UUID | None:
@@ -326,6 +373,10 @@ async def run_quiz_generation(
                     config=config,
                 )
 
+        replace_question_ids = _config_uuid_list(
+            dict(run.config_json or {}), "replace_question_ids"
+        )
+        await _finalize_replace(db, run_quiz_id, replace_question_ids)
         run.status = "completed"
         run.finished_at = utcnow()
         await db.commit()
