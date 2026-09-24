@@ -242,25 +242,18 @@ async def test_publish_with_zero_t_exp_returns_422(
     scenario: dict,
 ) -> None:
     quiz_id = scenario["quiz_id"]
-    question_id = uuid.uuid4()
-    async with engine.begin() as conn:
-        from sqlalchemy.exc import IntegrityError  # noqa: PLC0415
+    question_id = await _insert_question(
+        engine,
+        quiz_id=quiz_id,
+        position=1,
+        expected_response_time_ms=0,
+    )
 
-        with pytest.raises(IntegrityError):
-            await conn.execute(
-                text(
-                    "INSERT INTO quiz_questions "
-                    "(id, quiz_id, position, question_type, prompt_text, "
-                    "review_status, expected_response_time_ms) "
-                    "VALUES (:id, :qz, 1, 'multiple_choice', 'Q?', 'approved', 0)"
-                ),
-                {"id": question_id, "qz": quiz_id},
-            )
-
-    await _insert_question(engine, quiz_id=quiz_id, position=1, expected_response_time_ms=None)
     async with session_factory() as session, session.begin():
-        with pytest.raises(QuizPublishValidationError):
+        with pytest.raises(QuizPublishValidationError) as exc_info:
             await authoring_service.publish_quiz(session, quiz_id, _actor(scenario["owner_id"]))
+
+    assert question_id in exc_info.value.missing_t_exp_question_ids
 
 
 @pytest.mark.asyncio

@@ -260,12 +260,15 @@ async def run_coverage_pipeline(  # noqa: C901 -- pre-existing linear stage sequ
         current_stage="dedup",
         detail=f"{len(accepted)} accepted",
     )
-    kept, drops = await discard_duplicates(
-        db,
-        quiz,
-        accepted,
-        ignore_current_quiz=bool(config.get("replace_question_ids")),
-    )
+    if config.get("replace_question_ids"):
+        kept, drops = await discard_duplicates(
+            db,
+            quiz,
+            accepted,
+            ignore_current_quiz=True,
+        )
+    else:
+        kept, drops = await discard_duplicates(db, quiz, accepted)
     if not kept:
         log_validator_aborted_run(
             candidates=questions,
