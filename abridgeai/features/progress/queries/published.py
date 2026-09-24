@@ -42,7 +42,9 @@ async def list_lesson_ids_for_course(db: AsyncSession, course_id: UUID) -> list[
             JOIN modules m ON m.id = l.module_id
             WHERE m.course_id = :course_id
               AND l.deleted_at IS NULL
+              AND l.status = 'published'
               AND m.deleted_at IS NULL
+              AND m.status = 'published'
             """
         ),
         {"course_id": course_id},
@@ -64,7 +66,9 @@ async def list_lesson_ids_for_courses(
             JOIN modules m ON m.id = l.module_id
             WHERE m.course_id = ANY(CAST(:course_ids AS uuid[]))
               AND l.deleted_at IS NULL
+              AND l.status = 'published'
               AND m.deleted_at IS NULL
+              AND m.status = 'published'
             ORDER BY m.course_id, l.id
             """
         ),

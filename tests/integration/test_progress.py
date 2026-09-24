@@ -373,6 +373,50 @@ async def test_course_summary_counts_a_lesson_never_opened(
 
 
 @pytest.mark.asyncio
+async def test_course_summary_excludes_draft_lessons(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict[str, uuid.UUID],
+    seeded_users: SeededUsers,
+) -> None:
+    """Draft lessons are not learner-visible and never enter the denominator."""
+    draft_id = uuid.uuid4()
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO lessons "
+                "(id, module_id, slug, title, status, estimated_minutes) "
+                "VALUES (:id, :module_id, :slug, 'Draft lesson', 'draft', 20)"
+            ),
+            {
+                "id": draft_id,
+                "module_id": scenario["module_id"],
+                "slug": f"draft-progress-{draft_id.hex}",
+            },
+        )
+
+    try:
+        from abridgeai.features.progress.services.reporting import (
+            get_my_course_progress_summary,
+        )
+
+        async with session_factory() as session:
+            summary = await get_my_course_progress_summary(
+                session,
+                user_id=seeded_users.student_id,
+                course_id=scenario["course_id"],
+            )
+
+        assert summary.total_lessons == 1
+        assert draft_id not in {row.lesson_id for row in summary.lessons}
+    finally:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("DELETE FROM lessons WHERE id = :id"), {"id": draft_id}
+            )
+
+
+@pytest.mark.asyncio
 async def test_course_summary_reflects_a_completed_lesson(
     client: httpx.AsyncClient,
     session_factory: async_sessionmaker[AsyncSession],
