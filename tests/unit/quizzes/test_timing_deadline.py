@@ -9,6 +9,7 @@ from abridgeai.features.quizzes.services.timing import (
     compute_deadline,
     is_overdue,
     resolve_attempt_timing,
+    timing_payload_update,
     timing_snapshot,
 )
 
@@ -65,6 +66,15 @@ def test_attempt_timing_snapshot_wins_over_later_quiz_values():
     resolved = resolve_attempt_timing(quiz, attempt)
 
     assert resolved == EffectiveTiming(time_limit_seconds=3600, available_until=None)
+
+
+def test_timing_payload_update_exposes_effective_values_to_the_client():
+    timing = EffectiveTiming(time_limit_seconds=3600, available_until=T0 + timedelta(hours=2))
+
+    assert timing_payload_update(timing) == {
+        "available_until": T0 + timedelta(hours=2),
+        "time_limit_seconds": 3600,
+    }
 
 
 def test_timing_snapshot_round_trips_close_time():

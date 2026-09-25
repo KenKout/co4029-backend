@@ -541,7 +541,9 @@ async def start_attempt(
     await flush_or_conflict(db)
     available_questions = apply_layout(available_questions, layout)
 
-    public_quiz = QuizPublic.model_validate(quiz)
+    public_quiz = QuizPublic.model_validate(quiz).model_copy(
+        update=_timing.timing_payload_update(_timing.resolve_effective_timing(quiz, effective))
+    )
     public_questions = [
         QuizQuestionPublic.model_validate(question) for question in available_questions
     ]

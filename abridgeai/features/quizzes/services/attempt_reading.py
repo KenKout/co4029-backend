@@ -283,6 +283,12 @@ async def get_attempt_progress(
     )
 
     quiz = await _require_quiz(db, attempt.quiz_id)
+    from abridgeai.features.quizzes.services.timing import (
+        resolve_attempt_timing,
+        timing_payload_update,
+    )
+
+    effective_timing = resolve_attempt_timing(quiz, attempt)
     questions = await _load_quiz_questions_for_taking(db, attempt.quiz_id)
     # Re-apply the per-attempt shuffle layout persisted at start time so a
     # resume (refresh / re-open) shows the SAME shuffled order the student saw,
@@ -295,7 +301,9 @@ async def get_attempt_progress(
     public_questions = [QuizQuestionPublic.model_validate(q) for q in questions]
     _renumber_display_positions(public_questions)
     take_payload = QuizForTakingPublic(
-        quiz=QuizPublic.model_validate(quiz),
+        quiz=QuizPublic.model_validate(quiz).model_copy(
+            update=timing_payload_update(effective_timing)
+        ),
         questions=public_questions,
     )
 

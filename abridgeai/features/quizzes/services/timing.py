@@ -86,6 +86,14 @@ def resolve_effective_timing(quiz: object, effective: object | None = None) -> E
     return EffectiveTiming(time_limit_seconds=time_limit, available_until=available_until)
 
 
+def timing_payload_update(timing: EffectiveTiming) -> dict[str, Any]:
+    """Return the effective timing fields exposed in learner take payloads."""
+    return {
+        "available_until": timing.available_until,
+        "time_limit_seconds": timing.time_limit_seconds,
+    }
+
+
 def timing_snapshot(timing: EffectiveTiming) -> dict[str, Any]:
     """Serialize resolved timing for durable use by one quiz attempt."""
     return {
@@ -126,5 +134,6 @@ __all__ = [
     "is_overdue",
     "resolve_attempt_timing",
     "resolve_effective_timing",
+    "timing_payload_update",
     "timing_snapshot",
 ]
