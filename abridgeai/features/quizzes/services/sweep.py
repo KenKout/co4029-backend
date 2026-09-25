@@ -37,10 +37,11 @@ _logger = get_logger(__name__)
 async def list_overdue_candidates(
     db: AsyncSession, *, limit: int = 500
 ) -> list[tuple[QuizAttempt, Quiz]]:
-    """``in_progress`` attempts on quizzes that have some deadline mechanism.
+    """``in_progress`` attempts with a base or frozen deadline mechanism.
 
-    Pre-filters in SQL (time limit OR close date present) to keep the scan cheap;
-    the exact deadline/grace math is applied per-attempt by :func:`sweep_overdue`.
+    Pre-filters in SQL (base time limit/close date OR a frozen attempt timing
+    snapshot) to keep the scan cheap; the exact deadline/grace math is applied
+    per-attempt by :func:`sweep_overdue`.
     """
     stmt = (
         select(QuizAttempt, Quiz)
