@@ -20,7 +20,9 @@
 --       └─ modules m            (l.module_id = m.id)
 --            └─ module_items mi (mi.module_id = m.id, mi.quiz_id NOT NULL)
 --                 └─ quizzes q  (q.id = mi.quiz_id)
---                      └─ quiz_questions qq (qq.quiz_id = q.id)
+--                      └─ quiz_source_lessons qsl (qsl.quiz_id = q.id,
+--                                                   qsl.lesson_id = l.id)
+--                           └─ quiz_questions qq (qq.quiz_id = q.id)
 --
 -- Soft-delete: every layer respects ``deleted_at IS NULL`` and the
 -- learner-visibility rules are NOT applied here (the unlock gate cares
@@ -33,7 +35,8 @@
 --
 -- Bind parameters:
 --   :student_id      UUID  — learner whose state we read.
---   :lesson_id       UUID  — lesson whose cards we aggregate.
+--   :lesson_id       UUID  — lesson whose cards we aggregate; quizzes must
+--                           also have a ``quiz_source_lessons`` row for it.
 --   :ef_min          float — EF threshold from lesson.ef_min_unlock.
 --   :blocking_limit  int   — cap on returned blocking_card payload size.
 --
@@ -49,6 +52,9 @@ WITH lesson_cards AS (
     JOIN module_items mi ON mi.quiz_id = q.id
     JOIN modules m ON m.id = mi.module_id
     JOIN lessons l ON l.module_id = m.id
+    JOIN quiz_source_lessons qsl
+        ON qsl.quiz_id = q.id
+        AND qsl.lesson_id = l.id
     LEFT JOIN student_card_state scs
         ON scs.question_id = qq.id
         AND scs.student_id = :student_id

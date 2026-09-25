@@ -241,6 +241,7 @@ async def _attach_quiz_with_cards(
     *,
     course_id: UUID,
     module_id: UUID,
+    lesson_id: UUID,
     student_id: UUID,
     cards: list[float],
     position: int = 1,
@@ -269,6 +270,13 @@ async def _attach_quiz_with_cards(
                 "quiz": quiz_id,
                 "pos": position,
             },
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO quiz_source_lessons (quiz_id, lesson_id) "
+                "VALUES (:quiz, :lesson)"
+            ),
+            {"quiz": quiz_id, "lesson": lesson_id},
         )
         for idx, ef_value in enumerate(cards, start=1):
             qid = question_ids[idx - 1]
@@ -357,6 +365,7 @@ async def test_eligible_all_passing(
         engine,
         course_id=base["course_id"],
         module_id=base["module_id"],
+        lesson_id=lesson_id,
         student_id=base["student_id"],
         cards=[2.5, 2.4, 2.3, 2.2, 2.1],
     )
@@ -383,6 +392,41 @@ async def test_eligible_all_passing(
 
 
 @pytest.mark.asyncio
+async def test_quiz_cards_are_scoped_to_source_lesson(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    cache_disabled: None,
+) -> None:
+    base = await _seed_org_user_course_module(engine)
+    lesson_a = await _seed_lesson(engine, module_id=base["module_id"], slug_suffix="source")
+    lesson_b = await _seed_lesson(engine, module_id=base["module_id"], slug_suffix="unrelated")
+    await _attach_quiz_with_cards(
+        engine,
+        course_id=base["course_id"],
+        module_id=base["module_id"],
+        lesson_id=lesson_a,
+        student_id=base["student_id"],
+        cards=[1.4],
+    )
+
+    async with session_factory() as session:
+        source_status = await check_lesson_unlock(
+            session,
+            student_id=base["student_id"],
+            lesson_id=lesson_a,
+        )
+        unrelated_status = await check_lesson_unlock(
+            session,
+            student_id=base["student_id"],
+            lesson_id=lesson_b,
+        )
+
+    assert source_status.total_cards == 1
+    assert unrelated_status.total_cards == 0
+    assert unrelated_status.eligible is True
+
+
+@pytest.mark.asyncio
 async def test_blocked_partial_fail(
     engine: AsyncEngine,
     session_factory: async_sessionmaker[AsyncSession],
@@ -394,6 +438,7 @@ async def test_blocked_partial_fail(
         engine,
         course_id=base["course_id"],
         module_id=base["module_id"],
+        lesson_id=lesson_id,
         student_id=base["student_id"],
         cards=[2.5, 2.5, 2.5, 1.5, 1.7],
     )
@@ -459,6 +504,7 @@ async def test_prereq_blocked_recursion(
         engine,
         course_id=base["course_id"],
         module_id=base["module_id"],
+        lesson_id=lesson_c,
         student_id=base["student_id"],
         cards=[2.5, 2.5, 1.4, 1.4, 1.4],
         position=1,
@@ -493,6 +539,7 @@ async def test_interview_required_not_passed(
         engine,
         course_id=base["course_id"],
         module_id=base["module_id"],
+        lesson_id=lesson_id,
         student_id=base["student_id"],
         cards=[2.5, 2.5, 2.5, 2.5, 2.5],
     )
@@ -531,6 +578,7 @@ async def test_interview_required_passed(
         engine,
         course_id=base["course_id"],
         module_id=base["module_id"],
+        lesson_id=lesson_id,
         student_id=base["student_id"],
         cards=[2.5, 2.5, 2.5, 2.5, 2.5],
     )
@@ -602,6 +650,7 @@ async def test_cache_speedup(
         engine,
         course_id=base["course_id"],
         module_id=base["module_id"],
+        lesson_id=lesson_id,
         student_id=base["student_id"],
         cards=[2.5, 2.5, 2.5, 2.5, 2.5],
     )
