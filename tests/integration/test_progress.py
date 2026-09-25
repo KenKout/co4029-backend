@@ -360,6 +360,9 @@ async def test_course_summary_counts_a_lesson_never_opened(
         )
 
     assert summary.total_lessons >= 1
+    assert summary.unit_total == 1
+    assert summary.unit_done == 0
+    assert float(summary.unit_completion_percent or 0) == 0.0
     assert summary.total_lessons == (
         summary.completed_lessons + summary.in_progress_lessons + summary.not_started_lessons
     ), "every lesson falls into exactly one bucket"
@@ -444,6 +447,9 @@ async def test_course_summary_reflects_a_completed_lesson(
         )
 
     assert summary.completed_lessons >= 1
+    assert summary.unit_total == 1
+    assert summary.unit_done == 1
+    assert float(summary.unit_completion_percent or 0) == 100.0
     assert summary.total_lessons == (
         summary.completed_lessons + summary.in_progress_lessons + summary.not_started_lessons
     )

@@ -55,6 +55,13 @@ async def get_my_course_progress_summary(
     )
     total_time_seconds = sum(p.total_time_seconds for p in progresses)
     last_activity_at = _max_last_activity(progresses)
+    from abridgeai.features.enrollments.queries.completion_units import (
+        get_course_unit_tally,
+    )
+
+    unit_tally = await get_course_unit_tally(
+        db, course_id=course_id, student_id=user_id
+    )
 
     summaries = [
         _to_summary(by_lesson.get(lesson_id), lesson_id) for lesson_id in lesson_ids
@@ -69,6 +76,9 @@ async def get_my_course_progress_summary(
         completion_percent=completion_percent,
         total_time_seconds=total_time_seconds,
         last_activity_at=last_activity_at,
+        unit_total=unit_tally.total,
+        unit_done=unit_tally.done,
+        unit_completion_percent=Decimal(str(unit_tally.percent)),
         lessons=summaries,
     )
 

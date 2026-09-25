@@ -61,6 +61,9 @@ class MyCourseProgressSummary(BaseModel):
     completion_percent: Decimal
     total_time_seconds: int
     last_activity_at: datetime | None
+    unit_total: int | None = None
+    unit_done: int | None = None
+    unit_completion_percent: Decimal | None = None
     lessons: list[LessonProgressSummary]
 
 
