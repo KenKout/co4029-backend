@@ -79,6 +79,11 @@ async def fixture_data(engine: AsyncEngine) -> AsyncIterator[dict]:
     mat_invisible_ready = uuid.uuid4()
     mat_visible_processing = uuid.uuid4()
     mat_archived = uuid.uuid4()
+    # A material whose newest version is unservable while an older one is
+    # ready: the re-upload case. One still in the pipeline, one whose ingest
+    # failed outright.
+    mat_reupload_in_flight = uuid.uuid4()
+    mat_reupload_failed = uuid.uuid4()
 
     ver_v1_ready = uuid.uuid4()
     ver_v2_ready_current = uuid.uuid4()
@@ -86,6 +91,10 @@ async def fixture_data(engine: AsyncEngine) -> AsyncIterator[dict]:
     ver_processing = uuid.uuid4()
     ver_archived_cancelled = uuid.uuid4()
     ver_other_course = uuid.uuid4()
+    ver_in_flight_old_ready = uuid.uuid4()
+    ver_in_flight_new_pending = uuid.uuid4()
+    ver_failed_old_ready = uuid.uuid4()
+    ver_failed_new = uuid.uuid4()
 
     mat_other_course = uuid.uuid4()
 
@@ -157,7 +166,9 @@ async def fixture_data(engine: AsyncEngine) -> AsyncIterator[dict]:
                 "(:m2, :l, 'Invisible Ready', 'pdf', TRUE, FALSE), "
                 "(:m3, :l, 'Visible Processing', 'pdf', TRUE, TRUE), "
                 "(:m4, :l, 'Archived', 'pdf', TRUE, TRUE), "
-                "(:m5, :l2, 'Other Lesson Material', 'pdf', TRUE, TRUE)"
+                "(:m5, :l2, 'Other Lesson Material', 'pdf', TRUE, TRUE), "
+                "(:m6, :l, 'Re-upload In Flight', 'pdf', TRUE, TRUE), "
+                "(:m7, :l, 'Re-upload Failed', 'pdf', TRUE, TRUE)"
             ),
             {
                 "m1": mat_visible_ready,
@@ -165,6 +176,8 @@ async def fixture_data(engine: AsyncEngine) -> AsyncIterator[dict]:
                 "m3": mat_visible_processing,
                 "m4": mat_archived,
                 "m5": mat_other_course,
+                "m6": mat_reupload_in_flight,
+                "m7": mat_reupload_failed,
                 "l": lesson_id,
                 "l2": other_lesson_id,
             },
@@ -180,7 +193,11 @@ async def fixture_data(engine: AsyncEngine) -> AsyncIterator[dict]:
                 "(:vinv, :m2, :s, 1, TRUE, 'ready'), "
                 "(:vproc, :m3, :s, 1, TRUE, 'extracting'), "
                 "(:vcan, :m4, :s, 1, TRUE, 'cancelled'), "
-                "(:voc, :m5, :s, 1, TRUE, 'ready')"
+                "(:voc, :m5, :s, 1, TRUE, 'ready'), "
+                "(:vifold, :m6, :s, 1, FALSE, 'ready'), "
+                "(:vifnew, :m6, :s, 2, TRUE, 'pending'), "
+                "(:vfold, :m7, :s, 1, FALSE, 'ready'), "
+                "(:vfnew, :m7, :s, 2, TRUE, 'failed')"
             ),
             {
                 "v1": ver_v1_ready,
@@ -189,11 +206,17 @@ async def fixture_data(engine: AsyncEngine) -> AsyncIterator[dict]:
                 "vproc": ver_processing,
                 "vcan": ver_archived_cancelled,
                 "voc": ver_other_course,
+                "vifold": ver_in_flight_old_ready,
+                "vifnew": ver_in_flight_new_pending,
+                "vfold": ver_failed_old_ready,
+                "vfnew": ver_failed_new,
                 "m1": mat_visible_ready,
                 "m2": mat_invisible_ready,
                 "m3": mat_visible_processing,
                 "m4": mat_archived,
                 "m5": mat_other_course,
+                "m6": mat_reupload_in_flight,
+                "m7": mat_reupload_failed,
                 "s": storage_id,
             },
         )
@@ -201,8 +224,9 @@ async def fixture_data(engine: AsyncEngine) -> AsyncIterator[dict]:
             text(
                 "UPDATE learning_materials SET current_version_id = CASE id "
                 "WHEN :m1 THEN :v2 WHEN :m2 THEN :vinv WHEN :m3 THEN :vproc "
-                "WHEN :m4 THEN :vcan WHEN :m5 THEN :voc END "
-                "WHERE id IN (:m1, :m2, :m3, :m4, :m5)"
+                "WHEN :m4 THEN :vcan WHEN :m5 THEN :voc "
+                "WHEN :m6 THEN :vifnew WHEN :m7 THEN :vfnew END "
+                "WHERE id IN (:m1, :m2, :m3, :m4, :m5, :m6, :m7)"
             ),
             {
                 "m1": mat_visible_ready,
@@ -210,11 +234,15 @@ async def fixture_data(engine: AsyncEngine) -> AsyncIterator[dict]:
                 "m3": mat_visible_processing,
                 "m4": mat_archived,
                 "m5": mat_other_course,
+                "m6": mat_reupload_in_flight,
+                "m7": mat_reupload_failed,
                 "v2": ver_v2_ready_current,
                 "vinv": ver_invisible_ready,
                 "vproc": ver_processing,
                 "vcan": ver_archived_cancelled,
                 "voc": ver_other_course,
+                "vifnew": ver_in_flight_new_pending,
+                "vfnew": ver_failed_new,
             },
         )
 
@@ -269,6 +297,12 @@ async def fixture_data(engine: AsyncEngine) -> AsyncIterator[dict]:
         "mat_visible_processing": mat_visible_processing,
         "mat_archived": mat_archived,
         "mat_other_course": mat_other_course,
+        "mat_reupload_in_flight": mat_reupload_in_flight,
+        "mat_reupload_failed": mat_reupload_failed,
+        "ver_in_flight_old_ready": ver_in_flight_old_ready,
+        "ver_in_flight_new_pending": ver_in_flight_new_pending,
+        "ver_failed_old_ready": ver_failed_old_ready,
+        "ver_failed_new": ver_failed_new,
         "ver_v1_ready": ver_v1_ready,
         "ver_v2_ready_current": ver_v2_ready_current,
         "ver_invisible_ready": ver_invisible_ready,
@@ -312,6 +346,8 @@ async def fixture_data(engine: AsyncEngine) -> AsyncIterator[dict]:
                     mat_visible_processing,
                     mat_archived,
                     mat_other_course,
+                    mat_reupload_in_flight,
+                    mat_reupload_failed,
                 ]
             },
         )
@@ -325,6 +361,10 @@ async def fixture_data(engine: AsyncEngine) -> AsyncIterator[dict]:
                     ver_processing,
                     ver_archived_cancelled,
                     ver_other_course,
+                    ver_in_flight_old_ready,
+                    ver_in_flight_new_pending,
+                    ver_failed_old_ready,
+                    ver_failed_new,
                 ]
             },
         )
@@ -337,6 +377,8 @@ async def fixture_data(engine: AsyncEngine) -> AsyncIterator[dict]:
                     mat_visible_processing,
                     mat_archived,
                     mat_other_course,
+                    mat_reupload_in_flight,
+                    mat_reupload_failed,
                 ]
             },
         )
@@ -420,6 +462,83 @@ async def test_get_latest_ready_version_none_for_processing(
 ) -> None:
     async with session_factory() as session:
         version = await get_latest_ready_version(session, fixture_data["mat_visible_processing"])
+    assert version is None
+
+
+async def test_a_re_upload_in_flight_keeps_serving_the_last_ready_version(
+    session_factory: async_sessionmaker[AsyncSession],
+    fixture_data: dict,
+) -> None:
+    """Students keep reading v1 while v2 is still in the pipeline.
+
+    ``complete_upload`` promotes the new version before the ingest runs, so
+    pairing ``current_version_id`` with ``processing_status='ready'`` — which
+    every learner read used to do — left no row satisfying both. The material
+    dropped out of the lesson for the whole of processing, which for a large
+    PDF is minutes.
+    """
+    async with session_factory() as session:
+        materials = await list_visible_materials(session, fixture_data["lesson_id"])
+        single = await get_visible_material(session, fixture_data["mat_reupload_in_flight"])
+        version = await get_latest_ready_version(session, fixture_data["mat_reupload_in_flight"])
+
+    assert fixture_data["mat_reupload_in_flight"] in {m.id for m in materials}
+    assert single is not None
+    assert version is not None
+    assert version.id == fixture_data["ver_in_flight_old_ready"]
+
+
+async def test_a_failed_re_upload_does_not_take_the_material_dark(
+    session_factory: async_sessionmaker[AsyncSession],
+    fixture_data: dict,
+) -> None:
+    """The permanent case: the new version's ingest failed and never recovers.
+
+    Nothing in the pipeline restores ``is_current`` to the previous version, so
+    before the fallback this material was unreadable until a teacher noticed
+    and called ``rollback_to_version`` by hand.
+    """
+    async with session_factory() as session:
+        materials = await list_visible_materials(session, fixture_data["lesson_id"])
+        single = await get_visible_material(session, fixture_data["mat_reupload_failed"])
+        version = await get_latest_ready_version(session, fixture_data["mat_reupload_failed"])
+
+    assert fixture_data["mat_reupload_failed"] in {m.id for m in materials}
+    assert single is not None
+    assert version is not None
+    assert version.id == fixture_data["ver_failed_old_ready"]
+
+
+async def test_the_current_version_still_wins_when_it_is_ready(
+    session_factory: async_sessionmaker[AsyncSession],
+    fixture_data: dict,
+) -> None:
+    """The fallback must not override a deliberate rollback.
+
+    ``mat_visible_ready`` holds two ready versions, v1 and the current v2.
+    Ordering on ``is_current`` before ``version_no`` is what makes this work in
+    the rollback direction too: ``rollback_to_version`` refuses a target that
+    is not ready, so a rolled-back-to v1 would be current AND ready, win the
+    sort, and keep the newer v2 out of the learner's way.
+    """
+    async with session_factory() as session:
+        version = await get_latest_ready_version(session, fixture_data["mat_visible_ready"])
+
+    assert version is not None
+    assert version.id == fixture_data["ver_v2_ready_current"]
+    assert version.is_current is True
+
+
+async def test_a_first_upload_still_processing_has_nothing_to_fall_back_to(
+    session_factory: async_sessionmaker[AsyncSession],
+    fixture_data: dict,
+) -> None:
+    """A material that has never finished a version stays invisible."""
+    async with session_factory() as session:
+        materials = await list_visible_materials(session, fixture_data["lesson_id"])
+        version = await get_latest_ready_version(session, fixture_data["mat_visible_processing"])
+
+    assert fixture_data["mat_visible_processing"] not in {m.id for m in materials}
     assert version is None
 
 

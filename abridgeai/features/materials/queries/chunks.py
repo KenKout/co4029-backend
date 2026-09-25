@@ -12,12 +12,16 @@ Two helpers, both intentionally local to the materials feature:
   materials data layer regardless).
 
 Visibility gating: :func:`get_stream_target_for_material` enforces
-``visible_to_students = TRUE AND processing_status = 'ready' AND is_current = TRUE``
-inline; :func:`list_chunks_preview` is fronted by a service-layer
-visibility check (per the routers→services→queries discipline). The
-soft-delete listener (T0.7) auto-applies ``deleted_at IS NULL`` to ORM
-SELECTs; the raw-SQL ``stream-target`` query inlines the same predicate
-itself because the listener only watches ORM execution.
+``visible_to_students = TRUE`` inline and resolves the version through
+:mod:`._version_scope` (the current one when ready, else the newest ready
+one, so a re-upload in flight does not take the material away from
+students); :func:`list_chunks_preview` is fronted by a service-layer
+visibility check (per the routers→services→queries discipline) and resolves
+the same version, so a preview always describes the file the learner is
+actually served. The soft-delete listener (T0.7) auto-applies
+``deleted_at IS NULL`` to ORM SELECTs; the raw-SQL ``stream-target`` query
+inlines the same predicate itself because the listener only watches ORM
+execution.
 
 Soft-delete on chunks: ``DocumentChunk`` is intentionally not a
 soft-delete table (T4.1 — "deleted-and-rebuilt on re-ingest"), so its
@@ -38,6 +42,7 @@ from abridgeai.features.materials.models import (
     LearningMaterial,
     LearningMaterialVersion,
 )
+from abridgeai.features.materials.queries._version_scope import learner_version_id
 
 
 @dataclass
@@ -56,6 +61,13 @@ class MaterialStreamTarget:
     material_version_id: uuid.UUID | None = None
 
 
+# The readiness and is_current predicates that used to sit in the WHERE clause
+# now live in the version subquery, which PICKS the servable version instead of
+# asserting that the current one is servable. Spelled out rather than
+# interpolated from a shared constant: an f-string here trips S608, and
+# silencing an injection lint to save six lines of SQL is a bad trade. The
+# ORM twin is `_version_scope.learner_version_id` — the two must agree, and
+# `test_materials_queries` exercises both.
 _STREAM_TARGET_SQL = text(
     """
     SELECT so.bucket             AS bucket,
@@ -64,16 +76,21 @@ _STREAM_TARGET_SQL = text(
            lmv.id                AS material_version_id
     FROM learning_materials lm
     JOIN learning_material_versions lmv
-      ON lmv.id = lm.current_version_id
+      ON lmv.id = (
+          SELECT v.id
+          FROM learning_material_versions v
+          WHERE v.material_id = lm.id
+            AND v.processing_status = 'ready'
+            AND v.deleted_at IS NULL
+          ORDER BY v.is_current DESC, v.version_no DESC
+          LIMIT 1
+      )
     JOIN storage_objects so
       ON so.id = lmv.storage_object_id
     WHERE lm.id = :material_id
       AND lm.deleted_at IS NULL
-      AND lmv.deleted_at IS NULL
       AND so.deleted_at IS NULL
       AND lm.visible_to_students = TRUE
-      AND lmv.processing_status = 'ready'
-      AND lmv.is_current = TRUE
     """
 )
 
@@ -101,10 +118,12 @@ async def list_chunks_preview(
 ) -> list[DocumentChunk]:
     """Return the first ``limit`` chunks (by ``chunk_index`` ASC) for ``material_id``.
 
-    Joins through ``LearningMaterial.current_version_id`` so only chunks
-    belonging to the current version surface; historical or pre-rebuild
-    rows for the same material id never leak. Returns ``[]`` when
-    ``limit <= 0``. Visibility / readiness gating is the caller's job.
+    Resolves the version through :func:`~._version_scope.learner_version_id`
+    rather than ``current_version_id``, so the preview describes the same
+    version the learner is streamed: historical or pre-rebuild rows for the
+    same material id never leak, and a re-upload in flight shows the last
+    ready version's chunks instead of nothing. Returns ``[]`` when
+    ``limit <= 0``. Visibility gating is the caller's job.
     """
     if limit <= 0:
         return []
@@ -116,7 +135,7 @@ async def list_chunks_preview(
         )
         .join(
             LearningMaterial,
-            LearningMaterial.current_version_id == LearningMaterialVersion.id,
+            LearningMaterialVersion.id == learner_version_id(LearningMaterial.id),
         )
         .where(LearningMaterial.id == material_id)
         .order_by(DocumentChunk.chunk_index.asc())
@@ -131,9 +150,11 @@ async def get_stream_target_for_material(
     """Bucket + object_key + title for a learner-streamable material.
 
     Returns ``None`` (router maps to 404) when the material is missing,
-    soft-deleted, invisible, draft, mid-pipeline, or its current version
-    has no resolvable storage object. Existence MUST NOT leak — the query
-    silently returns ``None`` for every disqualifying state.
+    soft-deleted, invisible, has never finished processing a single version,
+    or that version has no resolvable storage object. A material whose newest
+    version is mid-pipeline (or failed) still streams its last ready version.
+    Existence MUST NOT leak — the query silently returns ``None`` for every
+    disqualifying state.
     """
     result = await db.execute(_STREAM_TARGET_SQL, {"material_id": material_id})
     row = result.one_or_none()
