@@ -53,6 +53,7 @@ async def list_overdue_candidates(
                     Quiz.time_limit_seconds > 0,
                 ),
                 Quiz.available_until.is_not(None),
+                QuizAttempt.timing_snapshot.is_not(None),
             )
         )
         .order_by(QuizAttempt.started_at.asc())
@@ -68,7 +69,7 @@ async def sweep_overdue(db: AsyncSession, *, now: datetime | None = None) -> dic
     expired = 0
     skipped = 0
     for attempt, quiz in await list_overdue_candidates(db):
-        eff = _timing.resolve_effective_timing(quiz)
+        eff = _timing.resolve_attempt_timing(quiz, attempt)
         overdue = _timing.is_overdue(
             attempt.started_at,
             eff,

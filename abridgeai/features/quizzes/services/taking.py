@@ -491,11 +491,14 @@ async def start_attempt(
     available_questions = [q for q in questions if q.id not in cooldown_map]
 
     next_number = await _next_attempt_number(db, quiz_id, actor.user_id)
+    from abridgeai.features.quizzes.services import timing as _timing  # noqa: PLC0415
+
     attempt = QuizAttempt(
         quiz_id=quiz_id,
         student_id=actor.user_id,
         attempt_number=next_number,
         idempotency_key=idempotency_key,
+        timing_snapshot=_timing.timing_snapshot(_timing.resolve_effective_timing(quiz, effective)),
         # Freeze the integrity policy NOW. Editing the quiz's weights or
         # threshold later must not re-score an attempt already under way —
         # the same cohort-fairness rule the interview applies at session
@@ -805,7 +808,7 @@ async def submit_attempt(
     from abridgeai.features.quizzes.services import timing as _timing  # noqa: PLC0415
 
     now = utcnow()
-    eff = _timing.resolve_effective_timing(quiz)
+    eff = _timing.resolve_attempt_timing(quiz, attempt)
     overdue = _timing.is_overdue(
         attempt.started_at,
         eff,

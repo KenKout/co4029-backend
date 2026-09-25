@@ -164,7 +164,7 @@ async def test_sweep_counts_skipped_expired_and_submitted(monkeypatch):
             ]
         ),
     )
-    monkeypatch.setattr(sweep._timing, "resolve_effective_timing", Mock(return_value=object()))
+    monkeypatch.setattr(sweep._timing, "resolve_attempt_timing", Mock(return_value=object()))
     monkeypatch.setattr(sweep._timing, "is_overdue", Mock(side_effect=[False, True, True]))
     expire = AsyncMock()
     finalize = AsyncMock()

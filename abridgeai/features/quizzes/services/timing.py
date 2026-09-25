@@ -14,7 +14,8 @@ An unbounded attempt (no limit, no close) has no deadline.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from abridgeai.core.security import utcnow
 
@@ -85,9 +86,45 @@ def resolve_effective_timing(quiz: object, effective: object | None = None) -> E
     return EffectiveTiming(time_limit_seconds=time_limit, available_until=available_until)
 
 
+def timing_snapshot(timing: EffectiveTiming) -> dict[str, Any]:
+    """Serialize resolved timing for durable use by one quiz attempt."""
+    return {
+        "version": 1,
+        "time_limit_seconds": timing.time_limit_seconds,
+        "available_until": (
+            timing.available_until.isoformat() if timing.available_until is not None else None
+        ),
+    }
+
+
+def resolve_attempt_timing(quiz: object, attempt: object) -> EffectiveTiming:
+    """Use an attempt's frozen timing, falling back for legacy attempts."""
+    snapshot = getattr(attempt, "timing_snapshot", None)
+    if not isinstance(snapshot, dict) or snapshot.get("version") != 1:
+        return resolve_effective_timing(quiz)
+
+    available_until = snapshot.get("available_until")
+    if isinstance(available_until, str):
+        available_until = datetime.fromisoformat(available_until)
+        if available_until.tzinfo is None:
+            available_until = available_until.replace(tzinfo=UTC)
+    elif available_until is not None:
+        available_until = None
+
+    time_limit = snapshot.get("time_limit_seconds")
+    if time_limit is not None:
+        time_limit = int(time_limit)
+    return EffectiveTiming(
+        time_limit_seconds=time_limit,
+        available_until=available_until,
+    )
+
+
 __all__ = [
     "EffectiveTiming",
     "compute_deadline",
     "is_overdue",
+    "resolve_attempt_timing",
     "resolve_effective_timing",
+    "timing_snapshot",
 ]

@@ -514,6 +514,10 @@ class QuizAttempt(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     passed: Mapped[bool | None] = mapped_column(Boolean)
     idempotency_key: Mapped[uuid.UUID | None] = mapped_column(PGUUID(as_uuid=True), unique=True)
     layout: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    # Effective timing resolved for this student when the attempt was created.
+    # This freezes accommodations against later quiz/override edits and lets
+    # submit + the overdue sweeper share one deadline.
+    timing_snapshot: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     integrity_policy_snapshot: Mapped[dict[str, Any]] = mapped_column(
         JSONB, nullable=False, server_default=text("'{}'::jsonb")
     )
