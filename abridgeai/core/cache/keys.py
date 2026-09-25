@@ -87,6 +87,20 @@ LESSON_UNLOCK: Final = CacheKey(
     description="Whether a lesson is unlocked for a learner (SR engine).",
 )
 
+LESSON_UNLOCK_STUDENT: Final = CacheKey(
+    pattern="lesson_unlock:{student_id}",
+    ttl_seconds=60,
+    description="All lesson-unlock entries for one learner.",
+    prefix_match=True,
+)
+
+LESSON_UNLOCK_NAMESPACE: Final = CacheKey(
+    pattern="lesson_unlock",
+    ttl_seconds=60,
+    description="All lesson-unlock entries for dependency-graph invalidation.",
+    prefix_match=True,
+)
+
 COURSE_CONTENT_PUBLISHED: Final = CacheKey(
     pattern="course_content:published:{course_id}",
     ttl_seconds=300,
@@ -169,6 +183,8 @@ __all__ = [
     "KG_LESSON_CONCEPTS",
     "KR_ESTIMATE",
     "LESSON_UNLOCK",
+    "LESSON_UNLOCK_NAMESPACE",
+    "LESSON_UNLOCK_STUDENT",
     "PERM_COURSE",
     "PERM_USER",
     "PRESIGNED_URL",

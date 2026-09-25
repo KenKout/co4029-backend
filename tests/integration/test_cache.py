@@ -15,6 +15,7 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 from abridgeai.core.cache import (
     CARDS_DUE,
     INVALIDATION_RULES,
+    LESSON_UNLOCK,
     PERM_USER,
     SESSION,
     SESSION_BY_REFRESH_HASH,
@@ -61,6 +62,18 @@ class FakeCardState(_Base):
     __tablename__ = "_cache_test_card_state"
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     student_id: Mapped[str] = mapped_column(String(64))
+
+
+class FakeInterviewSession(_Base):
+    __tablename__ = "interview_sessions"
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    student_id: Mapped[str] = mapped_column(String(64))
+
+
+class FakeLessonPrerequisite(_Base):
+    __tablename__ = "lesson_prerequisites"
+    lesson_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    prereq_lesson_id: Mapped[str] = mapped_column(String(64), primary_key=True)
 
 
 @pytest.fixture(autouse=True)
@@ -176,6 +189,49 @@ async def test_prefix_match_invalidates_suffixed_cards_due(
     for k in live_keys:
         assert await redis_clean.exists(k) == 0, f"{k} should have been invalidated"
     assert await redis_clean.exists(other_key) == 1, "other user's cache untouched"
+
+
+@pytest.mark.asyncio
+async def test_interview_write_invalidates_student_lesson_unlocks(
+    redis_clean: Any, sqlite_session: Session
+) -> None:
+    student = "u-interview"
+    own_keys = [
+        LESSON_UNLOCK.format(student_id=student, lesson_id="lesson-1"),
+        LESSON_UNLOCK.format(student_id=student, lesson_id="lesson-2"),
+    ]
+    other_key = LESSON_UNLOCK.format(student_id="u-other", lesson_id="lesson-1")
+    for key in [*own_keys, other_key]:
+        await redis_clean.set(key, json.dumps({"eligible": False}), ex=60)
+
+    sqlite_session.add(FakeInterviewSession(student_id=student))
+    sqlite_session.flush()
+    await drain_invalidations()
+
+    for key in own_keys:
+        assert await redis_clean.exists(key) == 0
+    assert await redis_clean.exists(other_key) == 1
+
+
+@pytest.mark.asyncio
+async def test_prerequisite_write_invalidates_lesson_unlock_namespace(
+    redis_clean: Any, sqlite_session: Session
+) -> None:
+    keys = [
+        LESSON_UNLOCK.format(student_id="u-1", lesson_id="lesson-1"),
+        LESSON_UNLOCK.format(student_id="u-2", lesson_id="lesson-2"),
+    ]
+    for key in keys:
+        await redis_clean.set(key, json.dumps({"eligible": False}), ex=60)
+
+    sqlite_session.add(
+        FakeLessonPrerequisite(lesson_id="lesson-2", prereq_lesson_id="lesson-1")
+    )
+    sqlite_session.flush()
+    await drain_invalidations()
+
+    for key in keys:
+        assert await redis_clean.exists(key) == 0
 
 
 @pytest.mark.asyncio

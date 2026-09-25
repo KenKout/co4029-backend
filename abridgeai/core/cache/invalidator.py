@@ -46,6 +46,8 @@ from .keys import (
     CARDS_DUE,
     KR_ESTIMATE,
     LESSON_UNLOCK,
+    LESSON_UNLOCK_NAMESPACE,
+    LESSON_UNLOCK_STUDENT,
     SESSION,
     USER_SESSIONS_INDEX,
     CacheKey,
@@ -62,6 +64,13 @@ INVALIDATION_RULES_BY_TABLE: dict[str, list[CacheKey]] = {
     "card_reviews": [LESSON_UNLOCK, CARDS_DUE, KR_ESTIMATE],
     "student_card_state": [LESSON_UNLOCK, CARDS_DUE, KR_ESTIMATE],
     "lessons": [LESSON_UNLOCK],
+    # A passed interview changes every lesson in the student's graph that
+    # requires the module interview. The student alias resolves directly to
+    # the learner-specific prefix key.
+    "interview_sessions": [LESSON_UNLOCK_STUDENT],
+    # A prerequisite edge can affect the edited lesson and every downstream
+    # lesson, across every student. Invalidate the whole small namespace.
+    "lesson_prerequisites": [LESSON_UNLOCK_NAMESPACE],
 }
 
 USER_SESSION_CASCADE_MODELS: set[type] = set()
