@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import uuid
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
@@ -244,14 +245,43 @@ async def test_email_pref_enabled_enqueues_arq(
             body="Open the app to view.",
             arq_pool=pool,
         )
+        pool.enqueue_job.assert_not_awaited()
         await session.commit()
 
+    await asyncio.gather(*list(dispatch_service._PENDING_EMAIL_TASKS))
     pool.enqueue_job.assert_awaited_once()
     args = pool.enqueue_job.await_args
     assert args is not None
     assert args.args[0] == "send_email_notification_task"
     assert args.args[1] == seeded_users.student_id
     assert isinstance(args.args[2], UUID)
+
+
+
+
+@pytest.mark.asyncio
+async def test_rollback_discards_staged_email_job(
+    session_factory: async_sessionmaker[AsyncSession],
+    seeded_users: SeededUsers,
+    clean_notifications: None,
+) -> None:
+    pool = AsyncMock()
+    pool.enqueue_job = AsyncMock(return_value=None)
+
+    async with session_factory() as session:
+        await dispatch_service.send_notification(
+            session,
+            recipient_user_id=seeded_users.student_id,
+            notification_type="interview_result",
+            title="Discard me",
+            body="This transaction rolls back.",
+            arq_pool=pool,
+        )
+        await session.rollback()
+        await session.commit()
+
+    await asyncio.gather(*list(dispatch_service._PENDING_EMAIL_TASKS))
+    pool.enqueue_job.assert_not_awaited()
 
 
 @pytest.mark.asyncio

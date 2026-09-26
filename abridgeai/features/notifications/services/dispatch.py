@@ -11,9 +11,9 @@ Contract:
   visibility downstream via dismissal (delivery_status='cancelled') or
   read state.
 * Email channel is gated by :func:`get_email_preference`. If enabled,
-  the dispatcher enqueues ``send_email_notification_task`` on the
-  provided ARQ pool. Email send is *never* awaited inline -- the API
-  request thread does not block on SMTP.
+  the dispatcher stages ``send_email_notification_task`` on the caller's
+  SQLAlchemy session and enqueues it from an ``after_commit`` hook. Email send
+  is *never* awaited inline -- the API request thread does not block on SMTP.
 * If ``arq_pool is None`` and email is enabled, the email send is
   skipped silently. This is the contract for unit tests / sync code
   paths that should never enqueue, and for emergency runtime configs
@@ -26,8 +26,12 @@ this surface.
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING
 from uuid import UUID
+
+from sqlalchemy import event
+from sqlalchemy.orm import Session
 
 from abridgeai.core.observability import get_logger
 from abridgeai.features.notifications.queries.notifications import (
@@ -46,13 +50,56 @@ if TYPE_CHECKING:
 _logger = get_logger(__name__)
 
 EMAIL_NOTIFICATION_TASK_NAME = "send_email_notification_task"
-"""ARQ job-name for the email worker.
+_PENDING_EMAIL_JOBS = "notifications.pending_email_jobs"
+_PENDING_EMAIL_TASKS: set[asyncio.Task[None]] = set()
 
-Locked here so the worker registration and the dispatcher always agree.
-Mirrors the T6.11/T6.13 pattern (``run_interview_generation_task``,
-``evaluate_interview_session_task``) -- canonical Python function name
-used verbatim as the enqueue string to dodge the T5.14 reconcile-trap.
-"""
+
+async def _enqueue_email_job(
+    arq_pool: object, recipient_user_id: UUID, notification_id: UUID
+) -> None:
+    await arq_pool.enqueue_job(  # type: ignore[attr-defined]
+        EMAIL_NOTIFICATION_TASK_NAME,
+        recipient_user_id,
+        notification_id,
+    )
+
+
+def _log_deferred_email_failure(task: asyncio.Task[None]) -> None:
+    _PENDING_EMAIL_TASKS.discard(task)
+    if task.cancelled():
+        return
+    error = task.exception()
+    if error is not None:
+        _logger.exception(
+            "notification_email_enqueue_failed_after_commit",
+            exc_info=(type(error), error, error.__traceback__),
+        )
+
+
+@event.listens_for(Session, "after_commit")
+def _enqueue_staged_email_jobs(session: Session) -> None:
+    jobs = session.info.pop(_PENDING_EMAIL_JOBS, ())
+    if not jobs:
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        _logger.error("notification_email_enqueue_no_running_loop")
+        return
+    for arq_pool, recipient_user_id, notification_id in jobs:
+        task = loop.create_task(
+            _enqueue_email_job(arq_pool, recipient_user_id, notification_id)
+        )
+        _PENDING_EMAIL_TASKS.add(task)
+        task.add_done_callback(_log_deferred_email_failure)
+
+
+@event.listens_for(Session, "after_rollback")
+def _clear_staged_email_jobs(session: Session) -> None:
+    session.info.pop(_PENDING_EMAIL_JOBS, None)
+
+
+# Email job-name for the worker.
 
 
 async def send_notification(
@@ -67,7 +114,7 @@ async def send_notification(
     action_url: str | None = None,
     arq_pool: object | None = None,
 ) -> Notification:
-    """Create the in-app row, then conditionally enqueue an email.
+    """Create the in-app row, then conditionally stage an email job.
 
     Parameters
     ----------
@@ -134,13 +181,11 @@ async def send_notification(
         )
         return notification
 
-    await arq_pool.enqueue_job(  # type: ignore[attr-defined]
-        EMAIL_NOTIFICATION_TASK_NAME,
-        recipient_user_id,
-        notification.id,
+    db.sync_session.info.setdefault(_PENDING_EMAIL_JOBS, []).append(
+        (arq_pool, recipient_user_id, notification.id)
     )
     _logger.info(
-        "notification_email_enqueued",
+        "notification_email_staged_until_commit",
         notification_id=str(notification.id),
         recipient_user_id=str(recipient_user_id),
         category=notification_type,
