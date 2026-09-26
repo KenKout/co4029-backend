@@ -3,6 +3,10 @@ services:
     image: pgvector/pgvector:pg16
     container_name: abridgeai-postgres
     restart: unless-stopped
+    # Default max_connections (100) is exhausted by 4 uvicorn workers
+    # (pool 10 + overflow 10 each) + arq worker + agents under peak load —
+    # measured in perf/k6/results/nfr-peak-2026-09-26.md (4× NFR overload).
+    command: ["postgres", "-c", "max_connections=300"]
     environment:
       POSTGRES_USER: abridgeai
       POSTGRES_PASSWORD: abridgeai
