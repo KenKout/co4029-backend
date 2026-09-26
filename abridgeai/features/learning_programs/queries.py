@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import cast
 from uuid import UUID
 
 from sqlalchemy import delete, exists, func, select, text
@@ -681,7 +682,7 @@ async def build_exit_snapshot(
                 "course_id": str(row["course_id"]),
                 "title": str(row["title"]),
                 "slug": str(row["slug"]),
-                "progress_percent": float(row["completion_percent"]),
+                "progress_percent": float(cast(float | int | str, row["completion_percent"])),
                 "completed": bool(row["satisfied"]),
             }
             for row in rows

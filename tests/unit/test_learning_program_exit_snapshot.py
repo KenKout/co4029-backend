@@ -9,6 +9,7 @@ from uuid import uuid4
 import pytest
 
 from abridgeai.features.learning_programs import queries
+from abridgeai.features.learning_programs.schemas import PathExitSnapshot
 
 
 @pytest.mark.asyncio
@@ -64,6 +65,27 @@ async def test_build_exit_snapshot_uses_stage_aware_progress_and_keeps_raw_count
         version_id=attempt.career_path_version_id,
         student_id=student_id,
     )
+
+
+def test_exit_snapshot_schema_keeps_legacy_rows_readable() -> None:
+    """Pre-v2 JSONB rows gain safe defaults instead of failing API serialization."""
+    path_id = uuid4()
+    version_id = uuid4()
+
+    snapshot = PathExitSnapshot.model_validate(
+        {
+            "career_path_id": str(path_id),
+            "career_path_version_id": str(version_id),
+            "completed_course_ids": [],
+            "completed_courses": 0,
+            "total_courses": 2,
+            "overall_percent": 0,
+            "captured_at": "2026-09-26T10:30:00Z",
+        }
+    )
+
+    assert snapshot.schema_version == 1
+    assert snapshot.courses == []
 
 
 @pytest.mark.asyncio
