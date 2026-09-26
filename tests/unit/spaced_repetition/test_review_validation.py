@@ -106,6 +106,7 @@ async def test_admin_interval_unit_controls_pass_and_failure_due_at(
     after = datetime.now(tz=UTC)
 
     assert result.interval_after == 1
+    assert result.interval_seconds == 10
     assert result.due_at is not None
     assert before + timedelta(seconds=10) <= result.due_at
     assert result.due_at <= after + timedelta(seconds=10)

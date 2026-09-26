@@ -80,7 +80,9 @@ class ReviewSubmitResult(BaseModel):
     #: New review timestamp the card was rescheduled to, or ``None`` when
     #: this review retired the card and there is no next one.
     due_at: datetime | None
-    #: Days until the next review (post-jitter).
+    #: Exact real-time delay using the configured interval unit.
+    interval_seconds: int | None
+    #: Logical SM-2 interval (normally days when the unit is 86400 seconds).
     interval_days: int
     #: How many cards remain due AFTER this submission (drives the counter).
     remaining_due: int

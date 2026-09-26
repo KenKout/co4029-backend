@@ -75,6 +75,8 @@ class CardReviewResult:
     #: ``None`` when the card retired on this review -- see
     #: ``spaced_repetition.retire_beyond_max_interval``.
     due_at: datetime | None
+    #: Exact real-time delay after applying the configured interval unit.
+    interval_seconds: int | None
     last_q: int
     passing: bool
     retry_available_at: datetime | None
@@ -347,6 +349,9 @@ async def record_card_review(
         interval_after=interval_after,
         repetition_count_after=n_after,
         due_at=due_at,
+        interval_seconds=(
+            None if due_at is None else interval_after * interval_unit_seconds
+        ),
         last_q=q,
         passing=passing,
         retry_available_at=retry_available_at,

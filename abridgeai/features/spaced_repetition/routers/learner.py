@@ -515,6 +515,7 @@ async def submit_review(
         q=review.q,
         passing=review.passing,
         due_at=review.due_at,
+        interval_seconds=review.interval_seconds,
         interval_days=review.interval_after,
         remaining_due=remaining_due,
         correct_option_ids=grade.correct_option_ids,

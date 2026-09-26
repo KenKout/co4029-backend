@@ -68,6 +68,7 @@ def _failed_review() -> CardReviewResult:
         interval_after=1,
         repetition_count_after=0,
         due_at=datetime.now(tz=UTC),
+        interval_seconds=86400,
         last_q=0,
         passing=False,
         retry_available_at=datetime.now(tz=UTC),
