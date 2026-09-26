@@ -49,3 +49,19 @@ async def test_build_exit_snapshot_uses_stage_aware_progress_and_keeps_raw_count
         version_id=attempt.career_path_version_id,
         student_id=student_id,
     )
+
+
+@pytest.mark.asyncio
+async def test_terminalize_live_assessments_closes_both_assessment_types() -> None:
+    db = SimpleNamespace(execute=AsyncMock())
+
+    await queries._terminalize_live_assessments_for_enrollments(db, [uuid4()])
+
+    assert db.execute.await_count == 2
+    quiz_sql = str(db.execute.await_args_list[0].args[0])
+    interview_sql = str(db.execute.await_args_list[1].args[0])
+    assert "UPDATE quiz_attempts" in quiz_sql
+    assert "status = 'abandoned'" in quiz_sql
+    assert "UPDATE interview_sessions" in interview_sql
+    assert "status = 'abandoned'" in interview_sql
+    assert "AND s.status = 'in_progress'" in interview_sql

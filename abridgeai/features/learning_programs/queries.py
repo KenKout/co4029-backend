@@ -694,6 +694,54 @@ async def build_exit_snapshot(
     }
 
 
+async def _terminalize_live_assessments_for_enrollments(
+    db: AsyncSession, enrollment_ids: list[UUID]
+) -> None:
+    """Close live quizzes/interviews when their course access is dropped.
+
+    Path entitlements are the source of truth for course access. This helper is
+    called only with enrollment rows that transitioned from active to dropped,
+    so shared courses retained by another path are never terminalized.
+    """
+    if not enrollment_ids:
+        return
+    params = {"enrollment_ids": enrollment_ids}
+    await db.execute(
+        text(
+            """
+            UPDATE quiz_attempts qa
+            SET status = 'abandoned',
+                submitted_at = NOW(),
+                time_taken_seconds = GREATEST(
+                    0, EXTRACT(EPOCH FROM (NOW() - qa.started_at))::int
+                )
+            FROM quizzes q
+            JOIN course_enrollments ce ON ce.course_id = q.course_id
+            WHERE qa.quiz_id = q.id
+              AND ce.id = ANY(:enrollment_ids)
+              AND qa.student_id = ce.student_id
+              AND qa.status = 'in_progress'
+            """
+        ),
+        params,
+    )
+    await db.execute(
+        text(
+            """
+            UPDATE interview_sessions s
+            SET status = 'abandoned', ended_at = NOW()
+            FROM interview_configs ic
+            JOIN course_enrollments ce ON ce.course_id = ic.course_id
+            WHERE s.interview_config_id = ic.id
+              AND ce.id = ANY(:enrollment_ids)
+              AND s.student_id = ce.student_id
+              AND s.status = 'in_progress'
+            """
+        ),
+        params,
+    )
+
+
 async def transfer_path_entitlements(
     db: AsyncSession,
     *,
@@ -755,22 +803,30 @@ async def transfer_path_entitlements(
     )
     if not affected:
         return
-    await db.execute(
-        text(
-            """
-            UPDATE course_enrollments ce
-            SET status = 'dropped', dropped_at = NOW(), updated_at = NOW()
-            WHERE ce.id = ANY(:enrollment_ids)
-              AND ce.status = 'active'
-              AND NOT EXISTS (
-                  SELECT 1 FROM course_enrollment_entitlements live
-                  WHERE live.course_enrollment_id = ce.id
-                    AND live.revoked_at IS NULL
-              )
-            """
-        ),
-        {"enrollment_ids": list(set(affected))},
+    dropped_enrollment_ids = (
+        (
+            await db.execute(
+                text(
+                    """
+                UPDATE course_enrollments ce
+                SET status = 'dropped', dropped_at = NOW(), updated_at = NOW()
+                WHERE ce.id = ANY(:enrollment_ids)
+                  AND ce.status = 'active'
+                  AND NOT EXISTS (
+                      SELECT 1 FROM course_enrollment_entitlements live
+                      WHERE live.course_enrollment_id = ce.id
+                        AND live.revoked_at IS NULL
+                  )
+                RETURNING ce.id
+                """
+                ),
+                {"enrollment_ids": list(set(affected))},
+            )
+        )
+        .scalars()
+        .all()
     )
+    await _terminalize_live_assessments_for_enrollments(db, dropped_enrollment_ids)
 
 
 async def revoke_path_entitlements(
@@ -805,22 +861,30 @@ async def revoke_path_entitlements(
     )
     if not affected:
         return
-    await db.execute(
-        text(
-            """
-            UPDATE course_enrollments ce
-            SET status = 'dropped', dropped_at = NOW(), updated_at = NOW()
-            WHERE ce.id = ANY(:enrollment_ids)
-              AND ce.status = 'active'
-              AND NOT EXISTS (
-                  SELECT 1 FROM course_enrollment_entitlements live
-                  WHERE live.course_enrollment_id = ce.id
-                    AND live.revoked_at IS NULL
-              )
-            """
-        ),
-        {"enrollment_ids": list(set(affected))},
+    dropped_enrollment_ids = (
+        (
+            await db.execute(
+                text(
+                    """
+                UPDATE course_enrollments ce
+                SET status = 'dropped', dropped_at = NOW(), updated_at = NOW()
+                WHERE ce.id = ANY(:enrollment_ids)
+                  AND ce.status = 'active'
+                  AND NOT EXISTS (
+                      SELECT 1 FROM course_enrollment_entitlements live
+                      WHERE live.course_enrollment_id = ce.id
+                        AND live.revoked_at IS NULL
+                  )
+                RETURNING ce.id
+                """
+                ),
+                {"enrollment_ids": list(set(affected))},
+            )
+        )
+        .scalars()
+        .all()
     )
+    await _terminalize_live_assessments_for_enrollments(db, dropped_enrollment_ids)
 
 
 __all__ = [name for name in globals() if not name.startswith("_")]
