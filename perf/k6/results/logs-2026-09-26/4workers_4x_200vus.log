@@ -1,0 +1,1035 @@
+>> multi-user mode: USERS_FILE=/root/co4029-backend/perf/k6/.state/users.json (200 users)
+>> running scenarios/07_nfr_peak.js 
+
+         /\      Grafana   /‾‾/  
+    /\  /  \     |\  __   /  /   
+   /  \/    \    | |/ /  /   ‾‾\ 
+  /          \   |   (  |  (‾)  |
+ / __________ \  |_|\_\  \_____/ 
+
+     execution: local
+        script: /root/co4029-backend/perf/k6/scenarios/07_nfr_peak.js
+        output: -
+
+     scenarios: (100.00%) 2 scenarios, 200 max VUs, 3m45s max duration (incl. graceful stop):
+              * browse: Up to 160 looping VUs for 3m30s over 3 stages (gracefulRampDown: 10s, exec: browse, gracefulStop: 30s)
+              * quiz_take: Up to 40 looping VUs for 3m30s over 3 stages (gracefulRampDown: 15s, exec: quizTake, gracefulStop: 30s)
+
+
+running (0m00.7s), 006/200 VUs, 0 complete and 0 interrupted iterations
+browse      [   0% ] 005/160 VUs  0m00.7s/3m30.0s
+quiz_take   [   0% ] 01/40 VUs    0m00.7s/3m30.0s
+
+running (0m01.7s), 016/200 VUs, 0 complete and 0 interrupted iterations
+browse      [   1% ] 013/160 VUs  0m01.7s/3m30.0s
+quiz_take   [   1% ] 03/40 VUs    0m01.7s/3m30.0s
+
+running (0m02.7s), 026/200 VUs, 3 complete and 0 interrupted iterations
+browse      [   1% ] 021/160 VUs  0m02.7s/3m30.0s
+quiz_take   [   1% ] 05/40 VUs    0m02.7s/3m30.0s
+
+running (0m03.7s), 036/200 VUs, 11 complete and 0 interrupted iterations
+browse      [   2% ] 029/160 VUs  0m03.7s/3m30.0s
+quiz_take   [   2% ] 07/40 VUs    0m03.7s/3m30.0s
+
+running (0m04.7s), 046/200 VUs, 21 complete and 0 interrupted iterations
+browse      [   2% ] 037/160 VUs  0m04.7s/3m30.0s
+quiz_take   [   2% ] 09/40 VUs    0m04.7s/3m30.0s
+
+running (0m05.7s), 056/200 VUs, 36 complete and 0 interrupted iterations
+browse      [   3% ] 045/160 VUs  0m05.7s/3m30.0s
+quiz_take   [   3% ] 11/40 VUs    0m05.7s/3m30.0s
+
+running (0m06.7s), 066/200 VUs, 46 complete and 0 interrupted iterations
+browse      [   3% ] 053/160 VUs  0m06.7s/3m30.0s
+quiz_take   [   3% ] 13/40 VUs    0m06.7s/3m30.0s
+
+running (0m07.7s), 076/200 VUs, 55 complete and 0 interrupted iterations
+browse      [   4% ] 061/160 VUs  0m07.7s/3m30.0s
+quiz_take   [   4% ] 15/40 VUs    0m07.7s/3m30.0s
+
+running (0m08.7s), 086/200 VUs, 71 complete and 0 interrupted iterations
+browse      [   4% ] 069/160 VUs  0m08.7s/3m30.0s
+quiz_take   [   4% ] 17/40 VUs    0m08.7s/3m30.0s
+
+running (0m09.7s), 096/200 VUs, 80 complete and 0 interrupted iterations
+browse      [   5% ] 077/160 VUs  0m09.7s/3m30.0s
+quiz_take   [   5% ] 19/40 VUs    0m09.7s/3m30.0s
+
+running (0m10.7s), 106/200 VUs, 93 complete and 0 interrupted iterations
+browse      [   5% ] 085/160 VUs  0m10.7s/3m30.0s
+quiz_take   [   5% ] 21/40 VUs    0m10.7s/3m30.0s
+
+running (0m11.7s), 116/200 VUs, 101 complete and 0 interrupted iterations
+browse      [   6% ] 093/160 VUs  0m11.7s/3m30.0s
+quiz_take   [   6% ] 23/40 VUs    0m11.7s/3m30.0s
+
+running (0m12.7s), 126/200 VUs, 106 complete and 0 interrupted iterations
+browse      [   6% ] 101/160 VUs  0m12.7s/3m30.0s
+quiz_take   [   6% ] 25/40 VUs    0m12.7s/3m30.0s
+
+running (0m13.7s), 136/200 VUs, 118 complete and 0 interrupted iterations
+browse      [   7% ] 109/160 VUs  0m13.7s/3m30.0s
+quiz_take   [   7% ] 27/40 VUs    0m13.7s/3m30.0s
+
+running (0m14.7s), 146/200 VUs, 128 complete and 0 interrupted iterations
+browse      [   7% ] 117/160 VUs  0m14.7s/3m30.0s
+quiz_take   [   7% ] 29/40 VUs    0m14.7s/3m30.0s
+
+running (0m15.7s), 156/200 VUs, 140 complete and 0 interrupted iterations
+browse      [   7% ] 125/160 VUs  0m15.7s/3m30.0s
+quiz_take   [   7% ] 31/40 VUs    0m15.7s/3m30.0s
+
+running (0m16.7s), 166/200 VUs, 153 complete and 0 interrupted iterations
+browse      [   8% ] 133/160 VUs  0m16.7s/3m30.0s
+quiz_take   [   8% ] 33/40 VUs    0m16.7s/3m30.0s
+time="2026-09-26T18:35:05Z" level=warning msg="UNEXPECTED 500 GET /api/v1/me/notifications/unread-count :: Internal Server Error" source=console
+time="2026-09-26T18:35:05Z" level=warning msg="UNEXPECTED 500 GET /api/v1/users/me :: Internal Server Error" source=console
+time="2026-09-26T18:35:05Z" level=warning msg="UNEXPECTED 500 GET /api/v1/users/me :: Internal Server Error" source=console
+time="2026-09-26T18:35:05Z" level=warning msg="UNEXPECTED 500 GET /api/v1/users/me :: Internal Server Error" source=console
+time="2026-09-26T18:35:05Z" level=warning msg="UNEXPECTED 500 GET /api/v1/users/me :: Internal Server Error" source=console
+time="2026-09-26T18:35:05Z" level=warning msg="UNEXPECTED 500 GET /api/v1/me/sr-dashboard-summary :: Internal Server Error" source=console
+time="2026-09-26T18:35:05Z" level=warning msg="UNEXPECTED 500 GET /api/v1/me/notifications/unread-count :: Internal Server Error" source=console
+
+running (0m17.7s), 176/200 VUs, 163 complete and 0 interrupted iterations
+browse      [   8% ] 141/160 VUs  0m17.7s/3m30.0s
+quiz_take   [   8% ] 35/40 VUs    0m17.7s/3m30.0s
+time="2026-09-26T18:35:06Z" level=warning msg="UNEXPECTED 500 GET /api/v1/me/notifications/unread-count :: Internal Server Error" source=console
+time="2026-09-26T18:35:06Z" level=warning msg="UNEXPECTED 500 GET /api/v1/users/me :: Internal Server Error" source=console
+time="2026-09-26T18:35:06Z" level=warning msg="UNEXPECTED 500 GET /api/v1/me/cards-due :: Internal Server Error" source=console
+time="2026-09-26T18:35:06Z" level=warning msg="UNEXPECTED 500 GET /api/v1/courses/e5ba475d-140e-4a82-9a6b-b283b8e760ac/quiz-progress :: Internal Server Error" source=console
+
+running (0m18.7s), 186/200 VUs, 179 complete and 0 interrupted iterations
+browse      [   9% ] 149/160 VUs  0m18.7s/3m30.0s
+quiz_take   [   9% ] 37/40 VUs    0m18.7s/3m30.0s
+time="2026-09-26T18:35:07Z" level=warning msg="UNEXPECTED 500 GET /api/v1/courses/e5ba475d-140e-4a82-9a6b-b283b8e760ac/interview-progress :: Internal Server Error" source=console
+time="2026-09-26T18:35:07Z" level=warning msg="UNEXPECTED 500 GET /api/v1/me/cards-due :: Internal Server Error" source=console
+time="2026-09-26T18:35:07Z" level=warning msg="UNEXPECTED 500 GET /api/v1/me/notifications/unread-count :: Internal Server Error" source=console
+
+running (0m19.7s), 196/200 VUs, 189 complete and 0 interrupted iterations
+browse      [   9% ] 157/160 VUs  0m19.7s/3m30.0s
+quiz_take   [   9% ] 39/40 VUs    0m19.7s/3m30.0s
+time="2026-09-26T18:35:08Z" level=warning msg="UNEXPECTED 500 GET /api/v1/me/notifications/unread-count :: Internal Server Error" source=console
+
+running (0m20.7s), 200/200 VUs, 197 complete and 0 interrupted iterations
+browse      [  10% ] 160/160 VUs  0m20.7s/3m30.0s
+quiz_take   [  10% ] 40/40 VUs    0m20.7s/3m30.0s
+time="2026-09-26T18:35:09Z" level=warning msg="UNEXPECTED 500 POST /api/v1/attempts/e72de49d-0741-457b-a31f-9d83f0f2d8f4/session/heartbeat :: Internal Server Error" source=console
+time="2026-09-26T18:35:09Z" level=warning msg="UNEXPECTED 500 GET /api/v1/me/notifications/unread-count :: Internal Server Error" source=console
+time="2026-09-26T18:35:09Z" level=warning msg="UNEXPECTED 500 GET /api/v1/me/courses :: Internal Server Error" source=console
+time="2026-09-26T18:35:09Z" level=warning msg="UNEXPECTED 500 GET /api/v1/users/me :: Internal Server Error" source=console
+
+running (0m21.7s), 200/200 VUs, 208 complete and 0 interrupted iterations
+browse      [  10% ] 160/160 VUs  0m21.7s/3m30.0s
+quiz_take   [  10% ] 40/40 VUs    0m21.7s/3m30.0s
+time="2026-09-26T18:35:10Z" level=warning msg="UNEXPECTED 500 GET /api/v1/me/courses :: Internal Server Error" source=console
+time="2026-09-26T18:35:10Z" level=warning msg="UNEXPECTED 500 GET /api/v1/me/courses :: Internal Server Error" source=console
+time="2026-09-26T18:35:10Z" level=warning msg="UNEXPECTED 500 GET /api/v1/me/cards-due :: Internal Server Error" source=console
+time="2026-09-26T18:35:10Z" level=warning msg="UNEXPECTED 500 GET /api/v1/me/progress/courses/e5ba475d-140e-4a82-9a6b-b283b8e760ac :: Internal Server Error" source=console
+time="2026-09-26T18:35:10Z" level=warning msg="UNEXPECTED 500 GET /api/v1/me/cards-due :: Internal Server Error" source=console
+time="2026-09-26T18:35:10Z" level=warning msg="UNEXPECTED 500 GET /api/v1/me/notifications/unread-count :: Internal Server Error" source=console
+time="2026-09-26T18:35:10Z" level=warning msg="UNEXPECTED 500 GET /api/v1/courses/e5ba475d-140e-4a82-9a6b-b283b8e760ac/content :: Internal Server Error" source=console
+
+running (0m22.7s), 200/200 VUs, 216 complete and 0 interrupted iterations
+browse      [  11% ] 160/160 VUs  0m22.7s/3m30.0s
+quiz_take   [  11% ] 40/40 VUs    0m22.7s/3m30.0s
+
+running (0m23.7s), 200/200 VUs, 237 complete and 0 interrupted iterations
+browse      [  11% ] 160/160 VUs  0m23.7s/3m30.0s
+quiz_take   [  11% ] 40/40 VUs    0m23.7s/3m30.0s
+
+running (0m24.7s), 200/200 VUs, 249 complete and 0 interrupted iterations
+browse      [  12% ] 160/160 VUs  0m24.7s/3m30.0s
+quiz_take   [  12% ] 40/40 VUs    0m24.7s/3m30.0s
+
+running (0m25.7s), 200/200 VUs, 272 complete and 0 interrupted iterations
+browse      [  12% ] 160/160 VUs  0m25.7s/3m30.0s
+quiz_take   [  12% ] 40/40 VUs    0m25.7s/3m30.0s
+
+running (0m26.7s), 200/200 VUs, 290 complete and 0 interrupted iterations
+browse      [  13% ] 160/160 VUs  0m26.7s/3m30.0s
+quiz_take   [  13% ] 40/40 VUs    0m26.7s/3m30.0s
+time="2026-09-26T18:35:15Z" level=warning msg="UNEXPECTED 500 GET /api/v1/users/me :: Internal Server Error" source=console
+time="2026-09-26T18:35:15Z" level=warning msg="UNEXPECTED 500 GET /api/v1/me/courses :: Internal Server Error" source=console
+time="2026-09-26T18:35:15Z" level=warning msg="UNEXPECTED 500 GET /api/v1/users/me :: Internal Server Error" source=console
+time="2026-09-26T18:35:15Z" level=warning msg="UNEXPECTED 500 GET /api/v1/me/notifications/unread-count :: Internal Server Error" source=console
+time="2026-09-26T18:35:15Z" level=warning msg="UNEXPECTED 500 GET /api/v1/me/progress/courses/e5ba475d-140e-4a82-9a6b-b283b8e760ac :: Internal Server Error" source=console
+
+running (0m27.7s), 200/200 VUs, 299 complete and 0 interrupted iterations
+browse      [  13% ] 160/160 VUs  0m27.7s/3m30.0s
+quiz_take   [  13% ] 40/40 VUs    0m27.7s/3m30.0s
+
+running (0m28.7s), 200/200 VUs, 314 complete and 0 interrupted iterations
+browse      [  14% ] 160/160 VUs  0m28.7s/3m30.0s
+quiz_take   [  14% ] 40/40 VUs    0m28.7s/3m30.0s
+
+running (0m29.7s), 200/200 VUs, 325 complete and 0 interrupted iterations
+browse      [  14% ] 160/160 VUs  0m29.7s/3m30.0s
+quiz_take   [  14% ] 40/40 VUs    0m29.7s/3m30.0s
+
+running (0m30.7s), 200/200 VUs, 356 complete and 0 interrupted iterations
+browse      [  15% ] 160/160 VUs  0m30.7s/3m30.0s
+quiz_take   [  15% ] 40/40 VUs    0m30.7s/3m30.0s
+
+running (0m31.7s), 200/200 VUs, 372 complete and 0 interrupted iterations
+browse      [  15% ] 160/160 VUs  0m31.7s/3m30.0s
+quiz_take   [  15% ] 40/40 VUs    0m31.7s/3m30.0s
+
+running (0m32.7s), 200/200 VUs, 381 complete and 0 interrupted iterations
+browse      [  16% ] 160/160 VUs  0m32.7s/3m30.0s
+quiz_take   [  16% ] 40/40 VUs    0m32.7s/3m30.0s
+
+running (0m33.7s), 200/200 VUs, 394 complete and 0 interrupted iterations
+browse      [  16% ] 160/160 VUs  0m33.7s/3m30.0s
+quiz_take   [  16% ] 40/40 VUs    0m33.7s/3m30.0s
+
+running (0m34.7s), 200/200 VUs, 407 complete and 0 interrupted iterations
+browse      [  17% ] 160/160 VUs  0m34.7s/3m30.0s
+quiz_take   [  17% ] 40/40 VUs    0m34.7s/3m30.0s
+
+running (0m35.7s), 200/200 VUs, 418 complete and 0 interrupted iterations
+browse      [  17% ] 160/160 VUs  0m35.7s/3m30.0s
+quiz_take   [  17% ] 40/40 VUs    0m35.7s/3m30.0s
+
+running (0m36.7s), 200/200 VUs, 434 complete and 0 interrupted iterations
+browse      [  17% ] 160/160 VUs  0m36.7s/3m30.0s
+quiz_take   [  17% ] 40/40 VUs    0m36.7s/3m30.0s
+time="2026-09-26T18:35:25Z" level=warning msg="UNEXPECTED 500 GET /api/v1/me/cards-due :: Internal Server Error" source=console
+
+running (0m37.7s), 200/200 VUs, 443 complete and 0 interrupted iterations
+browse      [  18% ] 160/160 VUs  0m37.7s/3m30.0s
+quiz_take   [  18% ] 40/40 VUs    0m37.7s/3m30.0s
+time="2026-09-26T18:35:26Z" level=warning msg="UNEXPECTED 500 GET /api/v1/me/notifications/unread-count :: Internal Server Error" source=console
+time="2026-09-26T18:35:26Z" level=warning msg="UNEXPECTED 500 GET /api/v1/users/me :: Internal Server Error" source=console
+time="2026-09-26T18:35:26Z" level=warning msg="UNEXPECTED 500 GET /api/v1/me/progress/courses/e5ba475d-140e-4a82-9a6b-b283b8e760ac :: Internal Server Error" source=console
+
+running (0m38.7s), 200/200 VUs, 455 complete and 0 interrupted iterations
+browse      [  18% ] 160/160 VUs  0m38.7s/3m30.0s
+quiz_take   [  18% ] 40/40 VUs    0m38.7s/3m30.0s
+time="2026-09-26T18:35:27Z" level=warning msg="UNEXPECTED 500 GET /api/v1/me/cards-due :: Internal Server Error" source=console
+time="2026-09-26T18:35:27Z" level=warning msg="UNEXPECTED 500 GET /api/v1/me/notifications/unread-count :: Internal Server Error" source=console
+time="2026-09-26T18:35:27Z" level=warning msg="UNEXPECTED 500 GET /api/v1/users/me :: Internal Server Error" source=console
+time="2026-09-26T18:35:27Z" level=warning msg="UNEXPECTED 500 GET /api/v1/me/progress/courses/e5ba475d-140e-4a82-9a6b-b283b8e760ac :: Internal Server Error" source=console
+time="2026-09-26T18:35:27Z" level=warning msg="UNEXPECTED 500 GET /api/v1/me/courses :: Internal Server Error" source=console
+time="2026-09-26T18:35:27Z" level=warning msg="UNEXPECTED 500 GET /api/v1/me/notifications/unread-count :: Internal Server Error" source=console
+time="2026-09-26T18:35:27Z" level=warning msg="UNEXPECTED 500 GET /api/v1/courses :: Internal Server Error" source=console
+time="2026-09-26T18:35:27Z" level=warning msg="UNEXPECTED 500 GET /api/v1/me/cards-due :: Internal Server Error" source=console
+
+running (0m39.7s), 200/200 VUs, 466 complete and 0 interrupted iterations
+browse      [  19% ] 160/160 VUs  0m39.7s/3m30.0s
+quiz_take   [  19% ] 40/40 VUs    0m39.7s/3m30.0s
+time="2026-09-26T18:35:28Z" level=warning msg="UNEXPECTED 500 GET /api/v1/courses :: Internal Server Error" source=console
+time="2026-09-26T18:35:28Z" level=warning msg="UNEXPECTED 500 GET /api/v1/me/notifications/unread-count :: Internal Server Error" source=console
+time="2026-09-26T18:35:28Z" level=warning msg="UNEXPECTED 500 GET /api/v1/me/notifications/unread-count :: Internal Server Error" source=console
+time="2026-09-26T18:35:28Z" level=warning msg="UNEXPECTED 500 GET /api/v1/me/progress/courses/e5ba475d-140e-4a82-9a6b-b283b8e760ac :: Internal Server Error" source=console
+time="2026-09-26T18:35:28Z" level=warning msg="UNEXPECTED 500 GET /api/v1/me/progress/courses/e5ba475d-140e-4a82-9a6b-b283b8e760ac :: Internal Server Error" source=console
+time="2026-09-26T18:35:28Z" level=warning msg="UNEXPECTED 500 GET /api/v1/users/me :: Internal Server Error" source=console
+time="2026-09-26T18:35:28Z" level=warning msg="UNEXPECTED 500 GET /api/v1/users/me :: Internal Server Error" source=console
+time="2026-09-26T18:35:28Z" level=warning msg="UNEXPECTED 500 GET /api/v1/me/cards-due :: Internal Server Error" source=console
+time="2026-09-26T18:35:28Z" level=warning msg="UNEXPECTED 500 GET /api/v1/users/me :: Internal Server Error" source=console
+time="2026-09-26T18:35:28Z" level=warning msg="UNEXPECTED 500 GET /api/v1/me/notifications/unread-count :: Internal Server Error" source=console
+time="2026-09-26T18:35:28Z" level=warning msg="UNEXPECTED 500 POST /api/v1/attempts/d235ac70-687e-41f0-a4bd-3525a7f8854a/session/heartbeat :: Internal Server Error" source=console
+time="2026-09-26T18:35:28Z" level=warning msg="UNEXPECTED 500 GET /api/v1/users/me :: Internal Server Error" source=console
+time="2026-09-26T18:35:28Z" level=warning msg="UNEXPECTED 500 GET /api/v1/users/me :: Internal Server Error" source=console
+time="2026-09-26T18:35:28Z" level=warning msg="UNEXPECTED 500 GET /api/v1/users/me :: Internal Server Error" source=console
+time="2026-09-26T18:35:28Z" level=warning msg="UNEXPECTED 500 GET /api/v1/users/me :: Internal Server Error" source=console
+time="2026-09-26T18:35:28Z" level=warning msg="UNEXPECTED 500 GET /api/v1/me/notifications/unread-count :: Internal Server Error" source=console
+
+running (0m40.7s), 200/200 VUs, 488 complete and 0 interrupted iterations
+browse      [  19% ] 160/160 VUs  0m40.7s/3m30.0s
+quiz_take   [  19% ] 40/40 VUs    0m40.7s/3m30.0s
+time="2026-09-26T18:35:29Z" level=warning msg="UNEXPECTED 500 GET /api/v1/me/progress/courses/e5ba475d-140e-4a82-9a6b-b283b8e760ac :: Internal Server Error" source=console
+time="2026-09-26T18:35:29Z" level=warning msg="UNEXPECTED 500 GET /api/v1/users/me :: Internal Server Error" source=console
+time="2026-09-26T18:35:29Z" level=warning msg="UNEXPECTED 500 GET /api/v1/me/notifications/unread-count :: Internal Server Error" source=console
+
+running (0m41.7s), 200/200 VUs, 502 complete and 0 interrupted iterations
+browse      [  20% ] 160/160 VUs  0m41.7s/3m30.0s
+quiz_take   [  20% ] 40/40 VUs    0m41.7s/3m30.0s
+time="2026-09-26T18:35:30Z" level=warning msg="UNEXPECTED 500 GET /api/v1/me/courses :: Internal Server Error" source=console
+time="2026-09-26T18:35:30Z" level=warning msg="UNEXPECTED 500 GET /api/v1/me/courses :: Internal Server Error" source=console
+time="2026-09-26T18:35:30Z" level=warning msg="UNEXPECTED 500 GET /api/v1/me/notifications/unread-count :: Internal Server Error" source=console
+time="2026-09-26T18:35:30Z" level=warning msg="UNEXPECTED 500 GET /api/v1/me/notifications/unread-count :: Internal Server Error" source=console
+time="2026-09-26T18:35:30Z" level=warning msg="UNEXPECTED 500 GET /api/v1/me/progress/courses/e5ba475d-140e-4a82-9a6b-b283b8e760ac :: Internal Server Error" source=console
+time="2026-09-26T18:35:30Z" level=warning msg="UNEXPECTED 500 GET /api/v1/users/me :: Internal Server Error" source=console
+time="2026-09-26T18:35:30Z" level=warning msg="UNEXPECTED 500 GET /api/v1/me/courses :: Internal Server Error" source=console
+time="2026-09-26T18:35:30Z" level=warning msg="UNEXPECTED 500 GET /api/v1/me/progress/courses/e5ba475d-140e-4a82-9a6b-b283b8e760ac :: Internal Server Error" source=console
+time="2026-09-26T18:35:30Z" level=warning msg="UNEXPECTED 500 GET /api/v1/me/notifications/unread-count :: Internal Server Error" source=console
+time="2026-09-26T18:35:30Z" level=warning msg="UNEXPECTED 500 GET /api/v1/me/notifications/unread-count :: Internal Server Error" source=console
+time="2026-09-26T18:35:30Z" level=warning msg="UNEXPECTED 500 GET /api/v1/me/notifications/unread-count :: Internal Server Error" source=console
+time="2026-09-26T18:35:30Z" level=warning msg="UNEXPECTED 500 GET /api/v1/me/cards-due :: Internal Server Error" source=console
+time="2026-09-26T18:35:30Z" level=warning msg="UNEXPECTED 500 GET /api/v1/courses/e5ba475d-140e-4a82-9a6b-b283b8e760ac/quiz-progress :: Internal Server Error" source=console
+
+running (0m42.7s), 200/200 VUs, 519 complete and 0 interrupted iterations
+browse      [  20% ] 160/160 VUs  0m42.7s/3m30.0s
+quiz_take   [  20% ] 40/40 VUs    0m42.7s/3m30.0s
+
+running (0m43.7s), 200/200 VUs, 535 complete and 0 interrupted iterations
+browse      [  21% ] 160/160 VUs  0m43.7s/3m30.0s
+quiz_take   [  21% ] 40/40 VUs    0m43.7s/3m30.0s
+
+running (0m44.7s), 200/200 VUs, 547 complete and 0 interrupted iterations
+browse      [  21% ] 160/160 VUs  0m44.7s/3m30.0s
+quiz_take   [  21% ] 40/40 VUs    0m44.7s/3m30.0s
+time="2026-09-26T18:35:33Z" level=warning msg="UNEXPECTED 500 GET /api/v1/me/courses :: Internal Server Error" source=console
+
+running (0m45.7s), 200/200 VUs, 573 complete and 0 interrupted iterations
+browse      [  22% ] 160/160 VUs  0m45.7s/3m30.0s
+quiz_take   [  22% ] 40/40 VUs    0m45.7s/3m30.0s
+
+running (0m46.7s), 200/200 VUs, 599 complete and 0 interrupted iterations
+browse      [  22% ] 160/160 VUs  0m46.7s/3m30.0s
+quiz_take   [  22% ] 40/40 VUs    0m46.7s/3m30.0s
+time="2026-09-26T18:35:35Z" level=warning msg="UNEXPECTED 500 POST /api/v1/attempts/33b2856b-024e-43c7-a971-f8e68d9c3932/answers :: Internal Server Error" source=console
+time="2026-09-26T18:35:35Z" level=warning msg="UNEXPECTED 500 GET /api/v1/me/cards-due :: Internal Server Error" source=console
+time="2026-09-26T18:35:35Z" level=warning msg="UNEXPECTED 500 GET /api/v1/me/progress/courses/e5ba475d-140e-4a82-9a6b-b283b8e760ac :: Internal Server Error" source=console
+time="2026-09-26T18:35:35Z" level=warning msg="UNEXPECTED 500 GET /api/v1/me/notifications/unread-count :: Internal Server Error" source=console
+
+running (0m47.7s), 200/200 VUs, 608 complete and 0 interrupted iterations
+browse      [  23% ] 160/160 VUs  0m47.7s/3m30.0s
+quiz_take   [  23% ] 40/40 VUs    0m47.7s/3m30.0s
+
+running (0m48.7s), 200/200 VUs, 621 complete and 0 interrupted iterations
+browse      [  23% ] 160/160 VUs  0m48.7s/3m30.0s
+quiz_take   [  23% ] 40/40 VUs    0m48.7s/3m30.0s
+
+running (0m49.7s), 200/200 VUs, 638 complete and 0 interrupted iterations
+browse      [  24% ] 160/160 VUs  0m49.7s/3m30.0s
+quiz_take   [  24% ] 40/40 VUs    0m49.7s/3m30.0s
+time="2026-09-26T18:35:38Z" level=warning msg="UNEXPECTED 500 GET /api/v1/me/notifications/unread-count :: Internal Server Error" source=console
+time="2026-09-26T18:35:38Z" level=warning msg="UNEXPECTED 500 GET /api/v1/me/notifications/unread-count :: Internal Server Error" source=console
+time="2026-09-26T18:35:38Z" level=warning msg="UNEXPECTED 500 GET /api/v1/users/me :: Internal Server Error" source=console
+time="2026-09-26T18:35:38Z" level=warning msg="UNEXPECTED 500 GET /api/v1/users/me :: Internal Server Error" source=console
+time="2026-09-26T18:35:38Z" level=warning msg="UNEXPECTED 500 GET /api/v1/courses :: Internal Server Error" source=console
+
+running (0m50.7s), 200/200 VUs, 656 complete and 0 interrupted iterations
+browse      [  24% ] 160/160 VUs  0m50.7s/3m30.0s
+quiz_take   [  24% ] 40/40 VUs    0m50.7s/3m30.0s
+time="2026-09-26T18:35:39Z" level=warning msg="UNEXPECTED 500 GET /api/v1/courses/e5ba475d-140e-4a82-9a6b-b283b8e760ac/quiz-progress :: Internal Server Error" source=console
+
+running (0m51.7s), 200/200 VUs, 682 complete and 0 interrupted iterations
+browse      [  25% ] 160/160 VUs  0m51.7s/3m30.0s
+quiz_take   [  25% ] 40/40 VUs    0m51.7s/3m30.0s
+time="2026-09-26T18:35:40Z" level=warning msg="UNEXPECTED 500 GET /api/v1/me/courses :: Internal Server Error" source=console
+time="2026-09-26T18:35:40Z" level=warning msg="UNEXPECTED 500 GET /api/v1/me/sr-dashboard-summary :: Internal Server Error" source=console
+time="2026-09-26T18:35:40Z" level=warning msg="UNEXPECTED 500 GET /api/v1/me/notifications/unread-count :: Internal Server Error" source=console
+time="2026-09-26T18:35:40Z" level=warning msg="UNEXPECTED 500 GET /api/v1/me/cards-due :: Internal Server Error" source=console
+time="2026-09-26T18:35:40Z" level=warning msg="UNEXPECTED 500 GET /api/v1/me/notifications/unread-count :: Internal Server Error" source=console
+time="2026-09-26T18:35:40Z" level=warning msg="UNEXPECTED 500 POST /api/v1/quizzes/d3e2fe10-19b7-482d-bb68-37a793a3f4fa/attempts :: Internal Server Error" source=console
+
+running (0m52.7s), 200/200 VUs, 699 complete and 0 interrupted iterations
+browse      [  25% ] 160/160 VUs  0m52.7s/3m30.0s
+quiz_take   [  25% ] 40/40 VUs    0m52.7s/3m30.0s
+time="2026-09-26T18:35:41Z" level=warning msg="UNEXPECTED 500 GET /api/v1/me/notifications/unread-count :: Internal Server Error" source=console
+time="2026-09-26T18:35:41Z" level=warning msg="UNEXPECTED 500 GET /api/v1/me/notifications/unread-count :: Internal Server Error" source=console
+time="2026-09-26T18:35:41Z" level=warning msg="UNEXPECTED 500 GET /api/v1/me/cards-due :: Internal Server Error" source=console
+time="2026-09-26T18:35:41Z" level=warning msg="UNEXPECTED 500 GET /api/v1/users/me :: Internal Server Error" source=console
+time="2026-09-26T18:35:41Z" level=warning msg="UNEXPECTED 500 GET /api/v1/users/me :: Internal Server Error" source=console
+time="2026-09-26T18:35:41Z" level=warning msg="UNEXPECTED 500 GET /api/v1/me/notifications/unread-count :: Internal Server Error" source=console
+
+running (0m53.7s), 200/200 VUs, 716 complete and 0 interrupted iterations
+browse      [  26% ] 160/160 VUs  0m53.7s/3m30.0s
+quiz_take   [  26% ] 40/40 VUs    0m53.7s/3m30.0s
+time="2026-09-26T18:35:42Z" level=warning msg="UNEXPECTED 500 GET /api/v1/me/courses :: Internal Server Error" source=console
+time="2026-09-26T18:35:42Z" level=warning msg="UNEXPECTED 500 GET /api/v1/me/courses :: Internal Server Error" source=console
+time="2026-09-26T18:35:42Z" level=warning msg="UNEXPECTED 500 GET /api/v1/me/notifications/unread-count :: Internal Server Error" source=console
+time="2026-09-26T18:35:42Z" level=warning msg="UNEXPECTED 500 GET /api/v1/me/progress/courses/e5ba475d-140e-4a82-9a6b-b283b8e760ac :: Internal Server Error" source=console
+time="2026-09-26T18:35:42Z" level=warning msg="UNEXPECTED 500 GET /api/v1/me/notifications/unread-count :: Internal Server Error" source=console
+time="2026-09-26T18:35:42Z" level=warning msg="UNEXPECTED 500 GET /api/v1/me/progress/courses/e5ba475d-140e-4a82-9a6b-b283b8e760ac :: Internal Server Error" source=console
+time="2026-09-26T18:35:42Z" level=warning msg="UNEXPECTED 500 GET /api/v1/users/me :: Internal Server Error" source=console
+time="2026-09-26T18:35:42Z" level=warning msg="UNEXPECTED 500 GET /api/v1/me/cards-due :: Internal Server Error" source=console
+time="2026-09-26T18:35:42Z" level=warning msg="UNEXPECTED 500 GET /api/v1/me/cards-due :: Internal Server Error" source=console
+time="2026-09-26T18:35:43Z" level=warning msg="UNEXPECTED 500 GET /api/v1/me/progress/courses/e5ba475d-140e-4a82-9a6b-b283b8e760ac :: Internal Server Error" source=console
+
+running (0m54.7s), 200/200 VUs, 732 complete and 0 interrupted iterations
+browse      [  26% ] 160/160 VUs  0m54.7s/3m30.0s
+quiz_take   [  26% ] 40/40 VUs    0m54.7s/3m30.0s
+time="2026-09-26T18:35:43Z" level=warning msg="UNEXPECTED 500 GET /api/v1/me/courses :: Internal Server Error" source=console
+time="2026-09-26T18:35:43Z" level=warning msg="UNEXPECTED 500 GET /api/v1/courses :: Internal Server Error" source=console
+time="2026-09-26T18:35:43Z" level=warning msg="UNEXPECTED 500 GET /api/v1/users/me :: Internal Server Error" source=console
+time="2026-09-26T18:35:43Z" level=warning msg="UNEXPECTED 500 GET /api/v1/courses/e5ba475d-140e-4a82-9a6b-b283b8e760ac/content :: Internal Server Error" source=console
+time="2026-09-26T18:35:43Z" level=warning msg="UNEXPECTED 500 POST /api/v1/attempts/ae4419b0-6283-42a5-b17c-280116a3c85b/answers :: Internal Server Error" source=console
+time="2026-09-26T18:35:43Z" level=warning msg="UNEXPECTED 500 GET /api/v1/me/cards-due :: Internal Server Error" source=console
+time="2026-09-26T18:35:43Z" level=warning msg="UNEXPECTED 500 GET /api/v1/me/notifications/unread-count :: Internal Server Error" source=console
+time="2026-09-26T18:35:43Z" level=warning msg="UNEXPECTED 500 GET /api/v1/courses :: Internal Server Error" source=console
+time="2026-09-26T18:35:43Z" level=warning msg="UNEXPECTED 500 GET /api/v1/me/courses :: Internal Server Error" source=console
+time="2026-09-26T18:35:43Z" level=warning msg="UNEXPECTED 500 GET /api/v1/me/cards-due :: Internal Server Error" source=console
+time="2026-09-26T18:35:43Z" level=warning msg="UNEXPECTED 500 GET /api/v1/me/courses :: Internal Server Error" source=console
+time="2026-09-26T18:35:43Z" level=warning msg="UNEXPECTED 500 GET /api/v1/me/cards-due :: Internal Server Error" source=console
+time="2026-09-26T18:35:43Z" level=warning msg="UNEXPECTED 500 GET /api/v1/courses/e5ba475d-140e-4a82-9a6b-b283b8e760ac/content :: Internal Server Error" source=console
+time="2026-09-26T18:35:43Z" level=warning msg="UNEXPECTED 500 GET /api/v1/me/courses :: Internal Server Error" source=console
+time="2026-09-26T18:35:43Z" level=warning msg="UNEXPECTED 500 GET /api/v1/users/me :: Internal Server Error" source=console
+time="2026-09-26T18:35:43Z" level=warning msg="UNEXPECTED 500 GET /api/v1/me/progress/courses/e5ba475d-140e-4a82-9a6b-b283b8e760ac :: Internal Server Error" source=console
+
+running (0m55.7s), 200/200 VUs, 747 complete and 0 interrupted iterations
+browse      [  27% ] 160/160 VUs  0m55.7s/3m30.0s
+quiz_take   [  27% ] 40/40 VUs    0m55.7s/3m30.0s
+time="2026-09-26T18:35:44Z" level=warning msg="UNEXPECTED 500 GET /api/v1/me/progress/courses/e5ba475d-140e-4a82-9a6b-b283b8e760ac :: Internal Server Error" source=console
+
+running (0m56.7s), 200/200 VUs, 762 complete and 0 interrupted iterations
+browse      [  27% ] 160/160 VUs  0m56.7s/3m30.0s
+quiz_take   [  27% ] 40/40 VUs    0m56.7s/3m30.0s
+time="2026-09-26T18:35:45Z" level=warning msg="UNEXPECTED 500 GET /api/v1/me/progress/courses/e5ba475d-140e-4a82-9a6b-b283b8e760ac :: Internal Server Error" source=console
+time="2026-09-26T18:35:45Z" level=warning msg="UNEXPECTED 500 GET /api/v1/me/progress/courses/e5ba475d-140e-4a82-9a6b-b283b8e760ac :: Internal Server Error" source=console
+
+running (0m57.7s), 200/200 VUs, 777 complete and 0 interrupted iterations
+browse      [  27% ] 160/160 VUs  0m57.7s/3m30.0s
+quiz_take   [  27% ] 40/40 VUs    0m57.7s/3m30.0s
+
+running (0m58.7s), 200/200 VUs, 794 complete and 0 interrupted iterations
+browse      [  28% ] 160/160 VUs  0m58.7s/3m30.0s
+quiz_take   [  28% ] 40/40 VUs    0m58.7s/3m30.0s
+
+running (0m59.7s), 200/200 VUs, 804 complete and 0 interrupted iterations
+browse      [  28% ] 160/160 VUs  0m59.7s/3m30.0s
+quiz_take   [  28% ] 40/40 VUs    0m59.7s/3m30.0s
+
+running (1m00.7s), 200/200 VUs, 823 complete and 0 interrupted iterations
+browse      [  29% ] 160/160 VUs  1m00.7s/3m30.0s
+quiz_take   [  29% ] 40/40 VUs    1m00.7s/3m30.0s
+time="2026-09-26T18:35:49Z" level=warning msg="UNEXPECTED 500 GET /api/v1/me/notifications/unread-count :: Internal Server Error" source=console
+
+running (1m01.7s), 200/200 VUs, 846 complete and 0 interrupted iterations
+browse      [  29% ] 160/160 VUs  1m01.7s/3m30.0s
+quiz_take   [  29% ] 40/40 VUs    1m01.7s/3m30.0s
+
+running (1m02.7s), 200/200 VUs, 880 complete and 0 interrupted iterations
+browse      [  30% ] 160/160 VUs  1m02.7s/3m30.0s
+quiz_take   [  30% ] 40/40 VUs    1m02.7s/3m30.0s
+time="2026-09-26T18:35:51Z" level=warning msg="UNEXPECTED 500 GET /api/v1/me/notifications/unread-count :: Internal Server Error" source=console
+time="2026-09-26T18:35:51Z" level=warning msg="UNEXPECTED 500 GET /api/v1/me/notifications/unread-count :: Internal Server Error" source=console
+
+running (1m03.7s), 200/200 VUs, 887 complete and 0 interrupted iterations
+browse      [  30% ] 160/160 VUs  1m03.7s/3m30.0s
+quiz_take   [  30% ] 40/40 VUs    1m03.7s/3m30.0s
+
+running (1m04.7s), 200/200 VUs, 898 complete and 0 interrupted iterations
+browse      [  31% ] 160/160 VUs  1m04.7s/3m30.0s
+quiz_take   [  31% ] 40/40 VUs    1m04.7s/3m30.0s
+
+running (1m05.7s), 200/200 VUs, 901 complete and 0 interrupted iterations
+browse      [  31% ] 160/160 VUs  1m05.7s/3m30.0s
+quiz_take   [  31% ] 40/40 VUs    1m05.7s/3m30.0s
+
+running (1m06.7s), 200/200 VUs, 913 complete and 0 interrupted iterations
+browse      [  32% ] 160/160 VUs  1m06.7s/3m30.0s
+quiz_take   [  32% ] 40/40 VUs    1m06.7s/3m30.0s
+
+running (1m07.7s), 200/200 VUs, 949 complete and 0 interrupted iterations
+browse      [  32% ] 160/160 VUs  1m07.7s/3m30.0s
+quiz_take   [  32% ] 40/40 VUs    1m07.7s/3m30.0s
+
+running (1m08.7s), 200/200 VUs, 964 complete and 0 interrupted iterations
+browse      [  33% ] 160/160 VUs  1m08.7s/3m30.0s
+quiz_take   [  33% ] 40/40 VUs    1m08.7s/3m30.0s
+
+running (1m09.7s), 200/200 VUs, 972 complete and 0 interrupted iterations
+browse      [  33% ] 160/160 VUs  1m09.7s/3m30.0s
+quiz_take   [  33% ] 40/40 VUs    1m09.7s/3m30.0s
+
+running (1m10.7s), 200/200 VUs, 987 complete and 0 interrupted iterations
+browse      [  34% ] 160/160 VUs  1m10.7s/3m30.0s
+quiz_take   [  34% ] 40/40 VUs    1m10.7s/3m30.0s
+time="2026-09-26T18:35:59Z" level=warning msg="UNEXPECTED 500 GET /api/v1/courses :: Internal Server Error" source=console
+
+running (1m11.7s), 200/200 VUs, 999 complete and 0 interrupted iterations
+browse      [  34% ] 160/160 VUs  1m11.7s/3m30.0s
+quiz_take   [  34% ] 40/40 VUs    1m11.7s/3m30.0s
+
+running (1m12.7s), 200/200 VUs, 1024 complete and 0 interrupted iterations
+browse      [  35% ] 160/160 VUs  1m12.7s/3m30.0s
+quiz_take   [  35% ] 40/40 VUs    1m12.7s/3m30.0s
+
+running (1m13.7s), 200/200 VUs, 1040 complete and 0 interrupted iterations
+browse      [  35% ] 160/160 VUs  1m13.7s/3m30.0s
+quiz_take   [  35% ] 40/40 VUs    1m13.7s/3m30.0s
+
+running (1m14.7s), 200/200 VUs, 1070 complete and 0 interrupted iterations
+browse      [  36% ] 160/160 VUs  1m14.7s/3m30.0s
+quiz_take   [  36% ] 40/40 VUs    1m14.7s/3m30.0s
+
+running (1m15.7s), 200/200 VUs, 1079 complete and 0 interrupted iterations
+browse      [  36% ] 160/160 VUs  1m15.7s/3m30.0s
+quiz_take   [  36% ] 40/40 VUs    1m15.7s/3m30.0s
+
+running (1m16.7s), 200/200 VUs, 1089 complete and 0 interrupted iterations
+browse      [  37% ] 160/160 VUs  1m16.7s/3m30.0s
+quiz_take   [  37% ] 40/40 VUs    1m16.7s/3m30.0s
+
+running (1m17.7s), 200/200 VUs, 1098 complete and 0 interrupted iterations
+browse      [  37% ] 160/160 VUs  1m17.7s/3m30.0s
+quiz_take   [  37% ] 40/40 VUs    1m17.7s/3m30.0s
+
+running (1m18.7s), 200/200 VUs, 1116 complete and 0 interrupted iterations
+browse      [  37% ] 160/160 VUs  1m18.7s/3m30.0s
+quiz_take   [  37% ] 40/40 VUs    1m18.7s/3m30.0s
+
+running (1m19.7s), 200/200 VUs, 1142 complete and 0 interrupted iterations
+browse      [  38% ] 160/160 VUs  1m19.7s/3m30.0s
+quiz_take   [  38% ] 40/40 VUs    1m19.7s/3m30.0s
+
+running (1m20.7s), 200/200 VUs, 1155 complete and 0 interrupted iterations
+browse      [  38% ] 160/160 VUs  1m20.7s/3m30.0s
+quiz_take   [  38% ] 40/40 VUs    1m20.7s/3m30.0s
+time="2026-09-26T18:36:09Z" level=warning msg="UNEXPECTED 500 GET /api/v1/me/courses :: Internal Server Error" source=console
+time="2026-09-26T18:36:09Z" level=warning msg="UNEXPECTED 500 GET /api/v1/me/notifications/unread-count :: Internal Server Error" source=console
+
+running (1m21.7s), 200/200 VUs, 1169 complete and 0 interrupted iterations
+browse      [  39% ] 160/160 VUs  1m21.7s/3m30.0s
+quiz_take   [  39% ] 40/40 VUs    1m21.7s/3m30.0s
+
+running (1m22.7s), 200/200 VUs, 1188 complete and 0 interrupted iterations
+browse      [  39% ] 160/160 VUs  1m22.7s/3m30.0s
+quiz_take   [  39% ] 40/40 VUs    1m22.7s/3m30.0s
+
+running (1m23.7s), 200/200 VUs, 1201 complete and 0 interrupted iterations
+browse      [  40% ] 160/160 VUs  1m23.7s/3m30.0s
+quiz_take   [  40% ] 40/40 VUs    1m23.7s/3m30.0s
+
+running (1m24.7s), 200/200 VUs, 1209 complete and 0 interrupted iterations
+browse      [  40% ] 160/160 VUs  1m24.7s/3m30.0s
+quiz_take   [  40% ] 40/40 VUs    1m24.7s/3m30.0s
+
+running (1m25.7s), 200/200 VUs, 1236 complete and 0 interrupted iterations
+browse      [  41% ] 160/160 VUs  1m25.7s/3m30.0s
+quiz_take   [  41% ] 40/40 VUs    1m25.7s/3m30.0s
+
+running (1m26.7s), 200/200 VUs, 1250 complete and 0 interrupted iterations
+browse      [  41% ] 160/160 VUs  1m26.7s/3m30.0s
+quiz_take   [  41% ] 40/40 VUs    1m26.7s/3m30.0s
+
+running (1m27.7s), 200/200 VUs, 1261 complete and 0 interrupted iterations
+browse      [  42% ] 160/160 VUs  1m27.7s/3m30.0s
+quiz_take   [  42% ] 40/40 VUs    1m27.7s/3m30.0s
+
+running (1m28.7s), 200/200 VUs, 1276 complete and 0 interrupted iterations
+browse      [  42% ] 160/160 VUs  1m28.7s/3m30.0s
+quiz_take   [  42% ] 40/40 VUs    1m28.7s/3m30.0s
+
+running (1m29.7s), 200/200 VUs, 1287 complete and 0 interrupted iterations
+browse      [  43% ] 160/160 VUs  1m29.7s/3m30.0s
+quiz_take   [  43% ] 40/40 VUs    1m29.7s/3m30.0s
+
+running (1m30.7s), 200/200 VUs, 1313 complete and 0 interrupted iterations
+browse      [  43% ] 160/160 VUs  1m30.7s/3m30.0s
+quiz_take   [  43% ] 40/40 VUs    1m30.7s/3m30.0s
+
+running (1m31.7s), 200/200 VUs, 1329 complete and 0 interrupted iterations
+browse      [  44% ] 160/160 VUs  1m31.7s/3m30.0s
+quiz_take   [  44% ] 40/40 VUs    1m31.7s/3m30.0s
+
+running (1m32.7s), 200/200 VUs, 1344 complete and 0 interrupted iterations
+browse      [  44% ] 160/160 VUs  1m32.7s/3m30.0s
+quiz_take   [  44% ] 40/40 VUs    1m32.7s/3m30.0s
+
+running (1m33.7s), 200/200 VUs, 1359 complete and 0 interrupted iterations
+browse      [  45% ] 160/160 VUs  1m33.7s/3m30.0s
+quiz_take   [  45% ] 40/40 VUs    1m33.7s/3m30.0s
+
+running (1m34.7s), 200/200 VUs, 1369 complete and 0 interrupted iterations
+browse      [  45% ] 160/160 VUs  1m34.7s/3m30.0s
+quiz_take   [  45% ] 40/40 VUs    1m34.7s/3m30.0s
+
+running (1m35.7s), 200/200 VUs, 1384 complete and 0 interrupted iterations
+browse      [  46% ] 160/160 VUs  1m35.7s/3m30.0s
+quiz_take   [  46% ] 40/40 VUs    1m35.7s/3m30.0s
+
+running (1m36.7s), 200/200 VUs, 1403 complete and 0 interrupted iterations
+browse      [  46% ] 160/160 VUs  1m36.7s/3m30.0s
+quiz_take   [  46% ] 40/40 VUs    1m36.7s/3m30.0s
+
+running (1m37.7s), 200/200 VUs, 1415 complete and 0 interrupted iterations
+browse      [  47% ] 160/160 VUs  1m37.7s/3m30.0s
+quiz_take   [  47% ] 40/40 VUs    1m37.7s/3m30.0s
+
+running (1m38.7s), 200/200 VUs, 1434 complete and 0 interrupted iterations
+browse      [  47% ] 160/160 VUs  1m38.7s/3m30.0s
+quiz_take   [  47% ] 40/40 VUs    1m38.7s/3m30.0s
+
+running (1m39.7s), 200/200 VUs, 1445 complete and 0 interrupted iterations
+browse      [  47% ] 160/160 VUs  1m39.7s/3m30.0s
+quiz_take   [  47% ] 40/40 VUs    1m39.7s/3m30.0s
+
+running (1m40.7s), 200/200 VUs, 1455 complete and 0 interrupted iterations
+browse      [  48% ] 160/160 VUs  1m40.7s/3m30.0s
+quiz_take   [  48% ] 40/40 VUs    1m40.7s/3m30.0s
+
+running (1m41.7s), 200/200 VUs, 1477 complete and 0 interrupted iterations
+browse      [  48% ] 160/160 VUs  1m41.7s/3m30.0s
+quiz_take   [  48% ] 40/40 VUs    1m41.7s/3m30.0s
+
+running (1m42.7s), 200/200 VUs, 1485 complete and 0 interrupted iterations
+browse      [  49% ] 160/160 VUs  1m42.7s/3m30.0s
+quiz_take   [  49% ] 40/40 VUs    1m42.7s/3m30.0s
+
+running (1m43.7s), 200/200 VUs, 1501 complete and 0 interrupted iterations
+browse      [  49% ] 160/160 VUs  1m43.7s/3m30.0s
+quiz_take   [  49% ] 40/40 VUs    1m43.7s/3m30.0s
+
+running (1m44.7s), 200/200 VUs, 1513 complete and 0 interrupted iterations
+browse      [  50% ] 160/160 VUs  1m44.7s/3m30.0s
+quiz_take   [  50% ] 40/40 VUs    1m44.7s/3m30.0s
+
+running (1m45.7s), 200/200 VUs, 1529 complete and 0 interrupted iterations
+browse      [  50% ] 160/160 VUs  1m45.7s/3m30.0s
+quiz_take   [  50% ] 40/40 VUs    1m45.7s/3m30.0s
+
+running (1m46.7s), 200/200 VUs, 1556 complete and 0 interrupted iterations
+browse      [  51% ] 160/160 VUs  1m46.7s/3m30.0s
+quiz_take   [  51% ] 40/40 VUs    1m46.7s/3m30.0s
+
+running (1m47.7s), 200/200 VUs, 1586 complete and 0 interrupted iterations
+browse      [  51% ] 160/160 VUs  1m47.7s/3m30.0s
+quiz_take   [  51% ] 40/40 VUs    1m47.7s/3m30.0s
+
+running (1m48.7s), 200/200 VUs, 1603 complete and 0 interrupted iterations
+browse      [  52% ] 160/160 VUs  1m48.7s/3m30.0s
+quiz_take   [  52% ] 40/40 VUs    1m48.7s/3m30.0s
+
+running (1m49.7s), 200/200 VUs, 1616 complete and 0 interrupted iterations
+browse      [  52% ] 160/160 VUs  1m49.7s/3m30.0s
+quiz_take   [  52% ] 40/40 VUs    1m49.7s/3m30.0s
+
+running (1m50.7s), 200/200 VUs, 1633 complete and 0 interrupted iterations
+browse      [  53% ] 160/160 VUs  1m50.7s/3m30.0s
+quiz_take   [  53% ] 40/40 VUs    1m50.7s/3m30.0s
+
+running (1m51.7s), 200/200 VUs, 1652 complete and 0 interrupted iterations
+browse      [  53% ] 160/160 VUs  1m51.7s/3m30.0s
+quiz_take   [  53% ] 40/40 VUs    1m51.7s/3m30.0s
+
+running (1m52.7s), 200/200 VUs, 1669 complete and 0 interrupted iterations
+browse      [  54% ] 160/160 VUs  1m52.7s/3m30.0s
+quiz_take   [  54% ] 40/40 VUs    1m52.7s/3m30.0s
+
+running (1m53.7s), 200/200 VUs, 1684 complete and 0 interrupted iterations
+browse      [  54% ] 160/160 VUs  1m53.7s/3m30.0s
+quiz_take   [  54% ] 40/40 VUs    1m53.7s/3m30.0s
+
+running (1m54.7s), 200/200 VUs, 1699 complete and 0 interrupted iterations
+browse      [  55% ] 160/160 VUs  1m54.7s/3m30.0s
+quiz_take   [  55% ] 40/40 VUs    1m54.7s/3m30.0s
+
+running (1m55.7s), 200/200 VUs, 1719 complete and 0 interrupted iterations
+browse      [  55% ] 160/160 VUs  1m55.7s/3m30.0s
+quiz_take   [  55% ] 40/40 VUs    1m55.7s/3m30.0s
+
+running (1m56.7s), 200/200 VUs, 1731 complete and 0 interrupted iterations
+browse      [  56% ] 160/160 VUs  1m56.7s/3m30.0s
+quiz_take   [  56% ] 40/40 VUs    1m56.7s/3m30.0s
+
+running (1m57.7s), 200/200 VUs, 1752 complete and 0 interrupted iterations
+browse      [  56% ] 160/160 VUs  1m57.7s/3m30.0s
+quiz_take   [  56% ] 40/40 VUs    1m57.7s/3m30.0s
+
+running (1m58.7s), 200/200 VUs, 1764 complete and 0 interrupted iterations
+browse      [  57% ] 160/160 VUs  1m58.7s/3m30.0s
+quiz_take   [  57% ] 40/40 VUs    1m58.7s/3m30.0s
+
+running (1m59.7s), 200/200 VUs, 1778 complete and 0 interrupted iterations
+browse      [  57% ] 160/160 VUs  1m59.7s/3m30.0s
+quiz_take   [  57% ] 40/40 VUs    1m59.7s/3m30.0s
+
+running (2m00.7s), 200/200 VUs, 1800 complete and 0 interrupted iterations
+browse      [  57% ] 160/160 VUs  2m00.7s/3m30.0s
+quiz_take   [  57% ] 40/40 VUs    2m00.7s/3m30.0s
+
+running (2m01.7s), 200/200 VUs, 1814 complete and 0 interrupted iterations
+browse      [  58% ] 160/160 VUs  2m01.7s/3m30.0s
+quiz_take   [  58% ] 40/40 VUs    2m01.7s/3m30.0s
+
+running (2m02.7s), 200/200 VUs, 1832 complete and 0 interrupted iterations
+browse      [  58% ] 160/160 VUs  2m02.7s/3m30.0s
+quiz_take   [  58% ] 40/40 VUs    2m02.7s/3m30.0s
+
+running (2m03.7s), 200/200 VUs, 1841 complete and 0 interrupted iterations
+browse      [  59% ] 160/160 VUs  2m03.7s/3m30.0s
+quiz_take   [  59% ] 40/40 VUs    2m03.7s/3m30.0s
+
+running (2m04.7s), 200/200 VUs, 1860 complete and 0 interrupted iterations
+browse      [  59% ] 160/160 VUs  2m04.7s/3m30.0s
+quiz_take   [  59% ] 40/40 VUs    2m04.7s/3m30.0s
+
+running (2m05.7s), 200/200 VUs, 1886 complete and 0 interrupted iterations
+browse      [  60% ] 160/160 VUs  2m05.7s/3m30.0s
+quiz_take   [  60% ] 40/40 VUs    2m05.7s/3m30.0s
+
+running (2m06.7s), 200/200 VUs, 1902 complete and 0 interrupted iterations
+browse      [  60% ] 160/160 VUs  2m06.7s/3m30.0s
+quiz_take   [  60% ] 40/40 VUs    2m06.7s/3m30.0s
+
+running (2m07.7s), 200/200 VUs, 1911 complete and 0 interrupted iterations
+browse      [  61% ] 160/160 VUs  2m07.7s/3m30.0s
+quiz_take   [  61% ] 40/40 VUs    2m07.7s/3m30.0s
+
+running (2m08.7s), 200/200 VUs, 1918 complete and 0 interrupted iterations
+browse      [  61% ] 160/160 VUs  2m08.7s/3m30.0s
+quiz_take   [  61% ] 40/40 VUs    2m08.7s/3m30.0s
+
+running (2m09.7s), 200/200 VUs, 1945 complete and 0 interrupted iterations
+browse      [  62% ] 160/160 VUs  2m09.7s/3m30.0s
+quiz_take   [  62% ] 40/40 VUs    2m09.7s/3m30.0s
+
+running (2m10.7s), 200/200 VUs, 1966 complete and 0 interrupted iterations
+browse      [  62% ] 160/160 VUs  2m10.7s/3m30.0s
+quiz_take   [  62% ] 40/40 VUs    2m10.7s/3m30.0s
+
+running (2m11.7s), 200/200 VUs, 1981 complete and 0 interrupted iterations
+browse      [  63% ] 160/160 VUs  2m11.7s/3m30.0s
+quiz_take   [  63% ] 40/40 VUs    2m11.7s/3m30.0s
+
+running (2m12.7s), 200/200 VUs, 2002 complete and 0 interrupted iterations
+browse      [  63% ] 160/160 VUs  2m12.7s/3m30.0s
+quiz_take   [  63% ] 40/40 VUs    2m12.7s/3m30.0s
+
+running (2m13.7s), 200/200 VUs, 2013 complete and 0 interrupted iterations
+browse      [  64% ] 160/160 VUs  2m13.7s/3m30.0s
+quiz_take   [  64% ] 40/40 VUs    2m13.7s/3m30.0s
+
+running (2m14.7s), 200/200 VUs, 2032 complete and 0 interrupted iterations
+browse      [  64% ] 160/160 VUs  2m14.7s/3m30.0s
+quiz_take   [  64% ] 40/40 VUs    2m14.7s/3m30.0s
+
+running (2m15.7s), 200/200 VUs, 2045 complete and 0 interrupted iterations
+browse      [  65% ] 160/160 VUs  2m15.7s/3m30.0s
+quiz_take   [  65% ] 40/40 VUs    2m15.7s/3m30.0s
+
+running (2m16.7s), 200/200 VUs, 2064 complete and 0 interrupted iterations
+browse      [  65% ] 160/160 VUs  2m16.7s/3m30.0s
+quiz_take   [  65% ] 40/40 VUs    2m16.7s/3m30.0s
+
+running (2m17.7s), 200/200 VUs, 2077 complete and 0 interrupted iterations
+browse      [  66% ] 160/160 VUs  2m17.7s/3m30.0s
+quiz_take   [  66% ] 40/40 VUs    2m17.7s/3m30.0s
+
+running (2m18.7s), 200/200 VUs, 2094 complete and 0 interrupted iterations
+browse      [  66% ] 160/160 VUs  2m18.7s/3m30.0s
+quiz_take   [  66% ] 40/40 VUs    2m18.7s/3m30.0s
+
+running (2m19.7s), 200/200 VUs, 2108 complete and 0 interrupted iterations
+browse      [  67% ] 160/160 VUs  2m19.7s/3m30.0s
+quiz_take   [  67% ] 40/40 VUs    2m19.7s/3m30.0s
+
+running (2m20.7s), 200/200 VUs, 2130 complete and 0 interrupted iterations
+browse      [  67% ] 160/160 VUs  2m20.7s/3m30.0s
+quiz_take   [  67% ] 40/40 VUs    2m20.7s/3m30.0s
+
+running (2m21.7s), 200/200 VUs, 2141 complete and 0 interrupted iterations
+browse      [  67% ] 160/160 VUs  2m21.7s/3m30.0s
+quiz_take   [  67% ] 40/40 VUs    2m21.7s/3m30.0s
+
+running (2m22.7s), 200/200 VUs, 2151 complete and 0 interrupted iterations
+browse      [  68% ] 160/160 VUs  2m22.7s/3m30.0s
+quiz_take   [  68% ] 40/40 VUs    2m22.7s/3m30.0s
+
+running (2m23.7s), 200/200 VUs, 2174 complete and 0 interrupted iterations
+browse      [  68% ] 160/160 VUs  2m23.7s/3m30.0s
+quiz_take   [  68% ] 40/40 VUs    2m23.7s/3m30.0s
+
+running (2m24.7s), 200/200 VUs, 2190 complete and 0 interrupted iterations
+browse      [  69% ] 160/160 VUs  2m24.7s/3m30.0s
+quiz_take   [  69% ] 40/40 VUs    2m24.7s/3m30.0s
+
+running (2m25.7s), 200/200 VUs, 2207 complete and 0 interrupted iterations
+browse      [  69% ] 160/160 VUs  2m25.7s/3m30.0s
+quiz_take   [  69% ] 40/40 VUs    2m25.7s/3m30.0s
+
+running (2m26.7s), 200/200 VUs, 2211 complete and 0 interrupted iterations
+browse      [  70% ] 160/160 VUs  2m26.7s/3m30.0s
+quiz_take   [  70% ] 40/40 VUs    2m26.7s/3m30.0s
+
+running (2m27.7s), 200/200 VUs, 2224 complete and 0 interrupted iterations
+browse      [  70% ] 160/160 VUs  2m27.7s/3m30.0s
+quiz_take   [  70% ] 40/40 VUs    2m27.7s/3m30.0s
+
+running (2m28.7s), 200/200 VUs, 2241 complete and 0 interrupted iterations
+browse      [  71% ] 160/160 VUs  2m28.7s/3m30.0s
+quiz_take   [  71% ] 40/40 VUs    2m28.7s/3m30.0s
+
+running (2m29.7s), 200/200 VUs, 2256 complete and 0 interrupted iterations
+browse      [  71% ] 160/160 VUs  2m29.7s/3m30.0s
+quiz_take   [  71% ] 40/40 VUs    2m29.7s/3m30.0s
+
+running (2m30.7s), 200/200 VUs, 2275 complete and 0 interrupted iterations
+browse      [  72% ] 160/160 VUs  2m30.7s/3m30.0s
+quiz_take   [  72% ] 40/40 VUs    2m30.7s/3m30.0s
+
+running (2m31.7s), 200/200 VUs, 2294 complete and 0 interrupted iterations
+browse      [  72% ] 160/160 VUs  2m31.7s/3m30.0s
+quiz_take   [  72% ] 40/40 VUs    2m31.7s/3m30.0s
+
+running (2m32.7s), 200/200 VUs, 2302 complete and 0 interrupted iterations
+browse      [  73% ] 160/160 VUs  2m32.7s/3m30.0s
+quiz_take   [  73% ] 40/40 VUs    2m32.7s/3m30.0s
+
+running (2m33.7s), 200/200 VUs, 2311 complete and 0 interrupted iterations
+browse      [  73% ] 160/160 VUs  2m33.7s/3m30.0s
+quiz_take   [  73% ] 40/40 VUs    2m33.7s/3m30.0s
+
+running (2m34.7s), 200/200 VUs, 2324 complete and 0 interrupted iterations
+browse      [  74% ] 160/160 VUs  2m34.7s/3m30.0s
+quiz_take   [  74% ] 40/40 VUs    2m34.7s/3m30.0s
+
+running (2m35.7s), 200/200 VUs, 2334 complete and 0 interrupted iterations
+browse      [  74% ] 160/160 VUs  2m35.7s/3m30.0s
+quiz_take   [  74% ] 40/40 VUs    2m35.7s/3m30.0s
+
+running (2m36.7s), 200/200 VUs, 2362 complete and 0 interrupted iterations
+browse      [  75% ] 160/160 VUs  2m36.7s/3m30.0s
+quiz_take   [  75% ] 40/40 VUs    2m36.7s/3m30.0s
+
+running (2m37.7s), 200/200 VUs, 2376 complete and 0 interrupted iterations
+browse      [  75% ] 160/160 VUs  2m37.7s/3m30.0s
+quiz_take   [  75% ] 40/40 VUs    2m37.7s/3m30.0s
+
+running (2m38.7s), 200/200 VUs, 2396 complete and 0 interrupted iterations
+browse      [  76% ] 160/160 VUs  2m38.7s/3m30.0s
+quiz_take   [  76% ] 40/40 VUs    2m38.7s/3m30.0s
+
+running (2m39.7s), 200/200 VUs, 2402 complete and 0 interrupted iterations
+browse      [  76% ] 160/160 VUs  2m39.7s/3m30.0s
+quiz_take   [  76% ] 40/40 VUs    2m39.7s/3m30.0s
+
+running (2m40.7s), 200/200 VUs, 2423 complete and 0 interrupted iterations
+browse      [  77% ] 160/160 VUs  2m40.7s/3m30.0s
+quiz_take   [  77% ] 40/40 VUs    2m40.7s/3m30.0s
+
+running (2m41.7s), 200/200 VUs, 2438 complete and 0 interrupted iterations
+browse      [  77% ] 160/160 VUs  2m41.7s/3m30.0s
+quiz_take   [  77% ] 40/40 VUs    2m41.7s/3m30.0s
+
+running (2m42.7s), 200/200 VUs, 2470 complete and 0 interrupted iterations
+browse      [  77% ] 160/160 VUs  2m42.7s/3m30.0s
+quiz_take   [  77% ] 40/40 VUs    2m42.7s/3m30.0s
+
+running (2m43.7s), 200/200 VUs, 2483 complete and 0 interrupted iterations
+browse      [  78% ] 160/160 VUs  2m43.7s/3m30.0s
+quiz_take   [  78% ] 40/40 VUs    2m43.7s/3m30.0s
+
+running (2m44.7s), 200/200 VUs, 2496 complete and 0 interrupted iterations
+browse      [  78% ] 160/160 VUs  2m44.7s/3m30.0s
+quiz_take   [  78% ] 40/40 VUs    2m44.7s/3m30.0s
+
+running (2m45.7s), 200/200 VUs, 2508 complete and 0 interrupted iterations
+browse      [  79% ] 160/160 VUs  2m45.7s/3m30.0s
+quiz_take   [  79% ] 40/40 VUs    2m45.7s/3m30.0s
+
+running (2m46.7s), 200/200 VUs, 2515 complete and 0 interrupted iterations
+browse      [  79% ] 160/160 VUs  2m46.7s/3m30.0s
+quiz_take   [  79% ] 40/40 VUs    2m46.7s/3m30.0s
+
+running (2m47.7s), 200/200 VUs, 2536 complete and 0 interrupted iterations
+browse      [  80% ] 160/160 VUs  2m47.7s/3m30.0s
+quiz_take   [  80% ] 40/40 VUs    2m47.7s/3m30.0s
+
+running (2m48.7s), 200/200 VUs, 2549 complete and 0 interrupted iterations
+browse      [  80% ] 160/160 VUs  2m48.7s/3m30.0s
+quiz_take   [  80% ] 40/40 VUs    2m48.7s/3m30.0s
+
+running (2m49.7s), 200/200 VUs, 2579 complete and 0 interrupted iterations
+browse      [  81% ] 160/160 VUs  2m49.7s/3m30.0s
+quiz_take   [  81% ] 40/40 VUs    2m49.7s/3m30.0s
+
+running (2m50.7s), 200/200 VUs, 2591 complete and 0 interrupted iterations
+browse      [  81% ] 160/160 VUs  2m50.7s/3m30.0s
+quiz_take   [  81% ] 40/40 VUs    2m50.7s/3m30.0s
+
+running (2m51.7s), 200/200 VUs, 2600 complete and 0 interrupted iterations
+browse      [  82% ] 160/160 VUs  2m51.7s/3m30.0s
+quiz_take   [  82% ] 40/40 VUs    2m51.7s/3m30.0s
+
+running (2m52.7s), 200/200 VUs, 2611 complete and 0 interrupted iterations
+browse      [  82% ] 160/160 VUs  2m52.7s/3m30.0s
+quiz_take   [  82% ] 40/40 VUs    2m52.7s/3m30.0s
+
+running (2m53.7s), 200/200 VUs, 2626 complete and 0 interrupted iterations
+browse      [  83% ] 160/160 VUs  2m53.7s/3m30.0s
+quiz_take   [  83% ] 40/40 VUs    2m53.7s/3m30.0s
+
+running (2m54.7s), 200/200 VUs, 2649 complete and 0 interrupted iterations
+browse      [  83% ] 160/160 VUs  2m54.7s/3m30.0s
+quiz_take   [  83% ] 40/40 VUs    2m54.7s/3m30.0s
+
+running (2m55.7s), 200/200 VUs, 2664 complete and 0 interrupted iterations
+browse      [  84% ] 160/160 VUs  2m55.7s/3m30.0s
+quiz_take   [  84% ] 40/40 VUs    2m55.7s/3m30.0s
+
+running (2m56.7s), 200/200 VUs, 2688 complete and 0 interrupted iterations
+browse      [  84% ] 160/160 VUs  2m56.7s/3m30.0s
+quiz_take   [  84% ] 40/40 VUs    2m56.7s/3m30.0s
+
+running (2m57.7s), 200/200 VUs, 2704 complete and 0 interrupted iterations
+browse      [  85% ] 160/160 VUs  2m57.7s/3m30.0s
+quiz_take   [  85% ] 40/40 VUs    2m57.7s/3m30.0s
+
+running (2m58.7s), 200/200 VUs, 2719 complete and 0 interrupted iterations
+browse      [  85% ] 160/160 VUs  2m58.7s/3m30.0s
+quiz_take   [  85% ] 40/40 VUs    2m58.7s/3m30.0s
+
+running (2m59.7s), 200/200 VUs, 2730 complete and 0 interrupted iterations
+browse      [  86% ] 160/160 VUs  2m59.7s/3m30.0s
+quiz_take   [  86% ] 40/40 VUs    2m59.7s/3m30.0s
+
+running (3m00.7s), 200/200 VUs, 2748 complete and 0 interrupted iterations
+browse      [  86% ] 160/160 VUs  3m00.7s/3m30.0s
+quiz_take   [  86% ] 40/40 VUs    3m00.7s/3m30.0s
+
+running (3m01.7s), 200/200 VUs, 2765 complete and 0 interrupted iterations
+browse      [  87% ] 160/160 VUs  3m01.7s/3m30.0s
+quiz_take   [  87% ] 40/40 VUs    3m01.7s/3m30.0s
+
+running (3m02.7s), 200/200 VUs, 2778 complete and 0 interrupted iterations
+browse      [  87% ] 160/160 VUs  3m02.7s/3m30.0s
+quiz_take   [  87% ] 40/40 VUs    3m02.7s/3m30.0s
+
+running (3m03.7s), 200/200 VUs, 2789 complete and 0 interrupted iterations
+browse      [  87% ] 160/160 VUs  3m03.7s/3m30.0s
+quiz_take   [  87% ] 40/40 VUs    3m03.7s/3m30.0s
+
+running (3m04.7s), 200/200 VUs, 2808 complete and 0 interrupted iterations
+browse      [  88% ] 160/160 VUs  3m04.7s/3m30.0s
+quiz_take   [  88% ] 40/40 VUs    3m04.7s/3m30.0s
+
+running (3m05.7s), 200/200 VUs, 2831 complete and 0 interrupted iterations
+browse      [  88% ] 160/160 VUs  3m05.7s/3m30.0s
+quiz_take   [  88% ] 40/40 VUs    3m05.7s/3m30.0s
+
+running (3m06.7s), 200/200 VUs, 2852 complete and 0 interrupted iterations
+browse      [  89% ] 160/160 VUs  3m06.7s/3m30.0s
+quiz_take   [  89% ] 40/40 VUs    3m06.7s/3m30.0s
+
+running (3m07.7s), 200/200 VUs, 2866 complete and 0 interrupted iterations
+browse      [  89% ] 160/160 VUs  3m07.7s/3m30.0s
+quiz_take   [  89% ] 40/40 VUs    3m07.7s/3m30.0s
+
+running (3m08.7s), 200/200 VUs, 2877 complete and 0 interrupted iterations
+browse      [  90% ] 160/160 VUs  3m08.7s/3m30.0s
+quiz_take   [  90% ] 40/40 VUs    3m08.7s/3m30.0s
+
+running (3m09.7s), 200/200 VUs, 2888 complete and 0 interrupted iterations
+browse      [  90% ] 160/160 VUs  3m09.7s/3m30.0s
+quiz_take   [  90% ] 40/40 VUs    3m09.7s/3m30.0s
+
+running (3m10.7s), 200/200 VUs, 2906 complete and 0 interrupted iterations
+browse      [  91% ] 160/160 VUs  3m10.7s/3m30.0s
+quiz_take   [  91% ] 40/40 VUs    3m10.7s/3m30.0s
+
+running (3m11.7s), 200/200 VUs, 2916 complete and 0 interrupted iterations
+browse      [  91% ] 160/160 VUs  3m11.7s/3m30.0s
+quiz_take   [  91% ] 40/40 VUs    3m11.7s/3m30.0s
+
+running (3m12.7s), 200/200 VUs, 2926 complete and 0 interrupted iterations
+browse      [  92% ] 160/160 VUs  3m12.7s/3m30.0s
+quiz_take   [  92% ] 40/40 VUs    3m12.7s/3m30.0s
+
+running (3m13.7s), 200/200 VUs, 2941 complete and 0 interrupted iterations
+browse      [  92% ] 160/160 VUs  3m13.7s/3m30.0s
+quiz_take   [  92% ] 40/40 VUs    3m13.7s/3m30.0s
+
+running (3m14.7s), 200/200 VUs, 2961 complete and 0 interrupted iterations
+browse      [  93% ] 160/160 VUs  3m14.7s/3m30.0s
+quiz_take   [  93% ] 40/40 VUs    3m14.7s/3m30.0s
+
+running (3m15.7s), 200/200 VUs, 2975 complete and 0 interrupted iterations
+browse      [  93% ] 160/160 VUs  3m15.7s/3m30.0s
+quiz_take   [  93% ] 40/40 VUs    3m15.7s/3m30.0s
+
+running (3m16.7s), 200/200 VUs, 2987 complete and 0 interrupted iterations
+browse      [  94% ] 160/160 VUs  3m16.7s/3m30.0s
+quiz_take   [  94% ] 40/40 VUs    3m16.7s/3m30.0s
+
+running (3m17.7s), 200/200 VUs, 3021 complete and 0 interrupted iterations
+browse      [  94% ] 160/160 VUs  3m17.7s/3m30.0s
+quiz_take   [  94% ] 40/40 VUs    3m17.7s/3m30.0s
+
+running (3m18.7s), 200/200 VUs, 3036 complete and 0 interrupted iterations
+browse      [  95% ] 160/160 VUs  3m18.7s/3m30.0s
+quiz_take   [  95% ] 40/40 VUs    3m18.7s/3m30.0s
+
+running (3m19.7s), 200/200 VUs, 3052 complete and 0 interrupted iterations
+browse      [  95% ] 160/160 VUs  3m19.7s/3m30.0s
+quiz_take   [  95% ] 40/40 VUs    3m19.7s/3m30.0s
+
+running (3m20.7s), 200/200 VUs, 3068 complete and 0 interrupted iterations
+browse      [  96% ] 160/160 VUs  3m20.7s/3m30.0s
+quiz_take   [  96% ] 40/40 VUs    3m20.7s/3m30.0s
+
+running (3m21.7s), 197/200 VUs, 3085 complete and 0 interrupted iterations
+browse      [  96% ] 157/160 VUs  3m21.7s/3m30.0s
+quiz_take   [  96% ] 40/40 VUs    3m21.7s/3m30.0s
+
+running (3m22.7s), 196/200 VUs, 3095 complete and 0 interrupted iterations
+browse      [  97% ] 157/160 VUs  3m22.7s/3m30.0s
+quiz_take   [  97% ] 39/40 VUs    3m22.7s/3m30.0s
+
+running (3m23.7s), 187/200 VUs, 3119 complete and 0 interrupted iterations
+browse      [  97% ] 149/160 VUs  3m23.7s/3m30.0s
+quiz_take   [  97% ] 38/40 VUs    3m23.7s/3m30.0s
+
+running (3m24.7s), 178/200 VUs, 3136 complete and 0 interrupted iterations
+browse      [  97% ] 141/160 VUs  3m24.7s/3m30.0s
+quiz_take   [  97% ] 37/40 VUs    3m24.7s/3m30.0s
+
+running (3m25.7s), 172/200 VUs, 3151 complete and 0 interrupted iterations
+browse      [  98% ] 135/160 VUs  3m25.7s/3m30.0s
+quiz_take   [  98% ] 37/40 VUs    3m25.7s/3m30.0s
+
+running (3m26.7s), 161/200 VUs, 3168 complete and 0 interrupted iterations
+browse      [  98% ] 124/160 VUs  3m26.7s/3m30.0s
+quiz_take   [  98% ] 37/40 VUs    3m26.7s/3m30.0s
+
+running (3m27.7s), 148/200 VUs, 3189 complete and 0 interrupted iterations
+browse      [  99% ] 112/160 VUs  3m27.7s/3m30.0s
+quiz_take   [  99% ] 36/40 VUs    3m27.7s/3m30.0s
+
+running (3m28.7s), 120/200 VUs, 3219 complete and 0 interrupted iterations
+browse      [  99% ] 087/160 VUs  3m28.7s/3m30.0s
+quiz_take   [  99% ] 33/40 VUs    3m28.7s/3m30.0s
+
+running (3m29.7s), 090/200 VUs, 3254 complete and 0 interrupted iterations
+browse      [ 100% ] 060/160 VUs  3m29.7s/3m30.0s
+quiz_take   [ 100% ] 30/40 VUs    3m29.7s/3m30.0s
+
+running (3m30.7s), 063/200 VUs, 3279 complete and 2 interrupted iterations
+browse    ↓ [ 100% ] 051/160 VUs  3m30s
+quiz_take ↓ [ 100% ] 28/40 VUs    3m30s
+
+running (3m31.7s), 035/200 VUs, 3305 complete and 4 interrupted iterations
+browse    ↓ [ 100% ] 051/160 VUs  3m30s
+quiz_take ↓ [ 100% ] 28/40 VUs    3m30s
+
+running (3m32.7s), 021/200 VUs, 3318 complete and 5 interrupted iterations
+browse    ↓ [ 100% ] 051/160 VUs  3m30s
+quiz_take ↓ [ 100% ] 28/40 VUs    3m30s
+
+running (3m33.7s), 007/200 VUs, 3332 complete and 5 interrupted iterations
+browse    ✓ [ 100% ] 000/160 VUs  3m30s
+quiz_take ↓ [ 100% ] 28/40 VUs    3m30s
+
+total requests : 24132 (112.6/s)
+error rate     : 0.55%
+duration       : med=413ms p95=5.94s p99=11.37s max=25.65s
+threshold FAIL: http_req_duration
+threshold PASS: http_req_failed
+
+════════ Per-endpoint summary (report-ready) ════════
+Endpoint                                              Count   RPS     p50      p95      p99      Max      Err%
+GET /api/v1/me/notifications/unread-count             6196    28.9    239ms    4.59s    7.48s    15.86s   0.58%
+GET /api/v1/users/me                                  3099    14.5    314ms    4.55s    7.59s    11.34s   0.84%
+GET /api/v1/me/courses                                3099    14.5    410ms    4.58s    7.43s    11.82s   0.55%
+GET /api/v1/me/progress/courses/{id}                  3099    14.5    267ms    4.42s    7.34s    14.08s   0.55%
+GET /api/v1/me/cards-due                              3099    14.5    737ms    6.18s    9.22s    14.41s   0.55%
+POST /api/v1/attempts/{id}/answers                    1220    5.7     860ms    5.88s    8.63s    12.92s   0.16%
+GET /api/v1/me/sr-dashboard-summary                   659     3.1     2.23s    12.58s   16.82s   20.85s   0.30%
+GET /api/v1/courses/{id}/content                      625     2.9     651ms    6.14s    8.87s    10.48s   0.48%
+GET /api/v1/courses                                   620     2.9     649ms    5.07s    7.90s    13.90s   0.97%
+GET /api/v1/courses/{id}/interview-progress           616     2.9     307ms    4.26s    7.39s    10.74s   0.16%
+GET /api/v1/courses/{id}/quiz-progress                579     2.7     323ms    3.79s    6.31s    11.95s   0.52%
+POST /api/v1/attempts/{id}/session/heartbeat          488     2.3     495ms    5.89s    10.11s   13.44s   0.41%
+POST /api/v1/quizzes/{quiz_id}/attempts               245     1.1     8.63s    17.82s   19.65s   22.90s   0.41%
+POST /api/v1/attempts/{id}/integrity-events           244     1.1     609ms    5.66s    7.96s    8.69s    0.00%
+POST /api/v1/attempts/{id}/submit                     244     1.1     9.66s    19.11s   23.12s   25.65s   0.00%
+
+running (3m34.4s), 000/200 VUs, 3339 complete and 5 interrupted iterations
+browse    ✓ [ 100% ] 000/160 VUs  3m30s
+quiz_take ✓ [ 100% ] 00/40 VUs    3m30s
+time="2026-09-26T18:38:23Z" level=error msg="thresholds on metrics 'http_req_duration' have been crossed"

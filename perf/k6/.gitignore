@@ -1,0 +1,3 @@
+.state/
+bin/k6
+*.log

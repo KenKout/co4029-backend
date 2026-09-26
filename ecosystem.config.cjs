@@ -4,7 +4,7 @@ module.exports = {
       name: "abridgeai-backend",
       cwd: "/root/co4029/backend",
       script: "/root/co4029/backend/.venv/bin/uvicorn",
-      args: "abridgeai.api:create_app --factory --host 0.0.0.0 --port 8000",
+      args: "abridgeai.api:create_app --factory --host 0.0.0.0 --port 8000 --workers 4",
       interpreter: "none",
       autorestart: true,
       max_restarts: 10,
