@@ -101,6 +101,10 @@ class QuizQuestionBankItem(
             "('remember', 'understand', 'apply', 'analyze', 'evaluate', 'create')",
             name="ck_quiz_bank_bloom_level",
         ),
+        CheckConstraint(
+            "expected_response_time_ms IS NULL OR expected_response_time_ms > 0",
+            name="ck_quiz_bank_expected_time_positive",
+        ),
     )
 
     course_id: Mapped[uuid.UUID] = mapped_column(

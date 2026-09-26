@@ -35,13 +35,13 @@ from uuid import UUID
 
 from abridgeai.core.config import get_settings
 from abridgeai.core.exceptions import NotFoundError
+from abridgeai.core.runtime_settings import resolve_setting
 from abridgeai.features.quizzes.api.public import (
     get_guess_probability,
     get_question_with_quiz_context,
     get_t_exp_for_question,
 )
 from abridgeai.features.spaced_repetition.models import CardReview, StudentCardState
-from abridgeai.core.runtime_settings import resolve_setting
 from abridgeai.features.spaced_repetition.sm2 import (
     apply_interval_ceiling,
     apply_jitter,
@@ -92,10 +92,10 @@ async def _load_quiz_question_meta(
     context = await get_question_with_quiz_context(db, question_id)
     if context is None:
         raise NotFoundError(f"QuizQuestion {question_id} not found")
-    if t_exp_ms is None:
+    if t_exp_ms is None or t_exp_ms <= 0:
         raise ValueError(
-            f"QuizQuestion {question_id} has no expected_response_time_ms — "
-            "T_exp must be set before review (T7.5.9 publish gate)",
+            f"QuizQuestion {question_id} has no positive expected_response_time_ms — "
+            "T_exp must be positive before review (T7.5.9 publish gate)",
         )
     return int(t_exp_ms), context.quiz_id, context.initial_ef
 
@@ -205,10 +205,9 @@ async def record_card_review(
             (T_exp must be set before scheduling — T7.5.9 publish gate).
     """
     t_exp_ms, quiz_id, initial_ef = await _load_quiz_question_meta(db, question_id)
-    if t_actual_ms is None:
-        t_actual_ms = t_exp_ms
-    else:
-        t_actual_ms = _clamp_t_actual(t_actual_ms, t_exp_ms)
+    t_actual_ms = (
+        t_exp_ms if t_actual_ms is None else _clamp_t_actual(t_actual_ms, t_exp_ms)
+    )
 
     state, _was_created = await _load_or_init_state(
         db, student_id=student_id, question_id=question_id, initial_ef=initial_ef

@@ -312,6 +312,10 @@ class QuizQuestion(UUIDPrimaryKeyMixin, TimestampMixin, AuditedByMixin, SoftDele
             "('remember', 'understand', 'apply', 'analyze', 'evaluate', 'create')",
             name="ck_quiz_questions_bloom_level",
         ),
+        CheckConstraint(
+            "expected_response_time_ms IS NULL OR expected_response_time_ms > 0",
+            name="quiz_questions_expected_response_ms_check",
+        ),
     )
 
     quiz_id: Mapped[uuid.UUID] = mapped_column(

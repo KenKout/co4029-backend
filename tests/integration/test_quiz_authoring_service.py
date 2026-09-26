@@ -674,6 +674,49 @@ async def test_approving_on_create_stamps_the_reviewer(
 
 
 @pytest.mark.asyncio
+async def test_question_create_and_update_reject_zero_expected_time(
+    session_factory: async_sessionmaker[AsyncSession],
+    scenario: dict,
+) -> None:
+    """Loose authoring dictionaries cannot bypass the positive T_exp invariant."""
+    async with session_factory() as session, session.begin():
+        quiz = await _make_quiz(session, scenario)
+        with pytest.raises(AppError, match="positive integer"):
+            await authoring_service.create_question(
+                session,
+                quiz.id,
+                _question_payload(
+                    options=_MCQ_OPTIONS,
+                    expected_response_time_ms=0,
+                ),
+                _actor(scenario["owner_id"]),
+            )
+        question = await authoring_service.create_question(
+            session,
+            quiz.id,
+            _question_payload(
+                options=_MCQ_OPTIONS,
+                expected_response_time_ms=30_000,
+            ),
+            _actor(scenario["owner_id"]),
+        )
+
+    async with session_factory() as session:
+        with pytest.raises(AppError, match="positive integer"):
+            await authoring_service.update_question(
+                session,
+                question.id,
+                _AttrShim({"expected_response_time_ms": 0}),
+                _actor(scenario["owner_id"]),
+            )
+
+    async with session_factory() as session:
+        stored = await session.get(QuizQuestion, question.id)
+        assert stored is not None
+        assert stored.expected_response_time_ms == 30_000
+
+
+@pytest.mark.asyncio
 async def test_an_option_edit_cannot_leave_two_correct_answers(
     session_factory: async_sessionmaker[AsyncSession],
     scenario: dict,

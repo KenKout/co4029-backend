@@ -127,6 +127,11 @@ def test_expected_response_time_ms_nullable() -> None:
     assert col.nullable is True, (
         "§C1: T_exp must be nullable in draft; T7.5.9 publish gate enforces NOT NULL"
     )
+    sqltext = _check_constraint_text(
+        QuizQuestion, "quiz_questions_expected_response_ms_check"
+    )
+    assert "IS NULL" in sqltext
+    assert "> 0" in sqltext
 
 
 def test_hint_text_is_text_type() -> None:

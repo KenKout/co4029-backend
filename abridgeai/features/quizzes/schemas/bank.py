@@ -102,7 +102,7 @@ class QuizQuestionBankItemCreate(BaseModel):
     explanation: str | None = None
     difficulty: Difficulty | None = None
     bloom_level: BloomLevel | None = None
-    expected_response_time_ms: int | None = None
+    expected_response_time_ms: int | None = Field(default=None, gt=0)
     expected_ef_ceiling: Decimal | None = None
     learning_outcome_id: UUID | None = None
     source_refs: list[Any] = []
@@ -131,7 +131,7 @@ class QuizQuestionBankItemUpdate(BaseModel):
     explanation: str | None = None
     difficulty: Difficulty | None = None
     bloom_level: BloomLevel | None = None
-    expected_response_time_ms: int | None = None
+    expected_response_time_ms: int | None = Field(default=None, gt=0)
     expected_ef_ceiling: Decimal | None = None
     learning_outcome_id: UUID | None = None
     prompt_format: str | None = None

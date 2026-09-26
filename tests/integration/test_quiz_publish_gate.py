@@ -17,6 +17,7 @@ from alembic import command
 from alembic.config import Config
 from sqlalchemy import Column, Table, text
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -236,9 +237,8 @@ async def test_publish_with_one_missing_returns_422(
 
 
 @pytest.mark.asyncio
-async def test_publish_with_zero_t_exp_returns_422(
+async def test_database_rejects_zero_t_exp(
     engine: AsyncEngine,
-    session_factory: async_sessionmaker[AsyncSession],
     scenario: dict,
 ) -> None:
     quiz_id = scenario["quiz_id"]
@@ -246,14 +246,18 @@ async def test_publish_with_zero_t_exp_returns_422(
         engine,
         quiz_id=quiz_id,
         position=1,
-        expected_response_time_ms=0,
+        expected_response_time_ms=None,
     )
 
-    async with session_factory() as session, session.begin():
-        with pytest.raises(QuizPublishValidationError) as exc_info:
-            await authoring_service.publish_quiz(session, quiz_id, _actor(scenario["owner_id"]))
-
-    assert question_id in exc_info.value.missing_t_exp_question_ids
+    with pytest.raises(IntegrityError):
+        async with engine.begin() as conn:
+            await conn.execute(
+                text(
+                    "UPDATE quiz_questions "
+                    "SET expected_response_time_ms = 0 WHERE id = :id"
+                ),
+                {"id": question_id},
+            )
 
 
 @pytest.mark.asyncio

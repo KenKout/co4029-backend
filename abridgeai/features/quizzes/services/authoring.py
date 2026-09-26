@@ -108,6 +108,21 @@ _INTEGRITY_PATCH_BOUNDS: dict[str, tuple[int, int]] = {
 }
 
 
+def _validated_expected_response_time_ms(value: object) -> int | None:
+    """Return a valid draft T_exp value or raise a boundary error.
+
+    Draft questions may leave T_exp unset, but zero is not a meaningful
+    calibration value: SM-2 divides by it and the publish gate rejects it.
+    Keep this check in the service because the legacy create/PATCH routes
+    accept loose dictionaries and can be called without the teacher SPA.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise AppError("expected_response_time_ms must be a positive integer or null")
+    return value
+
+
 def _validated_response_policy(value: object) -> object:
     """One of the two integrity response policies, or a named error.
 
@@ -700,7 +715,9 @@ async def create_question(
         difficulty=getattr(payload, "difficulty", None),
         bloom_level=getattr(payload, "bloom_level", None),
         review_status=getattr(payload, "review_status", "pending"),
-        expected_response_time_ms=getattr(payload, "expected_response_time_ms", None),
+        expected_response_time_ms=_validated_expected_response_time_ms(
+            getattr(payload, "expected_response_time_ms", None)
+        ),
         learning_outcome_id=getattr(payload, "learning_outcome_id", None),
         source_refs=getattr(payload, "source_refs", []) or [],
         original_generated_payload=None,
@@ -775,6 +792,8 @@ async def update_question(
     _assert_quiz_editable(quiz)
     revision_no = await _next_revision_no(db, question_id)
     payload_json = payload.model_dump(exclude_unset=True, mode="json")
+    if "expected_response_time_ms" in payload_json:
+        _validated_expected_response_time_ms(payload_json["expected_response_time_ms"])
     db.add(
         QuizQuestionRevision(
             question_id=question_id,
@@ -805,7 +824,7 @@ async def update_question(
             field_updates[_text_field] = sanitize_rich_content(field_updates[_text_field], fmt=_fmt)
 
     for key, value in field_updates.items():
-        setattr(question, key, value)
+        setattr(question, key, _coerce_patch_value(key, value))
 
     options_payload = getattr(payload, "options", None)
     if options_payload is not None:

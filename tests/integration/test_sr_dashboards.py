@@ -741,30 +741,29 @@ async def test_cards_due_excludes_questions_with_no_expected_time(
             due_at=past,
             last_q=4,
         )
-    # One loses its T_exp entirely, one is set non-positive: the publish gate
-    # rejects both shapes, so both must be treated the same here.
-    cleared_qid, zeroed_qid = qids[0], qids[1]
+    # A question that loses T_exp after publish must disappear from both SR
+    # surfaces. Non-positive values are now rejected by the database itself.
+    cleared_qid = qids[0]
     async with engine.begin() as conn:
         await conn.execute(
             text("UPDATE quiz_questions SET expected_response_time_ms = NULL WHERE id = :id"),
             {"id": cleared_qid},
-        )
-        await conn.execute(
-            text("UPDATE quiz_questions SET expected_response_time_ms = 0 WHERE id = :id"),
-            {"id": zeroed_qid},
         )
     try:
         headers = {"Authorization": f"Bearer {student_bearer}"}
         cards = await client.get("/api/v1/me/cards-due?limit=100", headers=headers)
         assert cards.status_code == 200, cards.text
         listed = {i["question_id"] for i in cards.json()["items"]}
-        assert listed == {str(qids[2])}
+        assert listed == {str(qids[1]), str(qids[2])}
 
         queue = await client.get("/api/v1/me/review/queue", headers=headers)
         assert queue.status_code == 200, queue.text
         qbody = queue.json()
-        assert qbody["total_due"] == 1
-        assert [c["question_id"] for c in qbody["items"]] == [str(qids[2])]
+        assert qbody["total_due"] == 2
+        assert {c["question_id"] for c in qbody["items"]} == {
+            str(qids[1]),
+            str(qids[2]),
+        }
 
         # Submitting one directly is still refused -- the queue no longer
         # offers it, so this is now only reachable by a stale client.
