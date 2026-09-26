@@ -19,5 +19,10 @@ FROM user_role_assignments ra
 JOIN roles r ON r.id = ra.role_id
 WHERE ra.updated_at >= CAST(:since AS timestamptz)
   AND (CAST(:until AS timestamptz) IS NULL OR updated_at < CAST(:until AS timestamptz))
+  AND (CAST(:user_id AS uuid) IS NULL
+       OR ra.user_id = CAST(:user_id AS uuid)
+       OR ra.granted_by = CAST(:user_id AS uuid)
+       OR ra.updated_by = CAST(:user_id AS uuid)
+       OR ra.deleted_by = CAST(:user_id AS uuid))
 ORDER BY ra.updated_at DESC
 LIMIT :limit;

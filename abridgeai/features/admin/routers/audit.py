@@ -100,11 +100,12 @@ async def get_role_changes(
         datetime | None,
         Query(description="Exclusive upper bound on updated_at (optional)."),
     ] = None,
+    user_id: Annotated[UUID | None, Query(description="User involved in the change.")] = None,
     limit: Annotated[int, Query(ge=1, le=500)] = 100,
 ) -> list[RoleChangeRow]:
     org_id = await resolve_admin_scope(db, user)
     rows = await audit_service.role_changes(
-        db, since=since, until=until, organization_id=org_id, limit=limit
+        db, since=since, until=until, organization_id=org_id, user_id=user_id, limit=limit
     )
     return [RoleChangeRow.model_validate(r) for r in rows]
 
@@ -129,6 +130,7 @@ async def list_data_changes(
         datetime | None,
         Query(description="Exclusive upper bound on updated_at (optional)."),
     ] = None,
+    user_id: Annotated[UUID | None, Query(description="User involved in the change.")] = None,
     limit: Annotated[int, Query(ge=1, le=500)] = 100,
 ) -> list[DataChangeOut]:
     """Every row in ``table`` changed within ``[since, until)``, newest first.
@@ -149,7 +151,7 @@ async def list_data_changes(
             },
         )
     rows = await audit_service.data_changes_list(
-        db, table=table, since=since, until=until, limit=limit
+        db, table=table, since=since, until=until, user_id=user_id, limit=limit
     )
     return [DataChangeOut.model_validate(r) for r in rows]
 

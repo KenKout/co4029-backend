@@ -16,5 +16,10 @@ SELECT
 FROM courses c
 WHERE c.updated_at >= CAST(:since AS timestamptz)
   AND (CAST(:until AS timestamptz) IS NULL OR updated_at < CAST(:until AS timestamptz))
+  AND (CAST(:user_id AS uuid) IS NULL
+       OR c.id = CAST(:user_id AS uuid)
+       OR c.created_by = CAST(:user_id AS uuid)
+       OR c.updated_by = CAST(:user_id AS uuid)
+       OR c.deleted_by = CAST(:user_id AS uuid))
 ORDER BY c.updated_at DESC
 LIMIT :limit;

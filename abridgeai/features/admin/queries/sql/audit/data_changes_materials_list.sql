@@ -21,5 +21,10 @@ JOIN modules mo ON mo.id = l.module_id
 JOIN courses c  ON c.id = mo.course_id
 WHERE m.updated_at >= CAST(:since AS timestamptz)
   AND (CAST(:until AS timestamptz) IS NULL OR updated_at < CAST(:until AS timestamptz))
+  AND (CAST(:user_id AS uuid) IS NULL
+       OR m.id = CAST(:user_id AS uuid)
+       OR m.created_by = CAST(:user_id AS uuid)
+       OR m.updated_by = CAST(:user_id AS uuid)
+       OR m.deleted_by = CAST(:user_id AS uuid))
 ORDER BY m.updated_at DESC
 LIMIT :limit;

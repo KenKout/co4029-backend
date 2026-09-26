@@ -78,6 +78,7 @@ async def role_changes(
     since: datetime,
     until: datetime | None,
     organization_id: UUID | None,
+    user_id: UUID | None,
     limit: int,
 ) -> list[dict[str, Any]]:
     rows = (
@@ -87,6 +88,7 @@ async def role_changes(
                 "since": since,
                 "until": until,
                 "organization_id": organization_id,
+                "user_id": user_id,
                 "limit": limit,
             },
         )
@@ -174,13 +176,14 @@ async def data_changes_list(
     table: str,
     since: datetime,
     until: datetime | None,
+    user_id: UUID | None,
     limit: int,
 ) -> list[dict[str, Any]]:
     """Every row in ``table`` updated within ``[since, until)``, newest first."""
     rows = (
         await db.execute(
             _DATA_CHANGES_LIST_SQL[table],
-            {"since": since, "until": until, "limit": limit},
+            {"since": since, "until": until, "user_id": user_id, "limit": limit},
         )
     ).mappings()
     return [dict(r) for r in rows]

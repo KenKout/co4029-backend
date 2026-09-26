@@ -866,9 +866,14 @@ async def test_audit_role_changes_search(
             f"/api/v1/admin/audit/role-changes?since={since}&limit=10",
             headers=_auth(token),
         )
+        filtered = await client.get(
+            f"/api/v1/admin/audit/role-changes?since={since}&user_id={seeded_users.admin_id}&limit=10",
+            headers=_auth(token),
+        )
     finally:
         await _purge_sessions(engine, seeded_users.admin_id)
     assert resp.status_code == 200, resp.text
+    assert filtered.status_code == 200, filtered.text
     body = resp.json()
     assert isinstance(body, list)
     assert len(body) >= 5
@@ -937,9 +942,14 @@ async def test_data_changes_list(
             "/api/v1/admin/audit/data-changes/list?table=courses&since=2000-01-01T00:00:00Z&limit=50",
             headers=_auth(token),
         )
+        filtered = await client.get(
+            f"/api/v1/admin/audit/data-changes/list?table=courses&since=2000-01-01T00:00:00Z&user_id={seeded_users.admin_id}&limit=50",
+            headers=_auth(token),
+        )
     finally:
         await _purge_sessions(engine, seeded_users.admin_id)
     assert resp.status_code == 200, resp.text
+    assert filtered.status_code == 200, filtered.text
     body = resp.json()
     assert isinstance(body, list)
     assert any(row["entity_id"] == str(seeded_users.course_id) for row in body)
