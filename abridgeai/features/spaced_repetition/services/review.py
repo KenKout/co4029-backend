@@ -28,12 +28,11 @@ would still trigger a side-effect.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING
 from uuid import UUID
 
-from abridgeai.core.config import get_settings
 from abridgeai.core.exceptions import NotFoundError
 from abridgeai.core.runtime_settings import resolve_setting
 from abridgeai.features.quizzes.api.public import (
@@ -46,6 +45,7 @@ from abridgeai.features.spaced_repetition.sm2 import (
     apply_interval_ceiling,
     apply_jitter,
     derive_q,
+    interval_due_at,
     next_interval_days,
     update_ef,
 )
@@ -54,9 +54,6 @@ from ._events import CardFailedEvent
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
-
-
-_DEFAULT_FAILURE_COOLDOWN_SECONDS = 86400
 
 
 @dataclass(frozen=True)
@@ -183,7 +180,7 @@ async def record_card_review(
         StudentCardState in the caller's transaction.
 
     Failure path (q < 3) resets the SM-2 counters (n=0, interval=1) and
-    pushes ``due_at`` out by the configured cooldown (default 24 h). The
+    pushes ``due_at`` out by one configured interval unit (default 24 h). The
     ``retry_available_at`` field on the result mirrors that timestamp so
     the quiz router (T7.5.11) can enforce a per-card retry block.
 
@@ -244,14 +241,20 @@ async def record_card_review(
     # but it does not re-enter the review queue, or "retired" would mean only
     # "not due at the moment".
     already_retired = state.due_at is None
+    interval_unit_seconds = int(
+        await resolve_setting(db, "spaced_repetition.interval_unit_seconds")
+    )
     if passing:
         n_after = n_before + 1
         base_interval = next_interval_days(
             ef=ef_after, n=n_before, q=q, prev_interval=interval_before
         )
-        interval_after = apply_jitter(base_interval, fraction=0.1)
-        # Applied after jitter so the bound is a true ceiling: jitter is up to
-        # +10% and would otherwise carry the stored interval past it.
+        jitter_fraction = (
+            int(await resolve_setting(db, "spaced_repetition.jitter_percent")) / 100
+        )
+        interval_after = apply_jitter(base_interval, fraction=jitter_fraction)
+        # Applied after jitter so the bound is a true ceiling: positive jitter
+        # would otherwise carry the stored interval past it.
         interval_after, retired = apply_interval_ceiling(
             interval_after,
             max_interval_days=int(
@@ -263,22 +266,31 @@ async def record_card_review(
                 )
             ),
         )
-        due_at = None if (retired or already_retired) else now + timedelta(days=interval_after)
+        due_at = (
+            None
+            if (retired or already_retired)
+            else interval_due_at(
+                now=now,
+                interval_units=interval_after,
+                unit_seconds=interval_unit_seconds,
+            )
+        )
         retry_available_at = None
     else:
         n_after = 0
         interval_after = 1
-        cooldown_seconds = int(
-            getattr(
-                get_settings(),
-                "sr_failure_cooldown_seconds",
-                _DEFAULT_FAILURE_COOLDOWN_SECONDS,
-            )
-        )
         # A failure never retires a card, and never revives one: the reset
         # is what a card needs when it is still being learned, and a retired
         # card is no longer in that conversation.
-        due_at = None if already_retired else now + timedelta(seconds=cooldown_seconds)
+        due_at = (
+            None
+            if already_retired
+            else interval_due_at(
+                now=now,
+                interval_units=interval_after,
+                unit_seconds=interval_unit_seconds,
+            )
+        )
         retry_available_at = due_at
 
     rho = (Decimal(t_actual_ms) / Decimal(t_exp_ms) if t_exp_ms > 0 else Decimal(0)).quantize(

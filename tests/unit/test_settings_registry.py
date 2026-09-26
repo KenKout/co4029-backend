@@ -17,6 +17,19 @@ from abridgeai.core.settings_registry import (
 
 
 class TestRegistryShape:
+    def test_spaced_repetition_interval_controls_preserve_production_defaults(
+        self,
+    ) -> None:
+        unit = SETTINGS_REGISTRY["spaced_repetition.interval_unit_seconds"]
+        jitter = SETTINGS_REGISTRY["spaced_repetition.jitter_percent"]
+
+        assert unit.default == 86400
+        assert unit.minimum == 1
+        assert unit.maximum == 86400
+        assert jitter.default == 10
+        assert jitter.minimum == 0
+        assert jitter.maximum == 99
+
     def test_the_student_wide_path_limit_is_the_one_that_is_configurable(self) -> None:
         """The per-program limit is a manager's curriculum decision, stored on
         the program version and bounded by its CHECK constraint. This is the

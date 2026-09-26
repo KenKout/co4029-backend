@@ -5,6 +5,8 @@ from __future__ import annotations
 import random
 from datetime import datetime, timedelta
 
+DEFAULT_INTERVAL_UNIT_SECONDS = 86400
+
 
 def next_interval_days(*, ef: float, n: int, q: int, prev_interval: int) -> int:
     """SM-2 interval recurrence.
@@ -100,28 +102,60 @@ def apply_jitter(
     return max(1, jittered)
 
 
+def interval_due_at(
+    *,
+    now: datetime,
+    interval_units: int,
+    unit_seconds: int = DEFAULT_INTERVAL_UNIT_SECONDS,
+) -> datetime:
+    """Convert a stored SM-2 interval into an absolute due timestamp.
+
+    The recurrence remains expressed as integer logical units (1, 6, then
+    ``previous * EF``).  Production maps one unit to one day; the runtime
+    setting may shorten that unit for accelerated demos without changing the
+    stored learning state or the SM-2 recurrence itself.
+    """
+    if now.tzinfo is None:
+        raise ValueError("now must be timezone-aware (use UTC)")
+    if interval_units < 1:
+        raise ValueError("interval_units must be at least 1")
+    if unit_seconds < 1:
+        raise ValueError("unit_seconds must be at least 1")
+    return now + timedelta(seconds=interval_units * unit_seconds)
+
+
 def next_due_at(
     *,
     now: datetime,
     interval_days: int,
     jitter_fraction: float = 0.1,
+    interval_unit_seconds: int = DEFAULT_INTERVAL_UNIT_SECONDS,
     rng: random.Random | None = None,
 ) -> datetime:
     """Compose interval + jitter into an absolute UTC-aware due timestamp.
 
     Args:
         now: timezone-aware reference datetime (must have tzinfo).
-        interval_days: pre-computed base interval in days.
+        interval_days: pre-computed base interval in logical SM-2 units.
         jitter_fraction: jitter magnitude passed to :func:`apply_jitter`.
+        interval_unit_seconds: real seconds represented by one interval unit.
         rng: optional RNG for determinism in tests.
 
     Raises:
         ValueError: if ``now`` is naive (no tzinfo).
     """
-    if now.tzinfo is None:
-        raise ValueError("now must be timezone-aware (use UTC)")
     jittered = apply_jitter(interval_days, fraction=jitter_fraction, rng=rng)
-    return now + timedelta(days=jittered)
+    return interval_due_at(
+        now=now,
+        interval_units=jittered,
+        unit_seconds=interval_unit_seconds,
+    )
 
 
-__all__ = ["apply_jitter", "next_due_at", "next_interval_days"]
+__all__ = [
+    "DEFAULT_INTERVAL_UNIT_SECONDS",
+    "apply_jitter",
+    "interval_due_at",
+    "next_due_at",
+    "next_interval_days",
+]

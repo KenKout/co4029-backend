@@ -7,6 +7,7 @@ import pytest
 
 from abridgeai.features.spaced_repetition.sm2.scheduler import (
     apply_jitter,
+    interval_due_at,
     next_due_at,
     next_interval_days,
 )
@@ -130,6 +131,46 @@ def test_next_due_at_returns_tz_aware_future() -> None:
     result = next_due_at(now=now, interval_days=10, jitter_fraction=0)
     assert result.tzinfo is not None
     assert result == now + timedelta(days=10)
+
+
+def test_interval_due_at_supports_accelerated_admin_unit() -> None:
+    now = datetime(2025, 1, 1, 12, 0, 0, tzinfo=UTC)
+
+    assert interval_due_at(now=now, interval_units=1, unit_seconds=10) == (
+        now + timedelta(seconds=10)
+    )
+    assert interval_due_at(now=now, interval_units=6, unit_seconds=10) == (
+        now + timedelta(seconds=60)
+    )
+
+
+def test_next_due_at_uses_configured_interval_unit_after_jitter() -> None:
+    now = datetime(2025, 1, 1, 12, 0, 0, tzinfo=UTC)
+    result = next_due_at(
+        now=now,
+        interval_days=6,
+        jitter_fraction=0,
+        interval_unit_seconds=10,
+    )
+
+    assert result == now + timedelta(seconds=60)
+
+
+@pytest.mark.parametrize(
+    ("interval_units", "unit_seconds"),
+    [(0, 10), (1, 0)],
+)
+def test_interval_due_at_rejects_non_positive_values(
+    interval_units: int,
+    unit_seconds: int,
+) -> None:
+    now = datetime(2025, 1, 1, tzinfo=UTC)
+    with pytest.raises(ValueError, match="must be at least 1"):
+        interval_due_at(
+            now=now,
+            interval_units=interval_units,
+            unit_seconds=unit_seconds,
+        )
 
 
 def test_next_due_at_deterministic_with_seeded_rng() -> None:

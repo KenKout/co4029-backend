@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from uuid import uuid4
@@ -43,3 +45,68 @@ async def test_non_positive_expected_time_fails_before_card_state_init(
         )
 
     load_or_init.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("q", "passing"),
+    [(4, True), (0, False)],
+)
+async def test_admin_interval_unit_controls_pass_and_failure_due_at(
+    monkeypatch: pytest.MonkeyPatch,
+    q: int,
+    passing: bool,
+) -> None:
+    """The same runtime unit drives normal intervals and failure cooldown."""
+    question_id = uuid4()
+    student_id = uuid4()
+    quiz_id = uuid4()
+    state = SimpleNamespace(
+        ef=Decimal("2.5"),
+        interval_days=1,
+        repetition_count=0,
+        due_at=datetime.now(tz=UTC),
+        total_reviews=0,
+    )
+    db = SimpleNamespace(add=lambda _row: None, flush=AsyncMock())
+
+    monkeypatch.setattr(
+        review,
+        "_load_quiz_question_meta",
+        AsyncMock(return_value=(30_000, quiz_id, None)),
+    )
+    monkeypatch.setattr(
+        review,
+        "_load_or_init_state",
+        AsyncMock(return_value=(state, False)),
+    )
+    monkeypatch.setattr(review, "derive_q", lambda **_kwargs: q)
+    monkeypatch.setattr(review, "get_guess_probability", AsyncMock(return_value=0.0))
+
+    async def _setting(_db: object, key: str) -> int | bool:
+        return {
+            "spaced_repetition.interval_unit_seconds": 10,
+            "spaced_repetition.jitter_percent": 0,
+            "spaced_repetition.max_interval_days": 36500,
+            "spaced_repetition.retire_beyond_max_interval": False,
+        }[key]
+
+    monkeypatch.setattr(review, "resolve_setting", _setting)
+
+    before = datetime.now(tz=UTC)
+    result = await review.record_card_review(
+        db,
+        student_id=student_id,
+        question_id=question_id,
+        quiz_attempt_id=None,
+        t_actual_ms=30_000,
+        correct=passing,
+        hint_used=False,
+    )
+    after = datetime.now(tz=UTC)
+
+    assert result.interval_after == 1
+    assert result.due_at is not None
+    assert before + timedelta(seconds=10) <= result.due_at
+    assert result.due_at <= after + timedelta(seconds=10)
+    assert (result.retry_available_at is not None) is (not passing)

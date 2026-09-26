@@ -89,8 +89,9 @@ class AllCardsInCooldownError(AppError):
     """Every question in the quiz has ``student_card_state.due_at > now``.
 
     Per thesis UC-LEARN-01 Alt 1a: a student who fails a card cannot
-    retry it until the SR scheduler's failure cooldown elapses (default
-    24 h, configurable via ``settings.sr_failure_cooldown_seconds``).
+    retry it until the SR scheduler's failure cooldown elapses (one interval
+    unit: 24 h by default, configurable via the admin runtime setting
+    ``spaced_repetition.interval_unit_seconds``).
     When the *whole* quiz is in cooldown the router must reply HTTP 429
     with a ``Retry-After`` header — :class:`AllCardsInCooldownError`
     carries the timing payload needed to build that response.

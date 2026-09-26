@@ -535,6 +535,42 @@ _SPECS: tuple[SettingSpec, ...] = (
         ),
     ),
     SettingSpec(
+        key="spaced_repetition.interval_unit_seconds",
+        group="spaced_repetition",
+        type="int",
+        default=86400,
+        minimum=1,
+        maximum=86400,
+        env_var="SR_INTERVAL_UNIT_SECONDS",
+        label="Review interval unit (seconds)",
+        description=(
+            "Number of real seconds represented by one SM-2 interval unit. "
+            "The default of 86400 preserves production scheduling where the "
+            "stored sequence 1, 6, ... means 1 day, 6 days, .... Lower this "
+            "only for accelerated demonstrations or controlled testing: a "
+            "value of 10 makes the first two nominal intervals 10 seconds and "
+            "60 seconds. Failure cooldown uses the same unit. Set review "
+            "interval jitter to 0% when exact demo timing is required."
+        ),
+    ),
+    SettingSpec(
+        key="spaced_repetition.jitter_percent",
+        group="spaced_repetition",
+        type="int",
+        default=10,
+        minimum=0,
+        maximum=99,
+        env_var="SR_JITTER_PERCENT",
+        label="Review interval jitter (%)",
+        description=(
+            "Random plus-or-minus percentage applied to every passing SM-2 "
+            "interval before scheduling. It spreads due cards so a cohort "
+            "does not return all at once. The default 10 preserves current "
+            "behaviour. Set to 0 for deterministic tests and demos; failures "
+            "are never jittered."
+        ),
+    ),
+    SettingSpec(
         key="spaced_repetition.max_interval_days",
         group="spaced_repetition",
         type="int",
