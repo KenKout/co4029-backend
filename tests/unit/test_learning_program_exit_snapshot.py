@@ -16,15 +16,16 @@ async def test_build_exit_snapshot_uses_stage_aware_progress_and_keeps_raw_count
     """The query delegates its percentage to the stage-aware public API."""
     course_ids = [uuid4() for _ in range(7)]
     rows = [
-        {"course_id": course_id, "completed": index < 3}
+        {
+            "course_id": course_id,
+            "title": f"Course {index + 1}",
+            "slug": f"course-{index + 1}",
+            "completion_percent": 100.0 if index < 3 else 40.0,
+            "satisfied": index < 3,
+        }
         for index, course_id in enumerate(course_ids)
     ]
-    mappings = SimpleNamespace(all=lambda: rows)
-    db = SimpleNamespace(
-        execute=AsyncMock(
-            return_value=SimpleNamespace(mappings=lambda: mappings),
-        )
-    )
+    db = SimpleNamespace()
     attempt = SimpleNamespace(
         career_path_id=uuid4(),
         career_path_version_id=uuid4(),
@@ -33,6 +34,7 @@ async def test_build_exit_snapshot_uses_stage_aware_progress_and_keeps_raw_count
     stage_progress = AsyncMock(return_value=100.0)
 
     with patch.object(queries, "career_paths_api", create=True) as career_paths_api:
+        career_paths_api.get_version_course_progress_for_user = AsyncMock(return_value=rows)
         career_paths_api.get_version_progress_percent_for_user = stage_progress
         snapshot = await queries.build_exit_snapshot(
             db,  # type: ignore[arg-type]
@@ -41,9 +43,22 @@ async def test_build_exit_snapshot_uses_stage_aware_progress_and_keeps_raw_count
         )
 
     assert snapshot["overall_percent"] == 100.0
+    assert snapshot["schema_version"] == 2
     assert "formula_version" not in snapshot
     assert snapshot["completed_courses"] == 3
     assert snapshot["total_courses"] == 7
+    assert snapshot["courses"][3] == {
+        "course_id": str(course_ids[3]),
+        "title": "Course 4",
+        "slug": "course-4",
+        "progress_percent": 40.0,
+        "completed": False,
+    }
+    career_paths_api.get_version_course_progress_for_user.assert_awaited_once_with(
+        db,
+        version_id=attempt.career_path_version_id,
+        student_id=student_id,
+    )
     stage_progress.assert_awaited_once_with(
         db,
         version_id=attempt.career_path_version_id,

@@ -170,6 +170,35 @@ class ProgramWithdrawRequest(BaseModel):
     reason: str = Field(min_length=1, max_length=2000)
 
 
+class PathExitCourseSnapshot(BaseModel):
+    """Frozen progress for one course when a path attempt ends."""
+
+    course_id: UUID
+    title: str
+    slug: str
+    progress_percent: float = Field(ge=0, le=100)
+    completed: bool
+
+
+class PathExitSnapshot(BaseModel):
+    """Versioned, backward-compatible payload stored in ``exit_snapshot``.
+
+    Rows written before the per-course snapshot shipped have no
+    ``schema_version`` or ``courses``.  Defaults deliberately project those
+    blobs as v1 rather than making historical attempts unreadable.
+    """
+
+    schema_version: int = 1
+    career_path_id: UUID
+    career_path_version_id: UUID
+    completed_course_ids: list[UUID] = Field(default_factory=list)
+    completed_courses: int = 0
+    total_courses: int = 0
+    overall_percent: float = Field(default=0, ge=0, le=100)
+    captured_at: datetime
+    courses: list[PathExitCourseSnapshot] = Field(default_factory=list)
+
+
 class PathAttemptRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -181,7 +210,7 @@ class PathAttemptRead(BaseModel):
     selection_source: str = "student"
     selected_at: datetime
     ended_at: datetime | None
-    exit_snapshot: dict[str, object] | None
+    exit_snapshot: PathExitSnapshot | None
     progress_percent: float = 0
     completed_courses: int = 0
     total_courses: int = 0
@@ -362,6 +391,8 @@ __all__ = [
     "ChangeRequestRejection",
     "DropPathRequestCreate",
     "PathChangeRejectionReasonCode",
+    "PathExitCourseSnapshot",
+    "PathExitSnapshot",
     "PathAttemptRead",
     "PathChangeRequestRead",
     "ProgramCreate",

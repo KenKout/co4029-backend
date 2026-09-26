@@ -497,9 +497,7 @@ async def update_program(
         if "max_career_paths_per_enrollment" in payload.model_fields_set:
             # Same reason as the copy-on-write branch above: null clears the
             # cap, absence leaves it alone.
-            current.max_career_paths_per_enrollment = (
-                payload.max_career_paths_per_enrollment
-            )
+            current.max_career_paths_per_enrollment = payload.max_career_paths_per_enrollment
         current.updated_by = actor.user_id
         if (
             payload.career_path_ids is not None
@@ -1120,18 +1118,30 @@ async def _enrollment_out(db: AsyncSession, enrollment: ProgramEnrollment) -> Pr
                 version_id=attempt.career_path_version_id,
                 student_id=enrollment.student_id,
             )
-        attempt_completed = sum(bool(row.get("satisfied")) for row in progress_rows)
-        attempt_total = len(progress_rows)
-        completed_courses += attempt_completed
-        total_courses += attempt_total
+        snapshot = attempt.exit_snapshot or {}
+        is_frozen = attempt.status in ("switched_out", "cancelled") and bool(snapshot)
+        attempt_completed = (
+            int(snapshot.get("completed_courses", 0))
+            if is_frozen
+            else sum(bool(row.get("satisfied")) for row in progress_rows)
+        )
+        attempt_total = int(snapshot.get("total_courses", 0)) if is_frozen else len(progress_rows)
+        attempt_percent = (
+            float(snapshot.get("overall_percent", 0))
+            if is_frozen
+            else ((attempt_completed / attempt_total * 100) if attempt_total else 0)
+        )
+        # Enrollment-level progress is current state only. Historical attempts
+        # expose their frozen snapshot on their own row but must not inflate the
+        # active program denominator after a switch.
+        if attempt.status in ("active", "completed"):
+            completed_courses += attempt_completed
+            total_courses += attempt_total
         attempt_outputs.append(
             PathAttemptRead.model_validate(
                 {
                     **attempt.__dict__,
-                    "progress_percent": round(
-                        (attempt_completed / attempt_total * 100) if attempt_total else 0,
-                        2,
-                    ),
+                    "progress_percent": round(attempt_percent, 2),
                     "completed_courses": attempt_completed,
                     "total_courses": attempt_total,
                 }

@@ -121,6 +121,14 @@ async def list_student_program_enrollments(
                         "status": a.status,
                         "selected_at": a.selected_at,
                         "ended_at": a.ended_at,
+                        "exit_snapshot": (
+                            a.exit_snapshot.model_dump(mode="json")
+                            if a.exit_snapshot is not None
+                            else None
+                        ),
+                        "progress_percent": a.progress_percent,
+                        "completed_courses": a.completed_courses,
+                        "total_courses": a.total_courses,
                     }
                     for a in row.attempts
                 ],

@@ -653,28 +653,12 @@ async def list_program_change_requests(
 async def build_exit_snapshot(
     db: AsyncSession, *, student_id: UUID, attempt: ProgramPathAttempt
 ) -> dict[str, object]:
-    rows = (
-        (
-            await db.execute(
-                text("""
-                SELECT cci.course_id,
-                       EXISTS (
-                         SELECT 1 FROM course_completion_awards cca
-                         WHERE cca.student_id = :student_id
-                           AND cca.course_id = cci.course_id
-                           AND cca.revoked_at IS NULL
-                       ) AS completed
-                FROM career_course_items cci
-                WHERE cci.version_id = :version_id
-                ORDER BY cci.position
-            """),
-                {"student_id": student_id, "version_id": attempt.career_path_version_id},
-            )
-        )
-        .mappings()
-        .all()
+    rows = await career_paths_api.get_version_course_progress_for_user(
+        db,
+        version_id=attempt.career_path_version_id,
+        student_id=student_id,
     )
-    completed = [str(row["course_id"]) for row in rows if row["completed"]]
+    completed = [str(row["course_id"]) for row in rows if row["satisfied"]]
     total = len(rows)
     # The formula-version stamp was retired with migration 0126. Existing
     # exit_snapshot blobs are frozen; new snapshots deliberately omit it.
@@ -684,6 +668,7 @@ async def build_exit_snapshot(
         student_id=student_id,
     )
     return {
+        "schema_version": 2,
         "career_path_id": str(attempt.career_path_id),
         "career_path_version_id": str(attempt.career_path_version_id),
         "completed_course_ids": completed,
@@ -691,6 +676,16 @@ async def build_exit_snapshot(
         "total_courses": total,
         "overall_percent": overall_percent,
         "captured_at": datetime.now(UTC).isoformat(),
+        "courses": [
+            {
+                "course_id": str(row["course_id"]),
+                "title": str(row["title"]),
+                "slug": str(row["slug"]),
+                "progress_percent": float(row["completion_percent"]),
+                "completed": bool(row["satisfied"]),
+            }
+            for row in rows
+        ],
     }
 
 
