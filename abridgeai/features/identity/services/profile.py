@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
@@ -41,6 +42,14 @@ _AVATAR_MAX_BYTES = 2 * 1024 * 1024
 MAX_PROFILE_LINKS = 10
 
 
+@dataclass
+class _StorageTarget:
+    """Structural S3 target; keep ORM descriptors out of the infrastructure API."""
+
+    bucket: str
+    object_key: str
+
+
 class AvatarUploadError(ValueError):
     """Raised when an uploaded avatar fails validation (type / size)."""
 
@@ -62,7 +71,9 @@ async def _mint_avatar_url(db: AsyncSession, profile: UserProfile | None) -> str
     if storage is None:
         return None
     try:
-        url, _ = await create_stream_url(storage)
+        url, _ = await create_stream_url(
+            _StorageTarget(bucket=storage.bucket, object_key=storage.object_key)
+        )
     except Exception:  # noqa: BLE001 — never let a storage blip break profile reads
         return None
     return url

@@ -27,6 +27,7 @@ failing the discussion read — the same guard
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 from uuid import UUID
 
@@ -44,6 +45,14 @@ if TYPE_CHECKING:
 _logger = get_logger(__name__)
 
 
+@dataclass
+class _StorageTarget:
+    """Structural S3 target; keep ORM descriptors out of the infrastructure API."""
+
+    bucket: str
+    object_key: str
+
+
 async def _avatar_urls(
     db: AsyncSession, avatar_object_ids: set[UUID]
 ) -> dict[UUID, str]:
@@ -58,7 +67,9 @@ async def _avatar_urls(
     urls: dict[UUID, str] = {}
     for storage in storage_rows:
         try:
-            url, _ = await create_stream_url(storage)
+            url, _ = await create_stream_url(
+                _StorageTarget(bucket=storage.bucket, object_key=storage.object_key)
+            )
         except Exception:  # noqa: BLE001 — a storage blip must not break the thread
             _logger.warning(
                 "discussions.avatar_presign_failed",

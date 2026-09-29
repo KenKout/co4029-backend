@@ -9,6 +9,7 @@ disable time stay revoked so the user must complete a fresh OAuth round-trip.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
@@ -29,6 +30,14 @@ from abridgeai.infrastructure.s3 import create_stream_url
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
+
+
+@dataclass
+class _StorageTarget:
+    """Structural S3 target; keep ORM descriptors out of the infrastructure API."""
+
+    bucket: str
+    object_key: str
 
 
 _DISABLE_USER_SQL = text(
@@ -146,7 +155,9 @@ async def user_detail(db: AsyncSession, *, user_id: UUID) -> dict[str, Any]:
         storage = await db.get(StorageObject, profile["avatar_object_id"])
         if storage is not None:
             try:
-                profile["avatar_url"], _ = await create_stream_url(storage)
+                profile["avatar_url"], _ = await create_stream_url(
+                    _StorageTarget(bucket=storage.bucket, object_key=storage.object_key)
+                )
             except Exception:  # noqa: BLE001 — a storage blip must not break user detail
                 profile["avatar_url"] = None
     user_payload = dict(base_dict)

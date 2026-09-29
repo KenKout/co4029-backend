@@ -15,6 +15,7 @@ Future work may add timestamp-based opaque cursors per Reconciliation §A10.
 from __future__ import annotations
 
 import base64
+from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING
 from uuid import UUID
@@ -47,6 +48,14 @@ if TYPE_CHECKING:
     from abridgeai.features.identity.models import StorageObject
 
 
+@dataclass
+class _StorageTarget:
+    """Structural S3 target; keep ORM descriptors out of the infrastructure API."""
+
+    bucket: str
+    object_key: str
+
+
 async def _mint_avatar_url(
     storage_map: dict[UUID, StorageObject],
     profile: UserProfile | None,
@@ -63,7 +72,9 @@ async def _mint_avatar_url(
     if storage is None:
         return None
     try:
-        url, _ = await create_stream_url(storage)
+        url, _ = await create_stream_url(
+            _StorageTarget(bucket=storage.bucket, object_key=storage.object_key)
+        )
     except Exception:  # noqa: BLE001 — never let a storage blip break the list
         return None
     return url
