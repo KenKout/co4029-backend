@@ -128,6 +128,15 @@ PRESIGNED_URL: Final = CacheKey(
     description="S3 presigned download URL (cached < URL TTL of 3600s).",
 )
 
+THUMBNAIL_URL: Final = CacheKey(
+    pattern="presigned:thumbnail:{object_key}",
+    ttl_seconds=3000,
+    description=(
+        "S3 presigned thumbnail GET URL (cached < URL TTL of 3600s so every "
+        "response within the TTL hands the browser the same URL and its cache)."
+    ),
+)
+
 KR_ESTIMATE: Final = CacheKey(
     pattern="kr:{user_id}:{lesson_id}",
     ttl_seconds=300,
@@ -190,6 +199,7 @@ __all__ = [
     "PRESIGNED_URL",
     "SESSION",
     "SESSION_BY_REFRESH_HASH",
+    "THUMBNAIL_URL",
     "USER_SESSIONS_INDEX",
     "USER_STATUS",
     "QUIZ_ATTEMPT_SESSION",

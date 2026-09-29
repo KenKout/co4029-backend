@@ -299,10 +299,11 @@ async def evaluate_session(
             )
         )
 
-    # A completed attempt is graded against the complete published question
-    # set, including when the candidate ends early. Unanswered questions must
-    # not disappear from the denominator: represent each one as an explicit
-    # zero across every rubric criterion without spending an LLM call.
+    # An asked question the candidate ended without answering must not
+    # disappear from the denominator: represent it as an explicit zero
+    # across every rubric criterion without spending an LLM call. (The
+    # denominator itself is the ASKED set — never-asked questions are
+    # already excluded by the caller's context builder.)
     answered_question_ids = {evaluation.session_question_id for evaluation in response_evaluations}
     for question_id in all_question_ids:
         if question_id in answered_question_ids:
@@ -345,14 +346,21 @@ def _outcome_for_prompt(outcome: InterviewOutcome) -> dict[str, Any]:
 def _is_candidate_answer(message: InterviewSessionMessage) -> bool:
     """Filter for student utterances; AI / system messages are not scored.
 
-    Typed-turn receipts (``metadata_json.source == 'native_agent'``) carry a
-    ``turn_state`` state machine — ``received`` (durable, fold not finished),
-    ``failed`` (fold raised), ``applied`` (folded into runtime state). Only an
-    ``applied`` receipt is evidence: a ``received`` receipt could still fail
-    and never reach the graded conversation, and a ``failed`` one provably
-    didn't. Non-receipt user rows (REST/voice answers) have no receipt marker
-    and stay eligible, as do rows without a question link at THIS stage —
-    linkage filtering is the caller's job (``_list_candidate_answers``).
+    Only a typed-turn RECEIPT carries the ``turn_state`` state machine
+    (``received`` → ``applied``/``failed``), and only a receipt is gated on
+    reaching ``applied``: a ``received`` receipt could still fail and never
+    reach the graded conversation, and a ``failed`` one provably didn't.
+
+    Voice transcript rows written by ``record_turn`` carry
+    ``source == 'native_agent'`` WITHOUT ``turn_state`` — they are the only
+    durable record of a spoken answer and MUST stay gradeable evidence.
+    (Gating them on ``turn_state == 'applied'`` silently voided every voice
+    interview: the rubric saw zero answers and the session failed on a
+    transcript that looked complete.) The receipt discriminator is the
+    presence of the state machine, never the ``source`` value. Non-receipt
+    user rows (REST/voice answers) stay eligible, as do rows without a
+    question link at THIS stage — linkage filtering is the caller's job
+    (``_list_candidate_answers``).
     """
     if getattr(message, "role", None) != "user":
         return False
@@ -361,8 +369,8 @@ def _is_candidate_answer(message: InterviewSessionMessage) -> bool:
         # Audit P1: a hint/repeat/clarify request is conversation UX, never
         # rubric evidence — even when the recorder linked it to a question.
         return False
-    if not isinstance(metadata, dict) or metadata.get("source") != "native_agent":
-        return True  # ordinary REST / voice user row
+    if not isinstance(metadata, dict) or metadata.get("turn_state") is None:
+        return True  # ordinary REST / voice transcript user row
     return metadata.get("turn_state") == "applied"
 
 

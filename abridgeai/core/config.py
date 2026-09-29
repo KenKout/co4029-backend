@@ -350,7 +350,12 @@ class Settings(BaseSettings):
     # Raising this creates no capacity; it stops the worker refusing work over
     # load it does not own. A host truly saturated by interviews needs a second
     # worker instead.
-    interview_voice_load_threshold: float = Field(default=0.9, gt=0.0, lt=1.0)
+    #
+    # 0.99 is the ceiling, not a taste: the SDK raises on any value > 1 in
+    # prod mode (livekit-agents worker.py "load_threshold in prod env must be
+    # less than 1"). Observed whole-host spikes top out ~0.93, so 0.99 clears
+    # them all while staying load-bearing if the box ever truly saturates.
+    interview_voice_load_threshold: float = Field(default=0.99, gt=0.0, lt=1.0)
     # Native (multiturn) interview agent. OFF runs the ROUTED path verbatim (no
     # LLM in the AgentSession; every turn routed to
     # ``orchestration_bridge.handle_student_turn``). ON gives the agent one

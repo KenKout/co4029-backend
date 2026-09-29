@@ -31,6 +31,7 @@ from abridgeai.features.career_paths.schemas.public import CareerPathCoursePubli
 from abridgeai.features.career_paths.services import stages as stage_service
 from abridgeai.features.enrollments.api import public as enrollments_api
 from abridgeai.infrastructure.s3 import create_stream_url
+from abridgeai.infrastructure.thumbnails import mint_thumbnail_url
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -117,16 +118,19 @@ def _to_path_public(
 async def _thumbnail_urls(
     db: AsyncSession, path_ids: list[UUID]
 ) -> dict[UUID, str]:
+    """Stable, cache-controlled presigned path thumbnails (see thumbnails.py).
+
+    Uses :func:`infrastructure.thumbnails.mint_thumbnail_url` so the
+    roadmap hands the browser the SAME URL within the cache TTL and its
+    cache actually gets hit.
+    """
     targets = await authoring_queries.list_career_path_thumbnail_storage_targets(
         db, path_ids
     )
     urls: dict[UUID, str] = {}
     for path_id, target in targets.items():
         try:
-            url, _ = await create_stream_url(
-                _RosterAvatarTarget(bucket=target[0], object_key=target[1])
-            )
-            urls[path_id] = url
+            urls[path_id] = await mint_thumbnail_url(target[0], target[1])
         except Exception:  # noqa: BLE001, S112 -- image failure must not break reads
             continue
     return urls

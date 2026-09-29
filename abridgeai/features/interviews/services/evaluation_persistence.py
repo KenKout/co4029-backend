@@ -69,13 +69,22 @@ def _build_question_evaluation_context(
     session_questions: list[InterviewSessionQuestion],
     candidate_answers: list[InterviewSessionMessage],
 ) -> tuple[list[InterviewQuestion], dict[UUID, str], list[UUID], set[UUID]]:
-    """Resolve answer FKs and the complete gradeable question set.
+    """Resolve answer FKs and the gradeable question set the interview ASKED.
 
     Message rows reference ``InterviewSessionQuestion.id``, not
     ``InterviewQuestion.id``. The old evaluator indexed prompts by the latter,
-    so production judge prompts silently had an empty question. This mapping
-    also includes every approved but unasked question in the score denominator
-    when a candidate ends the interview early.
+    so production judge prompts silently had an empty question.
+
+    The denominator is the ASKED set — every gradeable config question that
+    has a session row — not the full published bank. Questions the interviewer
+    never asked are excluded: on the native path the server owns advancing
+    and closing (coverage-based close can end an interview with bank
+    questions left), so zero-filling never-asked questions punished the
+    candidate for the agent's decision and produced factually wrong reports
+    ("did not submit" prose, 0-rubric) for candidates who answered everything
+    asked. Asked-but-unanswered questions STAY in the denominator and are
+    zero-filled — a candidate who stonewalls an asked question still scores 0
+    on it.
     """
     question_by_id = {question.id: question for question in all_questions}
     asked_config_ids = {
@@ -83,10 +92,10 @@ def _build_question_evaluation_context(
         for asked in session_questions
         if asked.interview_question_id is not None
     }
+    # Asked drafts count too: the candidate answered the question they were
+    # actually asked, and dropping it would silently lose transcript evidence.
     questions = [
-        question
-        for question in all_questions
-        if question.review_status == "approved" or question.id in asked_config_ids
+        question for question in all_questions if question.id in asked_config_ids
     ]
     gradeable_config_ids = {question.id for question in questions}
 

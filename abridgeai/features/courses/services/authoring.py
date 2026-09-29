@@ -95,6 +95,11 @@ from abridgeai.features.materials.api import public as materials_public
 from abridgeai.features.progress.api import public as progress_api
 from abridgeai.features.quizzes.api import public as quizzes_public
 from abridgeai.infrastructure.s3 import create_stream_url, put_object_bytes
+from abridgeai.infrastructure.thumbnails import (
+    ThumbnailDecodeError,
+    encode_thumbnail,
+    mint_thumbnail_url,
+)
 
 
 @dataclass
@@ -1960,8 +1965,7 @@ async def upload_course_thumbnail(
     the avatar upload flow (raw-body, server-side put). Raises
     :class:`ThumbnailUploadError` on an unsupported type or oversized file.
     """
-    ext = _THUMBNAIL_MIME_TYPES.get(content_type)
-    if ext is None:
+    if content_type not in _THUMBNAIL_MIME_TYPES:
         raise ThumbnailUploadError(
             "unsupported_thumbnail_type: allowed types are JPEG, PNG, WebP, GIF."
         )
@@ -1970,27 +1974,35 @@ async def upload_course_thumbnail(
     if len(data) > _THUMBNAIL_MAX_BYTES:
         raise ThumbnailUploadError("thumbnail_too_large: images must be 5 MiB or smaller.")
 
+    # Re-encode to constrained WebP BEFORE any DB or storage work, so a
+    # corrupt body still fails as a 422 client error; the 5 MiB cap above
+    # already bounds what the decoder ever sees.
+    try:
+        encoded = encode_thumbnail(data, content_type=content_type)
+    except ThumbnailDecodeError as exc:
+        raise ThumbnailUploadError(str(exc)) from exc
+
     course = await _require_course(db, course_id)
 
     settings = get_settings()
     bucket = settings.s3_bucket_name or "abridgeai-local"
     object_id = uuid4()
-    object_key = f"course-thumbnails/{course_id}/{object_id}.{ext}"
+    object_key = f"course-thumbnails/{course_id}/{object_id}.{encoded.extension}"
 
     # Upload bytes first — if storage fails we never touch the DB.
     await put_object_bytes(
         _AuthoringStorageTarget(bucket=bucket, object_key=object_key),
-        data,
-        content_type=content_type,
+        encoded.data,
+        content_type=encoded.content_type,
     )
 
     storage = StorageObject(
         id=object_id,
         bucket=bucket,
         object_key=object_key,
-        original_filename=f"thumbnail.{ext}",
-        mime_type=content_type,
-        size_bytes=len(data),
+        original_filename=f"thumbnail.{encoded.extension}",
+        mime_type=encoded.content_type,
+        size_bytes=len(encoded.data),
         uploaded_by=uploaded_by,
         uploaded_at=datetime.now(tz=UTC),
     )
@@ -2009,21 +2021,21 @@ async def upload_course_thumbnail(
 
 
 async def _mint_thumbnail_url(db: AsyncSession, course_id: UUID) -> str | None:
-    """Mint a short-TTL presigned GET URL for a course's thumbnail image.
+    """Mint a stable, cache-controlled presigned GET URL for the thumbnail.
 
-    Returns ``None`` when the course has no thumbnail set, or a storage blip
-    occurs (a blip must never break a course read — the SPA falls back to the
-    gradient banner).
+    Routes through :func:`infrastructure.thumbnails.mint_thumbnail_url`
+    so consecutive responses within the cache TTL carry the SAME URL
+    (plus ``Cache-Control``) and the browser can reuse its cache.
+    Returns ``None`` when the course has no thumbnail set, or a storage
+    blip occurs (a blip must never break a course read — the SPA falls
+    back to the gradient banner).
     """
     target = await authoring_queries.get_course_thumbnail_storage_target(db, course_id)
     if target is None:
         return None
     bucket, object_key = target
     try:
-        url, _ = await create_stream_url(
-            _AuthoringStorageTarget(bucket=bucket, object_key=object_key)
-        )
-        return url
+        return await mint_thumbnail_url(bucket, object_key)
     except Exception:  # noqa: BLE001 — a storage blip must not break the course read
         return None
 

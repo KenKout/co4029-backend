@@ -151,7 +151,11 @@ max-complexity = 12
 # Typed-receipt linkage remediation — an operator CLI over historical data:
 # dry-run by default, prints its report to stdout (T20), and writes the JSON
 # export synchronously inside the async run (ASYNC230 is intentional here).
-"scripts/backfill_typed_receipt_linkage.py" = ["T20", "ASYNC230"]
+ "scripts/backfill_typed_receipt_linkage.py" = ["T20", "ASYNC230"]
+# Session regrade — a manual-trigger operator CLI that resets one published
+# verdict and re-enqueues the ARQ evaluation job. Prints its plan and the
+# enqueued job id to stdout (T20).
+"scripts/regrade_interview_session.py" = ["T20"]
 # Interview quality report — a manual-trigger, read-only diagnostics CLI
 # (calibration / contingency / leading-question metrics over a finished
 # session). Prints a human report to stdout (T20), has long usage + rubric
@@ -171,6 +175,12 @@ max-complexity = 12
 # design: it sweeps historical rows, so an ORM round-trip per row would be
 # both slower and less atomic than one UPDATE.
 "scripts/backfill_ai_call_costs.py" = ["T20", "E501"]
+# Thumbnail WebP backfill — a manual-trigger maintenance CLI that re-encodes
+# existing Garage thumbnail objects. Prints a per-object report to stdout
+# (T20); the temp-file fetch/cleanup around download_to_temp uses sync
+# pathlib calls inside the async run (ASYNC240), mirroring the voice-harness
+# carve-out — the calls are bounded single-file ops, not directory walks.
+"scripts/backfill_thumbnails.py" = ["T20", "ASYNC240"]
 "scripts/seed_policies.py" = ["T20", "E501"]
 # Org-tenancy audit — a manual-trigger, read-only forensic CLI. Prints a
 # human report to stdout (T20) and builds its SQL by formatting a table name

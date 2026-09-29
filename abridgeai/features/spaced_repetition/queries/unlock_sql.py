@@ -164,6 +164,35 @@ async def fetch_lesson_module_id(
     return lesson.module_id
 
 
+async def lesson_has_any_review(
+    db: AsyncSession,
+    *,
+    student_id: UUID,
+    lesson_id: UUID,
+) -> bool:
+    """True iff the student has reviewed at least one of the lesson's cards.
+
+    Exists to detect the never-touched state: EF evidence cannot exist
+    before the first engagement, so the unlock gate must not gate on it
+    there (the co3005 first-lesson chicken-and-egg).
+    """
+    result = await db.execute(
+        text(
+            "SELECT 1 "
+            "FROM student_card_state scs "
+            "JOIN quiz_questions qq ON qq.id = scs.question_id "
+            "JOIN quiz_source_lessons qsl ON qsl.quiz_id = qq.quiz_id "
+            "WHERE scs.student_id = :student_id "
+            "AND qsl.lesson_id = :lesson_id "
+            "AND scs.total_reviews > 0 "
+            "AND qq.deleted_at IS NULL "
+            "LIMIT 1"
+        ),
+        {"student_id": str(student_id), "lesson_id": str(lesson_id)},
+    )
+    return result.first() is not None
+
+
 async def has_passing_interview_for_module(
     db: AsyncSession,
     *,
@@ -195,4 +224,5 @@ __all__ = [
     "fetch_prerequisite_lesson_ids",
     "fetch_prerequisite_module_lesson_ids",
     "has_passing_interview_for_module",
+    "lesson_has_any_review",
 ]
