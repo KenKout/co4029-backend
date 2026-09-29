@@ -20,6 +20,7 @@ from fastapi import HTTPException
 
 from abridgeai.features.courses.routers.learner import _ensure_lesson_unlocked
 from abridgeai.features.spaced_repetition.api.public import LessonUnlockStatus
+from abridgeai.features.spaced_repetition.sm2.lesson_unlock import BlockingCardInfo
 
 _STUDENT = uuid.uuid4()
 _LESSON = uuid.uuid4()
@@ -28,7 +29,15 @@ _MODULE = uuid.uuid4()
 _CONFIG = uuid.uuid4()
 
 
-def _unlock_status(*, eligible: bool) -> LessonUnlockStatus:
+def _blocking(quiz_id: uuid.UUID) -> BlockingCardInfo:
+    return BlockingCardInfo(
+        question_id=uuid.uuid4(), current_ef=0.0, quiz_id=quiz_id, source_chunk_ids=[]
+    )
+
+
+def _unlock_status(
+    *, eligible: bool, blocking_cards: list[BlockingCardInfo] | None = None
+) -> LessonUnlockStatus:
     return LessonUnlockStatus(
         eligible=eligible,
         current_ratio=0.5,
@@ -36,7 +45,7 @@ def _unlock_status(*, eligible: bool) -> LessonUnlockStatus:
         ef_min=2.0,
         total_cards=10,
         passing_cards=5,
-        blocking_cards=[],
+        blocking_cards=blocking_cards or [],
         prereq_lesson_ids_unlocked=True,
         interview_pass_required=False,
         interview_passed=False,
@@ -100,6 +109,51 @@ class TestEnsureLessonUnlocked:
         assert exc.detail["passing_cards"] == 5
         assert exc.detail["prerequisites_met"] is True
 
+    async def test_403_names_the_quizzes_holding_the_lesson_shut(self) -> None:
+        """The locked screen needs somewhere to send the student.
+
+        Quiz routes are not lesson-gated, so the student can always clear the
+        gate — but before these ids rode along, the 403 said "review 4 more
+        cards" and named nothing, which reads as a dead end. Deduplicated:
+        several blocking cards usually belong to one quiz, and the client
+        renders one button per quiz.
+        """
+        quiz_a, quiz_b = uuid.uuid4(), uuid.uuid4()
+        status = _unlock_status(
+            eligible=False,
+            blocking_cards=[_blocking(quiz_a), _blocking(quiz_a), _blocking(quiz_b)],
+        )
+        with (
+            patch(
+                "abridgeai.features.courses.routers.learner.get_settings",
+                return_value=_settings(enforced=True),
+            ),
+            patch(
+                "abridgeai.features.spaced_repetition.api.public.check_lesson_unlock",
+                new=AsyncMock(return_value=status),
+            ),
+            pytest.raises(HTTPException) as exc_info,
+        ):
+            await _ensure_lesson_unlocked(AsyncMock(), _fake_user(), _LESSON)
+
+        assert exc_info.value.detail["blocking_quiz_ids"] == [str(quiz_a), str(quiz_b)]
+
+    async def test_403_carries_no_quizzes_when_nothing_is_blocking(self) -> None:
+        """A prerequisite-only lock has no quiz to offer — and must not invent one."""
+        with (
+            patch(
+                "abridgeai.features.courses.routers.learner.get_settings",
+                return_value=_settings(enforced=True),
+            ),
+            patch(
+                "abridgeai.features.spaced_repetition.api.public.check_lesson_unlock",
+                new=AsyncMock(return_value=_unlock_status(eligible=False)),
+            ),
+            pytest.raises(HTTPException) as exc_info,
+        ):
+            await _ensure_lesson_unlocked(AsyncMock(), _fake_user(), _LESSON)
+
+        assert exc_info.value.detail["blocking_quiz_ids"] == []
 
 
 class TestGateWiring:

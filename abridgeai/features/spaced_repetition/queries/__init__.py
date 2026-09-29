@@ -21,6 +21,7 @@ from abridgeai.features.spaced_repetition.queries.unlock_sql import (
     fetch_lesson_module_id,
     fetch_lesson_unlock_config,
     fetch_prerequisite_lesson_ids,
+    fetch_prerequisite_module_lesson_ids,
     has_passing_interview_for_module,
 )
 
@@ -39,6 +40,7 @@ __all__ = [
     "fetch_lesson_module_id",
     "fetch_lesson_unlock_config",
     "fetch_prerequisite_lesson_ids",
+    "fetch_prerequisite_module_lesson_ids",
     "has_passing_interview_for_module",
     "knowledge_retention_estimate",
     "progression_readiness",

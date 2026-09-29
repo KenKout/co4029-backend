@@ -71,6 +71,10 @@ INVALIDATION_RULES_BY_TABLE: dict[str, list[CacheKey]] = {
     # A prerequisite edge can affect the edited lesson and every downstream
     # lesson, across every student. Invalidate the whole small namespace.
     "lesson_prerequisites": [LESSON_UNLOCK_NAMESPACE],
+    # Module edges are the same fan-out one grain up: gating module B behind A
+    # moves every lesson in B for every student. The row itself carries only
+    # module ids, so there is no narrower key to build from it.
+    "module_prerequisites": [LESSON_UNLOCK_NAMESPACE],
 }
 
 USER_SESSION_CASCADE_MODELS: set[type] = set()

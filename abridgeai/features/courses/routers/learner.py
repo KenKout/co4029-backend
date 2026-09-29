@@ -135,6 +135,21 @@ async def _ensure_course_enrolled(
     )
 
 
+def _distinct_blocking_quiz_ids(unlock: object) -> list[str]:
+    """Quiz ids behind the blocking cards, deduplicated, order preserved."""
+    quiz_ids: list[str] = []
+    seen: set[str] = set()
+    for card in getattr(unlock, "blocking_cards", []) or []:
+        quiz_id = getattr(card, "quiz_id", None)
+        if quiz_id is None:
+            continue
+        rendered = str(quiz_id)
+        if rendered not in seen:
+            seen.add(rendered)
+            quiz_ids.append(rendered)
+    return quiz_ids
+
+
 async def _ensure_lesson_unlocked(
     db: AsyncSession, current_user: CurrentUser, lesson_id: UUID
 ) -> None:
@@ -174,6 +189,7 @@ async def _ensure_lesson_unlocked(
             "interview_pass_required": unlock.interview_pass_required,
             "interview_passed": unlock.interview_passed,
             "next_unlock_estimate": unlock.next_unlock_estimate,
+            "blocking_quiz_ids": _distinct_blocking_quiz_ids(unlock),
         },
     )
 

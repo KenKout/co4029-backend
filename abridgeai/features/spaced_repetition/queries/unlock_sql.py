@@ -103,6 +103,55 @@ async def fetch_prerequisite_lesson_ids(
     return out
 
 
+async def fetch_prerequisite_module_lesson_ids(
+    db: AsyncSession,
+    *,
+    lesson_id: UUID,
+) -> list[UUID]:
+    """Lessons the student must clear in modules that gate this lesson's module.
+
+    ``module_prerequisites`` is the only prerequisite edge a teacher can
+    actually author (``PUT /teacher/modules/{id}/prerequisites``); the
+    lesson-level ``lesson_prerequisites`` table the gate also reads has no
+    write route at all, and is only ever populated by the course-clone copier.
+    Until this query existed, setting "Module 2 requires Module 1" therefore
+    wrote a row nothing read, and the cross-module sequencing the product
+    offers — learn A before B — did not happen.
+
+    "Clear a module" is expanded here into its lessons, so the caller can reuse
+    the same per-lesson eligibility rule it already applies to
+    ``lesson_prerequisites``: a prerequisite is satisfied when the student's
+    retention on that lesson's cards passes its own gate.
+
+    Only ``published`` lessons are returned. This deliberately differs from the
+    EF aggregation in ``lesson_unlock.sql``, which counts draft quizzes so an
+    author can preview their own gate: a DRAFT lesson in a prerequisite module
+    is not something a learner can study, so counting it would brick every
+    student behind work the teacher has not released.
+    """
+    result = await db.execute(
+        text(
+            """
+            SELECT prereq_lesson.id
+            FROM lessons target
+            JOIN module_prerequisites mp ON mp.module_id = target.module_id
+            JOIN modules prereq_module
+                ON prereq_module.id = mp.prerequisite_module_id
+            JOIN lessons prereq_lesson
+                ON prereq_lesson.module_id = prereq_module.id
+            WHERE target.id = :lesson_id
+              AND target.deleted_at IS NULL
+              AND prereq_module.deleted_at IS NULL
+              AND prereq_module.status = 'published'
+              AND prereq_lesson.deleted_at IS NULL
+              AND prereq_lesson.status = 'published'
+            """
+        ),
+        {"lesson_id": str(lesson_id)},
+    )
+    return [row[0] if isinstance(row[0], UUID) else UUID(str(row[0])) for row in result.all()]
+
+
 async def fetch_lesson_module_id(
     db: AsyncSession,
     *,
@@ -144,5 +193,6 @@ __all__ = [
     "fetch_lesson_module_id",
     "fetch_lesson_unlock_config",
     "fetch_prerequisite_lesson_ids",
+    "fetch_prerequisite_module_lesson_ids",
     "has_passing_interview_for_module",
 ]

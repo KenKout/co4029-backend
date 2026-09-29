@@ -1,7 +1,8 @@
 """Lesson unlock gate per thesis §5.x + §3.2 — combined EF + interview + prereqs.
 
 Cross-feature contract: the gate reads from ``lessons``,
-``lesson_prerequisites``, ``module_items``, ``modules``, ``quizzes``,
+``lesson_prerequisites``, ``module_prerequisites``, ``module_items``,
+``modules``, ``quizzes``,
 ``quiz_questions``, ``student_card_state`` and ``interview_sessions``
 through raw ``sqlalchemy.text(...)``. We do NOT import models from
 ``features.courses`` / ``features.quizzes`` / ``features.interviews``
@@ -26,6 +27,7 @@ from abridgeai.features.spaced_repetition.queries import (
     fetch_lesson_module_id,
     fetch_lesson_unlock_config,
     fetch_prerequisite_lesson_ids,
+    fetch_prerequisite_module_lesson_ids,
     has_passing_interview_for_module,
 )
 
@@ -192,8 +194,24 @@ async def _prereqs_unlocked(
         return True
     visited.add(lesson_id)
 
-    prereq_ids = await fetch_prerequisite_lesson_ids(db, lesson_id=lesson_id)
+    # Two edges feed this gate, and they mean the same thing at different
+    # grains. `lesson_prerequisites` names individual lessons. Module
+    # prerequisites name a whole module, expanded here into its published
+    # lessons — that is the edge a teacher can actually author, and the one
+    # that carries "understand module A before module B".
+    #
+    # Both resolve to the same rule: a prerequisite is met when that lesson is
+    # itself eligible, which folds in its own EF gate. Ordering matters only
+    # for cost: the explicit lesson edges are usually the shorter list, so they
+    # get the chance to short-circuit first.
+    prereq_ids = list(await fetch_prerequisite_lesson_ids(db, lesson_id=lesson_id))
+    prereq_ids.extend(await fetch_prerequisite_module_lesson_ids(db, lesson_id=lesson_id))
     for prereq_id in prereq_ids:
+        if prereq_id in visited:
+            # Already accounted for on this walk — either a genuine cycle
+            # (handled above) or the same lesson reached through both edge
+            # kinds. Re-checking would be wasted work, not a different answer.
+            continue
         status = await _check_unlock_recursive(
             db,
             student_id=student_id,
@@ -323,8 +341,11 @@ async def check_lesson_unlock(
 
     Combined gate per thesis §5.x + §3.2:
 
-    * **Prerequisite gate** — every lesson in ``lesson_prerequisites``
-      must itself be eligible (recursively, cycle-safe).
+    * **Prerequisite gate** — every lesson named by ``lesson_prerequisites``,
+      plus every published lesson of every module named by
+      ``module_prerequisites``, must itself be eligible (recursively,
+      cycle-safe). The module edge is the one a teacher can author, and is
+      what makes "finish module A before module B" hold.
     * **EF gate** — ``passing_cards / total_cards >= tau_unlock`` where
       a card is "passing" iff its stored EF is at least
       ``lesson.ef_min_unlock``. Empty lessons (0 cards) bypass the EF
