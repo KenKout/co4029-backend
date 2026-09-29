@@ -27,6 +27,7 @@ from abridgeai.features.spaced_repetition.queries import (
     fetch_lesson_unlock_config,
     fetch_prerequisite_lesson_ids,
     has_passing_interview_for_module,
+    lesson_has_any_review,
 )
 
 if TYPE_CHECKING:
@@ -60,6 +61,11 @@ class LessonUnlockStatus:
     interview_pass_required: bool
     interview_passed: bool
     next_unlock_estimate: str | None = None
+    # True when the student has NEVER reviewed any of the lesson's cards.
+    # The EF gate is skipped in that state: EF evidence cannot exist before
+    # the first engagement, so gating on it would brick first-touch lessons
+    # (the chicken-and-egg the co3005 introduction lesson hit).
+    unattempted: bool = False
 
 
 def _coerce_uuid_list(raw: object) -> list[UUID]:
@@ -132,6 +138,7 @@ def _status_to_dict(status: LessonUnlockStatus) -> dict[str, Any]:
         "interview_pass_required": status.interview_pass_required,
         "interview_passed": status.interview_passed,
         "next_unlock_estimate": status.next_unlock_estimate,
+        "unattempted": status.unattempted,
     }
 
 
@@ -169,6 +176,7 @@ def _status_from_dict(payload: dict[str, Any]) -> LessonUnlockStatus:
         interview_pass_required=bool(payload.get("interview_pass_required", False)),
         interview_passed=bool(payload.get("interview_passed", False)),
         next_unlock_estimate=payload.get("next_unlock_estimate"),
+        unattempted=bool(payload.get("unattempted", False)),
     )
 
 
@@ -250,7 +258,15 @@ async def _check_unlock_recursive(
                 db, student_id=student_id, module_id=module_id
             )
 
-    ef_gate_ok = total == 0 or current_ratio >= tau_unlock
+    # First-touch bypass: a student who has never reviewed ANY of the
+    # lesson's cards cannot hold EF evidence, so gating on EF coverage
+    # there bricks first-touch lessons (the co3005 introduction
+    # chicken-and-egg). Open the lesson; once they engage, the threshold
+    # applies as configured.
+    unattempted = total > 0 and not await lesson_has_any_review(
+        db, student_id=student_id, lesson_id=lesson_id
+    )
+    ef_gate_ok = total == 0 or unattempted or current_ratio >= tau_unlock
     interview_gate_ok = (not requires_interview_pass) or interview_passed
     eligible = prereqs_ok and ef_gate_ok and interview_gate_ok
 
@@ -297,6 +313,7 @@ async def _check_unlock_recursive(
         interview_pass_required=requires_interview_pass,
         interview_passed=interview_passed,
         next_unlock_estimate=estimate,
+        unattempted=unattempted,
     )
 
 
@@ -328,7 +345,9 @@ async def check_lesson_unlock(
     * **EF gate** — ``passing_cards / total_cards >= tau_unlock`` where
       a card is "passing" iff its stored EF is at least
       ``lesson.ef_min_unlock``. Empty lessons (0 cards) bypass the EF
-      gate.
+      gate, as does a first-touch student with zero reviews across all
+      of the lesson's cards (EF evidence cannot exist before the first
+      engagement).
     * **Interview gate** — when the lesson sets
       ``requires_interview_pass``, the student must have a completed
       ``interview_sessions`` row with ``pass_verdict = TRUE`` against

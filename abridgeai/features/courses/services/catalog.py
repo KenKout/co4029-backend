@@ -61,6 +61,7 @@ from abridgeai.features.courses.schemas import (
 )
 from abridgeai.features.courses.services.assignment import list_teachers_with_emails
 from abridgeai.infrastructure.s3 import create_stream_url
+from abridgeai.infrastructure.thumbnails import mint_thumbnail_url
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -298,21 +299,22 @@ async def _course_with_instructor(db: AsyncSession, course: object) -> CoursePub
 
 
 async def _mint_course_thumbnail_url(db: AsyncSession, course_id: UUID) -> str | None:
-    """Mint a short-TTL presigned GET URL for a published course's thumbnail.
+    """Mint a stable, cache-controlled presigned GET URL for a published
+    course's thumbnail.
 
-    Returns ``None`` when the course has no thumbnail set, or a storage blip
-    occurs (a blip must never break a course read — the SPA falls back to the
-    gradient banner).
+    Routes through :func:`infrastructure.thumbnails.mint_thumbnail_url`
+    (Redis-memoised URL + ``Cache-Control``) so list/detail responses
+    within the cache TTL carry the same URL and the browser reuses its
+    cache. Returns ``None`` when the course has no thumbnail set, or a
+    storage blip occurs (a blip must never break a course read — the SPA
+    falls back to the gradient banner).
     """
     target = await get_published_course_thumbnail_storage_target(db, course_id)
     if target is None:
         return None
     bucket, object_key = target
     try:
-        url, _ = await create_stream_url(
-            _StorageTarget(bucket=bucket, object_key=object_key)
-        )
-        return url
+        return await mint_thumbnail_url(bucket, object_key)
     except Exception:  # noqa: BLE001 — a storage blip must not break the course read
         return None
 
@@ -320,7 +322,7 @@ async def _mint_course_thumbnail_url(db: AsyncSession, course_id: UUID) -> str |
 async def get_course_thumbnail_urls(
     db: AsyncSession, course_ids: list[UUID]
 ) -> dict[UUID, str]:
-    """Short-lived presigned thumbnail URLs, keyed by course id.
+    """Stable presigned thumbnail URLs, keyed by course id.
 
     For sibling features listing courses (the career-path roadmap). A course
     with no thumbnail — or one whose presign fails — is absent from the map
@@ -336,10 +338,7 @@ async def get_course_thumbnail_urls(
     urls: dict[UUID, str] = {}
     for course_id, (bucket, object_key) in targets.items():
         try:
-            url, _ = await create_stream_url(
-                _StorageTarget(bucket=bucket, object_key=object_key)
-            )
-            urls[course_id] = url
+            urls[course_id] = await mint_thumbnail_url(bucket, object_key)
         except Exception:  # noqa: BLE001, S112 -- a storage blip must not break the read
             continue
     return urls

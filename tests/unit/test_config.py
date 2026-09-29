@@ -37,7 +37,7 @@ def test_voice_load_threshold_defaults_above_the_sdk_value() -> None:
     to an otherwise idle worker.
     """
     s = Settings(jwt_secret_key=_DEV_SECRET_32, environment="dev")
-    assert s.interview_voice_load_threshold == 0.9
+    assert s.interview_voice_load_threshold == 0.99
     assert s.interview_voice_load_threshold > 0.7
 
 

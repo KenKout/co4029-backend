@@ -1,10 +1,13 @@
 """Evaluation eligibility: only APPLIED typed receipts are gradeable evidence.
 
-Plan §1 (regression tests, "tests/integration/test_interview_evaluation_stage.py"):
-a typed receipt that is still ``received`` or ``failed`` must NOT reach the
-rubric/outcome prompts, while ordinary voice/REST user rows keep their old
-eligibility. The predicate under test is the SINGLE shared one
-(``logic._is_candidate_answer``) that both the evaluation stage and
+A typed receipt that is still ``received`` or ``failed`` must NOT reach the
+rubric/outcome prompts. The receipt discriminator is the PRESENCE of the
+``turn_state`` state machine — not ``source == 'native_agent'``: voice
+transcript rows written by ``record_turn`` (native_transcript.py) carry that
+source WITHOUT the machine and are the only durable record of a spoken
+answer, so they must stay gradeable (regression: sessions judged 0/0 on a
+complete voice transcript). The predicate under test is the SINGLE shared
+one (``logic._is_candidate_answer``) that both the evaluation stage and
 ``_list_candidate_answers`` route through.
 """
 
@@ -56,13 +59,22 @@ class TestTypedReceiptStates:
         assert _is_candidate_answer(_message(metadata=_receipt("failed"))) is False
 
     def test_missing_turn_state_is_not_evidence(self) -> None:
+        # No state machine on the row → not a receipt → not gated. (This shape
+        # is not written by any current path; receipts always carry a state.)
         meta: dict[str, Any] = {"source": "native_agent", "kind": "answer", "turn_key": "tk"}
-        assert _is_candidate_answer(_message(metadata=meta)) is False
+        assert _is_candidate_answer(_message(metadata=meta)) is True
 
 
 class TestNonReceiptRowsKeepOldBehavior:
     def test_voice_or_rest_user_row_is_evidence(self) -> None:
         assert _is_candidate_answer(_message(metadata={"kind": "answer"})) is True
+
+    def test_record_turn_voice_transcript_row_is_evidence(self) -> None:
+        # EXACTLY what record_turn (conversation_item_added hook) writes for a
+        # spoken answer: native_agent source, no turn_state. Regression for the
+        # incident where every voice session graded 0/0 on a full transcript.
+        meta: dict[str, Any] = {"kind": "answer", "source": "native_agent"}
+        assert _is_candidate_answer(_message(metadata=meta)) is True
 
     def test_plain_user_row_without_metadata_is_evidence(self) -> None:
         assert _is_candidate_answer(_message(metadata=None)) is True
@@ -70,10 +82,11 @@ class TestNonReceiptRowsKeepOldBehavior:
     def test_ai_rows_are_never_evidence(self) -> None:
         assert _is_candidate_answer(_message(role="ai", metadata=None)) is False
 
-    def test_non_native_agent_source_is_ordinary_row(self) -> None:
-        # A different 'source' value is not a typed receipt — old rules apply.
+    def test_receipt_machine_gates_regardless_of_source(self) -> None:
+        # The discriminator is the state machine's presence, never the source
+        # value: an unapplied receipt from any writer stays excluded.
         rest_meta: dict[str, Any] = {"source": "rest", "turn_state": "received"}
-        assert _is_candidate_answer(_message(metadata=rest_meta)) is True
+        assert _is_candidate_answer(_message(metadata=rest_meta)) is False
 
 
 class TestCandidateText:

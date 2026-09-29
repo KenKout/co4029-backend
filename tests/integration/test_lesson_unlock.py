@@ -272,10 +272,7 @@ async def _attach_quiz_with_cards(
             },
         )
         await conn.execute(
-            text(
-                "INSERT INTO quiz_source_lessons (quiz_id, lesson_id) "
-                "VALUES (:quiz, :lesson)"
-            ),
+            text("INSERT INTO quiz_source_lessons (quiz_id, lesson_id) VALUES (:quiz, :lesson)"),
             {"quiz": quiz_id, "lesson": lesson_id},
         )
         for idx, ef_value in enumerate(cards, start=1):
@@ -303,6 +300,68 @@ async def _attach_quiz_with_cards(
                     "VALUES (:s, :q, :ef, 1, 1, NOW(), 1)"
                 ),
                 {"s": student_id, "q": qid, "ef": ef_value},
+            )
+    return quiz_id, question_ids
+
+
+async def _seed_quiz_with_cards_no_state(
+    engine: AsyncEngine,
+    *,
+    course_id: UUID,
+    module_id: UUID,
+    lesson_id: UUID,
+    card_count: int = 5,
+) -> tuple[UUID, list[UUID]]:
+    """Fresh-student shape: quiz + cards, NO student_card_state rows."""
+    return await _attach_quiz_with_cards_raw(
+        engine,
+        course_id=course_id,
+        module_id=module_id,
+        lesson_id=lesson_id,
+        card_count=card_count,
+    )
+
+
+async def _attach_quiz_with_cards_raw(
+    engine: AsyncEngine,
+    *,
+    course_id: UUID,
+    module_id: UUID,
+    lesson_id: UUID,
+    card_count: int,
+) -> tuple[UUID, list[UUID]]:
+    quiz_id = uuid.uuid4()
+    item_id = uuid.uuid4()
+    question_ids: list[UUID] = [uuid.uuid4() for _ in range(card_count)]
+    async with _conn(engine) as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO quizzes (id, course_id, module_id, title, status, slug) VALUES (:id, :course, :module, 'Quiz', 'published', 'slug-' || uuid_generate_v4()::text);"
+            ),
+            {"id": quiz_id, "course": course_id, "module": module_id},
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO module_items "
+                "(id, module_id, item_type, quiz_id, position) "
+                "VALUES (:id, :module, 'quiz', :quiz, 1)"
+            ),
+            {"id": item_id, "module": module_id, "quiz": quiz_id},
+        )
+        await conn.execute(
+            text("INSERT INTO quiz_source_lessons (quiz_id, lesson_id) VALUES (:quiz, :lesson)"),
+            {"quiz": quiz_id, "lesson": lesson_id},
+        )
+        for idx, qid in enumerate(question_ids, start=1):
+            await conn.execute(
+                text(
+                    "INSERT INTO quiz_questions "
+                    "(id, quiz_id, position, question_type, prompt_text, "
+                    "expected_response_time_ms, source_refs, review_status) "
+                    "VALUES (:id, :quiz, :pos, 'multiple_choice', "
+                    ":prompt, 30000, '[]'::jsonb, 'approved')"
+                ),
+                {"id": qid, "quiz": quiz_id, "pos": idx, "prompt": f"Q{idx}"},
             )
     return quiz_id, question_ids
 
@@ -695,4 +754,90 @@ async def test_unknown_lesson_returns_ineligible(
         )
     assert status.eligible is False
     assert status.total_cards == 0
+    assert status.passing_cards == 0
+
+
+@pytest.mark.asyncio
+async def test_first_touch_student_bypasses_ef_gate(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    cache_disabled: None,
+) -> None:
+    """A student with ZERO reviews on the lesson's cards can still open it.
+
+    EF evidence cannot exist before the first engagement, so gating on EF
+    coverage there bricked first-touch lessons (the co3005 introduction
+    chicken-and-egg: 0 of 5 cards meet the 80% threshold on a lesson the
+    student was never able to open). The cards are seeded with NO
+    student_card_state rows — exactly the fresh-student shape.
+    """
+    base = await _seed_org_user_course_module(engine)
+    lesson_id = await _seed_lesson(engine, module_id=base["module_id"])
+    quiz_id, question_ids = await _seed_quiz_with_cards_no_state(
+        engine,
+        course_id=base["course_id"],
+        module_id=base["module_id"],
+        lesson_id=lesson_id,
+    )
+    assert len(question_ids) == 5
+
+    async with session_factory() as session:
+        status = await check_lesson_unlock(
+            session,
+            student_id=base["student_id"],
+            lesson_id=lesson_id,
+        )
+
+    assert status.eligible is True
+    assert status.unattempted is True
+    assert status.total_cards == 5
+    assert status.passing_cards == 0
+    assert quiz_id is not None
+
+
+@pytest.mark.asyncio
+async def test_engaged_student_still_gated_by_ef(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    cache_disabled: None,
+) -> None:
+    """Once ANY card has been reviewed the EF threshold applies again.
+
+    The bypass is a first-touch rule only: after one review the student
+    has engagement evidence, and the lesson locks per the configured tau.
+    """
+    base = await _seed_org_user_course_module(engine)
+    lesson_id = await _seed_lesson(engine, module_id=base["module_id"])
+    quiz_id, _ = await _seed_quiz_with_cards_no_state(
+        engine,
+        course_id=base["course_id"],
+        module_id=base["module_id"],
+        lesson_id=lesson_id,
+    )
+    async with _conn(engine) as conn:
+        first_question = (
+            await conn.execute(
+                text("SELECT id FROM quiz_questions WHERE quiz_id = :q ORDER BY position LIMIT 1"),
+                {"q": quiz_id},
+            )
+        ).scalar_one()
+        await conn.execute(
+            text(
+                "INSERT INTO student_card_state "
+                "(student_id, question_id, ef, interval_days, "
+                "repetition_count, due_at, total_reviews) "
+                "VALUES (:s, :q, 1.3, 1, 0, NOW(), 1)"
+            ),
+            {"s": base["student_id"], "q": first_question},
+        )
+
+    async with session_factory() as session:
+        status = await check_lesson_unlock(
+            session,
+            student_id=base["student_id"],
+            lesson_id=lesson_id,
+        )
+
+    assert status.unattempted is False
+    assert status.eligible is False
     assert status.passing_cards == 0

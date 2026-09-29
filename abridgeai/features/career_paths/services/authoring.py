@@ -39,7 +39,12 @@ from abridgeai.features.career_paths.schemas import (
 )
 from abridgeai.features.courses.api import public as courses_api
 from abridgeai.features.enrollments.api import public as enrollments_api
-from abridgeai.infrastructure.s3 import create_stream_url, put_object_bytes
+from abridgeai.infrastructure.s3 import put_object_bytes
+from abridgeai.infrastructure.thumbnails import (
+    ThumbnailDecodeError,
+    encode_thumbnail,
+    mint_thumbnail_url,
+)
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -190,17 +195,19 @@ async def get_career_path(db: AsyncSession, career_path_id: UUID) -> CareerPathA
 async def get_career_path_thumbnail_urls(
     db: AsyncSession, career_path_ids: list[UUID]
 ) -> dict[UUID, str]:
-    """Mint short-lived URLs without allowing storage failures to break reads."""
+    """Mint stable, cache-controlled URLs; storage failures never break reads.
+
+    Routes through :func:`infrastructure.thumbnails.mint_thumbnail_url`
+    (Redis-memoised URL + ``Cache-Control``) so list responses within the
+    cache TTL carry the same URL and the browser reuses its cache.
+    """
     targets = await authoring_queries.list_career_path_thumbnail_storage_targets(
         db, career_path_ids
     )
     urls: dict[UUID, str] = {}
     for path_id, (bucket, object_key) in targets.items():
         try:
-            url, _ = await create_stream_url(
-                _ThumbnailStorageTarget(bucket=bucket, object_key=object_key)
-            )
-            urls[path_id] = url
+            urls[path_id] = await mint_thumbnail_url(bucket, object_key)
         except Exception:  # noqa: BLE001, S112 -- thumbnail failure must not break reads
             continue
     return urls
@@ -439,8 +446,7 @@ async def upload_career_path_thumbnail(
     uploaded_by: UUID,
 ) -> CareerPathAuthoring:
     """Validate and store the image used on learner Career Path cards."""
-    ext = _THUMBNAIL_MIME_TYPES.get(content_type)
-    if ext is None:
+    if content_type not in _THUMBNAIL_MIME_TYPES:
         raise ThumbnailUploadError(
             "unsupported_thumbnail_type: allowed types are JPEG, PNG, WebP, GIF."
         )
@@ -449,25 +455,33 @@ async def upload_career_path_thumbnail(
     if len(data) > _THUMBNAIL_MAX_BYTES:
         raise ThumbnailUploadError("thumbnail_too_large: images must be 5 MiB or smaller.")
 
+    # Re-encode to constrained WebP BEFORE any DB or storage work, so a
+    # corrupt body still fails as a 422 client error; the 5 MiB cap above
+    # already bounds what the decoder ever sees.
+    try:
+        encoded = encode_thumbnail(data, content_type=content_type)
+    except ThumbnailDecodeError as exc:
+        raise ThumbnailUploadError(str(exc)) from exc
+
     path = await _require_path(db, career_path_id)
     settings = get_settings()
     bucket = settings.s3_bucket_name or "abridgeai-local"
     object_id = uuid4()
-    object_key = f"career-path-thumbnails/{career_path_id}/{object_id}.{ext}"
+    object_key = f"career-path-thumbnails/{career_path_id}/{object_id}.{encoded.extension}"
 
     await put_object_bytes(
         _ThumbnailStorageTarget(bucket=bucket, object_key=object_key),
-        data,
-        content_type=content_type,
+        encoded.data,
+        content_type=encoded.content_type,
     )
     authoring_queries.insert_thumbnail_storage_object(
         db,
         object_id=object_id,
         bucket=bucket,
         object_key=object_key,
-        original_filename=f"thumbnail.{ext}",
-        mime_type=content_type,
-        size_bytes=len(data),
+        original_filename=f"thumbnail.{encoded.extension}",
+        mime_type=encoded.content_type,
+        size_bytes=len(encoded.data),
         uploaded_by=uploaded_by,
         uploaded_at=datetime.now(tz=UTC),
     )
