@@ -238,6 +238,25 @@ async def stop_recording_for_session(db: AsyncSession, *, session_id: UUID) -> N
                 extra={"session_id": str(session_id), "egress_id": recording.egress_id},
             )
             return
+        # The provider ACCEPTED the stop, but the output is not uploaded yet:
+        # LiveKit finalizes the file and only THEN fires ``egress_ended`` (and
+        # the reconciler's list_egress poll only sees it then too). Marking the
+        # row ``cancelled`` here orphaned every finished recording — both the
+        # late COMPLETE callback and the reconcile sweep skip non-active rows,
+        # so the audio sat in S3 with nothing attached for playback. Leave the
+        # row ``active``; the webhook or the reconcile sweep drives it to
+        # ``complete`` (output validated + attached) or ``failed``.
+        logger.info(
+            "interview.recording.stopped",
+            extra={
+                "session_id": str(session_id),
+                "recording_id": str(recording.id),
+                "awaiting_output": True,
+            },
+        )
+        return
+    # Pending row (start died before the egress id was stamped): there is no
+    # job for the reconciler to interrogate, so cancel outright.
     await recordings_queries.mark_recording_cancelled(
         db, session_id=session_id, reason="stopped"
     )

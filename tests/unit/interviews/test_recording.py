@@ -186,6 +186,53 @@ async def test_stop_failure_keeps_active_recording_for_reconciliation(
     cancel.assert_not_awaited()
 
 
+@pytest.mark.asyncio
+async def test_stop_accepted_leaves_active_row_for_output_attach(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A provider-ACCEPTED stop must NOT cancel the recording row.
+
+    LiveKit finalizes + uploads the file after stop_egress returns, and only
+    then fires ``egress_ended``; the reconcile sweep also only interrogates
+    ``pending``/``active`` rows. Cancelling here orphaned every recording —
+    the audio landed in S3 with nothing attached for playback (prod: every
+    2026-09-29 session shows cancelled/'stopped' with no output, while the
+    ONE session whose stop API failed stayed active and reconciled to
+    complete). The webhook/reconciler must drive the row to complete/failed.
+    """
+    row = SimpleNamespace(id=uuid4(), status="active", egress_id="EG_test")
+    monkeypatch.setattr(
+        recording.recordings_queries, "get_recording_for_session", AsyncMock(return_value=row)
+    )
+    cancel = AsyncMock()
+    monkeypatch.setattr(recording.recordings_queries, "mark_recording_cancelled", cancel)
+    monkeypatch.setattr(recording, "_stop_egress_quietly", AsyncMock(return_value=True))
+
+    await recording.stop_recording_for_session(AsyncMock(), session_id=uuid4())
+
+    cancel.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_stop_cancels_pending_row_without_egress_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pending row has no egress id — nothing to await, cancel outright."""
+    row = SimpleNamespace(id=uuid4(), status="pending", egress_id=None)
+    monkeypatch.setattr(
+        recording.recordings_queries, "get_recording_for_session", AsyncMock(return_value=row)
+    )
+    cancel = AsyncMock(return_value=True)
+    monkeypatch.setattr(recording.recordings_queries, "mark_recording_cancelled", cancel)
+    stop = AsyncMock()
+    monkeypatch.setattr(recording, "_stop_egress_quietly", stop)
+
+    await recording.stop_recording_for_session(AsyncMock(), session_id=uuid4())
+
+    cancel.assert_awaited_once()
+    stop.assert_not_awaited()
+
+
 def test_missing_webhook_signature_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(recording, "get_settings", lambda: _settings())
     with pytest.raises(ValueError, match="missing webhook"):
