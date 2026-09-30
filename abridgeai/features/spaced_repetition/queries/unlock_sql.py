@@ -17,6 +17,12 @@ _LESSON_UNLOCK_SQL = text(
     .read_text(encoding="utf-8")
 )
 
+_LESSON_PREREQ_CARDS_SQL = text(
+    resources.files("abridgeai.features.spaced_repetition.queries.sql")
+    .joinpath("lesson_prereq_cards.sql")
+    .read_text(encoding="utf-8")
+)
+
 DEFAULT_BLOCKING_LIMIT = 50
 
 
@@ -40,6 +46,53 @@ async def aggregate_lesson_card_ef(
         {
             "student_id": str(student_id),
             "lesson_id": str(lesson_id),
+            "ef_min": float(ef_min),
+            "blocking_limit": int(blocking_limit),
+        },
+    )
+    row = result.first()
+    if row is None:
+        return 0, 0, []
+    passing_raw, total_raw, blocking_raw = row[0], row[1], row[2]
+    passing = int(passing_raw or 0)
+    total = int(total_raw or 0)
+    if isinstance(blocking_raw, list):
+        blocking_list: list[dict[str, Any]] = list(blocking_raw)
+    elif blocking_raw is None:
+        blocking_list = []
+    else:
+        import json
+
+        blocking_list = list(json.loads(blocking_raw))
+    return passing, total, blocking_list
+
+
+async def aggregate_prerequisite_card_ef(
+    db: AsyncSession,
+    *,
+    student_id: UUID,
+    prereq_lesson_ids: list[UUID],
+    ef_min: float,
+    blocking_limit: int = DEFAULT_BLOCKING_LIMIT,
+) -> tuple[int, int, list[dict[str, Any]]]:
+    """Return (passing, total, blocking) over PREREQUISITE lesson cards.
+
+    The redesigned gate semantics ("understand A to unlock B"): the EF
+    evidence demanded by lesson B is the card state of B's prerequisite
+    lessons, not B's own quiz — a quiz never gates its own lesson.
+    ``prereq_lesson_ids`` is the union of both prerequisite edge kinds
+    (``lesson_prerequisites`` rows plus ``module_prerequisites``
+    expansions), resolved by the caller. An empty list returns
+    (0, 0, []): no prerequisites means no card evidence exists to
+    demand, so the lesson opens by construction.
+    """
+    if not prereq_lesson_ids:
+        return 0, 0, []
+    result = await db.execute(
+        _LESSON_PREREQ_CARDS_SQL,
+        {
+            "student_id": str(student_id),
+            "lesson_ids": [str(lid) for lid in prereq_lesson_ids],
             "ef_min": float(ef_min),
             "blocking_limit": int(blocking_limit),
         },
@@ -219,6 +272,7 @@ async def has_passing_interview_for_module(
 __all__ = [
     "DEFAULT_BLOCKING_LIMIT",
     "aggregate_lesson_card_ef",
+    "aggregate_prerequisite_card_ef",
     "fetch_lesson_module_id",
     "fetch_lesson_unlock_config",
     "fetch_prerequisite_lesson_ids",

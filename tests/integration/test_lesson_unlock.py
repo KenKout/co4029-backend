@@ -413,7 +413,7 @@ async def _seed_only_interview_config(
 
 
 @pytest.mark.asyncio
-async def test_eligible_all_passing(
+async def test_no_prerequisites_opens_by_construction(
     engine: AsyncEngine,
     session_factory: async_sessionmaker[AsyncSession],
     cache_disabled: None,
@@ -426,7 +426,7 @@ async def test_eligible_all_passing(
         module_id=base["module_id"],
         lesson_id=lesson_id,
         student_id=base["student_id"],
-        cards=[2.5, 2.4, 2.3, 2.2, 2.1],
+        cards=[1.3, 1.3, 1.3, 1.3, 1.3],  # even ALL-LOW own cards never self-gate
     )
 
     async with session_factory() as session:
@@ -438,9 +438,11 @@ async def test_eligible_all_passing(
 
     assert isinstance(status, LessonUnlockStatus)
     assert status.eligible is True
-    assert status.total_cards == 5
-    assert status.passing_cards == 5
-    assert status.current_ratio == pytest.approx(1.0)
+    # Own quiz never gates own lesson: evidence set is the prereq set,
+    # which is empty here.
+    assert status.total_cards == 0
+    assert status.passing_cards == 0
+    assert status.current_ratio == pytest.approx(0.0)
     assert status.required_ratio == pytest.approx(0.8)
     assert status.ef_min == pytest.approx(2.0)
     assert status.blocking_cards == []
@@ -480,8 +482,13 @@ async def test_quiz_cards_are_scoped_to_source_lesson(
             lesson_id=lesson_b,
         )
 
-    assert source_status.total_cards == 1
+    # Redesigned semantics: card state no longer counts toward a lesson's
+    # OWN gate — lesson A's cards gate lesson A's PREREQUISITE-dependents.
+    # Both lessons here have no prerequisites, so both open by
+    # construction regardless of any card state.
+    assert source_status.total_cards == 0
     assert unrelated_status.total_cards == 0
+    assert source_status.eligible is True
     assert unrelated_status.eligible is True
 
 
@@ -491,13 +498,16 @@ async def test_blocked_partial_fail(
     session_factory: async_sessionmaker[AsyncSession],
     cache_disabled: None,
 ) -> None:
+    """A prereq's weak cards block its dependent lesson (understand A→B)."""
     base = await _seed_org_user_course_module(engine)
-    lesson_id = await _seed_lesson(engine, module_id=base["module_id"])
+    lesson_a = await _seed_lesson(engine, module_id=base["module_id"], slug_suffix="a")
+    lesson_b = await _seed_lesson(engine, module_id=base["module_id"], slug_suffix="b")
+    await _add_lesson_prereq(engine, lesson_id=lesson_b, prereq_id=lesson_a)
     _, question_ids = await _attach_quiz_with_cards(
         engine,
         course_id=base["course_id"],
         module_id=base["module_id"],
-        lesson_id=lesson_id,
+        lesson_id=lesson_a,
         student_id=base["student_id"],
         cards=[2.5, 2.5, 2.5, 1.5, 1.7],
     )
@@ -506,7 +516,7 @@ async def test_blocked_partial_fail(
         status = await check_lesson_unlock(
             session,
             student_id=base["student_id"],
-            lesson_id=lesson_id,
+            lesson_id=lesson_b,
         )
 
     assert status.eligible is False
@@ -616,7 +626,7 @@ async def test_interview_required_not_passed(
     assert status.eligible is False
     assert status.interview_pass_required is True
     assert status.interview_passed is False
-    assert status.passing_cards == 5
+    assert status.passing_cards == 0  # no prereqs -> no evidence set
     assert status.next_unlock_estimate is not None
     assert "interview" in status.next_unlock_estimate.lower()
 
@@ -758,26 +768,61 @@ async def test_unknown_lesson_returns_ineligible(
 
 
 @pytest.mark.asyncio
-async def test_first_touch_student_bypasses_ef_gate(
+async def test_prereq_all_passing_unlocks_dependent(
     engine: AsyncEngine,
     session_factory: async_sessionmaker[AsyncSession],
     cache_disabled: None,
 ) -> None:
-    """A student with ZERO reviews on the lesson's cards can still open it.
+    """Strong evidence on A's cards opens B (the healthy progression)."""
+    base = await _seed_org_user_course_module(engine)
+    lesson_a = await _seed_lesson(engine, module_id=base["module_id"], slug_suffix="a")
+    lesson_b = await _seed_lesson(engine, module_id=base["module_id"], slug_suffix="b")
+    await _add_lesson_prereq(engine, lesson_id=lesson_b, prereq_id=lesson_a)
+    await _attach_quiz_with_cards(
+        engine,
+        course_id=base["course_id"],
+        module_id=base["module_id"],
+        lesson_id=lesson_a,
+        student_id=base["student_id"],
+        cards=[2.5, 2.4, 2.3, 2.2, 2.1],
+    )
 
-    EF evidence cannot exist before the first engagement, so gating on EF
-    coverage there bricked first-touch lessons (the co3005 introduction
-    chicken-and-egg: 0 of 5 cards meet the 80% threshold on a lesson the
-    student was never able to open). The cards are seeded with NO
-    student_card_state rows — exactly the fresh-student shape.
+    async with session_factory() as session:
+        status = await check_lesson_unlock(
+            session,
+            student_id=base["student_id"],
+            lesson_id=lesson_b,
+        )
+
+    assert status.eligible is True
+    assert status.total_cards == 5
+    assert status.passing_cards == 5
+    assert status.current_ratio == pytest.approx(1.0)
+    assert status.blocking_cards == []
+    assert status.next_unlock_estimate is None
+
+
+@pytest.mark.asyncio
+async def test_own_quiz_never_gates_own_lesson(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    cache_disabled: None,
+) -> None:
+    """Even one-sided evidence on A's OWN quiz leaves A open.
+
+    The redesigned gate reads only PREREQUISITE cards, so a student who
+    bombed A's quiz (EF 1.3 everywhere) still opens A — the quiz result
+    matters when they reach A's dependents, not A itself.
     """
     base = await _seed_org_user_course_module(engine)
     lesson_id = await _seed_lesson(engine, module_id=base["module_id"])
-    quiz_id, question_ids = await _seed_quiz_with_cards_no_state(
+    _, question_ids = await _attach_quiz_with_cards(
         engine,
         course_id=base["course_id"],
         module_id=base["module_id"],
         lesson_id=lesson_id,
+        student_id=base["student_id"],
+        cards=[1.3, 1.3, 1.3, 1.3, 1.3],
     )
     assert len(question_ids) == 5
 
@@ -789,55 +834,5 @@ async def test_first_touch_student_bypasses_ef_gate(
         )
 
     assert status.eligible is True
-    assert status.unattempted is True
-    assert status.total_cards == 5
-    assert status.passing_cards == 0
-    assert quiz_id is not None
-
-
-@pytest.mark.asyncio
-async def test_engaged_student_still_gated_by_ef(
-    engine: AsyncEngine,
-    session_factory: async_sessionmaker[AsyncSession],
-    cache_disabled: None,
-) -> None:
-    """Once ANY card has been reviewed the EF threshold applies again.
-
-    The bypass is a first-touch rule only: after one review the student
-    has engagement evidence, and the lesson locks per the configured tau.
-    """
-    base = await _seed_org_user_course_module(engine)
-    lesson_id = await _seed_lesson(engine, module_id=base["module_id"])
-    quiz_id, _ = await _seed_quiz_with_cards_no_state(
-        engine,
-        course_id=base["course_id"],
-        module_id=base["module_id"],
-        lesson_id=lesson_id,
-    )
-    async with _conn(engine) as conn:
-        first_question = (
-            await conn.execute(
-                text("SELECT id FROM quiz_questions WHERE quiz_id = :q ORDER BY position LIMIT 1"),
-                {"q": quiz_id},
-            )
-        ).scalar_one()
-        await conn.execute(
-            text(
-                "INSERT INTO student_card_state "
-                "(student_id, question_id, ef, interval_days, "
-                "repetition_count, due_at, total_reviews) "
-                "VALUES (:s, :q, 1.3, 1, 0, NOW(), 1)"
-            ),
-            {"s": base["student_id"], "q": first_question},
-        )
-
-    async with session_factory() as session:
-        status = await check_lesson_unlock(
-            session,
-            student_id=base["student_id"],
-            lesson_id=lesson_id,
-        )
-
-    assert status.unattempted is False
-    assert status.eligible is False
+    assert status.total_cards == 0
     assert status.passing_cards == 0

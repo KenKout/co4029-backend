@@ -23,13 +23,12 @@ from abridgeai.core.cache.decorators import cached
 from abridgeai.core.cache.keys import LESSON_UNLOCK
 from abridgeai.features.spaced_repetition.queries import (
     DEFAULT_BLOCKING_LIMIT,
-    aggregate_lesson_card_ef,
+    aggregate_prerequisite_card_ef,
     fetch_lesson_module_id,
     fetch_lesson_unlock_config,
     fetch_prerequisite_lesson_ids,
     fetch_prerequisite_module_lesson_ids,
     has_passing_interview_for_module,
-    lesson_has_any_review,
 )
 
 if TYPE_CHECKING:
@@ -63,11 +62,6 @@ class LessonUnlockStatus:
     interview_pass_required: bool
     interview_passed: bool
     next_unlock_estimate: str | None = None
-    # True when the student has NEVER reviewed any of the lesson's cards.
-    # The EF gate is skipped in that state: EF evidence cannot exist before
-    # the first engagement, so gating on it would brick first-touch lessons
-    # (the chicken-and-egg the co3005 introduction lesson hit).
-    unattempted: bool = False
 
 
 def _coerce_uuid_list(raw: object) -> list[UUID]:
@@ -140,7 +134,6 @@ def _status_to_dict(status: LessonUnlockStatus) -> dict[str, Any]:
         "interview_pass_required": status.interview_pass_required,
         "interview_passed": status.interview_passed,
         "next_unlock_estimate": status.next_unlock_estimate,
-        "unattempted": status.unattempted,
     }
 
 
@@ -178,7 +171,6 @@ def _status_from_dict(payload: dict[str, Any]) -> LessonUnlockStatus:
         interview_pass_required=bool(payload.get("interview_pass_required", False)),
         interview_passed=bool(payload.get("interview_passed", False)),
         next_unlock_estimate=payload.get("next_unlock_estimate"),
-        unattempted=bool(payload.get("unattempted", False)),
     )
 
 
@@ -188,7 +180,18 @@ async def _prereqs_unlocked(
     student_id: UUID,
     lesson_id: UUID,
     visited: set[UUID],
-) -> bool:
+) -> tuple[bool, list[UUID]]:
+    """Return (all prerequisites eligible, flat prerequisite lesson ids).
+
+    The flat id list is the EF evidence set for THIS lesson under the
+    redesigned semantics — "understand A to unlock B" — so the caller
+    aggregates card state over exactly these lessons. Two edge kinds
+    feed the gate, and they mean the same thing at different grains:
+    ``lesson_prerequisites`` names individual lessons; module
+    prerequisites name a whole module, expanded into its published
+    lessons — that is the edge a teacher can actually author, and the
+    one that carries "understand module A before module B".
+    """
     if lesson_id in visited:
         logger.warning(
             "lesson_unlock.cycle_detected",
@@ -199,36 +202,38 @@ async def _prereqs_unlocked(
                 "visited": sorted(str(v) for v in visited),
             },
         )
-        return True
-    visited.add(lesson_id)
+        return True, []
 
-    # Two edges feed this gate, and they mean the same thing at different
-    # grains. `lesson_prerequisites` names individual lessons. Module
-    # prerequisites name a whole module, expanded here into its published
-    # lessons — that is the edge a teacher can actually author, and the one
-    # that carries "understand module A before module B".
-    #
-    # Both resolve to the same rule: a prerequisite is met when that lesson is
-    # itself eligible, which folds in its own EF gate. Ordering matters only
-    # for cost: the explicit lesson edges are usually the shorter list, so they
-    # get the chance to short-circuit first.
     prereq_ids = list(await fetch_prerequisite_lesson_ids(db, lesson_id=lesson_id))
     prereq_ids.extend(await fetch_prerequisite_module_lesson_ids(db, lesson_id=lesson_id))
+
+    all_eligible = True
     for prereq_id in prereq_ids:
         if prereq_id in visited:
             # Already accounted for on this walk — either a genuine cycle
-            # (handled above) or the same lesson reached through both edge
-            # kinds. Re-checking would be wasted work, not a different answer.
+            # (A→B→A) or the same lesson reached through both edge kinds.
+            # Both surface as the cycle WARN the contract logs; re-checking
+            # would be wasted work, not a different answer.
+            logger.warning(
+                "lesson_unlock.cycle_detected",
+                extra={
+                    "event": "lesson_unlock_cycle_detected",
+                    "lesson_id": str(lesson_id),
+                    "student_id": str(student_id),
+                    "visited": sorted(str(v) for v in visited | {prereq_id}),
+                },
+            )
             continue
         status = await _check_unlock_recursive(
             db,
             student_id=student_id,
             lesson_id=prereq_id,
-            visited=visited,
+            visited=visited | {lesson_id},
         )
         if not status.eligible:
-            return False
-    return True
+            all_eligible = False
+            break
+    return all_eligible, prereq_ids
 
 
 async def _check_unlock_recursive(
@@ -255,14 +260,22 @@ async def _check_unlock_recursive(
         )
     ef_min, tau_unlock, requires_interview_pass = config
 
-    prereqs_ok = await _prereqs_unlocked(
+    prereqs_ok, prereq_lesson_ids = await _prereqs_unlocked(
         db, student_id=student_id, lesson_id=lesson_id, visited=visited
     )
 
-    passing, total, blocking_payload = await aggregate_lesson_card_ef(
+    # Redesigned EF gate — "understand A to unlock B": the card evidence
+    # demanded by this lesson is the SM-2 state of its PREREQUISITE
+    # lessons' quizzes, never this lesson's own quiz. A quiz exists to
+    # feed the NEXT lesson's gate, so the learn → quiz → next-lesson
+    # order is the only possible one; the old self-gating design locked
+    # the lesson behind its own quiz and bricked first touch (co3005
+    # introduction). No prerequisites ⇒ no evidence to demand ⇒ the
+    # lesson opens by construction (total == 0).
+    passing, total, blocking_payload = await aggregate_prerequisite_card_ef(
         db,
         student_id=student_id,
-        lesson_id=lesson_id,
+        prereq_lesson_ids=prereq_lesson_ids,
         ef_min=ef_min,
         blocking_limit=DEFAULT_BLOCKING_LIMIT,
     )
@@ -276,15 +289,7 @@ async def _check_unlock_recursive(
                 db, student_id=student_id, module_id=module_id
             )
 
-    # First-touch bypass: a student who has never reviewed ANY of the
-    # lesson's cards cannot hold EF evidence, so gating on EF coverage
-    # there bricks first-touch lessons (the co3005 introduction
-    # chicken-and-egg). Open the lesson; once they engage, the threshold
-    # applies as configured.
-    unattempted = total > 0 and not await lesson_has_any_review(
-        db, student_id=student_id, lesson_id=lesson_id
-    )
-    ef_gate_ok = total == 0 or unattempted or current_ratio >= tau_unlock
+    ef_gate_ok = total == 0 or current_ratio >= tau_unlock
     interview_gate_ok = (not requires_interview_pass) or interview_passed
     eligible = prereqs_ok and ef_gate_ok and interview_gate_ok
 
@@ -331,7 +336,6 @@ async def _check_unlock_recursive(
         interview_pass_required=requires_interview_pass,
         interview_passed=interview_passed,
         next_unlock_estimate=estimate,
-        unattempted=unattempted,
     )
 
 
@@ -356,19 +360,22 @@ async def check_lesson_unlock(
 ) -> LessonUnlockStatus:
     """Compute the lesson unlock status for a learner.
 
-    Combined gate per thesis §5.x + §3.2:
+    Combined gate per thesis §5.x + §3.2 (redesigned EF semantics):
 
     * **Prerequisite gate** — every lesson named by ``lesson_prerequisites``,
       plus every published lesson of every module named by
       ``module_prerequisites``, must itself be eligible (recursively,
       cycle-safe). The module edge is the one a teacher can author, and is
       what makes "finish module A before module B" hold.
-    * **EF gate** — ``passing_cards / total_cards >= tau_unlock`` where
-      a card is "passing" iff its stored EF is at least
-      ``lesson.ef_min_unlock``. Empty lessons (0 cards) bypass the EF
-      gate, as does a first-touch student with zero reviews across all
-      of the lesson's cards (EF evidence cannot exist before the first
-      engagement).
+    * **EF gate** — the card evidence demanded by THIS lesson is the SM-2
+      state of its PREREQUISITE lessons' quizzes:
+      ``passing_cards / total_cards >= tau_unlock`` where a card is
+      "passing" iff its stored EF is at least ``lesson.ef_min_unlock``
+      and never-reviewed cards count as EF 0. A lesson's own quiz never
+      gates its own lesson — learn the lesson, take its quiz, and that
+      evidence unlocks the NEXT lesson. No prerequisites means no
+      evidence to demand, so the lesson opens by construction (first
+      lessons are never EF-blocked).
     * **Interview gate** — when the lesson sets
       ``requires_interview_pass``, the student must have a completed
       ``interview_sessions`` row with ``pass_verdict = TRUE`` against
